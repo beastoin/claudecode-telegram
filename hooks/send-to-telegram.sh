@@ -1,12 +1,37 @@
 #!/bin/bash
-# Claude Code Stop hook - sends response back to Telegram
+# Claude Code Stop hook - sends response back to Telegram (multi-session)
 # Install: copy to ~/.claude/hooks/ and add to ~/.claude/settings.json
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-YOUR_BOT_TOKEN_HERE}"
 INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
-CHAT_ID_FILE=~/.claude/telegram_chat_id
-PENDING_FILE=~/.claude/telegram_pending
+
+# Detect session name from tmux
+# TMUX format: /tmp/tmux-xxx/default,window,pane - session name is in the socket path
+# But we need to query tmux for the actual session name
+SESSION_NAME=""
+if [ -n "$TMUX" ]; then
+    # Get current tmux session name
+    SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+fi
+
+# Extract name from claude-<name> pattern
+BRIDGE_SESSION=""
+if [[ "$SESSION_NAME" == claude-* ]]; then
+    BRIDGE_SESSION="${SESSION_NAME#claude-}"
+fi
+
+# Determine file paths based on session type
+if [ -n "$BRIDGE_SESSION" ]; then
+    # Multi-session mode: per-session files
+    SESSION_DIR=~/.claude/telegram/sessions/"$BRIDGE_SESSION"
+    CHAT_ID_FILE="$SESSION_DIR/chat_id"
+    PENDING_FILE="$SESSION_DIR/pending"
+else
+    # Legacy single-session mode (fallback)
+    CHAT_ID_FILE=~/.claude/telegram_chat_id
+    PENDING_FILE=~/.claude/telegram_pending
+fi
 
 # Only respond to Telegram-initiated messages
 [ ! -f "$PENDING_FILE" ] && exit 0
