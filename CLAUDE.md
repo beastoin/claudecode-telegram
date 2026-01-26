@@ -9,7 +9,7 @@ When making changes that result in a new version:
    VERSION="x.y.z"
    ```
 
-2. **Update `doc.md`** with:
+2. **Update `DOC.md`** with:
    - New version number in header
    - Changelog entry describing:
      - Breaking changes (table format if applicable)
@@ -36,15 +36,15 @@ When making changes that result in a new version:
 | `bridge.py` | Telegram webhook handler, session management |
 | `claudecode-telegram.sh` | CLI wrapper, tunnel/webhook setup |
 | `hooks/send-to-telegram.sh` | Claude Stop hook, sends responses |
-| `doc.md` | Design philosophy, changelog |
+| `DOC.md` | Design philosophy, changelog |
 
 ## Design Philosophy
 
-**Source of truth: `doc.md`** - All principles are documented there with full context.
+**Source of truth: `DOC.md`** - All principles are documented there with full context.
 
-When making changes, ensure they align with the philosophy in `doc.md`. If adding new principles, update `doc.md` first (both the summary table at the top AND the detailed section), then reference here.
+When making changes, ensure they align with the philosophy in `DOC.md`. If adding new principles, update `DOC.md` first (both the summary table at the top AND the detailed section), then reference here.
 
-### Quick Reference (see doc.md for details)
+### Quick Reference (see DOC.md for details)
 
 | Principle | Rule |
 |-----------|------|
