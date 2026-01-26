@@ -38,20 +38,21 @@ When making changes that result in a new version:
 | `hooks/send-to-telegram.sh` | Claude Stop hook, sends responses |
 | `doc.md` | Design philosophy, changelog |
 
-## Architecture Principles (preserve these)
+## Design Philosophy
 
-1. **tmux IS persistence** - No database, no state.json
-2. **`claude-<name>` naming** - Enables auto-discovery
-3. **RAM state only** - Rebuilt on startup from tmux
-4. **Per-session files** - Minimal hook↔gateway coordination
-5. **Fail loudly** - No silent errors, no hidden retries
+**Source of truth: `doc.md`** - All principles are documented there with full context.
 
-## Security Principles (v0.3.0+)
+When making changes, ensure they align with the philosophy in `doc.md`. If adding new principles, update `doc.md` first (both the summary table at the top AND the detailed section), then reference here.
 
-1. **Token isolation** - `TELEGRAM_BOT_TOKEN` NEVER leaves bridge process
-   - Claude sessions don't have token in environment
-   - Hook forwards to bridge via localhost HTTP, not Telegram API
-2. **Admin auto-learn** - First user to message becomes admin (RAM only)
-3. **Silent rejection** - Non-admin users get no response
-4. **Secure permissions** - Directories 0o700, files 0o600
-5. **Optional webhook verification** - `TELEGRAM_WEBHOOK_SECRET` for extra security
+### Quick Reference (see doc.md for details)
+
+| Principle | Rule |
+|-----------|------|
+| tmux IS persistence | No database, no state.json |
+| `claude-<name>` naming | Enables auto-discovery |
+| RAM state only | Rebuilt on startup from tmux |
+| Per-session files | Minimal hook↔gateway coordination |
+| Fail loudly | No silent errors, no hidden retries |
+| Token isolation | `TELEGRAM_BOT_TOKEN` NEVER leaves bridge |
+| Admin auto-learn | First user becomes admin (RAM only) |
+| Secure by default | 0o700 dirs, 0o600 files |

@@ -2,69 +2,20 @@
 
 > Version: 0.3.0 (Security Hardening)
 
-## Changelog
+## Current Philosophy (Summary)
 
-### v0.3.0 - Security Hardening
+| Principle | Description |
+|-----------|-------------|
+| **tmux IS persistence** | No database, no state.json - tmux sessions are the source of truth |
+| **`claude-<name>` naming** | Enables auto-discovery via `tmux list-sessions \| grep ^claude-` |
+| **RAM state only** | Rebuilt on startup from tmux, never persisted |
+| **Per-session files** | Minimal hook↔gateway coordination via filesystem |
+| **Fail loudly** | No silent errors, no hidden retries |
+| **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves bridge process |
+| **Admin auto-learn** | First user to message becomes admin (RAM only) |
+| **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
 
-**Security principle: Token never leaves the bridge.**
-
-| Before (v0.2.0) | After (v0.3.0) |
-|-----------------|----------------|
-| Token exported to Claude tmux session | Token only in bridge process |
-| Hook calls Telegram API directly | Hook forwards to bridge via localhost |
-| Any Telegram user can control bot | First user auto-registered as admin |
-| Default file permissions | Explicit 0o700/0o600 permissions |
-| No webhook verification | Optional `TELEGRAM_WEBHOOK_SECRET` |
-
-**New security features:**
-- **Token isolation**: Claude sessions never see `TELEGRAM_BOT_TOKEN`
-- **Bridge-centric architecture**: Hook → localhost HTTP → bridge → Telegram
-- **Admin auto-learn**: First user to message becomes admin (RAM only)
-- **Silent rejection**: Non-admin users get no response (bot doesn't reveal itself)
-- **Secure file permissions**: Session directories 0o700, files 0o600
-- **Optional webhook verification**: Set `TELEGRAM_WEBHOOK_SECRET` to verify Telegram requests
-
-**Architecture change:**
-```
-Before:                              After:
-Claude (has token)                   Claude (NO token)
-    │                                    │
-    └─► Hook calls Telegram API          └─► Hook POSTs to localhost:8080/response
-                                              │
-                                              ▼
-                                         Bridge (has token) ─► Telegram API
-```
-
-### v0.2.0 - Multi-Session Control Panel
-
-**Breaking changes from v0.1.0:**
-
-| v0.1.0 (Single Session) | v0.2.0 (Multi-Session) |
-|-------------------------|------------------------|
-| One tmux session: `claude` | Multiple: `claude-<name>` |
-| Global files: `~/.claude/telegram_chat_id` | Per-session: `~/.claude/telegram/sessions/<name>/` |
-| `TMUX_SESSION` env var | Sessions created via `/new` |
-| Messages → single Claude | Messages → active session or `@name` routing |
-
-**New features:**
-- `/new <name>` - Create named Claude instance
-- `/use <name>` - Switch active session
-- `/list` - List all instances (scans tmux)
-- `/kill <name>` - Stop and remove instance
-- `@name <msg>` - One-off message routing
-- Auto-discovery of `claude-*` sessions on startup
-- JSON registration for unregistered sessions
-
-**Architecture changes:**
-- No persistent state file - tmux IS the persistence
-- RAM state rebuilt on gateway restart
-- Per-session file isolation for hook coordination
-
-### v0.1.0 - Initial Release
-
-- Single tmux session support
-- Basic Telegram ↔ Claude bridging
-- `/clear`, `/resume`, `/continue_`, `/loop`, `/stop`, `/status` commands
+---
 
 ## Core Principle: tmux IS the Persistence
 
@@ -280,3 +231,69 @@ All session files use restrictive permissions:
 - Files: `0o600` (owner only)
 
 This prevents other users on multi-user systems from reading chat IDs or session data.
+
+---
+
+## Changelog
+
+### v0.3.0 - Security Hardening
+
+**Security principle: Token never leaves the bridge.**
+
+| Before (v0.2.0) | After (v0.3.0) |
+|-----------------|----------------|
+| Token exported to Claude tmux session | Token only in bridge process |
+| Hook calls Telegram API directly | Hook forwards to bridge via localhost |
+| Any Telegram user can control bot | First user auto-registered as admin |
+| Default file permissions | Explicit 0o700/0o600 permissions |
+| No webhook verification | Optional `TELEGRAM_WEBHOOK_SECRET` |
+
+**New security features:**
+- **Token isolation**: Claude sessions never see `TELEGRAM_BOT_TOKEN`
+- **Bridge-centric architecture**: Hook → localhost HTTP → bridge → Telegram
+- **Admin auto-learn**: First user to message becomes admin (RAM only)
+- **Silent rejection**: Non-admin users get no response (bot doesn't reveal itself)
+- **Secure file permissions**: Session directories 0o700, files 0o600
+- **Optional webhook verification**: Set `TELEGRAM_WEBHOOK_SECRET` to verify Telegram requests
+
+**Architecture change:**
+```
+Before:                              After:
+Claude (has token)                   Claude (NO token)
+    │                                    │
+    └─► Hook calls Telegram API          └─► Hook POSTs to localhost:8080/response
+                                              │
+                                              ▼
+                                         Bridge (has token) ─► Telegram API
+```
+
+### v0.2.0 - Multi-Session Control Panel
+
+**Breaking changes from v0.1.0:**
+
+| v0.1.0 (Single Session) | v0.2.0 (Multi-Session) |
+|-------------------------|------------------------|
+| One tmux session: `claude` | Multiple: `claude-<name>` |
+| Global files: `~/.claude/telegram_chat_id` | Per-session: `~/.claude/telegram/sessions/<name>/` |
+| `TMUX_SESSION` env var | Sessions created via `/new` |
+| Messages → single Claude | Messages → active session or `@name` routing |
+
+**New features:**
+- `/new <name>` - Create named Claude instance
+- `/use <name>` - Switch active session
+- `/list` - List all instances (scans tmux)
+- `/kill <name>` - Stop and remove instance
+- `@name <msg>` - One-off message routing
+- Auto-discovery of `claude-*` sessions on startup
+- JSON registration for unregistered sessions
+
+**Architecture changes:**
+- No persistent state file - tmux IS the persistence
+- RAM state rebuilt on gateway restart
+- Per-session file isolation for hook coordination
+
+### v0.1.0 - Initial Release
+
+- Single tmux session support
+- Basic Telegram ↔ Claude bridging
+- `/clear`, `/resume`, `/continue_`, `/loop`, `/stop`, `/status` commands
