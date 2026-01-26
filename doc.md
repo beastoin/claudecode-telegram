@@ -2,6 +2,39 @@
 
 > Version: 0.2.0 (Multi-Session Control Panel)
 
+## Changelog
+
+### v0.2.0 - Multi-Session Control Panel
+
+**Breaking changes from v0.1.0:**
+
+| v0.1.0 (Single Session) | v0.2.0 (Multi-Session) |
+|-------------------------|------------------------|
+| One tmux session: `claude` | Multiple: `claude-<name>` |
+| Global files: `~/.claude/telegram_chat_id` | Per-session: `~/.claude/telegram/sessions/<name>/` |
+| `TMUX_SESSION` env var | Sessions created via `/new` |
+| Messages → single Claude | Messages → active session or `@name` routing |
+
+**New features:**
+- `/new <name>` - Create named Claude instance
+- `/use <name>` - Switch active session
+- `/list` - List all instances (scans tmux)
+- `/kill <name>` - Stop and remove instance
+- `@name <msg>` - One-off message routing
+- Auto-discovery of `claude-*` sessions on startup
+- JSON registration for unregistered sessions
+
+**Architecture changes:**
+- No persistent state file - tmux IS the persistence
+- RAM state rebuilt on gateway restart
+- Per-session file isolation for hook coordination
+
+### v0.1.0 - Initial Release
+
+- Single tmux session support
+- Basic Telegram ↔ Claude bridging
+- `/clear`, `/resume`, `/continue_`, `/loop`, `/stop`, `/status` commands
+
 ## Core Principle: tmux IS the Persistence
 
 The most important design decision: **no database, no state files, no JSON persistence**. tmux sessions ARE the source of truth.
