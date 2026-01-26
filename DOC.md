@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.3.0 (Security Hardening)
+> Version: 0.3.1 (Bug Fixes)
 
 ## Current Philosophy (Summary)
 
@@ -235,6 +235,16 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.3.1 - Bug Fixes
+
+**Fixes:**
+- **Startup crash**: Fixed `((attempts++))` causing script exit with `set -e` when attempts=0 (bash arithmetic returns exit code 1 when expression evaluates to 0)
+- **Claude confirmation dialog**: Added automatic acceptance of `--dangerously-skip-permissions` confirmation prompt (selects "Yes, I accept")
+
+**Technical details:**
+- Changed `((attempts++))` to `((++attempts))` in tunnel URL wait loop
+- Added keystrokes to bridge.py to navigate and accept Claude's startup dialog
 
 ### v0.3.0 - Security Hardening
 

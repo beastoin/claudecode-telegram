@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -179,7 +179,7 @@ cmd_run() {
     while [[ -z "$tunnel_url" && $attempts -lt 30 ]]; do
         sleep 1
         tunnel_url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
-        ((attempts++))
+        ((++attempts))
     done
 
     if [[ -z "$tunnel_url" ]]; then

@@ -227,6 +227,12 @@ def create_session(name):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name,
                    "claude --dangerously-skip-permissions", "Enter"])
 
+    # Wait for confirmation dialog and accept it (select option 2: "Yes, I accept")
+    time.sleep(1.5)
+    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])  # Select option 2
+    time.sleep(0.3)
+    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
+
     # Register in state
     state["sessions"][name] = {"tmux": tmux_name}
     state["active"] = name
