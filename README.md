@@ -43,6 +43,15 @@ Telegram -> Cloudflare Tunnel -> Bridge -> tmux (Claude Code)
 Claude Stop Hook -----> Bridge ----+----> Telegram
 ```
 
+## Philosophy
+
+- **Claude Code IS persistence** - Claude manages its own context and memory
+- **LLM tokens stay low** - No context rebuilding, Claude remembers
+- **Security by architecture** - Bot credentials never touch Claude
+- **Zero external state** - No database, no state.json
+
+See [DOC.md](DOC.md) for details.
+
 ## Credits
 
 Original project by [Han Xiao](https://github.com/hanxiao) - [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram)
