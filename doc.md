@@ -1,8 +1,39 @@
 # Design Philosophy
 
-> Version: 0.2.0 (Multi-Session Control Panel)
+> Version: 0.3.0 (Security Hardening)
 
 ## Changelog
+
+### v0.3.0 - Security Hardening
+
+**Security principle: Token never leaves the bridge.**
+
+| Before (v0.2.0) | After (v0.3.0) |
+|-----------------|----------------|
+| Token exported to Claude tmux session | Token only in bridge process |
+| Hook calls Telegram API directly | Hook forwards to bridge via localhost |
+| Any Telegram user can control bot | First user auto-registered as admin |
+| Default file permissions | Explicit 0o700/0o600 permissions |
+| No webhook verification | Optional `TELEGRAM_WEBHOOK_SECRET` |
+
+**New security features:**
+- **Token isolation**: Claude sessions never see `TELEGRAM_BOT_TOKEN`
+- **Bridge-centric architecture**: Hook → localhost HTTP → bridge → Telegram
+- **Admin auto-learn**: First user to message becomes admin (RAM only)
+- **Silent rejection**: Non-admin users get no response (bot doesn't reveal itself)
+- **Secure file permissions**: Session directories 0o700, files 0o600
+- **Optional webhook verification**: Set `TELEGRAM_WEBHOOK_SECRET` to verify Telegram requests
+
+**Architecture change:**
+```
+Before:                              After:
+Claude (has token)                   Claude (NO token)
+    │                                    │
+    └─► Hook calls Telegram API          └─► Hook POSTs to localhost:8080/response
+                                              │
+                                              ▼
+                                         Bridge (has token) ─► Telegram API
+```
 
 ### v0.2.0 - Multi-Session Control Panel
 
@@ -178,3 +209,74 @@ One Telegram DM manages all Claude instances because:
 3. **Mobile-friendly.** One conversation, explicit routing via commands.
 
 The `@name` syntax and `/use` command give you full control without the overhead of multiple chats.
+
+## Security Model (v0.3.0+)
+
+### Token Isolation
+
+The most important security principle: **Claude never sees the bot token.**
+
+Claude is a powerful agent that could inadvertently leak tokens via:
+- Tool use (e.g., `curl` commands in responses)
+- Log files
+- Error messages
+- Responses to the user
+
+The bridge-centric architecture ensures this can't happen:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ .env file ──► Gateway/Bridge (ONLY place with token)   │
+│                    │                                    │
+│                    │ creates tmux (NO token)            │
+│                    ▼                                    │
+│              Claude session (NO token)       ← SAFE    │
+│                    │                                    │
+│                    │ hook runs on stop                  │
+│                    ▼                                    │
+│              Hook (NO token needed)                     │
+│                    │                                    │
+│                    │ POST localhost:8080/response       │
+│                    ▼                                    │
+│              Bridge ──► Telegram API         ← SAFE    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Admin Auto-Learn
+
+```python
+admin_chat_id = None  # RAM only
+
+def handle_message(update):
+    chat_id = update["message"]["chat"]["id"]
+
+    # First user becomes admin
+    if admin_chat_id is None:
+        admin_chat_id = chat_id
+
+    # Reject non-admins silently
+    if chat_id != admin_chat_id:
+        return  # Don't reveal bot exists
+```
+
+Why auto-learn instead of config file?
+1. **Zero configuration** - Just start and message
+2. **Natural UX** - First user is obviously the owner
+3. **RAM-only** - Restart to reset admin (feature, not bug)
+
+### Optional Webhook Verification
+
+If `TELEGRAM_WEBHOOK_SECRET` is set:
+1. Gateway adds `secret_token` to webhook registration
+2. Telegram sends `X-Telegram-Bot-Api-Secret-Token` header
+3. Bridge verifies header matches, rejects mismatches
+
+If not set, works like before (simpler setup, still localhost-only for hook).
+
+### File Permissions
+
+All session files use restrictive permissions:
+- Directories: `0o700` (owner only)
+- Files: `0o600` (owner only)
+
+This prevents other users on multi-user systems from reading chat IDs or session data.

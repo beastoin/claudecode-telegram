@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -74,7 +74,12 @@ telegram_api() {
 
 telegram_set_webhook() {
     local token="$1" url="$2"
-    curl -s "https://api.telegram.org/bot${token}/setWebhook?url=${url}"
+    # Add secret_token if TELEGRAM_WEBHOOK_SECRET is set (optional security)
+    if [[ -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
+        curl -s "https://api.telegram.org/bot${token}/setWebhook?url=${url}&secret_token=${TELEGRAM_WEBHOOK_SECRET}"
+    else
+        curl -s "https://api.telegram.org/bot${token}/setWebhook?url=${url}"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,8 +452,8 @@ EOF
     fi
 
     log ""
-    log "$(bold "Note:") Hook uses TELEGRAM_BOT_TOKEN from environment"
-    hint "Make sure it's set when running Claude"
+    log "$(bold "Note:") Hook forwards to bridge - no token needed in Claude session"
+    hint "Run bridge with: ./claudecode-telegram.sh run"
 }
 
 cmd_hook_test() {
@@ -614,8 +619,16 @@ FLAGS
   -p, --port <port>     Bridge port (default: 8080)
 
 ENVIRONMENT
-  TELEGRAM_BOT_TOKEN    Bot token from @BotFather (required)
-  PORT                  Server port (default: 8080)
+  TELEGRAM_BOT_TOKEN        Bot token from @BotFather (required)
+  PORT                      Server port (default: 8080)
+  TELEGRAM_WEBHOOK_SECRET   Webhook verification secret (optional, for extra security)
+
+SECURITY
+  - Token is NEVER exposed to Claude sessions (bridge-centric architecture)
+  - First user to message becomes admin (auto-learn, stored in RAM)
+  - Non-admin users are silently ignored
+  - Session files use 0o700/0o600 permissions
+  - Optional webhook verification via TELEGRAM_WEBHOOK_SECRET
 
 MULTI-SESSION WORKFLOW
   1. Start gateway:    ./claudecode-telegram.sh run

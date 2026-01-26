@@ -45,3 +45,13 @@ When making changes that result in a new version:
 3. **RAM state only** - Rebuilt on startup from tmux
 4. **Per-session files** - Minimal hook↔gateway coordination
 5. **Fail loudly** - No silent errors, no hidden retries
+
+## Security Principles (v0.3.0+)
+
+1. **Token isolation** - `TELEGRAM_BOT_TOKEN` NEVER leaves bridge process
+   - Claude sessions don't have token in environment
+   - Hook forwards to bridge via localhost HTTP, not Telegram API
+2. **Admin auto-learn** - First user to message becomes admin (RAM only)
+3. **Silent rejection** - Non-admin users get no response
+4. **Secure permissions** - Directories 0o700, files 0o600
+5. **Optional webhook verification** - `TELEGRAM_WEBHOOK_SECRET` for extra security

@@ -13,6 +13,7 @@ from pathlib import Path
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "sessions"
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
 
@@ -22,6 +23,9 @@ state = {
     "sessions": {},  # name -> {"tmux": "claude-<name>"}
     "pending_registration": None,  # Unregistered tmux session awaiting name
 }
+
+# Security: Auto-learn first user as admin (RAM only, re-learns on restart)
+admin_chat_id = None
 
 BOT_COMMANDS = [
     {"command": "new", "description": "Create new Claude: /new <name>"},
@@ -71,9 +75,12 @@ def get_session_dir(name):
 
 
 def ensure_session_dir(name):
-    """Create session directory if needed."""
+    """Create session directory if needed with secure permissions (0o700)."""
     d = get_session_dir(name)
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Ensure parent directories also have secure permissions
+    SESSIONS_DIR.chmod(0o700)
+    d.chmod(0o700)
     return d
 
 
@@ -86,10 +93,14 @@ def get_chat_id_file(name):
 
 
 def set_pending(name, chat_id):
-    """Mark session as having a pending request."""
+    """Mark session as having a pending request with secure permissions (0o600)."""
     d = ensure_session_dir(name)
-    (d / "pending").write_text(str(int(time.time())))
-    (d / "chat_id").write_text(str(chat_id))
+    pending = d / "pending"
+    chat_id_file = d / "chat_id"
+    pending.write_text(str(int(time.time())))
+    pending.chmod(0o600)
+    chat_id_file.write_text(str(chat_id))
+    chat_id_file.chmod(0o600)
 
 
 def clear_pending(name):
@@ -191,7 +202,11 @@ def tmux_send_escape(tmux_name):
 
 
 def create_session(name):
-    """Create a new Claude instance."""
+    """Create a new Claude instance.
+
+    SECURITY: Token is NOT exported to Claude session. Hook forwards responses
+    to bridge via localhost HTTP, bridge sends to Telegram. Token isolation.
+    """
     tmux_name = f"claude-{name}"
 
     if tmux_exists(tmux_name):
@@ -207,10 +222,8 @@ def create_session(name):
 
     time.sleep(0.5)
 
-    # Export token and start claude
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                   f"export TELEGRAM_BOT_TOKEN='{BOT_TOKEN}'", "Enter"])
-    time.sleep(0.2)
+    # Start claude WITHOUT exporting token (security: token stays in bridge only)
+    # Hook will forward responses to bridge via localhost HTTP
     subprocess.run(["tmux", "send-keys", "-t", tmux_name,
                    "claude --dangerously-skip-permissions", "Enter"])
 
@@ -286,6 +299,22 @@ def send_typing_loop(chat_id, session_name):
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # Route based on path
+        if self.path == "/response":
+            # Hook forwarding response (internal, no auth needed - localhost only)
+            self.handle_hook_response()
+            return
+
+        # Telegram webhook - optional secret verification
+        if WEBHOOK_SECRET:
+            header_token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header_token != WEBHOOK_SECRET:
+                print(f"Webhook rejected: invalid secret token")
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Forbidden")
+                return
+
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:
             update = json.loads(body)
@@ -297,12 +326,60 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
+    def handle_hook_response(self):
+        """Handle response forwarded from Claude hook.
+
+        SECURITY: This is how Claude responses get to Telegram without
+        Claude ever having access to the bot token. Hook POSTs here,
+        bridge sends to Telegram.
+        """
+        try:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            data = json.loads(body)
+            session_name = data.get("session")
+            text = data.get("text", "")
+
+            if not session_name or not text:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing session or text")
+                return
+
+            # Get chat_id from session's file
+            chat_id_file = get_chat_id_file(session_name)
+            if not chat_id_file.exists():
+                print(f"Hook response: no chat_id for session '{session_name}'")
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"No chat_id for session")
+                return
+
+            chat_id = chat_id_file.read_text().strip()
+            print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
+
+            # Bridge sends to Telegram (only place with token)
+            telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+
+            # Clear pending
+            clear_pending(session_name)
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except Exception as e:
+            print(f"Hook response error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Claude-Telegram Multi-Session Bridge")
 
     def handle_message(self, update):
+        global admin_chat_id
+
         msg = update.get("message", {})
         text = msg.get("text", "")
         chat_id = msg.get("chat", {}).get("id")
@@ -310,6 +387,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if not text or not chat_id:
             return
+
+        # SECURITY: Auto-learn first user as admin
+        if admin_chat_id is None:
+            admin_chat_id = chat_id
+            print(f"Admin registered: {chat_id}")
+
+        # SECURITY: Reject non-admin users (silent - don't reveal bot exists)
+        if chat_id != admin_chat_id:
+            print(f"Rejected non-admin: {chat_id}")
+            return  # Silent rejection
 
         # Check for JSON registration response
         if state["pending_registration"]:
@@ -579,16 +666,23 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN not set")
         return
 
-    # Create sessions directory
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    # Create sessions directory with secure permissions (0o700)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    SESSIONS_DIR.chmod(0o700)
 
     # Discover existing sessions
     init_sessions()
 
     setup_bot_commands()
     print(f"Multi-Session Bridge on :{PORT}")
+    print(f"Hook endpoint: http://localhost:{PORT}/response")
     print(f"Active: {state['active'] or 'none'}")
     print(f"Sessions: {list(state['sessions'].keys()) or 'none'}")
+    if WEBHOOK_SECRET:
+        print("Webhook verification: enabled")
+    else:
+        print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
+    print("Admin: auto-learn (first user to message becomes admin)")
 
     try:
         HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
