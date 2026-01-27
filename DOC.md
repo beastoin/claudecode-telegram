@@ -1,18 +1,18 @@
 # Design Philosophy
 
-> Version: 0.3.1 (Bug Fixes)
+> Version: 0.5.1 (Test Isolation & System Command)
 
 ## Current Philosophy (Summary)
 
 | Principle | Description |
 |-----------|-------------|
 | **tmux IS persistence** | No database, no state.json - tmux sessions are the source of truth |
-| **`claude-<name>` naming** | Enables auto-discovery via `tmux list-sessions \| grep ^claude-` |
+| **`claude-<name>` naming** | Configurable prefix via `TMUX_PREFIX` (default: `claude-`) |
 | **RAM state only** | Rebuilt on startup from tmux, never persisted |
 | **Per-session files** | Minimal hook↔gateway coordination via filesystem |
 | **Fail loudly** | No silent errors, no hidden retries |
 | **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves bridge process |
-| **Admin auto-learn** | First user to message becomes admin (RAM only) |
+| **Admin config** | Pre-set via `ADMIN_CHAT_ID` or auto-learn first user |
 | **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
 
 ---
@@ -193,15 +193,25 @@ The bridge-centric architecture ensures this can't happen:
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Admin Auto-Learn
+### Admin Configuration
+
+Two modes:
+
+**1. Pre-configured (recommended for production):**
+```bash
+ADMIN_CHAT_ID=121604706  # Lock to specific user
+```
+
+**2. Auto-learn (default):**
+```python
+admin_chat_id = None  # RAM only, first user becomes admin
+```
 
 ```python
-admin_chat_id = None  # RAM only
-
 def handle_message(update):
     chat_id = update["message"]["chat"]["id"]
 
-    # First user becomes admin
+    # First user becomes admin (if not pre-configured)
     if admin_chat_id is None:
         admin_chat_id = chat_id
 
@@ -210,9 +220,9 @@ def handle_message(update):
         return  # Don't reveal bot exists
 ```
 
-Why auto-learn instead of config file?
-1. **Zero configuration** - Just start and message
-2. **Natural UX** - First user is obviously the owner
+Why two modes?
+1. **Pre-configured** - Secure, no race condition on first message
+2. **Auto-learn** - Zero configuration for quick setup
 3. **RAM-only** - Restart to reset admin (feature, not bug)
 
 ### Optional Webhook Verification
@@ -235,6 +245,50 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.5.1 - Test Isolation & System Command
+
+**New features:**
+- **`/system` command**: Shows system configuration with secrets redacted
+- **`ADMIN_CHAT_ID` env var**: Pre-lock admin instead of auto-learn (recommended for production)
+- **`TMUX_PREFIX` env var**: Configurable tmux session prefix (default: `claude-`)
+- **`SESSIONS_DIR` env var**: Configurable session files directory
+
+**Test improvements:**
+- Full test/prod isolation (separate prefix, port, session dir)
+- New `test_response_endpoint`: Tests complete hook → bridge → Telegram flow
+- `ADMIN_CHAT_ID` in tests enables full e2e with real Telegram messages
+- Success logging for response sends
+
+**Hook improvements:**
+- Hook now reads `TMUX_PREFIX` env var for session detection
+- Hook reads `PORT` env var for bridge endpoint
+
+### v0.5.0 - Tunnel Watchdog
+
+**New features:**
+- Watchdog monitors cloudflared process every 10 seconds
+- Auto-restarts tunnel if it dies
+- Updates webhook with new URL automatically
+- Notifies users via Telegram on tunnel reconnect
+- `/notify` endpoint for system alerts
+
+**Architecture:**
+- Shell script manages cloudflared lifecycle
+- Token stays in bridge (security principle maintained)
+
+### v0.4.0 - Testing Framework
+
+**New features:**
+- `/restart` command to restart Claude in session
+- `/status` shows Claude process state (not just tmux)
+- `--tunnel-url` flag for persistent tunnel URLs
+- Startup/shutdown notifications to Telegram
+- Fix `/command@botname` parsing (Telegram autocomplete)
+
+**Testing:**
+- `test.sh` automated acceptance tests
+- `TEST.md` testing documentation
 
 ### v0.3.1 - Bug Fixes
 

@@ -6,10 +6,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${TEST_PORT:-8095}"
-CHAT_ID="${TEST_CHAT_ID:-123456789}"
+CHAT_ID="${ADMIN_CHAT_ID:-${TEST_CHAT_ID:-123456789}}"
 BRIDGE_PID=""
 TUNNEL_PID=""
 TUNNEL_URL=""
+TEST_SESSION_DIR="${TMPDIR:-/tmp}/claudecode-telegram-test-$$"
+TEST_TMUX_PREFIX="claudetest-"
+BRIDGE_LOG="/tmp/bridge-test-$$.log"
 
 # Colors
 RED='\033[0;31m'
@@ -33,9 +36,12 @@ cleanup() {
     info "Cleaning up..."
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
-    # Kill any test sessions we created
-    tmux kill-session -t "claude-testbot1" 2>/dev/null || true
-    tmux kill-session -t "claude-testbot2" 2>/dev/null || true
+    # Kill any test sessions we created (using test prefix)
+    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null || true
+    # Remove test session directory and log
+    [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"
+    [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
 }
 
 trap cleanup EXIT
@@ -105,7 +111,10 @@ test_bridge_starts() {
     lsof -ti :"$PORT" | xargs kill -9 2>/dev/null || true
     sleep 1
 
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" PORT="$PORT" python3 -u "$SCRIPT_DIR/bridge.py" &
+    # Create isolated test session directory
+    mkdir -p "$TEST_SESSION_DIR"
+
+    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" PORT="$PORT" SESSIONS_DIR="$TEST_SESSION_DIR" TMUX_PREFIX="$TEST_TMUX_PREFIX" ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
 
     if wait_for_port "$PORT"; then
@@ -156,7 +165,7 @@ test_new_command() {
     send_message "/new testbot1" >/dev/null
     sleep 2
 
-    if tmux has-session -t "claude-testbot1" 2>/dev/null; then
+    if tmux has-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null; then
         success "/new creates tmux session"
     else
         fail "/new failed to create session"
@@ -248,12 +257,16 @@ test_at_mention() {
 test_session_files() {
     info "Testing session file permissions..."
 
-    local session_dir="$HOME/.claude/telegram/sessions/testbot1"
+    local session_dir="$TEST_SESSION_DIR/testbot1"
 
     if [[ -d "$session_dir" ]]; then
         # Check directory permissions (should be 0700)
         local dir_perms
-        dir_perms=$(stat -f "%Lp" "$session_dir" 2>/dev/null || stat -c "%a" "$session_dir" 2>/dev/null)
+        if [[ "$(uname)" == "Darwin" ]]; then
+            dir_perms=$(stat -f "%Lp" "$session_dir")
+        else
+            dir_perms=$(stat -c "%a" "$session_dir")
+        fi
         if [[ "$dir_perms" == "700" ]]; then
             success "Session directory has secure permissions (0700)"
         else
@@ -263,7 +276,11 @@ test_session_files() {
         # Check chat_id file if exists
         if [[ -f "$session_dir/chat_id" ]]; then
             local file_perms
-            file_perms=$(stat -f "%Lp" "$session_dir/chat_id" 2>/dev/null || stat -c "%a" "$session_dir/chat_id" 2>/dev/null)
+            if [[ "$(uname)" == "Darwin" ]]; then
+                file_perms=$(stat -f "%Lp" "$session_dir/chat_id")
+            else
+                file_perms=$(stat -c "%a" "$session_dir/chat_id")
+            fi
             if [[ "$file_perms" == "600" ]]; then
                 success "chat_id file has secure permissions (0600)"
             else
@@ -282,7 +299,7 @@ test_kill_command() {
     result=$(send_message "/kill testbot2")
     sleep 1
 
-    if ! tmux has-session -t "claude-testbot2" 2>/dev/null; then
+    if ! tmux has-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null; then
         success "/kill removes tmux session"
     else
         fail "/kill failed to remove session"
@@ -317,6 +334,59 @@ test_notify_endpoint() {
     fi
 }
 
+test_response_endpoint() {
+    info "Testing /response endpoint (hook -> bridge -> Telegram)..."
+
+    # Use real chat_id if ADMIN_CHAT_ID provided (for full e2e verification)
+    local test_chat_id="$CHAT_ID"
+    local expect_real="false"
+    [[ -n "${ADMIN_CHAT_ID:-}" ]] && expect_real="true"
+
+    # Create a new session for this test
+    send_message "/new responsetest" >/dev/null
+    sleep 3
+
+    # Set up pending file (simulates waiting for response)
+    local session_dir="$TEST_SESSION_DIR/responsetest"
+    mkdir -p "$session_dir"
+    date +%s > "$session_dir/pending"
+    echo "$test_chat_id" > "$session_dir/chat_id"
+
+    # Simulate hook calling /response endpoint
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"session":"responsetest","text":"Test response from hook"}')
+
+    if [[ "$result" == "OK" ]]; then
+        # Check bridge log for success
+        sleep 1
+        if grep -q "Response sent: responsetest -> Telegram OK" "$BRIDGE_LOG" 2>/dev/null; then
+            if [[ "$expect_real" == "true" ]]; then
+                success "/response endpoint sends to Telegram (check your Telegram!)"
+            else
+                success "/response endpoint sends to Telegram"
+            fi
+        else
+            # Check if there was an API error (expected with fake chat_id)
+            if grep -q "Telegram API error" "$BRIDGE_LOG" 2>/dev/null; then
+                if [[ "$expect_real" == "true" ]]; then
+                    fail "/response endpoint failed to send (check TEST_REAL_CHAT_ID)"
+                else
+                    success "/response endpoint works (API error expected with test chat_id)"
+                fi
+            else
+                fail "/response endpoint did not log send attempt"
+            fi
+        fi
+    else
+        fail "/response endpoint failed: $result"
+    fi
+
+    # Cleanup
+    send_message "/kill responsetest" >/dev/null 2>&1 || true
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Integration tests (require tunnel)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,16 +403,24 @@ test_with_tunnel() {
     fi
 
     info "Starting tunnel..."
-    cloudflared tunnel --url "http://localhost:$PORT" 2>&1 &
+    local tunnel_log="/tmp/cloudflared-test-$$.log"
+    cloudflared tunnel --url "http://localhost:$PORT" >"$tunnel_log" 2>&1 &
     TUNNEL_PID=$!
 
-    sleep 10
-
-    # Get tunnel URL from process
-    TUNNEL_URL=$(ps aux | grep cloudflared | grep -o 'https://[^[:space:]]*\.trycloudflare\.com' | head -1 || true)
+    # Wait for tunnel URL to appear in log (up to 30 seconds)
+    local attempts=0
+    while [[ $attempts -lt 30 ]]; do
+        TUNNEL_URL=$(grep -o 'https://[^[:space:]|]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
+        [[ -n "$TUNNEL_URL" ]] && break
+        sleep 1
+        ((++attempts))
+    done
 
     if [[ -n "$TUNNEL_URL" ]]; then
         success "Tunnel started: $TUNNEL_URL"
+
+        # Wait for DNS propagation
+        sleep 5
 
         # Test webhook setup
         local webhook_result
@@ -356,6 +434,8 @@ test_with_tunnel() {
     else
         fail "Could not get tunnel URL"
     fi
+
+    rm -f "$tunnel_log"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -397,6 +477,7 @@ main() {
     test_kill_command
     test_blocked_commands
     test_notify_endpoint
+    test_response_endpoint
 
     # Tunnel tests (optional)
     log ""

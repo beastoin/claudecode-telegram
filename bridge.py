@@ -16,7 +16,8 @@ from pathlib import Path
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
-SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "sessions"
+SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
+TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
@@ -27,8 +28,9 @@ state = {
     "startup_notified": False,  # Whether we've sent the startup message
 }
 
-# Security: Auto-learn first user as admin (RAM only, re-learns on restart)
-admin_chat_id = None
+# Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
+ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
+admin_chat_id = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
 BOT_COMMANDS = [
     {"command": "new", "description": "Create new Claude: /new <name>"},
@@ -38,6 +40,7 @@ BOT_COMMANDS = [
     {"command": "status", "description": "Detailed status of active Claude"},
     {"command": "stop", "description": "Interrupt active Claude (Escape)"},
     {"command": "restart", "description": "Restart Claude in active session"},
+    {"command": "system", "description": "Show system config (secrets redacted)"},
 ]
 
 BLOCKED_COMMANDS = [
@@ -152,9 +155,9 @@ def scan_tmux_sessions():
             )
             cmd = pane_cmd.stdout.strip() if pane_cmd.returncode == 0 else ""
 
-            if session_name.startswith("claude-"):
+            if session_name.startswith(TMUX_PREFIX):
                 # Registered session
-                name = session_name[7:]  # Remove "claude-" prefix
+                name = session_name[len(TMUX_PREFIX):]  # Remove prefix
                 registered[name] = {"tmux": session_name}
             elif "claude" in cmd.lower() or session_name == "claude":
                 # Unregistered session running claude
@@ -226,7 +229,7 @@ def create_session(name):
     SECURITY: Token is NOT exported to Claude session. Hook forwards responses
     to bridge via localhost HTTP, bridge sends to Telegram. Token isolation.
     """
-    tmux_name = f"claude-{name}"
+    tmux_name = f"{TMUX_PREFIX}{name}"
 
     if tmux_exists(tmux_name):
         return False, f"Session '{name}' already exists"
@@ -241,8 +244,13 @@ def create_session(name):
 
     time.sleep(0.5)
 
-    # Start claude WITHOUT exporting token (security: token stays in bridge only)
-    # Hook will forward responses to bridge via localhost HTTP
+    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection)
+    # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
+    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}'", "Enter"])
+    time.sleep(0.3)
+
+    # Start claude
     subprocess.run(["tmux", "send-keys", "-t", tmux_name,
                    "claude --dangerously-skip-permissions", "Enter"])
 
@@ -310,7 +318,7 @@ def switch_session(name):
 
 def register_session(name, tmux_session):
     """Register an unregistered tmux session under a name."""
-    new_tmux_name = f"claude-{name}"
+    new_tmux_name = f"{TMUX_PREFIX}{name}"
 
     # Rename the tmux session
     result = subprocess.run(
@@ -480,7 +488,9 @@ class Handler(BaseHTTPRequestHandler):
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
             # Bridge sends to Telegram (only place with token)
-            telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            result = telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            if result and result.get("ok"):
+                print(f"Response sent: {session_name} -> Telegram OK")
 
             # Clear pending
             clear_pending(session_name)
@@ -603,6 +613,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.cmd_stop(chat_id)
         elif cmd == "/restart":
             return self.cmd_restart(chat_id)
+        elif cmd == "/system":
+            return self.cmd_system(chat_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"'{cmd}' not supported (interactive)")
             return True
@@ -745,6 +757,34 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"Failed: {err}")
         return True
 
+    def cmd_system(self, chat_id):
+        """Show system configuration (secrets redacted)."""
+        def redact(s):
+            if not s:
+                return "(not set)"
+            if len(s) <= 8:
+                return "***"
+            return s[:4] + "..." + s[-4:]
+
+        lines = [
+            "System Configuration",
+            "─" * 20,
+            f"Bot Token: {redact(BOT_TOKEN)}",
+            f"Port: {PORT}",
+            f"Admin: {admin_chat_id or '(auto-learn)'}",
+            f"Webhook Secret: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
+            f"Sessions Dir: {SESSIONS_DIR}",
+            f"tmux Prefix: {TMUX_PREFIX}",
+            "",
+            "State",
+            "─" * 20,
+            f"Active: {state['active'] or '(none)'}",
+            f"Sessions: {list(state['sessions'].keys()) or '(none)'}",
+            f"Pending Registration: {state['pending_registration'] or '(none)'}",
+        ]
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
         # Check for unregistered sessions
@@ -864,7 +904,10 @@ def main():
         print("Webhook verification: enabled")
     else:
         print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
-    print("Admin: auto-learn (first user to message becomes admin)")
+    if admin_chat_id:
+        print(f"Admin: {admin_chat_id} (pre-configured)")
+    else:
+        print("Admin: auto-learn (first user to message becomes admin)")
 
     try:
         HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

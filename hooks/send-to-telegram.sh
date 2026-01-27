@@ -22,10 +22,11 @@ if [ -n "${TMUX:-}" ]; then
     SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
 fi
 
-# Extract name from claude-<name> pattern
+# Extract name from prefix pattern (configurable via TMUX_PREFIX env)
+TMUX_PREFIX="${TMUX_PREFIX:-claude-}"
 BRIDGE_SESSION=""
-if [[ "$SESSION_NAME" == claude-* ]]; then
-    BRIDGE_SESSION="${SESSION_NAME#claude-}"
+if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
+    BRIDGE_SESSION="${SESSION_NAME#${TMUX_PREFIX}}"
 fi
 
 # Determine file paths based on session type

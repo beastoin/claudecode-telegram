@@ -3,8 +3,7 @@
 ## Quick Start
 
 ```bash
-export TELEGRAM_BOT_TOKEN='your-test-bot-token'
-./test.sh
+TELEGRAM_BOT_TOKEN='your-test-bot-token' ./test.sh
 ```
 
 ## Test Categories
@@ -33,6 +32,7 @@ export TELEGRAM_BOT_TOKEN='your-test-bot-token'
 | `test_session_files` | Session dirs (0700) and files (0600) have secure permissions |
 | `test_kill_command` | `/kill <name>` removes tmux session |
 | `test_blocked_commands` | Interactive commands (`/mcp`, `/vim`, etc.) blocked |
+| `test_response_endpoint` | Full hook → bridge → Telegram response flow |
 
 ### Tunnel Tests (Optional)
 
@@ -49,6 +49,7 @@ Skip with: `SKIP_TUNNEL=1 ./test.sh`
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TEST_PORT` | No | Bridge port (default: 8095) |
 | `TEST_CHAT_ID` | No | Simulated chat ID (default: 123456789) |
+| `ADMIN_CHAT_ID` | No | Pre-lock admin to this chat ID (enables full e2e test with real Telegram messages) |
 | `SKIP_TUNNEL` | No | Set to `1` to skip tunnel tests |
 
 ## Manual Testing
@@ -95,6 +96,7 @@ curl -X POST http://localhost:8095 \
 - [x] `/status` - Session status with Claude process check
 - [x] `/stop` - Interrupt (Escape)
 - [x] `/restart` - Restart Claude
+- [x] `/system` - Show system config (secrets redacted)
 - [x] `@name <msg>` - Mention routing
 - [x] `<message>` - Route to active session
 
@@ -136,6 +138,32 @@ Then call from `main()`:
 ```bash
 test_my_feature
 ```
+
+## Test Isolation
+
+Tests run isolated from production:
+
+| Resource | Test | Production |
+|----------|------|------------|
+| Port | 8095 | 8080 |
+| tmux prefix | `claudetest-` | `claude-` |
+| Session files | `/tmp/claudecode-telegram-test-$$` | `~/.claude/telegram/sessions/` |
+| Bot token | Separate test bot | Production bot |
+
+This allows running tests while production is active.
+
+## Full E2E Test
+
+To test the complete response flow (hook → bridge → Telegram):
+
+```bash
+TELEGRAM_BOT_TOKEN='...' ADMIN_CHAT_ID='your-chat-id' ./test.sh
+```
+
+With `ADMIN_CHAT_ID` set:
+- Bridge pre-locks to your chat ID (no auto-learn)
+- Test messages use your real chat ID
+- Response test sends actual message to your Telegram
 
 ## CI Integration
 
