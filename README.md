@@ -18,6 +18,7 @@ cd claudecode-telegram
 
 # 3. Run (one command!)
 export TELEGRAM_BOT_TOKEN="your_token_from_botfather"
+export ADMIN_CHAT_ID="your_telegram_chat_id"  # Optional: lock to your account
 ./claudecode-telegram.sh run
 ```
 
@@ -33,6 +34,8 @@ Then from Telegram: `/new myproject` to create a Claude instance.
 | `/kill <name>` | Stop instance |
 | `/status` | Show status |
 | `/stop` | Interrupt Claude |
+| `/restart` | Restart Claude in session |
+| `/system` | Show system config (secrets redacted) |
 | `@name <msg>` | One-off message to specific instance |
 
 ## How it works
