@@ -769,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
             return s[:4] + "..." + s[-4:]
 
         lines = [
-            f"claudecode-telegram v{VERSION}",
+            f"claudecode-telegram v{VERSION} (beastoin)",
             "─" * 20,
             f"Bot Token: {redact(BOT_TOKEN)}",
             f"Port: {PORT}",

@@ -190,7 +190,7 @@ cmd_run() {
         port="$alt_port"
     fi
 
-    log "$(bold "Starting Claude Code Telegram Bridge v${VERSION}")"
+    log "$(bold "Starting Claude Code Telegram Bridge v${VERSION} (beastoin)")"
     log ""
 
     # 1. Install hook if needed
@@ -845,7 +845,7 @@ main() {
         case "$1" in
             --env-file)  set -a; source "$2"; set +a; shift 2;;
             -h|--help)   cmd_help; exit 0;;
-            -V|--version) echo "claudecode-telegram $VERSION"; exit 0;;
+            -V|--version) echo "claudecode-telegram $VERSION (beastoin)"; exit 0;;
             -q|--quiet)  QUIET=true; shift;;
             -v|--verbose) VERBOSE=true; shift;;
             --json)      JSON_OUTPUT=true; shift;;
