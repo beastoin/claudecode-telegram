@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.5
+> Version: 0.6.6
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,18 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.6 - @all broadcast
+
+**New feature:**
+- `@all <message>` broadcasts to all running Claude sessions
+- Each session receives the message and responds independently
+- Confirmation shows which sessions received the broadcast
+
+**Usage:**
+```
+@all what's your status?
+```
 
 ### v0.6.5 - Auto-clear stale pending files
 

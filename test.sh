@@ -276,6 +276,20 @@ test_at_mention() {
     fi
 }
 
+test_at_all_broadcast() {
+    info "Testing @all broadcast..."
+
+    # Both testbot1 and testbot2 should exist from previous tests
+    local result
+    result=$(send_message "@all hello everyone")
+
+    if [[ "$result" == "OK" ]]; then
+        success "@all broadcast accepted"
+    else
+        fail "@all broadcast failed"
+    fi
+}
+
 test_session_files() {
     info "Testing session file permissions..."
 
@@ -518,6 +532,7 @@ main() {
     test_restart_command
     test_stop_command
     test_at_mention
+    test_at_all_broadcast
     test_session_files
     test_kill_command
     test_blocked_commands

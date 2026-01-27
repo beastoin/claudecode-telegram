@@ -60,6 +60,14 @@ When making changes that result in a new version:
 
 ### Running tests
 
+**Rule: Always run tests and ensure all pass before pushing.**
+
+```bash
+# Before any commit/push:
+TEST_BOT_TOKEN='8117592253:AAE1vEf5WW1VJyzWD9iQg9A5A1xfEFOG8KU' TEST_CHAT_ID='121604706' ./test.sh
+```
+
+Alternative formats:
 ```bash
 # Basic test (uses mock chat ID)
 TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh

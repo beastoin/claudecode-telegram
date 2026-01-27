@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 
 import os
 import json
@@ -562,6 +562,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.handle_command(text, chat_id, msg_id):
                 return
 
+        # Handle @all broadcast
+        if text.lower().startswith("@all "):
+            message = text[5:]  # Remove "@all "
+            self.route_to_all(message, chat_id, msg_id)
+            return
+
         # Handle @name prefix for one-off routing
         target_session, message = self.parse_at_mention(text)
 
@@ -828,6 +834,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
+
+    def route_to_all(self, text, chat_id, msg_id):
+        """Broadcast message to all running sessions."""
+        sessions = list(state["sessions"].keys())
+        if not sessions:
+            self.reply(chat_id, "No sessions. Create with: /new <name>")
+            return
+
+        sent_to = []
+        for name in sessions:
+            session = state["sessions"][name]
+            tmux_name = session["tmux"]
+            if tmux_exists(tmux_name) and is_claude_running(tmux_name):
+                # Route without setting as active
+                self.route_message(name, text, chat_id, msg_id, one_off=True)
+                sent_to.append(name)
+
+        if not sent_to:
+            self.reply(chat_id, "No running sessions to broadcast to")
 
     def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
         """Route a message to a specific session."""
