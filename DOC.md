@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.5.3 (Restart Command)
+> Version: 0.5.4 (Tunnel Health Check)
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.5.4 - Tunnel Health Check
+
+**Improvements:**
+- **Tunnel watchdog now checks reachability**: Previously only checked if cloudflared process was alive. Now also curls the tunnel URL to verify it's actually reachable.
+- **Kills zombie tunnels**: If tunnel process is alive but URL unreachable, kills the process and restarts.
+
+**Why this matters:**
+- Cloudflare quick tunnels can become unreachable while the process is still running
+- This catches cases where DNS expires or Cloudflare revokes the tunnel
+- Faster recovery from tunnel failures
 
 ### v0.5.3 - Restart Command
 

@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.3"
+VERSION="0.5.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -112,6 +112,11 @@ wait_for_tunnel_url() {
 is_tunnel_alive() {
     local pid="$1"
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+is_tunnel_reachable() {
+    local url="$1"
+    [[ -n "$url" ]] && curl -s --max-time 5 "$url" >/dev/null 2>&1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,8 +315,17 @@ cmd_run() {
 
         # Check tunnel (only if we're managing it)
         if [[ -n "$tunnel_pid" ]]; then
+            local tunnel_problem=""
             if ! is_tunnel_alive "$tunnel_pid"; then
-                warn "Tunnel died, restarting..."
+                tunnel_problem="process died"
+            elif ! is_tunnel_reachable "$tunnel_url"; then
+                tunnel_problem="unreachable"
+                # Kill the zombie process
+                kill "$tunnel_pid" 2>/dev/null || true
+            fi
+
+            if [[ -n "$tunnel_problem" ]]; then
+                warn "Tunnel $tunnel_problem, restarting..."
 
                 # Notify users via bridge
                 bridge_notify "$port" "⚠️ Tunnel connection lost. Reconnecting..."
