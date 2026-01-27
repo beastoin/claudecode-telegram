@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -81,6 +81,36 @@ telegram_set_webhook() {
     else
         curl -s "https://api.telegram.org/bot${token}/setWebhook?url=${url}"
     fi
+}
+
+bridge_notify() {
+    local port="$1" message="$2"
+    # Ask bridge to send notification (bridge has the token, we don't)
+    curl -s -X POST "http://localhost:$port/notify" \
+        -H "Content-Type: application/json" \
+        -d "{\"text\":\"$message\"}" >/dev/null 2>&1 || true
+}
+
+start_tunnel() {
+    local port="$1" log_file="$2"
+    cloudflared tunnel --url "http://localhost:$port" > "$log_file" 2>&1 &
+    echo $!
+}
+
+wait_for_tunnel_url() {
+    local log_file="$1" timeout="${2:-30}"
+    local url="" attempts=0
+    while [[ -z "$url" && $attempts -lt $timeout ]]; do
+        sleep 1
+        url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$log_file" 2>/dev/null | head -1 || true)
+        ((attempts++))
+    done
+    echo "$url"
+}
+
+is_tunnel_alive() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,20 +217,14 @@ cmd_run() {
         # Start cloudflared quick tunnel in background
         log "Starting tunnel..."
         tunnel_log="/tmp/cloudflared-$$.log"
-        cloudflared tunnel --url "http://localhost:$port" > "$tunnel_log" 2>&1 &
-        tunnel_pid=$!
+        tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
 
         # Wait for tunnel URL
-        local attempts=0
-        while [[ -z "$tunnel_url" && $attempts -lt 30 ]]; do
-            sleep 1
-            tunnel_url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
-            ((attempts++))
-        done
+        tunnel_url=$(wait_for_tunnel_url "$tunnel_log" 30)
 
         if [[ -z "$tunnel_url" ]]; then
             error "Could not get tunnel URL"
-            kill $tunnel_pid 2>/dev/null || true
+            kill "$tunnel_pid" 2>/dev/null || true
             exit 1
         fi
 
@@ -253,17 +277,78 @@ cmd_run() {
     log ""
     log "$(bold "Commands:") /new /use /list /kill /status /stop /restart"
     log "$(dim "Ctrl+C to stop")"
+    if [[ -n "$tunnel_pid" ]]; then
+        log "$(dim "Tunnel watchdog: enabled (auto-restart on failure)")"
+    fi
     log ""
 
     # Cleanup on exit
-    if [[ -n "$tunnel_pid" ]]; then
-        trap 'kill $tunnel_pid $bridge_pid 2>/dev/null; rm -f "$tunnel_log"' EXIT
-    else
-        trap 'kill $bridge_pid 2>/dev/null' EXIT
-    fi
+    cleanup_and_exit() {
+        log ""
+        log "Shutting down..."
+        [[ -n "$tunnel_pid" ]] && kill "$tunnel_pid" 2>/dev/null
+        [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null
+        [[ -n "$tunnel_log" ]] && rm -f "$tunnel_log"
+        exit 0
+    }
+    trap cleanup_and_exit EXIT INT TERM
 
-    # 6. Wait for bridge (bring to foreground)
-    wait $bridge_pid
+    # 6. Watchdog loop - monitor both bridge and tunnel
+    while true; do
+        # Check if bridge is still running
+        if ! kill -0 "$bridge_pid" 2>/dev/null; then
+            error "Bridge died unexpectedly"
+            exit 1
+        fi
+
+        # Check tunnel (only if we're managing it)
+        if [[ -n "$tunnel_pid" ]]; then
+            if ! is_tunnel_alive "$tunnel_pid"; then
+                warn "Tunnel died, restarting..."
+
+                # Notify users via bridge
+                bridge_notify "$port" "⚠️ Tunnel connection lost. Reconnecting..."
+
+                # Restart tunnel
+                tunnel_log="/tmp/cloudflared-$$.log"
+                tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
+
+                # Wait for new URL
+                local new_url
+                new_url=$(wait_for_tunnel_url "$tunnel_log" 30)
+
+                if [[ -z "$new_url" ]]; then
+                    error "Failed to restart tunnel"
+                    bridge_notify "$port" "❌ Tunnel restart failed. Bridge may be offline."
+                    exit 1
+                fi
+
+                tunnel_url="$new_url"
+                success "Tunnel restarted: $tunnel_url"
+
+                # Update webhook
+                local webhook_ok=false
+                for delay in 0 2 5 10 20; do
+                    [[ $delay -gt 0 ]] && sleep "$delay"
+                    if telegram_set_webhook "$token" "$tunnel_url" | grep -q '"ok":true'; then
+                        webhook_ok=true
+                        break
+                    fi
+                done
+
+                if $webhook_ok; then
+                    success "Webhook updated"
+                    bridge_notify "$port" "✅ Tunnel reconnected"
+                else
+                    warn "Webhook update failed"
+                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed. May need manual intervention."
+                fi
+            fi
+        fi
+
+        # Sleep before next check
+        sleep 10
+    done
 }
 
 cmd_stop() {
@@ -674,6 +759,13 @@ SECURITY
   - Non-admin users are silently ignored
   - Session files use 0o700/0o600 permissions
   - Optional webhook verification via TELEGRAM_WEBHOOK_SECRET
+
+TUNNEL WATCHDOG
+  When using quick tunnels (no --tunnel-url), the bridge includes a watchdog:
+  - Monitors cloudflared process every 10 seconds
+  - Auto-restarts tunnel if it dies
+  - Updates webhook with new URL
+  - Notifies all connected users via Telegram
 
 MULTI-SESSION WORKFLOW
   1. Start gateway:    ./claudecode-telegram.sh run

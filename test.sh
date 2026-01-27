@@ -302,6 +302,21 @@ test_blocked_commands() {
     fi
 }
 
+test_notify_endpoint() {
+    info "Testing /notify endpoint..."
+
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/notify" \
+        -H "Content-Type: application/json" \
+        -d '{"text":"Test notification"}')
+
+    if echo "$result" | grep -q "Sent to"; then
+        success "/notify endpoint works"
+    else
+        fail "/notify endpoint failed: $result"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Integration tests (require tunnel)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +396,7 @@ main() {
     test_session_files
     test_kill_command
     test_blocked_commands
+    test_notify_endpoint
 
     # Tunnel tests (optional)
     log ""

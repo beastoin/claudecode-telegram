@@ -385,6 +385,11 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_hook_response()
             return
 
+        if self.path == "/notify":
+            # Internal endpoint for system notifications (localhost only)
+            self.handle_notify()
+            return
+
         # Telegram webhook - optional secret verification
         if WEBHOOK_SECRET:
             header_token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -405,6 +410,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def handle_notify(self):
+        """Handle system notification request (internal, localhost only).
+
+        SECURITY: This endpoint allows the shell script to trigger
+        notifications without having access to the bot token.
+        Used for tunnel watchdog alerts.
+        """
+        try:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            data = json.loads(body)
+            text = data.get("text", "")
+
+            if not text:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing text")
+                return
+
+            # Send to all known chat_ids
+            chat_ids = get_all_chat_ids()
+            sent = 0
+            for chat_id in chat_ids:
+                result = telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+                if result and result.get("ok"):
+                    sent += 1
+
+            print(f"Notify: sent to {sent}/{len(chat_ids)} chats: {text[:50]}...")
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(f"Sent to {sent} chats".encode())
+        except Exception as e:
+            print(f"Notify error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
 
     def handle_hook_response(self):
         """Handle response forwarded from Claude hook.
