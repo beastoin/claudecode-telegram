@@ -326,10 +326,10 @@ cmd_run() {
                 tunnel_url="$new_url"
                 success "Tunnel restarted: $tunnel_url"
 
-                # Update webhook
+                # Update webhook (longer delays for DNS propagation)
                 local webhook_ok=false
-                for delay in 0 2 5 10 20; do
-                    [[ $delay -gt 0 ]] && sleep "$delay"
+                for delay in 0 5 15 30 60 90; do
+                    [[ $delay -gt 0 ]] && { log "Waiting ${delay}s for DNS..."; sleep "$delay"; }
                     if telegram_set_webhook "$token" "$tunnel_url" | grep -q '"ok":true'; then
                         webhook_ok=true
                         break
