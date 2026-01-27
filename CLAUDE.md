@@ -45,12 +45,18 @@ When making changes that result in a new version:
 **All changes must pass tests before committing:**
 
 ```bash
+# Basic test (uses mock chat ID)
 TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh
+
+# Full e2e test (sends real Telegram messages)
+TELEGRAM_BOT_TOKEN='your-test-token' ADMIN_CHAT_ID='your-chat-id' ./test.sh
 ```
+
+**Test isolation:** Tests run isolated from production (separate port 8095, prefix `claudetest-`, temp session dir). You can run tests while production is active.
 
 Tests cover:
 - Unit: imports, version command
-- Integration: all commands, admin security, session files
+- Integration: all commands, admin security, session files, response flow
 - Tunnel: webhook setup (optional, skip with `SKIP_TUNNEL=1`)
 
 See `TEST.md` for detailed test documentation.
@@ -71,5 +77,5 @@ When making changes, ensure they align with the philosophy in `DOC.md`. If addin
 | Per-session files | Minimal hook↔gateway coordination |
 | Fail loudly | No silent errors, no hidden retries |
 | Token isolation | `TELEGRAM_BOT_TOKEN` NEVER leaves bridge |
-| Admin auto-learn | First user becomes admin (RAM only) |
+| Admin config | `ADMIN_CHAT_ID` env var or auto-learn first user |
 | Secure by default | 0o700 dirs, 0o600 files |
