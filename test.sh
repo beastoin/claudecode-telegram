@@ -356,26 +356,6 @@ test_notify_endpoint() {
     fi
 }
 
-test_broadcast_endpoint() {
-    info "Testing /broadcast endpoint (session-initiated messages)..."
-
-    local result
-    result=$(curl -s -X POST "http://localhost:$PORT/broadcast" \
-        -H "Content-Type: application/json" \
-        -d '{"from":"testbot","text":"Test broadcast message"}')
-
-    if [[ "$result" == "OK" ]]; then
-        success "/broadcast endpoint works"
-    else
-        # May fail if no admin_chat_id - that's expected in test mode
-        if [[ "$result" == "No admin configured" ]]; then
-            success "/broadcast endpoint works (no admin in test mode)"
-        else
-            fail "/broadcast endpoint failed: $result"
-        fi
-    fi
-}
-
 test_response_endpoint() {
     info "Testing /response endpoint (hook -> bridge -> Telegram)..."
 
@@ -511,7 +491,6 @@ main() {
     test_kill_command
     test_blocked_commands
     test_notify_endpoint
-    test_broadcast_endpoint
     test_response_endpoint
 
     # Tunnel tests (optional)

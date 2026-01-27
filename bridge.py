@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.5.4"
+VERSION = "0.5.3"
 
 import os
 import json
@@ -411,11 +411,6 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_notify()
             return
 
-        if self.path == "/broadcast":
-            # Internal endpoint for session-initiated messages (localhost only)
-            self.handle_broadcast()
-            return
-
         # Telegram webhook - optional secret verification
         if WEBHOOK_SECRET:
             header_token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -470,53 +465,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"Sent to {sent} chats".encode())
         except Exception as e:
             print(f"Notify error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
-
-    def handle_broadcast(self):
-        """Handle broadcast message from sessions (internal, localhost only).
-
-        SECURITY: Allows Claude sessions to send messages to Telegram
-        without needing a pending file. Used for unprompted notifications.
-        Token stays in bridge.
-        """
-        try:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            data = json.loads(body)
-            sender = data.get("from", "unknown")
-            text = data.get("text", "")
-
-            if not text:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Missing text")
-                return
-
-            # Format message with sender
-            formatted = f"[{sender}] {text}"
-
-            # Send to admin (primary recipient for broadcasts)
-            if admin_chat_id:
-                result = telegram_api("sendMessage", {
-                    "chat_id": admin_chat_id,
-                    "text": formatted,
-                    "parse_mode": "HTML"
-                })
-                if result and result.get("ok"):
-                    print(f"Broadcast from {sender}: {text[:50]}...")
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b"OK")
-                    return
-
-            # Fallback: no admin set
-            print(f"Broadcast failed: no admin_chat_id")
-            self.send_response(503)
-            self.end_headers()
-            self.wfile.write(b"No admin configured")
-        except Exception as e:
-            print(f"Broadcast error: {e}")
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())

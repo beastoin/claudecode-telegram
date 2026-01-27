@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.5.4 (Broadcast Endpoint)
+> Version: 0.5.3 (Restart Command)
 
 ## Current Philosophy (Summary)
 
@@ -245,29 +245,6 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
-
-### v0.5.4 - Broadcast Endpoint
-
-**New features:**
-- **`/broadcast` endpoint**: Sessions can send messages to Telegram without needing a pending file
-- **`broadcast.sh` script**: CLI tool for easy broadcast from any session
-
-**Usage:**
-```bash
-# From any terminal/session:
-./broadcast.sh "Build complete!"
-./broadcast.sh --from kelvin "Tests passed"
-
-# Or direct curl:
-curl -X POST http://localhost:8080/broadcast \
-  -H "Content-Type: application/json" \
-  -d '{"from": "mybot", "text": "Hello from Claude!"}'
-```
-
-**Architecture:**
-- Token isolation maintained: sessions call localhost, bridge handles Telegram API
-- Messages formatted as `[sender] text` in Telegram
-- Sends to `admin_chat_id` (must be set or auto-learned)
 
 ### v0.5.3 - Restart Command
 

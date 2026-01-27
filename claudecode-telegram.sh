@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.4"
+VERSION="0.5.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
