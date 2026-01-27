@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.5.4 (Tunnel Health Check)
+> Version: 0.6.0 (Multi-Node Support)
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,63 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.0 - Multi-Node Support
+
+**Breaking changes:**
+
+| Before | After |
+|--------|-------|
+| Single node, shared state | Multiple nodes, isolated state |
+| `~/.claude/telegram/sessions/` | `~/.claude/telegram/nodes/<node>/sessions/` |
+| `claude-<name>` tmux prefix | `claude-<node>-<name>` tmux prefix |
+| `TELEGRAM_BOT_TOKEN` required | Can use per-node `config.env` |
+
+**New features:**
+- **`NODE_NAME` env var**: Target specific node
+- **`--node` / `-n` flag**: Target specific node via CLI
+- **`--all` flag**: Target all nodes (stop, status)
+- **Per-node config files**: `~/.claude/telegram/nodes/<node>/config.env`
+- **Per-node state isolation**: Each node has its own sessions, PIDs, ports
+- **Smart auto-detection**: If only one node running, uses it; if multiple, prompts or errors
+
+**Usage:**
+```bash
+# Start nodes
+NODE_NAME=prod ./claudecode-telegram.sh run
+NODE_NAME=dev ./claudecode-telegram.sh run
+
+# Stop specific node
+./claudecode-telegram.sh --node dev stop
+
+# Status of all nodes
+./claudecode-telegram.sh --all status
+
+# Per-node config (optional)
+cat ~/.claude/telegram/nodes/prod/config.env
+# TELEGRAM_BOT_TOKEN=...
+# PORT=8080
+# ADMIN_CHAT_ID=...
+```
+
+**Directory structure:**
+```
+~/.claude/telegram/nodes/
+├── prod/
+│   ├── config.env      # Node configuration
+│   ├── pid             # Main process PID
+│   ├── bridge.pid      # Bridge process PID
+│   ├── tunnel.pid      # Tunnel process PID
+│   ├── port            # Current port
+│   ├── tunnel_url      # Current tunnel URL
+│   └── sessions/       # Per-session files
+└── dev/
+    └── ...
+```
+
+**Backward compatibility:**
+- Default node is "prod" if no `NODE_NAME` specified
+- Existing single-node setups continue to work
 
 ### v0.5.4 - Tunnel Health Check
 

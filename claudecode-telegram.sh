@@ -1,29 +1,36 @@
 #!/usr/bin/env bash
 #
 # claudecode-telegram - Bridge Claude Code to Telegram via webhooks
+# Multi-node support: use NODE_NAME or --node to target specific nodes
 #
 set -euo pipefail
 
-VERSION="0.5.4"
+VERSION="0.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global defaults (can be overridden by node config or env)
+# ─────────────────────────────────────────────────────────────────────────────
 
 : "${PORT:=8080}"
 : "${HOST:=0.0.0.0}"
-: "${TUNNEL_URL:=}"  # Pre-configured tunnel URL (skips cloudflared quick tunnel)
+: "${TUNNEL_URL:=}"
 
 CLAUDE_DIR="$HOME/.claude"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-: "${SESSIONS_DIR:=$CLAUDE_DIR/telegram/sessions}"
-: "${PID_FILE:=$CLAUDE_DIR/telegram/claudecode-telegram.pid}"
+NODES_DIR="$CLAUDE_DIR/telegram/nodes"
 HOOK_SCRIPT="send-to-telegram.sh"
 
+# CLI flags
 VERBOSE=false
 QUIET=false
 NO_COLOR=false
 NO_INPUT=false
 JSON_OUTPUT=false
 FORCE=false
+ALL_NODES=false
+NODE_NAME="${NODE_NAME:-}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output
@@ -45,6 +52,179 @@ warn()    { $QUIET || echo "$(yellow "warning:") $*" >&2; }
 hint()    { $QUIET || $JSON_OUTPUT || echo "$(dim "→") $*"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Node Management
+# ─────────────────────────────────────────────────────────────────────────────
+
+sanitize_node_name() {
+    local name="$1"
+    # Only allow alphanumeric and hyphens, lowercase
+    echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g'
+}
+
+get_node_dir() {
+    local node="$1"
+    echo "$NODES_DIR/$node"
+}
+
+get_node_config() {
+    local node="$1"
+    echo "$(get_node_dir "$node")/config.env"
+}
+
+get_node_pid_file() {
+    local node="$1"
+    echo "$(get_node_dir "$node")/pid"
+}
+
+get_node_sessions_dir() {
+    local node="$1"
+    echo "$(get_node_dir "$node")/sessions"
+}
+
+get_node_tmux_prefix() {
+    local node="$1"
+    echo "claude-${node}-"
+}
+
+load_node_config() {
+    local node="$1"
+    local config_file
+    config_file=$(get_node_config "$node")
+
+    if [[ -f "$config_file" ]]; then
+        debug "Loading config from $config_file"
+        set -a
+        # shellcheck source=/dev/null
+        source "$config_file"
+        set +a
+    fi
+}
+
+ensure_node_dir() {
+    local node="$1"
+    local node_dir
+    node_dir=$(get_node_dir "$node")
+    mkdir -p "$node_dir"
+    chmod 700 "$node_dir"
+
+    local sessions_dir
+    sessions_dir=$(get_node_sessions_dir "$node")
+    mkdir -p "$sessions_dir"
+    chmod 700 "$sessions_dir"
+}
+
+is_node_running() {
+    local node="$1"
+    local pid_file
+    pid_file=$(get_node_pid_file "$node")
+
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+list_running_nodes() {
+    local nodes=()
+
+    if [[ -d "$NODES_DIR" ]]; then
+        for node_dir in "$NODES_DIR"/*/; do
+            [[ -d "$node_dir" ]] || continue
+            local node
+            node=$(basename "$node_dir")
+            if is_node_running "$node"; then
+                nodes+=("$node")
+            fi
+        done
+    fi
+
+    printf '%s\n' "${nodes[@]}"
+}
+
+list_all_nodes() {
+    local nodes=()
+
+    if [[ -d "$NODES_DIR" ]]; then
+        for node_dir in "$NODES_DIR"/*/; do
+            [[ -d "$node_dir" ]] || continue
+            local node
+            node=$(basename "$node_dir")
+            nodes+=("$node")
+        done
+    fi
+
+    printf '%s\n' "${nodes[@]}"
+}
+
+resolve_target_node() {
+    # Returns the target node name, or exits with error
+    # Priority: --node flag > NODE_NAME env > auto-detect
+
+    if [[ -n "$NODE_NAME" ]]; then
+        local sanitized
+        sanitized=$(sanitize_node_name "$NODE_NAME")
+        if [[ -z "$sanitized" ]]; then
+            error "Invalid node name: $NODE_NAME"
+            exit 2
+        fi
+        echo "$sanitized"
+        return 0
+    fi
+
+    # Auto-detect: check running nodes
+    local running_nodes
+    running_nodes=$(list_running_nodes)
+    local count
+    count=$(echo "$running_nodes" | grep -c . || echo 0)
+
+    if [[ $count -eq 0 ]]; then
+        # No running nodes - default to "prod" for run command
+        echo "prod"
+        return 0
+    elif [[ $count -eq 1 ]]; then
+        # Exactly one running - use it
+        echo "$running_nodes"
+        return 0
+    else
+        # Multiple running - need explicit target
+        if $NO_INPUT || [[ ! -t 0 ]]; then
+            error "Multiple nodes running. Specify with --node <name> or --all"
+            hint "Running nodes: $(echo "$running_nodes" | tr '\n' ' ')"
+            exit 2
+        else
+            # Interactive: prompt
+            log "Multiple nodes running:"
+            local i=1
+            local node_array=()
+            while IFS= read -r node; do
+                [[ -n "$node" ]] || continue
+                log "  $i) $node"
+                node_array+=("$node")
+                ((i++))
+            done <<< "$running_nodes"
+            log "  a) all"
+
+            read -rp "Select node [1-$((i-1))/a]: " choice
+
+            if [[ "$choice" == "a" ]]; then
+                ALL_NODES=true
+                return 0
+            elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -lt $i ]]; then
+                echo "${node_array[$((choice-1))]}"
+                return 0
+            else
+                error "Invalid choice"
+                exit 2
+            fi
+        fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -56,7 +236,6 @@ require_token() {
 check_cmd() { command -v "$1" &>/dev/null; }
 
 port_in_use() {
-    # nc -z is the most reliable cross-platform port check
     nc -z localhost "$1" 2>/dev/null
 }
 
@@ -76,7 +255,6 @@ telegram_api() {
 
 telegram_set_webhook() {
     local token="$1" url="$2"
-    # Add secret_token if TELEGRAM_WEBHOOK_SECRET is set (optional security)
     if [[ -n "${TELEGRAM_WEBHOOK_SECRET:-}" ]]; then
         curl -s "https://api.telegram.org/bot${token}/setWebhook?url=${url}&secret_token=${TELEGRAM_WEBHOOK_SECRET}"
     else
@@ -86,7 +264,6 @@ telegram_set_webhook() {
 
 bridge_notify() {
     local port="$1" message="$2"
-    # Ask bridge to send notification (bridge has the token, we don't)
     curl -s -X POST "http://localhost:$port/notify" \
         -H "Content-Type: application/json" \
         -d "{\"text\":\"$message\"}" >/dev/null 2>&1 || true
@@ -124,6 +301,8 @@ is_tunnel_reachable() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_start() {
+    local node
+    node=$(resolve_target_node)
     local port="$PORT" host="$HOST"
 
     while [[ $# -gt 0 ]]; do
@@ -133,6 +312,10 @@ cmd_start() {
             *) shift;;
         esac
     done
+
+    # Load node config (may set TELEGRAM_BOT_TOKEN, PORT, etc.)
+    load_node_config "$node"
+    [[ -n "${PORT:-}" ]] && port="$PORT"
 
     local token; token=$(require_token)
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
@@ -151,14 +334,24 @@ cmd_start() {
         port="$alt_port"
     fi
 
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
-    log "$(bold "Multi-Session Bridge") on $host:$port"
+    ensure_node_dir "$node"
+
+    local sessions_dir tmux_prefix
+    sessions_dir=$(get_node_sessions_dir "$node")
+    tmux_prefix=$(get_node_tmux_prefix "$node")
+
+    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
+    export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
+
+    log "$(bold "Multi-Session Bridge") [$node] on $host:$port"
     log "$(dim "Sessions created via /new <name> from Telegram")"
     log "$(dim "Ctrl+C to stop")"
     exec python3 "$SCRIPT_DIR/bridge.py"
 }
 
 cmd_run() {
+    local node
+    node=$(resolve_target_node)
     local port="$PORT"
     local tunnel_url="$TUNNEL_URL"
 
@@ -170,15 +363,26 @@ cmd_run() {
         esac
     done
 
+    # Load node config
+    load_node_config "$node"
+    [[ -n "${PORT:-}" ]] && port="$PORT"
+    [[ -n "${TUNNEL_URL:-}" ]] && tunnel_url="$TUNNEL_URL"
+
     local token; token=$(require_token)
 
     # Check dependencies
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
     check_cmd python3 || { error "python3 not installed"; exit 4; }
 
-    # Only require cloudflared if no tunnel URL provided
     if [[ -z "$tunnel_url" ]]; then
         check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared (or use --tunnel-url)"; exit 4; }
+    fi
+
+    # Check if this node is already running
+    if is_node_running "$node"; then
+        error "Node '$node' is already running"
+        hint "Use: ./claudecode-telegram.sh --node $node restart"
+        exit 1
     fi
 
     # Check if port is available
@@ -195,7 +399,16 @@ cmd_run() {
         port="$alt_port"
     fi
 
-    log "$(bold "Starting Claude Code Telegram Bridge v${VERSION} (beastoin)")"
+    ensure_node_dir "$node"
+
+    local node_dir sessions_dir tmux_prefix pid_file
+    node_dir=$(get_node_dir "$node")
+    sessions_dir=$(get_node_sessions_dir "$node")
+    tmux_prefix=$(get_node_tmux_prefix "$node")
+    pid_file=$(get_node_pid_file "$node")
+
+    log "$(bold "Starting Claude Code Telegram Bridge v${VERSION}")"
+    log "$(bold "Node:") $node"
     log ""
 
     # 1. Install hook if needed
@@ -207,25 +420,21 @@ cmd_run() {
         log "$(dim "Hook already installed")"
     fi
 
-    # 2. Multi-session mode: Don't create default session
-    # Sessions are created via /new command from Telegram
     log "$(dim "No default session - use /new <name> from Telegram")"
 
     local tunnel_pid=""
     local tunnel_log=""
 
-    # 3. Start tunnel (or use provided URL)
+    # 2. Start tunnel (or use provided URL)
     if [[ -n "$tunnel_url" ]]; then
-        # Use pre-configured tunnel URL (user manages tunnel separately)
         log "$(dim "Using provided tunnel URL (no cloudflared started)")"
         success "Tunnel: $tunnel_url"
     else
-        # Start cloudflared quick tunnel in background
         log "Starting tunnel..."
-        tunnel_log="/tmp/cloudflared-$$.log"
+        tunnel_log="$node_dir/tunnel.log"
         tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
+        echo "$tunnel_pid" > "$node_dir/tunnel.pid"
 
-        # Wait for tunnel URL
         tunnel_url=$(wait_for_tunnel_url "$tunnel_log" 30)
 
         if [[ -z "$tunnel_url" ]]; then
@@ -235,18 +444,21 @@ cmd_run() {
         fi
 
         success "Tunnel: $tunnel_url"
-
-        # Give tunnel time to fully establish before webhook setup
+        echo "$tunnel_url" > "$node_dir/tunnel_url"
         sleep 3
     fi
 
-    # 4. Start bridge server in background (must be listening before webhook setup)
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
+    # 3. Start bridge server in background
+    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
+    export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
+
     python3 "$SCRIPT_DIR/bridge.py" &
     local bridge_pid=$!
-    sleep 1  # Give server time to start
+    echo "$bridge_pid" > "$node_dir/bridge.pid"
+    echo "$port" > "$node_dir/port"
+    sleep 1
 
-    # 5. Check if webhook already set to this URL (skip if unchanged)
+    # 4. Set webhook
     local current_webhook=""
     local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
     current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
@@ -255,7 +467,6 @@ cmd_run() {
         log "$(dim "Webhook already configured")"
         success "Webhook: $tunnel_url"
     else
-        # Set webhook (retry with backoff for DNS propagation)
         log "Setting webhook..."
         local r ok=false
 
@@ -273,7 +484,6 @@ cmd_run() {
             success "Webhook configured"
         else
             warn "Webhook setup failed (DNS may still be propagating)"
-            log "Bridge is running. Retry manually:"
             hint "./claudecode-telegram.sh webhook $tunnel_url"
         fi
     fi
@@ -288,53 +498,46 @@ cmd_run() {
     fi
     log ""
 
-    # Write PID file for easy identification/termination
-    echo $$ > "$PID_FILE"
-    chmod 600 "$PID_FILE"
-    log "$(dim "PID: $$ (${PID_FILE})")"
+    # Write main PID file
+    echo $$ > "$pid_file"
+    chmod 600 "$pid_file"
+    log "$(dim "PID: $$ ($pid_file)")"
 
     # Cleanup on exit
     cleanup_and_exit() {
         log ""
-        log "Shutting down..."
-        [[ -n "$tunnel_pid" ]] && kill "$tunnel_pid" 2>/dev/null
-        [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null
-        [[ -n "$tunnel_log" ]] && rm -f "$tunnel_log"
-        rm -f "$PID_FILE"
+        log "Shutting down node '$node'..."
+        [[ -n "${tunnel_pid:-}" ]] && kill "$tunnel_pid" 2>/dev/null || true
+        [[ -n "${bridge_pid:-}" ]] && kill "$bridge_pid" 2>/dev/null || true
+        rm -f "$pid_file" "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port"
         exit 0
     }
     trap cleanup_and_exit EXIT INT TERM
 
-    # 6. Watchdog loop - monitor both bridge and tunnel
+    # 5. Watchdog loop
     while true; do
-        # Check if bridge is still running
         if ! kill -0 "$bridge_pid" 2>/dev/null; then
             error "Bridge died unexpectedly"
             exit 1
         fi
 
-        # Check tunnel (only if we're managing it)
         if [[ -n "$tunnel_pid" ]]; then
             local tunnel_problem=""
             if ! is_tunnel_alive "$tunnel_pid"; then
                 tunnel_problem="process died"
             elif ! is_tunnel_reachable "$tunnel_url"; then
                 tunnel_problem="unreachable"
-                # Kill the zombie process
                 kill "$tunnel_pid" 2>/dev/null || true
             fi
 
             if [[ -n "$tunnel_problem" ]]; then
                 warn "Tunnel $tunnel_problem, restarting..."
-
-                # Notify users via bridge
                 bridge_notify "$port" "⚠️ Tunnel connection lost. Reconnecting..."
 
-                # Restart tunnel
-                tunnel_log="/tmp/cloudflared-$$.log"
+                tunnel_log="$node_dir/tunnel.log"
                 tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
+                echo "$tunnel_pid" > "$node_dir/tunnel.pid"
 
-                # Wait for new URL
                 local new_url
                 new_url=$(wait_for_tunnel_url "$tunnel_log" 30)
 
@@ -345,9 +548,9 @@ cmd_run() {
                 fi
 
                 tunnel_url="$new_url"
+                echo "$tunnel_url" > "$node_dir/tunnel_url"
                 success "Tunnel restarted: $tunnel_url"
 
-                # Update webhook (longer delays for DNS propagation)
                 local webhook_ok=false
                 for delay in 0 5 15 30 60 90; do
                     [[ $delay -gt 0 ]] && { log "Waiting ${delay}s for DNS..."; sleep "$delay"; }
@@ -362,49 +565,85 @@ cmd_run() {
                     bridge_notify "$port" "✅ Tunnel reconnected"
                 else
                     warn "Webhook update failed"
-                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed. May need manual intervention."
+                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed."
                 fi
             fi
         fi
 
-        # Sleep before next check
         sleep 10
     done
 }
 
 cmd_stop() {
-    log "Stopping everything..."
+    if $ALL_NODES; then
+        # Stop all nodes
+        local nodes
+        nodes=$(list_running_nodes)
+        if [[ -z "$nodes" ]]; then
+            log "No nodes running"
+            return 0
+        fi
 
+        while IFS= read -r node; do
+            [[ -n "$node" ]] || continue
+            stop_single_node "$node"
+        done <<< "$nodes"
+
+        success "All nodes stopped"
+    else
+        local node
+        node=$(resolve_target_node)
+        stop_single_node "$node"
+    fi
+}
+
+stop_single_node() {
+    local node="$1"
+    local node_dir pid_file tmux_prefix
+    node_dir=$(get_node_dir "$node")
+    pid_file=$(get_node_pid_file "$node")
+    tmux_prefix=$(get_node_tmux_prefix "$node")
+
+    log "Stopping node '$node'..."
     local killed=0
 
-    # Kill main process via PID file (this triggers cleanup of tunnel+bridge)
-    if [[ -f "$PID_FILE" ]]; then
+    # Kill main process via PID file
+    if [[ -f "$pid_file" ]]; then
         local main_pid
-        main_pid=$(cat "$PID_FILE")
+        main_pid=$(cat "$pid_file")
         if kill "$main_pid" 2>/dev/null; then
             ((killed++))
             success "Main process stopped (PID $main_pid)"
-            rm -f "$PID_FILE"
-            # Give it time to clean up children
+            rm -f "$pid_file"
             sleep 1
         fi
     fi
 
-    # Kill bridge (fallback if no PID file)
-    if pkill -f "bridge.py" 2>/dev/null; then
-        ((killed++))
-        success "Bridge stopped"
+    # Kill bridge
+    if [[ -f "$node_dir/bridge.pid" ]]; then
+        local bridge_pid
+        bridge_pid=$(cat "$node_dir/bridge.pid")
+        if kill "$bridge_pid" 2>/dev/null; then
+            ((killed++))
+            success "Bridge stopped"
+        fi
+        rm -f "$node_dir/bridge.pid"
     fi
 
-    # Kill cloudflared tunnel
-    if pkill -f "cloudflared tunnel" 2>/dev/null; then
-        ((killed++))
-        success "Tunnel stopped"
+    # Kill tunnel
+    if [[ -f "$node_dir/tunnel.pid" ]]; then
+        local tunnel_pid
+        tunnel_pid=$(cat "$node_dir/tunnel.pid")
+        if kill "$tunnel_pid" 2>/dev/null; then
+            ((killed++))
+            success "Tunnel stopped"
+        fi
+        rm -f "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url"
     fi
 
-    # Kill all claude-* tmux sessions
+    # Kill tmux sessions for this node
     local sessions
-    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude-' || true)
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${tmux_prefix}" || true)
     if [[ -n "$sessions" ]]; then
         while IFS= read -r session; do
             if tmux kill-session -t "$session" 2>/dev/null; then
@@ -414,53 +653,109 @@ cmd_stop() {
         done <<< "$sessions"
     fi
 
-    # Clean up temp files
-    rm -f /tmp/cloudflared-*.log 2>/dev/null
+    rm -f "$node_dir/port"
 
     if [[ $killed -eq 0 ]]; then
-        log "Nothing was running"
+        log "Node '$node' was not running"
     else
-        success "Cleanup complete"
+        success "Node '$node' stopped"
     fi
 }
 
 cmd_restart() {
-    log "Restarting gateway (preserving tmux sessions)..."
+    if $ALL_NODES; then
+        error "--all not supported for restart"
+        hint "Restart nodes individually: ./claudecode-telegram.sh --node <name> restart"
+        exit 2
+    fi
+
+    local node
+    node=$(resolve_target_node)
+
+    log "Restarting node '$node' (preserving tmux sessions)..."
 
     # Stop bridge and tunnel only (NOT tmux sessions)
-    if [[ -f "$PID_FILE" ]]; then
+    local node_dir pid_file
+    node_dir=$(get_node_dir "$node")
+    pid_file=$(get_node_pid_file "$node")
+
+    if [[ -f "$pid_file" ]]; then
         local main_pid
-        main_pid=$(cat "$PID_FILE")
+        main_pid=$(cat "$pid_file")
         if kill "$main_pid" 2>/dev/null; then
             success "Main process stopped (PID $main_pid)"
-            rm -f "$PID_FILE"
+            rm -f "$pid_file"
             sleep 1
         fi
     fi
 
     # Fallback kills
-    pkill -f "bridge.py" 2>/dev/null || true
-    pkill -f "cloudflared tunnel" 2>/dev/null || true
-    rm -f /tmp/cloudflared-*.log 2>/dev/null
+    [[ -f "$node_dir/bridge.pid" ]] && kill "$(cat "$node_dir/bridge.pid")" 2>/dev/null || true
+    [[ -f "$node_dir/tunnel.pid" ]] && kill "$(cat "$node_dir/tunnel.pid")" 2>/dev/null || true
+    rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port"
 
     sleep 1
 
     # Start fresh
     log ""
-    cmd_run
+    NODE_NAME="$node" cmd_run
 }
 
 cmd_status() {
+    if $ALL_NODES; then
+        # Show all nodes
+        local all_nodes
+        all_nodes=$(list_all_nodes)
+
+        if [[ -z "$all_nodes" ]]; then
+            log "No nodes configured"
+            hint "Run: ./claudecode-telegram.sh run"
+            return 0
+        fi
+
+        log "$(bold "All Nodes")"
+        log ""
+
+        while IFS= read -r node; do
+            [[ -n "$node" ]] || continue
+            show_node_status "$node"
+            log ""
+        done <<< "$all_nodes"
+    else
+        local node
+        node=$(resolve_target_node)
+        show_node_status "$node"
+    fi
+}
+
+show_node_status() {
+    local node="$1"
+    local node_dir tmux_prefix sessions_dir
+    node_dir=$(get_node_dir "$node")
+    tmux_prefix=$(get_node_tmux_prefix "$node")
+    sessions_dir=$(get_node_sessions_dir "$node")
+
+    local running=false port="" tunnel_url=""
     local hook_ok=false settings_ok=false token_ok=false bot_ok=false
     local bot_name="" webhook_url=""
     local claude_sessions=()
 
-    # Find all claude-* tmux sessions
+    # Check if running
+    if is_node_running "$node"; then
+        running=true
+        [[ -f "$node_dir/port" ]] && port=$(cat "$node_dir/port")
+        [[ -f "$node_dir/tunnel_url" ]] && tunnel_url=$(cat "$node_dir/tunnel_url")
+    fi
+
+    # Find tmux sessions for this node
     if check_cmd tmux; then
         while IFS= read -r line; do
             [[ -n "$line" ]] && claude_sessions+=("$line")
-        done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude-' || true)
+        done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${tmux_prefix}" || true)
     fi
+
+    # Load node config for token check
+    load_node_config "$node"
 
     [[ -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] && hook_ok=true
     [[ -f "$SETTINGS_FILE" ]] && grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null && settings_ok=true
@@ -482,36 +777,31 @@ cmd_status() {
             sessions_json=$(printf '%s\n' "${claude_sessions[@]}" | jq -R . | jq -s .)
         fi
         cat << EOF
-{"sessions":$sessions_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"bot":"$bot_name","webhook":"$webhook_url"}
+{"node":"$node","running":$running,"port":"$port","sessions":$sessions_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"bot":"$bot_name","webhook":"$webhook_url"}
 EOF
         return
     fi
 
-    log "$(bold "Status (Multi-Session Mode)")"
+    log "$(bold "Node: $node") $(if $running; then echo "$(green "[running]")"; else echo "$(yellow "[stopped]")"; fi)"
+
+    if $running; then
+        log "  port:     $port"
+        [[ -n "$tunnel_url" ]] && log "  tunnel:   $tunnel_url"
+    fi
+
     if [[ ${#claude_sessions[@]} -gt 0 ]]; then
         log "  sessions: $(green "${#claude_sessions[@]} running")"
         for s in "${claude_sessions[@]}"; do
-            log "            - ${s#claude-}"
+            log "            - ${s#${tmux_prefix}}"
         done
     else
-        log "  sessions: $(yellow "none") (use /new <name> from Telegram)"
+        log "  sessions: $(yellow "none")"
     fi
+
     $hook_ok && log "  hook:     $(green "installed")" || log "  hook:     $(yellow "not installed")"
-    $settings_ok && log "  settings: $(green "configured")" || log "  settings: $(yellow "not configured")"
     $token_ok && log "  token:    $(green "set") (${TELEGRAM_BOT_TOKEN:0:8}...)" || log "  token:    $(red "missing")"
     $bot_ok && log "  bot:      $(green "online") (@$bot_name)" || { $token_ok && log "  bot:      $(red "error")"; }
-    [[ -n "$webhook_url" ]] && log "  webhook:  $(green "set") ($webhook_url)" || { $token_ok && log "  webhook:  $(yellow "not set")"; }
-
-    # Suggest next action
-    if ! $token_ok; then
-        hint "Set TELEGRAM_BOT_TOKEN and run again"
-    elif ! $hook_ok; then
-        hint "Run: ./claudecode-telegram.sh hook install"
-    elif [[ -z "$webhook_url" ]]; then
-        hint "Run: ./claudecode-telegram.sh run"
-    elif [[ ${#claude_sessions[@]} -eq 0 ]]; then
-        hint "Send /new <name> to your bot on Telegram"
-    fi
+    [[ -n "$webhook_url" ]] && log "  webhook:  $(green "set")" || { $token_ok && log "  webhook:  $(yellow "not set")"; }
 }
 
 cmd_webhook() {
@@ -530,13 +820,16 @@ cmd_webhook_set() {
     local url="$1"
     [[ "$url" =~ ^https:// ]] || { error "Webhook must use HTTPS"; exit 2; }
 
+    local node
+    node=$(resolve_target_node)
+    load_node_config "$node"
+
     local token; token=$(require_token)
-    log "Setting webhook: $url"
+    log "Setting webhook for node '$node': $url"
 
     local r; r=$(telegram_set_webhook "$token" "$url")
     if echo "$r" | grep -q '"ok":true'; then
         success "Webhook configured"
-        hint "Start bridge: ./claudecode-telegram.sh start"
     else
         error "Failed to set webhook"
         echo "$r" >&2
@@ -545,25 +838,33 @@ cmd_webhook_set() {
 }
 
 cmd_webhook_info() {
+    local node
+    node=$(resolve_target_node)
+    load_node_config "$node"
+
     local token; token=$(require_token)
     local r; r=$(telegram_api "$token" "getWebhookInfo" "{}")
     local url; url=$(echo "$r" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
     local pending; pending=$(echo "$r" | grep -o '"pending_update_count":[0-9]*' | cut -d: -f2)
 
+    log "Node: $node"
     if [[ -n "$url" ]]; then
         log "URL:     $url"
         log "Pending: ${pending:-0}"
     else
         log "No webhook configured"
-        hint "./claudecode-telegram.sh webhook <url>"
     fi
 }
 
 cmd_webhook_delete() {
+    local node
+    node=$(resolve_target_node)
+    load_node_config "$node"
+
     local token; token=$(require_token)
 
     if ! $FORCE && ! $NO_INPUT; then
-        read -rp "Delete webhook? [y/N] " confirm
+        read -rp "Delete webhook for node '$node'? [y/N] " confirm
         [[ "$confirm" =~ ^[Yy] ]] || { log "Cancelled"; exit 0; }
     fi
 
@@ -607,7 +908,6 @@ cmd_hook_install() {
     cp "$src" "$dst" && chmod 755 "$dst"
     success "Hook installed: $dst"
 
-    # Update settings.json
     mkdir -p "$CLAUDE_DIR"
     local hook_cmd="~/.claude/hooks/$HOOK_SCRIPT"
 
@@ -631,38 +931,36 @@ EOF
 
     log ""
     log "$(bold "Note:") Hook forwards to bridge - no token needed in Claude session"
-    hint "Run bridge with: ./claudecode-telegram.sh run"
 }
 
 cmd_hook_test() {
-    local token; token=$(require_token)
+    local node
+    node=$(resolve_target_node)
+    load_node_config "$node"
 
-    # Find the most recent chat_id from any session
+    local token; token=$(require_token)
+    local sessions_dir
+    sessions_dir=$(get_node_sessions_dir "$node")
+
     local chat_id=""
     local chat_id_file=""
 
-    # Check multi-session directories first
-    if [[ -d "$SESSIONS_DIR" ]]; then
-        chat_id_file=$(find "$SESSIONS_DIR" -name "chat_id" -type f -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1)
+    if [[ -d "$sessions_dir" ]]; then
+        chat_id_file=$(find "$sessions_dir" -name "chat_id" -type f -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1)
         if [[ -n "$chat_id_file" ]]; then
             chat_id=$(cat "$chat_id_file")
         fi
     fi
 
-    # Fallback to legacy file
-    if [[ -z "$chat_id" ]] && [[ -f "$CLAUDE_DIR/telegram_chat_id" ]]; then
-        chat_id=$(cat "$CLAUDE_DIR/telegram_chat_id")
-    fi
-
     if [[ -z "$chat_id" ]]; then
-        error "No chat ID found"
+        error "No chat ID found for node '$node'"
         hint "Send a message to your bot first, then retry"
         exit 1
     fi
 
-    log "Sending test to chat $chat_id..."
+    log "Sending test to chat $chat_id (node: $node)..."
 
-    local r; r=$(telegram_api "$token" "sendMessage" "{\"chat_id\":\"$chat_id\",\"text\":\"Test OK!\"}")
+    local r; r=$(telegram_api "$token" "sendMessage" "{\"chat_id\":\"$chat_id\",\"text\":\"Test OK from node $node!\"}")
     echo "$r" | grep -q '"ok":true' && success "Message sent" || { error "Failed"; exit 1; }
 }
 
@@ -670,8 +968,7 @@ cmd_setup() {
     local errors=0
 
     if $NO_INPUT; then
-        # Headless: strict validation
-        log "$(bold "Headless Setup (Multi-Session Mode)")"
+        log "$(bold "Headless Setup")"
 
         check_cmd tmux  || { error "tmux not installed"; ((errors++)); }
         check_cmd jq    || { error "jq not installed"; ((errors++)); }
@@ -691,13 +988,12 @@ cmd_setup() {
         log "$(bold "Setup complete")"
         log "Run: ./claudecode-telegram.sh run"
     else
-        # Interactive: helpful warnings
-        log "$(bold "Setup (Multi-Session Mode)")"
+        log "$(bold "Setup")"
         log ""
 
         log "$(bold "Dependencies")"
         check_cmd tmux    && success "tmux"    || { error "tmux (required)"; hint "brew install tmux"; }
-        check_cmd jq      && success "jq"      || warn "jq (optional, for settings.json)"
+        check_cmd jq      && success "jq"      || warn "jq (optional)"
         check_cmd curl    && success "curl"    || error "curl (required)"
         check_cmd python3 && success "python3" || error "python3 (required)"
         check_cmd cloudflared && success "cloudflared" || warn "cloudflared (for tunnel)"
@@ -719,74 +1015,73 @@ cmd_setup() {
         [[ -f "$SCRIPT_DIR/hooks/$HOOK_SCRIPT" ]] && { cmd_hook_install 2>/dev/null || true; }
         log ""
 
-        log "$(bold "Sessions")"
-        local sessions
-        sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude-' || true)
-        if [[ -n "$sessions" ]]; then
-            while IFS= read -r s; do
-                success "${s#claude-}"
-            done <<< "$sessions"
+        log "$(bold "Nodes")"
+        local all_nodes
+        all_nodes=$(list_all_nodes)
+        if [[ -n "$all_nodes" ]]; then
+            while IFS= read -r node; do
+                if is_node_running "$node"; then
+                    success "$node $(green "[running]")"
+                else
+                    log "  $node $(yellow "[stopped]")"
+                fi
+            done <<< "$all_nodes"
         else
-            log "  $(dim "No claude-* sessions (use /new from Telegram)")"
+            log "  $(dim "No nodes configured")"
         fi
         log ""
 
-        log "$(bold "Quick Start (1 command!)")"
+        log "$(bold "Quick Start")"
         log "  1. export TELEGRAM_BOT_TOKEN='...'"
         log "  2. ./claudecode-telegram.sh run"
         log "  3. Send /new backend to your bot on Telegram"
         log ""
-        log "$(bold "Manual Setup (more control)")"
-        log "  1. export TELEGRAM_BOT_TOKEN='...'"
-        log "  2. ./claudecode-telegram.sh start"
-        log "  3. $(dim "(new terminal)") cloudflared tunnel --url http://localhost:8080"
-        log "  4. ./claudecode-telegram.sh webhook <tunnel-url>"
+        log "$(bold "Multi-Node")"
+        log "  NODE_NAME=dev ./claudecode-telegram.sh run"
+        log "  NODE_NAME=prod ./claudecode-telegram.sh run"
+        log "  ./claudecode-telegram.sh --node dev stop"
+        log "  ./claudecode-telegram.sh --all status"
     fi
 }
 
 cmd_help() {
     cat << 'EOF'
-claudecode-telegram - Bridge Claude Code to Telegram (Multi-Session)
+claudecode-telegram - Bridge Claude Code to Telegram (Multi-Node)
 
 USAGE
   ./claudecode-telegram.sh [flags] <command> [args]
 
-QUICK START (1 command!)
+QUICK START
   export TELEGRAM_BOT_TOKEN='...'
   ./claudecode-telegram.sh run
 
-  Then from Telegram:
-    /new backend     Create Claude instance "backend"
-    /new frontend    Create another instance "frontend"
-    /use backend     Switch to backend
-    /list            See all instances
-    @backend <msg>   One-off message to backend
+MULTI-NODE
+  NODE_NAME=prod ./claudecode-telegram.sh run     # Start prod node
+  NODE_NAME=dev ./claudecode-telegram.sh run      # Start dev node
+  ./claudecode-telegram.sh --node prod stop       # Stop prod only
+  ./claudecode-telegram.sh --all status           # Status of all nodes
 
-PERSISTENT URL (named tunnel)
-  # One-time setup:
-  cloudflared login
-  cloudflared tunnel create mytunnel
-  cloudflared tunnel route dns mytunnel claude.yourdomain.com
-
-  # Run with stable URL (webhook only set once):
-  ./claudecode-telegram.sh run --tunnel-url https://claude.yourdomain.com &
-  cloudflared tunnel run mytunnel
+NODE CONFIGURATION
+  Each node can have a config file at ~/.claude/telegram/nodes/<name>/config.env:
+    TELEGRAM_BOT_TOKEN=...
+    PORT=8080
+    ADMIN_CHAT_ID=...
 
 TELEGRAM COMMANDS
-  /new <name>       Create new Claude instance (tmux: claude-<name>)
+  /new <name>       Create new Claude instance
   /use <name>       Switch active Claude
-  /list             List all instances (scans tmux)
+  /list             List all instances
   /kill <name>      Stop and remove instance
-  /status           Detailed status of active Claude
-  /stop             Interrupt active Claude (Escape)
+  /status           Detailed status
+  /stop             Interrupt active Claude
   @name <msg>       One-off message to specific Claude
   <message>         Send to active Claude
 
 SHELL COMMANDS
-  run               Start gateway + tunnel (no default session)
-  restart           Restart gateway only (preserves tmux sessions)
+  run               Start gateway + tunnel
+  restart           Restart gateway (preserves tmux sessions)
   start             Start bridge only (manual setup)
-  stop              Stop bridge, tunnel, and tmux sessions
+  stop              Stop node (bridge, tunnel, tmux sessions)
   setup             Check deps, install hook, validate
   status            Show current status
   webhook <url>     Set Telegram webhook URL
@@ -798,48 +1093,37 @@ SHELL COMMANDS
 FLAGS
   -h, --help            Show help
   -V, --version         Show version
+  -n, --node <name>     Target specific node
+  --all                 Target all nodes (stop, status)
   -q, --quiet           Suppress non-error output
   -v, --verbose         Show debug output
   --json                JSON output (status command)
   --no-color            Disable colors
   --no-input            Headless mode (strict, no prompts)
   --env-file <path>     Load environment from file
-  -f, --force           Overwrite existing (hook install, webhook delete)
+  -f, --force           Overwrite existing
   -p, --port <port>     Bridge port (default: 8080)
-  --tunnel-url <url>    Use pre-configured tunnel URL (skips cloudflared)
+  --tunnel-url <url>    Use pre-configured tunnel URL
 
 ENVIRONMENT
-  TELEGRAM_BOT_TOKEN        Bot token from @BotFather (required)
-  PORT                      Server port (default: 8080)
-  TUNNEL_URL                Pre-configured tunnel URL (skips cloudflared)
-  TELEGRAM_WEBHOOK_SECRET   Webhook verification secret (optional, for extra security)
+  NODE_NAME               Target node (default: auto-detect or "prod")
+  TELEGRAM_BOT_TOKEN      Bot token from @BotFather (required)
+  PORT                    Server port (default: 8080)
+  TUNNEL_URL              Pre-configured tunnel URL
+  TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
 
-SECURITY
-  - Token is NEVER exposed to Claude sessions (bridge-centric architecture)
-  - First user to message becomes admin (auto-learn, stored in RAM)
-  - Non-admin users are silently ignored
-  - Session files use 0o700/0o600 permissions
-  - Optional webhook verification via TELEGRAM_WEBHOOK_SECRET
-
-TUNNEL WATCHDOG
-  When using quick tunnels (no --tunnel-url), the bridge includes a watchdog:
-  - Monitors cloudflared process every 10 seconds
-  - Auto-restarts tunnel if it dies
-  - Updates webhook with new URL
-  - Notifies all connected users via Telegram
-
-MULTI-SESSION WORKFLOW
-  1. Start gateway:    ./claudecode-telegram.sh run
-  2. From Telegram:    /new backend
-  3. Send message:     Write unit tests for the API
-  4. Create another:   /new frontend
-  5. Switch:           /use backend  (or @backend <msg>)
-  6. List all:         /list
-
-AUTO-DISCOVERY
-  - Existing claude-* tmux sessions are auto-discovered on startup
-  - Unregistered sessions (running claude) can be registered via:
-    {"name": "your-session-name"}
+DIRECTORY STRUCTURE
+  ~/.claude/telegram/nodes/
+  ├── prod/
+  │   ├── config.env      # Node configuration
+  │   ├── pid             # Main process PID
+  │   ├── bridge.pid      # Bridge process PID
+  │   ├── tunnel.pid      # Tunnel process PID
+  │   ├── port            # Current port
+  │   ├── tunnel_url      # Current tunnel URL
+  │   └── sessions/       # Per-session files
+  └── dev/
+      └── ...
 
 EXIT CODES
   0  Success
@@ -867,6 +1151,8 @@ main() {
             --no-input)  NO_INPUT=true; shift;;
             -f|--force)  FORCE=true; shift;;
             -p|--port)   PORT="$2"; shift 2;;
+            -n|--node)   NODE_NAME="$2"; shift 2;;
+            --all)       ALL_NODES=true; shift;;
             -*)          error "Unknown flag: $1"; exit 2;;
             *)           break;;
         esac

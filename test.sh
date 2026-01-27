@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${TEST_PORT:-8095}"
-CHAT_ID="${ADMIN_CHAT_ID:-${TEST_CHAT_ID:-123456789}}"
+CHAT_ID="${TEST_CHAT_ID:-123456789}"
 BRIDGE_PID=""
 TUNNEL_PID=""
 TUNNEL_URL=""
@@ -15,7 +15,7 @@ TUNNEL_URL=""
 TEST_BASE_DIR="$HOME/.claude/telegram-test"
 TEST_SESSION_DIR="$TEST_BASE_DIR/sessions"
 TEST_PID_FILE="$TEST_BASE_DIR/claudecode-telegram.pid"
-TEST_TMUX_PREFIX="claudetest-"
+TEST_TMUX_PREFIX="claude-test-"
 BRIDGE_LOG="$TEST_BASE_DIR/bridge.log"
 TUNNEL_LOG="$TEST_BASE_DIR/tunnel.log"
 
@@ -61,9 +61,9 @@ cleanup() {
 trap cleanup EXIT
 
 require_token() {
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        log "${RED}Error:${NC} TELEGRAM_BOT_TOKEN not set"
-        log "Usage: TELEGRAM_BOT_TOKEN='...' ./test.sh"
+    if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
+        log "${RED}Error:${NC} TEST_BOT_TOKEN not set"
+        log "Usage: TEST_BOT_TOKEN='...' ./test.sh"
         exit 1
     fi
 }
@@ -130,12 +130,12 @@ test_bridge_starts() {
     mkdir -p "$TEST_SESSION_DIR"
 
     # Start bridge with full test isolation
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
     PORT="$PORT" \
     SESSIONS_DIR="$TEST_SESSION_DIR" \
     PID_FILE="$TEST_PID_FILE" \
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
-    ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" \
+    ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
 
@@ -359,10 +359,10 @@ test_notify_endpoint() {
 test_response_endpoint() {
     info "Testing /response endpoint (hook -> bridge -> Telegram)..."
 
-    # Use real chat_id if ADMIN_CHAT_ID provided (for full e2e verification)
+    # Use real chat_id if TEST_CHAT_ID provided (for full e2e verification)
     local test_chat_id="$CHAT_ID"
     local expect_real="false"
-    [[ -n "${ADMIN_CHAT_ID:-}" ]] && expect_real="true"
+    [[ -n "${TEST_CHAT_ID:-}" ]] && expect_real="true"
 
     # Create a new session for this test
     send_message "/new responsetest" >/dev/null
@@ -440,7 +440,7 @@ test_with_tunnel() {
 
         # Test webhook setup
         local webhook_result
-        webhook_result=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${TUNNEL_URL}")
+        webhook_result=$(curl -s "https://api.telegram.org/bot${TEST_BOT_TOKEN}/setWebhook?url=${TUNNEL_URL}")
 
         if echo "$webhook_result" | grep -q '"ok":true'; then
             success "Webhook configured"
