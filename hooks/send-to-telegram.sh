@@ -13,9 +13,8 @@
 
 set -euo pipefail
 
-# Bridge endpoint (same port as webhook server)
+# Bridge port (default, may be overridden by port file below)
 BRIDGE_PORT="${PORT:-8080}"
-BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
 
 INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
@@ -41,10 +40,18 @@ if [ -n "$BRIDGE_SESSION" ]; then
     SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
     CHAT_ID_FILE="$SESSION_DIR/chat_id"
     PENDING_FILE="$SESSION_DIR/pending"
+    # Read port from file (more reliable than env var on bridge restart)
+    PORT_FILE="$SESSIONS_DIR/../port"
+    if [ -f "$PORT_FILE" ]; then
+        BRIDGE_PORT=$(cat "$PORT_FILE")
+    fi
 else
     # Not a telegram session, exit
     exit 0
 fi
+
+# Build bridge URL after port is determined
+BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
 
 # Only send to Telegram if this is a telegram-connected session (chat_id exists)
 [ ! -f "$CHAT_ID_FILE" ] && exit 0

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.2
+> Version: 0.6.3
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.3 - Fix port mismatch on bridge restart
+
+**Bug fix:**
+- Bridge now writes `port` file to node directory on startup
+- Hook reads port from file instead of env var
+- Fixes issue where hook sent to wrong port after bridge restart
 
 ### v0.6.2 - Remove pending gate, enable proactive messaging
 

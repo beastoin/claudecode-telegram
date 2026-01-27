@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 import os
 import json
@@ -904,6 +904,11 @@ def main():
     # Create sessions directory with secure permissions (0o700)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     SESSIONS_DIR.chmod(0o700)
+
+    # Write port file for hook to read (solves port mismatch on bridge restart)
+    port_file = SESSIONS_DIR.parent / "port"
+    port_file.write_text(str(PORT))
+    port_file.chmod(0o600)
 
     # Discover existing sessions
     init_sessions()
