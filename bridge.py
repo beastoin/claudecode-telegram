@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
+VERSION = "0.5.3"
+
 import os
 import json
 import signal
@@ -767,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
             return s[:4] + "..." + s[-4:]
 
         lines = [
-            "System Configuration",
+            f"claudecode-telegram v{VERSION}",
             "─" * 20,
             f"Bot Token: {redact(BOT_TOKEN)}",
             f"Port: {PORT}",
