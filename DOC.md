@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.5.1 (Test Isolation & System Command)
+> Version: 0.5.2 (PID File)
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,18 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.5.2 - PID File
+
+**New features:**
+- **PID file**: Main process writes PID to `~/.claude/telegram/claudecode-telegram.pid`
+- **Improved `stop` command**: Uses PID file for clean shutdown of main process + children
+- PID displayed at startup for easy identification
+- PID file removed on clean shutdown
+
+**Why:**
+- Easy identification of claudecode-telegram processes
+- Clean termination via `./claudecode-telegram.sh stop` or `kill $(cat ~/.claude/telegram/claudecode-telegram.pid)`
 
 ### v0.5.1 - Test Isolation & System Command
 

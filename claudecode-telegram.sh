@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.1"
+VERSION="0.5.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -15,6 +15,7 @@ CLAUDE_DIR="$HOME/.claude"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 SESSIONS_DIR="$CLAUDE_DIR/telegram/sessions"
+PID_FILE="$CLAUDE_DIR/telegram/claudecode-telegram.pid"
 HOOK_SCRIPT="send-to-telegram.sh"
 
 VERBOSE=false
@@ -282,6 +283,11 @@ cmd_run() {
     fi
     log ""
 
+    # Write PID file for easy identification/termination
+    echo $$ > "$PID_FILE"
+    chmod 600 "$PID_FILE"
+    log "$(dim "PID: $$ (${PID_FILE})")"
+
     # Cleanup on exit
     cleanup_and_exit() {
         log ""
@@ -289,6 +295,7 @@ cmd_run() {
         [[ -n "$tunnel_pid" ]] && kill "$tunnel_pid" 2>/dev/null
         [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null
         [[ -n "$tunnel_log" ]] && rm -f "$tunnel_log"
+        rm -f "$PID_FILE"
         exit 0
     }
     trap cleanup_and_exit EXIT INT TERM
@@ -356,7 +363,20 @@ cmd_stop() {
 
     local killed=0
 
-    # Kill bridge
+    # Kill main process via PID file (this triggers cleanup of tunnel+bridge)
+    if [[ -f "$PID_FILE" ]]; then
+        local main_pid
+        main_pid=$(cat "$PID_FILE")
+        if kill "$main_pid" 2>/dev/null; then
+            ((killed++))
+            success "Main process stopped (PID $main_pid)"
+            rm -f "$PID_FILE"
+            # Give it time to clean up children
+            sleep 1
+        fi
+    fi
+
+    # Kill bridge (fallback if no PID file)
     if pkill -f "bridge.py" 2>/dev/null; then
         ((killed++))
         success "Bridge stopped"
