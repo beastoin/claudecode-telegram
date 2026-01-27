@@ -552,20 +552,24 @@ cmd_run() {
                 success "Tunnel restarted: $tunnel_url"
 
                 local webhook_ok=false
-                for delay in 0 5 15 30 60 90; do
+                local webhook_response=""
+                for delay in 0 5 15 30 60 90 120 180; do
                     [[ $delay -gt 0 ]] && { log "Waiting ${delay}s for DNS..."; sleep "$delay"; }
-                    if telegram_set_webhook "$token" "$tunnel_url" | grep -q '"ok":true'; then
+                    webhook_response=$(telegram_set_webhook "$token" "$tunnel_url")
+                    if echo "$webhook_response" | grep -q '"ok":true'; then
                         webhook_ok=true
                         break
                     fi
+                    log "Webhook attempt failed: $webhook_response"
                 done
 
                 if $webhook_ok; then
                     success "Webhook updated"
                     bridge_notify "$port" "✅ Tunnel reconnected"
                 else
-                    warn "Webhook update failed"
-                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed."
+                    warn "Webhook update failed after all retries"
+                    log "Last response: $webhook_response"
+                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed. May need manual intervention."
                 fi
             fi
         fi
