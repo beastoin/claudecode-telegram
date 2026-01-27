@@ -42,7 +42,23 @@ When making changes that result in a new version:
 
 ## Testing Requirements
 
-**All changes must pass tests before committing:**
+### Every new feature MUST have a test
+
+**This is non-negotiable.** When adding any new feature:
+
+1. **Write the test first** (or alongside the feature)
+2. **Focus on end-to-end tests** - test the full flow, not just units
+3. **Add to `test.sh`** - all tests live in one file for simplicity
+4. **Verify the test fails** without your feature (proves it tests something)
+5. **Run full test suite** before committing
+
+**Why e2e tests matter:**
+- They catch integration bugs that unit tests miss
+- They document how features actually work
+- They give confidence when refactoring
+- They're the safety net for this project
+
+### Running tests
 
 ```bash
 # Basic test (uses mock chat ID)
@@ -54,10 +70,12 @@ TELEGRAM_BOT_TOKEN='your-test-token' ADMIN_CHAT_ID='your-chat-id' ./test.sh
 
 **Test isolation:** Tests run isolated from production (separate port 8095, prefix `claudetest-`, temp session dir). You can run tests while production is active.
 
-Tests cover:
-- Unit: imports, version command
-- Integration: all commands, admin security, session files, response flow
-- Tunnel: webhook setup (optional, skip with `SKIP_TUNNEL=1`)
+### Test coverage
+
+| Category | What's tested |
+|----------|---------------|
+| Unit | imports, version command |
+| Integration | all commands, admin security, session files, /response, /notify |
 
 See `TEST.md` for detailed test documentation.
 
@@ -71,6 +89,7 @@ When making changes, ensure they align with the philosophy in `DOC.md`. If addin
 
 | Principle | Rule |
 |-----------|------|
+| **Tests required** | Every new feature MUST have an e2e test |
 | tmux IS persistence | No database, no state.json |
 | `claude-<name>` naming | Enables auto-discovery |
 | RAM state only | Rebuilt on startup from tmux |
