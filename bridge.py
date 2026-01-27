@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 import os
 import json
@@ -121,13 +121,16 @@ def clear_pending(name):
 
 
 def is_pending(name):
-    """Check if session has a pending request."""
+    """Check if session has a pending request. Auto-clears after 10 min timeout."""
     pending = get_pending_file(name)
     if not pending.exists():
         return False
     try:
         ts = int(pending.read_text().strip())
-        return (time.time() - ts) < 600  # 10 min timeout
+        if (time.time() - ts) > 600:  # 10 min timeout - auto-clear stale pending
+            pending.unlink()
+            return False
+        return True
     except:
         return False
 
@@ -218,13 +221,10 @@ def tmux_send(tmux_name, text, literal=True):
     return result.returncode == 0
 
 
-def tmux_send_enter(tmux_name, count=1):
-    """Send Enter key(s) to tmux session. Double Enter forces submit when Claude is processing."""
-    for _ in range(count):
-        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-        if result.returncode != 0:
-            return False
-    return True
+def tmux_send_enter(tmux_name):
+    """Send Enter key to tmux session."""
+    result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+    return result.returncode == 0
 
 
 def tmux_send_escape(tmux_name):
@@ -856,8 +856,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Send to tmux
         send_ok = tmux_send(tmux_name, text)
-        # Double Enter forces submit even when Claude is processing (avoids batch issue)
-        enter_ok = tmux_send_enter(tmux_name, count=2)
+        enter_ok = tmux_send_enter(tmux_name)
 
         # Add 👀 reaction only after successful send to Claude
         if msg_id and send_ok and enter_ok:

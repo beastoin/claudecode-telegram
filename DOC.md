@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.4
+> Version: 0.6.5
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.5 - Auto-clear stale pending files
+
+**Changes:**
+- Pending files now auto-delete after 10 minutes
+- Reverted double Enter (didn't help with batching)
+- Fixes "busy" status getting stuck when hooks don't fire
 
 ### v0.6.4 - Fix message batching with double Enter
 
