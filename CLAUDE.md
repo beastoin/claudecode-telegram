@@ -134,3 +134,20 @@ SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 1. Search for ALL usages of the old hardcoded value
 2. Update every location that references it
 3. Ensure all entry points (create, register, restart, discover) handle it consistently
+
+### Watchdog for bridge requires careful testing
+
+**Problem:** Adding bridge auto-restart to the watchdog (like tunnel has) seems simple but has hidden complexity:
+- Shell output buffering when redirected to files
+- Port conflicts between test stages
+- Race conditions between process cleanup and restart
+- Test timeouts vs DNS propagation delays
+
+**Current state:** Only tunnel watchdog exists (v0.5.0). Bridge watchdog was attempted (v0.5.4) but reverted due to test failures.
+
+**If re-implementing:**
+1. Test the script manually first, not just via test harness
+2. Use `stdbuf -oL` for unbuffered output in tests
+3. Add longer delays between killing processes and checking ports
+4. Consider skipping watchdog tests in CI (mark as slow/optional)
+5. Ensure `start_bridge()` passes ALL required env vars, not just token/port
