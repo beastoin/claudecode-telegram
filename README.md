@@ -18,7 +18,7 @@ cd claudecode-telegram
 
 # 3. Run (one command!)
 export TELEGRAM_BOT_TOKEN="your_token_from_botfather"
-export ADMIN_CHAT_ID="your_telegram_chat_id"  # Optional: lock to your account
+# export ADMIN_CHAT_ID="your_telegram_chat_id"  # Optional: lock to your account
 ./claudecode-telegram.sh run
 ```
 
