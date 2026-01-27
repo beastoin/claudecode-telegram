@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.3"
+VERSION="0.5.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -95,6 +95,12 @@ bridge_notify() {
 start_tunnel() {
     local port="$1" log_file="$2"
     cloudflared tunnel --url "http://localhost:$port" > "$log_file" 2>&1 &
+    echo $!
+}
+
+start_bridge() {
+    local token="$1" port="$2"
+    TELEGRAM_BOT_TOKEN="$token" PORT="$port" python3 "$SCRIPT_DIR/bridge.py" &
     echo $!
 }
 
@@ -236,9 +242,8 @@ cmd_run() {
     fi
 
     # 4. Start bridge server in background (must be listening before webhook setup)
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
-    python3 "$SCRIPT_DIR/bridge.py" &
-    local bridge_pid=$!
+    local bridge_pid
+    bridge_pid=$(start_bridge "$token" "$port")
     sleep 1  # Give server time to start
 
     # 5. Check if webhook already set to this URL (skip if unchanged)
@@ -278,9 +283,7 @@ cmd_run() {
     log ""
     log "$(bold "Commands:") /new /use /list /kill /status /stop /restart"
     log "$(dim "Ctrl+C to stop")"
-    if [[ -n "$tunnel_pid" ]]; then
-        log "$(dim "Tunnel watchdog: enabled (auto-restart on failure)")"
-    fi
+    log "$(dim "Watchdog: enabled (auto-restart bridge$([[ -n "$tunnel_pid" ]] && echo " + tunnel") on failure)")"
     log ""
 
     # Write PID file for easy identification/termination
@@ -304,8 +307,16 @@ cmd_run() {
     while true; do
         # Check if bridge is still running
         if ! kill -0 "$bridge_pid" 2>/dev/null; then
-            error "Bridge died unexpectedly"
-            exit 1
+            warn "Bridge died, restarting..."
+            bridge_pid=$(start_bridge "$token" "$port")
+            sleep 1
+
+            if kill -0 "$bridge_pid" 2>/dev/null; then
+                success "Bridge restarted (PID $bridge_pid)"
+            else
+                error "Bridge failed to restart"
+                exit 1
+            fi
         fi
 
         # Check tunnel (only if we're managing it)
@@ -807,12 +818,12 @@ SECURITY
   - Session files use 0o700/0o600 permissions
   - Optional webhook verification via TELEGRAM_WEBHOOK_SECRET
 
-TUNNEL WATCHDOG
-  When using quick tunnels (no --tunnel-url), the bridge includes a watchdog:
-  - Monitors cloudflared process every 10 seconds
-  - Auto-restarts tunnel if it dies
-  - Updates webhook with new URL
-  - Notifies all connected users via Telegram
+WATCHDOG
+  The gateway includes a watchdog that monitors every 10 seconds:
+  - Bridge: auto-restarts if it crashes
+  - Tunnel: auto-restarts if it dies (when using quick tunnels)
+  - Updates webhook with new URL after tunnel restart
+  - Tunnel restarts notify users; bridge restarts are silent
 
 MULTI-SESSION WORKFLOW
   1. Start gateway:    ./claudecode-telegram.sh run

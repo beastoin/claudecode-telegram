@@ -246,6 +246,18 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.5.4 - Bridge Watchdog
+
+**New features:**
+- **Bridge auto-restart**: Watchdog now restarts bridge if it crashes (same as tunnel)
+- Previously watchdog only monitored tunnel; bridge crash = full exit
+- Bridge restarts are silent (no Telegram notification)
+
+**Why:**
+- Symmetry: both bridge and tunnel get same treatment
+- Resilience: bridge crash no longer kills the whole gateway
+- Allows manual bridge restart without losing tunnel URL
+
 ### v0.5.3 - Restart Command
 
 **New features:**
