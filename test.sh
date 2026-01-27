@@ -25,8 +25,8 @@ failed=0
 # ─────────────────────────────────────────────────────────────────────────────
 
 log()     { echo -e "$@"; }
-success() { log "${GREEN}✓${NC} $1"; ((passed++)); }
-fail()    { log "${RED}✗${NC} $1"; ((failed++)); }
+success() { log "${GREEN}✓${NC} $1"; ((passed++)) || true; }
+fail()    { log "${RED}✗${NC} $1"; ((failed++)) || true; }
 info()    { log "${YELLOW}→${NC} $1"; }
 
 cleanup() {
