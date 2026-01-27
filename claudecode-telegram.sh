@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.2"
+VERSION="0.5.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
@@ -190,7 +190,7 @@ cmd_run() {
         port="$alt_port"
     fi
 
-    log "$(bold "Starting Claude Code Telegram Bridge (Multi-Session)")"
+    log "$(bold "Starting Claude Code Telegram Bridge v${VERSION}")"
     log ""
 
     # 1. Install hook if needed
@@ -408,6 +408,32 @@ cmd_stop() {
     else
         success "Cleanup complete"
     fi
+}
+
+cmd_restart() {
+    log "Restarting gateway (preserving tmux sessions)..."
+
+    # Stop bridge and tunnel only (NOT tmux sessions)
+    if [[ -f "$PID_FILE" ]]; then
+        local main_pid
+        main_pid=$(cat "$PID_FILE")
+        if kill "$main_pid" 2>/dev/null; then
+            success "Main process stopped (PID $main_pid)"
+            rm -f "$PID_FILE"
+            sleep 1
+        fi
+    fi
+
+    # Fallback kills
+    pkill -f "bridge.py" 2>/dev/null || true
+    pkill -f "cloudflared tunnel" 2>/dev/null || true
+    rm -f /tmp/cloudflared-*.log 2>/dev/null
+
+    sleep 1
+
+    # Start fresh
+    log ""
+    cmd_run
 }
 
 cmd_status() {
@@ -744,8 +770,9 @@ TELEGRAM COMMANDS
 
 SHELL COMMANDS
   run               Start gateway + tunnel (no default session)
+  restart           Restart gateway only (preserves tmux sessions)
   start             Start bridge only (manual setup)
-  stop              Stop bridge and tunnel, clean up
+  stop              Stop bridge, tunnel, and tmux sessions
   setup             Check deps, install hook, validate
   status            Show current status
   webhook <url>     Set Telegram webhook URL
@@ -836,6 +863,7 @@ main() {
 
     case "$cmd" in
         run)     cmd_run "$@";;
+        restart) cmd_restart "$@";;
         start)   cmd_start "$@";;
         stop)    cmd_stop;;
         setup)   cmd_setup;;

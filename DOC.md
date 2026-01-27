@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.5.2 (PID File)
+> Version: 0.5.3 (Restart Command)
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.5.3 - Restart Command
+
+**New features:**
+- **`restart` command**: Restart gateway only, preserves tmux sessions
+- **Version in startup log**: Shows `Starting Claude Code Telegram Bridge v0.5.3`
+
+**Usage:**
+```bash
+./claudecode-telegram.sh restart   # Restarts bridge + tunnel, keeps sessions
+```
 
 ### v0.5.2 - PID File
 
