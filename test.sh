@@ -392,11 +392,6 @@ test_response_endpoint() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_with_tunnel() {
-    if [[ "${SKIP_TUNNEL:-}" == "1" ]]; then
-        info "Skipping tunnel tests (SKIP_TUNNEL=1)"
-        return 0
-    fi
-
     if ! command -v cloudflared &>/dev/null; then
         info "Skipping tunnel tests (cloudflared not installed)"
         return 0
@@ -439,11 +434,6 @@ test_with_tunnel() {
 }
 
 test_watchdog() {
-    if [[ "${TEST_WATCHDOG:-}" != "1" ]]; then
-        info "Skipping watchdog test (TEST_WATCHDOG=1 to enable)"
-        return 0
-    fi
-
     if ! command -v cloudflared &>/dev/null; then
         info "Skipping watchdog test (cloudflared not installed)"
         return 0
