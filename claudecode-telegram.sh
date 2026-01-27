@@ -4,11 +4,12 @@
 #
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.4.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${PORT:=8080}"
 : "${HOST:=0.0.0.0}"
+: "${TUNNEL_URL:=}"  # Pre-configured tunnel URL (skips cloudflared quick tunnel)
 
 CLAUDE_DIR="$HOME/.claude"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
@@ -123,10 +124,12 @@ cmd_start() {
 
 cmd_run() {
     local port="$PORT"
+    local tunnel_url="$TUNNEL_URL"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port) port="$2"; shift 2;;
+            --tunnel-url) tunnel_url="$2"; shift 2;;
             *) shift;;
         esac
     done
@@ -135,8 +138,12 @@ cmd_run() {
 
     # Check dependencies
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
-    check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared"; exit 4; }
     check_cmd python3 || { error "python3 not installed"; exit 4; }
+
+    # Only require cloudflared if no tunnel URL provided
+    if [[ -z "$tunnel_url" ]]; then
+        check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared (or use --tunnel-url)"; exit 4; }
+    fi
 
     # Check if port is available
     if port_in_use "$port"; then
@@ -168,30 +175,40 @@ cmd_run() {
     # Sessions are created via /new command from Telegram
     log "$(dim "No default session - use /new <name> from Telegram")"
 
-    # 3. Start cloudflared tunnel in background
-    log "Starting tunnel..."
-    local tunnel_log="/tmp/cloudflared-$$.log"
-    cloudflared tunnel --url "http://localhost:$port" > "$tunnel_log" 2>&1 &
-    local tunnel_pid=$!
+    local tunnel_pid=""
+    local tunnel_log=""
 
-    # Wait for tunnel URL
-    local tunnel_url="" attempts=0
-    while [[ -z "$tunnel_url" && $attempts -lt 30 ]]; do
-        sleep 1
-        tunnel_url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
-        ((++attempts))
-    done
+    # 3. Start tunnel (or use provided URL)
+    if [[ -n "$tunnel_url" ]]; then
+        # Use pre-configured tunnel URL (user manages tunnel separately)
+        log "$(dim "Using provided tunnel URL (no cloudflared started)")"
+        success "Tunnel: $tunnel_url"
+    else
+        # Start cloudflared quick tunnel in background
+        log "Starting tunnel..."
+        tunnel_log="/tmp/cloudflared-$$.log"
+        cloudflared tunnel --url "http://localhost:$port" > "$tunnel_log" 2>&1 &
+        tunnel_pid=$!
 
-    if [[ -z "$tunnel_url" ]]; then
-        error "Could not get tunnel URL"
-        kill $tunnel_pid 2>/dev/null || true
-        exit 1
+        # Wait for tunnel URL
+        local attempts=0
+        while [[ -z "$tunnel_url" && $attempts -lt 30 ]]; do
+            sleep 1
+            tunnel_url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
+            ((attempts++))
+        done
+
+        if [[ -z "$tunnel_url" ]]; then
+            error "Could not get tunnel URL"
+            kill $tunnel_pid 2>/dev/null || true
+            exit 1
+        fi
+
+        success "Tunnel: $tunnel_url"
+
+        # Give tunnel time to fully establish before webhook setup
+        sleep 3
     fi
-
-    success "Tunnel: $tunnel_url"
-
-    # Give tunnel time to fully establish before webhook setup
-    sleep 3
 
     # 4. Start bridge server in background (must be listening before webhook setup)
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
@@ -199,35 +216,51 @@ cmd_run() {
     local bridge_pid=$!
     sleep 1  # Give server time to start
 
-    # 5. Set webhook (retry with backoff for DNS propagation)
-    log "Setting webhook..."
-    local r ok=false
+    # 5. Check if webhook already set to this URL (skip if unchanged)
+    local current_webhook=""
+    local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
+    current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
 
-    for delay in 0 1 2 5 15 30 60; do
-        [[ $delay -gt 0 ]] && { log "Webhook not ready, retrying in ${delay}s..."; sleep "$delay"; }
-        r=$(telegram_set_webhook "$token" "$tunnel_url")
-        if echo "$r" | grep -q '"ok":true'; then
-            ok=true
-            break
-        fi
-    done
-
-    log ""
-    if $ok; then
-        success "Webhook configured"
-        log "$(bold "Ready!") Send /new <name> to your bot to create a Claude instance"
+    if [[ "$current_webhook" == "$tunnel_url" ]]; then
+        log "$(dim "Webhook already configured")"
+        success "Webhook: $tunnel_url"
     else
-        warn "Webhook setup failed (DNS may still be propagating)"
-        log "Bridge and tunnel are still running. Retry manually:"
-        hint "./claudecode-telegram.sh webhook $tunnel_url"
+        # Set webhook (retry with backoff for DNS propagation)
+        log "Setting webhook..."
+        local r ok=false
+
+        for delay in 0 1 2 5 15 30 60; do
+            [[ $delay -gt 0 ]] && { log "Webhook not ready, retrying in ${delay}s..."; sleep "$delay"; }
+            r=$(telegram_set_webhook "$token" "$tunnel_url")
+            if echo "$r" | grep -q '"ok":true'; then
+                ok=true
+                break
+            fi
+        done
+
+        log ""
+        if $ok; then
+            success "Webhook configured"
+        else
+            warn "Webhook setup failed (DNS may still be propagating)"
+            log "Bridge is running. Retry manually:"
+            hint "./claudecode-telegram.sh webhook $tunnel_url"
+        fi
     fi
+
     log ""
-    log "$(bold "Commands:") /new /use /list /kill /status /stop"
+    log "$(bold "Ready!") Send /new <name> to your bot to create a Claude instance"
+    log ""
+    log "$(bold "Commands:") /new /use /list /kill /status /stop /restart"
     log "$(dim "Ctrl+C to stop")"
     log ""
 
     # Cleanup on exit
-    trap 'kill $tunnel_pid $bridge_pid 2>/dev/null; rm -f "$tunnel_log"' EXIT
+    if [[ -n "$tunnel_pid" ]]; then
+        trap 'kill $tunnel_pid $bridge_pid 2>/dev/null; rm -f "$tunnel_log"' EXIT
+    else
+        trap 'kill $bridge_pid 2>/dev/null' EXIT
+    fi
 
     # 6. Wait for bridge (bring to foreground)
     wait $bridge_pid
@@ -584,6 +617,16 @@ QUICK START (1 command!)
     /list            See all instances
     @backend <msg>   One-off message to backend
 
+PERSISTENT URL (named tunnel)
+  # One-time setup:
+  cloudflared login
+  cloudflared tunnel create mytunnel
+  cloudflared tunnel route dns mytunnel claude.yourdomain.com
+
+  # Run with stable URL (webhook only set once):
+  ./claudecode-telegram.sh run --tunnel-url https://claude.yourdomain.com &
+  cloudflared tunnel run mytunnel
+
 TELEGRAM COMMANDS
   /new <name>       Create new Claude instance (tmux: claude-<name>)
   /use <name>       Switch active Claude
@@ -617,10 +660,12 @@ FLAGS
   --env-file <path>     Load environment from file
   -f, --force           Overwrite existing (hook install, webhook delete)
   -p, --port <port>     Bridge port (default: 8080)
+  --tunnel-url <url>    Use pre-configured tunnel URL (skips cloudflared)
 
 ENVIRONMENT
   TELEGRAM_BOT_TOKEN        Bot token from @BotFather (required)
   PORT                      Server port (default: 8080)
+  TUNNEL_URL                Pre-configured tunnel URL (skips cloudflared)
   TELEGRAM_WEBHOOK_SECRET   Webhook verification secret (optional, for extra security)
 
 SECURITY

@@ -3,7 +3,9 @@
 
 import os
 import json
+import signal
 import subprocess
+import sys
 import threading
 import time
 import re
@@ -22,6 +24,7 @@ state = {
     "active": None,  # Currently active session name
     "sessions": {},  # name -> {"tmux": "claude-<name>"}
     "pending_registration": None,  # Unregistered tmux session awaiting name
+    "startup_notified": False,  # Whether we've sent the startup message
 }
 
 # Security: Auto-learn first user as admin (RAM only, re-learns on restart)
@@ -34,6 +37,7 @@ BOT_COMMANDS = [
     {"command": "kill", "description": "Stop Claude: /kill <name>"},
     {"command": "status", "description": "Detailed status of active Claude"},
     {"command": "stop", "description": "Interrupt active Claude (Escape)"},
+    {"command": "restart", "description": "Restart Claude in active session"},
 ]
 
 BLOCKED_COMMANDS = [
@@ -184,6 +188,21 @@ def tmux_exists(tmux_name):
     ).returncode == 0
 
 
+def get_pane_command(tmux_name):
+    """Get the current command running in tmux pane."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
+        capture_output=True, text=True
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def is_claude_running(tmux_name):
+    """Check if claude process is running in tmux session."""
+    cmd = get_pane_command(tmux_name)
+    return "claude" in cmd.lower()
+
+
 def tmux_send(tmux_name, text, literal=True):
     """Send text to tmux session."""
     cmd = ["tmux", "send-keys", "-t", tmux_name]
@@ -258,6 +277,28 @@ def kill_session(name):
     return True, None
 
 
+def restart_claude(name):
+    """Restart claude in an existing tmux session."""
+    if name not in state["sessions"]:
+        return False, f"Session '{name}' not found"
+
+    tmux_name = state["sessions"][name]["tmux"]
+
+    if not tmux_exists(tmux_name):
+        return False, f"tmux session '{tmux_name}' not running"
+
+    if is_claude_running(tmux_name):
+        return False, "Claude is already running"
+
+    # Start claude in the existing tmux session
+    subprocess.run([
+        "tmux", "send-keys", "-t", tmux_name,
+        "claude --dangerously-skip-permissions", "Enter"
+    ])
+
+    return True, None
+
+
 def switch_session(name):
     """Switch active session."""
     if name not in state["sessions"]:
@@ -297,6 +338,39 @@ def send_typing_loop(chat_id, session_name):
     while is_pending(session_name):
         telegram_api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
         time.sleep(4)
+
+
+def get_all_chat_ids():
+    """Get all unique chat_ids from session files."""
+    chat_ids = set()
+    if SESSIONS_DIR.exists():
+        for session_dir in SESSIONS_DIR.iterdir():
+            if session_dir.is_dir():
+                chat_id_file = session_dir / "chat_id"
+                if chat_id_file.exists():
+                    try:
+                        chat_id = chat_id_file.read_text().strip()
+                        if chat_id:
+                            chat_ids.add(chat_id)
+                    except Exception:
+                        pass
+    # Also include current admin if known
+    if admin_chat_id:
+        chat_ids.add(str(admin_chat_id))
+    return chat_ids
+
+
+def send_shutdown_message():
+    """Send shutdown notification to all known chat_ids."""
+    chat_ids = get_all_chat_ids()
+    if not chat_ids:
+        print("No chat_ids to notify")
+        return
+
+    print(f"Sending shutdown to {len(chat_ids)} chat(s)...")
+    for chat_id in chat_ids:
+        telegram_api("sendMessage", {"chat_id": chat_id, "text": "Bridge going offline"})
+    print("Shutdown notifications sent")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -399,6 +473,11 @@ class Handler(BaseHTTPRequestHandler):
             admin_chat_id = chat_id
             print(f"Admin registered: {chat_id}")
 
+        # Send startup notification on first admin interaction
+        if not state["startup_notified"]:
+            state["startup_notified"] = True
+            self.send_startup_message(chat_id)
+
         # SECURITY: Reject non-admin users (silent - don't reveal bot exists)
         if chat_id != admin_chat_id:
             print(f"Rejected non-admin: {chat_id}")
@@ -463,6 +542,9 @@ class Handler(BaseHTTPRequestHandler):
         """Handle /commands. Returns True if handled."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
+        # Strip @botname suffix (Telegram appends this in groups/autocomplete)
+        if "@" in cmd:
+            cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd == "/new":
@@ -477,6 +559,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.cmd_status(chat_id)
         elif cmd == "/stop":
             return self.cmd_stop(chat_id)
+        elif cmd == "/restart":
+            return self.cmd_restart(chat_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"'{cmd}' not supported (interactive)")
             return True
@@ -575,7 +659,16 @@ class Handler(BaseHTTPRequestHandler):
         status = []
         status.append(f"Session: {name}")
         status.append(f"tmux: {tmux_name}")
-        status.append(f"Running: {'yes' if exists else 'no'}")
+        status.append(f"tmux running: {'yes' if exists else 'no'}")
+
+        if exists:
+            claude_running = is_claude_running(tmux_name)
+            pane_cmd = get_pane_command(tmux_name)
+            status.append(f"Claude running: {'yes' if claude_running else 'no'}")
+            status.append(f"Process: {pane_cmd or '(none)'}")
+            if not claude_running:
+                status.append("\nClaude exited. Use /restart to restart.")
+
         status.append(f"Busy: {'yes' if pending else 'no'}")
 
         self.reply(chat_id, "\n".join(status))
@@ -594,6 +687,20 @@ class Handler(BaseHTTPRequestHandler):
             clear_pending(name)
 
         self.reply(chat_id, f"Interrupted \"{name}\"")
+        return True
+
+    def cmd_restart(self, chat_id):
+        """Restart Claude in active session."""
+        if not state["active"]:
+            self.reply(chat_id, "No active session")
+            return True
+
+        name = state["active"]
+        ok, err = restart_claude(name)
+        if ok:
+            self.reply(chat_id, f"Restarting Claude in \"{name}\"...")
+        else:
+            self.reply(chat_id, f"Failed: {err}")
         return True
 
     def route_to_active(self, text, chat_id, msg_id):
@@ -663,14 +770,41 @@ class Handler(BaseHTTPRequestHandler):
     def reply(self, chat_id, text):
         telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
 
+    def send_startup_message(self, chat_id):
+        """Send bridge startup notification."""
+        sessions = list(state["sessions"].keys())
+        active = state["active"]
+
+        lines = ["Bridge online"]
+        if sessions:
+            lines.append(f"Sessions: {', '.join(sessions)}")
+            if active:
+                lines.append(f"Active: {active}")
+        else:
+            lines.append("No sessions. Create with: /new <name>")
+
+        self.reply(chat_id, "\n".join(lines))
+
     def log_message(self, *args):
         pass
+
+
+def graceful_shutdown(signum, frame):
+    """Handle shutdown signals gracefully."""
+    sig_name = signal.Signals(signum).name if signum else "unknown"
+    print(f"\nReceived {sig_name}, shutting down...")
+    send_shutdown_message()
+    sys.exit(0)
 
 
 def main():
     if not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
         return
+
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
 
     # Create sessions directory with secure permissions (0o700)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -693,7 +827,7 @@ def main():
     try:
         HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped")
+        graceful_shutdown(signal.SIGINT, None)
 
 
 if __name__ == "__main__":

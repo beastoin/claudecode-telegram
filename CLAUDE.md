@@ -19,9 +19,9 @@ When making changes that result in a new version:
 
 3. **Run acceptance tests** before committing:
    ```bash
-   python3 -c "import bridge; ..."  # See test script
-   ./claudecode-telegram.sh --version
+   TELEGRAM_BOT_TOKEN='...' ./test.sh
    ```
+   See `TEST.md` for full testing documentation.
 
 ## When to Bump Version
 
@@ -36,7 +36,24 @@ When making changes that result in a new version:
 | `bridge.py` | Telegram webhook handler, session management |
 | `claudecode-telegram.sh` | CLI wrapper, tunnel/webhook setup |
 | `hooks/send-to-telegram.sh` | Claude Stop hook, sends responses |
+| `test.sh` | Automated acceptance tests |
 | `DOC.md` | Design philosophy, changelog |
+| `TEST.md` | Testing documentation |
+
+## Testing Requirements
+
+**All changes must pass tests before committing:**
+
+```bash
+TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh
+```
+
+Tests cover:
+- Unit: imports, version command
+- Integration: all commands, admin security, session files
+- Tunnel: webhook setup (optional, skip with `SKIP_TUNNEL=1`)
+
+See `TEST.md` for detailed test documentation.
 
 ## Design Philosophy
 
