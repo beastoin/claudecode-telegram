@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 import os
 import json
@@ -218,9 +218,13 @@ def tmux_send(tmux_name, text, literal=True):
     return result.returncode == 0
 
 
-def tmux_send_enter(tmux_name):
-    result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-    return result.returncode == 0
+def tmux_send_enter(tmux_name, count=1):
+    """Send Enter key(s) to tmux session. Double Enter forces submit when Claude is processing."""
+    for _ in range(count):
+        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+        if result.returncode != 0:
+            return False
+    return True
 
 
 def tmux_send_escape(tmux_name):
@@ -852,7 +856,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Send to tmux
         send_ok = tmux_send(tmux_name, text)
-        enter_ok = tmux_send_enter(tmux_name)
+        # Double Enter forces submit even when Claude is processing (avoids batch issue)
+        enter_ok = tmux_send_enter(tmux_name, count=2)
 
         # Add 👀 reaction only after successful send to Claude
         if msg_id and send_ok and enter_ok:

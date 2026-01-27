@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.3
+> Version: 0.6.4
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.4 - Fix message batching with double Enter
+
+**Bug fix:**
+- Bridge now sends double Enter when routing messages
+- Forces Claude Code to submit even when processing previous message
+- Prevents messages from batching together and causing missed responses
 
 ### v0.6.3 - Fix port mismatch on bridge restart
 
