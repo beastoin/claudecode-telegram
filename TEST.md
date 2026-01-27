@@ -141,13 +141,16 @@ test_my_feature
 
 ## Test Isolation
 
-Tests run isolated from production:
+Tests run isolated from production under `~/.claude/telegram-test/`:
 
 | Resource | Test | Production |
 |----------|------|------------|
+| Base dir | `~/.claude/telegram-test/` | `~/.claude/telegram/` |
 | Port | 8095 | 8080 |
 | tmux prefix | `claudetest-` | `claude-` |
-| Session files | `/tmp/claudecode-telegram-test-$$` | `~/.claude/telegram/sessions/` |
+| Session files | `~/.claude/telegram-test/sessions/` | `~/.claude/telegram/sessions/` |
+| PID file | `~/.claude/telegram-test/claudecode-telegram.pid` | `~/.claude/telegram/claudecode-telegram.pid` |
+| Logs | `~/.claude/telegram-test/*.log` | (stdout) |
 | Bot token | Separate test bot | Production bot |
 
 This allows running tests while production is active.

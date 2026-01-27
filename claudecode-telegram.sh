@@ -14,8 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-SESSIONS_DIR="$CLAUDE_DIR/telegram/sessions"
-PID_FILE="$CLAUDE_DIR/telegram/claudecode-telegram.pid"
+: "${SESSIONS_DIR:=$CLAUDE_DIR/telegram/sessions}"
+: "${PID_FILE:=$CLAUDE_DIR/telegram/claudecode-telegram.pid}"
 HOOK_SCRIPT="send-to-telegram.sh"
 
 VERBOSE=false

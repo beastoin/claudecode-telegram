@@ -68,7 +68,7 @@ TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh
 TELEGRAM_BOT_TOKEN='your-test-token' ADMIN_CHAT_ID='your-chat-id' ./test.sh
 ```
 
-**Test isolation:** Tests run isolated from production (separate port 8095, prefix `claudetest-`, temp session dir). You can run tests while production is active.
+**Test isolation:** Tests run isolated from production under `~/.claude/telegram-test/` (separate port 8095, prefix `claudetest-`, separate PID file). You can run tests while production is active.
 
 ### Test coverage
 
@@ -98,3 +98,39 @@ When making changes, ensure they align with the philosophy in `DOC.md`. If addin
 | Token isolation | `TELEGRAM_BOT_TOKEN` NEVER leaves bridge |
 | Admin config | `ADMIN_CHAT_ID` env var or auto-learn first user |
 | Secure by default | 0o700 dirs, 0o600 files |
+
+## Learnings
+
+### Never hardcode paths
+
+**Problem:** Hardcoded paths break test isolation and make the system inflexible.
+
+**Rule:** All paths must be configurable via environment variables with sensible defaults.
+
+```bash
+# Good: configurable with default
+SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
+
+# Bad: hardcoded
+SESSIONS_DIR="$HOME/.claude/telegram/sessions"
+```
+
+### Env vars must propagate through the full chain
+
+**Problem:** When process A spawns process B which runs process C, env vars set in A don't automatically reach C.
+
+**Rule:** If a subprocess needs config, explicitly export it at each boundary:
+- Parent process sets env var
+- Parent exports to child's environment (e.g., `tmux send-keys "export VAR=value"`)
+- Child process reads env var
+
+**Check all entry points:** If a session can be created via `create_session()`, `register_session()`, or `restart_claude()`, ALL of them must export the required env vars.
+
+### When adding configurable behavior, audit all code paths
+
+**Problem:** Adding a new config option in one place but missing other places that need it.
+
+**Rule:** When making something configurable:
+1. Search for ALL usages of the old hardcoded value
+2. Update every location that references it
+3. Ensure all entry points (create, register, restart, discover) handle it consistently

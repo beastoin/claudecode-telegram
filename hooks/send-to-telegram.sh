@@ -30,9 +30,11 @@ if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
 fi
 
 # Determine file paths based on session type
+# SESSIONS_DIR can be set by bridge for test isolation
+SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
 if [ -n "$BRIDGE_SESSION" ]; then
     # Multi-session mode: per-session files
-    SESSION_DIR=~/.claude/telegram/sessions/"$BRIDGE_SESSION"
+    SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
     PENDING_FILE="$SESSION_DIR/pending"
 else
     # Legacy single-session mode (fallback) - still check pending

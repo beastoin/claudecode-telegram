@@ -209,16 +209,18 @@ def is_claude_running(tmux_name):
 
 
 def tmux_send(tmux_name, text, literal=True):
-    """Send text to tmux session."""
+    """Send text to tmux session. Returns True if successful."""
     cmd = ["tmux", "send-keys", "-t", tmux_name]
     if literal:
         cmd.append("-l")
     cmd.append(text)
-    subprocess.run(cmd)
+    result = subprocess.run(cmd)
+    return result.returncode == 0
 
 
 def tmux_send_enter(tmux_name):
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+    result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+    return result.returncode == 0
 
 
 def tmux_send_escape(tmux_name):
@@ -246,10 +248,10 @@ def create_session(name):
 
     time.sleep(0.5)
 
-    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection)
+    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
     # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
     subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}'", "Enter"])
+                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
     time.sleep(0.3)
 
     # Start claude
@@ -300,6 +302,11 @@ def restart_claude(name):
     if is_claude_running(tmux_name):
         return False, "Claude is already running"
 
+    # Re-export env vars for hook (in case session was created by older version or bridge restarted)
+    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
+    time.sleep(0.3)
+
     # Start claude in the existing tmux session
     subprocess.run([
         "tmux", "send-keys", "-t", tmux_name,
@@ -329,6 +336,10 @@ def register_session(name, tmux_session):
     )
     if result.returncode != 0:
         return False, "Failed to rename tmux session"
+
+    # Export env vars for hook (same as create_session)
+    subprocess.run(["tmux", "send-keys", "-t", new_tmux_name,
+                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
 
     # Register in state
     state["sessions"][name] = {"tmux": new_tmux_name}
@@ -832,14 +843,6 @@ class Handler(BaseHTTPRequestHandler):
         # Set pending
         set_pending(session_name, chat_id)
 
-        # Add reaction
-        if msg_id:
-            telegram_api("setMessageReaction", {
-                "chat_id": chat_id,
-                "message_id": msg_id,
-                "reaction": [{"type": "emoji", "emoji": "\u2705"}]
-            })
-
         # Start typing indicator
         threading.Thread(
             target=send_typing_loop,
@@ -848,8 +851,16 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
 
         # Send to tmux
-        tmux_send(tmux_name, text)
-        tmux_send_enter(tmux_name)
+        send_ok = tmux_send(tmux_name, text)
+        enter_ok = tmux_send_enter(tmux_name)
+
+        # Add 👀 reaction only after successful send to Claude
+        if msg_id and send_ok and enter_ok:
+            telegram_api("setMessageReaction", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "reaction": [{"type": "emoji", "emoji": "👀"}]
+            })
 
     def reply(self, chat_id, text):
         telegram_api("sendMessage", {"chat_id": chat_id, "text": text})

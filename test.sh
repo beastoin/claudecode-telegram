@@ -10,9 +10,14 @@ CHAT_ID="${ADMIN_CHAT_ID:-${TEST_CHAT_ID:-123456789}}"
 BRIDGE_PID=""
 TUNNEL_PID=""
 TUNNEL_URL=""
-TEST_SESSION_DIR="${TMPDIR:-/tmp}/claudecode-telegram-test-$$"
+
+# Test isolation: all test files under ~/.claude/telegram-test
+TEST_BASE_DIR="$HOME/.claude/telegram-test"
+TEST_SESSION_DIR="$TEST_BASE_DIR/sessions"
+TEST_PID_FILE="$TEST_BASE_DIR/claudecode-telegram.pid"
 TEST_TMUX_PREFIX="claudetest-"
-BRIDGE_LOG="/tmp/bridge-test-$$.log"
+BRIDGE_LOG="$TEST_BASE_DIR/bridge.log"
+TUNNEL_LOG="$TEST_BASE_DIR/tunnel.log"
 
 # Colors
 RED='\033[0;31m'
@@ -34,14 +39,23 @@ info()    { log "${YELLOW}→${NC} $1"; }
 
 cleanup() {
     info "Cleaning up..."
+    # Stop test gateway using PID file
+    if [[ -f "$TEST_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$TEST_PID_FILE")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$TEST_PID_FILE"
+    fi
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
     # Kill any test sessions we created (using test prefix)
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null || true
-    # Remove test session directory and log
+    tmux kill-session -t "${TEST_TMUX_PREFIX}responsetest" 2>/dev/null || true
+    # Clean up test directory (but keep base dir for next run)
     [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"
     [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
+    [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"
 }
 
 trap cleanup EXIT
@@ -111,10 +125,18 @@ test_bridge_starts() {
     lsof -ti :"$PORT" | xargs kill -9 2>/dev/null || true
     sleep 1
 
-    # Create isolated test session directory
+    # Create isolated test directories
+    mkdir -p "$TEST_BASE_DIR"
     mkdir -p "$TEST_SESSION_DIR"
 
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" PORT="$PORT" SESSIONS_DIR="$TEST_SESSION_DIR" TMUX_PREFIX="$TEST_TMUX_PREFIX" ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
+    # Start bridge with full test isolation
+    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+    PORT="$PORT" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    PID_FILE="$TEST_PID_FILE" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" \
+    python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
 
     if wait_for_port "$PORT"; then
@@ -398,14 +420,13 @@ test_with_tunnel() {
     fi
 
     info "Starting tunnel..."
-    local tunnel_log="/tmp/cloudflared-test-$$.log"
-    cloudflared tunnel --url "http://localhost:$PORT" >"$tunnel_log" 2>&1 &
+    cloudflared tunnel --url "http://localhost:$PORT" >"$TUNNEL_LOG" 2>&1 &
     TUNNEL_PID=$!
 
     # Wait for tunnel URL to appear in log (up to 30 seconds)
     local attempts=0
     while [[ $attempts -lt 30 ]]; do
-        TUNNEL_URL=$(grep -o 'https://[^[:space:]|]*\.trycloudflare\.com' "$tunnel_log" 2>/dev/null | head -1 || true)
+        TUNNEL_URL=$(grep -o 'https://[^[:space:]|]*\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -1 || true)
         [[ -n "$TUNNEL_URL" ]] && break
         sleep 1
         ((++attempts))
@@ -429,8 +450,6 @@ test_with_tunnel() {
     else
         fail "Could not get tunnel URL"
     fi
-
-    rm -f "$tunnel_log"
 }
 
 test_watchdog() {
@@ -441,16 +460,20 @@ test_watchdog() {
 
     info "Testing watchdog (this may take a few minutes for DNS)..."
 
-    # Kill any existing processes
-    pkill -f "claudecode-telegram.sh" 2>/dev/null || true
-    pkill -f "bridge.py" 2>/dev/null || true
-    pkill -f "cloudflared tunnel" 2>/dev/null || true
+    # Kill any existing test processes (not prod!)
+    [[ -f "$TEST_PID_FILE" ]] && kill "$(cat "$TEST_PID_FILE")" 2>/dev/null || true
+    pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
     sleep 2
 
-    # Start via full script (includes watchdog)
-    local watchdog_log="/tmp/watchdog-test-$$.log"
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" PORT="$PORT" \
-        "$SCRIPT_DIR/claudecode-telegram.sh" run --port "$PORT" >"$watchdog_log" 2>&1 &
+    # Start via full script with test isolation (includes watchdog)
+    local watchdog_log="$TEST_BASE_DIR/watchdog.log"
+    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+    PORT="$PORT" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    PID_FILE="$TEST_PID_FILE" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" \
+        "$SCRIPT_DIR/claudecode-telegram.sh" run >"$watchdog_log" 2>&1 &
     local main_pid=$!
 
     # Wait for startup
@@ -520,7 +543,7 @@ test_watchdog() {
     # Cleanup
     kill "$main_pid" 2>/dev/null || true
     pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
-    rm -f "$watchdog_log"
+    rm -f "$watchdog_log" "$TEST_PID_FILE"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
