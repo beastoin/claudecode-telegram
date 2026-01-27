@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.0 (Multi-Node Support)
+> Version: 0.6.2
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,29 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.2 - Remove pending gate, enable proactive messaging
+
+**Breaking change in hook behavior:**
+- Hook now sends to Telegram if `chat_id` exists, regardless of `pending` file
+- `pending` file is now only used for busy status indicator (UI), not as a send gate
+
+**Why this change:**
+- Fixes race condition where multiple rapid messages could cause lost responses
+- Enables Claude to send proactive messages to Telegram
+- Simplifies the send logic: `chat_id` exists = Telegram session = send responses
+
+**What stays the same:**
+- `pending` file still created when message arrives (for busy indicator)
+- `pending` file still cleared after response (to update busy status)
+- Sessions without `chat_id` (non-Telegram) don't send to Telegram
+
+### v0.6.1 - Fix pending file cleanup
+
+**Bug fix:**
+- Stop hook now cleans up `pending` file after successfully sending response to bridge
+- Previously, sessions would appear "busy" forever because pending file was never removed
+- Also fixes early exit on empty response (now properly cleans up pending file)
 
 ### v0.6.0 - Multi-Node Support
 

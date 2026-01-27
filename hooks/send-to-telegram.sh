@@ -5,6 +5,10 @@
 # response and forwards to bridge via localhost HTTP. Bridge sends to Telegram.
 # Token isolation: Claude never sees the token.
 #
+# DESIGN: Sends to Telegram if session has chat_id (is telegram-connected).
+# The pending file is only used for busy status indicator, not as a send gate.
+# This enables proactive messaging and avoids race conditions with multiple messages.
+#
 # Install: copy to ~/.claude/hooks/ and add to ~/.claude/settings.json
 
 set -euo pipefail
@@ -35,19 +39,18 @@ SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
 if [ -n "$BRIDGE_SESSION" ]; then
     # Multi-session mode: per-session files
     SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
+    CHAT_ID_FILE="$SESSION_DIR/chat_id"
     PENDING_FILE="$SESSION_DIR/pending"
 else
-    # Legacy single-session mode (fallback) - still check pending
-    PENDING_FILE=~/.claude/telegram_pending
+    # Not a telegram session, exit
+    exit 0
 fi
 
-# Only respond to Telegram-initiated messages (check pending file)
-[ ! -f "$PENDING_FILE" ] && exit 0
+# Only send to Telegram if this is a telegram-connected session (chat_id exists)
+[ ! -f "$CHAT_ID_FILE" ] && exit 0
 
-PENDING_TIME=$(cat "$PENDING_FILE" 2>/dev/null || echo "")
-NOW=$(date +%s)
-[ -z "$PENDING_TIME" ] || [ $((NOW - PENDING_TIME)) -gt 600 ] && rm -f "$PENDING_FILE" && exit 0
-[ ! -f "$TRANSCRIPT_PATH" ] && rm -f "$PENDING_FILE" && exit 0
+# Validate transcript exists
+[ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
 # Extract response text from transcript
 LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
@@ -60,7 +63,7 @@ tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" | \
   grep '"type":"assistant"' | \
   jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
 
-[ ! -s "$TMPFILE" ] && exit 0
+[ ! -s "$TMPFILE" ] && rm -f "$PENDING_FILE" && exit 0
 
 # Format and forward to bridge
 python3 - "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL" << 'PYEOF'
@@ -111,3 +114,6 @@ except Exception as e:
     print(f"Failed to forward to bridge: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
+
+# Clean up pending file on success
+rm -f "$PENDING_FILE"

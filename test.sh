@@ -409,6 +409,37 @@ test_response_endpoint() {
     send_message "/kill responsetest" >/dev/null 2>&1 || true
 }
 
+test_response_without_pending() {
+    info "Testing /response works without pending file (v0.6.2 behavior)..."
+
+    # Create a session for this test
+    send_message "/new nopendingtest" >/dev/null
+    sleep 3
+
+    # Set up ONLY chat_id file - NO pending file
+    # This tests v0.6.2 change: pending is not a gate for sending
+    local session_dir="$TEST_SESSION_DIR/nopendingtest"
+    mkdir -p "$session_dir"
+    echo "$CHAT_ID" > "$session_dir/chat_id"
+    # Explicitly ensure no pending file
+    rm -f "$session_dir/pending"
+
+    # Simulate hook calling /response endpoint
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"session":"nopendingtest","text":"Test without pending"}')
+
+    if [[ "$result" == "OK" ]]; then
+        success "/response works without pending file (proactive messaging enabled)"
+    else
+        fail "/response without pending failed: $result"
+    fi
+
+    # Cleanup
+    send_message "/kill nopendingtest" >/dev/null 2>&1 || true
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Integration tests (require tunnel)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,6 +523,7 @@ main() {
     test_blocked_commands
     test_notify_endpoint
     test_response_endpoint
+    test_response_without_pending
 
     # Tunnel tests (optional)
     log ""
