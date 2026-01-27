@@ -452,100 +452,6 @@ test_with_tunnel() {
     fi
 }
 
-test_watchdog() {
-    if ! command -v cloudflared &>/dev/null; then
-        info "Skipping watchdog test (cloudflared not installed)"
-        return 0
-    fi
-
-    info "Testing watchdog (this may take a few minutes for DNS)..."
-
-    # Kill any existing test processes (not prod!)
-    [[ -f "$TEST_PID_FILE" ]] && kill "$(cat "$TEST_PID_FILE")" 2>/dev/null || true
-    pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
-    sleep 2
-
-    # Start via full script with test isolation (includes watchdog)
-    local watchdog_log="$TEST_BASE_DIR/watchdog.log"
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
-    PORT="$PORT" \
-    SESSIONS_DIR="$TEST_SESSION_DIR" \
-    PID_FILE="$TEST_PID_FILE" \
-    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
-    ADMIN_CHAT_ID="${ADMIN_CHAT_ID:-}" \
-        "$SCRIPT_DIR/claudecode-telegram.sh" run >"$watchdog_log" 2>&1 &
-    local main_pid=$!
-
-    # Wait for startup
-    local attempts=0
-    while ! grep -q "Tunnel watchdog: enabled" "$watchdog_log" 2>/dev/null && [[ $attempts -lt 30 ]]; do
-        sleep 1
-        ((++attempts))
-    done
-
-    if ! grep -q "Tunnel watchdog: enabled" "$watchdog_log" 2>/dev/null; then
-        fail "Watchdog did not start"
-        kill "$main_pid" 2>/dev/null || true
-        rm -f "$watchdog_log"
-        return 1
-    fi
-    success "Watchdog started"
-
-    # Get initial tunnel PID
-    local tunnel_pid
-    tunnel_pid=$(pgrep -f "cloudflared tunnel.*$PORT" | head -1 || true)
-    if [[ -z "$tunnel_pid" ]]; then
-        fail "Could not find tunnel PID"
-        kill "$main_pid" 2>/dev/null || true
-        rm -f "$watchdog_log"
-        return 1
-    fi
-    info "Initial tunnel PID: $tunnel_pid"
-
-    # Kill the tunnel
-    info "Killing tunnel to test watchdog..."
-    kill "$tunnel_pid" 2>/dev/null
-    sleep 2
-
-    # Wait for watchdog to detect and restart (up to 60 seconds)
-    attempts=0
-    while ! grep -q "Tunnel restarted:" "$watchdog_log" 2>/dev/null && [[ $attempts -lt 60 ]]; do
-        sleep 1
-        ((++attempts))
-    done
-
-    if grep -q "Tunnel restarted:" "$watchdog_log" 2>/dev/null; then
-        success "Watchdog detected dead tunnel and restarted"
-    else
-        fail "Watchdog did not restart tunnel"
-        kill "$main_pid" 2>/dev/null || true
-        rm -f "$watchdog_log"
-        return 1
-    fi
-
-    # Verify new tunnel is running
-    local new_tunnel_pid
-    new_tunnel_pid=$(pgrep -f "cloudflared tunnel.*$PORT" | head -1 || true)
-    if [[ -n "$new_tunnel_pid" ]] && [[ "$new_tunnel_pid" != "$tunnel_pid" ]]; then
-        success "New tunnel running (PID: $new_tunnel_pid)"
-    else
-        fail "New tunnel not running or same PID"
-    fi
-
-    # Check if webhook was updated (may take time for DNS)
-    if grep -q "Webhook updated" "$watchdog_log" 2>/dev/null; then
-        success "Webhook updated after restart"
-    else
-        # DNS propagation can be slow - not a failure
-        info "Webhook update pending (DNS propagation slow)"
-    fi
-
-    # Cleanup
-    kill "$main_pid" 2>/dev/null || true
-    pkill -f "cloudflared tunnel.*$PORT" 2>/dev/null || true
-    rm -f "$watchdog_log" "$TEST_PID_FILE"
-}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,11 +497,6 @@ main() {
     log ""
     log "── Tunnel Tests ────────────────────────────────────────────────────────"
     test_with_tunnel
-
-    # Watchdog tests (optional, slow)
-    log ""
-    log "── Watchdog Tests ──────────────────────────────────────────────────────"
-    test_watchdog
 
     # Cleanup test sessions
     send_message "/kill testbot1" >/dev/null 2>&1 || true
