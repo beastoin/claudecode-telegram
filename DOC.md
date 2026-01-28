@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.7
+> Version: 0.6.8
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.8 - Fix HTML tag rendering
+
+**Bug fix:**
+- Allowed HTML tags (`<code>`, `<pre>`, `<b>`, `<i>`) now render properly in Telegram
+- Other HTML is still escaped for safety
+- Fixes issue where Claude's code formatting showed literal `<code>` tags
 
 ### v0.6.7 - Session-prefixed responses
 

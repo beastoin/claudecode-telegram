@@ -113,12 +113,18 @@ test_response_prefix_formatting() {
     info "Testing response prefix formatting..."
     if python3 -c "
 from bridge import format_response_text
-text = 'Hello <b>world</b> & \"x\"'
-expected = '<b>session-1:</b>\nHello &lt;b&gt;world&lt;/b&gt; &amp; &quot;x&quot;'
-assert format_response_text('session-1', text) == expected
+# Test: allowed tags (<b>, <code>) preserved, dangerous chars escaped
+text = 'Hello <b>world</b> & <code>test</code> <script>bad</script>'
+result = format_response_text('session-1', text)
+# <b> and <code> should be preserved, <script> should be escaped
+assert '<b>session-1:</b>' in result  # prefix
+assert '<b>world</b>' in result       # allowed tag preserved
+assert '<code>test</code>' in result  # allowed tag preserved
+assert '&lt;script&gt;' in result     # dangerous tag escaped
+assert '&amp;' in result              # ampersand escaped
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Response formatting adds session prefix and escapes HTML"
+        success "Response formatting preserves allowed HTML, escapes rest"
     else
         fail "Response formatting failed"
     fi
