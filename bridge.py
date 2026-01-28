@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.8"
+VERSION = "0.6.9"
 
 import os
 import json
@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 import re
-from html import escape
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -70,22 +69,8 @@ def telegram_api(method, data):
 
 
 def format_response_text(session_name, text):
-    """Format response with session prefix and HTML escaping."""
-    escaped_session = escape(session_name)
-    escaped_text = escape_telegram_html(text)
-    return f"<b>{escaped_session}:</b>\n{escaped_text}"
-
-
-ALLOWED_HTML_TAGS = ("code", "pre", "b", "i")
-
-
-def escape_telegram_html(text):
-    """Escape text but allow a small subset of safe HTML tags."""
-    escaped = escape(text)
-    for tag in ALLOWED_HTML_TAGS:
-        escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
-        escaped = escaped.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
-    return escaped
+    """Format response with session prefix. No escaping - Claude Code handles safety."""
+    return f"<b>{session_name}:</b>\n{text}"
 
 
 def setup_bot_commands():

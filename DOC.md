@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.8
+> Version: 0.6.9
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.9 - Remove HTML escaping
+
+**Changes:**
+- Removed HTML escaping from responses
+- Claude Code already handles output safety
+- Simpler code, preserves all formatting
 
 ### v0.6.8 - Fix HTML tag rendering
 
