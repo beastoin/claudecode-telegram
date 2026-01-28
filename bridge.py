@@ -36,15 +36,18 @@ ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
 BOT_COMMANDS = [
-    {"command": "hire", "description": "Hire a worker: /hire <name>"},
+    # Daily commands (frequency-first, natural workflow order)
+    {"command": "team", "description": "Show your team"},
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
-    {"command": "team", "description": "Show the long-lived team"},
-    {"command": "end", "description": "Offboard a worker: /end <name>"},
-    {"command": "progress", "description": "Progress for focused worker"},
+    {"command": "progress", "description": "Check focused worker status"},
+    {"command": "learn", "description": "Ask focused worker what they learned"},
     {"command": "pause", "description": "Pause focused worker"},
     {"command": "relaunch", "description": "Relaunch focused worker"},
+    # Occasional
     {"command": "settings", "description": "Show settings"},
-    {"command": "learn", "description": "Ask focused worker what they learned today"},
+    # Rare (onboarding/offboarding)
+    {"command": "hire", "description": "Hire a worker: /hire <name>"},
+    {"command": "end", "description": "Offboard a worker: /end <name>"},
 ]
 
 BLOCKED_COMMANDS = [
