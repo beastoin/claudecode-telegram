@@ -658,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
         elif cmd in ("/settings", "/system"):
             return self.cmd_settings(chat_id)
         elif cmd == "/learn":
-            return self.cmd_learn(arg, chat_id)
+            return self.cmd_learn(arg, chat_id, msg_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
@@ -834,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_learn(self, text, chat_id):
+    def cmd_learn(self, text, chat_id, msg_id=None):
         """Ask the focused worker what they learned today."""
         if not state["active"]:
             self.reply(chat_id, "No focused worker. Use /focus <name> first.", outcome="Needs decision")
@@ -871,10 +871,16 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
 
         # Send prompt to worker
-        tmux_send(tmux_name, prompt)
-        tmux_send_enter(tmux_name)
+        send_ok = tmux_send(tmux_name, prompt)
+        enter_ok = tmux_send_enter(tmux_name)
 
-        self.reply(chat_id, f"Asking \"{name}\" about today's learnings...", outcome="Working")
+        # 👀 reaction confirms delivery - no text reply needed (worker will respond)
+        if msg_id and send_ok and enter_ok:
+            telegram_api("setMessageReaction", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "reaction": [{"type": "emoji", "emoji": "👀"}]
+            })
         return True
 
     def parse_learning(self, text):

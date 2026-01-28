@@ -96,6 +96,15 @@ fix the bug              → active session (currently frontend)
 
 The `@name` syntax allows one-off messages without switching context. You're working on frontend but need backend to do something? `@backend run the tests` — no context switch needed.
 
+## Feedback Philosophy
+
+- 👀 means the message hit the worker.
+- The worker reply is the confirmation: `worker_name: response`.
+- Text replies only for errors and state/info commands (`/hire`, `/end`, `/focus`, `/team`, `/progress`).
+- Regular messages, `@mentions`, and `/learn` are silent.
+- Managers want clean chat; the emoji is instant feedback.
+- If no worker reply is coming, then we speak.
+
 ## Registration Flow: Adopt Existing Sessions
 
 What if someone manually started `tmux new -s claude` and ran `claude`?
