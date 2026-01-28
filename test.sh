@@ -109,6 +109,21 @@ test_imports() {
     fi
 }
 
+test_response_prefix_formatting() {
+    info "Testing response prefix formatting..."
+    if python3 -c "
+from bridge import format_response_text
+text = 'Hello <b>world</b> & \"x\"'
+expected = '<b>session-1:</b>\nHello &lt;b&gt;world&lt;/b&gt; &amp; &quot;x&quot;'
+assert format_response_text('session-1', text) == expected
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Response formatting adds session prefix and escapes HTML"
+    else
+        fail "Response formatting failed"
+    fi
+}
+
 test_version() {
     info "Testing version..."
     if ./claudecode-telegram.sh --version | grep -q "claudecode-telegram"; then
@@ -515,6 +530,7 @@ main() {
     # Unit tests (no bridge needed)
     log "── Unit Tests ──────────────────────────────────────────────────────────"
     test_imports
+    test_response_prefix_formatting
     test_version
 
     # Integration tests (bridge needed)

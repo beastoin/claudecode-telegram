@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 
 import os
 import json
@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import re
+from html import escape
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -66,6 +67,13 @@ def telegram_api(method, data):
     except Exception as e:
         print(f"Telegram API error: {e}")
         return None
+
+
+def format_response_text(session_name, text):
+    """Format response with session prefix and HTML escaping."""
+    escaped_session = escape(session_name)
+    escaped_text = escape(text)
+    return f"<b>{escaped_session}:</b>\n{escaped_text}"
 
 
 def setup_bot_commands():
@@ -504,8 +512,11 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
+            # Format with session prefix and HTML escaping
+            response_text = format_response_text(session_name, text)
+
             # Bridge sends to Telegram (only place with token)
-            result = telegram_api("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            result = telegram_api("sendMessage", {"chat_id": chat_id, "text": response_text, "parse_mode": "HTML"})
             if result and result.get("ok"):
                 print(f"Response sent: {session_name} -> Telegram OK")
 

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.6
+> Version: 0.6.7
 
 ## Current Philosophy (Summary)
 
@@ -245,6 +245,12 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.6.7 - Session-prefixed responses
+
+**Changes:**
+- `/response` messages now include a bold `<b>{session}:</b>` prefix
+- HTML-escaped body prevents formatting injection from Claude output
 
 ### v0.6.6 - @all broadcast
 
