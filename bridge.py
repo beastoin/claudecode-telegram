@@ -590,9 +590,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if target_session:
             self.route_message(target_session, message, chat_id, msg_id, one_off=True)
-        else:
-            # Route to active session
-            self.route_to_active(text, chat_id, msg_id)
+            return
+
+        # Handle reply-to-worker routing
+        reply_to = msg.get("reply_to_message")
+        if reply_to:
+            reply_target, reply_context = self.parse_reply_target(reply_to)
+            if reply_target:
+                routed_text = self.format_reply_context(text, reply_context)
+                self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
+                return
+
+        # Route to active session
+        self.route_to_active(text, chat_id, msg_id)
 
     def try_registration(self, text, chat_id):
         """Try to parse JSON registration."""
@@ -631,6 +641,43 @@ class Handler(BaseHTTPRequestHandler):
             if name in registered:
                 return name, message
         return None, text
+
+    def parse_worker_prefix(self, text):
+        """Parse worker_name: prefix from a message."""
+        if not text:
+            return None, ""
+        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
+        if not match:
+            return None, ""
+        name = match.group(1).lower()
+        message = match.group(2).strip()
+        registered = get_registered_sessions()
+        if name not in registered:
+            return None, ""
+        return name, message
+
+    def parse_reply_target(self, reply_msg):
+        """Extract worker target and context from a replied-to message."""
+        if not reply_msg:
+            return None, ""
+        reply_from = reply_msg.get("from", {})
+        if reply_from and reply_from.get("is_bot") is False:
+            return None, ""
+        reply_text = reply_msg.get("text") or reply_msg.get("caption") or ""
+        return self.parse_worker_prefix(reply_text)
+
+    def format_reply_context(self, reply_text, context_text):
+        """Format a manager reply with context for the worker."""
+        reply_text = (reply_text or "").strip()
+        context_text = (context_text or "").strip()
+        if context_text:
+            return (
+                "Manager reply:\n"
+                f"{reply_text}\n\n"
+                "Context (your previous message):\n"
+                f"{context_text}"
+            )
+        return f"Manager reply:\n{reply_text}"
 
     def handle_command(self, text, chat_id, msg_id):
         """Handle /commands. Returns True if handled."""
