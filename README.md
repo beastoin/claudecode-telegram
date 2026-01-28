@@ -21,21 +21,23 @@ export TELEGRAM_BOT_TOKEN="your_token_from_botfather"
 ./claudecode-telegram.sh run
 ```
 
-Then from Telegram: `/new myproject` to create a Claude instance.
+Then from Telegram: `/hire myproject` to create your first AI worker.
 
 ## Commands (Telegram)
 
-| Command | Description |
-|---------|-------------|
-| `/new <name>` | Create Claude instance |
-| `/use <name>` | Switch active session |
-| `/list` | List all instances |
-| `/kill <name>` | Stop instance |
-| `/status` | Show status |
-| `/stop` | Interrupt Claude |
-| `/restart` | Restart Claude in session |
-| `/system` | Show system config (secrets redacted) |
-| `@name <msg>` | One-off message to specific instance |
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/hire <name>` | `/new` | Hire a long-lived AI worker |
+| `/focus <name>` | `/use` | Focus on a worker |
+| `/team` | `/list` | Show your team |
+| `/end <name>` | `/kill` | Offboard a worker |
+| `/progress` | `/status` | Check focused worker status |
+| `/pause` | `/stop` | Pause focused worker |
+| `/relaunch` | `/restart` | Relaunch focused worker |
+| `/settings` | `/system` | Show system config |
+| `/learn` | - | Capture daily learning (Problem/Fix/Why) |
+| `@name <msg>` | - | One-off message to specific worker |
+| `@all <msg>` | - | Broadcast to all workers |
 
 ## How it works
 
@@ -47,12 +49,26 @@ Claude Stop Hook -----> Bridge ----+----> Telegram
 
 ## Philosophy
 
-- **Claude Code IS persistence** - Claude manages its own context and memory
-- **LLM tokens stay low** - No context rebuilding, Claude remembers
+- **Workers are long-lived** - They keep context across restarts
+- **tmux IS persistence** - No database, no state.json
+- **Daily learning** - `/learn` captures fixes to team playbook
 - **Security by architecture** - Bot credentials never touch Claude
-- **Zero external state** - No database, no state.json
 
 See [DOC.md](DOC.md) for details.
+
+## Project Structure
+
+```
+claudecode-telegram/
+├── bridge.py              # Telegram webhook handler (v0.8.0)
+├── claudecode-telegram.sh # CLI wrapper, tunnel/webhook setup
+├── hooks/
+│   └── send-to-telegram.sh # Claude Stop hook
+├── CLAUDE.md              # Project instructions
+├── DOC.md                 # Design philosophy, changelog
+├── TEST.md                # Testing documentation
+└── test.sh                # Acceptance tests
+```
 
 ## Credits
 
