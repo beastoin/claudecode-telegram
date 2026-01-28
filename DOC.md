@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.7.0
+> Version: 0.8.0
 
 ## Current Philosophy (Summary)
 
@@ -244,6 +244,34 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.8.0 - Manager-friendly UX overhaul
+
+**New command aliases (manager-friendly):**
+| Old | New |
+|-----|-----|
+| `/new` | `/hire` |
+| `/use` | `/focus` |
+| `/list` | `/team` |
+| `/kill` | `/end` |
+| `/status` | `/progress` |
+| `/stop` | `/pause` |
+| `/restart` | `/relaunch` |
+| `/system` | `/settings` |
+
+**New command:**
+- `/learn` - Capture daily learnings (Problem/Fix/Why format), appends to team playbook, shares with all online workers
+
+**Voice & terms updated:**
+- "sessions" → "workers" in all user-facing messages
+- "active" → "focused"
+- Outcome-first responses: `Done —`, `Working —`, `Needs decision —`
+- Persistence emphasized: "Workers are long-lived and keep context across restarts."
+
+**Daily Learning workflow:**
+- Team playbook stored at `~/.claude/telegram/team_playbook.md`
+- Learnings shared with all online workers automatically
+- Format: Problem/Fix/Why
 
 ### v0.7.0 - Threaded HTTP + session refactors
 

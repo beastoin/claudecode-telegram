@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 import os
 import json
@@ -21,6 +21,8 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webho
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
+PLAYBOOK_FILE = SESSIONS_DIR.parent / "team_playbook.md"
+PERSISTENCE_NOTE = "Workers are long-lived and keep context across restarts."
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
@@ -34,18 +36,19 @@ ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
 BOT_COMMANDS = [
-    {"command": "new", "description": "Create new Claude: /new <name>"},
-    {"command": "use", "description": "Switch active Claude: /use <name>"},
-    {"command": "list", "description": "List all Claude instances"},
-    {"command": "kill", "description": "Stop Claude: /kill <name>"},
-    {"command": "status", "description": "Detailed status of active Claude"},
-    {"command": "stop", "description": "Interrupt active Claude (Escape)"},
-    {"command": "restart", "description": "Restart Claude in active session"},
-    {"command": "system", "description": "Show system config (secrets redacted)"},
+    {"command": "hire", "description": "Hire a worker: /hire <name>"},
+    {"command": "focus", "description": "Focus a worker: /focus <name>"},
+    {"command": "team", "description": "Show the long-lived team"},
+    {"command": "end", "description": "Offboard a worker: /end <name>"},
+    {"command": "progress", "description": "Progress for focused worker"},
+    {"command": "pause", "description": "Pause focused worker"},
+    {"command": "relaunch", "description": "Relaunch focused worker"},
+    {"command": "settings", "description": "Show settings"},
+    {"command": "learn", "description": "Capture a learning (Problem/Fix/Why)"},
 ]
 
 BLOCKED_COMMANDS = [
-    "/mcp", "/help", "/settings", "/config", "/model", "/compact", "/cost",
+    "/mcp", "/help", "/config", "/model", "/compact", "/cost",
     "/doctor", "/init", "/login", "/logout", "/memory", "/permissions",
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
 ]
@@ -250,7 +253,7 @@ def create_session(name):
     tmux_name = f"{TMUX_PREFIX}{name}"
 
     if tmux_exists(tmux_name):
-        return False, f"Session '{name}' already exists"
+        return False, f"Worker '{name}' already exists"
 
     # Create tmux session
     result = subprocess.run(
@@ -258,7 +261,7 @@ def create_session(name):
         capture_output=True
     )
     if result.returncode != 0:
-        return False, "Failed to create tmux session"
+        return False, "Could not start the worker workspace"
 
     time.sleep(0.5)
 
@@ -287,7 +290,7 @@ def kill_session(name):
     """Kill a Claude instance."""
     registered = get_registered_sessions()
     if name not in registered:
-        return False, f"Session '{name}' not found"
+        return False, f"Worker '{name}' not found"
 
     tmux_name = registered[name]["tmux"]
     subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
@@ -304,15 +307,15 @@ def restart_claude(name):
     """Restart claude in an existing tmux session."""
     registered = get_registered_sessions()
     if name not in registered:
-        return False, f"Session '{name}' not found"
+        return False, f"Worker '{name}' not found"
 
     tmux_name = registered[name]["tmux"]
 
     if not tmux_exists(tmux_name):
-        return False, f"tmux session '{tmux_name}' not running"
+        return False, "Worker workspace is not running"
 
     if is_claude_running(tmux_name):
-        return False, "Claude is already running"
+        return False, "Worker is already running"
 
     # Re-export env vars for hook (in case session was created by older version or bridge restarted)
     export_hook_env(tmux_name)
@@ -331,7 +334,7 @@ def switch_session(name):
     """Switch active session."""
     registered = get_registered_sessions()
     if name not in registered:
-        return False, f"Session '{name}' not found"
+        return False, f"Worker '{name}' not found"
 
     state["active"] = name
     return True, None
@@ -347,7 +350,7 @@ def register_session(name, tmux_session):
         capture_output=True
     )
     if result.returncode != 0:
-        return False, "Failed to rename tmux session"
+        return False, "Could not claim the running worker"
 
     # Export env vars for hook (same as create_session)
     export_hook_env(new_tmux_name)
@@ -399,7 +402,10 @@ def send_shutdown_message():
 
     print(f"Sending shutdown to {len(chat_ids)} chat(s)...")
     for chat_id in chat_ids:
-        telegram_api("sendMessage", {"chat_id": chat_id, "text": "Bridge going offline"})
+        telegram_api("sendMessage", {
+            "chat_id": chat_id,
+            "text": "Working - Team hub going offline. Your workers stay intact and keep context."
+        })
     print("Shutdown notifications sent")
 
 
@@ -594,19 +600,19 @@ class Handler(BaseHTTPRequestHandler):
                 name = re.sub(r'[^a-z0-9-]', '', name)
 
                 if not name:
-                    self.reply(chat_id, "Invalid name. Use alphanumeric and hyphens only.")
+                    self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
                     return True
 
                 registered = get_registered_sessions()
                 if name in registered:
-                    self.reply(chat_id, f"Name '{name}' already in use. Choose another.")
+                    self.reply(chat_id, f"Worker name \"{name}\" is already on the team. Choose another.", outcome="Needs decision")
                     return True
 
                 ok, err = register_session(name, state["pending_registration"])
                 if ok:
-                    self.reply(chat_id, f"Registered \"{name}\" (now active)")
+                    self.reply(chat_id, f"Claimed and focused \"{name}\". {PERSISTENCE_NOTE}")
                 else:
-                    self.reply(chat_id, f"Failed: {err}")
+                    self.reply(chat_id, f"Could not claim that worker. {err}", outcome="Needs decision")
                 return True
         except json.JSONDecodeError:
             pass
@@ -632,112 +638,120 @@ class Handler(BaseHTTPRequestHandler):
             cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        if cmd == "/new":
-            return self.cmd_new(arg, chat_id)
-        elif cmd == "/use":
-            return self.cmd_use(arg, chat_id)
-        elif cmd == "/list":
-            return self.cmd_list(chat_id)
-        elif cmd == "/kill":
-            return self.cmd_kill(arg, chat_id)
-        elif cmd == "/status":
-            return self.cmd_status(chat_id)
-        elif cmd == "/stop":
-            return self.cmd_stop(chat_id)
-        elif cmd == "/restart":
-            return self.cmd_restart(chat_id)
-        elif cmd == "/system":
-            return self.cmd_system(chat_id)
+        if cmd in ("/hire", "/new"):
+            return self.cmd_hire(arg, chat_id)
+        elif cmd in ("/focus", "/use"):
+            return self.cmd_focus(arg, chat_id)
+        elif cmd in ("/team", "/list"):
+            return self.cmd_team(chat_id)
+        elif cmd in ("/end", "/kill"):
+            return self.cmd_end(arg, chat_id)
+        elif cmd in ("/progress", "/status"):
+            return self.cmd_progress(chat_id)
+        elif cmd in ("/pause", "/stop"):
+            return self.cmd_pause(chat_id)
+        elif cmd in ("/relaunch", "/restart"):
+            return self.cmd_relaunch(chat_id)
+        elif cmd in ("/settings", "/system"):
+            return self.cmd_settings(chat_id)
+        elif cmd == "/learn":
+            return self.cmd_learn(arg, chat_id)
         elif cmd in BLOCKED_COMMANDS:
-            self.reply(chat_id, f"'{cmd}' not supported (interactive)")
+            self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
 
         # Not a control command - might be a Claude command, pass through
         return False
 
-    def cmd_new(self, name, chat_id):
+    def cmd_hire(self, name, chat_id):
         """Create new Claude instance."""
         if not name:
-            self.reply(chat_id, "Usage: /new <name>")
+            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
 
         name = name.lower().strip()
         name = re.sub(r'[^a-z0-9-]', '', name)
 
         if not name:
-            self.reply(chat_id, "Invalid name. Use alphanumeric and hyphens only.")
+            self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
             return True
 
         ok, err = create_session(name)
         if ok:
-            self.reply(chat_id, f"Created \"{name}\" (now active)")
+            self.reply(chat_id, f"Hired \"{name}\" and focused them. {PERSISTENCE_NOTE}")
         else:
-            self.reply(chat_id, f"Failed: {err}")
+            self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_use(self, name, chat_id):
-        """Switch active Claude."""
+    def cmd_focus(self, name, chat_id):
+        """Switch focused Claude."""
         if not name:
-            self.reply(chat_id, "Usage: /use <name>")
+            self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
             return True
 
         name = name.lower().strip()
         ok, err = switch_session(name)
         if ok:
-            self.reply(chat_id, f"Switched to \"{name}\"")
+            self.reply(chat_id, f"Focused \"{name}\". They keep their context.")
         else:
-            self.reply(chat_id, f"Failed: {err}")
+            self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_list(self, chat_id):
+    def cmd_team(self, chat_id):
         """List all Claude instances."""
         # Refresh from tmux
         registered, unregistered = scan_tmux_sessions()
         registered = get_registered_sessions(registered)
 
         if not registered and not unregistered:
-            self.reply(chat_id, "No sessions. Create with: /new <name>")
+            self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
             return True
 
         lines = []
+        lines.append(f"Team overview. {PERSISTENCE_NOTE}")
+        lines.append(f"Focused: {state['active'] or '(none)'}")
+        lines.append("Workers:")
         for name in sorted(registered.keys()):
-            marker = " <- active" if name == state["active"] else ""
-            pending = " (busy)" if is_pending(name) else ""
-            lines.append(f"  {name}{marker}{pending}")
+            status = []
+            if name == state["active"]:
+                status.append("focused")
+            status.append("working" if is_pending(name) else "available")
+            lines.append(f"- {name} ({', '.join(status)})")
 
         if unregistered:
-            lines.append("\nUnregistered:")
+            lines.append("")
+            lines.append("Unclaimed running Claude (needs a name):")
             for tmux in unregistered:
-                lines.append(f"  {tmux}")
+                lines.append(f"- {tmux}")
 
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_kill(self, name, chat_id):
+    def cmd_end(self, name, chat_id):
         """Kill a Claude instance."""
         if not name:
-            self.reply(chat_id, "Usage: /kill <name>")
+            self.reply(chat_id, "Offboarding is permanent. Usage: /end <name>", outcome="Needs decision")
             return True
 
         name = name.lower().strip()
         ok, err = kill_session(name)
         if ok:
-            self.reply(chat_id, f"Killed \"{name}\"")
+            self.reply(chat_id, f"Offboarded \"{name}\". This is for long-lived team changes.")
         else:
-            self.reply(chat_id, f"Failed: {err}")
+            self.reply(chat_id, f"Could not offboard \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_status(self, chat_id):
-        """Show detailed status of active Claude."""
+    def cmd_progress(self, chat_id):
+        """Show detailed status of focused Claude."""
         if not state["active"]:
-            self.reply(chat_id, "No active session. Use /list or /new <name>")
+            self.reply(chat_id, "No focused worker. Use /team or /focus <name>.", outcome="Needs decision")
             return True
 
         name = state["active"]
         registered = get_registered_sessions()
         session = registered.get(name)
         if not session:
-            self.reply(chat_id, "Active session not found")
+            self.reply(chat_id, "Focused worker not found. Use /team to refocus.", outcome="Needs decision")
             return True
 
         tmux_name = session["tmux"]
@@ -745,27 +759,24 @@ class Handler(BaseHTTPRequestHandler):
         pending = is_pending(name)
 
         status = []
-        status.append(f"Session: {name}")
-        status.append(f"tmux: {tmux_name}")
-        status.append(f"tmux running: {'yes' if exists else 'no'}")
+        status.append(f"Progress for focused worker: {name}")
+        status.append("Focused: yes")
+        status.append(f"Working: {'yes' if pending else 'no'}")
+        status.append(f"Online: {'yes' if exists else 'no'}")
 
         if exists:
             claude_running = is_claude_running(tmux_name)
-            pane_cmd = get_pane_command(tmux_name)
-            status.append(f"Claude running: {'yes' if claude_running else 'no'}")
-            status.append(f"Process: {pane_cmd or '(none)'}")
+            status.append(f"Ready: {'yes' if claude_running else 'no'}")
             if not claude_running:
-                status.append("\nClaude exited. Use /restart to restart.")
-
-        status.append(f"Busy: {'yes' if pending else 'no'}")
+                status.append("Needs attention: worker app is not running. Use /relaunch.")
 
         self.reply(chat_id, "\n".join(status))
         return True
 
-    def cmd_stop(self, chat_id):
+    def cmd_pause(self, chat_id):
         """Interrupt active Claude."""
         if not state["active"]:
-            self.reply(chat_id, "No active session")
+            self.reply(chat_id, "No focused worker.", outcome="Needs decision")
             return True
 
         name = state["active"]
@@ -775,24 +786,24 @@ class Handler(BaseHTTPRequestHandler):
             tmux_send_escape(session["tmux"])
             clear_pending(name)
 
-        self.reply(chat_id, f"Interrupted \"{name}\"")
+        self.reply(chat_id, f"Paused \"{name}\". They stay focused and keep context.")
         return True
 
-    def cmd_restart(self, chat_id):
+    def cmd_relaunch(self, chat_id):
         """Restart Claude in active session."""
         if not state["active"]:
-            self.reply(chat_id, "No active session")
+            self.reply(chat_id, "No focused worker.", outcome="Needs decision")
             return True
 
         name = state["active"]
         ok, err = restart_claude(name)
         if ok:
-            self.reply(chat_id, f"Restarting Claude in \"{name}\"...")
+            self.reply(chat_id, f"Relaunching \"{name}\" now. Their context remains intact.", outcome="Working")
         else:
-            self.reply(chat_id, f"Failed: {err}")
+            self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_system(self, chat_id):
+    def cmd_settings(self, chat_id):
         """Show system configuration (secrets redacted)."""
         def redact(s):
             if not s:
@@ -802,24 +813,126 @@ class Handler(BaseHTTPRequestHandler):
             return s[:4] + "..." + s[-4:]
 
         registered = get_registered_sessions()
+        team_list = ", ".join(registered.keys()) if registered else "(none)"
         lines = [
-            f"claudecode-telegram v{VERSION} (beastoin)",
-            "─" * 20,
-            f"Bot Token: {redact(BOT_TOKEN)}",
-            f"Port: {PORT}",
-            f"Admin: {admin_chat_id or '(auto-learn)'}",
-            f"Webhook Secret: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
-            f"Sessions Dir: {SESSIONS_DIR}",
-            f"tmux Prefix: {TMUX_PREFIX}",
+            f"claudecode-telegram v{VERSION}",
+            PERSISTENCE_NOTE,
             "",
-            "State",
-            "─" * 20,
-            f"Active: {state['active'] or '(none)'}",
-            f"Sessions: {list(registered.keys()) or '(none)'}",
-            f"Pending Registration: {state['pending_registration'] or '(none)'}",
+            f"Bot token: {redact(BOT_TOKEN)}",
+            f"Admin: {admin_chat_id or '(auto-learn)'}",
+            f"Webhook verification: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
+            f"Team storage: {SESSIONS_DIR.parent}",
+            "",
+            "Team state",
+            f"Focused worker: {state['active'] or '(none)'}",
+            f"Workers: {team_list}",
+            f"Pending claim: {state['pending_registration'] or '(none)'}",
         ]
         self.reply(chat_id, "\n".join(lines))
         return True
+
+    def cmd_learn(self, text, chat_id):
+        """Capture a learning (Problem/Fix/Why), append to playbook, share with team."""
+        if not text:
+            template = (
+                "Format:\n"
+                "Problem: <what happened>\n"
+                "Fix: <what solved it>\n"
+                "Why: <root cause>\n"
+                "Example:\n"
+                "Problem: Deploy failed on missing env var\n"
+                "Fix: Added TELEGRAM_BOT_TOKEN to prod\n"
+                "Why: New secret was not added to the deploy checklist"
+            )
+            self.reply(chat_id, template, outcome="Needs decision")
+            return True
+
+        problem, fix, why = self.parse_learning(text)
+        if not problem or not fix or not why:
+            self.reply(chat_id, "Please use Problem/Fix/Why format. Send /learn again with the template.", outcome="Needs decision")
+            return True
+
+        try:
+            self.append_learning_to_playbook(problem, fix, why)
+        except Exception as exc:
+            self.reply(chat_id, f"Could not write to the team playbook. {exc}", outcome="Needs decision")
+            return True
+
+        shared_with = self.share_learning_with_team(problem, fix, why)
+
+        shared_note = f"Shared with {len(shared_with)} online worker(s)." if shared_with else "No online workers to share with right now."
+        self.reply(
+            chat_id,
+            f"Learning captured in the team playbook. {shared_note} {PERSISTENCE_NOTE}",
+            outcome="Done"
+        )
+        return True
+
+    def parse_learning(self, text):
+        """Parse Problem/Fix/Why sections from text."""
+        sections = {"problem": "", "fix": "", "why": ""}
+        for line in text.splitlines():
+            match = re.match(r'^\s*(problem|fix|why)\s*[:\-]\s*(.+)\s*$', line, re.IGNORECASE)
+            if match:
+                key = match.group(1).lower()
+                sections[key] = match.group(2).strip()
+
+        if all(sections.values()):
+            return sections["problem"], sections["fix"], sections["why"]
+
+        if "|" in text:
+            parts = [p.strip() for p in text.split("|")]
+        elif " / " in text:
+            parts = [p.strip() for p in text.split(" / ")]
+        elif text.count("/") >= 2:
+            parts = [p.strip() for p in text.split("/")]
+        else:
+            parts = []
+
+        if len(parts) >= 3:
+            return parts[0], parts[1], parts[2]
+
+        return sections["problem"], sections["fix"], sections["why"]
+
+    def append_learning_to_playbook(self, problem, fix, why):
+        """Append a learning entry to the team playbook."""
+        PLAYBOOK_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not PLAYBOOK_FILE.exists():
+            PLAYBOOK_FILE.write_text("# Team Playbook\n\n", encoding="utf-8")
+            PLAYBOOK_FILE.chmod(0o600)
+
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+        focused = state["active"] or "none"
+        entry = (
+            f"## {timestamp}\n"
+            f"- Problem: {problem}\n"
+            f"- Fix: {fix}\n"
+            f"- Why: {why}\n"
+            f"- Focused worker: {focused}\n\n"
+        )
+
+        with PLAYBOOK_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(entry)
+
+    def share_learning_with_team(self, problem, fix, why):
+        """Share the learning with online workers."""
+        registered = get_registered_sessions()
+        shared_with = []
+        note = (
+            "Team learning (long-lived context):\n"
+            f"Problem: {problem}\n"
+            f"Fix: {fix}\n"
+            f"Why: {why}\n"
+            "Please add this to your context."
+        )
+
+        for name, session in registered.items():
+            tmux_name = session["tmux"]
+            if tmux_exists(tmux_name) and is_claude_running(tmux_name):
+                if tmux_send(tmux_name, note) and tmux_send_enter(tmux_name):
+                    shared_with.append(name)
+
+        return shared_with
 
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
@@ -831,20 +944,22 @@ class Handler(BaseHTTPRequestHandler):
             if unregistered:
                 # Prompt for registration
                 state["pending_registration"] = unregistered[0]
-                self.reply(chat_id,
-                    f"Unregistered session detected: {unregistered[0]}\n"
-                    f"Register with:\n"
-                    f'  {{"name": "your-session-name"}}'
+                self.reply(
+                    chat_id,
+                    "Found a running Claude not yet on your team.\n"
+                    "Claim it to make it a long-lived worker by replying with:\n"
+                    '{"name": "your-worker-name"}',
+                    outcome="Needs decision"
                 )
                 return
             elif registered:
                 # Sessions exist but none active
                 names = ", ".join(registered.keys())
-                self.reply(chat_id, f"No active session. Found: {names}\nUse: /use <name>")
+                self.reply(chat_id, f"No focused worker. Team: {names}\nUse: /focus <name>", outcome="Needs decision")
                 return
             else:
                 # No sessions at all
-                self.reply(chat_id, "No sessions. Create with: /new <name>")
+                self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
                 return
 
         self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
@@ -854,7 +969,7 @@ class Handler(BaseHTTPRequestHandler):
         registered = get_registered_sessions()
         sessions = list(registered.keys())
         if not sessions:
-            self.reply(chat_id, "No sessions. Create with: /new <name>")
+            self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
             return
 
         sent_to = []
@@ -867,20 +982,20 @@ class Handler(BaseHTTPRequestHandler):
                 sent_to.append(name)
 
         if not sent_to:
-            self.reply(chat_id, "No running sessions to broadcast to")
+            self.reply(chat_id, "No online workers to share with right now.", outcome="Needs decision")
 
     def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
         """Route a message to a specific session."""
         registered = get_registered_sessions()
         session = registered.get(session_name)
         if not session:
-            self.reply(chat_id, f"Session '{session_name}' not found")
+            self.reply(chat_id, f"Worker \"{session_name}\" not found.", outcome="Needs decision")
             return
 
         tmux_name = session["tmux"]
 
         if not tmux_exists(tmux_name):
-            self.reply(chat_id, f"Session '{session_name}' tmux not running")
+            self.reply(chat_id, f"Worker \"{session_name}\" is not online right now.", outcome="Needs decision")
             return
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
@@ -907,8 +1022,10 @@ class Handler(BaseHTTPRequestHandler):
                 "reaction": [{"type": "emoji", "emoji": "👀"}]
             })
 
-    def reply(self, chat_id, text):
-        telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+    def reply(self, chat_id, text, outcome="Done"):
+        prefix = f"{outcome} - " if text else f"{outcome}"
+        message = f"{prefix}{text}" if text else prefix
+        telegram_api("sendMessage", {"chat_id": chat_id, "text": message})
 
     def send_startup_message(self, chat_id):
         """Send bridge startup notification."""
@@ -916,13 +1033,13 @@ class Handler(BaseHTTPRequestHandler):
         sessions = list(registered.keys())
         active = state["active"]
 
-        lines = ["Bridge online"]
+        lines = [f"Team hub online. {PERSISTENCE_NOTE}"]
         if sessions:
-            lines.append(f"Sessions: {', '.join(sessions)}")
+            lines.append(f"Team: {', '.join(sessions)}")
             if active:
-                lines.append(f"Active: {active}")
+                lines.append(f"Focused: {active}")
         else:
-            lines.append("No sessions. Create with: /new <name>")
+            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
 
         self.reply(chat_id, "\n".join(lines))
 
