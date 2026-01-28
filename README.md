@@ -35,9 +35,10 @@ Then from Telegram: `/hire myproject` to create your first AI worker.
 | `/pause` | `/stop` | Pause focused worker |
 | `/relaunch` | `/restart` | Relaunch focused worker |
 | `/settings` | `/system` | Show system config |
-| `/learn` | - | Capture daily learning (Problem/Fix/Why) |
+| `/learn` | - | Ask focused worker what they learned |
 | `@name <msg>` | - | One-off message to specific worker |
 | `@all <msg>` | - | Broadcast to all workers |
+| `[photo]` | - | Send image to focused worker |
 
 ## How it works
 
@@ -51,7 +52,7 @@ Claude Stop Hook -----> Bridge ----+----> Telegram
 
 - **Workers are long-lived** - They keep context across restarts
 - **tmux IS persistence** - No database, no state.json
-- **Daily learning** - `/learn` captures fixes to team playbook
+- **Image support** - Send screenshots, receive diagrams
 - **Security by architecture** - Bot credentials never touch Claude
 
 See [DOC.md](DOC.md) for details.
@@ -60,7 +61,7 @@ See [DOC.md](DOC.md) for details.
 
 ```
 claudecode-telegram/
-├── bridge.py              # Telegram webhook handler (v0.8.0)
+├── bridge.py              # Telegram webhook handler (v0.9.0)
 ├── claudecode-telegram.sh # CLI wrapper, tunnel/webhook setup
 ├── hooks/
 │   └── send-to-telegram.sh # Claude Stop hook

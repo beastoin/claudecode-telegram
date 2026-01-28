@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 import os
 import json
+import mimetypes
 import signal
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import threading
 import time
 import re
 import urllib.request
+import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -71,6 +73,211 @@ def telegram_api(method, data):
     except Exception as e:
         print(f"Telegram API error: {e}")
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image Handling
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Max image size: 20MB (Telegram limit)
+MAX_IMAGE_SIZE = 20 * 1024 * 1024
+
+# Allowed image extensions for outgoing
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+
+
+def get_inbox_dir(session_name):
+    """Get inbox directory for incoming images."""
+    return get_session_dir(session_name) / "inbox"
+
+
+def ensure_inbox_dir(session_name):
+    """Create inbox directory with secure permissions."""
+    inbox = get_inbox_dir(session_name)
+    inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    inbox.chmod(0o700)
+    return inbox
+
+
+def download_telegram_file(file_id, session_name):
+    """Download a file from Telegram to the session's inbox.
+
+    Returns the local file path or None on failure.
+    SECURITY: Files are sandboxed in session's inbox directory.
+    """
+    if not BOT_TOKEN:
+        return None
+
+    # Get file info from Telegram
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            data=json.dumps({"file_id": file_id}).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            result = json.loads(r.read())
+            if not result.get("ok"):
+                print(f"getFile failed: {result}")
+                return None
+            file_info = result.get("result", {})
+    except Exception as e:
+        print(f"getFile error: {e}")
+        return None
+
+    file_path = file_info.get("file_path")
+    file_size = file_info.get("file_size", 0)
+
+    if not file_path:
+        print("No file_path in response")
+        return None
+
+    # Check file size
+    if file_size > MAX_IMAGE_SIZE:
+        print(f"File too large: {file_size} > {MAX_IMAGE_SIZE}")
+        return None
+
+    # Download the file
+    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    inbox = ensure_inbox_dir(session_name)
+
+    # Generate unique filename with original extension
+    ext = Path(file_path).suffix or ".jpg"
+    local_filename = f"{uuid.uuid4().hex}{ext}"
+    local_path = inbox / local_filename
+
+    try:
+        req = urllib.request.Request(download_url)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            content = r.read()
+            if len(content) > MAX_IMAGE_SIZE:
+                print(f"Downloaded file too large: {len(content)}")
+                return None
+            local_path.write_bytes(content)
+            local_path.chmod(0o600)
+        print(f"Downloaded image: {local_path}")
+        return str(local_path)
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
+
+
+def send_photo(chat_id, photo_path, caption=None):
+    """Send a photo to Telegram using multipart/form-data.
+
+    SECURITY: Path is validated before sending.
+    Returns True on success, False on failure.
+    """
+    if not BOT_TOKEN:
+        return False
+
+    photo_path = Path(photo_path)
+
+    # Security: validate path
+    if not photo_path.exists():
+        print(f"Photo not found: {photo_path}")
+        return False
+
+    if not photo_path.is_file():
+        print(f"Not a file: {photo_path}")
+        return False
+
+    # Check extension
+    if photo_path.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
+        print(f"Invalid image extension: {photo_path.suffix}")
+        return False
+
+    # Check size
+    file_size = photo_path.stat().st_size
+    if file_size > MAX_IMAGE_SIZE:
+        print(f"Photo too large: {file_size} > {MAX_IMAGE_SIZE}")
+        return False
+
+    # Security: path must be within allowed directories
+    # Allow: session inbox dirs, /tmp, and current working directory
+    allowed_roots = [
+        SESSIONS_DIR,
+        Path("/tmp"),
+        Path.cwd(),
+    ]
+    photo_resolved = photo_path.resolve()
+    is_allowed = any(
+        str(photo_resolved).startswith(str(root.resolve()))
+        for root in allowed_roots
+    )
+    if not is_allowed:
+        print(f"Photo path not in allowed directory: {photo_path}")
+        return False
+
+    # Build multipart form data
+    boundary = uuid.uuid4().hex
+    content_type = mimetypes.guess_type(str(photo_path))[0] or "image/jpeg"
+
+    body_parts = []
+
+    # chat_id field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+    body_parts.append(b"")
+    body_parts.append(str(chat_id).encode())
+
+    # photo field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(f'Content-Disposition: form-data; name="photo"; filename="{photo_path.name}"'.encode())
+    body_parts.append(f"Content-Type: {content_type}".encode())
+    body_parts.append(b"")
+    body_parts.append(photo_path.read_bytes())
+
+    # caption field (optional)
+    if caption:
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="caption"')
+        body_parts.append(b"")
+        body_parts.append(caption.encode())
+
+    body_parts.append(f"--{boundary}--".encode())
+    body_parts.append(b"")
+
+    body = b"\r\n".join(body_parts)
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            result = json.loads(r.read())
+            if result.get("ok"):
+                print(f"Photo sent: {photo_path.name}")
+                return True
+            else:
+                print(f"sendPhoto failed: {result}")
+                return False
+    except Exception as e:
+        print(f"sendPhoto error: {e}")
+        return False
+
+
+def parse_image_tags(text):
+    """Parse [[image:/path|caption]] tags from text.
+
+    Returns (clean_text, [(path, caption), ...])
+    """
+    pattern = r'\[\[image:([^\]|]+)(?:\|([^\]]*))?\]\]'
+    images = []
+
+    def replace_tag(match):
+        path = match.group(1).strip()
+        caption = (match.group(2) or "").strip()
+        images.append((path, caption))
+        return ""  # Remove tag from text
+
+    clean_text = re.sub(pattern, replace_tag, text)
+    # Clean up extra whitespace from removed tags
+    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+
+    return clean_text, images
 
 
 def format_response_text(session_name, text):
@@ -493,6 +700,8 @@ class Handler(BaseHTTPRequestHandler):
         SECURITY: This is how Claude responses get to Telegram without
         Claude ever having access to the bot token. Hook POSTs here,
         bridge sends to Telegram.
+
+        IMAGE SUPPORT: Parses [[image:/path|caption]] tags and sends via sendPhoto.
         """
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -518,13 +727,29 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Format with session prefix and HTML escaping
-            response_text = format_response_text(session_name, text)
+            # Parse image tags from text
+            clean_text, images = parse_image_tags(text)
 
-            # Bridge sends to Telegram (only place with token)
-            result = telegram_api("sendMessage", {"chat_id": chat_id, "text": response_text, "parse_mode": "HTML"})
-            if result and result.get("ok"):
-                print(f"Response sent: {session_name} -> Telegram OK")
+            # Send text message if there's text content
+            if clean_text:
+                response_text = format_response_text(session_name, clean_text)
+                result = telegram_api("sendMessage", {"chat_id": chat_id, "text": response_text, "parse_mode": "HTML"})
+                if result and result.get("ok"):
+                    print(f"Response sent: {session_name} -> Telegram OK")
+
+            # Send images
+            for img_path, img_caption in images:
+                # Add session prefix to caption
+                full_caption = f"{session_name}: {img_caption}" if img_caption else f"{session_name}:"
+                if send_photo(chat_id, img_path, full_caption):
+                    print(f"Image sent: {session_name} -> {img_path}")
+                else:
+                    # Notify about failed image
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": f"<b>{session_name}:</b> [Image failed: {img_path}]",
+                        "parse_mode": "HTML"
+                    })
 
             # Clear pending
             clear_pending(session_name)
@@ -547,9 +772,57 @@ class Handler(BaseHTTPRequestHandler):
         global admin_chat_id
 
         msg = update.get("message", {})
-        text = msg.get("text", "")
+        text = msg.get("text", "") or msg.get("caption", "")
         chat_id = msg.get("chat", {}).get("id")
         msg_id = msg.get("message_id")
+
+        # Handle photo messages
+        photo = msg.get("photo")
+        document = msg.get("document")
+
+        # Check if document is an image
+        doc_is_image = False
+        if document:
+            mime_type = document.get("mime_type", "")
+            doc_is_image = mime_type.startswith("image/")
+
+        if (photo or doc_is_image) and chat_id:
+            # Get file_id from photo or document
+            if photo:
+                largest = max(photo, key=lambda p: p.get("file_size", 0))
+                file_id = largest.get("file_id")
+            else:
+                file_id = document.get("file_id")
+
+            if file_id:
+                # Admin check first
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return  # Silent rejection
+
+                # Download to focused worker's inbox
+                if not state["active"]:
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "Needs decision - No focused worker. Use /focus <name> first."
+                    })
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    # Build message with image path
+                    image_text = f"Manager sent image: {local_path}"
+                    if text:
+                        image_text = f"{text}\n\n{image_text}"
+                    # Route to active session
+                    self.route_to_active(image_text, chat_id, msg_id)
+                else:
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "Needs decision - Could not download image. Try again or send as file."
+                    })
+                return
 
         if not text or not chat_id:
             return

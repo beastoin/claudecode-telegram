@@ -182,3 +182,18 @@ lsof -ti :8081 | xargs kill
 ```
 
 **Why this matters:** Production runs multiple nodes (prod, dev, test) simultaneously. Pattern-based killing causes collateral damage to other running nodes.
+
+### Use script commands or PID files to stop services
+
+**Problem:** Used pkill to restart bridge, caused production outage.
+
+**Fix:** Use the script's stop command or kill via PID file:
+```bash
+# RIGHT - use script command
+./claudecode-telegram.sh stop
+
+# RIGHT - use PID file
+kill $(cat ~/.claude/telegram/claudecode-telegram.pid)
+```
+
+**Why:** pkill is too broad and can kill processes unexpectedly, causing downtime.

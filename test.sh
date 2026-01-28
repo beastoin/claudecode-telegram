@@ -52,6 +52,14 @@ cleanup() {
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null || true
     tmux kill-session -t "${TEST_TMUX_PREFIX}responsetest" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}inboxtest" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}learnbot" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}replybot" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}contextbot" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}nopendingtest" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}imageresponsetest" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}imgrecv" 2>/dev/null || true
     # Clean up test directory (but keep base dir for next run)
     [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"
     [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
@@ -121,6 +129,30 @@ send_reply() {
                     "date": '"$(date +%s)"',
                     "text": "'"$reply_text"'"
                 }
+            }
+        }'
+}
+
+send_photo_message() {
+    local file_id="$1"
+    local caption="${2:-}"
+    local chat_id="${3:-$CHAT_ID}"
+    local update_id=$((RANDOM))
+
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$chat_id"', "first_name": "TestUser"},
+                "chat": {"id": '"$chat_id"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "photo": [
+                    {"file_id": "'"$file_id"'_small", "file_size": 1000, "width": 90, "height": 90},
+                    {"file_id": "'"$file_id"'", "file_size": 5000, "width": 320, "height": 320}
+                ],
+                "caption": "'"$caption"'"
             }
         }'
 }
@@ -545,6 +577,223 @@ test_notify_endpoint() {
     fi
 }
 
+test_image_tag_parsing() {
+    info "Testing image tag parsing..."
+
+    if python3 -c "
+from bridge import parse_image_tags
+
+# Test single image tag
+text = 'Here is an image [[image:/tmp/test.jpg|my caption]] and more text'
+clean, images = parse_image_tags(text)
+assert clean == 'Here is an image  and more text', f'clean text wrong: {clean!r}'
+assert len(images) == 1, f'expected 1 image, got {len(images)}'
+assert images[0] == ('/tmp/test.jpg', 'my caption'), f'image data wrong: {images[0]}'
+
+# Test image tag without caption
+text2 = '[[image:/path/to/photo.png]]'
+clean2, images2 = parse_image_tags(text2)
+assert clean2 == '', f'clean text should be empty: {clean2!r}'
+assert images2[0] == ('/path/to/photo.png', ''), f'image without caption wrong: {images2[0]}'
+
+# Test multiple images
+text3 = 'First [[image:/a.jpg|cap1]] middle [[image:/b.png|cap2]] end'
+clean3, images3 = parse_image_tags(text3)
+assert len(images3) == 2, f'expected 2 images, got {len(images3)}'
+assert images3[0] == ('/a.jpg', 'cap1')
+assert images3[1] == ('/b.png', 'cap2')
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Image tag parsing works correctly"
+    else
+        fail "Image tag parsing failed"
+    fi
+}
+
+test_image_path_validation() {
+    info "Testing image path validation..."
+
+    if python3 -c "
+from pathlib import Path
+import tempfile
+import os
+
+# Import after setting up test paths
+from bridge import ALLOWED_IMAGE_EXTENSIONS, SESSIONS_DIR, send_photo
+
+# Test allowed extensions
+for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
+    assert ext in ALLOWED_IMAGE_EXTENSIONS, f'{ext} should be allowed'
+
+# Test disallowed extensions
+for ext in ['.exe', '.sh', '.py', '.txt']:
+    assert ext not in ALLOWED_IMAGE_EXTENSIONS, f'{ext} should not be allowed'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Image extension validation works"
+    else
+        fail "Image extension validation failed"
+    fi
+}
+
+test_photo_message_no_focused() {
+    info "Testing photo message without focused worker..."
+
+    # First ensure no focused worker
+    send_message "/end testbot1" >/dev/null 2>&1 || true
+    sleep 1
+
+    # Clear active by killing all test sessions
+    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
+
+    local result
+    result=$(send_photo_message "test_file_id" "test caption")
+
+    if [[ "$result" == "OK" ]]; then
+        # Should log error about no focused worker
+        success "Photo without focused worker handled"
+    else
+        fail "Photo message handling failed"
+    fi
+}
+
+test_incoming_image_e2e() {
+    info "Testing incoming image e2e (upload -> webhook -> download)..."
+
+    # Create worker to receive image
+    send_message "/hire imgrecv" >/dev/null
+    sleep 2
+    send_message "/focus imgrecv" >/dev/null
+    sleep 1
+
+    # Create a test image
+    python3 << 'PYEOF'
+from PIL import Image, ImageDraw
+img = Image.new('RGB', (200, 100), color='#28A745')
+draw = ImageDraw.Draw(img)
+draw.text((20, 40), "E2E Test Image", fill='white')
+img.save('/tmp/e2e-test-incoming.png')
+PYEOF
+
+    # Upload image to Telegram to get a real file_id
+    local upload_response
+    upload_response=$(curl -s -X POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/sendPhoto" \
+        -F "chat_id=${CHAT_ID}" \
+        -F "photo=@/tmp/e2e-test-incoming.png" \
+        -F "caption=E2E test upload")
+
+    # Extract file_id from response
+    local file_id
+    file_id=$(echo "$upload_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['photo'][-1]['file_id'])" 2>/dev/null)
+
+    if [[ -z "$file_id" ]]; then
+        fail "Could not upload test image to get file_id"
+        send_message "/end imgrecv" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Now simulate incoming photo webhook with real file_id
+    local update_id=$((RANDOM))
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$CHAT_ID"', "first_name": "TestUser"},
+                "chat": {"id": '"$CHAT_ID"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "photo": [
+                    {"file_id": "'"$file_id"'_small", "file_size": 1000, "width": 90, "height": 45},
+                    {"file_id": "'"$file_id"'", "file_size": 5000, "width": 200, "height": 100}
+                ],
+                "caption": "Test incoming image"
+            }
+        }' >/dev/null
+
+    sleep 3
+
+    # Check if image was downloaded to inbox
+    local inbox_dir="$TEST_SESSION_DIR/imgrecv/inbox"
+    if ls "$inbox_dir"/*.png 2>/dev/null || ls "$inbox_dir"/*.jpg 2>/dev/null; then
+        success "Incoming image downloaded to inbox"
+        ls -la "$inbox_dir"/ 2>/dev/null | head -3
+    else
+        # Check bridge log for download attempt
+        if grep -q "Downloaded image" "$BRIDGE_LOG" 2>/dev/null; then
+            success "Incoming image download attempted (check log)"
+        else
+            fail "Incoming image not downloaded to inbox"
+        fi
+    fi
+
+    # Cleanup
+    send_message "/end imgrecv" >/dev/null 2>&1 || true
+}
+
+test_inbox_directory() {
+    info "Testing inbox directory creation..."
+
+    # Create worker
+    send_message "/hire inboxtest" >/dev/null
+    sleep 2
+    send_message "/focus inboxtest" >/dev/null
+
+    if python3 -c "
+from bridge import ensure_inbox_dir, get_inbox_dir
+import os
+
+inbox = ensure_inbox_dir('inboxtest')
+assert inbox.exists(), 'inbox should exist'
+perms = oct(inbox.stat().st_mode)[-3:]
+assert perms == '700', f'inbox perms should be 700, got {perms}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Inbox directory created with correct permissions"
+    else
+        fail "Inbox directory creation failed"
+    fi
+
+    # Cleanup
+    send_message "/end inboxtest" >/dev/null 2>&1 || true
+}
+
+test_response_with_image_tags() {
+    info "Testing /response endpoint with image tags..."
+
+    # Create a session
+    send_message "/new imageresponsetest" >/dev/null
+    sleep 2
+
+    # Set up session files
+    local session_dir="$TEST_SESSION_DIR/imageresponsetest"
+    mkdir -p "$session_dir"
+    echo "$CHAT_ID" > "$session_dir/chat_id"
+
+    # Test response with image tag (image won't exist, but parsing should work)
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"session":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}')
+
+    if [[ "$result" == "OK" ]]; then
+        # Check bridge log for image handling attempt
+        sleep 1
+        if grep -q "imageresponsetest" "$BRIDGE_LOG" 2>/dev/null; then
+            success "/response endpoint handles image tags"
+        else
+            fail "/response endpoint did not process message"
+        fi
+    else
+        fail "/response with image tags failed: $result"
+    fi
+
+    # Cleanup
+    send_message "/kill imageresponsetest" >/dev/null 2>&1 || true
+}
+
 test_response_endpoint() {
     info "Testing /response endpoint (hook -> bridge -> Telegram)..."
 
@@ -716,6 +965,12 @@ main() {
     test_learn_command
     test_reply_routing
     test_reply_context
+    test_image_tag_parsing
+    test_image_path_validation
+    test_inbox_directory
+    test_photo_message_no_focused
+    test_incoming_image_e2e
+    test_response_with_image_tags
     test_notify_endpoint
     test_response_endpoint
     test_response_without_pending

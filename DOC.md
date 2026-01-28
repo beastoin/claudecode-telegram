@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.8.0
+> Version: 0.9.0
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,41 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.9.0 - Image Support
+
+**New features:**
+- **Incoming images**: Manager can send photos/images to workers
+  - Images downloaded to `~/.claude/telegram/sessions/<worker>/inbox/`
+  - Path passed to Claude: "Manager sent image: /path/to/image.jpg"
+  - Supports photos and image documents (files sent as attachments)
+  - Optional caption included in message
+
+- **Outgoing images**: Workers can send images back via tag syntax
+  - Use `[[image:/path/to/file.jpg|optional caption]]` in responses
+  - Bridge parses tags and sends via Telegram's sendPhoto API
+  - Multiple images per response supported
+  - Caption is optional: `[[image:/path.png]]` works too
+
+**Security:**
+- Path allowlist: Only files in sessions dir, /tmp, or cwd can be sent
+- Extension validation: Only .jpg, .jpeg, .png, .gif, .webp, .bmp allowed
+- Size limit: 20MB max (Telegram's limit)
+- Inbox directories use 0o700 permissions
+
+**Usage:**
+```
+# Manager sends image in Telegram
+[photo attachment with optional caption]
+
+# Worker receives
+Manager sent image: /home/user/.claude/telegram/sessions/worker/inbox/abc123.jpg
+Please describe this screenshot
+
+# Worker responds with image
+Here's the diagram:
+[[image:/tmp/diagram.png|Architecture overview]]
+```
 
 ### v0.8.0 - Manager-friendly UX overhaul
 
