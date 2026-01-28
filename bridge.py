@@ -44,7 +44,7 @@ BOT_COMMANDS = [
     {"command": "pause", "description": "Pause focused worker"},
     {"command": "relaunch", "description": "Relaunch focused worker"},
     {"command": "settings", "description": "Show settings"},
-    {"command": "learn", "description": "Capture a learning (Problem/Fix/Why)"},
+    {"command": "learn", "description": "Ask focused worker what they learned today"},
 ]
 
 BLOCKED_COMMANDS = [
@@ -832,40 +832,46 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def cmd_learn(self, text, chat_id):
-        """Capture a learning (Problem/Fix/Why), append to playbook, share with team."""
-        if not text:
-            template = (
-                "Format:\n"
-                "Problem: <what happened>\n"
-                "Fix: <what solved it>\n"
-                "Why: <root cause>\n"
-                "Example:\n"
-                "Problem: Deploy failed on missing env var\n"
-                "Fix: Added TELEGRAM_BOT_TOKEN to prod\n"
-                "Why: New secret was not added to the deploy checklist"
-            )
-            self.reply(chat_id, template, outcome="Needs decision")
+        """Ask the focused worker what they learned today."""
+        if not state["active"]:
+            self.reply(chat_id, "No focused worker. Use /focus <name> first.", outcome="Needs decision")
             return True
 
-        problem, fix, why = self.parse_learning(text)
-        if not problem or not fix or not why:
-            self.reply(chat_id, "Please use Problem/Fix/Why format. Send /learn again with the template.", outcome="Needs decision")
+        name = state["active"]
+        registered = get_registered_sessions()
+        session = registered.get(name)
+        if not session:
+            self.reply(chat_id, "Focused worker not found.", outcome="Needs decision")
             return True
 
-        try:
-            self.append_learning_to_playbook(problem, fix, why)
-        except Exception as exc:
-            self.reply(chat_id, f"Could not write to the team playbook. {exc}", outcome="Needs decision")
+        tmux_name = session["tmux"]
+        if not tmux_exists(tmux_name) or not is_claude_running(tmux_name):
+            self.reply(chat_id, f"Worker \"{name}\" is not online. Use /relaunch first.", outcome="Needs decision")
             return True
 
-        shared_with = self.share_learning_with_team(problem, fix, why)
-
-        shared_note = f"Shared with {len(shared_with)} online worker(s)." if shared_with else "No online workers to share with right now."
-        self.reply(
-            chat_id,
-            f"Learning captured in the team playbook. {shared_note} {PERSISTENCE_NOTE}",
-            outcome="Done"
+        # Ask the worker what they learned
+        prompt = (
+            "What did you learn today? Share your top learning in this format:\n"
+            "Problem: <what went wrong or was inefficient>\n"
+            "Fix: <the better approach>\n"
+            "Why: <root cause or insight>\n"
+            "Keep it concise - this will be added to the team playbook."
         )
+
+        set_pending(name, chat_id)
+
+        # Start typing indicator
+        threading.Thread(
+            target=send_typing_loop,
+            args=(chat_id, name),
+            daemon=True
+        ).start()
+
+        # Send prompt to worker
+        tmux_send(tmux_name, prompt)
+        tmux_send_enter(tmux_name)
+
+        self.reply(chat_id, f"Asking \"{name}\" about today's learnings...", outcome="Working")
         return True
 
     def parse_learning(self, text):
