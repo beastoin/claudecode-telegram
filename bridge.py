@@ -585,17 +585,25 @@ class Handler(BaseHTTPRequestHandler):
             self.route_to_all(message, chat_id, msg_id)
             return
 
-        # Handle @name prefix for one-off routing
+        # Check for reply context (used by both @mention and reply routing)
+        reply_to = msg.get("reply_to_message")
+        reply_context = ""
+        if reply_to:
+            _, reply_context = self.parse_reply_target(reply_to)
+
+        # Handle @name prefix for one-off routing (priority over reply target)
         target_session, message = self.parse_at_mention(text)
 
         if target_session:
+            # Include reply context if replying to a message
+            if reply_context:
+                message = self.format_reply_context(message, reply_context)
             self.route_message(target_session, message, chat_id, msg_id, one_off=True)
             return
 
-        # Handle reply-to-worker routing
-        reply_to = msg.get("reply_to_message")
-        if reply_to:
-            reply_target, reply_context = self.parse_reply_target(reply_to)
+        # Handle reply-to-worker routing (when no @mention)
+        if reply_to and reply_context:
+            reply_target, _ = self.parse_reply_target(reply_to)
             if reply_target:
                 routed_text = self.format_reply_context(text, reply_context)
                 self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
