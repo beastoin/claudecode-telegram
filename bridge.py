@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.6.9"
+VERSION = "0.7.0"
 
 import os
 import json
@@ -12,7 +12,7 @@ import threading
 import time
 import re
 import urllib.request
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -25,7 +25,6 @@ HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
     "active": None,  # Currently active session name
-    "sessions": {},  # name -> {"tmux": "claude-<name>"}
     "pending_registration": None,  # Unregistered tmux session awaiting name
     "startup_notified": False,  # Whether we've sent the startup message
 }
@@ -178,19 +177,17 @@ def scan_tmux_sessions():
     return registered, unregistered
 
 
-def init_sessions():
-    """Initialize state by scanning tmux on startup."""
-    global state
-    registered, unregistered = scan_tmux_sessions()
-    state["sessions"] = registered
+def get_registered_sessions(registered=None):
+    """Get registered sessions from tmux and reconcile active state."""
+    if registered is None:
+        registered, _ = scan_tmux_sessions()
 
-    # Set active to first session if any exist
+    if state["active"] and state["active"] not in registered:
+        state["active"] = None
     if registered and not state["active"]:
         state["active"] = list(registered.keys())[0]
 
-    print(f"Discovered sessions: {list(registered.keys())}")
-    if unregistered:
-        print(f"Unregistered sessions: {unregistered}")
+    return registered
 
 
 def tmux_exists(tmux_name):
@@ -236,6 +233,14 @@ def tmux_send_escape(tmux_name):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
 
 
+def export_hook_env(tmux_name):
+    """Export env vars for hook inside tmux session."""
+    subprocess.run([
+        "tmux", "send-keys", "-t", tmux_name,
+        f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"
+    ])
+
+
 def create_session(name):
     """Create a new Claude instance.
 
@@ -259,8 +264,7 @@ def create_session(name):
 
     # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
     # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
+    export_hook_env(tmux_name)
     time.sleep(0.3)
 
     # Start claude
@@ -273,8 +277,6 @@ def create_session(name):
     time.sleep(0.3)
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
 
-    # Register in state
-    state["sessions"][name] = {"tmux": tmux_name}
     state["active"] = name
     ensure_session_dir(name)
 
@@ -283,27 +285,28 @@ def create_session(name):
 
 def kill_session(name):
     """Kill a Claude instance."""
-    if name not in state["sessions"]:
+    registered = get_registered_sessions()
+    if name not in registered:
         return False, f"Session '{name}' not found"
 
-    tmux_name = state["sessions"][name]["tmux"]
+    tmux_name = registered[name]["tmux"]
     subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-
-    del state["sessions"][name]
 
     # Clear active if it was the killed session
     if state["active"] == name:
-        state["active"] = list(state["sessions"].keys())[0] if state["sessions"] else None
+        state["active"] = None
+        get_registered_sessions()
 
     return True, None
 
 
 def restart_claude(name):
     """Restart claude in an existing tmux session."""
-    if name not in state["sessions"]:
+    registered = get_registered_sessions()
+    if name not in registered:
         return False, f"Session '{name}' not found"
 
-    tmux_name = state["sessions"][name]["tmux"]
+    tmux_name = registered[name]["tmux"]
 
     if not tmux_exists(tmux_name):
         return False, f"tmux session '{tmux_name}' not running"
@@ -312,8 +315,7 @@ def restart_claude(name):
         return False, "Claude is already running"
 
     # Re-export env vars for hook (in case session was created by older version or bridge restarted)
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
+    export_hook_env(tmux_name)
     time.sleep(0.3)
 
     # Start claude in the existing tmux session
@@ -327,7 +329,8 @@ def restart_claude(name):
 
 def switch_session(name):
     """Switch active session."""
-    if name not in state["sessions"]:
+    registered = get_registered_sessions()
+    if name not in registered:
         return False, f"Session '{name}' not found"
 
     state["active"] = name
@@ -347,11 +350,8 @@ def register_session(name, tmux_session):
         return False, "Failed to rename tmux session"
 
     # Export env vars for hook (same as create_session)
-    subprocess.run(["tmux", "send-keys", "-t", new_tmux_name,
-                   f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"])
+    export_hook_env(new_tmux_name)
 
-    # Register in state
-    state["sessions"][name] = {"tmux": new_tmux_name}
     state["active"] = name
     state["pending_registration"] = None
     ensure_session_dir(name)
@@ -597,7 +597,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(chat_id, "Invalid name. Use alphanumeric and hyphens only.")
                     return True
 
-                if name in state["sessions"]:
+                registered = get_registered_sessions()
+                if name in registered:
                     self.reply(chat_id, f"Name '{name}' already in use. Choose another.")
                     return True
 
@@ -617,7 +618,8 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             name = match.group(1).lower()
             message = match.group(2)
-            if name in state["sessions"]:
+            registered = get_registered_sessions()
+            if name in registered:
                 return name, message
         return None, text
 
@@ -691,7 +693,7 @@ class Handler(BaseHTTPRequestHandler):
         """List all Claude instances."""
         # Refresh from tmux
         registered, unregistered = scan_tmux_sessions()
-        state["sessions"] = registered
+        registered = get_registered_sessions(registered)
 
         if not registered and not unregistered:
             self.reply(chat_id, "No sessions. Create with: /new <name>")
@@ -732,7 +734,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
 
         name = state["active"]
-        session = state["sessions"].get(name)
+        registered = get_registered_sessions()
+        session = registered.get(name)
         if not session:
             self.reply(chat_id, "Active session not found")
             return True
@@ -766,7 +769,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
 
         name = state["active"]
-        session = state["sessions"].get(name)
+        registered = get_registered_sessions()
+        session = registered.get(name)
         if session:
             tmux_send_escape(session["tmux"])
             clear_pending(name)
@@ -797,6 +801,7 @@ class Handler(BaseHTTPRequestHandler):
                 return "***"
             return s[:4] + "..." + s[-4:]
 
+        registered = get_registered_sessions()
         lines = [
             f"claudecode-telegram v{VERSION} (beastoin)",
             "─" * 20,
@@ -810,7 +815,7 @@ class Handler(BaseHTTPRequestHandler):
             "State",
             "─" * 20,
             f"Active: {state['active'] or '(none)'}",
-            f"Sessions: {list(state['sessions'].keys()) or '(none)'}",
+            f"Sessions: {list(registered.keys()) or '(none)'}",
             f"Pending Registration: {state['pending_registration'] or '(none)'}",
         ]
         self.reply(chat_id, "\n".join(lines))
@@ -819,7 +824,8 @@ class Handler(BaseHTTPRequestHandler):
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
         # Check for unregistered sessions
-        _, unregistered = scan_tmux_sessions()
+        registered, unregistered = scan_tmux_sessions()
+        registered = get_registered_sessions(registered)
 
         if not state["active"]:
             if unregistered:
@@ -831,9 +837,9 @@ class Handler(BaseHTTPRequestHandler):
                     f'  {{"name": "your-session-name"}}'
                 )
                 return
-            elif state["sessions"]:
+            elif registered:
                 # Sessions exist but none active
-                names = ", ".join(state["sessions"].keys())
+                names = ", ".join(registered.keys())
                 self.reply(chat_id, f"No active session. Found: {names}\nUse: /use <name>")
                 return
             else:
@@ -845,14 +851,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_to_all(self, text, chat_id, msg_id):
         """Broadcast message to all running sessions."""
-        sessions = list(state["sessions"].keys())
+        registered = get_registered_sessions()
+        sessions = list(registered.keys())
         if not sessions:
             self.reply(chat_id, "No sessions. Create with: /new <name>")
             return
 
         sent_to = []
         for name in sessions:
-            session = state["sessions"][name]
+            session = registered[name]
             tmux_name = session["tmux"]
             if tmux_exists(tmux_name) and is_claude_running(tmux_name):
                 # Route without setting as active
@@ -864,7 +871,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
         """Route a message to a specific session."""
-        session = state["sessions"].get(session_name)
+        registered = get_registered_sessions()
+        session = registered.get(session_name)
         if not session:
             self.reply(chat_id, f"Session '{session_name}' not found")
             return
@@ -904,7 +912,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_startup_message(self, chat_id):
         """Send bridge startup notification."""
-        sessions = list(state["sessions"].keys())
+        registered = get_registered_sessions()
+        sessions = list(registered.keys())
         active = state["active"]
 
         lines = ["Bridge online"]
@@ -948,13 +957,18 @@ def main():
     port_file.chmod(0o600)
 
     # Discover existing sessions
-    init_sessions()
+    registered, unregistered = scan_tmux_sessions()
+    registered = get_registered_sessions(registered)
+    if registered:
+        print(f"Discovered sessions: {list(registered.keys())}")
+    if unregistered:
+        print(f"Unregistered sessions: {unregistered}")
 
     setup_bot_commands()
     print(f"Multi-Session Bridge on :{PORT}")
     print(f"Hook endpoint: http://localhost:{PORT}/response")
     print(f"Active: {state['active'] or 'none'}")
-    print(f"Sessions: {list(state['sessions'].keys()) or 'none'}")
+    print(f"Sessions: {list(registered.keys()) or 'none'}")
     if WEBHOOK_SECRET:
         print("Webhook verification: enabled")
     else:
@@ -965,7 +979,7 @@ def main():
         print("Admin: auto-learn (first user to message becomes admin)")
 
     try:
-        HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

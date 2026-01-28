@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.6.9
+> Version: 0.7.0
 
 ## Current Philosophy (Summary)
 
@@ -8,7 +8,7 @@
 |-----------|-------------|
 | **tmux IS persistence** | No database, no state.json - tmux sessions are the source of truth |
 | **`claude-<name>` naming** | Configurable prefix via `TMUX_PREFIX` (default: `claude-`) |
-| **RAM state only** | Rebuilt on startup from tmux, never persisted |
+| **RAM state only** | Derived on demand from tmux, never persisted |
 | **Per-session files** | Minimal hook↔gateway coordination via filesystem |
 | **Fail loudly** | No silent errors, no hidden retries |
 | **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves bridge process |
@@ -57,13 +57,12 @@ This prefix pattern enables:
 ```python
 state = {
     "active": "backend",      # Which session receives bare messages
-    "sessions": {...},        # Cache of discovered sessions
     "pending_registration": None
 }
 ```
 
 This state is:
-- Rebuilt on startup from tmux
+- Derived on demand from tmux
 - Never persisted to disk
 - Authoritative only for "active" selection (user preference)
 
@@ -245,6 +244,13 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.7.0 - Threaded HTTP + session refactors
+
+**Changes:**
+- Use `ThreadingHTTPServer` to handle concurrent requests
+- Remove cached session registry; derive sessions on demand from tmux
+- Centralize hook environment export in `export_hook_env()`
 
 ### v0.6.9 - Remove HTML escaping
 
