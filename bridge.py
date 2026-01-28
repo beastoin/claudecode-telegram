@@ -605,11 +605,17 @@ class Handler(BaseHTTPRequestHandler):
         if reply_to and reply_context:
             reply_target, _ = self.parse_reply_target(reply_to)
             if reply_target:
+                # Reply to worker message → route to that worker
                 routed_text = self.format_reply_context(text, reply_context)
                 self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
                 return
+            else:
+                # Reply to non-worker message → route to focused with context
+                routed_text = self.format_reply_context(text, reply_context)
+                self.route_to_active(routed_text, chat_id, msg_id)
+                return
 
-        # Route to active session
+        # Route to active session (no reply)
         self.route_to_active(text, chat_id, msg_id)
 
     def try_registration(self, text, chat_id):
@@ -665,14 +671,24 @@ class Handler(BaseHTTPRequestHandler):
         return name, message
 
     def parse_reply_target(self, reply_msg):
-        """Extract worker target and context from a replied-to message."""
+        """Extract worker target and context from a replied-to message.
+
+        Always returns context (the replied message text).
+        Only returns worker target if it's a bot message with worker prefix.
+        """
         if not reply_msg:
             return None, ""
-        reply_from = reply_msg.get("from", {})
-        if reply_from and reply_from.get("is_bot") is False:
-            return None, ""
         reply_text = reply_msg.get("text") or reply_msg.get("caption") or ""
-        return self.parse_worker_prefix(reply_text)
+
+        # Check if it's a bot message with worker prefix
+        reply_from = reply_msg.get("from", {})
+        if reply_from and reply_from.get("is_bot"):
+            worker, _ = self.parse_worker_prefix(reply_text)
+            if worker:
+                return worker, reply_text
+
+        # Not a worker message, but still return context
+        return None, reply_text
 
     def format_reply_context(self, reply_text, context_text):
         """Format a manager reply with context for the worker."""
