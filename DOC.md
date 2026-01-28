@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.9.1
+> Version: 0.9.0
 
 ## Current Philosophy (Summary)
 
@@ -253,23 +253,6 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
-
-### v0.9.1 - Fix tmux send race condition
-
-**Bug fix:**
-- Fixed race condition where Enter key could arrive before text was fully processed by tmux
-- Messages are now sent atomically: text + newline in a single `tmux send-keys` call
-- Previously used two separate calls (text, then Enter) which could race under load
-
-**Technical details:**
-- `tmux_send_message()` now appends `\n` to text and sends as one operation
-- Eliminates need for `TMUX_SEND_DELAY_MS` (kept for backward compatibility)
-- Single subprocess call instead of two = faster and more reliable
-
-**Why this matters:**
-- Fixes intermittent issue where text appeared but didn't submit
-- More reliable message delivery under concurrent load
-- Simpler code path with fewer failure modes
 
 ### v0.9.0 - Image Support
 
