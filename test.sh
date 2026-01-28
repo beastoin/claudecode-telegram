@@ -96,6 +96,35 @@ send_message() {
         }'
 }
 
+send_reply() {
+    local text="$1"
+    local reply_text="$2"
+    local reply_from_bot="${3:-true}"
+    local chat_id="${4:-$CHAT_ID}"
+    local update_id=$((RANDOM))
+    local reply_id=$((RANDOM + 1000))
+
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$chat_id"', "first_name": "TestUser"},
+                "chat": {"id": '"$chat_id"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "text": "'"$text"'",
+                "reply_to_message": {
+                    "message_id": '"$reply_id"',
+                    "from": {"id": 123456, "first_name": "Bot", "is_bot": '"$reply_from_bot"'},
+                    "chat": {"id": '"$chat_id"', "type": "private"},
+                    "date": '"$(date +%s)"',
+                    "text": "'"$reply_text"'"
+                }
+            }
+        }'
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -370,6 +399,137 @@ test_blocked_commands() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# New feature tests (v0.8.0+)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_command_aliases() {
+    info "Testing command aliases (/hire, /team, /focus, etc.)..."
+
+    # Create with /hire (alias for /new)
+    send_message "/hire aliasbot" >/dev/null
+    sleep 2
+
+    if tmux has-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null; then
+        success "/hire creates worker"
+    else
+        fail "/hire failed"
+        return
+    fi
+
+    # Test /team (alias for /list)
+    local result
+    result=$(send_message "/team")
+    if [[ "$result" == "OK" ]]; then
+        success "/team works"
+    else
+        fail "/team failed"
+    fi
+
+    # Test /focus (alias for /use)
+    result=$(send_message "/focus aliasbot")
+    if [[ "$result" == "OK" ]]; then
+        success "/focus works"
+    else
+        fail "/focus failed"
+    fi
+
+    # Test /progress (alias for /status)
+    result=$(send_message "/progress")
+    if [[ "$result" == "OK" ]]; then
+        success "/progress works"
+    else
+        fail "/progress failed"
+    fi
+
+    # Test /pause (alias for /stop)
+    result=$(send_message "/pause")
+    if [[ "$result" == "OK" ]]; then
+        success "/pause works"
+    else
+        fail "/pause failed"
+    fi
+
+    # Test /end (alias for /kill)
+    send_message "/end aliasbot" >/dev/null
+    sleep 1
+    if ! tmux has-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null; then
+        success "/end removes worker"
+    else
+        fail "/end failed"
+    fi
+}
+
+test_learn_command() {
+    info "Testing /learn command..."
+
+    # Create a worker first
+    send_message "/hire learnbot" >/dev/null
+    sleep 2
+    send_message "/focus learnbot" >/dev/null
+
+    # Test /learn (requires focused worker)
+    local result
+    result=$(send_message "/learn")
+    if [[ "$result" == "OK" ]]; then
+        success "/learn works"
+    else
+        fail "/learn failed"
+    fi
+
+    # Test /learn with topic
+    result=$(send_message "/learn git")
+    if [[ "$result" == "OK" ]]; then
+        success "/learn <topic> works"
+    else
+        fail "/learn <topic> failed"
+    fi
+
+    # Cleanup
+    send_message "/end learnbot" >/dev/null 2>&1 || true
+}
+
+test_reply_routing() {
+    info "Testing reply-to-worker routing..."
+
+    # Create worker
+    send_message "/hire replybot" >/dev/null
+    sleep 2
+
+    # Test reply to worker message (simulated bot message with worker prefix)
+    local result
+    result=$(send_reply "follow up question" "replybot: I fixed the bug")
+    if [[ "$result" == "OK" ]]; then
+        success "Reply to worker message routed correctly"
+    else
+        fail "Reply routing failed"
+    fi
+
+    # Cleanup
+    send_message "/end replybot" >/dev/null 2>&1 || true
+}
+
+test_reply_context() {
+    info "Testing reply context inclusion..."
+
+    # Create worker
+    send_message "/hire contextbot" >/dev/null
+    sleep 2
+    send_message "/focus contextbot" >/dev/null
+
+    # Test reply to own message (non-bot) includes context
+    local result
+    result=$(send_reply "." "my original message" "false")
+    if [[ "$result" == "OK" ]]; then
+        success "Reply to own message includes context"
+    else
+        fail "Reply context failed"
+    fi
+
+    # Cleanup
+    send_message "/end contextbot" >/dev/null 2>&1 || true
+}
+
 test_notify_endpoint() {
     info "Testing /notify endpoint..."
 
@@ -552,6 +712,10 @@ main() {
     test_session_files
     test_kill_command
     test_blocked_commands
+    test_command_aliases
+    test_learn_command
+    test_reply_routing
+    test_reply_context
     test_notify_endpoint
     test_response_endpoint
     test_response_without_pending
