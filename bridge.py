@@ -834,8 +834,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_learn(self, text, chat_id, msg_id=None):
-        """Ask the focused worker what they learned today."""
+    def cmd_learn(self, topic, chat_id, msg_id=None):
+        """Ask the focused worker what they learned today, optionally about a topic."""
         if not state["active"]:
             self.reply(chat_id, "No focused worker. Use /focus <name> first.", outcome="Needs decision")
             return True
@@ -852,14 +852,22 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"Worker \"{name}\" is not online. Use /relaunch first.", outcome="Needs decision")
             return True
 
-        # Ask the worker what they learned
-        prompt = (
-            "What did you learn today? Share your top learning in this format:\n"
-            "Problem: <what went wrong or was inefficient>\n"
-            "Fix: <the better approach>\n"
-            "Why: <root cause or insight>\n"
-            "Keep it concise - this will be added to the team playbook."
-        )
+        # Build prompt based on whether topic is provided
+        topic = topic.strip() if topic else ""
+        if topic:
+            prompt = (
+                f"What did you learn about {topic} today? Please answer in Problem / Fix / Why format:\n"
+                "Problem: <what went wrong or was inefficient>\n"
+                "Fix: <the better approach>\n"
+                "Why: <root cause or insight>"
+            )
+        else:
+            prompt = (
+                "What did you learn today? Please answer in Problem / Fix / Why format:\n"
+                "Problem: <what went wrong or was inefficient>\n"
+                "Fix: <the better approach>\n"
+                "Why: <root cause or insight>"
+            )
 
         set_pending(name, chat_id)
 
