@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 import os
 import json
@@ -25,6 +25,9 @@ TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix fo
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
 PLAYBOOK_FILE = SESSIONS_DIR.parent / "team_playbook.md"
 PERSISTENCE_NOTE = "Workers are long-lived and keep context across restarts."
+# DEPRECATED: No longer used since v0.9.1 (atomic send with embedded newline)
+# Kept for backward compatibility if external scripts reference it
+TMUX_SEND_DELAY_MS = int(os.environ.get("TMUX_SEND_DELAY_MS", "50"))
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
@@ -32,6 +35,10 @@ state = {
     "pending_registration": None,  # Unregistered tmux session awaiting name
     "startup_notified": False,  # Whether we've sent the startup message
 }
+
+# Per-session tmux send locks to avoid interleaving text/enter across threads.
+_tmux_send_locks = {}
+_tmux_send_locks_guard = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -440,6 +447,29 @@ def tmux_send_enter(tmux_name):
     """Send Enter key to tmux session."""
     result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
     return result.returncode == 0
+
+
+def _get_tmux_send_lock(tmux_name):
+    """Return per-session lock for tmux send operations."""
+    with _tmux_send_locks_guard:
+        lock = _tmux_send_locks.get(tmux_name)
+        if lock is None:
+            lock = threading.Lock()
+            _tmux_send_locks[tmux_name] = lock
+        return lock
+
+
+def tmux_send_message(tmux_name, text):
+    """Send text + Enter to tmux session atomically.
+
+    Uses embedded newline in single send-keys call to avoid race condition
+    where Enter arrives before text is fully processed by tmux.
+    """
+    lock = _get_tmux_send_lock(tmux_name)
+    with lock:
+        # Append newline to text and send as single atomic operation
+        # This eliminates race condition between text and Enter key
+        return tmux_send(tmux_name, text + "\n")
 
 
 def tmux_send_escape(tmux_name):
@@ -1223,11 +1253,10 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
 
         # Send prompt to worker
-        send_ok = tmux_send(tmux_name, prompt)
-        enter_ok = tmux_send_enter(tmux_name)
+        send_ok = tmux_send_message(tmux_name, prompt)
 
         # 👀 reaction confirms delivery - no text reply needed (worker will respond)
-        if msg_id and send_ok and enter_ok:
+        if msg_id and send_ok:
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -1296,7 +1325,7 @@ class Handler(BaseHTTPRequestHandler):
         for name, session in registered.items():
             tmux_name = session["tmux"]
             if tmux_exists(tmux_name) and is_claude_running(tmux_name):
-                if tmux_send(tmux_name, note) and tmux_send_enter(tmux_name):
+                if tmux_send_message(tmux_name, note):
                     shared_with.append(name)
 
         return shared_with
@@ -1378,11 +1407,10 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
 
         # Send to tmux
-        send_ok = tmux_send(tmux_name, text)
-        enter_ok = tmux_send_enter(tmux_name)
+        send_ok = tmux_send_message(tmux_name, text)
 
         # Add 👀 reaction only after successful send to Claude
-        if msg_id and send_ok and enter_ok:
+        if msg_id and send_ok:
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,

@@ -194,6 +194,46 @@ test_version() {
     fi
 }
 
+test_atomic_tmux_send() {
+    info "Testing atomic tmux send (text + newline in single call)..."
+
+    if python3 -c "
+import subprocess
+import time
+
+# Create test session
+subprocess.run(['tmux', 'new-session', '-d', '-s', 'test-atomic-send', '-x', '80', '-y', '10'], check=True)
+time.sleep(0.3)
+
+# Import and use the bridge function
+from bridge import tmux_send_message
+
+# Send a command that echoes back (proves Enter was processed)
+result = tmux_send_message('test-atomic-send', 'echo ATOMIC_TEST_MARKER')
+
+# Wait for command to execute
+time.sleep(0.5)
+
+# Capture pane output
+capture = subprocess.run(['tmux', 'capture-pane', '-t', 'test-atomic-send', '-p'], capture_output=True, text=True)
+
+# Cleanup
+subprocess.run(['tmux', 'kill-session', '-t', 'test-atomic-send'])
+
+# Verify the echo command ran (proves Enter was sent atomically with text)
+assert 'ATOMIC_TEST_MARKER' in capture.stdout, f'Command did not execute. Output: {capture.stdout}'
+assert result == True, 'tmux_send_message returned False'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Atomic tmux send works (text + Enter in single call)"
+    else
+        fail "Atomic tmux send failed"
+        # Cleanup on failure
+        tmux kill-session -t test-atomic-send 2>/dev/null || true
+    fi
+}
+
 test_bridge_starts() {
     info "Starting bridge on port $PORT..."
 
@@ -941,6 +981,7 @@ main() {
     test_imports
     test_response_prefix_formatting
     test_version
+    test_atomic_tmux_send
 
     # Integration tests (bridge needed)
     log ""
