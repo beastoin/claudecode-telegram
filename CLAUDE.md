@@ -159,3 +159,26 @@ SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 3. Add longer delays between killing processes and checking ports
 4. Consider skipping watchdog tests in CI (mark as slow/optional)
 5. Ensure `start_bridge()` passes ALL required env vars, not just token/port
+
+### NEVER use pkill on multi-node setups
+
+**Problem:** `pkill -f cloudflared` or `pkill -f bridge.py` kills ALL matching processes across ALL nodes, not just the target node.
+
+**Rule:** ALWAYS use PID-based killing, NEVER pattern-based.
+
+```bash
+# WRONG - kills ALL nodes
+pkill -f cloudflared
+pkill -f bridge.py
+
+# RIGHT - use specific PID from file
+kill $(cat ~/.claude/telegram/nodes/prod/pid)
+
+# RIGHT - use port-specific
+lsof -ti :8081 | xargs kill
+
+# RIGHT - use the script's stop command
+./claudecode-telegram.sh --node prod stop
+```
+
+**Why this matters:** Production runs multiple nodes (prod, dev, test) simultaneously. Pattern-based killing causes collateral damage to other running nodes.
