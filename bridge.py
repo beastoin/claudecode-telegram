@@ -1518,9 +1518,22 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def graceful_shutdown(signum, frame):
-    """Handle shutdown signals gracefully."""
+    """Handle shutdown signals gracefully with diagnostic info."""
+    from datetime import datetime
     sig_name = signal.Signals(signum).name if signum else "unknown"
-    print(f"\nReceived {sig_name}, shutting down...")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ppid = os.getppid()
+
+    # Try to get parent process info
+    parent_info = f"ppid={ppid}"
+    try:
+        with open(f"/proc/{ppid}/cmdline", "rb") as f:
+            cmdline = f.read().decode().replace("\x00", " ").strip()
+            parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
+    except Exception:
+        pass
+
+    print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
     send_shutdown_message()
     sys.exit(0)
 

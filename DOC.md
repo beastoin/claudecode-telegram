@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.9.6
+> Version: 0.9.7
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.9.7 - SIGTERM diagnostics and improved logging
+
+**Shutdown diagnostics:**
+- Bridge now logs timestamp, parent PID, and parent cmdline on SIGTERM
+- Helps identify what process/script triggered unexpected shutdowns
+
+**Logging improvements:**
+- Both `start` and `run` commands now write bridge output to log file
+- `start` command uses `tee` to show output AND log to file
+- `run` command appends to `$node_dir/bridge.log`
 
 ### v0.9.6 - Documentation updates & hook refinements
 

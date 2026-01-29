@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.9.6"
+VERSION="0.9.7"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,10 +430,15 @@ cmd_start() {
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
 
+    local node_dir
+    node_dir=$(get_node_dir "$node")
+    local bridge_log="$node_dir/bridge.log"
+
     log "$(bold "Multi-Session Bridge") [$node] on $host:$port"
     log "$(dim "Sessions created via /new <name> from Telegram")"
     log "$(dim "Ctrl+C to stop")"
-    exec python3 "$SCRIPT_DIR/bridge.py"
+    log "$(dim "Logging to: $bridge_log")"
+    exec python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
 }
 
 cmd_run() {
@@ -532,7 +537,8 @@ cmd_run() {
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
 
-    python3 "$SCRIPT_DIR/bridge.py" &
+    local bridge_log="$node_dir/bridge.log"
+    python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
     local bridge_pid=$!
     echo "$bridge_pid" > "$node_dir/bridge.pid"
     echo "$port" > "$node_dir/port"
