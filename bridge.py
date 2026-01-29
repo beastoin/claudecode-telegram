@@ -27,7 +27,6 @@ PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
-HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
 PERSISTENCE_NOTE = "They'll stay on your team."
 
 # Temporary image inbox (session-isolated, auto-cleaned)
@@ -1382,52 +1381,6 @@ class Handler(BaseHTTPRequestHandler):
             })
         return True
 
-    def parse_learning(self, text):
-        """Parse Problem/Fix/Why sections from text."""
-        sections = {"problem": "", "fix": "", "why": ""}
-        for line in text.splitlines():
-            match = re.match(r'^\s*(problem|fix|why)\s*[:\-]\s*(.+)\s*$', line, re.IGNORECASE)
-            if match:
-                key = match.group(1).lower()
-                sections[key] = match.group(2).strip()
-
-        if all(sections.values()):
-            return sections["problem"], sections["fix"], sections["why"]
-
-        if "|" in text:
-            parts = [p.strip() for p in text.split("|")]
-        elif " / " in text:
-            parts = [p.strip() for p in text.split(" / ")]
-        elif text.count("/") >= 2:
-            parts = [p.strip() for p in text.split("/")]
-        else:
-            parts = []
-
-        if len(parts) >= 3:
-            return parts[0], parts[1], parts[2]
-
-        return sections["problem"], sections["fix"], sections["why"]
-
-    def share_learning_with_team(self, problem, fix, why):
-        """Share the learning with online workers."""
-        registered = get_registered_sessions()
-        shared_with = []
-        note = (
-            "Team learning (long-lived context):\n"
-            f"Problem: {problem}\n"
-            f"Fix: {fix}\n"
-            f"Why: {why}\n"
-            "Please add this to your context."
-        )
-
-        for name, session in registered.items():
-            tmux_name = session["tmux"]
-            if tmux_exists(tmux_name) and is_claude_running(tmux_name):
-                if tmux_send_message(tmux_name, note):
-                    shared_with.append(name)
-
-        return shared_with
-
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
         # Check for unregistered sessions
@@ -1534,9 +1487,6 @@ class Handler(BaseHTTPRequestHandler):
             lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
 
         self.reply(chat_id, "\n".join(lines))
-
-    def log_message(self, *args):
-        pass
 
 
 def graceful_shutdown(signum, frame):
