@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.9.0"
+VERSION = "0.9.5"
 
 import os
 import json
@@ -17,14 +17,21 @@ import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+
+class ReuseAddrServer(ThreadingHTTPServer):
+    """HTTP server with SO_REUSEADDR to avoid 'Address already in use' on restart."""
+    allow_reuse_address = True
+
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
-PLAYBOOK_FILE = SESSIONS_DIR.parent / "team_playbook.md"
-PERSISTENCE_NOTE = "Workers are long-lived and keep context across restarts."
+PERSISTENCE_NOTE = "They'll stay on your team."
+
+# Temporary image inbox (session-isolated, auto-cleaned)
+IMAGE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
@@ -32,6 +39,11 @@ state = {
     "pending_registration": None,  # Unregistered tmux session awaiting name
     "startup_notified": False,  # Whether we've sent the startup message
 }
+
+# Per-session locks to prevent concurrent tmux sends from interleaving
+# Without this, rapid messages from multiple threads can corrupt each other
+_tmux_send_locks = {}
+_tmux_send_locks_guard = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -57,6 +69,16 @@ BLOCKED_COMMANDS = [
     "/doctor", "/init", "/login", "/logout", "/memory", "/permissions",
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
 ]
+
+# Reserved names that cannot be used as worker names (would clash with commands)
+RESERVED_NAMES = {
+    # Bridge commands
+    "team", "focus", "progress", "learn", "pause", "relaunch", "settings", "hire", "end",
+    # Aliases
+    "new", "use", "list", "kill", "status", "stop", "restart", "system",
+    # Special
+    "all", "start", "help",
+}
 
 
 def telegram_api(method, data):
@@ -87,8 +109,11 @@ ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
 
 def get_inbox_dir(session_name):
-    """Get inbox directory for incoming images."""
-    return get_session_dir(session_name) / "inbox"
+    """Get inbox directory for incoming images.
+
+    Uses /tmp for ephemeral storage, session-namespaced to prevent cross-session access.
+    """
+    return IMAGE_INBOX_ROOT / session_name / "inbox"
 
 
 def ensure_inbox_dir(session_name):
@@ -97,6 +122,17 @@ def ensure_inbox_dir(session_name):
     inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
     inbox.chmod(0o700)
     return inbox
+
+
+def cleanup_inbox(session_name):
+    """Clean up all images in a session's inbox."""
+    inbox = get_inbox_dir(session_name)
+    if inbox.exists():
+        for f in inbox.iterdir():
+            try:
+                f.unlink()
+            except Exception as e:
+                print(f"Failed to delete {f}: {e}")
 
 
 def download_telegram_file(file_id, session_name):
@@ -194,10 +230,10 @@ def send_photo(chat_id, photo_path, caption=None):
         return False
 
     # Security: path must be within allowed directories
-    # Allow: session inbox dirs, /tmp, and current working directory
+    # Allow: /tmp (includes image inbox), sessions dir, and current working directory
     allowed_roots = [
-        SESSIONS_DIR,
         Path("/tmp"),
+        SESSIONS_DIR,
         Path.cwd(),
     ]
     photo_resolved = photo_path.resolve()
@@ -286,9 +322,23 @@ def format_response_text(session_name, text):
 
 
 def setup_bot_commands():
-    result = telegram_api("setMyCommands", {"commands": BOT_COMMANDS})
+    """Initial bot commands setup."""
+    update_bot_commands()
+
+
+def update_bot_commands():
+    """Update bot commands including dynamic worker shortcuts."""
+    commands = list(BOT_COMMANDS)  # Copy static commands
+
+    # Add worker shortcuts (e.g., /lee, /chen)
+    registered, _ = scan_tmux_sessions()
+    for name in sorted(registered.keys()):
+        commands.append({"command": name, "description": f"Message {name}"})
+
+    result = telegram_api("setMyCommands", {"commands": commands})
     if result and result.get("ok"):
-        print("Bot commands registered")
+        worker_count = len(registered)
+        print(f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -442,6 +492,31 @@ def tmux_send_enter(tmux_name):
     return result.returncode == 0
 
 
+def _get_tmux_send_lock(tmux_name):
+    """Get or create a lock for a specific tmux session.
+
+    Prevents concurrent sends to the same session from interleaving,
+    which causes messages to corrupt each other.
+    """
+    with _tmux_send_locks_guard:
+        if tmux_name not in _tmux_send_locks:
+            _tmux_send_locks[tmux_name] = threading.Lock()
+        return _tmux_send_locks[tmux_name]
+
+
+def tmux_send_message(tmux_name, text):
+    """Send text + Enter to tmux session with locking.
+
+    Uses per-session lock to prevent concurrent sends from interleaving.
+    Sends text with -l flag (literal), then Enter key separately.
+    """
+    lock = _get_tmux_send_lock(tmux_name)
+    with lock:
+        send_ok = tmux_send(tmux_name, text, literal=True)
+        enter_ok = tmux_send_enter(tmux_name)
+        return send_ok and enter_ok
+
+
 def tmux_send_escape(tmux_name):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
 
@@ -490,6 +565,16 @@ def create_session(name):
     time.sleep(0.3)
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
 
+    # Send welcome message with feature info (after Claude starts)
+    time.sleep(2.0)
+    welcome = (
+        "You are connected to Telegram via claudecode-telegram bridge. "
+        "To send images back to Telegram, include this tag in your response: "
+        "[[image:/path/to/file.png|optional caption]]. "
+        "Allowed paths: /tmp, current directory. Allowed formats: jpg, png, gif, webp, bmp."
+    )
+    tmux_send_message(tmux_name, welcome)
+
     state["active"] = name
     ensure_session_dir(name)
 
@@ -504,6 +589,9 @@ def kill_session(name):
 
     tmux_name = registered[name]["tmux"]
     subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+
+    # Clean up inbox images
+    cleanup_inbox(name)
 
     # Clear active if it was the killed session
     if state["active"] == name:
@@ -614,7 +702,7 @@ def send_shutdown_message():
     for chat_id in chat_ids:
         telegram_api("sendMessage", {
             "chat_id": chat_id,
-            "text": "Working - Team hub going offline. Your workers stay intact and keep context."
+            "text": "Going offline briefly. Your team stays the same."
         })
     print("Shutdown notifications sent")
 
@@ -903,6 +991,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
                     return True
 
+                # Validate: name cannot clash with reserved commands
+                if name in RESERVED_NAMES:
+                    self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
+                    return True
+
                 registered = get_registered_sessions()
                 if name in registered:
                     self.reply(chat_id, f"Worker name \"{name}\" is already on the team. Choose another.", outcome="Needs decision")
@@ -910,7 +1003,9 @@ class Handler(BaseHTTPRequestHandler):
 
                 ok, err = register_session(name, state["pending_registration"])
                 if ok:
-                    self.reply(chat_id, f"Claimed and focused \"{name}\". {PERSISTENCE_NOTE}")
+                    self.reply(chat_id, f"{name.capitalize()} is now on your team and assigned.")
+                    # Update bot commands to include new worker
+                    update_bot_commands()
                 else:
                     self.reply(chat_id, f"Could not claim that worker. {err}", outcome="Needs decision")
                 return True
@@ -1007,6 +1102,28 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
 
+        # Check if command is a worker shortcut: /lee hello -> route to lee AND switch focus
+        # Slash commands are "strong" actions - they imply intent to talk to that person
+        worker_name = cmd[1:]  # Remove leading /
+        registered = get_registered_sessions()
+        if worker_name in registered:
+            # Always switch focus when using /name (strong intent)
+            prev_focus = state["active"]
+            state["active"] = worker_name
+            if not arg:
+                # Just /lee with no message - switch focus only
+                self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
+                return True
+            # /lee hello -> route message to lee AND switch focus
+            # Notify focus change if switching from different worker
+            if prev_focus != worker_name:
+                telegram_api("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": f"Now talking to {worker_name.capitalize()}."
+                })
+            self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
+            return True
+
         # Not a control command - might be a Claude command, pass through
         return False
 
@@ -1023,9 +1140,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
             return True
 
+        # Validate: name cannot clash with reserved commands
+        if name in RESERVED_NAMES:
+            self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
+            return True
+
         ok, err = create_session(name)
         if ok:
-            self.reply(chat_id, f"Hired \"{name}\" and focused them. {PERSISTENCE_NOTE}")
+            self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
+            # Update bot commands to include new worker
+            update_bot_commands()
         else:
             self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
         return True
@@ -1039,7 +1163,7 @@ class Handler(BaseHTTPRequestHandler):
         name = name.lower().strip()
         ok, err = switch_session(name)
         if ok:
-            self.reply(chat_id, f"Focused \"{name}\". They keep their context.")
+            self.reply(chat_id, f"Now talking to {name.capitalize()}.")
         else:
             self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
         return True
@@ -1051,11 +1175,11 @@ class Handler(BaseHTTPRequestHandler):
         registered = get_registered_sessions(registered)
 
         if not registered and not unregistered:
-            self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
+            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
         lines = []
-        lines.append(f"Team overview. {PERSISTENCE_NOTE}")
+        lines.append("Your team:")
         lines.append(f"Focused: {state['active'] or '(none)'}")
         lines.append("Workers:")
         for name in sorted(registered.keys()):
@@ -1083,7 +1207,9 @@ class Handler(BaseHTTPRequestHandler):
         name = name.lower().strip()
         ok, err = kill_session(name)
         if ok:
-            self.reply(chat_id, f"Offboarded \"{name}\". This is for long-lived team changes.")
+            self.reply(chat_id, f"{name.capitalize()} removed from your team.")
+            # Update bot commands to remove worker
+            update_bot_commands()
         else:
             self.reply(chat_id, f"Could not offboard \"{name}\". {err}", outcome="Needs decision")
         return True
@@ -1091,14 +1217,14 @@ class Handler(BaseHTTPRequestHandler):
     def cmd_progress(self, chat_id):
         """Show detailed status of focused Claude."""
         if not state["active"]:
-            self.reply(chat_id, "No focused worker. Use /team or /focus <name>.", outcome="Needs decision")
+            self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
             return True
 
         name = state["active"]
         registered = get_registered_sessions()
         session = registered.get(name)
         if not session:
-            self.reply(chat_id, "Focused worker not found. Use /team to refocus.", outcome="Needs decision")
+            self.reply(chat_id, "Can't find them. Check /team for who's available.")
             return True
 
         tmux_name = session["tmux"]
@@ -1123,7 +1249,7 @@ class Handler(BaseHTTPRequestHandler):
     def cmd_pause(self, chat_id):
         """Interrupt active Claude."""
         if not state["active"]:
-            self.reply(chat_id, "No focused worker.", outcome="Needs decision")
+            self.reply(chat_id, "No one assigned.")
             return True
 
         name = state["active"]
@@ -1133,19 +1259,19 @@ class Handler(BaseHTTPRequestHandler):
             tmux_send_escape(session["tmux"])
             clear_pending(name)
 
-        self.reply(chat_id, f"Paused \"{name}\". They stay focused and keep context.")
+        self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
         return True
 
     def cmd_relaunch(self, chat_id):
         """Restart Claude in active session."""
         if not state["active"]:
-            self.reply(chat_id, "No focused worker.", outcome="Needs decision")
+            self.reply(chat_id, "No one assigned.")
             return True
 
         name = state["active"]
         ok, err = restart_claude(name)
         if ok:
-            self.reply(chat_id, f"Relaunching \"{name}\" now. Their context remains intact.", outcome="Working")
+            self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
         else:
             self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
         return True
@@ -1181,19 +1307,19 @@ class Handler(BaseHTTPRequestHandler):
     def cmd_learn(self, topic, chat_id, msg_id=None):
         """Ask the focused worker what they learned today, optionally about a topic."""
         if not state["active"]:
-            self.reply(chat_id, "No focused worker. Use /focus <name> first.", outcome="Needs decision")
+            self.reply(chat_id, "No one assigned. Who should I talk to?")
             return True
 
         name = state["active"]
         registered = get_registered_sessions()
         session = registered.get(name)
         if not session:
-            self.reply(chat_id, "Focused worker not found.", outcome="Needs decision")
+            self.reply(chat_id, "Can't find them. Check /team.")
             return True
 
         tmux_name = session["tmux"]
         if not tmux_exists(tmux_name) or not is_claude_running(tmux_name):
-            self.reply(chat_id, f"Worker \"{name}\" is not online. Use /relaunch first.", outcome="Needs decision")
+            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
             return True
 
         # Build prompt based on whether topic is provided
@@ -1222,12 +1348,11 @@ class Handler(BaseHTTPRequestHandler):
             daemon=True
         ).start()
 
-        # Send prompt to worker
-        send_ok = tmux_send(tmux_name, prompt)
-        enter_ok = tmux_send_enter(tmux_name)
+        # Send prompt to worker (with lock to prevent interleaving)
+        send_ok = tmux_send_message(tmux_name, prompt)
 
         # 👀 reaction confirms delivery - no text reply needed (worker will respond)
-        if msg_id and send_ok and enter_ok:
+        if msg_id and send_ok:
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -1261,26 +1386,6 @@ class Handler(BaseHTTPRequestHandler):
 
         return sections["problem"], sections["fix"], sections["why"]
 
-    def append_learning_to_playbook(self, problem, fix, why):
-        """Append a learning entry to the team playbook."""
-        PLAYBOOK_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if not PLAYBOOK_FILE.exists():
-            PLAYBOOK_FILE.write_text("# Team Playbook\n\n", encoding="utf-8")
-            PLAYBOOK_FILE.chmod(0o600)
-
-        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
-        focused = state["active"] or "none"
-        entry = (
-            f"## {timestamp}\n"
-            f"- Problem: {problem}\n"
-            f"- Fix: {fix}\n"
-            f"- Why: {why}\n"
-            f"- Focused worker: {focused}\n\n"
-        )
-
-        with PLAYBOOK_FILE.open("a", encoding="utf-8") as handle:
-            handle.write(entry)
-
     def share_learning_with_team(self, problem, fix, why):
         """Share the learning with online workers."""
         registered = get_registered_sessions()
@@ -1296,7 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
         for name, session in registered.items():
             tmux_name = session["tmux"]
             if tmux_exists(tmux_name) and is_claude_running(tmux_name):
-                if tmux_send(tmux_name, note) and tmux_send_enter(tmux_name):
+                if tmux_send_message(tmux_name, note):
                     shared_with.append(name)
 
         return shared_with
@@ -1322,11 +1427,11 @@ class Handler(BaseHTTPRequestHandler):
             elif registered:
                 # Sessions exist but none active
                 names = ", ".join(registered.keys())
-                self.reply(chat_id, f"No focused worker. Team: {names}\nUse: /focus <name>", outcome="Needs decision")
+                self.reply(chat_id, f"No one assigned. Your team: {names}\nWho should I talk to?")
                 return
             else:
                 # No sessions at all
-                self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
+                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
                 return
 
         self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
@@ -1336,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
         registered = get_registered_sessions()
         sessions = list(registered.keys())
         if not sessions:
-            self.reply(chat_id, "No workers yet. Hire your first long-lived worker with /hire <name>.", outcome="Needs decision")
+            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return
 
         sent_to = []
@@ -1349,20 +1454,20 @@ class Handler(BaseHTTPRequestHandler):
                 sent_to.append(name)
 
         if not sent_to:
-            self.reply(chat_id, "No online workers to share with right now.", outcome="Needs decision")
+            self.reply(chat_id, "No one's online to share with.")
 
     def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
         """Route a message to a specific session."""
         registered = get_registered_sessions()
         session = registered.get(session_name)
         if not session:
-            self.reply(chat_id, f"Worker \"{session_name}\" not found.", outcome="Needs decision")
+            self.reply(chat_id, f"Can't find {session_name}. Check /team for who's available.")
             return
 
         tmux_name = session["tmux"]
 
         if not tmux_exists(tmux_name):
-            self.reply(chat_id, f"Worker \"{session_name}\" is not online right now.", outcome="Needs decision")
+            self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
             return
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
@@ -1377,22 +1482,20 @@ class Handler(BaseHTTPRequestHandler):
             daemon=True
         ).start()
 
-        # Send to tmux
-        send_ok = tmux_send(tmux_name, text)
-        enter_ok = tmux_send_enter(tmux_name)
+        # Send to tmux (with lock to prevent interleaving)
+        send_ok = tmux_send_message(tmux_name, text)
 
         # Add 👀 reaction only after successful send to Claude
-        if msg_id and send_ok and enter_ok:
+        if msg_id and send_ok:
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
                 "reaction": [{"type": "emoji", "emoji": "👀"}]
             })
 
-    def reply(self, chat_id, text, outcome="Done"):
-        prefix = f"{outcome} - " if text else f"{outcome}"
-        message = f"{prefix}{text}" if text else prefix
-        telegram_api("sendMessage", {"chat_id": chat_id, "text": message})
+    def reply(self, chat_id, text, outcome=None):
+        # No prefix - manager-friendly direct messages
+        telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
 
     def send_startup_message(self, chat_id):
         """Send bridge startup notification."""
@@ -1400,7 +1503,7 @@ class Handler(BaseHTTPRequestHandler):
         sessions = list(registered.keys())
         active = state["active"]
 
-        lines = [f"Team hub online. {PERSISTENCE_NOTE}"]
+        lines = ["I'm online and ready."]
         if sessions:
             lines.append(f"Team: {', '.join(sessions)}")
             if active:
@@ -1463,7 +1566,7 @@ def main():
         print("Admin: auto-learn (first user to message becomes admin)")
 
     try:
-        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        ReuseAddrServer(("0.0.0.0", PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

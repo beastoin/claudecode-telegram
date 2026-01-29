@@ -5,15 +5,24 @@
 #
 set -euo pipefail
 
-VERSION="0.9.0"
+VERSION="0.9.5"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Global defaults (can be overridden by node config or env)
+# Environment variables (simplified in v0.9.5)
+# ─────────────────────────────────────────────────────────────────────────────
+# Required:
+#   TELEGRAM_BOT_TOKEN  - Your bot token from @BotFather
+#
+# Optional:
+#   ADMIN_CHAT_ID       - Pre-set admin (otherwise auto-learns first user)
+#   TUNNEL_URL          - Use existing tunnel instead of starting cloudflared
+#
+# Internal (auto-derived, don't set manually):
+#   PORT, SESSIONS_DIR, TMUX_PREFIX - Derived per node
 # ─────────────────────────────────────────────────────────────────────────────
 
 : "${PORT:=8080}"
-: "${HOST:=0.0.0.0}"
 : "${TUNNEL_URL:=}"
 
 CLAUDE_DIR="$HOME/.claude"
@@ -247,6 +256,91 @@ find_free_port() {
     return 1
 }
 
+# Check if a process on a port is our bridge
+is_our_bridge() {
+    local port="$1"
+    local pid
+    pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
+    [[ -z "$pid" ]] && return 1
+
+    # Check if process command contains bridge.py
+    local cmd
+    cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
+    [[ "$cmd" == *"bridge.py"* ]]
+}
+
+# Handle port conflict with smart recovery
+# Returns: 0 = port is now free, 1 = need alternative port
+handle_port_conflict() {
+    local port="$1"
+    local node="$2"
+
+    if ! port_in_use "$port"; then
+        return 0  # Port is free
+    fi
+
+    # Check if it's our bridge
+    if is_our_bridge "$port"; then
+        log "Port $port is busy. Looks like an old bridge is still running."
+        log "Restarting it for you..."
+
+        local pid
+        pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
+
+        # Graceful shutdown first
+        kill "$pid" 2>/dev/null || true
+
+        # Wait up to 3 seconds
+        local wait=0
+        while port_in_use "$port" && [[ $wait -lt 6 ]]; do
+            sleep 0.5
+            ((wait++))
+        done
+
+        # Force kill if still running
+        if port_in_use "$port"; then
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+
+        if port_in_use "$port"; then
+            warn "Could not stop old bridge"
+            return 1
+        fi
+
+        success "done"
+        return 0
+    else
+        # Not our bridge - another app
+        return 1
+    fi
+}
+
+# Offer alternative port to user
+offer_alternative_port() {
+    local port="$1"
+    local alt_port
+    alt_port=$(find_free_port $((port + 1))) || { error "No free port found"; exit 1; }
+
+    log "Port $port is already being used by another app."
+    log "I won't stop other apps automatically."
+
+    if ! $NO_INPUT && [[ -t 0 ]]; then
+        read -rp "Would you like me to use port $alt_port instead? [Y/n] " confirm
+        if [[ "$confirm" =~ ^[Nn] ]]; then
+            log "No changes made. Try closing the other app, or run:"
+            hint "./claudecode-telegram.sh start --port $alt_port"
+            exit 0
+        fi
+        log "Okay—starting on port $alt_port..."
+        echo "$alt_port"
+    else
+        error "Port $port is already being used by another app."
+        hint "Try: ./claudecode-telegram.sh start --port $alt_port"
+        exit 1
+    fi
+}
+
 telegram_api() {
     local token="$1" method="$2" data="$3"
     curl -s -X POST "https://api.telegram.org/bot${token}/${method}" \
@@ -320,18 +414,11 @@ cmd_start() {
     local token; token=$(require_token)
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
 
-    # Check if port is available
+    # Check if port is available, try smart recovery
     if port_in_use "$port"; then
-        local alt_port
-        alt_port=$(find_free_port $((port + 1))) || { error "No free port found"; exit 1; }
-        warn "Port $port is already in use"
-        if ! $NO_INPUT; then
-            read -rp "Use port $alt_port instead? [Y/n] " confirm
-            [[ "$confirm" =~ ^[Nn] ]] && { log "Cancelled"; exit 0; }
-        else
-            log "Using port $alt_port"
+        if ! handle_port_conflict "$port" "$node"; then
+            port=$(offer_alternative_port "$port")
         fi
-        port="$alt_port"
     fi
 
     ensure_node_dir "$node"
@@ -385,18 +472,11 @@ cmd_run() {
         exit 1
     fi
 
-    # Check if port is available
+    # Check if port is available, try smart recovery
     if port_in_use "$port"; then
-        local alt_port
-        alt_port=$(find_free_port $((port + 1))) || { error "No free port found"; exit 1; }
-        warn "Port $port is already in use"
-        if ! $NO_INPUT; then
-            read -rp "Use port $alt_port instead? [Y/n] " confirm
-            [[ "$confirm" =~ ^[Nn] ]] && { log "Cancelled"; exit 0; }
-        else
-            log "Using port $alt_port"
+        if ! handle_port_conflict "$port" "$node"; then
+            port=$(offer_alternative_port "$port")
         fi
-        port="$alt_port"
     fi
 
     ensure_node_dir "$node"

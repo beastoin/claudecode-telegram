@@ -2,6 +2,17 @@
 #
 # test.sh - Automated acceptance tests for claudecode-telegram
 #
+# Usage:
+#   TEST_BOT_TOKEN='...' ./test.sh                    # Basic tests (mock chat ID)
+#   TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh # Full e2e (real Telegram messages)
+#
+# Environment:
+#   TEST_BOT_TOKEN  - Required: Your test bot token from @BotFather
+#   TEST_CHAT_ID    - Optional: Your chat ID for e2e verification
+#
+# Tests run isolated under ~/.claude/telegram-test/ with separate port (8095),
+# prefix (claude-test-), and PID file. Safe to run while production is active.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,7 +82,10 @@ trap cleanup EXIT
 require_token() {
     if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
         log "${RED}Error:${NC} TEST_BOT_TOKEN not set"
-        log "Usage: TEST_BOT_TOKEN='...' ./test.sh"
+        log ""
+        log "Usage:"
+        log "  TEST_BOT_TOKEN='...' ./test.sh                    # Basic tests"
+        log "  TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh # Full e2e"
         exit 1
     fi
 }
@@ -661,6 +675,12 @@ test_photo_message_no_focused() {
 
 test_incoming_image_e2e() {
     info "Testing incoming image e2e (upload -> webhook -> download)..."
+
+    # This test requires a real TEST_CHAT_ID to upload images to Telegram
+    if [[ "${TEST_CHAT_ID:-}" == "" ]] || [[ "$CHAT_ID" == "123456789" ]]; then
+        info "Skipping (requires TEST_CHAT_ID for real Telegram upload)"
+        return 0
+    fi
 
     # Create worker to receive image
     send_message "/hire imgrecv" >/dev/null

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.9.0
+> Version: 0.9.5
 
 ## Current Philosophy (Summary)
 
@@ -254,14 +254,94 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.9.5 - Simplified environment variables & smart port conflict handling
+
+**Environment variable simplification:**
+- Only `TELEGRAM_BOT_TOKEN` is required to run
+- `ADMIN_CHAT_ID` and `TUNNEL_URL` remain optional
+- Internal vars (`PORT`, `SESSIONS_DIR`, `TMUX_PREFIX`) auto-derived per node
+- Removed unused `HOST` variable
+
+**Smart port conflict handling:**
+- Detects if port is held by our bridge vs another process
+- Auto-restarts old bridge gracefully (no user action needed)
+- Falls back to suggesting alternative port if not our process
+- Uses `SO_REUSEADDR` to prevent "Address already in use" on restart
+
+**Manager-friendly copy improvements:**
+- First-person assistant voice for status messages
+- "Kenji is paused. I'll pick up where we left off." vs technical jargon
+- Focus hint on worker switch: "Now talking to Lee."
+
+**Test improvements:**
+- E2E image test skips gracefully when no real `TEST_CHAT_ID` provided
+- Updated test.sh header with clearer usage documentation
+
+### v0.9.4 - Slash command routing: /lee, /chen, etc.
+
+**New feature: Direct worker routing via slash commands**
+- `/lee hello` routes message directly to lee (one-off, no focus change)
+- `/lee` (no message) switches focus to lee (same as `/focus lee`)
+- Telegram autocomplete shows all workers as commands
+
+**Hire validation:**
+- Cannot hire workers with reserved names (team, focus, hire, end, etc.)
+- Prevents command collisions
+
+**Dynamic bot commands:**
+- Bot command list updates when workers are hired/offboarded
+- Workers appear in Telegram's command autocomplete
+
+**Why this matters:**
+- UX improvement: `/lee` is shorter than `/focus lee` or `@lee`
+- Telegram native: uses command autocomplete, works in groups with privacy mode
+- Safe: reserved names blocked at hire time
+
+### v0.9.3 - Philosophy alignment: ephemeral image inbox, prompt-only /learn, hook polling
+
+**Philosophy fixes:**
+- **Image inbox moved to /tmp**: Images now stored in `/tmp/claudecode-telegram/<session>/inbox/` instead of `~/.claude/telegram/sessions/<session>/inbox/`
+- **Inbox cleanup on session end**: `cleanup_inbox()` called when worker is offboarded via `/end`
+- **Removed playbook persistence**: `/learn` is prompt-only, doesn't write to disk
+- **Session isolation**: Each session's inbox is namespaced to prevent cross-session access
+
+**Hook transcript race condition fix:**
+- **Problem**: Stop hook fires before Claude Code flushes final text response to transcript
+- **Symptom**: Image tags (`[[image:...]]`) missing from responses sent to Telegram
+- **Fix**: Hook now polls transcript until stable (file size unchanged + content parseable)
+- **Implementation**: `wait_for_transcript()` function with 2s timeout, 50ms polling interval
+- **Why polling over sleep**: Avoids magic numbers, only waits when needed, has clear timeout
+
+**Why this matters:**
+- Aligns with "RAM state only" principle - no durable state outside tmux
+- Per-session files remain minimal coordination metadata (pending, chat_id)
+- Images are ephemeral input artifacts, cleaned up automatically
+- Team playbook management is external (e.g., `~/team-playbook.md`) - not bridge's responsibility
+
+### v0.9.2 - Fix tmux send race condition
+
+**Problem:** Concurrent messages to the same tmux session could interleave, causing messages to corrupt each other. This was especially visible under rapid message load where ~50% of messages would fail.
+
+**Root cause:** The two-call pattern (`tmux_send` + `tmux_send_enter`) was not atomic. When multiple threads sent messages to the same session simultaneously, their calls could interleave (e.g., text1, text2, Enter1, Enter2).
+
+**Fix:** Added per-session locks to serialize sends to the same tmux session:
+- New `_tmux_send_locks` dictionary holds one lock per session
+- New `tmux_send_message()` function wraps send+enter in a lock
+- All three send locations (route_message, cmd_learn, share_learning_with_team) now use the locked function
+
+**Testing:** Stress test showed improvement from 58% → 100% delivery rate under concurrent load.
+
+**Note:** v0.9.1 was attempted with an atomic `text\n` approach but made things worse because `-l` flag sends literal newline, not Enter key. That was reverted.
+
 ### v0.9.0 - Image Support
 
 **New features:**
 - **Incoming images**: Manager can send photos/images to workers
-  - Images downloaded to `~/.claude/telegram/sessions/<worker>/inbox/`
+  - Images downloaded to `/tmp/claudecode-telegram/<worker>/inbox/` (ephemeral)
   - Path passed to Claude: "Manager sent image: /path/to/image.jpg"
   - Supports photos and image documents (files sent as attachments)
   - Optional caption included in message
+  - Cleaned up automatically when worker is offboarded
 
 - **Outgoing images**: Workers can send images back via tag syntax
   - Use `[[image:/path/to/file.jpg|optional caption]]` in responses
@@ -270,10 +350,10 @@ This prevents other users on multi-user systems from reading chat IDs or session
   - Caption is optional: `[[image:/path.png]]` works too
 
 **Security:**
-- Path allowlist: Only files in sessions dir, /tmp, or cwd can be sent
+- Path allowlist: Only files in /tmp, sessions dir, or cwd can be sent
 - Extension validation: Only .jpg, .jpeg, .png, .gif, .webp, .bmp allowed
 - Size limit: 20MB max (Telegram's limit)
-- Inbox directories use 0o700 permissions
+- Inbox directories use 0o700 permissions, session-namespaced
 
 **Usage:**
 ```
@@ -281,7 +361,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 [photo attachment with optional caption]
 
 # Worker receives
-Manager sent image: /home/user/.claude/telegram/sessions/worker/inbox/abc123.jpg
+Manager sent image: /tmp/claudecode-telegram/worker/inbox/abc123.jpg
 Please describe this screenshot
 
 # Worker responds with image
@@ -304,7 +384,7 @@ Here's the diagram:
 | `/system` | `/settings` |
 
 **New command:**
-- `/learn` - Capture daily learnings (Problem/Fix/Why format), appends to team playbook, shares with all online workers
+- `/learn` - Ask focused worker about today's learnings (prompt-only, no persistent storage)
 
 **Voice & terms updated:**
 - "sessions" → "workers" in all user-facing messages
@@ -313,9 +393,9 @@ Here's the diagram:
 - Persistence emphasized: "Workers are long-lived and keep context across restarts."
 
 **Daily Learning workflow:**
-- Team playbook stored at `~/.claude/telegram/team_playbook.md`
-- Learnings shared with all online workers automatically
-- Format: Problem/Fix/Why
+- `/learn` prompts the focused worker to share learnings (Problem/Fix/Why format)
+- Learnings shared with all online workers via tmux
+- Team playbook managed externally (e.g., `~/team-playbook.md`) - bridge doesn't persist
 
 ### v0.7.0 - Threaded HTTP + session refactors
 
