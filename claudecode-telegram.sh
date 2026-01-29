@@ -397,7 +397,7 @@ is_tunnel_reachable() {
 cmd_start() {
     local node
     node=$(resolve_target_node)
-    local port="${PORT:-8080}" host="${HOST:-}"
+    local port="$PORT" host="$HOST"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
