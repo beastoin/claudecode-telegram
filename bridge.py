@@ -546,7 +546,7 @@ def export_hook_env(tmux_name):
     """Export env vars for hook inside tmux session."""
     subprocess.run([
         "tmux", "send-keys", "-t", tmux_name,
-        f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}'", "Enter"
+        f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}' TMUX_FALLBACK=1", "Enter"
     ])
 
 

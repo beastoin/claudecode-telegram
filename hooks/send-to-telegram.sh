@@ -5,18 +5,16 @@
 # response and forwards to bridge via localhost HTTP. Bridge sends to Telegram.
 # Token isolation: Claude never sees the token.
 #
-# DESIGN: Sends to Telegram if session has chat_id (is telegram-connected).
-#
-# DEBUG: Set HOOK_DEBUG=1 to enable logging to ~/.claude/telegram/hook.log
+# FLAGS:
+#   TMUX_FALLBACK=0  - Disable tmux capture fallback (enabled by default)
 
 set -euo pipefail
 
-# Debug logging - uncomment next 2 lines to enable
-# exec 2>> "$HOME/.claude/telegram/hook.log"
-# set -x
+LOG="$HOME/.claude/telegram/hook.log"
+TS() { date '+%Y-%m-%d %H:%M:%S'; }
 
-BRIDGE_PORT="${PORT:-8080}"
 INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
 
 # Detect session name from tmux
@@ -25,68 +23,106 @@ if [ -n "${TMUX:-}" ]; then
     SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
 fi
 
-# Extract name from prefix pattern
+# Extract bridge session name from prefix pattern
 TMUX_PREFIX="${TMUX_PREFIX:-claude-}"
 BRIDGE_SESSION=""
 if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
     BRIDGE_SESSION="${SESSION_NAME#${TMUX_PREFIX}}"
 fi
 
+[ -z "$BRIDGE_SESSION" ] && exit 0
+
 # Determine file paths
 SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
-if [ -n "$BRIDGE_SESSION" ]; then
-    SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
-    CHAT_ID_FILE="$SESSION_DIR/chat_id"
-    PENDING_FILE="$SESSION_DIR/pending"
-    PORT_FILE="$SESSIONS_DIR/../port"
-    if [ -f "$PORT_FILE" ]; then
-        BRIDGE_PORT=$(cat "$PORT_FILE")
-    fi
-else
-    exit 0
-fi
-
-BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
+SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
+CHAT_ID_FILE="$SESSION_DIR/chat_id"
+PENDING_FILE="$SESSION_DIR/pending"
 
 [ ! -f "$CHAT_ID_FILE" ] && exit 0
 [ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
-# Get last user line for extraction
+# Get bridge port
+PORT_FILE="$SESSIONS_DIR/../port"
+BRIDGE_PORT="${PORT:-8080}"
+[ -f "$PORT_FILE" ] && BRIDGE_PORT=$(cat "$PORT_FILE")
+BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
+
+# Find last user message line
 LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
 [ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
 
-TMPFILE=$(mktemp)
-trap 'rm -f "$TMPFILE"' EXIT
-
-# Extract assistant response from transcript
-extract_response() {
-    local assistant_lines
-
-    # Get assistant messages after last user message
-    assistant_lines=$(tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | grep '"type":"assistant"') || return 1
-
-    # Extract text content with jq
-    echo "$assistant_lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null || return 1
-
-    # Verify we got actual content
-    [ -s "$TMPFILE" ] && [ "$(cat "$TMPFILE")" != "null" ]
+# Extract text from transcript (with retry for race condition)
+extract_from_transcript() {
+    local tmp=$(mktemp)
+    cat "$TRANSCRIPT_PATH" > "$tmp" 2>/dev/null
+    local lines=$(tail -n "+$LAST_USER_LINE" "$tmp" | grep '"type":"assistant"') || { rm -f "$tmp"; return 1; }
+    TEXT=$(echo "$lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")') || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    [ -n "$TEXT" ] && [ "$TEXT" != "null" ]
 }
 
-# Simple retry: try up to 3 times with 100ms delay
-for attempt in 1 2 3; do
-    if extract_response; then
+# Try transcript extraction first (10 attempts × 500ms = 5s max)
+TEXT=""
+for attempt in $(seq 1 10); do
+    if extract_from_transcript; then
         break
     fi
-    if [ "$attempt" -lt 3 ]; then
-        sleep 0.1
-    else
-        rm -f "$PENDING_FILE"
-        exit 0
-    fi
+    sleep 0.5
 done
+
+# Fallback: extract from tmux capture (enabled by default, set TMUX_FALLBACK=0 to disable)
+if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
+    if [ "${TMUX_FALLBACK:-1}" != "0" ] && [ -n "$SESSION_NAME" ]; then
+        # Capture pane content (last 500 lines)
+        TMUX_CONTENT=$(tmux capture-pane -t "$SESSION_NAME" -p -S -500 2>/dev/null)
+
+        # Extract last response: text between last ● and next ❯ or ─── separator
+        TEXT=$(echo "$TMUX_CONTENT" | awk '
+            /^●/ {
+                in_response = 1
+                line = $0
+                sub(/^● */, "", line)
+                response = line
+                next
+            }
+            /^❯/ || /^───/ {
+                if (in_response && response != "") {
+                    last_response = response
+                }
+                in_response = 0
+                response = ""
+            }
+            in_response {
+                # Skip status lines and UI elements
+                if ($0 ~ /^[·✶⏵⎿]/) next
+                if ($0 ~ /stop hook/ || $0 ~ /Whirring/ || $0 ~ /Herding/) next
+                if ($0 ~ /^[a-z]+:$/) next
+                if ($0 ~ /Tip:.*Claude/) next
+                # Continuation of response (remove 2-space indent)
+                line = $0
+                sub(/^  /, "", line)
+                if (response != "") response = response "\n" line
+                else response = line
+            }
+            END {
+                if (response != "") print response
+                else if (last_response != "") print last_response
+            }
+        ')
+    fi
+fi
+
+# Exit if no text extracted
+if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
+    rm -f "$PENDING_FILE"
+    exit 0
+fi
 
 # Forward to bridge
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL"
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
+echo "$TEXT" > "$TMPFILE"
+python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL" 2>/dev/null
 
 rm -f "$PENDING_FILE"
