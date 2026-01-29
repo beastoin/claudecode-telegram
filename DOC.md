@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.9.7
+> Version: 0.10.0
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,29 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.10.0 - Simplify CLI (~200 lines removed)
+
+**Breaking changes:**
+- Removed `start` command (use `run --no-tunnel` instead)
+- Removed `setup` command (use `status` instead)
+
+**New flag:**
+- `--no-tunnel` for `run` command: skip tunnel/webhook setup (replaces `start`)
+
+**Simplifications:**
+- Removed smart port conflict recovery (now just errors if port busy)
+- Removed `find_free_port()`, `is_our_bridge()`, `handle_port_conflict()`, `offer_alternative_port()`
+- Added simple `require_port_free()` - errors with hint to use `--port`
+
+**Why:** Less magic, more predictable. If port is busy, user decides what to do.
+
+### v0.9.8 - Remove unused HOST variable
+
+**Bug fix:**
+- Removed `HOST` variable from `cmd_start()` that was supposed to be removed in v0.9.5
+- Fixed malformed log output "on :8080" → "on port 8080"
+- Removed `--host` flag from `cmd_start` (was non-functional)
 
 ### v0.9.7 - SIGTERM diagnostics and improved logging
 

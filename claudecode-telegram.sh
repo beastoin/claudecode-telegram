@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.9.8"
+VERSION="0.10.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,8 +188,8 @@ resolve_target_node() {
     # Auto-detect: check running nodes
     local running_nodes
     running_nodes=$(list_running_nodes)
-    local count
-    count=$(echo "$running_nodes" | grep -c . || echo 0)
+    local count=0
+    [[ -n "$running_nodes" ]] && count=$(echo "$running_nodes" | wc -l | tr -d ' ')
 
     if [[ $count -eq 0 ]]; then
         # No running nodes - default to "prod" for run command
@@ -249,96 +249,11 @@ port_in_use() {
     nc -z localhost "$1" 2>/dev/null
 }
 
-find_free_port() {
-    local start="${1:-8080}"
-    for p in $(seq "$start" $((start + 10))); do
-        port_in_use "$p" || { echo "$p"; return 0; }
-    done
-    return 1
-}
-
-# Check if a process on a port is our bridge
-is_our_bridge() {
+require_port_free() {
     local port="$1"
-    local pid
-    pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
-    [[ -z "$pid" ]] && return 1
-
-    # Check if process command contains bridge.py
-    local cmd
-    cmd=$(ps -p "$pid" -o args= 2>/dev/null || true)
-    [[ "$cmd" == *"bridge.py"* ]]
-}
-
-# Handle port conflict with smart recovery
-# Returns: 0 = port is now free, 1 = need alternative port
-handle_port_conflict() {
-    local port="$1"
-    local node="$2"
-
-    if ! port_in_use "$port"; then
-        return 0  # Port is free
-    fi
-
-    # Check if it's our bridge
-    if is_our_bridge "$port"; then
-        log "Port $port is busy. Looks like an old bridge is still running."
-        log "Restarting it for you..."
-
-        local pid
-        pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
-
-        # Graceful shutdown first
-        kill "$pid" 2>/dev/null || true
-
-        # Wait up to 3 seconds
-        local wait=0
-        while port_in_use "$port" && [[ $wait -lt 6 ]]; do
-            sleep 0.5
-            ((wait++))
-        done
-
-        # Force kill if still running
-        if port_in_use "$port"; then
-            kill -9 "$pid" 2>/dev/null || true
-            sleep 1
-        fi
-
-        if port_in_use "$port"; then
-            warn "Could not stop old bridge"
-            return 1
-        fi
-
-        success "done"
-        return 0
-    else
-        # Not our bridge - another app
-        return 1
-    fi
-}
-
-# Offer alternative port to user
-offer_alternative_port() {
-    local port="$1"
-    local alt_port
-    alt_port=$(find_free_port $((port + 1))) || { error "No free port found"; exit 1; }
-
-    # Use >&2 for all output since this function's stdout is captured for the port number
-    log "Port $port is already being used by another app." >&2
-    log "I won't stop other apps automatically." >&2
-
-    if ! $HEADLESS && [[ -t 0 ]]; then
-        read -rp "Would you like me to use port $alt_port instead? [Y/n] " confirm
-        if [[ "$confirm" =~ ^[Nn] ]]; then
-            log "No changes made. Try closing the other app, or run:" >&2
-            hint "./claudecode-telegram.sh start --port $alt_port"
-            exit 0
-        fi
-        log "Okay—starting on port $alt_port..." >&2
-        echo "$alt_port"
-    else
-        error "Port $port is already being used by another app."
-        hint "Try: ./claudecode-telegram.sh start --port $alt_port"
+    if port_in_use "$port"; then
+        error "Port $port is already in use"
+        hint "Stop the other process or use: --port <other-port>"
         exit 1
     fi
 }
@@ -395,71 +310,29 @@ is_tunnel_reachable() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
-
-cmd_start() {
-    local node
-    node=$(resolve_target_node)
-    local port="${PORT:-8080}"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -p|--port) port="$2"; shift 2;;
-            *) shift;;
-        esac
-    done
-
-    # Load node config (may set TELEGRAM_BOT_TOKEN, PORT, etc.)
-    load_node_config "$node"
-    [[ -n "${PORT:-}" ]] && port="$PORT"
-
-    local token; token=$(require_token)
-    check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
-
-    # Check if port is available, try smart recovery
-    if port_in_use "$port"; then
-        if ! handle_port_conflict "$port" "$node"; then
-            port=$(offer_alternative_port "$port")
-        fi
-    fi
-
-    ensure_node_dir "$node"
-
-    local sessions_dir tmux_prefix
-    sessions_dir=$(get_node_sessions_dir "$node")
-    tmux_prefix=$(get_node_tmux_prefix "$node")
-
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
-    export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
-
-    local node_dir
-    node_dir=$(get_node_dir "$node")
-    local bridge_log="$node_dir/bridge.log"
-
-    log "$(bold "Multi-Session Bridge") [$node] on port $port"
-    log "$(dim "Sessions created via /new <name> from Telegram")"
-    log "$(dim "Ctrl+C to stop")"
-    log "$(dim "Logging to: $bridge_log")"
-    exec python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
-}
-
 cmd_run() {
     local node
     node=$(resolve_target_node)
-    local port="$PORT"
-    local tunnel_url="$TUNNEL_URL"
+
+    # Parse args first (CLI takes precedence over config)
+    local port="" tunnel_url="" no_tunnel=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port) port="$2"; shift 2;;
             --tunnel-url) tunnel_url="$2"; shift 2;;
+            --no-tunnel) no_tunnel=true; shift;;
+            --headless) HEADLESS=true; shift;;
+            -q|--quiet) QUIET=true; shift;;
+            -v|--verbose) VERBOSE=true; shift;;
             *) shift;;
         esac
     done
 
-    # Load node config
+    # Load node config (only use if not set by CLI)
     load_node_config "$node"
-    [[ -n "${PORT:-}" ]] && port="$PORT"
-    [[ -n "${TUNNEL_URL:-}" ]] && tunnel_url="$TUNNEL_URL"
+    [[ -z "$port" ]] && port="${PORT:-8080}"
+    [[ -z "$tunnel_url" ]] && tunnel_url="${TUNNEL_URL:-}"
 
     local token; token=$(require_token)
 
@@ -467,8 +340,8 @@ cmd_run() {
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
     check_cmd python3 || { error "python3 not installed"; exit 4; }
 
-    if [[ -z "$tunnel_url" ]]; then
-        check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared (or use --tunnel-url)"; exit 4; }
+    if ! $no_tunnel && [[ -z "$tunnel_url" ]]; then
+        check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared (or use --no-tunnel)"; exit 4; }
     fi
 
     # Check if this node is already running
@@ -478,12 +351,7 @@ cmd_run() {
         exit 1
     fi
 
-    # Check if port is available, try smart recovery
-    if port_in_use "$port"; then
-        if ! handle_port_conflict "$port" "$node"; then
-            port=$(offer_alternative_port "$port")
-        fi
-    fi
+    require_port_free "$port"
 
     ensure_node_dir "$node"
 
@@ -508,12 +376,25 @@ cmd_run() {
 
     log "$(dim "No default session - use /new <name> from Telegram")"
 
+    # Set up env vars for bridge
+    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
+    export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
+
+    local bridge_log="$node_dir/bridge.log"
+
+    # No-tunnel mode: just run bridge in foreground
+    if $no_tunnel; then
+        log "$(dim "No tunnel (use external tunnel or local testing)")"
+        log "$(dim "Ctrl+C to stop")"
+        exec python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
+    fi
+
     local tunnel_pid=""
     local tunnel_log=""
 
-    # 2. Start tunnel (or use provided URL)
+    # Start tunnel (or use provided URL)
     if [[ -n "$tunnel_url" ]]; then
-        log "$(dim "Using provided tunnel URL (no cloudflared started)")"
+        log "$(dim "Using provided tunnel URL")"
         success "Tunnel: $tunnel_url"
     else
         log "Starting tunnel..."
@@ -534,18 +415,14 @@ cmd_run() {
         sleep 3
     fi
 
-    # 3. Start bridge server in background
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
-    export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
-
-    local bridge_log="$node_dir/bridge.log"
+    # Start bridge server in background
     python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
     local bridge_pid=$!
     echo "$bridge_pid" > "$node_dir/bridge.pid"
     echo "$port" > "$node_dir/port"
     sleep 1
 
-    # 4. Set webhook
+    # Set webhook
     local current_webhook=""
     local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
     current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
@@ -787,9 +664,9 @@ cmd_restart() {
 
     sleep 1
 
-    # Start fresh
+    # Start fresh with same args
     log ""
-    NODE_NAME="$node" cmd_run
+    NODE_NAME="$node" cmd_run "$@"
 }
 
 cmd_status() {
@@ -1054,87 +931,6 @@ cmd_hook_test() {
     local r; r=$(telegram_api "$token" "sendMessage" "{\"chat_id\":\"$chat_id\",\"text\":\"Test OK from node $node!\"}")
     echo "$r" | grep -q '"ok":true' && success "Message sent" || { error "Failed"; exit 1; }
 }
-
-cmd_setup() {
-    local errors=0
-
-    if $HEADLESS; then
-        log "$(bold "Headless Setup")"
-
-        check_cmd tmux  || { error "tmux not installed"; ((errors++)); }
-        check_cmd jq    || { error "jq not installed"; ((errors++)); }
-        check_cmd curl  || { error "curl not installed"; ((errors++)); }
-        check_cmd python3 || { error "python3 not installed"; ((errors++)); }
-        [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] || { error "TELEGRAM_BOT_TOKEN not set"; ((errors++)); }
-
-        [[ $errors -gt 0 ]] && { error "$errors error(s)"; exit 3; }
-
-        local r; r=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getMe" "{}")
-        echo "$r" | grep -q '"ok":true' || { error "Invalid token"; exit 3; }
-        success "Token valid: @$(echo "$r" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)"
-
-        FORCE=true
-        cmd_hook_install
-
-        log "$(bold "Setup complete")"
-        log "Run: ./claudecode-telegram.sh run"
-    else
-        log "$(bold "Setup")"
-        log ""
-
-        log "$(bold "Dependencies")"
-        check_cmd tmux    && success "tmux"    || { error "tmux (required)"; hint "brew install tmux"; }
-        check_cmd jq      && success "jq"      || warn "jq (optional)"
-        check_cmd curl    && success "curl"    || error "curl (required)"
-        check_cmd python3 && success "python3" || error "python3 (required)"
-        check_cmd cloudflared && success "cloudflared" || warn "cloudflared (for tunnel)"
-        log ""
-
-        log "$(bold "Configuration")"
-        if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-            success "Token: ${TELEGRAM_BOT_TOKEN:0:8}..."
-            local r; r=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getMe" "{}")
-            echo "$r" | grep -q '"ok":true' \
-                && success "Bot: @$(echo "$r" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)" \
-                || error "Token invalid"
-        else
-            warn "TELEGRAM_BOT_TOKEN not set"
-        fi
-        log ""
-
-        log "$(bold "Hook")"
-        [[ -f "$SCRIPT_DIR/hooks/$HOOK_SCRIPT" ]] && { cmd_hook_install 2>/dev/null || true; }
-        log ""
-
-        log "$(bold "Nodes")"
-        local all_nodes
-        all_nodes=$(list_all_nodes)
-        if [[ -n "$all_nodes" ]]; then
-            while IFS= read -r node; do
-                if is_node_running "$node"; then
-                    success "$node $(green "[running]")"
-                else
-                    log "  $node $(yellow "[stopped]")"
-                fi
-            done <<< "$all_nodes"
-        else
-            log "  $(dim "No nodes configured")"
-        fi
-        log ""
-
-        log "$(bold "Quick Start")"
-        log "  1. export TELEGRAM_BOT_TOKEN='...'"
-        log "  2. ./claudecode-telegram.sh run"
-        log "  3. Send /new backend to your bot on Telegram"
-        log ""
-        log "$(bold "Multi-Node")"
-        log "  NODE_NAME=dev ./claudecode-telegram.sh run"
-        log "  NODE_NAME=prod ./claudecode-telegram.sh run"
-        log "  ./claudecode-telegram.sh --node dev stop"
-        log "  ./claudecode-telegram.sh --all status"
-    fi
-}
-
 cmd_help() {
     cat << 'EOF'
 claudecode-telegram - Bridge Claude Code to Telegram (Multi-Node)
@@ -1169,11 +965,9 @@ TELEGRAM COMMANDS
   <message>         Send to active Claude
 
 SHELL COMMANDS
-  run               Start gateway + tunnel
-  restart           Restart gateway (preserves tmux sessions)
-  start             Start bridge only (manual setup)
-  stop              Stop node (bridge, tunnel, tmux sessions)
-  setup             Check deps, install hook, validate
+  run               Start bridge + tunnel + webhook
+  restart           Restart (preserves tmux sessions)
+  stop              Stop node (bridge, tunnel, sessions)
   status            Show current status
   webhook <url>     Set Telegram webhook URL
   webhook info      Show current webhook
@@ -1186,15 +980,16 @@ FLAGS
   -V, --version         Show version
   -n, --node <name>     Target specific node
   --all                 Target all nodes (stop, status)
-  -q, --quiet           Suppress non-error output
-  -v, --verbose         Show debug output
-  --json                JSON output (status command)
-  --no-color            Disable colors
-  --headless            Headless mode (strict, no prompts)
-  --env-file <path>     Load environment from file
-  -f, --force           Overwrite existing
   -p, --port <port>     Bridge port (default: 8080)
-  --tunnel-url <url>    Use pre-configured tunnel URL
+  --no-tunnel           Skip tunnel/webhook (manual setup)
+  --tunnel-url <url>    Use existing tunnel URL
+  --headless            Non-interactive mode
+  -q, --quiet           Suppress non-error output
+  -v, --verbose         Debug output
+  --json                JSON output (status)
+  --no-color            Disable colors
+  --env-file <path>     Load env from file
+  -f, --force           Overwrite existing
 
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
@@ -1255,9 +1050,7 @@ main() {
     case "$cmd" in
         run)     cmd_run "$@";;
         restart) cmd_restart "$@";;
-        start)   cmd_start "$@";;
         stop)    cmd_stop;;
-        setup)   cmd_setup;;
         status)  cmd_status;;
         webhook) cmd_webhook "$@";;
         hook)    cmd_hook "$@";;
