@@ -472,8 +472,30 @@ def get_pane_command(tmux_name):
 
 def is_claude_running(tmux_name):
     """Check if claude process is running in tmux session."""
+    # First try pane_current_command (fast path)
     cmd = get_pane_command(tmux_name)
-    return "claude" in cmd.lower()
+    if "claude" in cmd.lower():
+        return True
+
+    # Fallback: check if claude is a child process of the pane
+    # This handles cases where pane_current_command returns unexpected values
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return False
+
+    pane_pid = result.stdout.strip()
+    if not pane_pid:
+        return False
+
+    # Check for claude as child process using pgrep
+    result = subprocess.run(
+        ["pgrep", "-P", pane_pid, "claude"],
+        capture_output=True
+    )
+    return result.returncode == 0
 
 
 def tmux_send(tmux_name, text, literal=True):

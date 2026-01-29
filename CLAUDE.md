@@ -240,3 +240,29 @@ kill $(cat ~/.claude/telegram/claudecode-telegram.pid)
 **Fix:** Per-session locks in `tmux_send_message()` serialize sends to same session.
 
 **Why:** Two subprocess calls (`send-keys -l text`, `send-keys Enter`) are not atomic. Without locking, concurrent sends to the same session corrupt each other.
+
+### macOS vs Linux shell compatibility
+
+**Problem:** GNU coreutils (Linux) and BSD coreutils (macOS) have different flags for the same operations.
+
+**Common pitfalls:**
+| Operation | Linux (GNU) | macOS (BSD) |
+|-----------|-------------|-------------|
+| File size | `stat -c %s file` | `stat -f%z file` |
+| Milliseconds | `date +%s%3N` | Not supported (`%N` is GNU extension) |
+| sed in-place | `sed -i 's/a/b/'` | `sed -i '' 's/a/b/'` |
+| grep -P | Supported | Not supported (use `grep -E`) |
+
+**Fix:** Always use portable alternatives or try-fallback pattern:
+```bash
+# Portable file size
+size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+
+# Portable timing: use iteration counts instead of milliseconds
+for i in $(seq 1 40); do sleep 0.05; done  # 2 seconds total
+```
+
+**Prevention:**
+1. Run `shellcheck` on all shell scripts
+2. Test on macOS before merging (primary target platform)
+3. Avoid GNU-specific extensions: `%N`, `stat -c`, `sed -i`, `grep -P`

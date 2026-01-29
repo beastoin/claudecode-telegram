@@ -16,7 +16,10 @@ brew install tmux cloudflared jq
 git clone https://github.com/beastoin/claudecode-telegram
 cd claudecode-telegram
 
-# 3. Run (one command!)
+# 3. Install hooks
+cp hooks/*.sh hooks/*.py ~/.claude/hooks/
+
+# 4. Run
 export TELEGRAM_BOT_TOKEN="your_token_from_botfather"
 ./claudecode-telegram.sh run
 ```
@@ -61,10 +64,11 @@ See [DOC.md](DOC.md) for details.
 
 ```
 claudecode-telegram/
-├── bridge.py              # Telegram webhook handler (v0.9.0)
+├── bridge.py              # Telegram webhook handler
 ├── claudecode-telegram.sh # CLI wrapper, tunnel/webhook setup
 ├── hooks/
-│   └── send-to-telegram.sh # Claude Stop hook
+│   ├── send-to-telegram.sh  # Claude Stop hook (bash)
+│   └── forward-to-bridge.py # Forward response to bridge (python)
 ├── CLAUDE.md              # Project instructions
 ├── DOC.md                 # Design philosophy, changelog
 ├── TEST.md                # Testing documentation

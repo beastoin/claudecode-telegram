@@ -6,9 +6,14 @@
 # Token isolation: Claude never sees the token.
 #
 # DESIGN: Sends to Telegram if session has chat_id (is telegram-connected).
-# Uses polling with timeout to wait for transcript flush (not magic sleep).
+#
+# DEBUG: Set HOOK_DEBUG=1 to enable logging to ~/.claude/telegram/hook.log
 
 set -euo pipefail
+
+# Debug logging - uncomment next 2 lines to enable
+# exec 2>> "$HOME/.claude/telegram/hook.log"
+# set -x
 
 BRIDGE_PORT="${PORT:-8080}"
 INPUT=$(cat)
@@ -53,111 +58,35 @@ LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: 
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 
-# Poll until transcript is stable and has content (max 2 seconds)
-wait_for_transcript() {
-    local deadline_ms=2000
-    local sleep_ms=50
-    local stable_count=0
-    local last_size=-1
-    local start_ms
-    start_ms=$(date +%s%3N)
-    
-    while true; do
-        local now_ms
-        now_ms=$(date +%s%3N)
-        local elapsed=$((now_ms - start_ms))
-        
-        # Timeout reached
-        if [ "$elapsed" -ge "$deadline_ms" ]; then
-            return 1
-        fi
-        
-        # Get current file size
-        local size
-        size=$(stat -c %s "$TRANSCRIPT_PATH" 2>/dev/null || echo -1)
-        
-        if [ "$size" -eq "$last_size" ]; then
-            # File size stable, try extraction
-            tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | \
-                grep '"type":"assistant"' | \
-                jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
-            
-            # Check if we got actual content
-            if [ -s "$TMPFILE" ] && [ "$(cat "$TMPFILE")" != "null" ]; then
-                stable_count=$((stable_count + 1))
-                # Require 2 stable reads to confirm
-                if [ "$stable_count" -ge 2 ]; then
-                    return 0
-                fi
-            fi
-        else
-            stable_count=0
-            last_size=$size
-        fi
-        
-        # Sleep 50ms
-        sleep 0.05
-    done
+# Extract assistant response from transcript
+extract_response() {
+    local assistant_lines
+
+    # Get assistant messages after last user message
+    assistant_lines=$(tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | grep '"type":"assistant"') || return 1
+
+    # Extract text content with jq
+    echo "$assistant_lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null || return 1
+
+    # Verify we got actual content
+    [ -s "$TMPFILE" ] && [ "$(cat "$TMPFILE")" != "null" ]
 }
 
-# Wait for transcript with polling
-if ! wait_for_transcript; then
-    # Timeout - try one final extraction anyway
-    tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | \
-        grep '"type":"assistant"' | \
-        jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
-fi
-
-[ ! -s "$TMPFILE" ] && rm -f "$PENDING_FILE" && exit 0
-
-# Forward to bridge
-python3 - "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL" << 'PYEOF'
-import sys
-import re
-import json
-import urllib.request
-
-tmpfile, session, bridge_url = sys.argv[1], sys.argv[2], sys.argv[3]
-
-with open(tmpfile) as f:
-    text = f.read().strip()
-
-if not text or text == "null":
-    sys.exit(0)
-
-if len(text) > 4000:
-    text = text[:4000] + "\n..."
-
-def esc(s):
-    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-# Format markdown to HTML
-blocks, inlines = [], []
-text = re.sub(r'```(\w*)\n?(.*?)```', lambda m: (blocks.append((m.group(1) or '', m.group(2))), f"\x00B{len(blocks)-1}\x00")[1], text, flags=re.DOTALL)
-text = re.sub(r'`([^`\n]+)`', lambda m: (inlines.append(m.group(1)), f"\x00I{len(inlines)-1}\x00")[1], text)
-text = esc(text)
-text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', text)
-
-for i, (lang, code) in enumerate(blocks):
-    text = text.replace(f"\x00B{i}\x00", f'<pre><code class="language-{lang}">{esc(code.strip())}</code></pre>' if lang else f'<pre>{esc(code.strip())}</pre>')
-for i, code in enumerate(inlines):
-    text = text.replace(f"\x00I{i}\x00", f'<code>{esc(code)}</code>')
+# Simple retry: try up to 3 times with 100ms delay
+for attempt in 1 2 3; do
+    if extract_response; then
+        break
+    fi
+    if [ "$attempt" -lt 3 ]; then
+        sleep 0.1
+    else
+        rm -f "$PENDING_FILE"
+        exit 0
+    fi
+done
 
 # Forward to bridge
-data = json.dumps({"session": session, "text": text}).encode()
-try:
-    req = urllib.request.Request(
-        bridge_url,
-        data=data,
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        if r.status != 200:
-            print(f"Bridge error: {r.status}", file=sys.stderr)
-except Exception as e:
-    print(f"Failed to forward to bridge: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL"
 
 rm -f "$PENDING_FILE"

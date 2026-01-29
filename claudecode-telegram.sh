@@ -5,21 +5,22 @@
 #
 set -euo pipefail
 
-VERSION="0.9.7"
+VERSION="0.9.8"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Environment variables (simplified in v0.9.5)
+# Environment variables
 # ─────────────────────────────────────────────────────────────────────────────
 # Required:
-#   TELEGRAM_BOT_TOKEN  - Your bot token from @BotFather
+#   TELEGRAM_BOT_TOKEN      - Bot token from @BotFather
 #
 # Optional:
-#   ADMIN_CHAT_ID       - Pre-set admin (otherwise auto-learns first user)
-#   TUNNEL_URL          - Use existing tunnel instead of starting cloudflared
+#   ADMIN_CHAT_ID           - Pre-set admin (otherwise auto-learns first user)
+#   TUNNEL_URL              - Use existing tunnel instead of starting cloudflared
+#   TELEGRAM_WEBHOOK_SECRET - Webhook verification secret
 #
-# Internal (auto-derived, don't set manually):
-#   PORT, SESSIONS_DIR, TMUX_PREFIX - Derived per node
+# Derived (auto-set per node, don't set manually):
+#   PORT, SESSIONS_DIR, TMUX_PREFIX
 # ─────────────────────────────────────────────────────────────────────────────
 
 : "${PORT:=8080}"
@@ -35,7 +36,7 @@ HOOK_SCRIPT="send-to-telegram.sh"
 VERBOSE=false
 QUIET=false
 NO_COLOR=false
-NO_INPUT=false
+HEADLESS=false
 JSON_OUTPUT=false
 FORCE=false
 ALL_NODES=false
@@ -200,7 +201,7 @@ resolve_target_node() {
         return 0
     else
         # Multiple running - need explicit target
-        if $NO_INPUT || [[ ! -t 0 ]]; then
+        if $HEADLESS || [[ ! -t 0 ]]; then
             error "Multiple nodes running. Specify with --node <name> or --all"
             hint "Running nodes: $(echo "$running_nodes" | tr '\n' ' ')"
             exit 2
@@ -322,17 +323,18 @@ offer_alternative_port() {
     local alt_port
     alt_port=$(find_free_port $((port + 1))) || { error "No free port found"; exit 1; }
 
-    log "Port $port is already being used by another app."
-    log "I won't stop other apps automatically."
+    # Use >&2 for all output since this function's stdout is captured for the port number
+    log "Port $port is already being used by another app." >&2
+    log "I won't stop other apps automatically." >&2
 
-    if ! $NO_INPUT && [[ -t 0 ]]; then
+    if ! $HEADLESS && [[ -t 0 ]]; then
         read -rp "Would you like me to use port $alt_port instead? [Y/n] " confirm
         if [[ "$confirm" =~ ^[Nn] ]]; then
-            log "No changes made. Try closing the other app, or run:"
+            log "No changes made. Try closing the other app, or run:" >&2
             hint "./claudecode-telegram.sh start --port $alt_port"
             exit 0
         fi
-        log "Okay—starting on port $alt_port..."
+        log "Okay—starting on port $alt_port..." >&2
         echo "$alt_port"
     else
         error "Port $port is already being used by another app."
@@ -397,12 +399,11 @@ is_tunnel_reachable() {
 cmd_start() {
     local node
     node=$(resolve_target_node)
-    local port="${PORT:-8080}" host="${HOST:-}"
+    local port="${PORT:-8080}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--port) port="$2"; shift 2;;
-            --host) host="$2"; shift 2;;
             *) shift;;
         esac
     done
@@ -434,7 +435,7 @@ cmd_start() {
     node_dir=$(get_node_dir "$node")
     local bridge_log="$node_dir/bridge.log"
 
-    log "$(bold "Multi-Session Bridge") [$node] on $host:$port"
+    log "$(bold "Multi-Session Bridge") [$node] on port $port"
     log "$(dim "Sessions created via /new <name> from Telegram")"
     log "$(dim "Ctrl+C to stop")"
     log "$(dim "Logging to: $bridge_log")"
@@ -953,7 +954,7 @@ cmd_webhook_delete() {
 
     local token; token=$(require_token)
 
-    if ! $FORCE && ! $NO_INPUT; then
+    if ! $FORCE && ! $HEADLESS; then
         read -rp "Delete webhook for node '$node'? [y/N] " confirm
         [[ "$confirm" =~ ^[Yy] ]] || { log "Cancelled"; exit 0; }
     fi
@@ -1057,7 +1058,7 @@ cmd_hook_test() {
 cmd_setup() {
     local errors=0
 
-    if $NO_INPUT; then
+    if $HEADLESS; then
         log "$(bold "Headless Setup")"
 
         check_cmd tmux  || { error "tmux not installed"; ((errors++)); }
@@ -1189,7 +1190,7 @@ FLAGS
   -v, --verbose         Show debug output
   --json                JSON output (status command)
   --no-color            Disable colors
-  --no-input            Headless mode (strict, no prompts)
+  --headless            Headless mode (strict, no prompts)
   --env-file <path>     Load environment from file
   -f, --force           Overwrite existing
   -p, --port <port>     Bridge port (default: 8080)
@@ -1238,7 +1239,7 @@ main() {
             -v|--verbose) VERBOSE=true; shift;;
             --json)      JSON_OUTPUT=true; shift;;
             --no-color)  NO_COLOR=true; shift;;
-            --no-input)  NO_INPUT=true; shift;;
+            --headless)  HEADLESS=true; shift;;
             -f|--force)  FORCE=true; shift;;
             -p|--port)   PORT="$2"; shift 2;;
             -n|--node)   NODE_NAME="$2"; shift 2;;
