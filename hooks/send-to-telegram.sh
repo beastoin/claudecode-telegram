@@ -6,16 +6,11 @@
 # Token isolation: Claude never sees the token.
 #
 # DESIGN: Sends to Telegram if session has chat_id (is telegram-connected).
-# The pending file is only used for busy status indicator, not as a send gate.
-# This enables proactive messaging and avoids race conditions with multiple messages.
-#
-# Install: copy to ~/.claude/hooks/ and add to ~/.claude/settings.json
+# Uses polling with timeout to wait for transcript flush (not magic sleep).
 
 set -euo pipefail
 
-# Bridge port (default, may be overridden by port file below)
 BRIDGE_PORT="${PORT:-8080}"
-
 INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
 
@@ -25,54 +20,97 @@ if [ -n "${TMUX:-}" ]; then
     SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
 fi
 
-# Extract name from prefix pattern (configurable via TMUX_PREFIX env)
+# Extract name from prefix pattern
 TMUX_PREFIX="${TMUX_PREFIX:-claude-}"
 BRIDGE_SESSION=""
 if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
     BRIDGE_SESSION="${SESSION_NAME#${TMUX_PREFIX}}"
 fi
 
-# Determine file paths based on session type
-# SESSIONS_DIR can be set by bridge for test isolation
+# Determine file paths
 SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
 if [ -n "$BRIDGE_SESSION" ]; then
-    # Multi-session mode: per-session files
     SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
     CHAT_ID_FILE="$SESSION_DIR/chat_id"
     PENDING_FILE="$SESSION_DIR/pending"
-    # Read port from file (more reliable than env var on bridge restart)
     PORT_FILE="$SESSIONS_DIR/../port"
     if [ -f "$PORT_FILE" ]; then
         BRIDGE_PORT=$(cat "$PORT_FILE")
     fi
 else
-    # Not a telegram session, exit
     exit 0
 fi
 
-# Build bridge URL after port is determined
 BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
 
-# Only send to Telegram if this is a telegram-connected session (chat_id exists)
 [ ! -f "$CHAT_ID_FILE" ] && exit 0
-
-# Validate transcript exists
 [ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
-# Extract response text from transcript
+# Get last user line for extraction
 LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
 [ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
 
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 
-tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" | \
-  grep '"type":"assistant"' | \
-  jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
+# Poll until transcript is stable and has content (max 2 seconds)
+wait_for_transcript() {
+    local deadline_ms=2000
+    local sleep_ms=50
+    local stable_count=0
+    local last_size=-1
+    local start_ms
+    start_ms=$(date +%s%3N)
+    
+    while true; do
+        local now_ms
+        now_ms=$(date +%s%3N)
+        local elapsed=$((now_ms - start_ms))
+        
+        # Timeout reached
+        if [ "$elapsed" -ge "$deadline_ms" ]; then
+            return 1
+        fi
+        
+        # Get current file size
+        local size
+        size=$(stat -c %s "$TRANSCRIPT_PATH" 2>/dev/null || echo -1)
+        
+        if [ "$size" -eq "$last_size" ]; then
+            # File size stable, try extraction
+            tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | \
+                grep '"type":"assistant"' | \
+                jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
+            
+            # Check if we got actual content
+            if [ -s "$TMPFILE" ] && [ "$(cat "$TMPFILE")" != "null" ]; then
+                stable_count=$((stable_count + 1))
+                # Require 2 stable reads to confirm
+                if [ "$stable_count" -ge 2 ]; then
+                    return 0
+                fi
+            fi
+        else
+            stable_count=0
+            last_size=$size
+        fi
+        
+        # Sleep 50ms
+        sleep 0.05
+    done
+}
+
+# Wait for transcript with polling
+if ! wait_for_transcript; then
+    # Timeout - try one final extraction anyway
+    tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" 2>/dev/null | \
+        grep '"type":"assistant"' | \
+        jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
+fi
 
 [ ! -s "$TMPFILE" ] && rm -f "$PENDING_FILE" && exit 0
 
-# Format and forward to bridge
+# Forward to bridge
 python3 - "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL" << 'PYEOF'
 import sys
 import re
@@ -106,7 +144,7 @@ for i, (lang, code) in enumerate(blocks):
 for i, code in enumerate(inlines):
     text = text.replace(f"\x00I{i}\x00", f'<code>{esc(code)}</code>')
 
-# Forward to bridge (no token needed!)
+# Forward to bridge
 data = json.dumps({"session": session, "text": text}).encode()
 try:
     req = urllib.request.Request(
@@ -122,5 +160,4 @@ except Exception as e:
     sys.exit(1)
 PYEOF
 
-# Clean up pending file on success
 rm -f "$PENDING_FILE"

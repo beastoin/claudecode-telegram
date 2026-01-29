@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.9.5
+> Version: 0.9.6
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,20 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.9.6 - Documentation updates & hook refinements
+
+**CLAUDE.md learnings added:**
+- Port ownership verification: always check before killing (prod=8081, dev=8082, test=8095)
+- Dev before prod deployment order: local tests → dev node → manual verify → prod
+- tmux send race condition: per-session locks serialize concurrent sends
+
+**Hook improvements:**
+- Refined `wait_for_transcript()` polling with clearer deadline-based logic
+- Removed redundant comments for cleaner code
+
+**C bridge test fix:**
+- Added `TMUX_TMPDIR` to test environment for proper isolation
 
 ### v0.9.5 - Simplified environment variables & smart port conflict handling
 

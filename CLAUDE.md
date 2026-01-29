@@ -171,17 +171,40 @@ SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 pkill -f cloudflared
 pkill -f bridge.py
 
+# WRONG - kills without knowing which node owns the port
+lsof -ti :8081 | xargs kill
+
 # RIGHT - use specific PID from file
 kill $(cat ~/.claude/telegram/nodes/prod/pid)
-
-# RIGHT - use port-specific
-lsof -ti :8081 | xargs kill
 
 # RIGHT - use the script's stop command
 ./claudecode-telegram.sh --node prod stop
 ```
 
 **Why this matters:** Production runs multiple nodes (prod, dev, test) simultaneously. Pattern-based killing causes collateral damage to other running nodes.
+
+### Verify port ownership before killing
+
+**Problem:** Ran `lsof -ti :8081 | xargs kill` thinking it was dev node, but port 8081 = prod. Killed production bridge while team was working.
+
+**Port assignments:**
+| Port | Node |
+|------|------|
+| 8080 | (unused/legacy) |
+| 8081 | **prod** |
+| 8082 | dev |
+| 8095 | test |
+
+**Rule:** Before killing any port, verify which node owns it:
+```bash
+# Check what's running on a port BEFORE killing
+lsof -ti :8081  # Just list, don't kill
+
+# Or check node configs
+cat ~/.claude/telegram/nodes/*/port  # See all port assignments
+```
+
+**Why:** Port numbers are not intuitive (8081 looks like it could be "secondary" or "dev"). Always verify before destructive operations.
 
 ### Use script commands or PID files to stop services
 
@@ -197,3 +220,23 @@ kill $(cat ~/.claude/telegram/claudecode-telegram.pid)
 ```
 
 **Why:** pkill is too broad and can kill processes unexpectedly, causing downtime.
+
+### Always test on dev node before prod deployment
+
+**Problem:** Deployed v0.9.2 fix directly to prod without testing on dev node first. Ran local stress test but skipped real integration testing on dev.
+
+**Fix:** Always test on dev node before prod deployment:
+1. Start dev bridge with dev bot token on port 8095
+2. Run full integration tests against dev
+3. Test manually via Telegram on dev bot
+4. Only then deploy to prod
+
+**Why:** Local/unit tests prove concepts work in isolation, but real integration bugs only surface with actual Telegram traffic on a separate dev instance. Prod is not for testing.
+
+### tmux send race condition
+
+**Problem:** Concurrent sends to same tmux session interleave (text1, text2, Enter1, Enter2) causing ~50% message loss.
+
+**Fix:** Per-session locks in `tmux_send_message()` serialize sends to same session.
+
+**Why:** Two subprocess calls (`send-keys -l text`, `send-keys Enter`) are not atomic. Without locking, concurrent sends to the same session corrupt each other.
