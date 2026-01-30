@@ -1,4 +1,4 @@
-# claudecode-imessage
+# Claude Code iMessage
 
 Manage Claude Code workers from iMessage on macOS.
 
