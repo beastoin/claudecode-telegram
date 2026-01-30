@@ -58,8 +58,13 @@ Concrete outcomes from real teams using AI workers:
 
 ```bash
 # 1. Install dependencies
-brew install tmux cloudflared jq   # macOS
-# apt install tmux jq && snap install cloudflared   # Linux
+# macOS:
+brew install tmux cloudflared jq
+
+# Linux (Debian/Ubuntu):
+sudo apt install tmux jq curl python3
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+  -o /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared
 
 # 2. Clone and enter
 git clone https://github.com/beastoin/claudecode-telegram
