@@ -124,9 +124,11 @@ If you set an allowlist (and optionally single-admin mode), it is reasonable to 
    ./scripts/claudecode-imessage.sh hook install
    ./scripts/claudecode-imessage.sh run
    ```
-3) **Text from an allowed handle**:
-   - Send `/hire assistant` from your phone number or email in the allowlist.
-   - If you send from the same Apple ID as the Mac, the bridge will ignore it.
+3) **Text your Mac's iMessage account from a different device**:
+   - Your Mac is signed into Messages with an Apple ID (e.g., `you@icloud.com` or phone number)
+   - From your **phone** (using a **different** Apple ID or phone number), text that address
+   - Send `/hire assistant`
+   - **Note**: Messages from the same Apple ID are ignored to avoid loops
 4) **What happens next**:
    - The bridge sees the new message, verifies it is allowed, and creates a worker.
    - You get a confirmation message back in iMessage.
