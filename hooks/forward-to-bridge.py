@@ -82,10 +82,7 @@ def main():
     if not text or text == "null":
         sys.exit(0)
 
-    # Truncate if too long for Telegram
-    if len(text) > 4000:
-        text = text[:4000] + "\n..."
-
+    # Bridge handles message splitting - don't truncate here
     text = markdown_to_html(text)
 
     try:
