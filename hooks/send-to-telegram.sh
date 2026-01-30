@@ -97,7 +97,7 @@ if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
                 if ($0 ~ /^[·✶⏵⎿]/) next
                 if ($0 ~ /stop hook/ || $0 ~ /Whirring/ || $0 ~ /Herding/) next
                 if ($0 ~ /^[a-z]+:$/) next
-                if ($0 ~ /Tip:.*Claude/) next
+                if ($0 ~ /Tip:/) next
                 # Continuation of response (remove 2-space indent)
                 line = $0
                 sub(/^  /, "", line)
