@@ -17,6 +17,14 @@ claudecode-telegram is a Telegram bot for running multiple Claude Code workers a
 - Checked all 5 sessions at once to see who was stuck vs working
 - Broadcast playbook update to entire team with one command
 
+## Real Results (Recent Team Runs)
+
+Concrete outcomes from real teams using AI workers:
+
+- **Issue triage at scale**: @chen triaged 290 of 302 open issues, labeled each with priority (P0-P3), layer, and lane, and linked related issues to root causes. Flagged 6 critical (P0) and 39 high-priority (P1) issues with AI-reviewed scoring notes.
+- **Deep research with traceability**: @geni analyzed two open-source projects (682 and 14k stars), traced an 8-step end-to-end message flow at the code level, and mapped 80-85% of integration dependencies.
+- **Fast onboarding**: @kelvin and @kenji read the playbook and were ready to take tasks the same day.
+
 ## Tasks That Work Great
 
 - "Fix the login bug in auth.py"
