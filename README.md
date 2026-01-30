@@ -66,6 +66,10 @@ sudo apt install tmux jq curl python3
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
   -o /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared
 
+# Windows (via WSL2):
+# 1. Install WSL2: wsl --install (in PowerShell as Admin)
+# 2. Open Ubuntu from Start Menu, then run the Linux commands above
+
 # 2. Clone and enter
 git clone https://github.com/beastoin/claudecode-telegram
 cd claudecode-telegram
