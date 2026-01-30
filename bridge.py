@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 
 import os
 import json
@@ -28,6 +28,23 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webho
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 PERSISTENCE_NOTE = "They'll stay on your team."
+
+# Sandbox mode: run Claude Code in Docker container for isolation
+SANDBOX_ENABLED = os.environ.get("SANDBOX_ENABLED", "0") == "1"
+SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "claudecode-telegram:latest")
+SANDBOX_PROJECT_ROOT = os.environ.get("SANDBOX_PROJECT_ROOT", "")  # Required in sandbox mode
+
+# Directories to mount in sandbox (read-write)
+SANDBOX_MOUNTS = [
+    Path.home() / ".claude",      # Claude Code config
+    Path.home() / ".codex",       # Codex config
+    Path.home() / ".gemini",      # Gemini config
+    Path.home() / "learnings",    # Team learnings
+]
+# Files to mount (read-only)
+SANDBOX_MOUNT_FILES = [
+    Path.home() / "team-playbook.md",
+]
 
 # Temporary image inbox (session-isolated, auto-cleaned)
 IMAGE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
@@ -626,11 +643,115 @@ def export_hook_env(tmux_name):
     ])
 
 
-def create_session(name):
+def get_docker_run_cmd(name, project_root=None):
+    """Build docker run command for sandbox mode.
+
+    Args:
+        name: Worker name (used for container name)
+        project_root: Project directory to mount (optional, uses SANDBOX_PROJECT_ROOT if not set)
+
+    Returns:
+        Command string to run in tmux
+    """
+    import platform
+    container_name = f"claude-worker-{name}"
+    project = project_root or SANDBOX_PROJECT_ROOT
+
+    # Base command with security options
+    cmd_parts = [
+        "docker", "run", "-it",
+        f"--name={container_name}",
+        "--rm",  # Clean up on exit
+        "--read-only",
+        "--tmpfs=/tmp:exec",
+        "--tmpfs=/home/claude/.cache",
+        # Writable areas for package installation
+        "--tmpfs=/usr/local:exec",
+        "--tmpfs=/home/claude/.local:exec",
+        "--tmpfs=/home/claude/.npm",
+        "--tmpfs=/home/claude/.cargo",
+        "--tmpfs=/var/lib/apt",
+        "--tmpfs=/var/cache/apt",
+        "--pids-limit=512",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+    ]
+
+    # Host gateway for bridge communication
+    if platform.system() == "Linux":
+        cmd_parts.append("--add-host=host.docker.internal:host-gateway")
+
+    # Mount config directories (if they exist)
+    home = Path.home()
+    for mount_path in SANDBOX_MOUNTS:
+        if mount_path.exists():
+            # Map to same path in container for consistency
+            container_path = str(mount_path).replace(str(home), "/home/claude")
+            cmd_parts.append(f"--mount=type=bind,src={mount_path},dst={container_path}")
+
+    # Mount files (read-only)
+    for mount_file in SANDBOX_MOUNT_FILES:
+        if mount_file.exists():
+            container_path = str(mount_file).replace(str(home), "/home/claude")
+            cmd_parts.append(f"--mount=type=bind,src={mount_file},dst={container_path},readonly")
+
+    # Mount project directory
+    if project:
+        cmd_parts.append(f"--mount=type=bind,src={project},dst={project}")
+
+    # Mount session files for hook coordination
+    cmd_parts.append(f"--mount=type=bind,src={SESSIONS_DIR},dst=/home/claude/.claude/telegram/sessions")
+
+    # Mount temp for images
+    IMAGE_INBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    cmd_parts.append(f"--mount=type=bind,src={IMAGE_INBOX_ROOT},dst={IMAGE_INBOX_ROOT}")
+
+    # Environment variables
+    bridge_url = f"http://host.docker.internal:{PORT}"
+    cmd_parts.extend([
+        f"-e=BRIDGE_URL={bridge_url}",
+        f"-e=PORT={PORT}",
+        f"-e=TMUX_PREFIX={TMUX_PREFIX}",
+        f"-e=SESSIONS_DIR=/home/claude/.claude/telegram/sessions",
+        "-e=TMUX_FALLBACK=1",
+    ])
+
+    # Working directory
+    if project:
+        cmd_parts.extend(["-w", project])
+
+    # Image
+    cmd_parts.append(SANDBOX_IMAGE)
+
+    return " ".join(cmd_parts)
+
+
+def docker_container_exists(name):
+    """Check if a docker container exists (running or stopped)."""
+    container_name = f"claude-worker-{name}"
+    result = subprocess.run(
+        ["docker", "container", "inspect", container_name],
+        capture_output=True
+    )
+    return result.returncode == 0
+
+
+def stop_docker_container(name):
+    """Stop and remove a docker container."""
+    container_name = f"claude-worker-{name}"
+    subprocess.run(["docker", "stop", container_name], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+
+
+def create_session(name, project_root=None):
     """Create a new Claude instance.
 
     SECURITY: Token is NOT exported to Claude session. Hook forwards responses
     to bridge via localhost HTTP, bridge sends to Telegram. Token isolation.
+
+    Args:
+        name: Worker name
+        project_root: Project directory (optional, for sandbox mode)
     """
     tmux_name = f"{TMUX_PREFIX}{name}"
 
@@ -647,29 +768,38 @@ def create_session(name):
 
     time.sleep(0.5)
 
-    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
-    # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
-    export_hook_env(tmux_name)
-    time.sleep(0.3)
+    if SANDBOX_ENABLED:
+        # Sandbox mode: run Claude in Docker container
+        docker_cmd = get_docker_run_cmd(name, project_root)
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+        print(f"Started worker '{name}' in sandbox mode")
+    else:
+        # Legacy mode: run Claude directly
+        # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
+        # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
+        export_hook_env(tmux_name)
+        time.sleep(0.3)
 
-    # Start claude
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                   "claude --dangerously-skip-permissions", "Enter"])
+        # Start claude
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                       "claude --dangerously-skip-permissions", "Enter"])
 
-    # Wait for confirmation dialog and accept it (select option 2: "Yes, I accept")
-    time.sleep(1.5)
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])  # Select option 2
-    time.sleep(0.3)
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
+        # Wait for confirmation dialog and accept it (select option 2: "Yes, I accept")
+        time.sleep(1.5)
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])  # Select option 2
+        time.sleep(0.3)
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
 
     # Send welcome message with feature info (after Claude starts)
-    time.sleep(2.0)
+    time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)  # Container startup takes longer
     welcome = (
         "You are connected to Telegram via claudecode-telegram bridge. "
         "To send images back to Telegram, include this tag in your response: "
         "[[image:/path/to/file.png|optional caption]]. "
         "Allowed paths: /tmp, current directory. Allowed formats: jpg, png, gif, webp, bmp."
     )
+    if SANDBOX_ENABLED:
+        welcome += " Running in sandbox mode (Docker container)."
     tmux_send_message(tmux_name, welcome)
 
     state["active"] = name
@@ -685,6 +815,11 @@ def kill_session(name):
         return False, f"Worker '{name}' not found"
 
     tmux_name = registered[name]["tmux"]
+
+    # Stop docker container if in sandbox mode
+    if SANDBOX_ENABLED:
+        stop_docker_container(name)
+
     subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
 
     # Clean up inbox images
@@ -698,7 +833,7 @@ def kill_session(name):
     return True, None
 
 
-def restart_claude(name):
+def restart_claude(name, project_root=None):
     """Restart claude in an existing tmux session."""
     registered = get_registered_sessions()
     if name not in registered:
@@ -712,15 +847,24 @@ def restart_claude(name):
     if is_claude_running(tmux_name):
         return False, "Worker is already running"
 
-    # Re-export env vars for hook (in case session was created by older version or bridge restarted)
-    export_hook_env(tmux_name)
-    time.sleep(0.3)
+    if SANDBOX_ENABLED:
+        # Stop any existing container first
+        stop_docker_container(name)
+        time.sleep(0.5)
 
-    # Start claude in the existing tmux session
-    subprocess.run([
-        "tmux", "send-keys", "-t", tmux_name,
-        "claude --dangerously-skip-permissions", "Enter"
-    ])
+        # Start new container
+        docker_cmd = get_docker_run_cmd(name, project_root)
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+    else:
+        # Re-export env vars for hook (in case session was created by older version or bridge restarted)
+        export_hook_env(tmux_name)
+        time.sleep(0.3)
+
+        # Start claude in the existing tmux session
+        subprocess.run([
+            "tmux", "send-keys", "-t", tmux_name,
+            "claude --dangerously-skip-permissions", "Enter"
+        ])
 
     return True, None
 

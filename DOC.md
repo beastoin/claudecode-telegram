@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.10.2
+> Version: 0.11.0
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,32 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.11.0 - Sandbox mode (Docker isolation)
+
+**New Features:**
+- **Sandbox mode** (default: enabled): Workers run in Docker containers for isolation
+- No more `--dangerously-skip-permissions` needed when using sandbox
+- `--sandbox` / `--no-sandbox` flags to toggle
+- `--sandbox-image` to specify Docker image
+- `--project-root` to mount project directories
+
+**Mounts in sandbox mode:**
+- `~/.claude` - Claude Code config
+- `~/.codex` - Codex config
+- `~/.gemini` - Gemini config
+- `~/learnings/` - Team learnings
+- `~/team-playbook.md` - Team playbook (read-only)
+- Project directory (specified via `--project-root`)
+
+**Security improvements:**
+- Workers isolated via Docker containers
+- Read-only root filesystem
+- Dropped all capabilities
+- No new privileges
+- PID limit (512)
+
+**Fallback:** Use `--no-sandbox` for legacy behavior (direct execution with `--dangerously-skip-permissions`)
 
 ### v0.10.2 - Message splitting for Telegram 4096 char limit
 

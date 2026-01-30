@@ -321,6 +321,83 @@ test_equals_syntax() {
     fi
 }
 
+test_sandbox_config() {
+    info "Testing sandbox configuration variables..."
+    if python3 -c "
+from bridge import SANDBOX_ENABLED, SANDBOX_IMAGE, SANDBOX_MOUNTS, SANDBOX_MOUNT_FILES
+from pathlib import Path
+
+# Verify config variables exist
+assert isinstance(SANDBOX_ENABLED, bool), 'SANDBOX_ENABLED should be bool'
+assert isinstance(SANDBOX_IMAGE, str), 'SANDBOX_IMAGE should be str'
+assert isinstance(SANDBOX_MOUNTS, list), 'SANDBOX_MOUNTS should be list'
+assert isinstance(SANDBOX_MOUNT_FILES, list), 'SANDBOX_MOUNT_FILES should be list'
+
+# Verify mounts are Path objects
+for m in SANDBOX_MOUNTS:
+    assert isinstance(m, Path), f'Mount {m} should be Path'
+
+# Verify expected mounts
+home = Path.home()
+expected_mounts = [home / '.claude', home / '.codex', home / '.gemini', home / 'learnings']
+for em in expected_mounts:
+    assert em in SANDBOX_MOUNTS, f'{em} should be in SANDBOX_MOUNTS'
+
+# Verify team-playbook is read-only mount
+assert home / 'team-playbook.md' in SANDBOX_MOUNT_FILES, 'team-playbook.md should be in SANDBOX_MOUNT_FILES'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Sandbox config variables correct"
+    else
+        fail "Sandbox config test failed"
+    fi
+}
+
+test_sandbox_docker_cmd() {
+    info "Testing sandbox Docker command generation..."
+    if python3 -c "
+import os
+os.environ['SANDBOX_ENABLED'] = '1'
+os.environ['PORT'] = '8095'
+
+from bridge import get_docker_run_cmd
+
+cmd = get_docker_run_cmd('testworker', '/tmp/project')
+
+# Verify command structure
+assert 'docker run -it' in cmd, 'should have docker run -it'
+assert '--name=claude-worker-testworker' in cmd, 'should have container name'
+assert '--rm' in cmd, 'should have --rm for cleanup'
+assert '--read-only' in cmd, 'should have read-only rootfs'
+
+# Verify security options
+assert '--cap-drop=ALL' in cmd, 'should drop all caps'
+assert '--security-opt=no-new-privileges' in cmd, 'should prevent privilege escalation'
+assert '--pids-limit=512' in cmd, 'should limit processes'
+
+# Verify writable tmpfs for packages
+assert '--tmpfs=/usr/local:exec' in cmd, 'should have /usr/local tmpfs for packages'
+assert '--tmpfs=/home/claude/.local:exec' in cmd, 'should have .local tmpfs for pip'
+assert '--tmpfs=/home/claude/.npm' in cmd, 'should have .npm tmpfs'
+assert '--tmpfs=/home/claude/.cargo' in cmd, 'should have .cargo tmpfs'
+assert '--tmpfs=/var/lib/apt' in cmd, 'should have apt lib tmpfs'
+assert '--tmpfs=/var/cache/apt' in cmd, 'should have apt cache tmpfs'
+
+# Verify project mount
+assert '--mount=type=bind,src=/tmp/project,dst=/tmp/project' in cmd, 'should mount project'
+
+# Verify BRIDGE_URL for container->host communication
+assert 'BRIDGE_URL=http://host.docker.internal:8095' in cmd, 'should set BRIDGE_URL'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Sandbox Docker command correct"
+    else
+        fail "Sandbox Docker command test failed"
+    fi
+}
+
 test_bridge_starts() {
     info "Starting bridge on port $PORT..."
 
@@ -1079,6 +1156,8 @@ main() {
     test_multipart_formatting
     test_version
     test_equals_syntax
+    test_sandbox_config
+    test_sandbox_docker_cmd
 
     # Integration tests (bridge needed)
     log ""

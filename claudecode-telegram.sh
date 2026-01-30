@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.10.2"
+VERSION="0.11.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18,6 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   ADMIN_CHAT_ID           - Pre-set admin (otherwise auto-learns first user)
 #   TUNNEL_URL              - Use existing tunnel instead of starting cloudflared
 #   TELEGRAM_WEBHOOK_SECRET - Webhook verification secret
+#
+# Sandbox mode (Docker isolation):
+#   SANDBOX_ENABLED         - Set to "1" to run workers in Docker containers (default: 0)
+#   SANDBOX_IMAGE           - Docker image name (default: claudecode-telegram:latest)
+#   SANDBOX_PROJECT_ROOT    - Project directory to mount (optional)
 #
 # Derived (auto-set per node, don't set manually):
 #   PORT, SESSIONS_DIR, TMUX_PREFIX
@@ -41,6 +46,7 @@ JSON_OUTPUT=false
 FORCE=false
 ALL_NODES=false
 NODE_NAME="${NODE_NAME:-}"
+SANDBOX="${SANDBOX_ENABLED:-1}"  # Default: enabled (use Docker isolation)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output
@@ -381,6 +387,22 @@ cmd_run() {
     # Set up env vars for bridge
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
+
+    # Sandbox mode env vars
+    export SANDBOX_ENABLED="${SANDBOX:-1}"
+    export SANDBOX_IMAGE="${SANDBOX_IMAGE:-claudecode-telegram:latest}"
+    export SANDBOX_PROJECT_ROOT="${SANDBOX_PROJECT_ROOT:-}"
+
+    if [[ "$SANDBOX_ENABLED" == "1" ]]; then
+        log "$(green "Sandbox mode enabled") - workers run in Docker containers"
+        # Check if docker is available
+        if ! command -v docker &>/dev/null; then
+            warn "Docker not found - falling back to direct execution"
+            export SANDBOX_ENABLED=0
+        fi
+    else
+        log "$(yellow "Sandbox mode disabled") - workers run directly (--dangerously-skip-permissions)"
+    fi
 
     local bridge_log="$node_dir/bridge.log"
 
@@ -992,6 +1014,10 @@ FLAGS
   --no-color            Disable colors
   --env-file <path>     Load env from file
   -f, --force           Overwrite existing
+  --sandbox             Run workers in Docker (default: enabled)
+  --no-sandbox          Run workers directly (--dangerously-skip-permissions)
+  --sandbox-image <img> Docker image (default: claudecode-telegram:latest)
+  --project-root <dir>  Project directory to mount in sandbox
 
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
@@ -999,6 +1025,9 @@ ENVIRONMENT
   PORT                    Server port (default: 8080)
   TUNNEL_URL              Pre-configured tunnel URL
   TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
+  SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 1)
+  SANDBOX_IMAGE           Docker image for workers
+  SANDBOX_PROJECT_ROOT    Project directory to mount
 
 DIRECTORY STRUCTURE
   ~/.claude/telegram/nodes/
@@ -1044,6 +1073,12 @@ main() {
             -n=*|--node=*) NODE_NAME="${1#*=}"; shift;;
             -n|--node)     NODE_NAME="$2"; shift 2;;
             --all)        ALL_NODES=true; shift;;
+            --sandbox)    SANDBOX=1; shift;;
+            --no-sandbox) SANDBOX=0; shift;;
+            --sandbox-image=*) SANDBOX_IMAGE="${1#*=}"; shift;;
+            --sandbox-image)   SANDBOX_IMAGE="$2"; shift 2;;
+            --project-root=*)  SANDBOX_PROJECT_ROOT="${1#*=}"; shift;;
+            --project-root)    SANDBOX_PROJECT_ROOT="$2"; shift 2;;
             -*)           error "Unknown flag: $1"; exit 2;;
             *)            break;;
         esac

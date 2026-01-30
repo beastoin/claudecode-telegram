@@ -41,11 +41,17 @@ PENDING_FILE="$SESSION_DIR/pending"
 [ ! -f "$CHAT_ID_FILE" ] && exit 0
 [ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
-# Get bridge port
-PORT_FILE="$SESSIONS_DIR/../port"
-BRIDGE_PORT="${PORT:-8080}"
-[ -f "$PORT_FILE" ] && BRIDGE_PORT=$(cat "$PORT_FILE")
-BRIDGE_URL="http://localhost:${BRIDGE_PORT}/response"
+# Get bridge URL (BRIDGE_URL env var takes precedence for Docker container mode)
+if [ -n "${BRIDGE_URL:-}" ]; then
+    # Docker container mode - use host.docker.internal URL
+    BRIDGE_ENDPOINT="${BRIDGE_URL}/response"
+else
+    # Direct mode - use localhost
+    PORT_FILE="$SESSIONS_DIR/../port"
+    BRIDGE_PORT="${PORT:-8080}"
+    [ -f "$PORT_FILE" ] && BRIDGE_PORT=$(cat "$PORT_FILE")
+    BRIDGE_ENDPOINT="http://localhost:${BRIDGE_PORT}/response"
+fi
 
 # Find last user message line
 LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
@@ -123,6 +129,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 echo "$TEXT" > "$TMPFILE"
-python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_URL" 2>/dev/null
+python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT" 2>/dev/null
 
 rm -f "$PENDING_FILE"
