@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.10.0
+> Version: 0.10.2
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,34 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.10.2 - Message splitting for Telegram 4096 char limit
+
+**New feature:** Long responses are now automatically split into multiple messages to fit Telegram's 4096 character limit.
+
+**Split strategy:**
+- Messages split on safe boundaries: blank lines → newlines → spaces → hard cut
+- Multi-part messages show part numbers: `<b>worker (1/3):</b>`
+- Parts are chained with `reply_to_message_id` for visual grouping
+- Small delay (50ms) between parts ensures correct ordering
+
+**Implementation:**
+- `split_message(text, max_len)` - splits text on safe boundaries
+- `find_split_point(text, max_len)` - finds best split point
+- `format_multipart_messages(session_name, chunks)` - adds prefix + part numbers
+- `handle_hook_response()` now loops through chunks and sends sequentially
+
+### v0.10.1 - Support --flag=value argument syntax
+
+**Bug fix:** Argument parser now accepts both `--flag=value` and `--flag value` syntax.
+
+Previously, `--port=1789` was silently ignored (falling back to node config), causing confusing errors like "Port 8081 is already in use" when you specified a different port.
+
+Now both work:
+```bash
+./claudecode-telegram.sh run --node=prod --port=1789   # ✅ equals syntax
+./claudecode-telegram.sh run --node prod --port 1789   # ✅ space syntax
+```
 
 ### v0.10.0 - Simplify CLI (~200 lines removed)
 

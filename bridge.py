@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.10.0"
+VERSION = "0.10.2"
 
 import os
 import json
@@ -318,6 +318,82 @@ def parse_image_tags(text):
 def format_response_text(session_name, text):
     """Format response with session prefix. No escaping - Claude Code handles safety."""
     return f"<b>{session_name}:</b>\n{text}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Message Splitting (Telegram 4096 char limit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+TELEGRAM_MAX_LENGTH = 4096
+
+
+def split_message(text, max_len=TELEGRAM_MAX_LENGTH):
+    """Split text into chunks that fit within Telegram's message limit.
+
+    Splits on safe boundaries: blank lines → newlines → spaces → hard cut.
+    Returns list of text chunks.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+
+        # Find best split point within max_len
+        split_at = find_split_point(remaining, max_len)
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+
+    return chunks
+
+
+def find_split_point(text, max_len):
+    """Find the best point to split text within max_len.
+
+    Priority: blank line → newline → space → hard cut.
+    """
+    search_area = text[:max_len]
+
+    # Try blank line (paragraph break)
+    pos = search_area.rfind('\n\n')
+    if pos > max_len // 2:  # Only use if reasonably far into text
+        return pos + 1  # Include one newline in current chunk
+
+    # Try newline
+    pos = search_area.rfind('\n')
+    if pos > max_len // 2:
+        return pos + 1
+
+    # Try space
+    pos = search_area.rfind(' ')
+    if pos > max_len // 2:
+        return pos + 1
+
+    # Hard cut at max_len
+    return max_len
+
+
+def format_multipart_messages(session_name, chunks):
+    """Format chunks with session prefix and part indicators.
+
+    Single chunk: "<b>name:</b>\ntext"
+    Multiple chunks: "<b>name (1/3):</b>\ntext"
+    """
+    if len(chunks) == 1:
+        return [format_response_text(session_name, chunks[0])]
+
+    formatted = []
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        prefix = f"<b>{session_name} ({i}/{total}):</b>\n"
+        formatted.append(prefix + chunk)
+
+    return formatted
 
 
 def setup_bot_commands():
@@ -841,10 +917,36 @@ class Handler(BaseHTTPRequestHandler):
 
             # Send text message if there's text content
             if clean_text:
-                response_text = format_response_text(session_name, clean_text)
-                result = telegram_api("sendMessage", {"chat_id": chat_id, "text": response_text, "parse_mode": "HTML"})
-                if result and result.get("ok"):
-                    print(f"Response sent: {session_name} -> Telegram OK")
+                # Split long messages to fit Telegram's 4096 char limit
+                # Reserve space for prefix: "<b>name (xx/xx):</b>\n" ≈ 30 chars + session name
+                prefix_reserve = len(session_name) + 30
+                chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
+                formatted_parts = format_multipart_messages(session_name, chunks)
+
+                prev_msg_id = None
+                for i, part in enumerate(formatted_parts):
+                    msg_data = {
+                        "chat_id": chat_id,
+                        "text": part,
+                        "parse_mode": "HTML"
+                    }
+                    # Chain messages with reply_to for visual grouping
+                    if prev_msg_id:
+                        msg_data["reply_to_message_id"] = prev_msg_id
+
+                    result = telegram_api("sendMessage", msg_data)
+                    if result and result.get("ok"):
+                        prev_msg_id = result.get("result", {}).get("message_id")
+                        if len(formatted_parts) > 1:
+                            print(f"Response sent: {session_name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
+                        else:
+                            print(f"Response sent: {session_name} -> Telegram OK")
+                    else:
+                        print(f"Response failed: {session_name} part {i+1} -> {result}")
+
+                    # Small delay between parts to ensure order
+                    if i < len(formatted_parts) - 1:
+                        time.sleep(0.05)
 
             # Send images
             for img_path, img_caption in images:

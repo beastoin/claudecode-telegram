@@ -199,12 +199,125 @@ print('OK')
     fi
 }
 
+test_message_splitting_short() {
+    info "Testing message splitting (short message, no split)..."
+    if python3 -c "
+from bridge import split_message, TELEGRAM_MAX_LENGTH
+text = 'Short message'
+chunks = split_message(text)
+assert len(chunks) == 1, f'expected 1 chunk, got {len(chunks)}'
+assert chunks[0] == text, 'chunk should match original'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Short message not split"
+    else
+        fail "Short message splitting failed"
+    fi
+}
+
+test_message_splitting_newlines() {
+    info "Testing message splitting (split on newlines)..."
+    if python3 -c "
+from bridge import split_message
+
+# Create text that's over 4096 chars with clear newline breaks
+lines = ['Line ' + str(i) + ' ' + 'x' * 100 for i in range(50)]
+text = '\n'.join(lines)
+assert len(text) > 4096, f'test text should be >4096, got {len(text)}'
+
+chunks = split_message(text, max_len=4096)
+assert len(chunks) > 1, f'expected multiple chunks, got {len(chunks)}'
+
+# Each chunk should be within limit
+for i, chunk in enumerate(chunks):
+    assert len(chunk) <= 4096, f'chunk {i} too long: {len(chunk)}'
+
+# Joined chunks should contain all content (allowing for whitespace trimming)
+all_content = ''.join(c.strip() for c in chunks)
+original_content = text.replace('\n', '').replace(' ', '')
+# Just verify we didn't lose significant content
+assert len(all_content) > len(text) * 0.9, 'lost too much content'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Long message splits on newlines"
+    else
+        fail "Newline splitting failed"
+    fi
+}
+
+test_message_splitting_hard() {
+    info "Testing message splitting (hard split, no natural breaks)..."
+    if python3 -c "
+from bridge import split_message
+
+# Create text with no natural break points (one long line)
+text = 'x' * 10000
+chunks = split_message(text, max_len=4096)
+
+assert len(chunks) >= 3, f'expected 3+ chunks for 10000 chars, got {len(chunks)}'
+
+# Each chunk should be within limit
+for i, chunk in enumerate(chunks):
+    assert len(chunk) <= 4096, f'chunk {i} too long: {len(chunk)}'
+
+# Total length should match
+total_len = sum(len(c) for c in chunks)
+assert total_len == len(text), f'content lost: {total_len} vs {len(text)}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Hard split works for long lines"
+    else
+        fail "Hard split failed"
+    fi
+}
+
+test_multipart_formatting() {
+    info "Testing multipart message formatting..."
+    if python3 -c "
+from bridge import format_multipart_messages
+
+# Single chunk - no part numbers
+chunks = ['Hello world']
+formatted = format_multipart_messages('worker', chunks)
+assert len(formatted) == 1
+assert formatted[0] == '<b>worker:</b>\nHello world'
+assert '(1/' not in formatted[0], 'single chunk should not have part numbers'
+
+# Multiple chunks - should have part numbers
+chunks = ['Part 1 content', 'Part 2 content', 'Part 3 content']
+formatted = format_multipart_messages('lee', chunks)
+assert len(formatted) == 3
+assert formatted[0] == '<b>lee (1/3):</b>\nPart 1 content'
+assert formatted[1] == '<b>lee (2/3):</b>\nPart 2 content'
+assert formatted[2] == '<b>lee (3/3):</b>\nPart 3 content'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Multipart formatting works"
+    else
+        fail "Multipart formatting failed"
+    fi
+}
+
 test_version() {
     info "Testing version..."
     if ./claudecode-telegram.sh --version | grep -q "claudecode-telegram"; then
         success "Version command works"
     else
         fail "Version command failed"
+    fi
+}
+
+test_equals_syntax() {
+    info "Testing --flag=value argument syntax..."
+    # Test that --node=test and --port=9999 are parsed correctly (v0.10.1 fix)
+    # We just need to verify the script parses without error, not actually run
+    if ./claudecode-telegram.sh --node=testnode --port=9999 --help 2>/dev/null | grep -qi "usage"; then
+        success "Equals syntax (--flag=value) works"
+    else
+        fail "Equals syntax parsing failed"
     fi
 }
 
@@ -960,7 +1073,12 @@ main() {
     log "── Unit Tests ──────────────────────────────────────────────────────────"
     test_imports
     test_response_prefix_formatting
+    test_message_splitting_short
+    test_message_splitting_newlines
+    test_message_splitting_hard
+    test_multipart_formatting
     test_version
+    test_equals_syntax
 
     # Integration tests (bridge needed)
     log ""

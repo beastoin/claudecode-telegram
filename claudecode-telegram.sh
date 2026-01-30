@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.10.0"
+VERSION="0.10.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,12 +319,14 @@ cmd_run() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -p|--port) port="$2"; shift 2;;
-            --tunnel-url) tunnel_url="$2"; shift 2;;
-            --no-tunnel) no_tunnel=true; shift;;
-            --headless) HEADLESS=true; shift;;
-            -q|--quiet) QUIET=true; shift;;
-            -v|--verbose) VERBOSE=true; shift;;
+            -p=*|--port=*)       port="${1#*=}"; shift;;
+            -p|--port)           port="$2"; shift 2;;
+            --tunnel-url=*)      tunnel_url="${1#*=}"; shift;;
+            --tunnel-url)        tunnel_url="$2"; shift 2;;
+            --no-tunnel)         no_tunnel=true; shift;;
+            --headless)          HEADLESS=true; shift;;
+            -q|--quiet)          QUIET=true; shift;;
+            -v|--verbose)        VERBOSE=true; shift;;
             *) shift;;
         esac
     done
@@ -1027,20 +1029,23 @@ EOF
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --env-file)  set -a; source "$2"; set +a; shift 2;;
-            -h|--help)   cmd_help; exit 0;;
+            --env-file=*) set -a; source "${1#*=}"; set +a; shift;;
+            --env-file)   set -a; source "$2"; set +a; shift 2;;
+            -h|--help)    cmd_help; exit 0;;
             -V|--version) echo "claudecode-telegram $VERSION (beastoin)"; exit 0;;
-            -q|--quiet)  QUIET=true; shift;;
+            -q|--quiet)   QUIET=true; shift;;
             -v|--verbose) VERBOSE=true; shift;;
-            --json)      JSON_OUTPUT=true; shift;;
-            --no-color)  NO_COLOR=true; shift;;
-            --headless)  HEADLESS=true; shift;;
-            -f|--force)  FORCE=true; shift;;
-            -p|--port)   PORT="$2"; shift 2;;
-            -n|--node)   NODE_NAME="$2"; shift 2;;
-            --all)       ALL_NODES=true; shift;;
-            -*)          error "Unknown flag: $1"; exit 2;;
-            *)           break;;
+            --json)       JSON_OUTPUT=true; shift;;
+            --no-color)   NO_COLOR=true; shift;;
+            --headless)   HEADLESS=true; shift;;
+            -f|--force)   FORCE=true; shift;;
+            -p=*|--port=*) PORT="${1#*=}"; shift;;
+            -p|--port)     PORT="$2"; shift 2;;
+            -n=*|--node=*) NODE_NAME="${1#*=}"; shift;;
+            -n|--node)     NODE_NAME="$2"; shift 2;;
+            --all)        ALL_NODES=true; shift;;
+            -*)           error "Unknown flag: $1"; exit 2;;
+            *)            break;;
         esac
     done
 
