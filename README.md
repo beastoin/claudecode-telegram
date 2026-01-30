@@ -1,8 +1,38 @@
 # claudecode-telegram
 
-> Control your AI dev team from Telegram.
+> Manage a team of AI developers from your phone.
 
-Telegram bot that lets you manage multiple Claude Code workers via chat. Like having a remote AI dev team you message from your phone.
+claudecode-telegram is a Telegram bot for running multiple Claude Code workers at once. It feels like texting a remote dev team, except they work 24/7, keep full context, and ship while you sleep.
+
+## What You Get
+
+- **Ship faster**: AI works overnight so features land sooner.
+- **Manage multiple projects from Telegram**: one chat for all your work.
+- **No context switching**: long-lived workers remember everything.
+- **Scale output without hiring**: add workers in seconds.
+
+**In the wild**: Our ops manager (@luck) runs 5 AI workers across the Omi mobile app, Telegram bridge development, and research. Real examples from today:
+- Sent "gm" to all workers in parallel
+- Deployed v0.10.2 to prod via one worker
+- Checked all 5 sessions at once to see who was stuck vs working
+- Broadcast playbook update to entire team with one command
+
+## Tasks That Work Great
+
+- "Fix the login bug in auth.py"
+- "Add dark mode to the settings page"
+- "Write tests for the billing module"
+- "Review PR #123 and leave comments"
+- "Implement the feature from issue #456"
+
+## Make Money With It
+
+| Who | How |
+|-----|-----|
+| **Freelancers** | Take 3x more clients - workers handle parallel projects |
+| **Startups** | Ship features weekly instead of monthly |
+| **Agencies** | Scale delivery without hiring overhead |
+| **Solo devs** | Build side projects while keeping your day job |
 
 ## What You Can Do
 
