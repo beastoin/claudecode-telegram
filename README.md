@@ -71,14 +71,24 @@ export TELEGRAM_BOT_TOKEN="<token from @BotFather>"
 ## Daily Use (Real Commands)
 
 ```
-/hire api
+/hire ops
+/hire triage
+/hire research
 /hire frontend
+/hire qa
 
-/api Draft billing endpoints + error codes
-/frontend Sketch billing UI sections + fields
+/ops Run 5 worker queue: scrape refunds, reconcile invoices, update CRM notes, draft escalation email, and ping @qa for flaky test owners
+/triage Triage the latest GitHub issues; label, close dupes, and summarize top 10 with links
+/research Compare auth flows across api/, web/, and mobile/ repos; highlight inconsistencies + suggested fix
+/frontend Audit the settings UI for missing states and propose copy improvements
+/qa Reproduce the top crash from yesterday and draft a minimal repro
 
-@api Also include webhook payloads for failed charges
+@ops Coordinate with @frontend on status banner copy; @research share findings with @triage
 /progress
+
+(Later, after you sleep)
+/progress
+@ops Post the nightly summary + anything blocked
 ```
 
 You can also drop a screenshot and ask, "What is wrong with this UI?"
