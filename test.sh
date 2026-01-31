@@ -285,13 +285,13 @@ assert len(formatted) == 1
 assert formatted[0] == '<b>worker:</b>\nHello world'
 assert '(1/' not in formatted[0], 'single chunk should not have part numbers'
 
-# Multiple chunks - should have part numbers
+# Multiple chunks - first has prefix, rest are seamless (no prefix)
 chunks = ['Part 1 content', 'Part 2 content', 'Part 3 content']
 formatted = format_multipart_messages('lee', chunks)
 assert len(formatted) == 3
-assert formatted[0] == '<b>lee (1/3):</b>\nPart 1 content'
-assert formatted[1] == '<b>lee (2/3):</b>\nPart 2 content'
-assert formatted[2] == '<b>lee (3/3):</b>\nPart 3 content'
+assert formatted[0] == '<b>lee:</b>\nPart 1 content', f'first: {formatted[0]}'
+assert formatted[1] == 'Part 2 content', f'second should be plain: {formatted[1]}'
+assert formatted[2] == 'Part 3 content', f'third should be plain: {formatted[2]}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then

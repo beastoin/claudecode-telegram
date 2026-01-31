@@ -396,19 +396,22 @@ def find_split_point(text, max_len):
 
 
 def format_multipart_messages(session_name, chunks):
-    """Format chunks with session prefix and part indicators.
+    """Format chunks with session prefix (first chunk only).
 
     Single chunk: "<b>name:</b>\ntext"
-    Multiple chunks: "<b>name (1/3):</b>\ntext"
+    Multiple chunks: first has prefix, rest are plain text (seamless)
     """
     if len(chunks) == 1:
         return [format_response_text(session_name, chunks[0])]
 
     formatted = []
-    total = len(chunks)
-    for i, chunk in enumerate(chunks, 1):
-        prefix = f"<b>{session_name} ({i}/{total}):</b>\n"
-        formatted.append(prefix + chunk)
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            # First chunk gets the session prefix
+            formatted.append(format_response_text(session_name, chunk))
+        else:
+            # Subsequent chunks are plain text (seamless continuation)
+            formatted.append(chunk)
 
     return formatted
 
