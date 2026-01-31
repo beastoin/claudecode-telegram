@@ -23,33 +23,15 @@ Claude Code - Telegram is a Telegram bot + bridge that lets you run multiple Cla
 
 ## Where Everything Lives
 
-**Your Messages**: All your conversations stay in Telegram. We don't store your messages anywhere else - your chat history lives where you already use it. Search, scroll back, share - it's all in the app you know.
-
-**AI Memory**: Each AI worker maintains its own persistent memory within its session. When you talk to @chen, they remember your previous conversations and context. Start a new topic? They still know what you discussed before. It's like having a team member who never forgets.
-
-**Files & Code**: Any files the AI creates or modifies live on your server in standard folders. No proprietary formats, no lock-in. You can browse, edit, or backup everything with normal tools.
-
-## Team Knowledge
-
-Your AI team gets smarter over time through shared knowledge:
-
-**Team Playbook** (`~/team-playbook.md`)
-Shared instructions that all workers follow. Define your coding standards, communication preferences, or project-specific rules once - every team member follows them automatically.
-
-**Lessons Learned** (`~/learnings/README.md`)
-A living document of workflows, mistakes to avoid, and hard-won insights. When one worker figures out a better way to do something, the whole team benefits. No more repeating the same mistakes or rediscovering solutions.
-
-This means your AI team compounds knowledge just like a human team would - but without the tribal knowledge walking out the door.
+- **All messages stay in Telegram.** We don't store your messages anywhere else.
+- **Each AI worker keeps an ongoing conversation.** It remembers what was said before, so you don't have to repeat context.
+- **You can pick up anytime.** The chat itself is the workspace, so it's easy to resume work where you left off.
 
 ## Why This Architecture
 
-- **No Database to Manage**: Your conversation history lives in Telegram. Your files live on disk. There's no separate database to backup, migrate, or worry about corrupting.
-
-- **No Servers to Maintain**: Runs on any machine - your laptop, a $5 VPS, or a spare Raspberry Pi. No container orchestration, no cloud bills that scale with usage, no DevOps degree required.
-
-- **Chat History IS Project History**: Every decision, every change, every "why did we do it this way?" is searchable in your Telegram chat. Onboard new team members by sharing the chat. Your project's institutional memory is built-in.
-
-- **Works Where You Already Are**: No new apps to install or check. Your AI team lives in the same Telegram you use for everything else. Get notifications, respond on mobile, share with colleagues - it just works.
+- **No extra systems to manage.** There's no separate database and no servers you need to maintain.
+- **Chat history *is* project history.** Decisions, notes, and outputs live in the same place your team already uses.
+- **Less overhead, more clarity.** You get a clean record of work without adding new tools or processes.
 
 ## Quick Start
 
