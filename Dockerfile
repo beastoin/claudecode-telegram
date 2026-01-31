@@ -1,42 +1,67 @@
-# claudecode-telegram worker image
-# Runs Claude Code in an isolated container with hooks pre-installed
+# Dockerfile for claudecode-telegram sandbox workers
+#
+# This image runs Claude Code workers in isolated Docker containers.
+# Home directory (~) is mounted to /workspace at runtime.
+#
+# Build: docker build -t claudecode-telegram:latest .
+# Test:  docker run --rm -it claudecode-telegram:latest claude --version
+#
+FROM node:22-bookworm-slim
 
-FROM ubuntu:22.04
+LABEL org.opencontainers.image.title="claudecode-telegram"
+LABEL org.opencontainers.image.description="Claude Code sandbox worker for Telegram bridge"
+LABEL org.opencontainers.image.source="https://github.com/anthropics/claudecode-telegram"
 
-# Avoid interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
+# Install system dependencies
+# - git: version control (required by many Claude Code operations)
+# - curl: HTTP client for webhooks and APIs
+# - jq: JSON processing for scripts
+# - python3: scripting and tooling
+# - ca-certificates: HTTPS connections
+# - openssh-client: git over SSH
+# - bash: shell scripts
+# - procps: process utilities (ps, top)
+# - less: pager for viewing files
+# - vim-tiny: minimal text editor
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    curl \
     jq \
-    tmux \
     python3 \
     python3-pip \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-client \
+    bash \
+    procps \
+    less \
+    vim-tiny \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/vim.tiny /usr/bin/vim
 
-# Install Node.js (required for Claude Code)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI
+# Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
-# Create non-root user
-RUN useradd -m -s /bin/bash claude
+# Use existing 'node' user (UID/GID 1000) for bind mount compatibility
+# Rename to 'claude' for clarity and create home directory structure
+# Note: Don't create /home/claude/.claude - it will be a symlink to /workspace/.claude
+RUN usermod -l claude -d /home/claude -m node \
+    && groupmod -n claude node \
+    && chown -R claude:claude /home/claude
+
+# Create workspace directory (will be mounted at runtime)
+RUN mkdir -p /workspace && chown claude:claude /workspace
+
+# Switch to non-root user
 USER claude
-WORKDIR /home/claude
 
-# Copy hooks (will be mounted, but include defaults)
-COPY --chown=claude:claude hooks/ /home/claude/.claude/hooks/
+# Set working directory and HOME to match mount point
+WORKDIR /workspace
+ENV HOME=/workspace
 
-# Default environment
-ENV BRIDGE_URL=""
-ENV TMUX_PREFIX="claude-"
-ENV SESSIONS_DIR="/home/claude/.claude/telegram/sessions"
+# Symlink /home/claude/.claude -> /workspace/.claude for compatibility
+# (settings.json has hardcoded paths like /home/claude/.claude/hooks/...)
+RUN ln -sf /workspace/.claude /home/claude/.claude
 
-# Entry point - run Claude Code
-ENTRYPOINT ["claude"]
+# Default command: run claude with skip permissions flag
+# (actual command is overridden by bridge.py get_docker_run_cmd)
+CMD ["claude", "--dangerously-skip-permissions"]

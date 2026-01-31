@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.11.0"
+VERSION = "0.16.0"
 
 import os
 import json
@@ -27,27 +27,38 @@ PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
+
+# BRIDGE_URL: primary hook target for remote workers, falls back to localhost:PORT
+# User can set BRIDGE_URL=https://remote-bridge.example.com for distributed setups
+_bridge_url_env = os.environ.get("BRIDGE_URL", "")
+BRIDGE_URL = _bridge_url_env.rstrip("/") if _bridge_url_env else f"http://localhost:{PORT}"
 PERSISTENCE_NOTE = "They'll stay on your team."
 
 # Sandbox mode: run Claude Code in Docker container for isolation
+# CLI flags: --sandbox, --sandbox-image, --mount, --mount-ro
+# Default: mounts ~ to /workspace (rw)
 SANDBOX_ENABLED = os.environ.get("SANDBOX_ENABLED", "0") == "1"
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "claudecode-telegram:latest")
-SANDBOX_PROJECT_ROOT = os.environ.get("SANDBOX_PROJECT_ROOT", "")  # Required in sandbox mode
+# Extra mounts from CLI: list of (host_path, container_path, readonly)
+# Parsed from SANDBOX_MOUNTS env var: "/host:/container,/path,ro:/secrets:/secrets"
+SANDBOX_EXTRA_MOUNTS = []
+_mounts_env = os.environ.get("SANDBOX_MOUNTS", "")
+if _mounts_env:
+    for mount_spec in _mounts_env.split(","):
+        mount_spec = mount_spec.strip()
+        if not mount_spec:
+            continue
+        readonly = mount_spec.startswith("ro:")
+        if readonly:
+            mount_spec = mount_spec[3:]
+        if ":" in mount_spec:
+            host, container = mount_spec.split(":", 1)
+        else:
+            host = container = mount_spec
+        SANDBOX_EXTRA_MOUNTS.append((host, container, readonly))
 
-# Directories to mount in sandbox (read-write)
-SANDBOX_MOUNTS = [
-    Path.home() / ".claude",      # Claude Code config
-    Path.home() / ".codex",       # Codex config
-    Path.home() / ".gemini",      # Gemini config
-    Path.home() / "learnings",    # Team learnings
-]
-# Files to mount (read-only)
-SANDBOX_MOUNT_FILES = [
-    Path.home() / "team-playbook.md",
-]
-
-# Temporary image inbox (session-isolated, auto-cleaned)
-IMAGE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
+# Temporary file inbox (session-isolated, auto-cleaned)
+FILE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
@@ -117,19 +128,55 @@ def telegram_api(method, data):
 # Image Handling
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Max image size: 20MB (Telegram limit)
-MAX_IMAGE_SIZE = 20 * 1024 * 1024
+# Max file size: 20MB (Telegram limit)
+MAX_FILE_SIZE = 20 * 1024 * 1024
 
 # Allowed image extensions for outgoing
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
+# Allowed document extensions for outgoing (common code, docs, data files)
+ALLOWED_DOC_EXTENSIONS = {
+    # Docs
+    ".md", ".txt", ".rst", ".pdf",
+    # Data
+    ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml",
+    ".log", ".sql", ".patch", ".diff",
+    # Code
+    ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".go", ".rs", ".java", ".kt", ".swift",
+    ".rb", ".php", ".c", ".cpp", ".h", ".hpp",
+    ".sh", ".html", ".css", ".scss",
+}
+
+# Blocked extensions (secrets, keys, certificates)
+BLOCKED_DOC_EXTENSIONS = {
+    ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
+    ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc",
+}
+
+# Blocked filenames (case-insensitive)
+BLOCKED_FILENAMES = {
+    ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
+    "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig",
+}
+
+
+def format_file_size(size_bytes):
+    """Format file size in human-readable form."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
 
 def get_inbox_dir(session_name):
-    """Get inbox directory for incoming images.
+    """Get inbox directory for incoming files (images, documents, etc.).
 
     Uses /tmp for ephemeral storage, session-namespaced to prevent cross-session access.
     """
-    return IMAGE_INBOX_ROOT / session_name / "inbox"
+    return FILE_INBOX_ROOT / session_name / "inbox"
 
 
 def ensure_inbox_dir(session_name):
@@ -141,7 +188,7 @@ def ensure_inbox_dir(session_name):
 
 
 def cleanup_inbox(session_name):
-    """Clean up all images in a session's inbox."""
+    """Clean up all files in a session's inbox."""
     inbox = get_inbox_dir(session_name)
     if inbox.exists():
         for f in inbox.iterdir():
@@ -185,8 +232,8 @@ def download_telegram_file(file_id, session_name):
         return None
 
     # Check file size
-    if file_size > MAX_IMAGE_SIZE:
-        print(f"File too large: {file_size} > {MAX_IMAGE_SIZE}")
+    if file_size > MAX_FILE_SIZE:
+        print(f"File too large: {file_size} > {MAX_FILE_SIZE}")
         return None
 
     # Download the file
@@ -194,7 +241,7 @@ def download_telegram_file(file_id, session_name):
     inbox = ensure_inbox_dir(session_name)
 
     # Generate unique filename with original extension
-    ext = Path(file_path).suffix or ".jpg"
+    ext = Path(file_path).suffix or ""
     local_filename = f"{uuid.uuid4().hex}{ext}"
     local_path = inbox / local_filename
 
@@ -202,48 +249,36 @@ def download_telegram_file(file_id, session_name):
         req = urllib.request.Request(download_url)
         with urllib.request.urlopen(req, timeout=60) as r:
             content = r.read()
-            if len(content) > MAX_IMAGE_SIZE:
+            if len(content) > MAX_FILE_SIZE:
                 print(f"Downloaded file too large: {len(content)}")
                 return None
             local_path.write_bytes(content)
             local_path.chmod(0o600)
-        print(f"Downloaded image: {local_path}")
+        print(f"Downloaded file: {local_path}")
         return str(local_path)
     except Exception as e:
         print(f"Download error: {e}")
         return None
 
 
-def send_photo(chat_id, photo_path, caption=None):
-    """Send a photo to Telegram using multipart/form-data.
-
-    SECURITY: Path is validated before sending.
-    Returns True on success, False on failure.
-    """
-    if not BOT_TOKEN:
-        return False
-
+def validate_photo_path(photo_path):
+    """Validate a photo path. Returns (ok, Path or error string)."""
     photo_path = Path(photo_path)
 
-    # Security: validate path
     if not photo_path.exists():
-        print(f"Photo not found: {photo_path}")
-        return False
+        return False, f"Photo not found: {photo_path}"
 
     if not photo_path.is_file():
-        print(f"Not a file: {photo_path}")
-        return False
+        return False, f"Not a file: {photo_path}"
 
     # Check extension
     if photo_path.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
-        print(f"Invalid image extension: {photo_path.suffix}")
-        return False
+        return False, f"Invalid image extension: {photo_path.suffix}"
 
     # Check size
     file_size = photo_path.stat().st_size
-    if file_size > MAX_IMAGE_SIZE:
-        print(f"Photo too large: {file_size} > {MAX_IMAGE_SIZE}")
-        return False
+    if file_size > MAX_FILE_SIZE:
+        return False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}"
 
     # Security: path must be within allowed directories
     # Allow: /tmp (includes image inbox), sessions dir, and current working directory
@@ -258,8 +293,26 @@ def send_photo(chat_id, photo_path, caption=None):
         for root in allowed_roots
     )
     if not is_allowed:
-        print(f"Photo path not in allowed directory: {photo_path}")
+        return False, f"Photo path not in allowed directory: {photo_path}"
+
+    return True, photo_path
+
+
+def send_photo(chat_id, photo_path, caption=None):
+    """Send a photo to Telegram using multipart/form-data.
+
+    SECURITY: Path is validated before sending.
+    Returns True on success, False on failure.
+    """
+    if not BOT_TOKEN:
         return False
+
+    ok, validated = validate_photo_path(photo_path)
+    if not ok:
+        print(validated)
+        return False
+
+    photo_path = validated
 
     # Build multipart form data
     boundary = uuid.uuid4().hex
@@ -311,25 +364,206 @@ def send_photo(chat_id, photo_path, caption=None):
         return False
 
 
+def is_blocked_filename(filename):
+    """Check if filename matches blocked patterns (secrets, credentials, etc.)."""
+    name_lower = filename.lower()
+    # Check exact filename matches
+    if name_lower in BLOCKED_FILENAMES:
+        return True
+    # Check .env.* pattern
+    if name_lower.startswith(".env"):
+        return True
+    return False
+
+
+def validate_document_path(doc_path):
+    """Validate a document path. Returns (ok, Path or error string)."""
+    doc_path = Path(doc_path)
+
+    # Security: validate path exists and is regular file
+    if not doc_path.exists():
+        return False, f"Document not found: {doc_path}"
+
+    if not doc_path.is_file():
+        return False, f"Not a file: {doc_path}"
+
+    # Security: check for blocked extensions (sensitive)
+    ext_lower = doc_path.suffix.lower()
+    if ext_lower in BLOCKED_DOC_EXTENSIONS:
+        return False, f"Blocked extension (sensitive): {doc_path.suffix}"
+
+    # Check extension is in allowlist
+    if ext_lower not in ALLOWED_DOC_EXTENSIONS:
+        return False, f"Extension not allowed: {doc_path.suffix}"
+
+    # Security: check for blocked filenames
+    if is_blocked_filename(doc_path.name):
+        return False, f"Blocked filename (sensitive): {doc_path.name}"
+
+    # Check size
+    file_size = doc_path.stat().st_size
+    if file_size > MAX_FILE_SIZE:
+        return False, f"Document too large: {file_size} > {MAX_FILE_SIZE}"
+
+    # Note: No path restriction - workers can send from anywhere
+    # Security is enforced via extension allowlist and filename blocklist
+
+    return True, doc_path
+
+
+def send_document(chat_id, doc_path, caption=None):
+    """Send a document to Telegram using multipart/form-data.
+
+    SECURITY: Path and filename are validated before sending.
+    Returns True on success, False on failure.
+    """
+    if not BOT_TOKEN:
+        return False
+
+    ok, validated = validate_document_path(doc_path)
+    if not ok:
+        print(validated)
+        return False
+
+    doc_path = validated
+
+    # Build multipart form data
+    boundary = uuid.uuid4().hex
+    content_type = mimetypes.guess_type(str(doc_path))[0] or "application/octet-stream"
+
+    body_parts = []
+
+    # chat_id field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+    body_parts.append(b"")
+    body_parts.append(str(chat_id).encode())
+
+    # document field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(f'Content-Disposition: form-data; name="document"; filename="{doc_path.name}"'.encode())
+    body_parts.append(f"Content-Type: {content_type}".encode())
+    body_parts.append(b"")
+    body_parts.append(doc_path.read_bytes())
+
+    # caption field (optional)
+    if caption:
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="caption"')
+        body_parts.append(b"")
+        body_parts.append(caption.encode())
+
+    body_parts.append(f"--{boundary}--".encode())
+    body_parts.append(b"")
+
+    body = b"\r\n".join(body_parts)
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            result = json.loads(r.read())
+            if result.get("ok"):
+                print(f"Document sent: {doc_path.name}")
+                return True
+            else:
+                print(f"sendDocument failed: {result}")
+                return False
+    except Exception as e:
+        print(f"sendDocument error: {e}")
+        return False
+
+
+CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _split_protected_segments(text, pattern):
+    """Split text into (segment, is_protected) based on regex matches."""
+    segments = []
+    last = 0
+    for match in pattern.finditer(text):
+        if match.start() > last:
+            segments.append((text[last:match.start()], False))
+        segments.append((match.group(0), True))
+        last = match.end()
+    if last < len(text):
+        segments.append((text[last:], False))
+    return segments
+
+
+def _collapse_excess_newlines(text):
+    """Collapse 3+ newlines to 2, but avoid touching code blocks and inline code."""
+    output = []
+    for segment, protected in _split_protected_segments(text, CODE_FENCE_RE):
+        if protected:
+            output.append(segment)
+            continue
+        for inline_segment, inline_protected in _split_protected_segments(segment, INLINE_CODE_RE):
+            if inline_protected:
+                output.append(inline_segment)
+            else:
+                output.append(re.sub(r"\n{3,}", "\n\n", inline_segment))
+    return "".join(output)
+
+
+def _parse_media_tags(text, tag_name, validate_func):
+    """Parse media tags, skipping escaped tags and code spans.
+
+    Returns (clean_text, [(path, caption), ...]).
+    """
+    pattern = re.compile(rf"(\\)?\[\[{tag_name}:([^\]|]+)(?:\|([^\]]*))?\]\]")
+    items = []
+    removed = 0
+
+    def replace_tag(match):
+        nonlocal removed
+        if match.group(1):
+            # Escaped tag, return without the escape slash.
+            return match.group(0)[1:]
+        path = match.group(2).strip()
+        caption = (match.group(3) or "").strip()
+        ok, _ = validate_func(path)
+        if ok:
+            items.append((path, caption))
+            removed += 1
+            return ""
+        return match.group(0)
+
+    output = []
+    for segment, protected in _split_protected_segments(text, CODE_FENCE_RE):
+        if protected:
+            output.append(segment)
+            continue
+        for inline_segment, inline_protected in _split_protected_segments(segment, INLINE_CODE_RE):
+            if inline_protected:
+                output.append(inline_segment)
+            else:
+                output.append(pattern.sub(replace_tag, inline_segment))
+
+    clean_text = "".join(output)
+    if removed:
+        clean_text = _collapse_excess_newlines(clean_text).strip()
+    return clean_text, items
+
+
 def parse_image_tags(text):
     """Parse [[image:/path|caption]] tags from text.
 
     Returns (clean_text, [(path, caption), ...])
     """
-    pattern = r'\[\[image:([^\]|]+)(?:\|([^\]]*))?\]\]'
-    images = []
+    return _parse_media_tags(text, "image", validate_photo_path)
 
-    def replace_tag(match):
-        path = match.group(1).strip()
-        caption = (match.group(2) or "").strip()
-        images.append((path, caption))
-        return ""  # Remove tag from text
 
-    clean_text = re.sub(pattern, replace_tag, text)
-    # Clean up extra whitespace from removed tags
-    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+def parse_file_tags(text):
+    """Parse [[file:/path|caption]] tags from text.
 
-    return clean_text, images
+    Returns (clean_text, [(path, caption), ...])
+    """
+    return _parse_media_tags(text, "file", validate_document_path)
 
 
 def format_response_text(session_name, text):
@@ -627,104 +861,92 @@ def tmux_send_escape(tmux_name):
 
 
 def export_hook_env(tmux_name):
-    """Export env vars for hook inside tmux session."""
-    subprocess.run([
-        "tmux", "send-keys", "-t", tmux_name,
-        f"export PORT={PORT} TMUX_PREFIX='{TMUX_PREFIX}' SESSIONS_DIR='{SESSIONS_DIR}' TMUX_FALLBACK=1", "Enter"
-    ])
+    """Export env vars for hook inside tmux session.
+
+    Uses tmux set-environment which persists in session and survives restarts.
+    Hook reads these via `tmux show-environment -t $SESSION_NAME`.
+    """
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)])
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX])
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)])
+    # Only set BRIDGE_URL if user-provided (not default localhost)
+    # This makes override semantics clear: set = override, unset = use PORT
+    if _bridge_url_env:
+        subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
+    else:
+        # Unset to clear any stale value from previous config
+        subprocess.run(["tmux", "set-environment", "-u", "-t", tmux_name, "BRIDGE_URL"], capture_output=True)
 
 
-def get_docker_run_cmd(name, project_root=None):
+def get_docker_run_cmd(name):
     """Build docker run command for sandbox mode.
+
+    Default: mounts ~ to /workspace (rw)
+    Extra mounts via SANDBOX_EXTRA_MOUNTS (from --mount/--mount-ro flags)
 
     Args:
         name: Worker name (used for container name)
-        project_root: Project directory to mount (optional, uses SANDBOX_PROJECT_ROOT if not set)
 
     Returns:
         Command string to run in tmux
     """
     import platform
     container_name = f"claude-worker-{name}"
-    project = project_root or SANDBOX_PROJECT_ROOT
+    home = Path.home()
 
-    # Base command with security options
+    # Base command
     cmd_parts = [
         "docker", "run", "-it",
         f"--name={container_name}",
         "--rm",  # Clean up on exit
-        "--read-only",
-        "--tmpfs=/tmp:exec",
-        "--tmpfs=/home/claude/.cache",
-        # Writable areas for package installation
-        "--tmpfs=/usr/local:exec",
-        "--tmpfs=/home/claude/.local:exec",
-        "--tmpfs=/home/claude/.npm",
-        "--tmpfs=/home/claude/.cargo",
-        "--tmpfs=/var/lib/apt",
-        "--tmpfs=/var/cache/apt",
-        "--pids-limit=512",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
     ]
 
     # Host gateway for bridge communication
     if platform.system() == "Linux":
         cmd_parts.append("--add-host=host.docker.internal:host-gateway")
 
-    # Mount config directories (if they exist)
-    home = Path.home()
-    for mount_path in SANDBOX_MOUNTS:
-        if mount_path.exists():
-            # Map to same path in container for consistency
-            container_path = str(mount_path).replace(str(home), "/home/claude")
-            cmd_parts.append(f"--mount=type=bind,src={mount_path},dst={container_path}")
+    # Default mount: ~ → /workspace (rw)
+    cmd_parts.append(f"-v={home}:/workspace")
 
-    # Mount files (read-only)
-    for mount_file in SANDBOX_MOUNT_FILES:
-        if mount_file.exists():
-            container_path = str(mount_file).replace(str(home), "/home/claude")
-            cmd_parts.append(f"--mount=type=bind,src={mount_file},dst={container_path},readonly")
-
-    # Mount project directory
-    if project:
-        cmd_parts.append(f"--mount=type=bind,src={project},dst={project}")
+    # Extra mounts from --mount/--mount-ro flags
+    for host_path, container_path, readonly in SANDBOX_EXTRA_MOUNTS:
+        if readonly:
+            cmd_parts.append(f"-v={host_path}:{container_path}:ro")
+        else:
+            cmd_parts.append(f"-v={host_path}:{container_path}")
 
     # Mount session files for hook coordination
-    cmd_parts.append(f"--mount=type=bind,src={SESSIONS_DIR},dst=/home/claude/.claude/telegram/sessions")
+    cmd_parts.append(f"-v={SESSIONS_DIR}:{SESSIONS_DIR}")
 
-    # Mount temp for images
-    IMAGE_INBOX_ROOT.mkdir(parents=True, exist_ok=True)
-    cmd_parts.append(f"--mount=type=bind,src={IMAGE_INBOX_ROOT},dst={IMAGE_INBOX_ROOT}")
+    # Mount temp for file inbox
+    FILE_INBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    cmd_parts.append(f"-v={FILE_INBOX_ROOT}:{FILE_INBOX_ROOT}")
 
-    # Environment variables
-    bridge_url = f"http://host.docker.internal:{PORT}"
+    # Environment variables for hook
+    # Use global BRIDGE_URL if user-provided, otherwise default to host.docker.internal for Docker
+    if _bridge_url_env:
+        docker_bridge_url = BRIDGE_URL  # User-provided takes precedence
+    else:
+        docker_bridge_url = f"http://host.docker.internal:{PORT}"
     cmd_parts.extend([
-        f"-e=BRIDGE_URL={bridge_url}",
+        f"-e=BRIDGE_URL={docker_bridge_url}",
         f"-e=PORT={PORT}",
         f"-e=TMUX_PREFIX={TMUX_PREFIX}",
-        f"-e=SESSIONS_DIR=/home/claude/.claude/telegram/sessions",
+        f"-e=SESSIONS_DIR={SESSIONS_DIR}",
+        f"-e=BRIDGE_SESSION={name}",  # Session name for hook (no tmux inside container)
         "-e=TMUX_FALLBACK=1",
     ])
 
     # Working directory
-    if project:
-        cmd_parts.extend(["-w", project])
+    cmd_parts.extend(["-w", "/workspace"])
 
     # Image
     cmd_parts.append(SANDBOX_IMAGE)
 
+    # Run claude with --dangerously-skip-permissions (same as non-sandbox)
+    cmd_parts.append("claude --dangerously-skip-permissions")
+
     return " ".join(cmd_parts)
-
-
-def docker_container_exists(name):
-    """Check if a docker container exists (running or stopped)."""
-    container_name = f"claude-worker-{name}"
-    result = subprocess.run(
-        ["docker", "container", "inspect", container_name],
-        capture_output=True
-    )
-    return result.returncode == 0
 
 
 def stop_docker_container(name):
@@ -734,7 +956,7 @@ def stop_docker_container(name):
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
 
-def create_session(name, project_root=None):
+def create_session(name):
     """Create a new Claude instance.
 
     SECURITY: Token is NOT exported to Claude session. Hook forwards responses
@@ -742,7 +964,6 @@ def create_session(name, project_root=None):
 
     Args:
         name: Worker name
-        project_root: Project directory (optional, for sandbox mode)
     """
     tmux_name = f"{TMUX_PREFIX}{name}"
 
@@ -761,7 +982,7 @@ def create_session(name, project_root=None):
 
     if SANDBOX_ENABLED:
         # Sandbox mode: run Claude in Docker container
-        docker_cmd = get_docker_run_cmd(name, project_root)
+        docker_cmd = get_docker_run_cmd(name)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         print(f"Started worker '{name}' in sandbox mode")
     else:
@@ -785,9 +1006,9 @@ def create_session(name, project_root=None):
     time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)  # Container startup takes longer
     welcome = (
         "You are connected to Telegram via claudecode-telegram bridge. "
-        "To send images back to Telegram, include this tag in your response: "
-        "[[image:/path/to/file.png|optional caption]]. "
-        "Allowed paths: /tmp, current directory. Allowed formats: jpg, png, gif, webp, bmp."
+        "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
+        "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
+        "Allowed paths: /tmp, current directory."
     )
     if SANDBOX_ENABLED:
         welcome += " Running in sandbox mode (Docker container)."
@@ -824,7 +1045,7 @@ def kill_session(name):
     return True, None
 
 
-def restart_claude(name, project_root=None):
+def restart_claude(name):
     """Restart claude in an existing tmux session."""
     registered = get_registered_sessions()
     if name not in registered:
@@ -844,7 +1065,7 @@ def restart_claude(name, project_root=None):
         time.sleep(0.5)
 
         # Start new container
-        docker_cmd = get_docker_run_cmd(name, project_root)
+        docker_cmd = get_docker_run_cmd(name)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
     else:
         # Re-export env vars for hook (in case session was created by older version or bridge restarted)
@@ -1021,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
         Claude ever having access to the bot token. Hook POSTs here,
         bridge sends to Telegram.
 
-        IMAGE SUPPORT: Parses [[image:/path|caption]] tags and sends via sendPhoto.
+        FILE SUPPORT: Parses [[image:/path|caption]] and [[file:/path|caption]] tags.
         """
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -1047,8 +1268,9 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Parse image tags from text
+            # Parse image and file tags from text
             clean_text, images = parse_image_tags(text)
+            clean_text, files = parse_file_tags(clean_text)
 
             # Send text message if there's text content
             if clean_text:
@@ -1094,6 +1316,20 @@ class Handler(BaseHTTPRequestHandler):
                     telegram_api("sendMessage", {
                         "chat_id": chat_id,
                         "text": f"<b>{session_name}:</b> [Image failed: {img_path}]",
+                        "parse_mode": "HTML"
+                    })
+
+            # Send files/documents
+            for file_path, file_caption in files:
+                # Add session prefix to caption
+                full_caption = f"{session_name}: {file_caption}" if file_caption else f"{session_name}:"
+                if send_document(chat_id, file_path, full_caption):
+                    print(f"File sent: {session_name} -> {file_path}")
+                else:
+                    # Notify about failed file
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": f"<b>{session_name}:</b> [File failed: {file_path}]",
                         "parse_mode": "HTML"
                     })
 
@@ -1167,6 +1403,43 @@ class Handler(BaseHTTPRequestHandler):
                     telegram_api("sendMessage", {
                         "chat_id": chat_id,
                         "text": "Needs decision - Could not download image. Try again or send as file."
+                    })
+                return
+
+        # Handle non-image document attachments (PDF, txt, code files, etc.)
+        if document and not doc_is_image and chat_id:
+            file_id = document.get("file_id")
+            if file_id:
+                # Admin check first
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return  # Silent rejection
+
+                # Download to focused worker's inbox
+                if not state["active"]:
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "Needs decision - No focused worker. Use /focus <name> first."
+                    })
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    # Build message with file metadata
+                    file_name = document.get("file_name", "unknown")
+                    file_size = document.get("file_size", 0)
+                    mime_type = document.get("mime_type", "unknown")
+                    size_str = format_file_size(file_size)
+                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
+                    if text:
+                        file_text = f"{text}\n\n{file_text}"
+                    # Route to active session
+                    self.route_to_active(file_text, chat_id, msg_id)
+                else:
+                    telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "Needs decision - Could not download file. Try again."
                     })
                 return
 
@@ -1559,6 +1832,26 @@ class Handler(BaseHTTPRequestHandler):
             f"Workers: {team_list}",
             f"Pending claim: {state['pending_registration'] or '(none)'}",
         ]
+
+        # Sandbox details
+        lines.append("")
+        if SANDBOX_ENABLED:
+            lines.append("Sandbox: enabled (Docker isolation)")
+            lines.append(f"Image: {SANDBOX_IMAGE}")
+            lines.append(f"Default mount: {Path.home()} → /workspace")
+            if SANDBOX_EXTRA_MOUNTS:
+                lines.append("Extra mounts:")
+                for host, container, ro in SANDBOX_EXTRA_MOUNTS:
+                    ro_flag = " (ro)" if ro else ""
+                    lines.append(f"  {host} → {container}{ro_flag}")
+            lines.append("")
+            lines.append("Note: Workers run in containers with access")
+            lines.append("only to mounted directories. System paths")
+            lines.append("outside mounts are not accessible.")
+        else:
+            lines.append("Sandbox: disabled (direct execution)")
+            lines.append("Workers run with full system access.")
+
         self.reply(chat_id, "\n".join(lines))
         return True
 
@@ -1723,6 +2016,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
 
+        # Short sandbox note
+        if SANDBOX_ENABLED:
+            lines.append(f"Sandbox: {Path.home()} → /workspace")
+
         self.reply(chat_id, "\n".join(lines))
 
 
@@ -1760,11 +2057,6 @@ def main():
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     SESSIONS_DIR.chmod(0o700)
 
-    # Write port file for hook to read (solves port mismatch on bridge restart)
-    port_file = SESSIONS_DIR.parent / "port"
-    port_file.write_text(str(PORT))
-    port_file.chmod(0o600)
-
     # Discover existing sessions
     registered, unregistered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
@@ -1786,6 +2078,18 @@ def main():
         print(f"Admin: {admin_chat_id} (pre-configured)")
     else:
         print("Admin: auto-learn (first user to message becomes admin)")
+
+    # Sandbox status
+    if SANDBOX_ENABLED:
+        print(f"Sandbox mode: Workers run in Docker containers")
+        print(f"Mounted: {Path.home()} → /workspace")
+        if SANDBOX_EXTRA_MOUNTS:
+            for host, container, ro in SANDBOX_EXTRA_MOUNTS:
+                ro_flag = " (ro)" if ro else ""
+                print(f"Mounted: {host} → {container}{ro_flag}")
+        print("Workers can only access mounted directories")
+    else:
+        print("Sandbox mode: disabled (direct execution)")
 
     try:
         ReuseAddrServer(("0.0.0.0", PORT), Handler).serve_forever()
