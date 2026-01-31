@@ -396,24 +396,12 @@ def find_split_point(text, max_len):
 
 
 def format_multipart_messages(session_name, chunks):
-    """Format chunks with session prefix (first chunk only).
+    """Format chunks with session prefix (all chunks get prefix, no part numbers).
 
     Single chunk: "<b>name:</b>\ntext"
-    Multiple chunks: first has prefix, rest are plain text (seamless)
+    Multiple chunks: "<b>name:</b>\ntext" (same format, no 1/3, 2/3 etc)
     """
-    if len(chunks) == 1:
-        return [format_response_text(session_name, chunks[0])]
-
-    formatted = []
-    for i, chunk in enumerate(chunks):
-        if i == 0:
-            # First chunk gets the session prefix
-            formatted.append(format_response_text(session_name, chunk))
-        else:
-            # Subsequent chunks are plain text (seamless continuation)
-            formatted.append(chunk)
-
-    return formatted
+    return [format_response_text(session_name, chunk) for chunk in chunks]
 
 
 def setup_bot_commands():
