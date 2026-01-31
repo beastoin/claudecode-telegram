@@ -2,7 +2,7 @@
 
 Run multiple AI workers from Telegram—research, operations, and development in one chat.
 
-<img width="1320" height="2868" alt="image" src="https://github.com/user-attachments/assets/a12cbdbf-cf18-4ba4-8645-08a3a359559a" />
+<img width="400" alt="image" src="https://github.com/user-attachments/assets/a12cbdbf-cf18-4ba4-8645-08a3a359559a" />
 
 
 ## What This Is
