@@ -1,13 +1,13 @@
 # Claude Code - Telegram
 
-Manage a team of AI developers from Telegram. It feels like texting a remote dev team that never sleeps.
+Run multiple AI workers from Telegram—research, operations, and development in one chat.
 
 <img width="1320" height="2868" alt="image" src="https://github.com/user-attachments/assets/a12cbdbf-cf18-4ba4-8645-08a3a359559a" />
 
 
 ## What This Is
 
-Claude Code - Telegram is a Telegram bot + bridge that lets you run multiple Claude Code workers in parallel from one chat. You assign work, check progress, and get answers back as if they were teammates.
+Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coordinate parallel AI workers from a single chat. Use it for research deep dives, operational tasks, or any workstream that benefits from fast, concurrent execution with persistent context.
 
 ## Why Managers Use It
 
