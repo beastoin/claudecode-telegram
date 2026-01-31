@@ -41,6 +41,25 @@ Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coor
 - **Triage:** sort tickets, label issues, route requests.
 - **Support:** draft replies, summarize threads, suggest next steps.
 
+## Compounding Team Knowledge
+
+Use Claude Code - Telegram to keep a lightweight team memory. This is not a product feature—it's a simple routine that compounds value over time.
+
+**Set up two shared files**
+- `~/team-playbook.md`: your team's standards, workflows, and rules.
+- `~/learnings/README.md`: a living list of lessons learned and mistakes to avoid.
+
+**Weekly routine**
+- Daily: ops manager asks, "Any learnings today? Anything you need help with?"
+- Team shares: new workflows, gotchas, and mistakes worth avoiding.
+- Weekly: curate the best items into an "Evergreen Top 10".
+- Monthly: prune stale items and archive old learnings.
+
+**Why it works**
+- The team gets smarter every day without repeating the same explanations.
+- New workers read the playbook + learnings and onboard fast.
+- Mistakes become "team tuition" instead of repeated errors.
+
 ## Quick Start
 
 ### For Managers (Telegram only)
