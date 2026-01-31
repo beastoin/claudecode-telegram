@@ -114,3 +114,47 @@ A playbook tells your AI workers how to behave. Copy this template and customize
 ---
 
 **Tip:** Start simple. Add rules only when you hit real problems. The best playbooks grow from experience, not imagination.
+
+---
+
+## Clean Version (Copy This)
+
+```markdown
+# Team Playbook v1.0
+
+## Members & Projects
+- @worker1 -> ~/project-a
+- @worker2 -> ~/project-b
+- @researcher -> research
+- @ops -> operations manager
+
+## Operations Manager (@ops)
+- Assign tasks, track workload, coordinate team
+- "check team": Review all workers' status
+- Can run: /clear, /compact, /resume (when workers are stuck)
+
+## Non-Negotiables
+- Always run tests before commit/push
+- Get review before merging to main
+- Include your name when messaging teammates
+
+## Team Communication
+- Message teammates directly (no need to go through ops manager)
+- Always include your name: "@worker1 here - can you check this?"
+- Ask ops manager only for things you cannot do yourself
+
+## Core Commands
+- Start fresh: `cd ~/PROJECT && git pull origin main`
+- Check cost: `/cost`
+- Compact context: `/compact`
+
+## Learning Culture
+| Who | What | When |
+|-----|------|------|
+| Ops manager | Ask "any learnings today?" | Daily |
+| Everyone | Share workflows, gotchas, mistakes | When asked |
+| Ops manager | Curate into Evergreen Top 10 | Weekly |
+
+---
+Changelog: See ~/team-changelog.md
+```
