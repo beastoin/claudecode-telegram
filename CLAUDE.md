@@ -76,7 +76,7 @@ TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh
 TELEGRAM_BOT_TOKEN='your-test-token' ADMIN_CHAT_ID='your-chat-id' ./test.sh
 ```
 
-**Test isolation:** Tests run isolated from production under `~/.claude/telegram-test/` (separate port 8095, prefix `claudetest-`, separate PID file). You can run tests while production is active.
+**Test isolation:** Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/` (port 8095, prefix `claude-test-`). You can run tests while production is active.
 
 ### Test coverage
 
@@ -188,12 +188,14 @@ kill $(cat ~/.claude/telegram/nodes/prod/pid)
 **Problem:** Ran `lsof -ti :8081 | xargs kill` thinking it was dev node, but port 8081 = prod. Killed production bridge while team was working.
 
 **Port assignments:**
-| Port | Node |
-|------|------|
-| 8080 | (unused/legacy) |
-| 8081 | **prod** |
-| 8082 | dev |
-| 8095 | test |
+| Port | Node | Sandbox |
+|------|------|---------|
+| 8080 | sandbox (or custom) | `--sandbox` |
+| 8081 | **prod** | `--no-sandbox` |
+| 8082 | dev | `--no-sandbox` |
+| 8095 | test (test.sh) | `--no-sandbox` |
+
+**Why `--no-sandbox` for prod/dev/test?** Docker overhead is too slow. Sandbox node is for untrusted/experimental code.
 
 **Rule:** Before killing any port, verify which node owns it:
 ```bash
@@ -226,7 +228,7 @@ kill $(cat ~/.claude/telegram/claudecode-telegram.pid)
 **Problem:** Deployed v0.9.2 fix directly to prod without testing on dev node first. Ran local stress test but skipped real integration testing on dev.
 
 **Fix:** Always test on dev node before prod deployment:
-1. Start dev bridge with dev bot token on port 8095
+1. Start dev bridge with dev bot token on port 8082
 2. Run full integration tests against dev
 3. Test manually via Telegram on dev bot
 4. Only then deploy to prod
@@ -261,6 +263,24 @@ size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
 # Portable timing: use iteration counts instead of milliseconds
 for i in $(seq 1 40); do sleep 0.05; done  # 2 seconds total
 ```
+
+### Sed placeholders in conditionals
+
+**Problem:** Template had conditional logic that referenced the placeholder being substituted:
+```bash
+NODE_NAME="__NODE_NAME__"
+if [[ "$NODE_NAME" != "__NODE_NAME__" ]]; then  # Always false after sed!
+```
+After `sed -e "s|__NODE_NAME__|prod|g"`, condition becomes `"prod" != "prod"` → false.
+
+**Fix:** Don't use conditionals in templates. Just bake values directly:
+```bash
+TMUX_PREFIX="__NODE_PREFIX__"   # Becomes "claude-prod-" after sed
+SESSIONS_DIR="__NODE_SESSIONS_DIR__"
+BRIDGE_PORT="__NODE_PORT__"
+```
+
+**Why:** Sed substitution is global. It replaces ALL occurrences of the pattern, including in comparison strings. Keep templates simple - no fallback logic needed since templates are never run directly.
 
 **Prevention:**
 1. Run `shellcheck` on all shell scripts

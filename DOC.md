@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.11.0
+> Version: 0.16.1
 
 ## Current Philosophy (Summary)
 
@@ -254,10 +254,196 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.16.1 - Sandbox disabled by default
+
+**Breaking change:** Sandbox mode is now disabled by default (was enabled).
+
+**Why:** Sandbox mode is not stable yet. Use `--sandbox` flag to explicitly enable Docker isolation.
+
+**Added:** Node configuration documentation with recommended sandbox settings per node type.
+
+### v0.16.0 - Simplify config (remove config.env, add clean command)
+
+**New `clean` command:**
+```bash
+./claudecode-telegram.sh --node prod clean   # Reset stale chat_id files
+```
+Fixes the "wrong chat_id persists forever" issue by removing admin_chat_id and session chat_id files. Next message re-registers admin.
+
+**Removed config.env:**
+- No more `~/.claude/telegram/nodes/<node>/config.env` files
+- PORT now derived from node name: prod=8081, dev=8082, test=8095
+- Override via `--port` flag or `PORT` env var
+
+**Why:** config.env caused stale config issues similar to chat_id persistence. All config should be explicit (env vars, flags) or derived (node name), not persisted files.
+
+### v0.15.0 - Code cleanup (Codex-reviewed)
+
+**Removed unused code:**
+- `docker_container_exists()` function (never called)
+- `SESSION_ID` variable in hook (parsed but never used)
+- `NODE_NAME` export to bridge (bridge never reads it)
+- Port file write (hook never reads it)
+
+**Simplified `export_hook_env()`:**
+- Removed dangerous `tmux send-keys 'export ...'` that could inject text into running Claude sessions
+- Now uses only `tmux set-environment` (hooks read via `tmux show-environment`)
+- `BRIDGE_URL` only set when user-provided (not default) - clearer override semantics
+- Removed `TMUX_FALLBACK` export (hook already defaults to 1)
+
+**Net result:** ~30 lines removed, safer hook env setup, cleaner config semantics.
+
+### v0.14.0 - BRIDGE_URL support for remote workers
+
+**New feature:** Workers can now connect to remote bridges, enabling distributed deployments.
+
+| Config | Use Case |
+|--------|----------|
+| `PORT=8081` (default) | Local setup, hook builds `http://localhost:8081/response` |
+| `BRIDGE_URL=http://host.docker.internal:8081` | Docker containers |
+| `BRIDGE_URL=https://bridge.company.com` | Remote workers on different machines |
+
+**How it works:**
+- Bridge exports `BRIDGE_URL` to tmux session environment (alongside existing PORT, TMUX_PREFIX, SESSIONS_DIR)
+- Hook reads `BRIDGE_URL` first, falls back to building from `PORT`
+- User-provided `BRIDGE_URL` takes precedence over auto-generated URLs
+- Trailing slashes are stripped automatically
+
+**Backward compatible:** Existing setups using only `PORT` continue to work unchanged.
+
+### v0.13.2 - Fix hook template causing duplicate messages
+
+**Bug fix:** Per-node hooks were using template mode defaults instead of baked config.
+
+The issue was overly complex conditional logic that broke after sed substitution.
+All three hooks (prod/dev/sandbox) matched the same sessions → duplicates.
+
+**Fix:** Simplified hook template - removed all conditionals, just use baked values directly:
+```bash
+# Before: complex conditional with template mode fallback
+NODE_NAME="__NODE_NAME__"
+NODE_PREFIX="__NODE_PREFIX__"
+if [[ "$NODE_NAME" != "__NODE_NAME__" ]]; then
+    TMUX_PREFIX="$NODE_PREFIX"
+else
+    TMUX_PREFIX="${TMUX_PREFIX:-claude-}"  # fallback
+fi
+
+# After: direct assignment, no conditionals
+TMUX_PREFIX="__NODE_PREFIX__"
+SESSIONS_DIR="__NODE_SESSIONS_DIR__"
+BRIDGE_PORT="__NODE_PORT__"
+```
+
+### v0.13.1 - Fix hook install structure for multi-node
+
+**Bug fix:** `hook install` was generating incorrect Claude Code settings.json structure.
+
+The hooks configuration must use nested structure per Claude Code docs:
+```json
+// WRONG (old)
+{"hooks":{"Stop":[{"type":"command","command":"..."}]}}
+
+// CORRECT (fixed)
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"..."}]}]}}
+```
+
+**Changes:**
+- Fixed `cmd_hook_install` to create correct nested structure
+- Added migration logic for existing incorrect settings
+- New installs now create proper `hooks.Stop[0].hooks[]` array
+
+### v0.13.0 - Simplified sandbox mode
+
+**Breaking changes:**
+- Removed `--project-root` flag (no longer needed)
+- Removed `SANDBOX_PROJECT_ROOT` env var
+- Simplified Docker command (no read-only rootfs, no tmpfs mounts)
+
+**New design:**
+- Default: mounts `~` to `/workspace` (read-write)
+- Workers run with `--dangerously-skip-permissions` (same as non-sandbox)
+- Extra mounts via `--mount` and `--mount-ro` CLI flags
+
+**CLI flags:**
+```bash
+--sandbox              # Enable (default)
+--no-sandbox           # Disable
+--sandbox-image <img>  # Docker image
+--mount <path>         # Extra mount (host:container or just path)
+--mount-ro <path>      # Extra mount, read-only
+```
+
+**Example:**
+```bash
+./claudecode-telegram.sh start --sandbox \
+  --mount /data \
+  --mount /var/log:/logs \
+  --mount-ro /etc/ssl/certs
+```
+
+**Startup messages:**
+- Terminal: Shows sandbox status with all mounts
+- Telegram: Short sandbox note on "server online"
+- `/settings`: Detailed sandbox info (image, mounts, limitations)
+
+**Implementation:**
+- `SANDBOX_EXTRA_MOUNTS` replaces `SANDBOX_MOUNTS` and `SANDBOX_MOUNT_FILES`
+- `get_docker_run_cmd()` simplified (no project_root parameter)
+- `cmd_settings()` shows detailed sandbox info
+- `send_startup_message()` includes sandbox note
+
+### v0.12.1 - Outgoing file support (workers can send files back)
+
+**New feature:** Workers can now send documents back to Telegram using `[[file:/path|caption]]` tag.
+
+**Tag syntax:**
+```
+[[file:/tmp/report.pdf|Q4 Report]]
+[[file:/tmp/data.csv]]  (caption optional)
+```
+
+**Allowed extensions:**
+- Docs: `.md`, `.txt`, `.rst`, `.pdf`
+- Data: `.json`, `.csv`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.xml`, `.log`, `.sql`, `.patch`, `.diff`
+- Code: `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.go`, `.rs`, `.java`, `.kt`, `.swift`, `.rb`, `.php`, `.c`, `.cpp`, `.h`, `.hpp`, `.sh`, `.html`, `.css`, `.scss`
+
+**Security (blocked):**
+- Extensions: `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.der`, `.jks`, `.keystore`, `.kdb`, `.pgp`, `.gpg`, `.asc`
+- Filenames: `.env`, `.env.*`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `id_rsa`, `id_ed25519`, `credentials`, `kubeconfig`
+
+**Implementation:**
+- `send_document()` function with Telegram sendDocument API
+- `parse_file_tags()` for tag parsing
+- `is_blocked_filename()` for sensitive file detection
+- Path validation (must be in /tmp, sessions dir, or cwd)
+- Size limit: 20MB (Telegram's limit)
+
+### v0.12.0 - File attachment support
+
+**New feature:** Manager can now send any file type to workers, not just images.
+
+- **PDF, documents, code files** - all file types are accepted and downloaded to worker's inbox
+- **Metadata passed to Claude** - filename, size, mime type included in message
+- **Same inbox system** - files stored in `/tmp/claudecode-telegram/<session>/inbox/`
+- **Automatic cleanup** - files removed when worker is offboarded
+
+**Message format to Claude:**
+```
+Manager sent file: document.pdf (1.5 MB, application/pdf)
+Path: /tmp/claudecode-telegram/worker/inbox/abc123.pdf
+```
+
+**Implementation:**
+- `send_document_message()` test helper added
+- `format_file_size()` function for human-readable sizes
+- `FILE_INBOX_ROOT` renamed from `IMAGE_INBOX_ROOT` (now handles all files)
+- Welcome message updated to mention file attachment support
+
 ### v0.11.0 - Sandbox mode (Docker isolation)
 
 **New Features:**
-- **Sandbox mode** (default: enabled): Workers run in Docker containers for isolation
+- **Sandbox mode** (default: disabled): Workers can run in Docker containers for isolation
 - No more `--dangerously-skip-permissions` needed when using sandbox
 - `--sandbox` / `--no-sandbox` flags to toggle
 - `--sandbox-image` to specify Docker image
@@ -591,46 +777,55 @@ Here's the diagram:
 | Single node, shared state | Multiple nodes, isolated state |
 | `~/.claude/telegram/sessions/` | `~/.claude/telegram/nodes/<node>/sessions/` |
 | `claude-<name>` tmux prefix | `claude-<node>-<name>` tmux prefix |
-| `TELEGRAM_BOT_TOKEN` required | Can use per-node `config.env` |
+| `TELEGRAM_BOT_TOKEN` required | Same - always via env var |
 
 **New features:**
 - **`NODE_NAME` env var**: Target specific node
 - **`--node` / `-n` flag**: Target specific node via CLI
 - **`--all` flag**: Target all nodes (stop, status)
-- **Per-node config files**: `~/.claude/telegram/nodes/<node>/config.env`
+- **`clean` command**: Reset stale chat_id files
 - **Per-node state isolation**: Each node has its own sessions, PIDs, ports
 - **Smart auto-detection**: If only one node running, uses it; if multiple, prompts or errors
+- **Derived ports**: prod=8081, dev=8082, test=8095 (override with `--port`)
 
 **Usage:**
 ```bash
-# Start nodes
-NODE_NAME=prod ./claudecode-telegram.sh run
-NODE_NAME=dev ./claudecode-telegram.sh run
+# Start nodes (PORT derived from node name)
+NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # port 8081
+NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # port 8082
 
 # Stop specific node
 ./claudecode-telegram.sh --node dev stop
 
+# Clean stale chat_id (fixes wrong admin)
+./claudecode-telegram.sh --node prod clean
+
 # Status of all nodes
 ./claudecode-telegram.sh --all status
-
-# Per-node config (optional)
-cat ~/.claude/telegram/nodes/prod/config.env
-# TELEGRAM_BOT_TOKEN=...
-# PORT=8080
-# ADMIN_CHAT_ID=...
 ```
+
+**Recommended node configurations:**
+| Node | Token | Sandbox | Port | Purpose |
+|------|-------|---------|------|---------|
+| test | TEST_BOT_TOKEN | `--no-sandbox` | 8095 | Automated tests (fast, no Docker) |
+| prod | PROD_BOT_TOKEN | `--no-sandbox` | 8081 | Production (performance) |
+| dev | DEV_BOT_TOKEN | `--no-sandbox` | 8082 | Development |
+| sandbox | TEST_BOT_TOKEN | `--sandbox` | 8080 | Untrusted/experimental code |
+
+**Why `--no-sandbox` for prod/dev/test?** Docker overhead impacts performance. Use sandbox node for isolation when running untrusted code.
 
 **Directory structure:**
 ```
 ~/.claude/telegram/nodes/
 ├── prod/
-│   ├── config.env      # Node configuration
 │   ├── pid             # Main process PID
 │   ├── bridge.pid      # Bridge process PID
 │   ├── tunnel.pid      # Tunnel process PID
-│   ├── port            # Current port
 │   ├── tunnel_url      # Current tunnel URL
 │   └── sessions/       # Per-session files
+│       └── <worker>/
+│           ├── chat_id   # Admin chat ID for responses
+│           └── pending   # Request timestamp
 └── dev/
     └── ...
 ```

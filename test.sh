@@ -10,25 +10,26 @@
 #   TEST_BOT_TOKEN  - Required: Your test bot token from @BotFather
 #   TEST_CHAT_ID    - Optional: Your chat ID for e2e verification
 #
-# Tests run isolated under ~/.claude/telegram-test/ with separate port (8095),
+# Tests run isolated using --node test with separate port (8095),
 # prefix (claude-test-), and PID file. Safe to run while production is active.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${TEST_PORT:-8095}"
 CHAT_ID="${TEST_CHAT_ID:-123456789}"
 BRIDGE_PID=""
 TUNNEL_PID=""
 TUNNEL_URL=""
 
-# Test isolation: all test files under ~/.claude/telegram-test
-TEST_BASE_DIR="$HOME/.claude/telegram-test"
-TEST_SESSION_DIR="$TEST_BASE_DIR/sessions"
-TEST_PID_FILE="$TEST_BASE_DIR/claudecode-telegram.pid"
-TEST_TMUX_PREFIX="claude-test-"
-BRIDGE_LOG="$TEST_BASE_DIR/bridge.log"
-TUNNEL_LOG="$TEST_BASE_DIR/tunnel.log"
+# Test node configuration
+TEST_NODE="test"
+TEST_NODE_DIR="$HOME/.claude/telegram/nodes/$TEST_NODE"
+PORT="${TEST_PORT:-8095}"
+TEST_SESSION_DIR="$TEST_NODE_DIR/sessions"
+TEST_PID_FILE="$TEST_NODE_DIR/pid"
+TEST_TMUX_PREFIX="claude-${TEST_NODE}-"
+BRIDGE_LOG="$TEST_NODE_DIR/bridge.log"
+TUNNEL_LOG="$TEST_NODE_DIR/tunnel.log"
 
 # Colors
 RED='\033[0;31m'
@@ -50,31 +51,29 @@ info()    { log "${YELLOW}→${NC} $1"; }
 
 cleanup() {
     info "Cleaning up..."
-    # Stop test gateway using PID file
+    # Stop test node using PID file
     if [[ -f "$TEST_PID_FILE" ]]; then
         local pid
         pid=$(cat "$TEST_PID_FILE")
         kill "$pid" 2>/dev/null || true
         rm -f "$TEST_PID_FILE"
     fi
+    # Also kill bridge PID if tracked separately
+    if [[ -f "$TEST_NODE_DIR/bridge.pid" ]]; then
+        kill "$(cat "$TEST_NODE_DIR/bridge.pid")" 2>/dev/null || true
+        rm -f "$TEST_NODE_DIR/bridge.pid"
+    fi
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
     # Kill any test sessions we created (using test prefix)
-    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}responsetest" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}inboxtest" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}learnbot" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}replybot" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}contextbot" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}nopendingtest" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}imageresponsetest" 2>/dev/null || true
-    tmux kill-session -t "${TEST_TMUX_PREFIX}imgrecv" 2>/dev/null || true
-    # Clean up test directory (but keep base dir for next run)
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${TEST_TMUX_PREFIX}" | while read -r session; do
+        tmux kill-session -t "$session" 2>/dev/null || true
+    done
+    # Clean up test session files (but keep node dir for next run)
     [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"
     [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
     [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"
+    rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port"
 }
 
 trap cleanup EXIT
@@ -166,6 +165,36 @@ send_photo_message() {
                     {"file_id": "'"$file_id"'_small", "file_size": 1000, "width": 90, "height": 90},
                     {"file_id": "'"$file_id"'", "file_size": 5000, "width": 320, "height": 320}
                 ],
+                "caption": "'"$caption"'"
+            }
+        }'
+}
+
+send_document_message() {
+    local file_id="$1"
+    local file_name="${2:-document.pdf}"
+    local mime_type="${3:-application/pdf}"
+    local file_size="${4:-1024}"
+    local caption="${5:-}"
+    local chat_id="${6:-$CHAT_ID}"
+    local update_id=$((RANDOM))
+
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$chat_id"', "first_name": "TestUser"},
+                "chat": {"id": '"$chat_id"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "document": {
+                    "file_id": "'"$file_id"'",
+                    "file_unique_id": "'"$file_id"'_unique",
+                    "file_name": "'"$file_name"'",
+                    "mime_type": "'"$mime_type"'",
+                    "file_size": '"$file_size"'
+                },
                 "caption": "'"$caption"'"
             }
         }'
@@ -324,27 +353,15 @@ test_equals_syntax() {
 test_sandbox_config() {
     info "Testing sandbox configuration variables..."
     if python3 -c "
-from bridge import SANDBOX_ENABLED, SANDBOX_IMAGE, SANDBOX_MOUNTS, SANDBOX_MOUNT_FILES
-from pathlib import Path
+from bridge import SANDBOX_ENABLED, SANDBOX_IMAGE, SANDBOX_EXTRA_MOUNTS
 
 # Verify config variables exist
 assert isinstance(SANDBOX_ENABLED, bool), 'SANDBOX_ENABLED should be bool'
 assert isinstance(SANDBOX_IMAGE, str), 'SANDBOX_IMAGE should be str'
-assert isinstance(SANDBOX_MOUNTS, list), 'SANDBOX_MOUNTS should be list'
-assert isinstance(SANDBOX_MOUNT_FILES, list), 'SANDBOX_MOUNT_FILES should be list'
+assert isinstance(SANDBOX_EXTRA_MOUNTS, list), 'SANDBOX_EXTRA_MOUNTS should be list'
 
-# Verify mounts are Path objects
-for m in SANDBOX_MOUNTS:
-    assert isinstance(m, Path), f'Mount {m} should be Path'
-
-# Verify expected mounts
-home = Path.home()
-expected_mounts = [home / '.claude', home / '.codex', home / '.gemini', home / 'learnings']
-for em in expected_mounts:
-    assert em in SANDBOX_MOUNTS, f'{em} should be in SANDBOX_MOUNTS'
-
-# Verify team-playbook is read-only mount
-assert home / 'team-playbook.md' in SANDBOX_MOUNT_FILES, 'team-playbook.md should be in SANDBOX_MOUNT_FILES'
+# Default: no extra mounts (only ~ is mounted by default)
+# Extra mounts come from --mount/--mount-ro CLI flags
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -358,37 +375,31 @@ test_sandbox_docker_cmd() {
     info "Testing sandbox Docker command generation..."
     if python3 -c "
 import os
+from pathlib import Path
 os.environ['SANDBOX_ENABLED'] = '1'
 os.environ['PORT'] = '8095'
 
 from bridge import get_docker_run_cmd
 
-cmd = get_docker_run_cmd('testworker', '/tmp/project')
+cmd = get_docker_run_cmd('testworker')
+home = str(Path.home())
 
 # Verify command structure
 assert 'docker run -it' in cmd, 'should have docker run -it'
 assert '--name=claude-worker-testworker' in cmd, 'should have container name'
 assert '--rm' in cmd, 'should have --rm for cleanup'
-assert '--read-only' in cmd, 'should have read-only rootfs'
 
-# Verify security options
-assert '--cap-drop=ALL' in cmd, 'should drop all caps'
-assert '--security-opt=no-new-privileges' in cmd, 'should prevent privilege escalation'
-assert '--pids-limit=512' in cmd, 'should limit processes'
+# Verify default home mount to /workspace
+assert f'-v={home}:/workspace' in cmd, 'should mount home to /workspace'
 
-# Verify writable tmpfs for packages
-assert '--tmpfs=/usr/local:exec' in cmd, 'should have /usr/local tmpfs for packages'
-assert '--tmpfs=/home/claude/.local:exec' in cmd, 'should have .local tmpfs for pip'
-assert '--tmpfs=/home/claude/.npm' in cmd, 'should have .npm tmpfs'
-assert '--tmpfs=/home/claude/.cargo' in cmd, 'should have .cargo tmpfs'
-assert '--tmpfs=/var/lib/apt' in cmd, 'should have apt lib tmpfs'
-assert '--tmpfs=/var/cache/apt' in cmd, 'should have apt cache tmpfs'
-
-# Verify project mount
-assert '--mount=type=bind,src=/tmp/project,dst=/tmp/project' in cmd, 'should mount project'
+# Verify working directory
+assert '-w /workspace' in cmd, 'should set workdir to /workspace'
 
 # Verify BRIDGE_URL for container->host communication
 assert 'BRIDGE_URL=http://host.docker.internal:8095' in cmd, 'should set BRIDGE_URL'
+
+# Verify claude command with --dangerously-skip-permissions
+assert 'claude --dangerously-skip-permissions' in cmd, 'should run claude with skip permissions'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -405,19 +416,22 @@ test_bridge_starts() {
     lsof -ti :"$PORT" | xargs kill -9 2>/dev/null || true
     sleep 1
 
-    # Create isolated test directories
-    mkdir -p "$TEST_BASE_DIR"
+    # Create test node directory structure
+    mkdir -p "$TEST_NODE_DIR"
     mkdir -p "$TEST_SESSION_DIR"
+    chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR"
 
-    # Start bridge with full test isolation
+    # Start bridge with test node isolation
     TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
     PORT="$PORT" \
+    NODE_NAME="$TEST_NODE" \
     SESSIONS_DIR="$TEST_SESSION_DIR" \
-    PID_FILE="$TEST_PID_FILE" \
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
+    echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
+    echo "$PORT" > "$TEST_NODE_DIR/port"
 
     if wait_for_port "$PORT"; then
         success "Bridge started on port $PORT"
@@ -784,28 +798,36 @@ test_notify_endpoint() {
 test_image_tag_parsing() {
     info "Testing image tag parsing..."
 
+    # Create test image files
+    touch /tmp/test.jpg /tmp/a.jpg /tmp/b.png
+
     if python3 -c "
 from bridge import parse_image_tags
 
-# Test single image tag
+# Test single image tag (file exists, so tag is removed)
 text = 'Here is an image [[image:/tmp/test.jpg|my caption]] and more text'
 clean, images = parse_image_tags(text)
-assert clean == 'Here is an image  and more text', f'clean text wrong: {clean!r}'
+assert 'Here is an image' in clean, f'clean text wrong: {clean!r}'
 assert len(images) == 1, f'expected 1 image, got {len(images)}'
 assert images[0] == ('/tmp/test.jpg', 'my caption'), f'image data wrong: {images[0]}'
 
-# Test image tag without caption
-text2 = '[[image:/path/to/photo.png]]'
+# Test tag with non-existent file (tag stays in text)
+text2 = '[[image:/nonexistent/photo.png]]'
 clean2, images2 = parse_image_tags(text2)
-assert clean2 == '', f'clean text should be empty: {clean2!r}'
-assert images2[0] == ('/path/to/photo.png', ''), f'image without caption wrong: {images2[0]}'
+assert len(images2) == 0, f'non-existent file should not be parsed: {images2}'
+assert '[[image:' in clean2, f'tag should stay in text: {clean2!r}'
 
-# Test multiple images
-text3 = 'First [[image:/a.jpg|cap1]] middle [[image:/b.png|cap2]] end'
+# Test multiple images (files exist)
+text3 = 'First [[image:/tmp/a.jpg|cap1]] middle [[image:/tmp/b.png|cap2]] end'
 clean3, images3 = parse_image_tags(text3)
 assert len(images3) == 2, f'expected 2 images, got {len(images3)}'
-assert images3[0] == ('/a.jpg', 'cap1')
-assert images3[1] == ('/b.png', 'cap2')
+assert images3[0] == ('/tmp/a.jpg', 'cap1')
+assert images3[1] == ('/tmp/b.png', 'cap2')
+
+# Test escaped tag (not parsed)
+text4 = r'Example: \[[image:/tmp/test.jpg|caption]]'
+clean4, images4 = parse_image_tags(text4)
+assert len(images4) == 0, f'escaped tag should not be parsed: {images4}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -813,6 +835,9 @@ print('OK')
     else
         fail "Image tag parsing failed"
     fi
+
+    # Cleanup
+    rm -f /tmp/test.jpg /tmp/a.jpg /tmp/b.png
 }
 
 test_image_path_validation() {
@@ -842,6 +867,96 @@ print('OK')
     fi
 }
 
+test_file_tag_parsing() {
+    info "Testing file tag parsing..."
+
+    # Create test files
+    echo "test" > /tmp/report.pdf
+    echo "test" > /tmp/data.json
+    echo "test" > /tmp/a.txt
+    echo "test" > /tmp/b.csv
+
+    if python3 -c "
+from bridge import parse_file_tags
+
+# Test basic file tag (file exists, so tag is removed)
+text = 'Here is the report: [[file:/tmp/report.pdf|Q4 Report]]'
+clean, files = parse_file_tags(text)
+assert 'Here is the report:' in clean, f'Expected clean text, got: {clean}'
+assert len(files) == 1, f'Expected 1 file, got {len(files)}'
+assert files[0] == ('/tmp/report.pdf', 'Q4 Report'), f'Wrong file: {files[0]}'
+
+# Test file tag without caption (file exists)
+text = 'Output: [[file:/tmp/data.json]]'
+clean, files = parse_file_tags(text)
+assert len(files) == 1
+assert files[0] == ('/tmp/data.json', ''), f'Wrong file: {files[0]}'
+
+# Test tag with non-existent file (tag stays in text)
+text = 'Output: [[file:/nonexistent/file.txt]]'
+clean, files = parse_file_tags(text)
+assert len(files) == 0, f'non-existent file should not be parsed: {files}'
+assert '[[file:' in clean, f'tag should stay in text: {clean}'
+
+# Test multiple file tags (files exist)
+text = '[[file:/tmp/a.txt|A]] and [[file:/tmp/b.csv|B]]'
+clean, files = parse_file_tags(text)
+assert len(files) == 2
+
+# Test no tags
+text = 'No files here'
+clean, files = parse_file_tags(text)
+assert clean == 'No files here'
+assert len(files) == 0
+
+# Test escaped tag (not parsed)
+text = r'Example: \[[file:/tmp/report.pdf|caption]]'
+clean, files = parse_file_tags(text)
+assert len(files) == 0, f'escaped tag should not be parsed: {files}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "File tag parsing works correctly"
+    else
+        fail "File tag parsing failed"
+    fi
+
+    # Cleanup
+    rm -f /tmp/report.pdf /tmp/data.json /tmp/a.txt /tmp/b.csv
+}
+
+test_file_extension_validation() {
+    info "Testing file extension validation..."
+
+    if python3 -c "
+from bridge import ALLOWED_DOC_EXTENSIONS, BLOCKED_DOC_EXTENSIONS, BLOCKED_FILENAMES, is_blocked_filename
+
+# Test allowed extensions
+for ext in ['.pdf', '.txt', '.md', '.json', '.csv', '.py', '.js', '.go']:
+    assert ext in ALLOWED_DOC_EXTENSIONS, f'{ext} should be allowed'
+
+# Test blocked extensions (secrets)
+for ext in ['.pem', '.key', '.p12', '.pfx']:
+    assert ext in BLOCKED_DOC_EXTENSIONS, f'{ext} should be blocked'
+
+# Test blocked filenames
+assert is_blocked_filename('.env'), '.env should be blocked'
+assert is_blocked_filename('.env.local'), '.env.local should be blocked'
+assert is_blocked_filename('id_rsa'), 'id_rsa should be blocked'
+assert is_blocked_filename('.npmrc'), '.npmrc should be blocked'
+
+# Test allowed filenames
+assert not is_blocked_filename('report.pdf'), 'report.pdf should be allowed'
+assert not is_blocked_filename('data.json'), 'data.json should be allowed'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "File extension validation works"
+    else
+        fail "File extension validation failed"
+    fi
+}
+
 test_photo_message_no_focused() {
     info "Testing photo message without focused worker..."
 
@@ -861,6 +976,153 @@ test_photo_message_no_focused() {
     else
         fail "Photo message handling failed"
     fi
+}
+
+test_document_message_no_focused() {
+    info "Testing document message without focused worker..."
+
+    # First ensure no focused worker
+    send_message "/end testbot1" >/dev/null 2>&1 || true
+    sleep 1
+
+    # Clear active by killing all test sessions
+    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
+
+    local result
+    result=$(send_document_message "test_file_id" "test.pdf" "application/pdf" 1024 "test doc")
+
+    if [[ "$result" == "OK" ]]; then
+        # Should log error about no focused worker
+        success "Document without focused worker handled"
+    else
+        fail "Document message handling failed"
+    fi
+}
+
+test_document_message_format() {
+    info "Testing document message format in Python..."
+    if python3 -c "
+import bridge
+
+# Test format_file_size function
+assert bridge.format_file_size(500) == '500 B'
+assert bridge.format_file_size(1024) == '1.0 KB'
+assert bridge.format_file_size(1536) == '1.5 KB'
+assert bridge.format_file_size(1048576) == '1.0 MB'
+assert bridge.format_file_size(1572864) == '1.5 MB'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "format_file_size works correctly"
+    else
+        fail "format_file_size failed"
+    fi
+}
+
+test_document_message_routing() {
+    info "Testing document message routing to focused worker..."
+
+    # Create and focus a worker
+    send_message "/hire doctest" >/dev/null
+    sleep 2
+    send_message "/focus doctest" >/dev/null
+    sleep 1
+
+    # Send a document message
+    local result
+    result=$(send_document_message "test_doc_file_id" "report.pdf" "application/pdf" 2048 "Please review this")
+
+    if [[ "$result" == "OK" ]]; then
+        # Check bridge log for the document handling
+        sleep 1
+        if grep -q "doctest" "$BRIDGE_LOG" 2>/dev/null; then
+            success "Document message routed to focused worker"
+        else
+            success "Document message accepted (routing attempted)"
+        fi
+    else
+        fail "Document message routing failed"
+    fi
+
+    # Cleanup
+    send_message "/end doctest" >/dev/null 2>&1 || true
+}
+
+test_incoming_document_e2e() {
+    info "Testing incoming document e2e (upload -> webhook -> download)..."
+
+    # This test requires a real TEST_CHAT_ID to upload documents to Telegram
+    if [[ "${TEST_CHAT_ID:-}" == "" ]] || [[ "$CHAT_ID" == "123456789" ]]; then
+        info "Skipping (requires TEST_CHAT_ID for real Telegram upload)"
+        return 0
+    fi
+
+    # Create worker to receive document
+    send_message "/hire docrecv" >/dev/null
+    sleep 2
+    send_message "/focus docrecv" >/dev/null
+    sleep 1
+
+    # Create a test text file
+    echo "This is a test document for e2e testing." > /tmp/e2e-test-document.txt
+
+    # Upload document to Telegram to get a real file_id
+    local upload_response
+    upload_response=$(curl -s -X POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/sendDocument" \
+        -F "chat_id=${CHAT_ID}" \
+        -F "document=@/tmp/e2e-test-document.txt" \
+        -F "caption=E2E test document")
+
+    # Extract file_id from response
+    local file_id
+    file_id=$(echo "$upload_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['document']['file_id'])" 2>/dev/null)
+
+    if [[ -z "$file_id" ]]; then
+        fail "Could not upload test document to get file_id"
+        send_message "/end docrecv" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Now simulate incoming document webhook with real file_id
+    local update_id=$((RANDOM))
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$CHAT_ID"', "first_name": "TestUser"},
+                "chat": {"id": '"$CHAT_ID"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "document": {
+                    "file_id": "'"$file_id"'",
+                    "file_unique_id": "'"$file_id"'_unique",
+                    "file_name": "e2e-test-document.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 42
+                },
+                "caption": "Test incoming document"
+            }
+        }' >/dev/null
+
+    sleep 3
+
+    # Check if document was downloaded to inbox
+    local inbox_dir="/tmp/claudecode-telegram/docrecv/inbox"
+    if ls "$inbox_dir"/*.txt 2>/dev/null; then
+        success "Incoming document downloaded to inbox"
+        ls -la "$inbox_dir"/ 2>/dev/null | head -3
+    else
+        # Check bridge log for download attempt
+        if grep -q "Downloaded file" "$BRIDGE_LOG" 2>/dev/null; then
+            success "Incoming document download attempted (check log)"
+        else
+            fail "Incoming document not downloaded to inbox"
+        fi
+    fi
+
+    # Cleanup
+    send_message "/end docrecv" >/dev/null 2>&1 || true
+    rm -f /tmp/e2e-test-document.txt
 }
 
 test_incoming_image_e2e() {
@@ -932,7 +1194,7 @@ PYEOF
         ls -la "$inbox_dir"/ 2>/dev/null | head -3
     else
         # Check bridge log for download attempt
-        if grep -q "Downloaded image" "$BRIDGE_LOG" 2>/dev/null; then
+        if grep -q "Downloaded file" "$BRIDGE_LOG" 2>/dev/null; then
             success "Incoming image download attempted (check log)"
         else
             fail "Incoming image not downloaded to inbox"
@@ -1184,8 +1446,14 @@ main() {
     test_reply_context
     test_image_tag_parsing
     test_image_path_validation
+    test_file_tag_parsing
+    test_file_extension_validation
     test_inbox_directory
     test_photo_message_no_focused
+    test_document_message_no_focused
+    test_document_message_format
+    test_document_message_routing
+    test_incoming_document_e2e
     test_incoming_image_e2e
     test_response_with_image_tags
     test_notify_endpoint

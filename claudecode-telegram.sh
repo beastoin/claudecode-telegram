@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.11.1"
+VERSION="0.16.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Sandbox mode (Docker isolation):
 #   SANDBOX_ENABLED         - Set to "1" to run workers in Docker containers (default: 0)
 #   SANDBOX_IMAGE           - Docker image name (default: claudecode-telegram:latest)
-#   SANDBOX_PROJECT_ROOT    - Project directory to mount (optional)
+#   Use --mount/--mount-ro flags for additional mounts (CLI preferred over env)
 #
 # Derived (auto-set per node, don't set manually):
 #   PORT, SESSIONS_DIR, TMUX_PREFIX
@@ -46,7 +46,8 @@ JSON_OUTPUT=false
 FORCE=false
 ALL_NODES=false
 NODE_NAME="${NODE_NAME:-}"
-SANDBOX="${SANDBOX_ENABLED:-1}"  # Default: enabled (use Docker isolation)
+SANDBOX="${SANDBOX_ENABLED:-0}"  # Default: disabled (sandbox not stable yet)
+SANDBOX_MOUNTS=""  # Extra mounts from --mount/--mount-ro flags
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output
@@ -82,11 +83,6 @@ get_node_dir() {
     echo "$NODES_DIR/$node"
 }
 
-get_node_config() {
-    local node="$1"
-    echo "$(get_node_dir "$node")/config.env"
-}
-
 get_node_pid_file() {
     local node="$1"
     echo "$(get_node_dir "$node")/pid"
@@ -102,18 +98,14 @@ get_node_tmux_prefix() {
     echo "claude-${node}-"
 }
 
-load_node_config() {
+get_default_port() {
     local node="$1"
-    local config_file
-    config_file=$(get_node_config "$node")
-
-    if [[ -f "$config_file" ]]; then
-        debug "Loading config from $config_file"
-        set -a
-        # shellcheck source=/dev/null
-        source "$config_file"
-        set +a
-    fi
+    case "$node" in
+        prod) echo 8081 ;;
+        dev)  echo 8082 ;;
+        test) echo 8095 ;;
+        *)    echo 8080 ;;
+    esac
 }
 
 ensure_node_dir() {
@@ -337,9 +329,8 @@ cmd_run() {
         esac
     done
 
-    # Load node config (only use if not set by CLI)
-    load_node_config "$node"
-    [[ -z "$port" ]] && port="${PORT:-8080}"
+    # Port: CLI flag > env var > derived from node name
+    [[ -z "$port" ]] && port="${PORT:-$(get_default_port "$node")}"
     [[ -z "$tunnel_url" ]] && tunnel_url="${TUNNEL_URL:-}"
 
     local token; token=$(require_token)
@@ -373,7 +364,7 @@ cmd_run() {
     log "$(bold "Node:") $node"
     log ""
 
-    # 1. Install hook if needed
+    # 1. Install hook if needed (single hook for all nodes, reads env at runtime)
     if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]]; then
         log "Installing hook..."
         FORCE=true cmd_hook_install >/dev/null 2>&1 || true
@@ -385,16 +376,20 @@ cmd_run() {
     log "$(dim "No default session - use /new <name> from Telegram")"
 
     # Set up env vars for bridge
-    export TELEGRAM_BOT_TOKEN="$token" PORT="$port" NODE_NAME="$node"
+    export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
 
     # Sandbox mode env vars
-    export SANDBOX_ENABLED="${SANDBOX:-1}"
+    export SANDBOX_ENABLED="${SANDBOX:-0}"
     export SANDBOX_IMAGE="${SANDBOX_IMAGE:-claudecode-telegram:latest}"
-    export SANDBOX_PROJECT_ROOT="${SANDBOX_PROJECT_ROOT:-}"
+    export SANDBOX_MOUNTS="${SANDBOX_MOUNTS:-}"
 
     if [[ "$SANDBOX_ENABLED" == "1" ]]; then
         log "$(green "Sandbox mode enabled") - workers run in Docker containers"
+        log "$(dim "Default mount: $HOME → /workspace")"
+        if [[ -n "$SANDBOX_MOUNTS" ]]; then
+            log "$(dim "Extra mounts: $SANDBOX_MOUNTS")"
+        fi
         # Check if docker is available
         if ! command -v docker &>/dev/null; then
             warn "Docker not found - falling back to direct execution"
@@ -654,6 +649,40 @@ stop_single_node() {
     fi
 }
 
+cmd_clean() {
+    local node
+    node=$(resolve_target_node)
+    local node_dir sessions_dir
+    node_dir=$(get_node_dir "$node")
+    sessions_dir=$(get_node_sessions_dir "$node")
+
+    log "Cleaning node '$node'..."
+
+    # Remove admin_chat_id file
+    if [[ -f "$node_dir/admin_chat_id" ]]; then
+        rm -f "$node_dir/admin_chat_id"
+        success "Removed admin_chat_id"
+    fi
+
+    # Remove chat_id files from all sessions
+    local cleaned=0
+    if [[ -d "$sessions_dir" ]]; then
+        for session_dir in "$sessions_dir"/*/; do
+            [[ -d "$session_dir" ]] || continue
+            if [[ -f "${session_dir}chat_id" ]]; then
+                rm -f "${session_dir}chat_id"
+                ((cleaned++))
+            fi
+        done
+    fi
+
+    if [[ $cleaned -gt 0 ]]; then
+        success "Removed $cleaned session chat_id file(s)"
+    fi
+
+    success "Node '$node' cleaned. Next message will re-register admin."
+}
+
 cmd_restart() {
     if $ALL_NODES; then
         error "--all not supported for restart"
@@ -746,9 +775,6 @@ show_node_status() {
         done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${tmux_prefix}" || true)
     fi
 
-    # Load node config for token check
-    load_node_config "$node"
-
     [[ -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] && hook_ok=true
     [[ -f "$SETTINGS_FILE" ]] && grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null && settings_ok=true
 
@@ -814,7 +840,6 @@ cmd_webhook_set() {
 
     local node
     node=$(resolve_target_node)
-    load_node_config "$node"
 
     local token; token=$(require_token)
     log "Setting webhook for node '$node': $url"
@@ -832,7 +857,6 @@ cmd_webhook_set() {
 cmd_webhook_info() {
     local node
     node=$(resolve_target_node)
-    load_node_config "$node"
 
     local token; token=$(require_token)
     local r; r=$(telegram_api "$token" "getWebhookInfo" "{}")
@@ -851,7 +875,6 @@ cmd_webhook_info() {
 cmd_webhook_delete() {
     local node
     node=$(resolve_target_node)
-    load_node_config "$node"
 
     local token; token=$(require_token)
 
@@ -869,10 +892,11 @@ cmd_hook() {
     shift || true
 
     case "$action" in
-        install) cmd_hook_install "$@";;
-        test)    cmd_hook_test;;
-        "")      error "Subcommand required"; hint "./claudecode-telegram.sh hook <install|test>"; exit 2;;
-        *)       error "Unknown: hook $action"; exit 2;;
+        install)   cmd_hook_install "$@";;
+        uninstall) cmd_hook_uninstall "$@";;
+        test)      cmd_hook_test;;
+        "")        error "Subcommand required"; hint "./claudecode-telegram.sh hook <install|uninstall|test>"; exit 2;;
+        *)         error "Unknown: hook $action"; exit 2;;
     esac
 }
 
@@ -897,6 +921,7 @@ cmd_hook_install() {
         exit 1
     fi
 
+    # Just copy the hook (reads env vars at runtime, set by bridge)
     cp "$src" "$dst" && chmod 755 "$dst"
     success "Hook installed: $dst"
 
@@ -908,15 +933,25 @@ cmd_hook_install() {
     fi
 
     mkdir -p "$CLAUDE_DIR"
-    local hook_cmd="~/.claude/hooks/$HOOK_SCRIPT"
+    local hook_cmd="$HOME/.claude/hooks/$HOOK_SCRIPT"
 
+    # Add to settings.json
+    # Claude Code hooks structure: hooks.Stop[].hooks[] array
     if [[ -f "$SETTINGS_FILE" ]]; then
         if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
             log "$(dim "Already in settings.json")"
         elif check_cmd jq; then
-            jq --argjson h '{"hooks":[{"type":"command","command":"'"$hook_cmd"'"}]}' \
-                '.hooks.Stop += [$h]' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            if jq -e '.hooks.Stop[0].hooks' "$SETTINGS_FILE" >/dev/null 2>&1; then
+                jq --arg cmd "$hook_cmd" \
+                    '.hooks.Stop[0].hooks += [{"type":"command","command":$cmd}]' \
+                    "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                    && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            else
+                jq --arg cmd "$hook_cmd" \
+                    '.hooks.Stop = [{"hooks":[{"type":"command","command":$cmd}]}]' \
+                    "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                    && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            fi
             success "Updated settings.json"
         else
             warn "Install jq to auto-update settings.json"
@@ -929,13 +964,42 @@ EOF
     fi
 
     log ""
-    log "$(bold "Note:") Hook forwards to bridge - no token needed in Claude session"
+    log "$(bold "Note:") Single hook for all nodes. Reads config from env vars set by bridge."
+}
+
+cmd_hook_uninstall() {
+    local hook_file="$HOOKS_DIR/$HOOK_SCRIPT"
+
+    log "Uninstalling hook..."
+
+    # Remove hook file
+    if [[ -f "$hook_file" ]]; then
+        rm -f "$hook_file"
+        success "Removed: $hook_file"
+    else
+        log "$(dim "Hook file not found: $hook_file")"
+    fi
+
+    # Remove helper
+    rm -f "$HOOKS_DIR/forward-to-bridge.py"
+
+    # Remove from settings.json
+    if [[ -f "$SETTINGS_FILE" ]] && check_cmd jq; then
+        if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
+            jq --arg hook "$HOOK_SCRIPT" '
+                .hooks.Stop[0].hooks = [.hooks.Stop[0].hooks[] | select(.command | contains($hook) | not)]
+            ' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            success "Removed from settings.json"
+        else
+            log "$(dim "Not in settings.json")"
+        fi
+    fi
 }
 
 cmd_hook_test() {
     local node
     node=$(resolve_target_node)
-    load_node_config "$node"
 
     local token; token=$(require_token)
     local sessions_dir
@@ -999,11 +1063,13 @@ SHELL COMMANDS
   run               Start bridge + tunnel + webhook
   restart           Restart (preserves tmux sessions)
   stop              Stop node (bridge, tunnel, sessions)
+  clean             Reset admin/chat_id (fixes stale config)
   status            Show current status
   webhook <url>     Set Telegram webhook URL
   webhook info      Show current webhook
   webhook delete    Remove webhook
   hook install      Install Claude Code Stop hook
+  hook uninstall    Remove hook
   hook test         Send test message to Telegram
 
 FLAGS
@@ -1021,10 +1087,11 @@ FLAGS
   --no-color            Disable colors
   --env-file <path>     Load env from file
   -f, --force           Overwrite existing
-  --sandbox             Run workers in Docker (default: enabled)
+  --sandbox             Run workers in Docker (default: disabled)
   --no-sandbox          Run workers directly (--dangerously-skip-permissions)
   --sandbox-image <img> Docker image (default: claudecode-telegram:latest)
-  --project-root <dir>  Project directory to mount in sandbox
+  --mount <path>        Extra mount (host:container or just path)
+  --mount-ro <path>     Extra mount, read-only
 
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
@@ -1032,9 +1099,8 @@ ENVIRONMENT
   PORT                    Server port (default: 8080)
   TUNNEL_URL              Pre-configured tunnel URL
   TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
-  SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 1)
+  SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 0)
   SANDBOX_IMAGE           Docker image for workers
-  SANDBOX_PROJECT_ROOT    Project directory to mount
 
 DIRECTORY STRUCTURE
   ~/.claude/telegram/nodes/
@@ -1084,8 +1150,10 @@ main() {
             --no-sandbox) SANDBOX=0; shift;;
             --sandbox-image=*) SANDBOX_IMAGE="${1#*=}"; shift;;
             --sandbox-image)   SANDBOX_IMAGE="$2"; shift 2;;
-            --project-root=*)  SANDBOX_PROJECT_ROOT="${1#*=}"; shift;;
-            --project-root)    SANDBOX_PROJECT_ROOT="$2"; shift 2;;
+            --mount=*)    SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}${1#*=}"; shift;;
+            --mount)      SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}$2"; shift 2;;
+            --mount-ro=*) SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:${1#*=}"; shift;;
+            --mount-ro)   SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:$2"; shift 2;;
             -*)           error "Unknown flag: $1"; exit 2;;
             *)            break;;
         esac
@@ -1098,6 +1166,7 @@ main() {
         run)     cmd_run "$@";;
         restart) cmd_restart "$@";;
         stop)    cmd_stop;;
+        clean)   cmd_clean;;
         status)  cmd_status;;
         webhook) cmd_webhook "$@";;
         hook)    cmd_hook "$@";;
