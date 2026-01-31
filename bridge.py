@@ -860,6 +860,29 @@ def tmux_send_escape(tmux_name):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
 
 
+def tmux_prompt_empty(tmux_name, timeout=0.5):
+    """Check if Claude Code's input prompt is empty (message was accepted).
+
+    After sending a message, polls the tmux pane to verify the prompt
+    line (❯) is empty, indicating Claude accepted the input.
+
+    Returns True if prompt is empty within timeout, False otherwise.
+    """
+    import re
+    start = time.time()
+    while time.time() - start < timeout:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            # Check for empty prompt: line starting with ❯ followed by only whitespace
+            if re.search(r'^❯\s*$', result.stdout, re.MULTILINE):
+                return True
+        time.sleep(0.1)
+    return False
+
+
 def export_hook_env(tmux_name):
     """Export env vars for hook inside tmux session.
 
@@ -1902,8 +1925,8 @@ class Handler(BaseHTTPRequestHandler):
         # Send prompt to worker (with lock to prevent interleaving)
         send_ok = tmux_send_message(tmux_name, prompt)
 
-        # 👀 reaction confirms delivery - no text reply needed (worker will respond)
-        if msg_id and send_ok:
+        # 👀 reaction only if Claude accepted the message (prompt is empty)
+        if msg_id and send_ok and tmux_prompt_empty(tmux_name):
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -1990,8 +2013,8 @@ class Handler(BaseHTTPRequestHandler):
         # Send to tmux (with lock to prevent interleaving)
         send_ok = tmux_send_message(tmux_name, text)
 
-        # Add 👀 reaction only after successful send to Claude
-        if msg_id and send_ok:
+        # Add 👀 reaction only if Claude accepted the message (prompt is empty)
+        if msg_id and send_ok and tmux_prompt_empty(tmux_name):
             telegram_api("setMessageReaction", {
                 "chat_id": chat_id,
                 "message_id": msg_id,

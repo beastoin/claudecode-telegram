@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.16.1
+> Version: 0.16.2
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,18 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.16.2 - Reliable message reaction
+
+**Improvement:** 👀 reaction now only appears when Claude Code actually accepts the message.
+
+**How it works:**
+- After sending message + Enter, polls tmux pane for up to 500ms
+- Checks if Claude Code's input prompt (`❯`) is empty
+- Empty prompt = message was submitted → show 👀
+- Text still in prompt = submit failed → no reaction
+
+**Why:** Previously, reaction appeared immediately after `tmux send-keys` succeeded, but this didn't guarantee Claude Code actually processed the Enter as a submit (could be in multi-line mode, busy, etc.).
 
 ### v0.16.1 - Sandbox disabled by default
 
