@@ -9,11 +9,11 @@ Run multiple AI workers from Telegram—research, operations, and development in
 
 Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coordinate parallel AI workers from a single chat. Use it for research deep dives, operational tasks, or any workstream that benefits from fast, concurrent execution with persistent context.
 
-## Why Managers Use It
+## Manager Outcomes
 
-- **Parallel output**: Our ops manager runs 5 AI workers from Telegram and ships while the human team sleeps.
-- **Zero context re-explaining**: Workers are long-lived and remember the project.
-- **One chat to run everything**: You can broadcast, delegate, and check status without hopping tools.
+- **Throughput while offline.** Run multiple workers in parallel so work continues after hours.
+- **Less context tax.** Long-lived workers keep state, so you don't re-explain.
+- **One place to coordinate.** Broadcast, delegate, and check status from a single chat.
 
 ## Real Results (From Our Team)
 
@@ -21,17 +21,25 @@ Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coor
 - **@geni** did deep research on 2 OSS projects, tracing end-to-end flows and dependencies.
 - **Ops manager** keeps 5 workers running; code ships while they're offline.
 
-## Where Everything Lives
+## Where Data Lives
 
-- **All messages stay in Telegram.** We don't store your messages anywhere else.
-- **Each AI worker keeps an ongoing conversation.** It remembers what was said before, so you don't have to repeat context.
-- **You can pick up anytime.** The chat itself is the workspace, so it's easy to resume work where you left off.
+- **Messages stay in Telegram.** The bridge does not store message history elsewhere.
+- **Worker context is the chat.** Each worker continues from the same ongoing Telegram thread.
+- **Easy to resume.** Pick up any time from the existing chat history.
 
 ## Why This Architecture
 
-- **No extra systems to manage.** There's no separate database and no servers you need to maintain.
-- **Chat history *is* project history.** Decisions, notes, and outputs live in the same place your team already uses.
-- **Less overhead, more clarity.** You get a clean record of work without adding new tools or processes.
+- **Fewer places for data to live means lower risk.**
+- **Less to secure and less to monitor.**
+- **Easier reviews when you need to check what happened.**
+- **Fewer moving parts to break.**
+
+## Use Cases
+
+- **Ops:** incident updates, checklists, status notes.
+- **Research:** quick briefs, vendor comparisons, market scans.
+- **Triage:** sort tickets, label issues, route requests.
+- **Support:** draft replies, summarize threads, suggest next steps.
 
 ## Quick Start
 
