@@ -46,6 +46,7 @@ Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coor
 - Keep a lightweight team memory with two shared files: `~/team-playbook.md` and `~/learnings/README.md`.
 - Daily: ops manager asks for learnings/help, team adds quick notes.
 - Result: the team gets smarter every day and repeats fewer mistakes.
+- **[See our playbook template with real examples](TEMPLATE-PLAYBOOK.md)**
 
 ## Quick Start
 
