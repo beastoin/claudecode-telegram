@@ -900,6 +900,13 @@ cmd_hook_install() {
     cp "$src" "$dst" && chmod 755 "$dst"
     success "Hook installed: $dst"
 
+    # Also copy helper script
+    local helper_src="$SCRIPT_DIR/hooks/forward-to-bridge.py"
+    local helper_dst="$HOOKS_DIR/forward-to-bridge.py"
+    if [[ -f "$helper_src" ]]; then
+        cp "$helper_src" "$helper_dst" && chmod 755 "$helper_dst"
+    fi
+
     mkdir -p "$CLAUDE_DIR"
     local hook_cmd="~/.claude/hooks/$HOOK_SCRIPT"
 
