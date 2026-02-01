@@ -737,11 +737,28 @@ cmd_status() {
         log "$(bold "All Nodes")"
         log ""
 
+        # First pass: show status and count running nodes
+        local running_count=0
+        local running_nodes=""
+
         while IFS= read -r node; do
             [[ -n "$node" ]] || continue
             show_node_status "$node"
             log ""
+
+            if is_node_running "$node"; then
+                running_count=$((running_count + 1))
+                running_nodes+="$node "
+            fi
         done <<< "$all_nodes"
+
+        # Warn if multiple nodes running with same token
+        if [[ $running_count -gt 1 ]]; then
+            log "$(red "⚠ CONFLICT: $running_count nodes running with same bot token")"
+            log "  Running: ${running_nodes% }"
+            log "  Only ONE node receives webhook. Others miss messages."
+            log "  Fix: Use different TELEGRAM_BOT_TOKEN per node, or stop extras."
+        fi
     else
         local node
         node=$(resolve_target_node)
@@ -807,11 +824,63 @@ EOF
         [[ -n "$tunnel_url" ]] && log "  tunnel:   $tunnel_url"
     fi
 
+    # Get settings.json mtime for stale config detection
+    local settings_mtime=0
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        settings_mtime=$(stat -c %Y "$SETTINGS_FILE" 2>/dev/null || stat -f %m "$SETTINGS_FILE" 2>/dev/null || echo 0)
+    fi
+
     if [[ ${#claude_sessions[@]} -gt 0 ]]; then
         log "  sessions: $(green "${#claude_sessions[@]} running")"
+        local env_mismatch=false
+        local stale_config=false
         for s in "${claude_sessions[@]}"; do
-            log "            - ${s#${tmux_prefix}}"
+            local session_name="${s#${tmux_prefix}}"
+            local issues=""
+
+            # Check tmux env vars match node config
+            if $running; then
+                local tmux_port tmux_dir tmux_prefix_env
+                tmux_port=$(tmux show-environment -t "$s" PORT 2>/dev/null | cut -d= -f2- || true)
+                tmux_dir=$(tmux show-environment -t "$s" SESSIONS_DIR 2>/dev/null | cut -d= -f2- || true)
+                tmux_prefix_env=$(tmux show-environment -t "$s" TMUX_PREFIX 2>/dev/null | cut -d= -f2- || true)
+
+                [[ -n "$tmux_port" && "$tmux_port" != "$port" ]] && issues+="port "
+                [[ -n "$tmux_dir" && "$tmux_dir" != "$sessions_dir" ]] && issues+="dir "
+                [[ -n "$tmux_prefix_env" && "$tmux_prefix_env" != "$tmux_prefix" ]] && issues+="prefix "
+
+                if [[ -n "$issues" ]]; then
+                    env_mismatch=true
+                fi
+            fi
+
+            # Check if Claude started before settings.json was modified
+            local pane_pid claude_pid claude_start=0
+            pane_pid=$(tmux display-message -t "$s" -p '#{pane_pid}' 2>/dev/null || echo "")
+            if [[ -n "$pane_pid" ]]; then
+                claude_pid=$(pgrep -P "$pane_pid" -f "claude" 2>/dev/null | head -1 || true)
+                if [[ -n "$claude_pid" ]]; then
+                    claude_start=$(stat -c %Y "/proc/$claude_pid" 2>/dev/null || echo 0)
+                fi
+            fi
+            if [[ $settings_mtime -gt 0 && $claude_start -gt 0 && $settings_mtime -gt $claude_start ]]; then
+                issues+="stale-hooks "
+                stale_config=true
+            fi
+
+            if [[ -n "$issues" ]]; then
+                log "            - ${session_name} $(red "[${issues% }]")"
+            else
+                log "            - ${session_name}"
+            fi
         done
+
+        if $env_mismatch; then
+            log "  $(yellow "⚠ env mismatch: restart node to fix")"
+        fi
+        if $stale_config; then
+            log "  $(yellow "⚠ stale-hooks: restart Claude (/exit) to reload settings.json")"
+        fi
     else
         log "  sessions: $(yellow "none")"
     fi
@@ -936,7 +1005,7 @@ cmd_hook_install() {
     local hook_cmd="$HOME/.claude/hooks/$HOOK_SCRIPT"
 
     # Add to settings.json
-    # Claude Code hooks structure: hooks.Stop[].hooks[] array
+    # Claude Code hooks structure: hooks.Stop[].hooks[] (matcher group with hooks array)
     if [[ -f "$SETTINGS_FILE" ]]; then
         if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
             log "$(dim "Already in settings.json")"

@@ -33,7 +33,8 @@ fi
 # No defaults! Exit if config missing (fail closed for node isolation)
 # ─────────────────────────────────────────────────────────────────────────────
 get_tmux_env() {
-    tmux show-environment -t "$SESSION_NAME" "$1" 2>/dev/null | cut -d= -f2-
+    local val
+    val=$(tmux show-environment -t "$SESSION_NAME" "$1" 2>/dev/null) && echo "${val#*=}" || true
 }
 
 BRIDGE_URL="${BRIDGE_URL:-$(get_tmux_env BRIDGE_URL)}"
@@ -42,10 +43,19 @@ SESSIONS_DIR="${SESSIONS_DIR:-$(get_tmux_env SESSIONS_DIR)}"
 BRIDGE_PORT="${PORT:-$(get_tmux_env PORT)}"
 
 # Fail closed: exit if required config missing (prevents cross-node leakage)
-[ -z "$TMUX_PREFIX" ] && exit 0
-[ -z "$SESSIONS_DIR" ] && exit 0
+if [ -z "$TMUX_PREFIX" ]; then
+    echo "[hook] Missing TMUX_PREFIX in tmux env for $SESSION_NAME" >&2
+    exit 0
+fi
+if [ -z "$SESSIONS_DIR" ]; then
+    echo "[hook] Missing SESSIONS_DIR in tmux env for $SESSION_NAME" >&2
+    exit 0
+fi
 # Need either BRIDGE_URL or PORT
-[ -z "$BRIDGE_URL" ] && [ -z "$BRIDGE_PORT" ] && exit 0
+if [ -z "$BRIDGE_URL" ] && [ -z "$BRIDGE_PORT" ]; then
+    echo "[hook] Missing BRIDGE_URL and PORT in tmux env for $SESSION_NAME" >&2
+    exit 0
+fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Extract bridge session name from prefix pattern
@@ -74,7 +84,7 @@ else
 fi
 
 # Find last user message line
-LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
+LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1 || true)
 [ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
 
 # Extract text from transcript (with retry for race condition)
@@ -168,7 +178,7 @@ echo "$TEXT" > "$TMPFILE"
 
 # Run forward in background with 5s timeout, then cleanup
 (
-    timeout 5 python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT" 2>/dev/null
+    timeout 5 python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT"
     rm -f "$TMPFILE"
 ) &
 
