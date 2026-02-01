@@ -241,6 +241,10 @@ func (a *tmuxManagerAdapter) SessionExists(sessionName string) bool {
 	return a.manager.SessionExists(sessionName)
 }
 
+func (a *tmuxManagerAdapter) PromptEmpty(sessionName string, timeout time.Duration) bool {
+	return a.manager.PromptEmpty(sessionName, timeout)
+}
+
 // App represents the application with all its components.
 type App struct {
 	config   Config

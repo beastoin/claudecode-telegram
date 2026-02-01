@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -125,6 +126,7 @@ func (m *Manager) CreateSession(name, workdir string) error {
 
 // SendMessage sends text to a worker's tmux session.
 // Uses per-session locking to prevent concurrent message interleaving.
+// Small delay between text and Enter to prevent race condition.
 func (m *Manager) SendMessage(sessionName, text string) error {
 	fullName := fullSessionName(m.Prefix, sessionName)
 
@@ -143,6 +145,9 @@ func (m *Manager) SendMessage(sessionName, text string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("send text: %w", err)
 	}
+
+	// Delay to let terminal process text before Enter
+	time.Sleep(200 * time.Millisecond)
 
 	// Send Enter key separately
 	cmd = exec.Command(m.tmuxPath(), "send-keys", "-t", fullName, "Enter")
@@ -171,6 +176,38 @@ func (m *Manager) SendKeys(sessionName string, keys ...string) error {
 	}
 
 	return nil
+}
+
+// PromptEmpty checks if Claude Code's input prompt is empty (message was accepted).
+// After sending a message, polls the tmux pane to verify the prompt line (❯)
+// is empty, indicating Claude accepted the input.
+// Returns true if prompt is empty within timeout, false otherwise.
+func (m *Manager) PromptEmpty(sessionName string, timeout time.Duration) bool {
+	fullName := fullSessionName(m.Prefix, sessionName)
+
+	if !m.sessionExistsFull(fullName) {
+		return false
+	}
+
+	if timeout <= 0 {
+		timeout = 500 * time.Millisecond
+	}
+
+	promptEmptyRE := regexp.MustCompile(`(?m)^❯\s*$`)
+	start := time.Now()
+
+	for time.Since(start) < timeout {
+		cmd := exec.Command(m.tmuxPath(), "capture-pane", "-t", fullName, "-p")
+		output, err := cmd.Output()
+		if err == nil {
+			if promptEmptyRE.Match(output) {
+				return true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return false
 }
 
 // KillSession terminates a worker's tmux session.

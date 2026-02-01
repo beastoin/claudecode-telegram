@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/beastoin/claudecode-telegram/internal/sandbox"
 )
@@ -234,6 +235,11 @@ func (m *MockTmuxManager) SessionExists(sessionName string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.Sessions[sessionName]
+}
+
+func (m *MockTmuxManager) PromptEmpty(sessionName string, timeout time.Duration) bool {
+	// In tests, assume prompt is always empty (message accepted)
+	return true
 }
 
 func TestNewHandler(t *testing.T) {

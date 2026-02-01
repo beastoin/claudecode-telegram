@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/beastoin/claudecode-telegram/internal/files"
 	"github.com/beastoin/claudecode-telegram/internal/sandbox"
@@ -96,6 +97,7 @@ type TmuxManager interface {
 	SendMessage(sessionName, text string) error
 	KillSession(sessionName string) error
 	SessionExists(sessionName string) bool
+	PromptEmpty(sessionName string, timeout time.Duration) bool
 }
 
 // HandlerConfig holds configuration for the handler.
@@ -318,8 +320,10 @@ func (h *Handler) routeToDirectWorker(chatID string, messageID int64, workerName
 		return
 	}
 
-	// Send reaction to confirm delivery
-	h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	// Send reaction only if Claude accepted the message (prompt is empty)
+	if h.tmux.PromptEmpty(workerName, 500*time.Millisecond) {
+		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	}
 }
 
 // routeToBroadcast sends a message to all active workers.
@@ -342,17 +346,17 @@ func (h *Handler) routeToBroadcast(chatID string, messageID int64, content strin
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
-	anySuccess := false
+	anyAccepted := false
 	for _, session := range sessions {
 		if err := h.tmux.SendMessage(session.Name, content); err != nil {
 			h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to send to %s: %v", session.Name, err))
-		} else {
-			anySuccess = true
+		} else if h.tmux.PromptEmpty(session.Name, 500*time.Millisecond) {
+			anyAccepted = true
 		}
 	}
 
-	// Send reaction to confirm delivery if at least one succeeded
-	if anySuccess {
+	// Send reaction only if at least one Claude accepted the message
+	if anyAccepted {
 		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
 	}
 }
@@ -367,8 +371,10 @@ func (h *Handler) routeToWorker(chatID string, messageID int64, workerName, text
 		return
 	}
 
-	// Send reaction to confirm delivery
-	h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	// Send reaction only if Claude accepted the message (prompt is empty)
+	if h.tmux.PromptEmpty(workerName, 500*time.Millisecond) {
+		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	}
 }
 
 func (h *Handler) handleCommand(chatID, text string) {
@@ -654,8 +660,10 @@ func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text stri
 		return
 	}
 
-	// Send reaction to confirm delivery
-	h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	// Send reaction only if Claude accepted the message (prompt is empty)
+	if h.tmux.PromptEmpty(focused, 500*time.Millisecond) {
+		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	}
 }
 
 func (h *Handler) handleResponse(w http.ResponseWriter, r *http.Request) {
@@ -874,8 +882,10 @@ func (h *Handler) processFileMessage(chatID string, messageID int64, msg *Messag
 		return
 	}
 
-	// Send reaction to confirm delivery
-	h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	// Send reaction only if Claude accepted the message (prompt is empty)
+	if h.tmux.PromptEmpty(targetWorker, 500*time.Millisecond) {
+		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	}
 }
 
 // determineFileTarget determines the target worker and message content from the caption.

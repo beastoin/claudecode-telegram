@@ -308,6 +308,10 @@ func (a *TmuxManagerAdapter) SessionExists(sessionName string) bool {
 	return a.manager.SessionExists(sessionName)
 }
 
+func (a *TmuxManagerAdapter) PromptEmpty(sessionName string, timeout time.Duration) bool {
+	return a.manager.PromptEmpty(sessionName, timeout)
+}
+
 // E2ETestEnv holds all components for an e2e test.
 type E2ETestEnv struct {
 	t              *testing.T
