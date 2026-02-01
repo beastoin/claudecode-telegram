@@ -1,0 +1,10 @@
+# Compiled binaries
+cctg
+*.test
+
+# IDE
+.idea/
+.vscode/
+
+# Test artifacts
+*.log
