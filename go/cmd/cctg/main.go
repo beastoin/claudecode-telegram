@@ -299,7 +299,8 @@ func getHookSubcommand(args []string) string {
 }
 
 // cctgHookCommand is the command we install - used for duplicate detection
-const cctgHookCommand = `cctg hook --url "$BRIDGE_URL" --session "$CLAUDE_SESSION_NAME"`
+// Note: No --session flag - the hook auto-detects session from tmux
+const cctgHookCommand = `cctg hook`
 
 func runHookInstall(claudeDir string, stdout io.Writer) error {
 	settingsPath := claudeDir + "/settings.json"
@@ -828,6 +829,54 @@ func checkNodeHealth(nodesDir, nodeName, token, homeDir string) *nodeHealth {
 		h.Sessions = sessions
 	}
 
+	// Check session env vars
+	expectedBridgeURL := "http://localhost:" + h.Port
+	expectedPrefix := prefix
+	expectedSessionsDir := h.NodeDir + "/sessions"
+
+	for _, sess := range h.Sessions {
+		workerName := strings.TrimPrefix(sess.Name, prefix)
+
+		// Check BRIDGE_URL
+		if sess.BridgeURL == "" {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "ERROR",
+				Message: fmt.Sprintf("Session %s missing BRIDGE_URL", workerName),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s BRIDGE_URL %s", sess.Name, expectedBridgeURL),
+			})
+		} else if sess.BridgeURL != expectedBridgeURL {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "WARN",
+				Message: fmt.Sprintf("Session %s BRIDGE_URL mismatch (got %s, expected %s)", workerName, sess.BridgeURL, expectedBridgeURL),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s BRIDGE_URL %s", sess.Name, expectedBridgeURL),
+			})
+		}
+
+		// Check TMUX_PREFIX
+		if sess.TmuxPrefix == "" {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "ERROR",
+				Message: fmt.Sprintf("Session %s missing TMUX_PREFIX", workerName),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s TMUX_PREFIX %s", sess.Name, expectedPrefix),
+			})
+		} else if sess.TmuxPrefix != expectedPrefix {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "WARN",
+				Message: fmt.Sprintf("Session %s TMUX_PREFIX mismatch (got %s, expected %s)", workerName, sess.TmuxPrefix, expectedPrefix),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s TMUX_PREFIX %s", sess.Name, expectedPrefix),
+			})
+		}
+
+		// Check SESSIONS_DIR (warn only, not critical)
+		if sess.SessionsDir == "" {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "WARN",
+				Message: fmt.Sprintf("Session %s missing SESSIONS_DIR", workerName),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s SESSIONS_DIR %s", sess.Name, expectedSessionsDir),
+			})
+		}
+	}
+
 	// Check hook installation
 	h.HookInstalled = isHookInstalled(homeDir)
 
@@ -901,13 +950,25 @@ func printNodeHealth(h *nodeHealth, stdout io.Writer) {
 	if len(h.Sessions) > 0 {
 		fmt.Fprintf(stdout, "  sessions: %d active\n", len(h.Sessions))
 		prefix := "claude-" + h.NodeName + "-"
+		expectedBridgeURL := "http://localhost:" + h.Port
 		for _, s := range h.Sessions {
 			workerName := strings.TrimPrefix(s.Name, prefix)
+			var status []string
 			if s.ClaudeRunning {
-				fmt.Fprintf(stdout, "    - %s [claude running]\n", workerName)
+				status = append(status, "claude running")
 			} else {
-				fmt.Fprintf(stdout, "    - %s [claude not running]\n", workerName)
+				status = append(status, "claude not running")
 			}
+			// Check env vars
+			if s.BridgeURL == "" {
+				status = append(status, "NO BRIDGE_URL")
+			} else if s.BridgeURL != expectedBridgeURL {
+				status = append(status, "BRIDGE_URL mismatch")
+			}
+			if s.TmuxPrefix == "" {
+				status = append(status, "NO TMUX_PREFIX")
+			}
+			fmt.Fprintf(stdout, "    - %s [%s]\n", workerName, strings.Join(status, ", "))
 		}
 	} else {
 		fmt.Fprintln(stdout, "  sessions: none")
@@ -1199,6 +1260,11 @@ func setWebhook(token, webhookURL string) error {
 type tmuxSessionInfo struct {
 	Name          string
 	ClaudeRunning bool
+	// Env vars from tmux session
+	BridgeURL   string
+	TmuxPrefix  string
+	Port        string
+	SessionsDir string
 }
 
 // listTmuxSessions lists tmux sessions matching the given prefix.
@@ -1227,13 +1293,44 @@ func listTmuxSessions(prefix string) ([]tmuxSessionInfo, error) {
 		// Check if claude is running in this session
 		claudeRunning := isClaudeRunning(line)
 
+		// Get env vars from tmux session
+		envVars := getTmuxSessionEnv(line)
+
 		sessions = append(sessions, tmuxSessionInfo{
 			Name:          line,
 			ClaudeRunning: claudeRunning,
+			BridgeURL:     envVars["BRIDGE_URL"],
+			TmuxPrefix:    envVars["TMUX_PREFIX"],
+			Port:          envVars["PORT"],
+			SessionsDir:   envVars["SESSIONS_DIR"],
 		})
 	}
 
 	return sessions, nil
+}
+
+// getTmuxSessionEnv gets environment variables from a tmux session.
+func getTmuxSessionEnv(sessionName string) map[string]string {
+	result := make(map[string]string)
+
+	cmd := exec.Command("tmux", "show-environment", "-t", sessionName)
+	out, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-") {
+			continue // Skip empty lines and unset vars (prefixed with -)
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		}
+	}
+
+	return result
 }
 
 // isClaudeRunning checks if claude process is running in a tmux session.

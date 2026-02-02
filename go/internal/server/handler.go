@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,13 +127,18 @@ type Handler struct {
 	// State
 	mu            sync.RWMutex
 	focusedWorker string
+
+	// Typing loop cancellation
+	typingMu    sync.Mutex
+	typingStops map[string]chan struct{}
 }
 
 // NewHandler creates a new webhook handler.
 func NewHandler(telegram TelegramClient, tmux TmuxManager) *Handler {
 	return &Handler{
-		telegram: telegram,
-		tmux:     tmux,
+		telegram:    telegram,
+		tmux:        tmux,
+		typingStops: make(map[string]chan struct{}),
 	}
 }
 
@@ -146,6 +152,59 @@ func (h *Handler) SetConfig(cfg HandlerConfig) {
 	h.config = cfg
 	if cfg.SessionsDir != "" {
 		h.sessionsDir = cfg.SessionsDir
+	}
+}
+
+// startTypingLoop starts a goroutine that sends typing indicators every 4 seconds
+// while the session is pending. Call stopTypingLoop when the response arrives.
+func (h *Handler) startTypingLoop(chatID, sessionName string) {
+	h.typingMu.Lock()
+	// Stop any existing loop for this session
+	if stop, ok := h.typingStops[sessionName]; ok {
+		close(stop)
+	}
+	stop := make(chan struct{})
+	h.typingStops[sessionName] = stop
+	h.typingMu.Unlock()
+
+	// Set pending status
+	if h.sessionsDir != "" {
+		if err := files.SetPending(h.sessionsDir, sessionName); err != nil {
+			log.Printf("Failed to set pending for %s: %v", sessionName, err)
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				// Check if still pending
+				if h.sessionsDir == "" || !files.IsPending(h.sessionsDir, sessionName) {
+					return
+				}
+				h.telegram.SendChatAction(chatID, "typing")
+			}
+		}
+	}()
+}
+
+// stopTypingLoop stops the typing loop for a session and clears pending status.
+func (h *Handler) stopTypingLoop(sessionName string) {
+	h.typingMu.Lock()
+	if stop, ok := h.typingStops[sessionName]; ok {
+		close(stop)
+		delete(h.typingStops, sessionName)
+	}
+	h.typingMu.Unlock()
+
+	// Clear pending status
+	if h.sessionsDir != "" {
+		files.ClearPending(h.sessionsDir, sessionName)
 	}
 }
 
@@ -221,10 +280,11 @@ func (h *Handler) processMessage(msg *Message) {
 
 	// Routing priority:
 	// 1. Known commands (/hire, /end, etc.)
-	// 2. Direct worker routing (/<worker> message)
+	// 2. Direct worker routing (/<worker> message) - changes focus
 	// 3. Broadcast (@all message)
-	// 4. Reply-to routing (reply to [worker] message)
-	// 5. Focused worker
+	// 4. One-off worker routing (@worker message) - does NOT change focus
+	// 5. Reply-to routing (reply to [worker] message)
+	// 6. Focused worker
 
 	// Check for commands (starts with /)
 	if strings.HasPrefix(text, "/") {
@@ -257,6 +317,12 @@ func (h *Handler) processMessage(msg *Message) {
 	if strings.HasPrefix(text, "@all") {
 		content := strings.TrimSpace(strings.TrimPrefix(text, "@all"))
 		h.routeToBroadcast(chatIDStr, messageID, content)
+		return
+	}
+
+	// Check for @worker mention (one-off routing, does NOT change focus)
+	if workerName, message, matched := h.parseAtMention(text); matched {
+		h.routeToWorker(chatIDStr, messageID, workerName, message)
 		return
 	}
 
@@ -341,6 +407,28 @@ func (h *Handler) extractWorkerFromReply(text string) string {
 	return text[1:end]
 }
 
+// atMentionRegex matches @worker message patterns.
+// Pattern: @name followed by whitespace and the rest of the message.
+var atMentionRegex = regexp.MustCompile(`(?s)^@([a-zA-Z0-9-]+)\s+(.+)$`)
+
+// parseAtMention parses @name prefix from message.
+// Returns (workerName, message, matched). Only returns matched=true if the name
+// is a registered session.
+func (h *Handler) parseAtMention(text string) (workerName, message string, matched bool) {
+	match := atMentionRegex.FindStringSubmatch(text)
+	if match == nil {
+		return "", text, false
+	}
+	name := strings.ToLower(match[1])
+	msg := match[2]
+
+	// Only match if it's a registered session
+	if h.tmux.SessionExists(name) {
+		return name, msg, true
+	}
+	return "", text, false
+}
+
 // routeToDirectWorker sends a message to a specific worker with direct routing.
 func (h *Handler) routeToDirectWorker(chatID string, messageID int64, workerName string, messageParts []string) {
 	content := strings.Join(messageParts, " ")
@@ -369,6 +457,8 @@ func (h *Handler) routeToDirectWorker(chatID string, messageID int64, workerName
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
 		}
+		// Start typing loop (will send typing every 4 seconds until response arrives)
+		h.startTypingLoop(chatID, workerName)
 	} else {
 		log.Printf("PromptEmpty returned false for session %s, skipping reaction", workerName)
 	}
@@ -394,7 +484,7 @@ func (h *Handler) routeToBroadcast(chatID string, messageID int64, content strin
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
-	anyAccepted := false
+	var acceptedSessions []string
 	for _, session := range sessions {
 		// Save chat_id for each session (needed for /response endpoint)
 		if h.sessionsDir != "" {
@@ -406,14 +496,18 @@ func (h *Handler) routeToBroadcast(chatID string, messageID int64, content strin
 		if err := h.tmux.SendMessage(session.Name, content); err != nil {
 			h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to send to %s: %v", session.Name, err))
 		} else if h.tmux.PromptEmpty(session.Name, 1*time.Second) {
-			anyAccepted = true
+			acceptedSessions = append(acceptedSessions, session.Name)
 		}
 	}
 
 	// Send reaction only if at least one Claude accepted the message
-	if anyAccepted {
+	if len(acceptedSessions) > 0 {
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+		// Start typing loops for all sessions that accepted
+		for _, name := range acceptedSessions {
+			h.startTypingLoop(chatID, name)
 		}
 	} else {
 		log.Printf("No Claude instance accepted the broadcast message, skipping reaction")
@@ -442,6 +536,8 @@ func (h *Handler) routeToWorker(chatID string, messageID int64, workerName, text
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
 		}
+		// Start typing loop (will send typing every 4 seconds until response arrives)
+		h.startTypingLoop(chatID, workerName)
 	} else {
 		log.Printf("PromptEmpty returned false for session %s, skipping reaction", workerName)
 	}
@@ -610,8 +706,11 @@ func (h *Handler) cmdTeam(chatID string) {
 		if s.Name == focused {
 			status = append(status, "focused")
 		}
-		// Check if worker is running claude
-		if h.tmux.IsClaudeRunning(s.Name) {
+		// Check pending status first (working), then claude running (available), then offline
+		// This matches Python behavior: working > available > offline
+		if h.sessionsDir != "" && files.IsPending(h.sessionsDir, s.Name) {
+			status = append(status, "working")
+		} else if h.tmux.IsClaudeRunning(s.Name) {
 			status = append(status, "available")
 		} else {
 			status = append(status, "offline")
@@ -690,8 +789,9 @@ func (h *Handler) cmdProgress(chatID string) {
 
 	if sessionExists {
 		claudeRunning := h.tmux.IsClaudeRunning(focused)
-		// "Working" in Python checks is_pending - we'll approximate with IsClaudeRunning
-		status = append(status, fmt.Sprintf("Working: %s", boolYesNo(claudeRunning)))
+		// Check pending status for "Working" (matches Python behavior)
+		isPending := h.sessionsDir != "" && files.IsPending(h.sessionsDir, focused)
+		status = append(status, fmt.Sprintf("Working: %s", boolYesNo(isPending)))
 		status = append(status, fmt.Sprintf("Ready: %s", boolYesNo(claudeRunning)))
 		if !claudeRunning {
 			status = append(status, "Needs attention: worker app is not running. Use /relaunch.")
@@ -855,6 +955,8 @@ func (h *Handler) cmdLearn(chatID string, messageID int64, args []string) {
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
 		}
+		// Start typing loop (will send typing every 4 seconds until response arrives)
+		h.startTypingLoop(chatID, focused)
 	} else {
 		log.Printf("PromptEmpty returned false for session %s, skipping reaction", focused)
 	}
@@ -900,6 +1002,8 @@ func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text stri
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
 		}
+		// Start typing loop (will send typing every 4 seconds until response arrives)
+		h.startTypingLoop(chatID, focused)
 	} else {
 		log.Printf("PromptEmpty returned false for session %s, skipping reaction", focused)
 	}
@@ -932,6 +1036,9 @@ func (h *Handler) handleResponse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing text field", http.StatusBadRequest)
 		return
 	}
+
+	// Stop typing loop and clear pending status for this session
+	h.stopTypingLoop(payload.Session)
 
 	adminChatID := h.telegram.AdminChatID()
 
@@ -1134,6 +1241,8 @@ func (h *Handler) processFileMessage(chatID string, messageID int64, msg *Messag
 		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
 			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
 		}
+		// Start typing loop (will send typing every 4 seconds until response arrives)
+		h.startTypingLoop(chatID, targetWorker)
 	} else {
 		log.Printf("PromptEmpty returned false for session %s, skipping reaction", targetWorker)
 	}

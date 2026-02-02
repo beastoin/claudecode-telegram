@@ -160,6 +160,73 @@ func generateUniquePath(dir, filename string) string {
 	return filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, timestamp, ext))
 }
 
+// pendingPath returns the path to the pending file for a session.
+func pendingPath(sessionsDir, workerName string) string {
+	sessionsDir = filepath.Clean(sessionsDir)
+	return filepath.Join(sessionsDir, workerName, "pending")
+}
+
+// SetPending marks a session as having a pending request.
+// Writes the current timestamp to the pending file.
+func SetPending(sessionsDir, workerName string) error {
+	if strings.TrimSpace(sessionsDir) == "" {
+		return fmt.Errorf("sessions dir is empty")
+	}
+	if strings.TrimSpace(workerName) == "" {
+		return fmt.Errorf("worker name is empty")
+	}
+
+	sessionDir := filepath.Join(filepath.Clean(sessionsDir), workerName)
+	if err := os.MkdirAll(sessionDir, 0700); err != nil {
+		return fmt.Errorf("create session directory: %w", err)
+	}
+
+	path := pendingPath(sessionsDir, workerName)
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	if err := os.WriteFile(path, []byte(timestamp), 0600); err != nil {
+		return fmt.Errorf("write pending file: %w", err)
+	}
+
+	return nil
+}
+
+// ClearPending removes the pending status for a session.
+func ClearPending(sessionsDir, workerName string) {
+	if strings.TrimSpace(sessionsDir) == "" || strings.TrimSpace(workerName) == "" {
+		return
+	}
+	path := pendingPath(sessionsDir, workerName)
+	os.Remove(path) // Ignore errors - file may not exist
+}
+
+// IsPending checks if a session has a pending request.
+// Auto-clears pending status if it's older than 10 minutes.
+func IsPending(sessionsDir, workerName string) bool {
+	if strings.TrimSpace(sessionsDir) == "" || strings.TrimSpace(workerName) == "" {
+		return false
+	}
+
+	path := pendingPath(sessionsDir, workerName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+
+	// Parse timestamp and check for 10 minute timeout
+	var ts int64
+	if _, err := fmt.Sscanf(string(data), "%d", &ts); err != nil {
+		return false
+	}
+
+	// Auto-clear if older than 10 minutes
+	if time.Now().Unix()-ts > 600 {
+		os.Remove(path)
+		return false
+	}
+
+	return true
+}
+
 // CleanupInbox removes files older than maxAge from the inbox directory.
 // It only removes regular files, not subdirectories.
 // Returns nil if the directory doesn't exist or is empty.

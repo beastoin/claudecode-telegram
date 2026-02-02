@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/beastoin/claudecode-telegram/internal/files"
 	"github.com/beastoin/claudecode-telegram/internal/sandbox"
 )
 
@@ -3299,5 +3301,799 @@ func TestBroadcastShutdown(t *testing.T) {
 	}
 	if !strings.Contains(tg.SentMessages[0].Text, "Going offline") {
 		t.Errorf("expected shutdown message, got %q", tg.SentMessages[0].Text)
+	}
+}
+
+// Test @worker mention routing (one-off, does NOT change focus)
+func TestAtMentionRouting(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "bob" // Focus is on bob
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@alice Please check the logs",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should route to alice
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "alice" {
+		t.Errorf("expected message to alice, got %q", tm.SentMessages[0].Session)
+	}
+	if tm.SentMessages[0].Text != "Please check the logs" {
+		t.Errorf("expected text 'Please check the logs', got %q", tm.SentMessages[0].Text)
+	}
+
+	// Focus should NOT change (still bob)
+	if h.focusedWorker != "bob" {
+		t.Errorf("expected focus to remain on bob, got %q", h.focusedWorker)
+	}
+}
+
+func TestAtMentionDoesNotChangeFocus(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "bob"
+
+	// Send multiple @mention messages to alice
+	for i := 0; i < 3; i++ {
+		update := Update{
+			UpdateID: int64(i + 1),
+			Message: &Message{
+				MessageID: int64(i + 1),
+				From:      &User{ID: 123456, Username: "admin"},
+				Chat:      &Chat{ID: 123456},
+				Text:      fmt.Sprintf("@alice Message %d", i+1),
+			},
+		}
+
+		body, _ := json.Marshal(update)
+		req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		h.ServeHTTP(rec, req)
+	}
+
+	// All messages should go to alice
+	if len(tm.SentMessages) != 3 {
+		t.Fatalf("expected 3 messages sent to tmux, got %d", len(tm.SentMessages))
+	}
+	for _, msg := range tm.SentMessages {
+		if msg.Session != "alice" {
+			t.Errorf("expected all messages to alice, got %q", msg.Session)
+		}
+	}
+
+	// Focus should still be on bob
+	if h.focusedWorker != "bob" {
+		t.Errorf("expected focus to remain on bob after @mentions, got %q", h.focusedWorker)
+	}
+}
+
+func TestAtMentionVsSlashCommand(t *testing.T) {
+	// @worker -> one-off, no focus change
+	// /worker -> changes focus
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "bob"
+
+	// First: @alice (one-off)
+	update1 := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@alice Quick question",
+		},
+	}
+	body1, _ := json.Marshal(update1)
+	req1 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+
+	// Focus should still be bob
+	if h.focusedWorker != "bob" {
+		t.Errorf("expected focus on bob after @alice, got %q", h.focusedWorker)
+	}
+
+	// Clear sent messages
+	tm.SentMessages = nil
+	tg.SentMessages = nil
+
+	// Second: /alice (changes focus)
+	update2 := Update{
+		UpdateID: 2,
+		Message: &Message{
+			MessageID: 2,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "/alice Hello there",
+		},
+	}
+	body2, _ := json.Marshal(update2)
+	req2 := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+
+	// Focus should now be alice
+	if h.focusedWorker != "alice" {
+		t.Errorf("expected focus on alice after /alice, got %q", h.focusedWorker)
+	}
+}
+
+func TestAtMentionNonexistentWorker(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "bob"
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@nonexistent Hello there",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should fall through to focused worker (bob) since @nonexistent doesn't match
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "bob" {
+		t.Errorf("expected message to bob (focused), got %q", tm.SentMessages[0].Session)
+	}
+	// The full text including @nonexistent should be sent to focused worker
+	if tm.SentMessages[0].Text != "@nonexistent Hello there" {
+		t.Errorf("expected full text to be sent, got %q", tm.SentMessages[0].Text)
+	}
+}
+
+func TestAtMentionEmptyMessage(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "bob"
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@alice", // No message after @alice
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should fall through to focused worker since @alice without message doesn't match regex
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "bob" {
+		t.Errorf("expected message to bob (focused), got %q", tm.SentMessages[0].Session)
+	}
+}
+
+func TestAtMentionCaseInsensitive(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true // Session stored in lowercase
+	h := NewHandler(tg, tm)
+	h.focusedWorker = ""
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@Alice Please check this", // Uppercase A
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should route to alice (case-insensitive matching)
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "alice" {
+		t.Errorf("expected message to alice, got %q", tm.SentMessages[0].Session)
+	}
+}
+
+func TestAtMentionWithHyphenatedName(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["my-worker"] = true
+	h := NewHandler(tg, tm)
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@my-worker Hello there",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should route to my-worker
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "my-worker" {
+		t.Errorf("expected message to my-worker, got %q", tm.SentMessages[0].Session)
+	}
+}
+
+func TestAtMentionPriorityOverReplyTo(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 2,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@alice Check this out", // @mention to alice
+			ReplyToMessage: &Message{
+				MessageID: 1,
+				Text:      "[bob] Some previous message", // Reply context says bob
+			},
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// @mention should take priority over reply-to
+	if len(tm.SentMessages) != 1 {
+		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	}
+	if tm.SentMessages[0].Session != "alice" {
+		t.Errorf("expected message to alice (@mention), got %q", tm.SentMessages[0].Session)
+	}
+}
+
+func TestAtMentionReaction(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	h := NewHandler(tg, tm)
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 100,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@alice Hello there",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should have sent reaction
+	if len(tg.SentReactions) != 1 {
+		t.Fatalf("expected 1 reaction sent, got %d", len(tg.SentReactions))
+	}
+	if tg.SentReactions[0].MessageID != 100 {
+		t.Errorf("expected message_id 100, got %d", tg.SentReactions[0].MessageID)
+	}
+}
+
+func TestAtAllTakesPriorityOverAtMention(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+
+	// @all starts with @, but should be treated as broadcast, not @mention
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@all Hello everyone",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// Should broadcast to all workers, not just "all" worker
+	if len(tm.SentMessages) != 2 {
+		t.Fatalf("expected 2 messages sent to tmux (broadcast), got %d", len(tm.SentMessages))
+	}
+}
+
+func TestParseAtMention(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob-worker"] = true
+	h := NewHandler(tg, tm)
+
+	tests := []struct {
+		name        string
+		text        string
+		wantWorker  string
+		wantMessage string
+		wantMatched bool
+	}{
+		{
+			name:        "basic @mention",
+			text:        "@alice Hello there",
+			wantWorker:  "alice",
+			wantMessage: "Hello there",
+			wantMatched: true,
+		},
+		{
+			name:        "hyphenated name",
+			text:        "@bob-worker Check this",
+			wantWorker:  "bob-worker",
+			wantMessage: "Check this",
+			wantMatched: true,
+		},
+		{
+			name:        "nonexistent worker",
+			text:        "@nonexistent Hello",
+			wantWorker:  "",
+			wantMessage: "@nonexistent Hello",
+			wantMatched: false,
+		},
+		{
+			name:        "no message",
+			text:        "@alice",
+			wantWorker:  "",
+			wantMessage: "@alice",
+			wantMatched: false,
+		},
+		{
+			name:        "uppercase name",
+			text:        "@ALICE Hello",
+			wantWorker:  "alice",
+			wantMessage: "Hello",
+			wantMatched: true,
+		},
+		{
+			name:        "multiline message",
+			text:        "@alice Line 1\nLine 2\nLine 3",
+			wantWorker:  "alice",
+			wantMessage: "Line 1\nLine 2\nLine 3",
+			wantMatched: true,
+		},
+		{
+			name:        "not a mention",
+			text:        "Hello @alice there",
+			wantWorker:  "",
+			wantMessage: "Hello @alice there",
+			wantMatched: false,
+		},
+		{
+			name:        "email-like",
+			text:        "email@alice.com",
+			wantWorker:  "",
+			wantMessage: "email@alice.com",
+			wantMatched: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotWorker, gotMessage, gotMatched := h.parseAtMention(tt.text)
+			if gotWorker != tt.wantWorker {
+				t.Errorf("parseAtMention() worker = %q, want %q", gotWorker, tt.wantWorker)
+			}
+			if gotMessage != tt.wantMessage {
+				t.Errorf("parseAtMention() message = %q, want %q", gotMessage, tt.wantMessage)
+			}
+			if gotMatched != tt.wantMatched {
+				t.Errorf("parseAtMention() matched = %v, want %v", gotMatched, tt.wantMatched)
+			}
+		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typing Loop Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTypingLoopStartsOnMessageAccepted(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+
+	h := NewHandler(tg, tm)
+	h.SetSessionsDir(sessionsDir)
+
+	// Send a message to focused worker
+	h.mu.Lock()
+	h.focusedWorker = "alice"
+	h.mu.Unlock()
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "Hello alice",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Verify pending file was created
+	if !files.IsPending(sessionsDir, "alice") {
+		t.Error("expected pending file to be created after message sent")
+	}
+
+	// Clean up typing loop
+	h.stopTypingLoop("alice")
+}
+
+func TestTypingLoopStopsOnResponse(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	h := NewHandler(tg, tm)
+	h.SetSessionsDir(sessionsDir)
+
+	// Manually set pending (simulating a message was sent)
+	if err := files.SetPending(sessionsDir, "alice"); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	// Verify pending is set
+	if !files.IsPending(sessionsDir, "alice") {
+		t.Fatal("pending should be set before response")
+	}
+
+	// Send a response
+	payload := ResponsePayload{
+		Session: "alice",
+		Text:    "Task complete!",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/response", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+
+	// Verify pending was cleared
+	if files.IsPending(sessionsDir, "alice") {
+		t.Error("pending should be cleared after /response")
+	}
+}
+
+func TestTypingLoopSendsTypingIndicators(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	h := NewHandler(tg, tm)
+	h.SetSessionsDir(sessionsDir)
+
+	// Set pending manually
+	if err := files.SetPending(sessionsDir, "alice"); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	// Start typing loop
+	h.startTypingLoop("123456", "alice")
+
+	// Give time for the loop to initialize
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop the loop
+	h.stopTypingLoop("alice")
+
+	// Verify loop was properly cleaned up
+	h.typingMu.Lock()
+	_, exists := h.typingStops["alice"]
+	h.typingMu.Unlock()
+
+	if exists {
+		t.Error("typing loop channel should be removed after stopTypingLoop")
+	}
+}
+
+func TestTypingLoopReplacesExistingLoop(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	h := NewHandler(tg, tm)
+	h.SetSessionsDir(sessionsDir)
+
+	// Set pending
+	if err := files.SetPending(sessionsDir, "alice"); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	// Start first typing loop
+	h.startTypingLoop("123456", "alice")
+
+	h.typingMu.Lock()
+	firstChan := h.typingStops["alice"]
+	h.typingMu.Unlock()
+
+	// Start second typing loop (should replace first)
+	h.startTypingLoop("123456", "alice")
+
+	h.typingMu.Lock()
+	secondChan := h.typingStops["alice"]
+	h.typingMu.Unlock()
+
+	// Channels should be different (first was replaced)
+	if firstChan == secondChan {
+		t.Error("second startTypingLoop should create new channel")
+	}
+
+	// Clean up
+	h.stopTypingLoop("alice")
+}
+
+func TestBroadcastStartsTypingLoopForAllAcceptedSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+
+	h := NewHandler(tg, tm)
+	h.SetSessionsDir(sessionsDir)
+
+	// Send broadcast message
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "@all Hello everyone",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Verify both sessions have pending set
+	if !files.IsPending(sessionsDir, "alice") {
+		t.Error("alice should have pending after broadcast")
+	}
+	if !files.IsPending(sessionsDir, "bob") {
+		t.Error("bob should have pending after broadcast")
+	}
+
+	// Clean up
+	h.stopTypingLoop("alice")
+	h.stopTypingLoop("bob")
+}
+
+// Test /team command shows "working" status when pending
+func TestTeamCommandShowsWorkingStatus(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	tm.Sessions["bob"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "alice"
+
+	// Create temp sessions dir and set pending for alice
+	sessionsDir := t.TempDir()
+	h.SetSessionsDir(sessionsDir)
+	if err := files.SetPending(sessionsDir, "alice"); err != nil {
+		t.Fatalf("failed to set pending: %v", err)
+	}
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "/team",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected team list message")
+	}
+	msg := tg.SentMessages[0].Text
+
+	// Alice should show "working" since she has pending status
+	if !strings.Contains(msg, "alice (focused, working)") {
+		t.Errorf("expected alice to show 'working' status, got %q", msg)
+	}
+
+	// Bob should show "available" since he has no pending status (IsClaudeRunning returns true by default)
+	if !strings.Contains(msg, "bob (available)") {
+		t.Errorf("expected bob to show 'available' status, got %q", msg)
+	}
+}
+
+// Test /progress command shows "working" status when pending
+func TestProgressCommandShowsWorkingStatus(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "alice"
+
+	// Create temp sessions dir and set pending for alice
+	sessionsDir := t.TempDir()
+	h.SetSessionsDir(sessionsDir)
+	if err := files.SetPending(sessionsDir, "alice"); err != nil {
+		t.Fatalf("failed to set pending: %v", err)
+	}
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "/progress",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected progress message")
+	}
+	msg := tg.SentMessages[0].Text
+
+	// Should show "Working: yes" since pending is set
+	if !strings.Contains(msg, "Working: yes") {
+		t.Errorf("expected 'Working: yes' in progress, got %q", msg)
+	}
+}
+
+// Test /progress command shows "not working" when no pending
+func TestProgressCommandShowsNotWorkingStatus(t *testing.T) {
+	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
+	tm := NewMockTmuxManager()
+	tm.Sessions["alice"] = true
+	h := NewHandler(tg, tm)
+	h.focusedWorker = "alice"
+
+	// Create temp sessions dir but don't set pending
+	sessionsDir := t.TempDir()
+	h.SetSessionsDir(sessionsDir)
+
+	update := Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			From:      &User{ID: 123456, Username: "admin"},
+			Chat:      &Chat{ID: 123456},
+			Text:      "/progress",
+		},
+	}
+
+	body, _ := json.Marshal(update)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected progress message")
+	}
+	msg := tg.SentMessages[0].Text
+
+	// Should show "Working: no" since pending is not set
+	if !strings.Contains(msg, "Working: no") {
+		t.Errorf("expected 'Working: no' in progress, got %q", msg)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1355,5 +1356,88 @@ func TestNodeHealthWithServerRunning(t *testing.T) {
 	}
 	if !serverNotRunningFound {
 		t.Error("expected 'Server not running' issue")
+	}
+}
+
+func TestTmuxSessionInfoEnvVars(t *testing.T) {
+	// Test that tmuxSessionInfo struct has env var fields
+	info := tmuxSessionInfo{
+		Name:          "claude-prod-test",
+		ClaudeRunning: true,
+		BridgeURL:     "http://localhost:8080",
+		TmuxPrefix:    "claude-prod-",
+		Port:          "8080",
+		SessionsDir:   "/home/user/.claude/telegram/nodes/prod/sessions",
+	}
+
+	if info.BridgeURL != "http://localhost:8080" {
+		t.Errorf("BridgeURL = %q, want %q", info.BridgeURL, "http://localhost:8080")
+	}
+	if info.TmuxPrefix != "claude-prod-" {
+		t.Errorf("TmuxPrefix = %q, want %q", info.TmuxPrefix, "claude-prod-")
+	}
+	if info.Port != "8080" {
+		t.Errorf("Port = %q, want %q", info.Port, "8080")
+	}
+	if info.SessionsDir == "" {
+		t.Error("SessionsDir should not be empty")
+	}
+}
+
+func TestSessionEnvVarIssueDetection(t *testing.T) {
+	// Create a nodeHealth with sessions missing env vars
+	h := &nodeHealth{
+		NodeName: "test",
+		NodeDir:  "/tmp/test",
+		Port:     "8080",
+		Sessions: []tmuxSessionInfo{
+			{
+				Name:          "claude-test-worker1",
+				ClaudeRunning: true,
+				BridgeURL:     "http://localhost:8080",
+				TmuxPrefix:    "claude-test-",
+			},
+			{
+				Name:          "claude-test-worker2",
+				ClaudeRunning: true,
+				BridgeURL:     "", // Missing!
+				TmuxPrefix:    "claude-test-",
+			},
+		},
+	}
+
+	// Simulate the env var check (same logic as in checkNodeHealth)
+	expectedBridgeURL := "http://localhost:" + h.Port
+	expectedPrefix := "claude-" + h.NodeName + "-"
+
+	for _, sess := range h.Sessions {
+		workerName := strings.TrimPrefix(sess.Name, "claude-test-")
+		if sess.BridgeURL == "" {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "ERROR",
+				Message: fmt.Sprintf("Session %s missing BRIDGE_URL", workerName),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s BRIDGE_URL %s", sess.Name, expectedBridgeURL),
+			})
+		}
+		if sess.TmuxPrefix == "" {
+			h.Issues = append(h.Issues, healthIssue{
+				Level:   "ERROR",
+				Message: fmt.Sprintf("Session %s missing TMUX_PREFIX", workerName),
+				Fix:     fmt.Sprintf("tmux set-environment -t %s TMUX_PREFIX %s", sess.Name, expectedPrefix),
+			})
+		}
+	}
+
+	// Should have 1 issue for worker2 missing BRIDGE_URL
+	if len(h.Issues) != 1 {
+		t.Errorf("expected 1 issue, got %d", len(h.Issues))
+	}
+
+	if len(h.Issues) > 0 && !strings.Contains(h.Issues[0].Message, "worker2") {
+		t.Errorf("expected issue for worker2, got %q", h.Issues[0].Message)
+	}
+
+	if len(h.Issues) > 0 && !strings.Contains(h.Issues[0].Message, "BRIDGE_URL") {
+		t.Errorf("expected BRIDGE_URL issue, got %q", h.Issues[0].Message)
 	}
 }

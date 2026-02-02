@@ -1,6 +1,7 @@
 package files
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -302,6 +303,123 @@ func TestGetAllChatIDsMissingDir(t *testing.T) {
 	if len(ids) != 0 {
 		t.Errorf("expected empty chat ID list, got %v", ids)
 	}
+}
+
+func TestPendingFileFunctions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+
+	t.Run("SetPending creates pending file with timestamp", func(t *testing.T) {
+		if err := SetPending(sessionsDir, "alice"); err != nil {
+			t.Fatalf("SetPending() error = %v", err)
+		}
+
+		// Verify file exists
+		path := filepath.Join(sessionsDir, "alice", "pending")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("pending file not created: %v", err)
+		}
+
+		// Verify content is a valid timestamp
+		var ts int64
+		if _, err := fmt.Sscanf(string(data), "%d", &ts); err != nil {
+			t.Fatalf("pending file does not contain valid timestamp: %v", err)
+		}
+
+		// Timestamp should be recent (within last 5 seconds)
+		now := time.Now().Unix()
+		if now-ts > 5 {
+			t.Errorf("timestamp too old: %d (now: %d)", ts, now)
+		}
+
+		// Verify secure permissions
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("failed to stat pending file: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("pending permissions = %o, want %o", info.Mode().Perm(), 0600)
+		}
+	})
+
+	t.Run("IsPending returns true for recent pending", func(t *testing.T) {
+		if err := SetPending(sessionsDir, "bob"); err != nil {
+			t.Fatalf("SetPending() error = %v", err)
+		}
+
+		if !IsPending(sessionsDir, "bob") {
+			t.Error("IsPending() = false, want true")
+		}
+	})
+
+	t.Run("IsPending returns false when no pending file", func(t *testing.T) {
+		if IsPending(sessionsDir, "nonexistent") {
+			t.Error("IsPending() = true for nonexistent session, want false")
+		}
+	})
+
+	t.Run("ClearPending removes pending file", func(t *testing.T) {
+		if err := SetPending(sessionsDir, "charlie"); err != nil {
+			t.Fatalf("SetPending() error = %v", err)
+		}
+
+		ClearPending(sessionsDir, "charlie")
+
+		if IsPending(sessionsDir, "charlie") {
+			t.Error("IsPending() = true after ClearPending, want false")
+		}
+	})
+
+	t.Run("ClearPending is idempotent (no error if no file)", func(t *testing.T) {
+		// Should not panic or error
+		ClearPending(sessionsDir, "nonexistent")
+	})
+
+	t.Run("IsPending auto-clears after 10 minutes", func(t *testing.T) {
+		// Create pending file with old timestamp (11 minutes ago)
+		workerDir := filepath.Join(sessionsDir, "expired")
+		if err := os.MkdirAll(workerDir, 0700); err != nil {
+			t.Fatalf("failed to create worker dir: %v", err)
+		}
+
+		oldTs := time.Now().Unix() - 660 // 11 minutes ago
+		pendingPath := filepath.Join(workerDir, "pending")
+		if err := os.WriteFile(pendingPath, []byte(fmt.Sprintf("%d", oldTs)), 0600); err != nil {
+			t.Fatalf("failed to write old pending file: %v", err)
+		}
+
+		// Should return false and auto-clear
+		if IsPending(sessionsDir, "expired") {
+			t.Error("IsPending() = true for expired pending, want false")
+		}
+
+		// File should be removed
+		if _, err := os.Stat(pendingPath); !os.IsNotExist(err) {
+			t.Error("expired pending file should have been auto-cleared")
+		}
+	})
+
+	t.Run("SetPending with empty sessionsDir returns error", func(t *testing.T) {
+		if err := SetPending("", "alice"); err == nil {
+			t.Error("SetPending() with empty sessionsDir should error")
+		}
+	})
+
+	t.Run("SetPending with empty workerName returns error", func(t *testing.T) {
+		if err := SetPending(sessionsDir, ""); err == nil {
+			t.Error("SetPending() with empty workerName should error")
+		}
+	})
+
+	t.Run("IsPending with empty params returns false", func(t *testing.T) {
+		if IsPending("", "alice") {
+			t.Error("IsPending() with empty sessionsDir should return false")
+		}
+		if IsPending(sessionsDir, "") {
+			t.Error("IsPending() with empty workerName should return false")
+		}
+	})
 }
 
 func TestCleanupInbox(t *testing.T) {
