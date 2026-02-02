@@ -312,6 +312,22 @@ func (a *TmuxManagerAdapter) PromptEmpty(sessionName string, timeout time.Durati
 	return a.manager.PromptEmpty(sessionName, timeout)
 }
 
+func (a *TmuxManagerAdapter) SendKeys(sessionName string, keys ...string) error {
+	return a.manager.SendKeys(sessionName, keys...)
+}
+
+func (a *TmuxManagerAdapter) GetPaneCommand(sessionName string) (string, error) {
+	return a.manager.GetPaneCommand(sessionName)
+}
+
+func (a *TmuxManagerAdapter) IsClaudeRunning(sessionName string) bool {
+	return a.manager.IsClaudeRunning(sessionName)
+}
+
+func (a *TmuxManagerAdapter) RestartClaude(sessionName string) error {
+	return a.manager.RestartClaude(sessionName)
+}
+
 // E2ETestEnv holds all components for an e2e test.
 type E2ETestEnv struct {
 	t              *testing.T
@@ -424,7 +440,8 @@ func TestE2EWorkerLifecycle(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected at least 1 message after /hire")
 	}
-	if !strings.Contains(msgs[0].Text, "alice") || !strings.Contains(msgs[0].Text, "Hired") {
+	// Python format: "Alice is added and assigned. They'll stay on your team."
+	if !strings.Contains(msgs[0].Text, "Alice") || !strings.Contains(msgs[0].Text, "added") {
 		t.Errorf("Expected hire confirmation, got: %q", msgs[0].Text)
 	}
 
@@ -450,7 +467,8 @@ func TestE2EWorkerLifecycle(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /focus")
 	}
-	if !strings.Contains(msgs[0].Text, "alice") || !strings.Contains(msgs[0].Text, "focused") {
+	// Python format: "Now talking to Alice."
+	if !strings.Contains(msgs[0].Text, "Alice") || !strings.Contains(msgs[0].Text, "talking") {
 		t.Errorf("Expected focus confirmation, got: %q", msgs[0].Text)
 	}
 
@@ -500,7 +518,8 @@ func TestE2EWorkerLifecycle(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /end")
 	}
-	if !strings.Contains(msgs[0].Text, "alice") || !strings.Contains(msgs[0].Text, "Ended") {
+	// Python format: "Alice has been let go."
+	if !strings.Contains(msgs[0].Text, "Alice") || !strings.Contains(msgs[0].Text, "let go") {
 		t.Errorf("Expected end confirmation, got: %q", msgs[0].Text)
 	}
 
@@ -788,13 +807,10 @@ func TestE2EAdminGating(t *testing.T) {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
 	}
 
-	// Should send rejection message
-	msgs := env.WaitForMessages(1, 2*time.Second)
-	if len(msgs) < 1 {
-		t.Fatal("Expected rejection message")
-	}
-	if !strings.Contains(msgs[0].Text, "not authorized") {
-		t.Errorf("Expected authorization error, got: %q", msgs[0].Text)
+	// Silent rejection (security best practice) - no message sent
+	msgs := env.WaitForMessages(1, 500*time.Millisecond)
+	if len(msgs) > 0 {
+		t.Errorf("Expected silent rejection (no message), got: %q", msgs[0].Text)
 	}
 
 	// Verify session was NOT created
@@ -950,8 +966,9 @@ func TestE2EEndClearsFocus(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message about no focus")
 	}
-	if !strings.Contains(msgs[0].Text, "/focus") {
-		t.Errorf("Expected hint about /focus, got: %q", msgs[0].Text)
+	// Python format: "No team members yet. Add someone with /hire <name>."
+	if !strings.Contains(msgs[0].Text, "/hire") {
+		t.Errorf("Expected hint about /hire, got: %q", msgs[0].Text)
 	}
 }
 
@@ -1117,8 +1134,9 @@ func TestE2EPauseAndProgressCommands(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /pause")
 	}
-	if !strings.Contains(msgs[0].Text, "Escape") {
-		t.Errorf("Expected pause confirmation mentioning Escape, got: %q", msgs[0].Text)
+	// Python format: "Alice is paused. I'll pick up where we left off."
+	if !strings.Contains(msgs[0].Text, "paused") {
+		t.Errorf("Expected pause confirmation, got: %q", msgs[0].Text)
 	}
 
 	// Test /progress
@@ -1193,7 +1211,8 @@ func TestE2ERelaunchCommand(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /relaunch")
 	}
-	if !strings.Contains(msgs[0].Text, "Relaunching") || !strings.Contains(msgs[0].Text, "alice") {
+	// Python format: "Bringing Alice back online..."
+	if !strings.Contains(msgs[0].Text, "online") || !strings.Contains(msgs[0].Text, "Alice") {
 		t.Errorf("Expected relaunch confirmation, got: %q", msgs[0].Text)
 	}
 

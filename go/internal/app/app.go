@@ -245,12 +245,34 @@ func (a *tmuxManagerAdapter) PromptEmpty(sessionName string, timeout time.Durati
 	return a.manager.PromptEmpty(sessionName, timeout)
 }
 
+func (a *tmuxManagerAdapter) SendKeys(sessionName string, keys ...string) error {
+	return a.manager.SendKeys(sessionName, keys...)
+}
+
+func (a *tmuxManagerAdapter) GetPaneCommand(sessionName string) (string, error) {
+	return a.manager.GetPaneCommand(sessionName)
+}
+
+func (a *tmuxManagerAdapter) IsClaudeRunning(sessionName string) bool {
+	return a.manager.IsClaudeRunning(sessionName)
+}
+
+func (a *tmuxManagerAdapter) RestartClaude(sessionName string) error {
+	return a.manager.RestartClaude(sessionName)
+}
+
+// TmuxListSessions is an interface for listing sessions (used by App for startup message).
+type TmuxListSessions interface {
+	ListSessions() ([]server.SessionInfo, error)
+}
+
 // App represents the application with all its components.
 type App struct {
 	config   Config
 	handler  *server.Handler
 	server   *http.Server
 	telegram TelegramClientInterface
+	tmux     TmuxListSessions
 }
 
 // New creates a new App with the given configuration.
@@ -295,12 +317,36 @@ func New(cfg Config) (*App, error) {
 		handler:  handler,
 		server:   httpServer,
 		telegram: tgAdapter,
+		tmux:     tmuxAdapter,
 	}, nil
 }
 
-// SendStartupNotification sends a "Server online." message to the admin chat.
+// SendStartupNotification sends startup message with team context like Python.
 func (a *App) SendStartupNotification() error {
-	return a.telegram.SendMessage(a.config.AdminChatID, "Server online.")
+	sessions, _ := a.tmux.ListSessions()
+
+	var lines []string
+	lines = append(lines, "I'm online and ready.")
+
+	if len(sessions) > 0 {
+		var names []string
+		for _, s := range sessions {
+			names = append(names, s.Name)
+		}
+		lines = append(lines, fmt.Sprintf("Team: %s", strings.Join(names, ", ")))
+		// Note: We don't track focused state in App yet, handler does
+	} else {
+		lines = append(lines, "No workers yet. Hire your first long-lived worker with /hire <name>.")
+	}
+
+	// Short sandbox note
+	if a.config.SandboxEnabled {
+		if home, err := os.UserHomeDir(); err == nil {
+			lines = append(lines, fmt.Sprintf("Sandbox: %s -> /workspace", home))
+		}
+	}
+
+	return a.telegram.SendMessage(a.config.AdminChatID, strings.Join(lines, "\n"))
 }
 
 // Run starts the application and blocks until the context is cancelled.

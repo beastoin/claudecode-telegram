@@ -242,6 +242,45 @@ func (m *MockTmuxManager) PromptEmpty(sessionName string, timeout time.Duration)
 	return true
 }
 
+func (m *MockTmuxManager) SendKeys(sessionName string, keys ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.Sessions[sessionName] {
+		return fmt.Errorf("session %q does not exist", sessionName)
+	}
+	// In tests, just record as a sent message with keys joined
+	m.SentMessages = append(m.SentMessages, struct{ Session, Text string }{sessionName, strings.Join(keys, " ")})
+	return nil
+}
+
+func (m *MockTmuxManager) GetPaneCommand(sessionName string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.Sessions[sessionName] {
+		return "", fmt.Errorf("session %q does not exist", sessionName)
+	}
+	// In tests, assume claude is always running
+	return "claude", nil
+}
+
+func (m *MockTmuxManager) IsClaudeRunning(sessionName string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// In tests, assume claude is running if session exists
+	return m.Sessions[sessionName]
+}
+
+func (m *MockTmuxManager) RestartClaude(sessionName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.Sessions[sessionName] {
+		return fmt.Errorf("session %q does not exist", sessionName)
+	}
+	// In tests, just record as a sent message
+	m.SentMessages = append(m.SentMessages, struct{ Session, Text string }{sessionName, "claude --dangerously-skip-permissions"})
+	return nil
+}
+
 func TestNewHandler(t *testing.T) {
 	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
 	tm := NewMockTmuxManager()
@@ -286,12 +325,9 @@ func TestWebhookRejectsNonAdmin(t *testing.T) {
 		t.Errorf("expected status 200, got %d", rec.Code)
 	}
 
-	// Should have sent rejection message
-	if len(tg.SentMessages) != 1 {
-		t.Fatalf("expected 1 rejection message, got %d", len(tg.SentMessages))
-	}
-	if !strings.Contains(tg.SentMessages[0].Text, "not authorized") {
-		t.Errorf("expected rejection message, got %q", tg.SentMessages[0].Text)
+	// Should have silent rejection (no message - security best practice)
+	if len(tg.SentMessages) != 0 {
+		t.Fatalf("expected silent rejection (0 messages), got %d", len(tg.SentMessages))
 	}
 }
 
@@ -367,12 +403,12 @@ func TestHireCommand(t *testing.T) {
 		t.Errorf("expected workdir '/path/to/project', got %q", tm.CreatedSession[0].Workdir)
 	}
 
-	// Check confirmation message
+	// Check confirmation message (Python format: "Alice is added and assigned. They'll stay on your team.")
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected confirmation message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "alice") {
-		t.Errorf("expected confirmation to mention 'alice', got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "Alice") || !strings.Contains(tg.SentMessages[0].Text, "added") {
+		t.Errorf("expected confirmation to mention 'Alice' and 'added', got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -563,8 +599,8 @@ func TestTeamCommandEmpty(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected message about no workers")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No workers") {
-		t.Errorf("expected 'No workers' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No team members yet") {
+		t.Errorf("expected 'No team members yet' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -599,8 +635,9 @@ func TestFocusCommand(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected confirmation message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "alice") {
-		t.Errorf("expected confirmation about alice, got %q", tg.SentMessages[0].Text)
+	// Python format: "Now talking to Alice."
+	if !strings.Contains(tg.SentMessages[0].Text, "Alice") || !strings.Contains(tg.SentMessages[0].Text, "talking") {
+		t.Errorf("expected 'Now talking to Alice', got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -633,8 +670,9 @@ func TestFocusCommandNonexistent(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "does not exist") {
-		t.Errorf("expected 'does not exist' error, got %q", tg.SentMessages[0].Text)
+	// Python format: "Could not focus \"nonexistent\". Worker 'nonexistent' not found"
+	if !strings.Contains(tg.SentMessages[0].Text, "not found") {
+		t.Errorf("expected 'not found' error, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -650,7 +688,7 @@ func TestFocusClear(t *testing.T) {
 			MessageID: 1,
 			From:      &User{ID: 123456, Username: "admin"},
 			Chat:      &Chat{ID: 123456},
-			Text:      "/focus", // No worker name = clear focus
+			Text:      "/focus", // No worker name = shows usage (Python behavior)
 		},
 	}
 
@@ -661,8 +699,17 @@ func TestFocusClear(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	if h.focusedWorker != "" {
-		t.Errorf("expected focus cleared, got %q", h.focusedWorker)
+	// Focus is NOT cleared - Python behavior shows usage message instead
+	if h.focusedWorker != "alice" {
+		t.Errorf("expected focus unchanged, got %q", h.focusedWorker)
+	}
+
+	// Should show usage message
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected usage message")
+	}
+	if !strings.Contains(tg.SentMessages[0].Text, "Usage") {
+		t.Errorf("expected usage message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -724,12 +771,13 @@ func TestMessageWithoutFocusFails(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Should get instruction to focus first
+	// Should get message about no team members (Python style)
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected hint message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "/focus") {
-		t.Errorf("expected hint about /focus, got %q", tg.SentMessages[0].Text)
+	// Python format: "No team members yet. Add someone with /hire <name>."
+	if !strings.Contains(tg.SentMessages[0].Text, "hire") {
+		t.Errorf("expected hint about /hire, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -834,12 +882,11 @@ func TestPauseCommand(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Should send Escape key to the focused worker's session
-	// In mock, we track this as a special message
+	// Should confirm pause (Python style: "Alice is paused. I'll pick up where we left off.")
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected confirmation message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "Escape") || !strings.Contains(tg.SentMessages[0].Text, "alice") {
+	if !strings.Contains(tg.SentMessages[0].Text, "paused") || !strings.Contains(tg.SentMessages[0].Text, "Alice") {
 		t.Errorf("expected pause confirmation, got %q", tg.SentMessages[0].Text)
 	}
 }
@@ -868,12 +915,13 @@ func TestProgressCommand(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Should send /status command to focused worker
-	if len(tm.SentMessages) != 1 {
-		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
+	// Python behavior: show status in Telegram, NOT send to tmux
+	// Format: "Progress for focused worker: alice\nFocused: yes\nWorking: yes/no\nOnline: yes\nReady: yes/no"
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected status message")
 	}
-	if tm.SentMessages[0].Text != "/status" {
-		t.Errorf("expected '/status' message, got %q", tm.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "Progress") || !strings.Contains(tg.SentMessages[0].Text, "alice") {
+		t.Errorf("expected progress status, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -902,12 +950,20 @@ func TestRelaunchCommand(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Relaunch sends "claude" to the tmux session to restart claude
+	// Relaunch calls RestartClaude which sends "claude --dangerously-skip-permissions"
 	if len(tm.SentMessages) != 1 {
 		t.Fatalf("expected 1 message sent to tmux, got %d", len(tm.SentMessages))
 	}
-	if tm.SentMessages[0].Text != "claude" {
+	if !strings.Contains(tm.SentMessages[0].Text, "claude") {
 		t.Errorf("expected 'claude' command, got %q", tm.SentMessages[0].Text)
+	}
+
+	// Also check confirmation message (Python style: "Bringing Alice back online...")
+	if len(tg.SentMessages) == 0 {
+		t.Fatal("expected confirmation message")
+	}
+	if !strings.Contains(tg.SentMessages[0].Text, "online") || !strings.Contains(tg.SentMessages[0].Text, "Alice") {
+		t.Errorf("expected relaunch confirmation, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1238,8 +1294,8 @@ func TestPauseWithoutFocus(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No worker focused") {
-		t.Errorf("expected 'No worker focused' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No one assigned") {
+		t.Errorf("expected 'No one assigned' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1269,8 +1325,8 @@ func TestProgressWithoutFocus(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No worker focused") {
-		t.Errorf("expected 'No worker focused' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No one assigned") {
+		t.Errorf("expected 'No one assigned' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1300,16 +1356,17 @@ func TestRelaunchWithoutFocus(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No worker focused") {
-		t.Errorf("expected 'No worker focused' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No one assigned") {
+		t.Errorf("expected 'No one assigned' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
-// Test unknown command
+// Test unknown command - passes through to focused worker as a potential Claude command
 func TestUnknownCommand(t *testing.T) {
 	tg := &MockTelegramClient{AdminChatIDValue: "123456"}
 	tm := NewMockTmuxManager()
 	h := NewHandler(tg, tm)
+	// Without a focused worker, unknown commands result in "No team members yet" message
 
 	update := Update{
 		UpdateID: 1,
@@ -1329,10 +1386,11 @@ func TestUnknownCommand(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	if len(tg.SentMessages) == 0 {
-		t.Fatal("expected error message")
+		t.Fatal("expected message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "Unknown command") {
-		t.Errorf("expected 'Unknown command' message, got %q", tg.SentMessages[0].Text)
+	// Unknown commands pass through to focused worker, which doesn't exist, so we get "No team members"
+	if !strings.Contains(tg.SentMessages[0].Text, "No team members yet") {
+		t.Errorf("expected 'No team members yet' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1507,12 +1565,13 @@ func TestDirectWorkerRoutingNonexistentWorker(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Should be treated as unknown command since worker doesn't exist
+	// Unknown worker name - passes through as unknown command to focused worker
+	// Since no focused worker, get "No team members yet" message
 	if len(tg.SentMessages) == 0 {
-		t.Fatal("expected error message")
+		t.Fatal("expected message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "Unknown command") {
-		t.Errorf("expected 'Unknown command' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No team members yet") {
+		t.Errorf("expected 'No team members yet' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1625,8 +1684,8 @@ func TestBroadcastToAllNoWorkers(t *testing.T) {
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message about no workers")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No workers") {
-		t.Errorf("expected 'No workers' message, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No team members yet") {
+		t.Errorf("expected 'No team members yet' message, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -1762,11 +1821,12 @@ func TestReplyToRoutingNoWorkerPrefix(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	// Should fall back to focused worker behavior (no focus = error)
+	// Python format: "No team members yet. Add someone with /hire <name>."
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "/focus") {
-		t.Errorf("expected hint about /focus, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "/hire") {
+		t.Errorf("expected hint about /hire, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -2342,7 +2402,8 @@ func TestResponseEndpointWithImageTag(t *testing.T) {
 	if strings.Contains(tg.SentHTMLMessages[0].Text, "[[image:") {
 		t.Errorf("text message should not contain image tag, got %q", tg.SentHTMLMessages[0].Text)
 	}
-	if !strings.Contains(tg.SentHTMLMessages[0].Text, "[alice]") {
+	// Python format: <b>alice:</b>\ntext
+	if !strings.Contains(tg.SentHTMLMessages[0].Text, "<b>alice:</b>") {
 		t.Errorf("text message should contain worker prefix, got %q", tg.SentHTMLMessages[0].Text)
 	}
 
@@ -2641,9 +2702,9 @@ func TestHireCommandReservedName(t *testing.T) {
 				t.Fatalf("expected error message for reserved name %q", name)
 			}
 
-			expectedError := fmt.Sprintf("Cannot hire worker named '%s' - reserved command name.", name)
-			if tg.SentMessages[0].Text != expectedError {
-				t.Errorf("expected error %q, got %q", expectedError, tg.SentMessages[0].Text)
+			// Python format: Cannot use "name" - reserved command. Choose another name.
+			if !strings.Contains(tg.SentMessages[0].Text, "reserved command") {
+				t.Errorf("expected reserved command error, got %q", tg.SentMessages[0].Text)
 			}
 		})
 	}
@@ -2682,8 +2743,8 @@ func TestHireCommandReservedNameCaseInsensitive(t *testing.T) {
 		t.Fatal("expected error message")
 	}
 
-	if !strings.Contains(tg.SentMessages[0].Text, "reserved command name") {
-		t.Errorf("expected reserved name error, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "reserved command") {
+		t.Errorf("expected reserved command error, got %q", tg.SentMessages[0].Text)
 	}
 }
 
@@ -2755,20 +2816,20 @@ func TestSettingsCommand(t *testing.T) {
 	}
 
 	msg := tg.SentMessages[0].Text
-	if !strings.Contains(msg, "Settings:") {
-		t.Errorf("expected 'Settings:' in message, got %q", msg)
+	// Python format: starts with version, includes persistence note
+	if !strings.Contains(msg, "claudecode-telegram") {
+		t.Errorf("expected 'claudecode-telegram' in message, got %q", msg)
 	}
 	if !strings.Contains(msg, "Admin: 123456") {
 		t.Errorf("expected admin chat ID in message, got %q", msg)
 	}
-	if !strings.Contains(msg, "Port: 8080") {
-		t.Errorf("expected port in message, got %q", msg)
+	// Python format: "Team storage: path"
+	if !strings.Contains(msg, "Team storage:") {
+		t.Errorf("expected team storage in message, got %q", msg)
 	}
-	if !strings.Contains(msg, "Prefix: claude-") {
-		t.Errorf("expected prefix in message, got %q", msg)
-	}
-	if !strings.Contains(msg, "Sessions dir:") {
-		t.Errorf("expected sessions dir in message, got %q", msg)
+	// Python format: "Focused worker: (none)"
+	if !strings.Contains(msg, "Focused worker:") {
+		t.Errorf("expected focused worker in message, got %q", msg)
 	}
 }
 
@@ -2812,7 +2873,8 @@ func TestSettingsCommandSandboxEnabled(t *testing.T) {
 	if !strings.Contains(msg, "Sandbox: enabled") {
 		t.Errorf("expected sandbox enabled in message, got %q", msg)
 	}
-	if !strings.Contains(msg, "Sandbox image: sandbox:latest") {
+	// Python format: "Image: sandbox:latest"
+	if !strings.Contains(msg, "Image: sandbox:latest") {
 		t.Errorf("expected sandbox image in message, got %q", msg)
 	}
 	if !strings.Contains(msg, "/host -> /container (ro)") {
@@ -3134,12 +3196,12 @@ func TestLearnCommandNoFocus(t *testing.T) {
 
 	h.ServeHTTP(rec, req)
 
-	// Should send error message
+	// Should send error message (Python style: "No one assigned. Who should I talk to?")
 	if len(tg.SentMessages) == 0 {
 		t.Fatal("expected error message")
 	}
-	if !strings.Contains(tg.SentMessages[0].Text, "No worker focused") {
-		t.Errorf("expected 'No worker focused' error, got %q", tg.SentMessages[0].Text)
+	if !strings.Contains(tg.SentMessages[0].Text, "No one assigned") {
+		t.Errorf("expected 'No one assigned' error, got %q", tg.SentMessages[0].Text)
 	}
 }
 

@@ -95,9 +95,13 @@ type TmuxManager interface {
 	ListSessions() ([]SessionInfo, error)
 	CreateSession(name, workdir string) error
 	SendMessage(sessionName, text string) error
+	SendKeys(sessionName string, keys ...string) error
 	KillSession(sessionName string) error
 	SessionExists(sessionName string) bool
 	PromptEmpty(sessionName string, timeout time.Duration) bool
+	GetPaneCommand(sessionName string) (string, error)
+	IsClaudeRunning(sessionName string) bool
+	RestartClaude(sessionName string) error
 }
 
 // HandlerConfig holds configuration for the handler.
@@ -199,9 +203,8 @@ func (h *Handler) processMessage(msg *Message) {
 	messageID := msg.MessageID
 	adminChatID := h.telegram.AdminChatID()
 
-	// Admin gating
+	// Admin gating - silent rejection (security best practice)
 	if chatIDStr != adminChatID {
-		h.telegram.SendMessage(chatIDStr, "You are not authorized to use this bot.")
 		return
 	}
 
@@ -228,20 +231,25 @@ func (h *Handler) processMessage(msg *Message) {
 		parts := strings.Fields(text)
 		if len(parts) > 0 {
 			cmd := strings.ToLower(parts[0])
-			// Check if this is a known command
-			if h.isKnownCommand(cmd) {
-				h.handleCommand(chatIDStr, text)
+			// Strip @botname suffix
+			if atIdx := strings.Index(cmd, "@"); atIdx != -1 {
+				cmd = cmd[:atIdx]
+			}
+
+			// Check if this is a blocked command
+			if isBlockedCommand(cmd) {
+				h.telegram.SendMessage(chatIDStr, fmt.Sprintf("%s is interactive and not supported here.", cmd))
 				return
 			}
-			// Otherwise, try direct worker routing
-			workerName := strings.TrimPrefix(parts[0], "/")
-			if h.tmux.SessionExists(workerName) {
-				h.routeToDirectWorker(chatIDStr, messageID, workerName, parts[1:])
+
+			// Check if this is a known command or worker shortcut
+			workerName := strings.TrimPrefix(cmd, "/")
+			if h.isKnownCommand(cmd) || h.tmux.SessionExists(workerName) {
+				h.handleCommand(chatIDStr, messageID, text)
 				return
 			}
-			// Unknown command/worker
-			h.telegram.SendMessage(chatIDStr, fmt.Sprintf("Unknown command: %s", cmd))
-			return
+
+			// Unknown command - pass through to focused worker (could be a Claude command)
 		}
 	}
 
@@ -274,7 +282,9 @@ func (h *Handler) processMessage(msg *Message) {
 // isKnownCommand checks if the command is a known built-in command.
 func (h *Handler) isKnownCommand(cmd string) bool {
 	switch cmd {
-	case "/hire", "/end", "/team", "/focus", "/pause", "/progress", "/relaunch", "/settings", "/learn":
+	case "/hire", "/new", "/end", "/kill", "/team", "/list", "/focus", "/use",
+		"/pause", "/stop", "/progress", "/status", "/relaunch", "/restart",
+		"/settings", "/system", "/learn":
 		return true
 	default:
 		return false
@@ -283,7 +293,14 @@ func (h *Handler) isKnownCommand(cmd string) bool {
 
 // isReservedName checks if a name conflicts with a command.
 func isReservedName(name string) bool {
-	reserved := []string{"team", "focus", "hire", "end", "progress", "pause", "relaunch", "settings", "help", "start", "all", "learn"}
+	reserved := []string{
+		// Bridge commands
+		"team", "focus", "progress", "learn", "pause", "relaunch", "settings", "hire", "end",
+		// Aliases
+		"new", "use", "list", "kill", "status", "stop", "restart", "system",
+		// Special
+		"all", "start", "help",
+	}
 	for _, r := range reserved {
 		if strings.EqualFold(name, r) {
 			return true
@@ -291,6 +308,26 @@ func isReservedName(name string) bool {
 	}
 	return false
 }
+
+// blockedCommands are Claude commands that are interactive and not supported via Telegram.
+var blockedCommands = []string{
+	"/mcp", "/help", "/config", "/model", "/compact", "/cost",
+	"/doctor", "/init", "/login", "/logout", "/memory", "/permissions",
+	"/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen", "/ide",
+}
+
+// isBlockedCommand checks if a command is blocked (interactive Claude commands).
+func isBlockedCommand(cmd string) bool {
+	for _, blocked := range blockedCommands {
+		if strings.EqualFold(cmd, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// persistenceNote is appended to messages about worker persistence.
+const persistenceNote = "They'll stay on your team."
 
 // extractWorkerFromReply extracts a worker name from a [worker] prefix in text.
 func (h *Handler) extractWorkerFromReply(text string) string {
@@ -339,7 +376,7 @@ func (h *Handler) routeToBroadcast(chatID string, messageID int64, content strin
 	}
 
 	if len(sessions) == 0 {
-		h.telegram.SendMessage(chatID, "No workers currently active.")
+		h.telegram.SendMessage(chatID, "No team members yet. Add someone with /hire <name>.")
 		return
 	}
 
@@ -377,49 +414,89 @@ func (h *Handler) routeToWorker(chatID string, messageID int64, workerName, text
 	}
 }
 
-func (h *Handler) handleCommand(chatID, text string) {
+func (h *Handler) handleCommand(chatID string, messageID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
 		return
 	}
 
 	cmd := strings.ToLower(parts[0])
+	// Strip @botname suffix (Telegram appends this in groups/autocomplete)
+	if atIdx := strings.Index(cmd, "@"); atIdx != -1 {
+		cmd = cmd[:atIdx]
+	}
 	args := parts[1:]
 
+	// Check for blocked commands first
+	if isBlockedCommand(cmd) {
+		h.telegram.SendMessage(chatID, fmt.Sprintf("%s is interactive and not supported here.", cmd))
+		return
+	}
+
 	switch cmd {
-	case "/hire":
+	case "/hire", "/new":
 		h.cmdHire(chatID, args)
-	case "/end":
+	case "/end", "/kill":
 		h.cmdEnd(chatID, args)
-	case "/team":
+	case "/team", "/list":
 		h.cmdTeam(chatID)
-	case "/focus":
+	case "/focus", "/use":
 		h.cmdFocus(chatID, args)
-	case "/pause":
+	case "/pause", "/stop":
 		h.cmdPause(chatID)
-	case "/progress":
+	case "/progress", "/status":
 		h.cmdProgress(chatID)
-	case "/relaunch":
+	case "/relaunch", "/restart":
 		h.cmdRelaunch(chatID)
-	case "/settings":
+	case "/settings", "/system":
 		h.cmdSettings(chatID)
 	case "/learn":
-		h.cmdLearn(chatID, args)
+		h.cmdLearn(chatID, messageID, args)
+	default:
+		// Check if command is a worker shortcut: /lee hello -> route to lee AND switch focus
+		workerName := strings.TrimPrefix(cmd, "/")
+		if h.tmux.SessionExists(workerName) {
+			h.handleWorkerShortcut(chatID, messageID, workerName, args)
+		}
 	}
-	// Note: Unknown commands are handled by processMessage before calling handleCommand
+}
+
+// handleWorkerShortcut handles /workername messages.
+// /lee with no message -> switch focus only
+// /lee hello -> route message to lee AND switch focus
+func (h *Handler) handleWorkerShortcut(chatID string, messageID int64, workerName string, args []string) {
+	h.mu.Lock()
+	prevFocus := h.focusedWorker
+	h.focusedWorker = workerName
+	h.mu.Unlock()
+
+	if len(args) == 0 {
+		// Just /lee with no message - switch focus only
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Now talking to %s.", strings.Title(workerName)))
+		return
+	}
+
+	// /lee hello -> route message to lee AND switch focus
+	// Notify focus change if switching from different worker
+	if prevFocus != workerName {
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Now talking to %s.", strings.Title(workerName)))
+	}
+
+	content := strings.Join(args, " ")
+	h.routeToWorker(chatID, messageID, workerName, content)
 }
 
 func (h *Handler) cmdHire(chatID string, args []string) {
 	if len(args) < 1 {
-		h.telegram.SendMessage(chatID, "Usage: /hire <name> [workdir]")
+		h.telegram.SendMessage(chatID, "Usage: /hire <name>")
 		return
 	}
 
-	name := args[0]
+	name := strings.ToLower(strings.TrimSpace(args[0]))
 
 	// Check if name is reserved
 	if isReservedName(name) {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Cannot hire worker named '%s' - reserved command name.", name))
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Cannot use \"%s\" - reserved command. Choose another name.", name))
 		return
 	}
 
@@ -429,11 +506,16 @@ func (h *Handler) cmdHire(chatID string, args []string) {
 	}
 
 	if err := h.tmux.CreateSession(name, workdir); err != nil {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to hire %s: %v", name, err))
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Could not hire \"%s\". %v", name, err))
 		return
 	}
 
-	h.telegram.SendMessage(chatID, fmt.Sprintf("Hired worker: %s", name))
+	// Set as focused worker
+	h.mu.Lock()
+	h.focusedWorker = name
+	h.mu.Unlock()
+
+	h.telegram.SendMessage(chatID, fmt.Sprintf("%s is added and assigned. %s", strings.Title(name), persistenceNote))
 
 	// Update bot commands to include the new worker
 	h.updateBotCommands()
@@ -441,13 +523,13 @@ func (h *Handler) cmdHire(chatID string, args []string) {
 
 func (h *Handler) cmdEnd(chatID string, args []string) {
 	if len(args) < 1 {
-		h.telegram.SendMessage(chatID, "Usage: /end <name>")
+		h.telegram.SendMessage(chatID, "Offboarding is permanent. Usage: /end <name>")
 		return
 	}
 
-	name := args[0]
+	name := strings.ToLower(strings.TrimSpace(args[0]))
 	if err := h.tmux.KillSession(name); err != nil {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to end %s: %v", name, err))
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Could not offboard \"%s\". %v", name, err))
 		return
 	}
 
@@ -458,7 +540,7 @@ func (h *Handler) cmdEnd(chatID string, args []string) {
 	}
 	h.mu.Unlock()
 
-	h.telegram.SendMessage(chatID, fmt.Sprintf("Ended worker: %s", name))
+	h.telegram.SendMessage(chatID, fmt.Sprintf("%s has been let go.", strings.Title(name)))
 
 	// Update bot commands to remove the worker
 	h.updateBotCommands()
@@ -472,44 +554,50 @@ func (h *Handler) cmdTeam(chatID string) {
 	}
 
 	if len(sessions) == 0 {
-		h.telegram.SendMessage(chatID, "No workers currently active.")
+		h.telegram.SendMessage(chatID, "No team members yet. Add someone with /hire <name>.")
 		return
-	}
-
-	var names []string
-	for _, s := range sessions {
-		names = append(names, s.Name)
 	}
 
 	h.mu.RLock()
 	focused := h.focusedWorker
 	h.mu.RUnlock()
 
-	msg := "Active workers:\n"
-	for _, name := range names {
-		if name == focused {
-			msg += fmt.Sprintf("* %s (focused)\n", name)
-		} else {
-			msg += fmt.Sprintf("* %s\n", name)
+	// Format like Python: Your team: / Focused: / Workers:
+	var lines []string
+	lines = append(lines, "Your team:")
+	if focused != "" {
+		lines = append(lines, fmt.Sprintf("Focused: %s", focused))
+	} else {
+		lines = append(lines, "Focused: (none)")
+	}
+	lines = append(lines, "Workers:")
+
+	for _, s := range sessions {
+		var status []string
+		if s.Name == focused {
+			status = append(status, "focused")
 		}
+		// Check if worker is running claude
+		if h.tmux.IsClaudeRunning(s.Name) {
+			status = append(status, "available")
+		} else {
+			status = append(status, "offline")
+		}
+		lines = append(lines, fmt.Sprintf("- %s (%s)", s.Name, strings.Join(status, ", ")))
 	}
 
-	h.telegram.SendMessage(chatID, msg)
+	h.telegram.SendMessage(chatID, strings.Join(lines, "\n"))
 }
 
 func (h *Handler) cmdFocus(chatID string, args []string) {
 	if len(args) < 1 {
-		// Clear focus
-		h.mu.Lock()
-		h.focusedWorker = ""
-		h.mu.Unlock()
-		h.telegram.SendMessage(chatID, "Focus cleared.")
+		h.telegram.SendMessage(chatID, "Usage: /focus <name>")
 		return
 	}
 
-	name := args[0]
+	name := strings.ToLower(strings.TrimSpace(args[0]))
 	if !h.tmux.SessionExists(name) {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Worker %s does not exist.", name))
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Could not focus \"%s\". Worker '%s' not found", name, name))
 		return
 	}
 
@@ -517,7 +605,7 @@ func (h *Handler) cmdFocus(chatID string, args []string) {
 	h.focusedWorker = name
 	h.mu.Unlock()
 
-	h.telegram.SendMessage(chatID, fmt.Sprintf("Now focused on: %s", name))
+	h.telegram.SendMessage(chatID, fmt.Sprintf("Now talking to %s.", strings.Title(name)))
 }
 
 func (h *Handler) cmdPause(chatID string) {
@@ -526,13 +614,16 @@ func (h *Handler) cmdPause(chatID string) {
 	h.mu.RUnlock()
 
 	if focused == "" {
-		h.telegram.SendMessage(chatID, "No worker focused. Use /focus <name> first.")
+		h.telegram.SendMessage(chatID, "No one assigned.")
 		return
 	}
 
-	// Note: In the real implementation, this would send Escape key via tmux.SendKeys
-	// For now, we just confirm the action
-	h.telegram.SendMessage(chatID, fmt.Sprintf("Sent Escape to %s", focused))
+	// Send Escape key to interrupt Claude
+	if err := h.tmux.SendKeys(focused, "Escape"); err != nil {
+		log.Printf("Failed to send Escape to %s: %v", focused, err)
+	}
+
+	h.telegram.SendMessage(chatID, fmt.Sprintf("%s is paused. I'll pick up where we left off.", strings.Title(focused)))
 }
 
 func (h *Handler) cmdProgress(chatID string) {
@@ -541,15 +632,47 @@ func (h *Handler) cmdProgress(chatID string) {
 	h.mu.RUnlock()
 
 	if focused == "" {
-		h.telegram.SendMessage(chatID, "No worker focused. Use /focus <name> first.")
+		// List available workers
+		sessions, _ := h.tmux.ListSessions()
+		if len(sessions) > 0 {
+			var names []string
+			for _, s := range sessions {
+				names = append(names, s.Name)
+			}
+			h.telegram.SendMessage(chatID, fmt.Sprintf("No one assigned. Your team: %s\nWho should I talk to?", strings.Join(names, ", ")))
+		} else {
+			h.telegram.SendMessage(chatID, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
+		}
 		return
 	}
 
-	// Send /status command to get progress
-	if err := h.tmux.SendMessage(focused, "/status"); err != nil {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to get progress: %v", err))
-		return
+	// Build status like Python
+	var status []string
+	status = append(status, fmt.Sprintf("Progress for focused worker: %s", focused))
+	status = append(status, "Focused: yes")
+
+	// Check if session exists
+	sessionExists := h.tmux.SessionExists(focused)
+	status = append(status, fmt.Sprintf("Online: %s", boolYesNo(sessionExists)))
+
+	if sessionExists {
+		claudeRunning := h.tmux.IsClaudeRunning(focused)
+		// "Working" in Python checks is_pending - we'll approximate with IsClaudeRunning
+		status = append(status, fmt.Sprintf("Working: %s", boolYesNo(claudeRunning)))
+		status = append(status, fmt.Sprintf("Ready: %s", boolYesNo(claudeRunning)))
+		if !claudeRunning {
+			status = append(status, "Needs attention: worker app is not running. Use /relaunch.")
+		}
 	}
+
+	h.telegram.SendMessage(chatID, strings.Join(status, "\n"))
+}
+
+func boolYesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
 
 func (h *Handler) cmdRelaunch(chatID string) {
@@ -558,40 +681,65 @@ func (h *Handler) cmdRelaunch(chatID string) {
 	h.mu.RUnlock()
 
 	if focused == "" {
-		h.telegram.SendMessage(chatID, "No worker focused. Use /focus <name> first.")
+		h.telegram.SendMessage(chatID, "No one assigned.")
 		return
 	}
 
-	// Send "claude" command to restart Claude in the session
-	if err := h.tmux.SendMessage(focused, "claude"); err != nil {
-		h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to relaunch: %v", err))
+	// Restart claude: send Ctrl+C, wait, then start claude with --dangerously-skip-permissions
+	if err := h.tmux.RestartClaude(focused); err != nil {
+		h.telegram.SendMessage(chatID, fmt.Sprintf("Could not relaunch \"%s\". %v", focused, err))
 		return
 	}
 
-	h.telegram.SendMessage(chatID, fmt.Sprintf("Relaunching Claude for %s", focused))
+	h.telegram.SendMessage(chatID, fmt.Sprintf("Bringing %s back online...", strings.Title(focused)))
 }
 
 func (h *Handler) cmdSettings(chatID string) {
 	adminChatID := h.telegram.AdminChatID()
 
-	lines := []string{
-		"Settings:",
-		fmt.Sprintf("- Admin: %s", adminChatID),
-		fmt.Sprintf("- Port: %s", h.config.Port),
-		fmt.Sprintf("- Prefix: %s", h.config.Prefix),
-		fmt.Sprintf("- Sessions dir: %s", h.config.SessionsDir),
+	// Get session info for team state
+	sessions, _ := h.tmux.ListSessions()
+	var workerNames []string
+	for _, s := range sessions {
+		workerNames = append(workerNames, s.Name)
+	}
+	teamList := "(none)"
+	if len(workerNames) > 0 {
+		teamList = strings.Join(workerNames, ", ")
 	}
 
+	h.mu.RLock()
+	focused := h.focusedWorker
+	h.mu.RUnlock()
+	if focused == "" {
+		focused = "(none)"
+	}
+
+	// Format like Python
+	lines := []string{
+		"claudecode-telegram (Go)",
+		persistenceNote,
+		"",
+		fmt.Sprintf("Bot token: %s", redact(h.config.Port)), // We don't have token, show port
+		fmt.Sprintf("Admin: %s", adminChatID),
+		fmt.Sprintf("Team storage: %s", h.config.SessionsDir),
+		"",
+		"Team state",
+		fmt.Sprintf("Focused worker: %s", focused),
+		fmt.Sprintf("Workers: %s", teamList),
+	}
+
+	lines = append(lines, "")
 	if h.config.SandboxEnabled {
-		lines = append(lines, "- Sandbox: enabled (Docker isolation)")
+		lines = append(lines, "Sandbox: enabled (Docker isolation)")
 		if h.config.SandboxImage != "" {
-			lines = append(lines, fmt.Sprintf("- Sandbox image: %s", h.config.SandboxImage))
+			lines = append(lines, fmt.Sprintf("Image: %s", h.config.SandboxImage))
 		}
 		if home, err := os.UserHomeDir(); err == nil {
-			lines = append(lines, fmt.Sprintf("- Default mount: %s -> /workspace", home))
+			lines = append(lines, fmt.Sprintf("Default mount: %s -> /workspace", home))
 		}
 		if len(h.config.SandboxMounts) > 0 {
-			lines = append(lines, "- Extra mounts:")
+			lines = append(lines, "Extra mounts:")
 			for _, mount := range h.config.SandboxMounts {
 				ro := ""
 				if mount.ReadOnly {
@@ -600,20 +748,41 @@ func (h *Handler) cmdSettings(chatID string) {
 				lines = append(lines, fmt.Sprintf("  %s -> %s%s", mount.HostPath, mount.ContainerPath, ro))
 			}
 		}
+		lines = append(lines, "")
+		lines = append(lines, "Note: Workers run in containers with access")
+		lines = append(lines, "only to mounted directories. System paths")
+		lines = append(lines, "outside mounts are not accessible.")
 	} else {
-		lines = append(lines, "- Sandbox: disabled (direct execution)")
+		lines = append(lines, "Sandbox: disabled (direct execution)")
+		lines = append(lines, "Workers run with full system access.")
 	}
 
 	h.telegram.SendMessage(chatID, strings.Join(lines, "\n"))
 }
 
-func (h *Handler) cmdLearn(chatID string, args []string) {
+func redact(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
+}
+
+func (h *Handler) cmdLearn(chatID string, messageID int64, args []string) {
 	h.mu.RLock()
 	focused := h.focusedWorker
 	h.mu.RUnlock()
 
 	if focused == "" {
-		h.telegram.SendMessage(chatID, "No worker focused. Use /focus <name> first.")
+		h.telegram.SendMessage(chatID, "No one assigned. Who should I talk to?")
+		return
+	}
+
+	// Check if worker is online
+	if !h.tmux.SessionExists(focused) || !h.tmux.IsClaudeRunning(focused) {
+		h.telegram.SendMessage(chatID, fmt.Sprintf("%s is offline. Try /relaunch.", strings.Title(focused)))
 		return
 	}
 
@@ -640,6 +809,11 @@ func (h *Handler) cmdLearn(chatID string, args []string) {
 		h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to send prompt: %v", err))
 		return
 	}
+
+	// Send reaction if Claude accepted the message
+	if h.tmux.PromptEmpty(focused, 500*time.Millisecond) {
+		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	}
 }
 
 func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text string) {
@@ -648,7 +822,17 @@ func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text stri
 	h.mu.RUnlock()
 
 	if focused == "" {
-		h.telegram.SendMessage(chatID, "No worker focused. Use /focus <name> first.")
+		// List available workers
+		sessions, _ := h.tmux.ListSessions()
+		if len(sessions) > 0 {
+			var names []string
+			for _, s := range sessions {
+				names = append(names, s.Name)
+			}
+			h.telegram.SendMessage(chatID, fmt.Sprintf("No one assigned. Your team: %s\nWho should I talk to?", strings.Join(names, ", ")))
+		} else {
+			h.telegram.SendMessage(chatID, "No team members yet. Add someone with /hire <name>.")
+		}
 		return
 	}
 
@@ -700,7 +884,8 @@ func (h *Handler) handleResponse(w http.ResponseWriter, r *http.Request) {
 	cleanedText, mediaTags := telegram.ParseMediaTags(payload.Text)
 
 	// Send text message (with media tags removed)
-	msg := fmt.Sprintf("[%s] %s", payload.Session, cleanedText)
+	// Format: <b>session:</b>\ntext (HTML bold, colon, newline)
+	msg := fmt.Sprintf("<b>%s:</b>\n%s", payload.Session, cleanedText)
 	if err := h.telegram.SendMessageHTML(adminChatID, msg); err != nil {
 		log.Printf("Failed to send response to Telegram: %v", err)
 		http.Error(w, "Failed to send message", http.StatusInternalServerError)

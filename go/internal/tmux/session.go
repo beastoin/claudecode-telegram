@@ -424,6 +424,79 @@ func (m *Manager) getSendLock(sessionName string) *sync.Mutex {
 	return m.sendLocks[sessionName]
 }
 
+// IsClaudeRunning checks if claude process is running in tmux session.
+// First checks pane_current_command, then falls back to checking child processes.
+func (m *Manager) IsClaudeRunning(sessionName string) bool {
+	fullName := fullSessionName(m.Prefix, sessionName)
+
+	if !m.sessionExistsFull(fullName) {
+		return false
+	}
+
+	// First try pane_current_command (fast path)
+	paneCmd, err := m.GetPaneCommand(sessionName)
+	if err == nil && strings.Contains(strings.ToLower(paneCmd), "claude") {
+		return true
+	}
+
+	// Fallback: check if claude is a child process of the pane
+	cmd := exec.Command(m.tmuxPath(), "display-message", "-t", fullName, "-p", "#{pane_pid}")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	panePID := strings.TrimSpace(string(out))
+	if panePID == "" {
+		return false
+	}
+
+	// Check for claude as child process using pgrep
+	pgrepCmd := exec.Command("pgrep", "-P", panePID, "claude")
+	return pgrepCmd.Run() == nil
+}
+
+// RestartClaude restarts claude in an existing tmux session.
+// Sends Ctrl+C to interrupt, waits, then starts claude with --dangerously-skip-permissions.
+func (m *Manager) RestartClaude(sessionName string) error {
+	fullName := fullSessionName(m.Prefix, sessionName)
+
+	if !m.sessionExistsFull(fullName) {
+		return fmt.Errorf("session %q does not exist", sessionName)
+	}
+
+	// Check if claude is already running
+	if m.IsClaudeRunning(sessionName) {
+		return fmt.Errorf("worker is already running")
+	}
+
+	if m.SandboxEnabled {
+		// Stop any existing container first
+		m.stopDockerContainer(sessionName)
+		time.Sleep(500 * time.Millisecond)
+
+		// Start new container
+		dockerCmd, err := m.dockerRunCommand(sessionName)
+		if err != nil {
+			return err
+		}
+		return m.SendMessage(sessionName, dockerCmd)
+	}
+
+	// Re-export env vars for hook
+	m.exportHookEnv(sessionName)
+	time.Sleep(300 * time.Millisecond)
+
+	// Start claude in the existing tmux session
+	cmd := exec.Command(m.tmuxPath(), "send-keys", "-t", fullName,
+		"claude --dangerously-skip-permissions", "Enter")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("start claude: %w", err)
+	}
+
+	return nil
+}
+
 // parseSessionName extracts the worker name from a full tmux session name.
 // Returns the name and whether it matched the prefix.
 func parseSessionName(prefix, sessionName string) (string, bool) {

@@ -13,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/beastoin/claudecode-telegram/internal/server"
+	"github.com/beastoin/claudecode-telegram/internal/tmux"
 )
 
 // Test Config parsing from flags and environment
@@ -423,14 +426,43 @@ func (m *MockTelegramClientForApp) SendDocument(chatID, filePath, caption string
 func (m *MockTelegramClientForApp) AdminChatID() string                                 { return m.AdminChatIDValue }
 func (m *MockTelegramClientForApp) DownloadFile(fileID string) ([]byte, error)          { return nil, nil }
 
+// mockTmuxManagerAdapterForTest is a simple mock for testing
+type mockTmuxManagerAdapterForTest struct {
+	sessions []tmux.Session
+}
+
+func (m *mockTmuxManagerAdapterForTest) ListSessions() ([]server.SessionInfo, error) {
+	result := make([]server.SessionInfo, len(m.sessions))
+	for i, s := range m.sessions {
+		result[i] = server.SessionInfo{Name: s.Name}
+	}
+	return result, nil
+}
+
+func (m *mockTmuxManagerAdapterForTest) CreateSession(name, workdir string) error        { return nil }
+func (m *mockTmuxManagerAdapterForTest) SendMessage(sessionName, text string) error      { return nil }
+func (m *mockTmuxManagerAdapterForTest) SendKeys(sessionName string, keys ...string) error { return nil }
+func (m *mockTmuxManagerAdapterForTest) KillSession(sessionName string) error             { return nil }
+func (m *mockTmuxManagerAdapterForTest) SessionExists(sessionName string) bool            { return false }
+func (m *mockTmuxManagerAdapterForTest) PromptEmpty(sessionName string, timeout time.Duration) bool {
+	return true
+}
+func (m *mockTmuxManagerAdapterForTest) GetPaneCommand(sessionName string) (string, error) {
+	return "", nil
+}
+func (m *mockTmuxManagerAdapterForTest) IsClaudeRunning(sessionName string) bool { return false }
+func (m *mockTmuxManagerAdapterForTest) RestartClaude(sessionName string) error  { return nil }
+
 // Test startup notification
 func TestSendStartupNotification(t *testing.T) {
 	mockTg := &MockTelegramClientForApp{AdminChatIDValue: "123456"}
+	mockTmuxAdapter := &mockTmuxManagerAdapterForTest{sessions: []tmux.Session{}}
 
 	app := &App{
-		config: Config{AdminChatID: "123456"},
+		config:   Config{AdminChatID: "123456"},
+		telegram: mockTg,
+		tmux:     mockTmuxAdapter,
 	}
-	app.telegram = mockTg
 
 	err := app.SendStartupNotification()
 	if err != nil {
@@ -445,8 +477,9 @@ func TestSendStartupNotification(t *testing.T) {
 		t.Errorf("expected chat ID '123456', got %q", mockTg.SentMessages[0].ChatID)
 	}
 
-	if mockTg.SentMessages[0].Text != "Server online." {
-		t.Errorf("expected message 'Server online.', got %q", mockTg.SentMessages[0].Text)
+	// Python format: "I'm online and ready.\nNo workers yet. Hire your first long-lived worker with /hire <name>."
+	if !strings.Contains(mockTg.SentMessages[0].Text, "online") {
+		t.Errorf("expected message about being online, got %q", mockTg.SentMessages[0].Text)
 	}
 }
 
@@ -455,11 +488,13 @@ func TestSendStartupNotificationError(t *testing.T) {
 		AdminChatIDValue: "123456",
 		SendError:        fmt.Errorf("network error"),
 	}
+	mockTmuxAdapter := &mockTmuxManagerAdapterForTest{sessions: []tmux.Session{}}
 
 	app := &App{
-		config: Config{AdminChatID: "123456"},
+		config:   Config{AdminChatID: "123456"},
+		telegram: mockTg,
+		tmux:     mockTmuxAdapter,
 	}
-	app.telegram = mockTg
 
 	// Should return error but not panic
 	err := app.SendStartupNotification()
