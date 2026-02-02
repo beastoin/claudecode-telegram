@@ -87,13 +87,12 @@ func ConfigFromEnv() Config {
 }
 
 // Validate checks that required fields are set.
+// Note: AdminChatID is optional - if not set, first user to message becomes admin.
 func (c Config) Validate() error {
 	if c.Token == "" {
 		return fmt.Errorf("token is required (set TELEGRAM_BOT_TOKEN or use --token)")
 	}
-	if c.AdminChatID == "" {
-		return fmt.Errorf("admin chat ID is required (set ADMIN_CHAT_ID or use --admin)")
-	}
+	// AdminChatID is optional - auto-learn first user if not set
 	return nil
 }
 
@@ -190,6 +189,10 @@ func (a *telegramClientAdapter) SendChatAction(chatID, action string) error {
 
 func (a *telegramClientAdapter) AdminChatID() string {
 	return a.client.AdminChatID()
+}
+
+func (a *telegramClientAdapter) SetAdminChatID(chatID string) {
+	a.client.SetAdminChatID(chatID)
 }
 
 func (a *telegramClientAdapter) DownloadFile(fileID string) ([]byte, error) {
@@ -334,7 +337,13 @@ func New(cfg Config) (*App, error) {
 }
 
 // SendStartupNotification sends startup message with team context like Python.
+// If admin is not yet configured (auto-learn mode), this is a no-op.
 func (a *App) SendStartupNotification() error {
+	// Skip if admin not yet learned (will send on first message)
+	if a.config.AdminChatID == "" {
+		return nil
+	}
+
 	sessions, _ := a.tmux.ListSessions()
 
 	var lines []string
@@ -472,7 +481,9 @@ func RunHook(cfg HookConfig, r io.Reader) error {
 	}
 
 	rawInput := strings.TrimSpace(string(data))
+	fmt.Fprintf(os.Stderr, "DEBUG hook: rawInput len=%d\n", len(rawInput))
 	if rawInput == "" {
+		fmt.Fprintln(os.Stderr, "DEBUG hook: empty input, returning")
 		return nil
 	}
 
@@ -481,9 +492,11 @@ func RunHook(cfg HookConfig, r io.Reader) error {
 
 	// Try to parse as Claude hook JSON input
 	hookInput, err := hook.ParseInput(data)
+	fmt.Fprintf(os.Stderr, "DEBUG hook: parseInput err=%v, hookInput=%+v\n", err, hookInput)
 	if err == nil && hookInput.TranscriptPath != "" {
 		// Extract text from transcript
 		text, err = hook.ExtractFromTranscript(hookInput.TranscriptPath)
+		fmt.Fprintf(os.Stderr, "DEBUG hook: extractFromTranscript err=%v, textLen=%d\n", err, len(text))
 		if err != nil {
 			// Log but continue to fallback
 			text = ""

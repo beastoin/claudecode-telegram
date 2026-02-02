@@ -67,6 +67,11 @@ func (c *Client) AdminChatID() string {
 	return c.adminChatID
 }
 
+// SetAdminChatID sets the admin chat ID (used for auto-learn).
+func (c *Client) SetAdminChatID(chatID string) {
+	c.adminChatID = chatID
+}
+
 // SetBaseURL sets the base URL for the Telegram API (for testing).
 func (c *Client) SetBaseURL(url string) {
 	c.baseURL = url

@@ -87,6 +87,7 @@ type TelegramClient interface {
 	SendPhoto(chatID, filePath, caption string) error
 	SendDocument(chatID, filePath, caption string) error
 	AdminChatID() string
+	SetAdminChatID(chatID string)
 	DownloadFile(fileID string) ([]byte, error)
 	SetMyCommands(commands []BotCommand) error
 }
@@ -261,6 +262,13 @@ func (h *Handler) processMessage(msg *Message) {
 	chatIDStr := strconv.FormatInt(msg.Chat.ID, 10)
 	messageID := msg.MessageID
 	adminChatID := h.telegram.AdminChatID()
+
+	// Auto-learn first user as admin (like Python version)
+	if adminChatID == "" {
+		h.telegram.SetAdminChatID(chatIDStr)
+		adminChatID = chatIDStr
+		log.Printf("Admin registered: %s", chatIDStr)
+	}
 
 	// Admin gating - silent rejection (security best practice)
 	if chatIDStr != adminChatID {
