@@ -1384,6 +1384,166 @@ func TestTmuxSessionInfoEnvVars(t *testing.T) {
 	}
 }
 
+// TestHookInstallAppendsToExistingHooksArray verifies that cctg hook install
+// appends to the SAME hooks array inside the first Stop object, not creating
+// a new object in the Stop array.
+//
+// Bug fix test: Before the fix, running hook install on settings with an existing
+// hook would create: [{"hooks":[h1]}, {"hooks":[h2]}] (WRONG - two separate objects)
+// After fix: [{"hooks":[h1, h2]}] (CORRECT - both hooks in same array)
+func TestHookInstallAppendsToExistingHooksArray(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	claudeDir := tmpDir + "/.claude"
+	os.MkdirAll(claudeDir, 0755)
+
+	// Create existing settings.json with one hook already present
+	existingSettings := `{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/home/user/.claude/hooks/send-to-telegram.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {}
+}`
+	settingsPath := claudeDir + "/settings.json"
+	os.WriteFile(settingsPath, []byte(existingSettings), 0644)
+
+	// Run hook install
+	var stdout bytes.Buffer
+	err := runHookInstall(claudeDir, &stdout)
+	if err != nil {
+		t.Fatalf("hook install failed: %v", err)
+	}
+
+	// Read the result
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+
+	// Verify structure
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'hooks' key in settings.json")
+	}
+
+	stopHooks, ok := hooks["Stop"].([]interface{})
+	if !ok {
+		t.Fatal("expected 'Stop' key to be an array")
+	}
+
+	// CRITICAL: There should be exactly ONE object in the Stop array
+	// NOT two separate objects
+	if len(stopHooks) != 1 {
+		t.Fatalf("expected exactly 1 object in Stop array (both hooks should be in same object), got %d objects", len(stopHooks))
+	}
+
+	// Get the inner hooks array from the first (and only) Stop object
+	firstStop, ok := stopHooks[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected first Stop element to be an object")
+	}
+
+	innerHooks, ok := firstStop["hooks"].([]interface{})
+	if !ok {
+		t.Fatal("expected 'hooks' key inside first Stop object")
+	}
+
+	// There should be exactly 2 hooks in the inner array
+	if len(innerHooks) != 2 {
+		t.Fatalf("expected 2 hooks in inner array, got %d", len(innerHooks))
+	}
+
+	// Verify both hooks are present
+	foundExisting := false
+	foundCctg := false
+	for _, h := range innerHooks {
+		hook, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmd, _ := hook["command"].(string)
+		if strings.Contains(cmd, "send-to-telegram.sh") {
+			foundExisting = true
+		}
+		if strings.Contains(cmd, "cctg hook") {
+			foundCctg = true
+		}
+	}
+
+	if !foundExisting {
+		t.Error("existing hook (send-to-telegram.sh) should be preserved")
+	}
+	if !foundCctg {
+		t.Error("cctg hook should be added")
+	}
+
+	// Verify mcpServers is preserved
+	if _, ok := settings["mcpServers"]; !ok {
+		t.Error("expected mcpServers to be preserved")
+	}
+}
+
+// TestHookInstallIdempotent verifies that running hook install twice
+// does not add duplicate hooks
+func TestHookInstallIdempotent(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	claudeDir := tmpDir + "/.claude"
+	os.MkdirAll(claudeDir, 0755)
+
+	// Run hook install twice
+	var stdout1, stdout2 bytes.Buffer
+	err := runHookInstall(claudeDir, &stdout1)
+	if err != nil {
+		t.Fatalf("first hook install failed: %v", err)
+	}
+
+	err = runHookInstall(claudeDir, &stdout2)
+	if err != nil {
+		t.Fatalf("second hook install failed: %v", err)
+	}
+
+	// Second run should say "already installed"
+	if !strings.Contains(stdout2.String(), "already installed") {
+		t.Errorf("expected 'already installed' message on second run, got %q", stdout2.String())
+	}
+
+	// Read the result
+	data, err := os.ReadFile(claudeDir + "/settings.json")
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+
+	hooks := settings["hooks"].(map[string]interface{})
+	stopHooks := hooks["Stop"].([]interface{})
+	firstStop := stopHooks[0].(map[string]interface{})
+	innerHooks := firstStop["hooks"].([]interface{})
+
+	// Should still only have 1 hook (no duplicates)
+	if len(innerHooks) != 1 {
+		t.Fatalf("expected 1 hook after running install twice, got %d", len(innerHooks))
+	}
+}
+
 func TestSessionEnvVarIssueDetection(t *testing.T) {
 	// Create a nodeHealth with sessions missing env vars
 	h := &nodeHealth{
