@@ -39,30 +39,34 @@ type Config struct {
 }
 
 // DeriveNodeConfig sets defaults based on node name.
-// Explicit values in the config are preserved (not overwritten).
+//
+// Node and Port are independent concepts:
+//   - Node: isolation identity (determines prefix, sessions dir)
+//   - Port: network binding (default 8080, specify via --port)
+//
+// Fields ALWAYS derived from node (cannot be overridden):
+//   - Prefix: always "claude-{node}-"
+//   - SessionsDir: always "~/.claude/telegram/nodes/{node}/sessions"
+//
+// Fields ALWAYS derived from port (cannot be overridden):
+//   - BridgeURL: always "http://localhost:{port}"
 func (c *Config) DeriveNodeConfig() {
 	if c.NodeName == "" {
 		c.NodeName = "prod"
 	}
+	// Port: single default, independent of node
+	// Specify via --port flag
 	if c.Port == "" {
-		switch c.NodeName {
-		case "prod":
-			c.Port = "8081"
-		case "dev":
-			c.Port = "8082"
-		case "test":
-			c.Port = "8095"
-		default:
-			c.Port = "8080"
-		}
+		c.Port = "8080"
 	}
-	if c.Prefix == "" {
-		c.Prefix = "claude-" + c.NodeName + "-"
-	}
-	if c.SessionsDir == "" {
-		home, _ := os.UserHomeDir()
-		c.SessionsDir = filepath.Join(home, ".claude", "telegram", "nodes", c.NodeName, "sessions")
-	}
+	// Prefix: ALWAYS derived from node (no override) to ensure session isolation
+	c.Prefix = "claude-" + c.NodeName + "-"
+	// SessionsDir: ALWAYS derived from node (no override) to prevent cross-node mixing
+	home, _ := os.UserHomeDir()
+	c.SessionsDir = filepath.Join(home, ".claude", "telegram", "nodes", c.NodeName, "sessions")
+	// BridgeURL: ALWAYS derived from port (no override) - workers need correct bridge
+	c.BridgeURL = "http://localhost:" + c.Port
+	// SandboxImage: has default, rarely needs override
 	if c.SandboxImage == "" {
 		c.SandboxImage = "claudecode-telegram:latest"
 	}
@@ -70,36 +74,16 @@ func (c *Config) DeriveNodeConfig() {
 
 // ConfigFromEnv creates a Config from environment variables.
 // Note: This does NOT call DeriveNodeConfig() - caller should do that after
-// merging with command-line flags to allow flags to override env vars.
+// merging with command-line flags.
+//
+// Only secrets are read from the environment:
+//   - TELEGRAM_BOT_TOKEN
+//   - ADMIN_CHAT_ID
 func ConfigFromEnv() Config {
 	return Config{
-		Token:          os.Getenv("TELEGRAM_BOT_TOKEN"),
-		AdminChatID:    os.Getenv("ADMIN_CHAT_ID"),
-		Port:           os.Getenv("PORT"),
-		Prefix:         os.Getenv("TMUX_PREFIX"),
-		NodeName:       os.Getenv("NODE_NAME"),
-		SessionsDir:    os.Getenv("SESSIONS_DIR"),
-		SandboxEnabled: envBool(os.Getenv("SANDBOX_ENABLED")),
-		SandboxImage:   envOrDefault("SANDBOX_IMAGE", "claudecode-telegram:latest"),
-		SandboxMounts:  os.Getenv("SANDBOX_MOUNTS"),
-		BridgeURL:      os.Getenv("BRIDGE_URL"),
+		Token:       os.Getenv("TELEGRAM_BOT_TOKEN"),
+		AdminChatID: os.Getenv("ADMIN_CHAT_ID"),
 	}
-}
-
-func envBool(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "true", "yes", "y":
-		return true
-	default:
-		return false
-	}
-}
-
-func envOrDefault(key, def string) string {
-	if val := strings.TrimSpace(os.Getenv(key)); val != "" {
-		return val
-	}
-	return def
 }
 
 // Validate checks that required fields are set.
@@ -120,10 +104,38 @@ type HookConfig struct {
 }
 
 // HookConfigFromEnv creates a HookConfig from environment variables.
+// Falls back to reading from tmux session environment if shell env is empty.
 func HookConfigFromEnv() HookConfig {
+	bridgeURL := os.Getenv("BRIDGE_URL")
+	session := os.Getenv("SESSION_NAME")
+
+	// If not set in shell env, try tmux session env
+	if bridgeURL == "" || session == "" {
+		sessionName := hook.GetTmuxSessionName()
+		if sessionName != "" {
+			if bridgeURL == "" {
+				bridgeURL = hook.GetTmuxEnv(sessionName, "BRIDGE_URL")
+				// Fall back to PORT if BRIDGE_URL not set
+				if bridgeURL == "" {
+					port := hook.GetTmuxEnv(sessionName, "PORT")
+					if port != "" {
+						bridgeURL = "http://localhost:" + port
+					}
+				}
+			}
+			if session == "" {
+				// Extract session name from tmux session name using prefix
+				prefix := hook.GetTmuxEnv(sessionName, "TMUX_PREFIX")
+				if prefix != "" && strings.HasPrefix(sessionName, prefix) {
+					session = sessionName[len(prefix):]
+				}
+			}
+		}
+	}
+
 	return HookConfig{
-		BridgeURL: os.Getenv("BRIDGE_URL"),
-		Session:   os.Getenv("SESSION_NAME"),
+		BridgeURL: bridgeURL,
+		Session:   session,
 	}
 }
 

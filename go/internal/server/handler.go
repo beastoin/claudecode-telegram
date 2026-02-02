@@ -349,6 +349,13 @@ func (h *Handler) routeToDirectWorker(chatID string, messageID int64, workerName
 		return
 	}
 
+	// Save chat_id for this session (needed for /response endpoint)
+	if h.sessionsDir != "" {
+		if err := files.SaveChatID(h.sessionsDir, workerName, chatID); err != nil {
+			log.Printf("Failed to save chat_id for %s: %v", workerName, err)
+		}
+	}
+
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
@@ -358,8 +365,12 @@ func (h *Handler) routeToDirectWorker(chatID string, messageID int64, workerName
 	}
 
 	// Send reaction only if Claude accepted the message (prompt is empty)
-	if h.tmux.PromptEmpty(workerName, 500*time.Millisecond) {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	if h.tmux.PromptEmpty(workerName, 1*time.Second) {
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("PromptEmpty returned false for session %s, skipping reaction", workerName)
 	}
 }
 
@@ -385,21 +396,39 @@ func (h *Handler) routeToBroadcast(chatID string, messageID int64, content strin
 
 	anyAccepted := false
 	for _, session := range sessions {
+		// Save chat_id for each session (needed for /response endpoint)
+		if h.sessionsDir != "" {
+			if err := files.SaveChatID(h.sessionsDir, session.Name, chatID); err != nil {
+				log.Printf("Failed to save chat_id for %s: %v", session.Name, err)
+			}
+		}
+
 		if err := h.tmux.SendMessage(session.Name, content); err != nil {
 			h.telegram.SendMessage(chatID, fmt.Sprintf("Failed to send to %s: %v", session.Name, err))
-		} else if h.tmux.PromptEmpty(session.Name, 500*time.Millisecond) {
+		} else if h.tmux.PromptEmpty(session.Name, 1*time.Second) {
 			anyAccepted = true
 		}
 	}
 
 	// Send reaction only if at least one Claude accepted the message
 	if anyAccepted {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("No Claude instance accepted the broadcast message, skipping reaction")
 	}
 }
 
 // routeToWorker sends a message to a specific worker.
 func (h *Handler) routeToWorker(chatID string, messageID int64, workerName, text string) {
+	// Save chat_id for this session (needed for /response endpoint)
+	if h.sessionsDir != "" {
+		if err := files.SaveChatID(h.sessionsDir, workerName, chatID); err != nil {
+			log.Printf("Failed to save chat_id for %s: %v", workerName, err)
+		}
+	}
+
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
@@ -409,8 +438,12 @@ func (h *Handler) routeToWorker(chatID string, messageID int64, workerName, text
 	}
 
 	// Send reaction only if Claude accepted the message (prompt is empty)
-	if h.tmux.PromptEmpty(workerName, 500*time.Millisecond) {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	if h.tmux.PromptEmpty(workerName, 1*time.Second) {
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("PromptEmpty returned false for session %s, skipping reaction", workerName)
 	}
 }
 
@@ -540,7 +573,7 @@ func (h *Handler) cmdEnd(chatID string, args []string) {
 	}
 	h.mu.Unlock()
 
-	h.telegram.SendMessage(chatID, fmt.Sprintf("%s has been let go.", strings.Title(name)))
+	h.telegram.SendMessage(chatID, fmt.Sprintf("%s removed from your team.", strings.Title(name)))
 
 	// Update bot commands to remove the worker
 	h.updateBotCommands()
@@ -801,6 +834,13 @@ func (h *Handler) cmdLearn(chatID string, messageID int64, args []string) {
 			"Why: <root cause or insight>"
 	}
 
+	// Save chat_id for this session (needed for /response endpoint)
+	if h.sessionsDir != "" {
+		if err := files.SaveChatID(h.sessionsDir, focused, chatID); err != nil {
+			log.Printf("Failed to save chat_id for %s: %v", focused, err)
+		}
+	}
+
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
@@ -811,8 +851,12 @@ func (h *Handler) cmdLearn(chatID string, messageID int64, args []string) {
 	}
 
 	// Send reaction if Claude accepted the message
-	if h.tmux.PromptEmpty(focused, 500*time.Millisecond) {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	if h.tmux.PromptEmpty(focused, 1*time.Second) {
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("PromptEmpty returned false for session %s, skipping reaction", focused)
 	}
 }
 
@@ -836,6 +880,13 @@ func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text stri
 		return
 	}
 
+	// Save chat_id for this session (needed for /response endpoint)
+	if h.sessionsDir != "" {
+		if err := files.SaveChatID(h.sessionsDir, focused, chatID); err != nil {
+			log.Printf("Failed to save chat_id for %s: %v", focused, err)
+		}
+	}
+
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
@@ -845,8 +896,12 @@ func (h *Handler) routeToFocusedWorker(chatID string, messageID int64, text stri
 	}
 
 	// Send reaction only if Claude accepted the message (prompt is empty)
-	if h.tmux.PromptEmpty(focused, 500*time.Millisecond) {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	if h.tmux.PromptEmpty(focused, 1*time.Second) {
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("PromptEmpty returned false for session %s, skipping reaction", focused)
 	}
 }
 
@@ -1058,6 +1113,13 @@ func (h *Handler) processFileMessage(chatID string, messageID int64, msg *Messag
 		fullMessage = fmt.Sprintf("[%s: %s]", fileType, filePath)
 	}
 
+	// Save chat_id for this session (needed for /response endpoint)
+	if h.sessionsDir != "" {
+		if err := files.SaveChatID(h.sessionsDir, targetWorker, chatID); err != nil {
+			log.Printf("Failed to save chat_id for %s: %v", targetWorker, err)
+		}
+	}
+
 	// Send typing indicator
 	h.telegram.SendChatAction(chatID, "typing")
 
@@ -1068,8 +1130,12 @@ func (h *Handler) processFileMessage(chatID string, messageID int64, msg *Messag
 	}
 
 	// Send reaction only if Claude accepted the message (prompt is empty)
-	if h.tmux.PromptEmpty(targetWorker, 500*time.Millisecond) {
-		h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440") // 👀
+	if h.tmux.PromptEmpty(targetWorker, 1*time.Second) {
+		if err := h.telegram.SetMessageReaction(chatID, messageID, "\U0001F440"); err != nil {
+			log.Printf("Failed to set reaction for message %d: %v", messageID, err)
+		}
+	} else {
+		log.Printf("PromptEmpty returned false for session %s, skipping reaction", targetWorker)
 	}
 }
 

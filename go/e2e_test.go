@@ -518,8 +518,8 @@ func TestE2EWorkerLifecycle(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /end")
 	}
-	// Python format: "Alice has been let go."
-	if !strings.Contains(msgs[0].Text, "Alice") || !strings.Contains(msgs[0].Text, "let go") {
+	// Python format: "Alice removed from your team."
+	if !strings.Contains(msgs[0].Text, "Alice") || !strings.Contains(msgs[0].Text, "removed from your team") {
 		t.Errorf("Expected end confirmation, got: %q", msgs[0].Text)
 	}
 
@@ -1194,7 +1194,8 @@ func TestE2ERelaunchCommand(t *testing.T) {
 	resp.Body.Close()
 	env.WaitForMessages(1, 2*time.Second)
 
-	// Test /relaunch
+	// Test /relaunch when Claude is already running (should fail)
+	// This is expected behavior - CreateSession now starts Claude automatically
 	env.mockAPI.ClearMessages()
 	resp = env.SendWebhookUpdate(server.Update{
 		UpdateID: 3,
@@ -1211,9 +1212,9 @@ func TestE2ERelaunchCommand(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatal("Expected message after /relaunch")
 	}
-	// Python format: "Bringing Alice back online..."
-	if !strings.Contains(msgs[0].Text, "online") || !strings.Contains(msgs[0].Text, "Alice") {
-		t.Errorf("Expected relaunch confirmation, got: %q", msgs[0].Text)
+	// When Claude is already running, relaunch should fail with error
+	if !strings.Contains(msgs[0].Text, "already running") {
+		t.Errorf("Expected 'already running' error, got: %q", msgs[0].Text)
 	}
 
 	// Cleanup

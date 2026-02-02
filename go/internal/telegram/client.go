@@ -122,6 +122,43 @@ func (c *Client) SetWebhook(url string) error {
 	return c.postJSON("setWebhook", payload)
 }
 
+// WebhookInfo contains information about the current webhook.
+type WebhookInfo struct {
+	URL string `json:"url"`
+}
+
+// GetWebhookInfo retrieves the current webhook configuration from Telegram.
+func (c *Client) GetWebhookInfo() (WebhookInfo, error) {
+	url := fmt.Sprintf("%s/bot%s/getWebhookInfo", c.baseURL, c.token)
+
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return WebhookInfo{}, fmt.Errorf("getWebhookInfo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return WebhookInfo{}, fmt.Errorf("read response: %w", err)
+	}
+
+	var apiResp APIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return WebhookInfo{}, fmt.Errorf("parse response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return WebhookInfo{}, fmt.Errorf("telegram API error: %s", apiResp.Description)
+	}
+
+	var info WebhookInfo
+	if err := json.Unmarshal(apiResp.Result, &info); err != nil {
+		return WebhookInfo{}, fmt.Errorf("parse webhook info: %w", err)
+	}
+
+	return info, nil
+}
+
 // GetMe returns information about the bot.
 func (c *Client) GetMe() (User, error) {
 	url := fmt.Sprintf("%s/bot%s/getMe", c.baseURL, c.token)

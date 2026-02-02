@@ -19,20 +19,18 @@ import (
 )
 
 // Test Config parsing from flags and environment
+// ConfigFromEnv only reads secrets (Token, AdminChatID)
 func TestConfigFromEnv(t *testing.T) {
 	// Save original env vars
 	origToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	origAdmin := os.Getenv("ADMIN_CHAT_ID")
-	origPort := os.Getenv("PORT")
 	defer func() {
 		os.Setenv("TELEGRAM_BOT_TOKEN", origToken)
 		os.Setenv("ADMIN_CHAT_ID", origAdmin)
-		os.Setenv("PORT", origPort)
 	}()
 
 	os.Setenv("TELEGRAM_BOT_TOKEN", "test-token-123")
 	os.Setenv("ADMIN_CHAT_ID", "987654")
-	os.Setenv("PORT", "9090")
 
 	cfg := ConfigFromEnv()
 
@@ -42,8 +40,9 @@ func TestConfigFromEnv(t *testing.T) {
 	if cfg.AdminChatID != "987654" {
 		t.Errorf("expected admin chat ID '987654', got %q", cfg.AdminChatID)
 	}
-	if cfg.Port != "9090" {
-		t.Errorf("expected port '9090', got %q", cfg.Port)
+	// Port is NOT read from env - should be empty
+	if cfg.Port != "" {
+		t.Errorf("expected port '' (not read from env), got %q", cfg.Port)
 	}
 }
 
@@ -87,9 +86,9 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	cfg := ConfigFromEnv()
 	cfg.DeriveNodeConfig() // Defaults are now set by DeriveNodeConfig
 
-	// Default node is prod, so default port is 8081 and prefix is claude-prod-
-	if cfg.Port != "8081" {
-		t.Errorf("expected default port '8081' (prod node default), got %q", cfg.Port)
+	// Default node is prod, port is 8080 (single default, independent of node)
+	if cfg.Port != "8080" {
+		t.Errorf("expected default port '8080' (single default), got %q", cfg.Port)
 	}
 	if cfg.Prefix != "claude-prod-" {
 		t.Errorf("expected default prefix 'claude-prod-', got %q", cfg.Prefix)
@@ -622,38 +621,41 @@ func TestConfigWithJSONLog(t *testing.T) {
 func TestDeriveNodeConfigDefaults(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
+	// Node and Port are independent concepts:
+	// - Node: isolation identity (prefix, sessions dir)
+	// - Port: network binding (single default 8080, use --port to override)
 	tests := []struct {
 		name            string
 		nodeName        string
-		wantPort        string
+		wantPort        string // All nodes default to 8080
 		wantPrefix      string
 		wantSessionsDir string
 	}{
 		{
 			name:            "prod node defaults",
 			nodeName:        "prod",
-			wantPort:        "8081",
+			wantPort:        "8080", // Single default port for all nodes
 			wantPrefix:      "claude-prod-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/prod/sessions",
 		},
 		{
 			name:            "dev node defaults",
 			nodeName:        "dev",
-			wantPort:        "8082",
+			wantPort:        "8080", // Single default port for all nodes
 			wantPrefix:      "claude-dev-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/dev/sessions",
 		},
 		{
 			name:            "test node defaults",
 			nodeName:        "test",
-			wantPort:        "8095",
+			wantPort:        "8080", // Single default port for all nodes
 			wantPrefix:      "claude-test-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/test/sessions",
 		},
 		{
-			name:            "custom node defaults to port 8080",
+			name:            "custom node defaults",
 			nodeName:        "mynode",
-			wantPort:        "8080",
+			wantPort:        "8080", // Single default port for all nodes
 			wantPrefix:      "claude-mynode-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/mynode/sessions",
 		},
@@ -694,8 +696,9 @@ func TestDeriveNodeConfigEmptyNodeDefaultsToProd(t *testing.T) {
 	if cfg.NodeName != "prod" {
 		t.Errorf("expected node name 'prod', got %q", cfg.NodeName)
 	}
-	if cfg.Port != "8081" {
-		t.Errorf("expected port '8081', got %q", cfg.Port)
+	// Port defaults to 8080 (single default, independent of node)
+	if cfg.Port != "8080" {
+		t.Errorf("expected port '8080' (single default), got %q", cfg.Port)
 	}
 	if cfg.Prefix != "claude-prod-" {
 		t.Errorf("expected prefix 'claude-prod-', got %q", cfg.Prefix)
@@ -705,37 +708,39 @@ func TestDeriveNodeConfigEmptyNodeDefaultsToProd(t *testing.T) {
 	}
 }
 
-func TestDeriveNodeConfigExplicitValuesOverrideDefaults(t *testing.T) {
+func TestDeriveNodeConfigExplicitPortOverridesDefault(t *testing.T) {
+	home, _ := os.UserHomeDir()
 	cfg := Config{
 		Token:       "test-token",
 		AdminChatID: "123456",
 		NodeName:    "prod",
-		Port:        "9000",                 // Explicit port overrides default
-		Prefix:      "custom-",              // Explicit prefix overrides default
-		SessionsDir: "/custom/sessions/dir", // Explicit dir overrides default
+		Port:        "9000", // Explicit port overrides default
 	}
 	cfg.DeriveNodeConfig()
 
-	// Explicit values should not be overwritten
+	// Port: explicit value should not be overwritten
 	if cfg.Port != "9000" {
 		t.Errorf("expected port '9000' (explicit), got %q", cfg.Port)
 	}
-	if cfg.Prefix != "custom-" {
-		t.Errorf("expected prefix 'custom-' (explicit), got %q", cfg.Prefix)
+	// Prefix: ALWAYS derived from node, cannot override
+	if cfg.Prefix != "claude-prod-" {
+		t.Errorf("expected prefix 'claude-prod-' (always derived), got %q", cfg.Prefix)
 	}
-	if cfg.SessionsDir != "/custom/sessions/dir" {
-		t.Errorf("expected sessions dir '/custom/sessions/dir' (explicit), got %q", cfg.SessionsDir)
+	// SessionsDir: ALWAYS derived from node, cannot override
+	expectedDir := home + "/.claude/telegram/nodes/prod/sessions"
+	if cfg.SessionsDir != expectedDir {
+		t.Errorf("expected sessions dir %q (always derived), got %q", expectedDir, cfg.SessionsDir)
 	}
 }
 
-func TestConfigFromEnvWithNodeName(t *testing.T) {
+// TestConfigFromEnvOnlyReadsSecrets verifies that ConfigFromEnv only reads
+// secrets (Token, AdminChatID) and ignores other env vars like NODE_NAME, PORT
+func TestConfigFromEnvOnlyReadsSecrets(t *testing.T) {
 	// Save original env vars
 	origNodeName := os.Getenv("NODE_NAME")
 	origToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	origAdmin := os.Getenv("ADMIN_CHAT_ID")
 	origPort := os.Getenv("PORT")
-	origPrefix := os.Getenv("TMUX_PREFIX")
-	origSessionsDir := os.Getenv("SESSIONS_DIR")
 	defer func() {
 		if origNodeName != "" {
 			os.Setenv("NODE_NAME", origNodeName)
@@ -744,29 +749,34 @@ func TestConfigFromEnvWithNodeName(t *testing.T) {
 		}
 		os.Setenv("TELEGRAM_BOT_TOKEN", origToken)
 		os.Setenv("ADMIN_CHAT_ID", origAdmin)
-		os.Setenv("PORT", origPort)
-		if origPrefix != "" {
-			os.Setenv("TMUX_PREFIX", origPrefix)
+		if origPort != "" {
+			os.Setenv("PORT", origPort)
 		} else {
-			os.Unsetenv("TMUX_PREFIX")
-		}
-		if origSessionsDir != "" {
-			os.Setenv("SESSIONS_DIR", origSessionsDir)
-		} else {
-			os.Unsetenv("SESSIONS_DIR")
+			os.Unsetenv("PORT")
 		}
 	}()
 
+	// Set env vars that should be ignored
 	os.Setenv("NODE_NAME", "dev")
+	os.Setenv("PORT", "9999")
+	// Set secrets that should be read
 	os.Setenv("TELEGRAM_BOT_TOKEN", "test-token")
 	os.Setenv("ADMIN_CHAT_ID", "123456")
-	os.Unsetenv("PORT")
-	os.Unsetenv("TMUX_PREFIX")
-	os.Unsetenv("SESSIONS_DIR")
 
 	cfg := ConfigFromEnv()
 
-	if cfg.NodeName != "dev" {
-		t.Errorf("expected node name 'dev', got %q", cfg.NodeName)
+	// Secrets should be read
+	if cfg.Token != "test-token" {
+		t.Errorf("expected token 'test-token', got %q", cfg.Token)
+	}
+	if cfg.AdminChatID != "123456" {
+		t.Errorf("expected admin '123456', got %q", cfg.AdminChatID)
+	}
+	// Non-secrets should NOT be read
+	if cfg.NodeName != "" {
+		t.Errorf("expected node name '' (not read from env), got %q", cfg.NodeName)
+	}
+	if cfg.Port != "" {
+		t.Errorf("expected port '' (not read from env), got %q", cfg.Port)
 	}
 }

@@ -117,10 +117,24 @@ func (m *Manager) CreateSession(name, workdir string) error {
 		if err := m.SendMessage(name, dockerCmd); err != nil {
 			return fmt.Errorf("start sandbox: %w", err)
 		}
+		// Wait for container to start, then send welcome message
+		time.Sleep(5 * time.Second)
+		m.sendWelcomeMessage(name, true)
 		return nil
 	}
 
 	m.exportHookEnv(name)
+	time.Sleep(300 * time.Millisecond)
+
+	// Start Claude in the session
+	if err := m.startClaude(fullName); err != nil {
+		return fmt.Errorf("start claude: %w", err)
+	}
+
+	// Wait for Claude to start, then send welcome message
+	time.Sleep(2 * time.Second)
+	m.sendWelcomeMessage(name, false)
+
 	return nil
 }
 
@@ -190,10 +204,12 @@ func (m *Manager) PromptEmpty(sessionName string, timeout time.Duration) bool {
 	}
 
 	if timeout <= 0 {
-		timeout = 500 * time.Millisecond
+		timeout = 1 * time.Second
 	}
 
-	promptEmptyRE := regexp.MustCompile(`(?m)^❯\s*$`)
+	// Match empty prompt: ❯ followed by optional whitespace (including NBSP U+00A0)
+	// Go's \s only matches ASCII whitespace, so we explicitly include NBSP
+	promptEmptyRE := regexp.MustCompile(`(?m)^❯[\s\x{00A0}]*$`)
 	start := time.Now()
 
 	for time.Since(start) < timeout {
@@ -497,6 +513,31 @@ func (m *Manager) RestartClaude(sessionName string) error {
 	return nil
 }
 
+// startClaude starts Claude in a tmux session (internal helper).
+// The fullName must be the complete session name including prefix.
+func (m *Manager) startClaude(fullName string) error {
+	cmd := exec.Command(m.tmuxPath(), "send-keys", "-t", fullName,
+		"claude --dangerously-skip-permissions", "Enter")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("send keys: %w", err)
+	}
+
+	// Wait for Claude to start and check if confirmation dialog appears
+	time.Sleep(1500 * time.Millisecond)
+
+	// Check if the confirmation dialog is shown (contains "Yes, I accept" option)
+	captureCmd := exec.Command(m.tmuxPath(), "capture-pane", "-t", fullName, "-p")
+	output, err := captureCmd.Output()
+	if err == nil && strings.Contains(string(output), "Yes, I accept") {
+		// Dialog is showing, send "2" to accept
+		acceptCmd := exec.Command(m.tmuxPath(), "send-keys", "-t", fullName, "2")
+		acceptCmd.Run() // Ignore error, dialog might disappear
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	return nil
+}
+
 // parseSessionName extracts the worker name from a full tmux session name.
 // Returns the name and whether it matched the prefix.
 func parseSessionName(prefix, sessionName string) (string, bool) {
@@ -509,4 +550,18 @@ func parseSessionName(prefix, sessionName string) (string, bool) {
 // fullSessionName creates the full tmux session name from prefix and worker name.
 func fullSessionName(prefix, name string) string {
 	return prefix + name
+}
+
+// sendWelcomeMessage sends an introductory message to a new Claude worker.
+// This explains how to send files back via Telegram.
+func (m *Manager) sendWelcomeMessage(name string, sandbox bool) {
+	welcome := "You are connected to Telegram via claudecode-telegram bridge. " +
+		"Manager can send you files (images, PDFs, documents) - they'll appear as local paths. " +
+		"To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. " +
+		"Allowed paths: /tmp, current directory."
+	if sandbox {
+		welcome += " Running in sandbox mode (Docker container)."
+	}
+	// Ignore errors - welcome message is best-effort
+	_ = m.SendMessage(name, welcome)
 }

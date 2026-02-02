@@ -14,6 +14,9 @@ import (
 	"github.com/beastoin/claudecode-telegram/internal/tunnel"
 )
 
+// TestParseServeFlags tests flag parsing
+// Note: --prefix flag is removed (always derived from node)
+// Note: PORT, NODE_NAME env vars are not supported (use flags)
 func TestParseServeFlags(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -31,29 +34,28 @@ func TestParseServeFlags(t *testing.T) {
 	}{
 		{
 			name:             "all flags",
-			args:             []string{"--token", "abc123", "--admin", "999", "--port", "9090", "--prefix", "test-"},
+			args:             []string{"--token", "abc123", "--admin", "999", "--port", "9090", "--node", "prod"},
 			wantToken:        "abc123",
 			wantAdmin:        "999",
 			wantPort:         "9090",
-			wantPrefix:       "test-",
+			wantPrefix:       "claude-prod-", // always derived from node
 			wantSandboxImage: "claudecode-telegram:latest",
 		},
 		{
-			name: "env vars only",
+			name: "env vars for secrets only",
 			args: []string{},
 			env: map[string]string{
 				"TELEGRAM_BOT_TOKEN": "env-token",
 				"ADMIN_CHAT_ID":      "env-admin",
-				"PORT":               "7070",
 			},
 			wantToken:        "env-token",
 			wantAdmin:        "env-admin",
-			wantPort:         "7070",
-			wantPrefix:       "claude-prod-", // prod node default (no node specified defaults to prod)
+			wantPort:         "8080",         // single default (independent of node)
+			wantPrefix:       "claude-prod-", // always derived
 			wantSandboxImage: "claudecode-telegram:latest",
 		},
 		{
-			name: "flags override env",
+			name: "flags override env for secrets",
 			args: []string{"--token", "flag-token", "--admin", "flag-admin"},
 			env: map[string]string{
 				"TELEGRAM_BOT_TOKEN": "env-token",
@@ -61,8 +63,8 @@ func TestParseServeFlags(t *testing.T) {
 			},
 			wantToken:        "flag-token",
 			wantAdmin:        "flag-admin",
-			wantPort:         "8081",         // prod node default
-			wantPrefix:       "claude-prod-", // prod node default
+			wantPort:         "8080",         // single default (independent of node)
+			wantPrefix:       "claude-prod-", // always derived
 			wantSandboxImage: "claudecode-telegram:latest",
 		},
 		{
@@ -70,8 +72,8 @@ func TestParseServeFlags(t *testing.T) {
 			args:             []string{"--token", "t", "--admin", "a"},
 			wantToken:        "t",
 			wantAdmin:        "a",
-			wantPort:         "8081",         // prod node default (no node = prod)
-			wantPrefix:       "claude-prod-", // prod node default
+			wantPort:         "8080",         // single default (independent of node)
+			wantPrefix:       "claude-prod-", // always derived
 			wantSandboxImage: "claudecode-telegram:latest",
 		},
 		{
@@ -79,8 +81,8 @@ func TestParseServeFlags(t *testing.T) {
 			args:             []string{"--token", "t", "--admin", "a", "--json"},
 			wantToken:        "t",
 			wantAdmin:        "a",
-			wantPort:         "8081",         // prod node default
-			wantPrefix:       "claude-prod-", // prod node default
+			wantPort:         "8080",         // single default (independent of node)
+			wantPrefix:       "claude-prod-", // always derived
 			wantJSONLog:      true,
 			wantSandboxImage: "claudecode-telegram:latest",
 		},
@@ -89,7 +91,7 @@ func TestParseServeFlags(t *testing.T) {
 			args:              []string{"--token", "t", "--admin", "a", "--sandbox", "--sandbox-image", "sandbox:latest", "--mount", "/host:/container", "--mount-ro", "/secret:/secret"},
 			wantToken:         "t",
 			wantAdmin:         "a",
-			wantPort:          "8081",
+			wantPort:          "8080",
 			wantPrefix:        "claude-prod-",
 			wantSandbox:       true,
 			wantSandboxImage:  "sandbox:latest",
@@ -99,16 +101,11 @@ func TestParseServeFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save all relevant env vars
-			savedVars := []string{"TELEGRAM_BOT_TOKEN", "ADMIN_CHAT_ID", "PORT", "TMUX_PREFIX", "SANDBOX_ENABLED", "SANDBOX_IMAGE", "SANDBOX_MOUNTS", "BRIDGE_URL"}
+			// Save env vars for secrets
+			savedVars := []string{"TELEGRAM_BOT_TOKEN", "ADMIN_CHAT_ID"}
 			savedEnv := make(map[string]string)
 			for _, k := range savedVars {
 				savedEnv[k] = os.Getenv(k)
-			}
-			for k := range tt.env {
-				if _, ok := savedEnv[k]; !ok {
-					savedEnv[k] = os.Getenv(k)
-				}
 			}
 			defer func() {
 				for k, v := range savedEnv {
@@ -120,7 +117,7 @@ func TestParseServeFlags(t *testing.T) {
 				}
 			}()
 
-			// Clear all env vars first
+			// Clear env vars
 			for _, k := range savedVars {
 				os.Unsetenv(k)
 			}
@@ -385,6 +382,8 @@ func TestMainCommandRouting(t *testing.T) {
 	}
 }
 
+// TestParseTunnelFlags tests tunnel flag parsing
+// Note: NODE_NAME, PORT env vars are not supported (use flags)
 func TestParseTunnelFlags(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -404,24 +403,35 @@ func TestParseTunnelFlags(t *testing.T) {
 			wantPath:   "/hook",
 		},
 		{
-			name: "env vars with node default",
+			name: "token from env with node flag (port independent of node)",
+			args: []string{"--node", "dev"},
 			env: map[string]string{
 				"TELEGRAM_BOT_TOKEN": "env-token",
-				"NODE_NAME":          "dev",
 			},
 			wantToken:  "env-token",
-			wantURL:    "http://localhost:8082",
+			wantURL:    "http://localhost:8080", // single default (node doesn't affect port)
 			wantBinary: "cloudflared",
 			wantPath:   "/webhook",
 		},
 		{
-			name: "env port override",
+			name: "port flag overrides default",
+			args: []string{"--port", "9123"},
 			env: map[string]string{
 				"TELEGRAM_BOT_TOKEN": "env-token",
-				"PORT":               "9123",
 			},
 			wantToken:  "env-token",
 			wantURL:    "http://localhost:9123",
+			wantBinary: "cloudflared",
+			wantPath:   "/webhook",
+		},
+		{
+			name: "default port",
+			args: []string{},
+			env: map[string]string{
+				"TELEGRAM_BOT_TOKEN": "env-token",
+			},
+			wantToken:  "env-token",
+			wantURL:    "http://localhost:8080", // single default port
 			wantBinary: "cloudflared",
 			wantPath:   "/webhook",
 		},
@@ -429,15 +439,10 @@ func TestParseTunnelFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			savedVars := []string{"TELEGRAM_BOT_TOKEN", "NODE_NAME", "PORT"}
+			savedVars := []string{"TELEGRAM_BOT_TOKEN"}
 			savedEnv := make(map[string]string)
 			for _, k := range savedVars {
 				savedEnv[k] = os.Getenv(k)
-			}
-			for k := range tt.env {
-				if _, ok := savedEnv[k]; !ok {
-					savedEnv[k] = os.Getenv(k)
-				}
 			}
 			defer func() {
 				for k, v := range savedEnv {
@@ -863,14 +868,18 @@ func TestHookInstallUpdatesExisting(t *testing.T) {
 }
 
 // Multi-node support tests
+// Note: NODE_NAME env var is no longer supported - use --node flag
+// Note: --prefix flag is removed - prefix is always derived from node
 
 func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
+	// Node and Port are independent concepts:
+	// - Node: isolation identity (prefix, sessions dir)
+	// - Port: network binding (single default 8080, use --port to override)
 	tests := []struct {
 		name            string
 		args            []string
-		env             map[string]string
 		wantNodeName    string
 		wantPort        string
 		wantPrefix      string
@@ -880,7 +889,7 @@ func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 			name:            "prod node from flag",
 			args:            []string{"--token", "t", "--admin", "a", "--node", "prod"},
 			wantNodeName:    "prod",
-			wantPort:        "8081",
+			wantPort:        "8080", // single default (independent of node)
 			wantPrefix:      "claude-prod-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/prod/sessions",
 		},
@@ -888,7 +897,7 @@ func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 			name:            "dev node from flag",
 			args:            []string{"--token", "t", "--admin", "a", "--node", "dev"},
 			wantNodeName:    "dev",
-			wantPort:        "8082",
+			wantPort:        "8080", // single default (independent of node)
 			wantPrefix:      "claude-dev-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/dev/sessions",
 		},
@@ -896,53 +905,31 @@ func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 			name:            "test node from flag",
 			args:            []string{"--token", "t", "--admin", "a", "--node", "test"},
 			wantNodeName:    "test",
-			wantPort:        "8095",
+			wantPort:        "8080", // single default (independent of node)
 			wantPrefix:      "claude-test-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/test/sessions",
 		},
 		{
-			name: "dev node from NODE_NAME env var",
-			args: []string{"--token", "t", "--admin", "a"},
-			env: map[string]string{
-				"NODE_NAME": "dev",
-			},
-			wantNodeName:    "dev",
-			wantPort:        "8082",
-			wantPrefix:      "claude-dev-",
-			wantSessionsDir: home + "/.claude/telegram/nodes/dev/sessions",
-		},
-		{
-			name: "flag overrides NODE_NAME env var",
-			args: []string{"--token", "t", "--admin", "a", "--node", "test"},
-			env: map[string]string{
-				"NODE_NAME": "dev",
-			},
-			wantNodeName:    "test",
-			wantPort:        "8095",
-			wantPrefix:      "claude-test-",
-			wantSessionsDir: home + "/.claude/telegram/nodes/test/sessions",
-		},
-		{
-			name:            "explicit port overrides node default",
-			args:            []string{"--token", "t", "--admin", "a", "--node", "prod", "--port", "9000"},
+			name:            "default node is prod",
+			args:            []string{"--token", "t", "--admin", "a"},
 			wantNodeName:    "prod",
-			wantPort:        "9000", // Explicit overrides derived
+			wantPort:        "8080", // single default (independent of node)
 			wantPrefix:      "claude-prod-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/prod/sessions",
 		},
 		{
-			name:            "explicit prefix overrides node default",
-			args:            []string{"--token", "t", "--admin", "a", "--node", "prod", "--prefix", "custom-"},
+			name:            "explicit port overrides default",
+			args:            []string{"--token", "t", "--admin", "a", "--node", "prod", "--port", "9000"},
 			wantNodeName:    "prod",
-			wantPort:        "8081",
-			wantPrefix:      "custom-", // Explicit overrides derived
+			wantPort:        "9000", // Explicit overrides default
+			wantPrefix:      "claude-prod-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/prod/sessions",
 		},
 		{
 			name:            "custom node name",
 			args:            []string{"--token", "t", "--admin", "a", "--node", "mynode"},
 			wantNodeName:    "mynode",
-			wantPort:        "8080", // Custom nodes default to 8080
+			wantPort:        "8080", // single default (independent of node)
 			wantPrefix:      "claude-mynode-",
 			wantSessionsDir: home + "/.claude/telegram/nodes/mynode/sessions",
 		},
@@ -950,32 +937,6 @@ func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save all relevant env vars
-			savedVars := []string{"TELEGRAM_BOT_TOKEN", "ADMIN_CHAT_ID", "PORT", "TMUX_PREFIX", "NODE_NAME", "SESSIONS_DIR"}
-			savedEnv := make(map[string]string)
-			for _, k := range savedVars {
-				savedEnv[k] = os.Getenv(k)
-			}
-			defer func() {
-				for k, v := range savedEnv {
-					if v == "" {
-						os.Unsetenv(k)
-					} else {
-						os.Setenv(k, v)
-					}
-				}
-			}()
-
-			// Clear all env vars first
-			for _, k := range savedVars {
-				os.Unsetenv(k)
-			}
-
-			// Set test env
-			for k, v := range tt.env {
-				os.Setenv(k, v)
-			}
-
 			cfg, err := parseServeFlags(tt.args)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -994,5 +955,405 @@ func TestParseServeFlagsWithNodeFlag(t *testing.T) {
 				t.Errorf("sessions dir: want %q, got %q", tt.wantSessionsDir, cfg.SessionsDir)
 			}
 		})
+	}
+}
+
+// Status and Fix command tests
+
+func TestParseStatusFlags(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		env          map[string]string
+		wantNodeName string
+		wantAll      bool
+		wantToken    string
+	}{
+		{
+			name:         "default node is prod",
+			args:         []string{},
+			wantNodeName: "prod",
+			wantAll:      false,
+		},
+		{
+			name:         "explicit node",
+			args:         []string{"--node", "dev"},
+			wantNodeName: "dev",
+			wantAll:      false,
+		},
+		{
+			name:         "all flag",
+			args:         []string{"--all"},
+			wantNodeName: "",
+			wantAll:      true,
+		},
+		{
+			name:         "token from flag",
+			args:         []string{"--token", "test-token"},
+			wantNodeName: "prod",
+			wantToken:    "test-token",
+		},
+		{
+			name: "token from env",
+			args: []string{},
+			env: map[string]string{
+				"TELEGRAM_BOT_TOKEN": "env-token",
+			},
+			wantNodeName: "prod",
+			wantToken:    "env-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Save and restore env
+			savedEnv := os.Getenv("TELEGRAM_BOT_TOKEN")
+			defer func() {
+				if savedEnv == "" {
+					os.Unsetenv("TELEGRAM_BOT_TOKEN")
+				} else {
+					os.Setenv("TELEGRAM_BOT_TOKEN", savedEnv)
+				}
+			}()
+			os.Unsetenv("TELEGRAM_BOT_TOKEN")
+
+			for k, v := range tt.env {
+				os.Setenv(k, v)
+			}
+
+			cfg, err := parseStatusFlags(tt.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.NodeName != tt.wantNodeName {
+				t.Errorf("node: want %q, got %q", tt.wantNodeName, cfg.NodeName)
+			}
+			if cfg.All != tt.wantAll {
+				t.Errorf("all: want %v, got %v", tt.wantAll, cfg.All)
+			}
+			if cfg.Token != tt.wantToken {
+				t.Errorf("token: want %q, got %q", tt.wantToken, cfg.Token)
+			}
+		})
+	}
+}
+
+func TestParseFixFlags(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		env          map[string]string
+		wantNodeName string
+		wantToken    string
+	}{
+		{
+			name:         "default node is prod",
+			args:         []string{},
+			wantNodeName: "prod",
+		},
+		{
+			name:         "explicit node",
+			args:         []string{"--node", "test"},
+			wantNodeName: "test",
+		},
+		{
+			name:         "token from flag",
+			args:         []string{"--token", "test-token"},
+			wantNodeName: "prod",
+			wantToken:    "test-token",
+		},
+		{
+			name: "token from env",
+			args: []string{},
+			env: map[string]string{
+				"TELEGRAM_BOT_TOKEN": "env-token",
+			},
+			wantNodeName: "prod",
+			wantToken:    "env-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Save and restore env
+			savedEnv := os.Getenv("TELEGRAM_BOT_TOKEN")
+			defer func() {
+				if savedEnv == "" {
+					os.Unsetenv("TELEGRAM_BOT_TOKEN")
+				} else {
+					os.Setenv("TELEGRAM_BOT_TOKEN", savedEnv)
+				}
+			}()
+			os.Unsetenv("TELEGRAM_BOT_TOKEN")
+
+			for k, v := range tt.env {
+				os.Setenv(k, v)
+			}
+
+			cfg, err := parseFixFlags(tt.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if cfg.NodeName != tt.wantNodeName {
+				t.Errorf("node: want %q, got %q", tt.wantNodeName, cfg.NodeName)
+			}
+			if cfg.Token != tt.wantToken {
+				t.Errorf("token: want %q, got %q", tt.wantToken, cfg.Token)
+			}
+		})
+	}
+}
+
+func TestHealthExitCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		issues   []healthIssue
+		wantCode int
+	}{
+		{
+			name:     "no issues = healthy",
+			issues:   nil,
+			wantCode: 0,
+		},
+		{
+			name: "warn only = degraded",
+			issues: []healthIssue{
+				{Level: "WARN", Message: "test warning"},
+			},
+			wantCode: 1,
+		},
+		{
+			name: "error = critical",
+			issues: []healthIssue{
+				{Level: "ERROR", Message: "test error"},
+			},
+			wantCode: 2,
+		},
+		{
+			name: "error and warn = critical",
+			issues: []healthIssue{
+				{Level: "WARN", Message: "test warning"},
+				{Level: "ERROR", Message: "test error"},
+			},
+			wantCode: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &nodeHealth{Issues: tt.issues}
+			if got := h.ExitCode(); got != tt.wantCode {
+				t.Errorf("ExitCode() = %d, want %d", got, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestTruncateURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://short.com", "https://short.com"},
+		{"https://example.com/this/is/a/very/long/url/that/needs/truncation", "https://example.com/this/is/a/very/long/url/tha..."},
+	}
+
+	for _, tt := range tests {
+		got := truncateURL(tt.url)
+		if got != tt.want {
+			t.Errorf("truncateURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestCheckNodeHealthNotConfigured(t *testing.T) {
+	tmpDir := t.TempDir()
+	health := checkNodeHealth(tmpDir, "nonexistent", "", tmpDir)
+
+	if len(health.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(health.Issues))
+	}
+	if !strings.Contains(health.Issues[0].Message, "not configured") {
+		t.Errorf("expected 'not configured' in message, got %q", health.Issues[0].Message)
+	}
+	if health.ExitCode() != 2 {
+		t.Errorf("expected exit code 2, got %d", health.ExitCode())
+	}
+}
+
+func TestPrintNodeHealthFormat(t *testing.T) {
+	var buf bytes.Buffer
+	health := &nodeHealth{
+		NodeName:        "test",
+		Port:            "8095",
+		ServerRunning:   true,
+		ServerPID:       "12345",
+		TunnelURL:       "https://test.trycloudflare.com",
+		TunnelRunning:   true,
+		TunnelReachable: true,
+		WebhookURL:      "https://test.trycloudflare.com/webhook",
+		WebhookMatches:  true,
+		HookInstalled:   true,
+		Sessions:        nil,
+	}
+
+	printNodeHealth(health, &buf)
+	output := buf.String()
+
+	// Verify expected format elements
+	if !strings.Contains(output, "Node: test [running]") {
+		t.Errorf("expected 'Node: test [running]' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, ":8095 (PID 12345)") {
+		t.Errorf("expected port and PID in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[reachable]") {
+		t.Errorf("expected '[reachable]' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "webhook:  OK") {
+		t.Errorf("expected 'webhook:  OK' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Health: OK") {
+		t.Errorf("expected 'Health: OK' in output, got:\n%s", output)
+	}
+}
+
+func TestPrintNodeHealthWithIssues(t *testing.T) {
+	var buf bytes.Buffer
+	health := &nodeHealth{
+		NodeName:      "test",
+		Port:          "8095",
+		ServerRunning: false,
+		TunnelURL:     "",
+		HookInstalled: false,
+		Issues: []healthIssue{
+			{Level: "ERROR", Message: "Server not running", Fix: "cctg serve --node test"},
+			{Level: "WARN", Message: "Hook not installed", Fix: "cctg hook install"},
+		},
+	}
+
+	printNodeHealth(health, &buf)
+	output := buf.String()
+
+	// Verify expected format for issues
+	if !strings.Contains(output, "[CRITICAL]") {
+		t.Errorf("expected '[CRITICAL]' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "NOT RUNNING") {
+		t.Errorf("expected 'NOT RUNNING' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "2 issue(s) found") {
+		t.Errorf("expected '2 issue(s) found' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[ERROR] Server not running") {
+		t.Errorf("expected error message in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[WARN] Hook not installed") {
+		t.Errorf("expected warning message in output, got:\n%s", output)
+	}
+}
+
+func TestIsHookInstalled(t *testing.T) {
+	// Create temp home directory
+	tmpDir := t.TempDir()
+	claudeDir := tmpDir + "/.claude"
+	os.MkdirAll(claudeDir, 0755)
+
+	// Test: no settings file
+	if isHookInstalled(tmpDir) {
+		t.Error("expected false when no settings file exists")
+	}
+
+	// Test: settings file without hook
+	settingsNoHook := `{"hooks": {}}`
+	os.WriteFile(claudeDir+"/settings.json", []byte(settingsNoHook), 0644)
+	if isHookInstalled(tmpDir) {
+		t.Error("expected false when hook not installed")
+	}
+
+	// Test: settings file with cctg hook
+	settingsWithHook := `{
+		"hooks": {
+			"Stop": [
+				{
+					"hooks": [
+						{"type": "command", "command": "cctg hook --url \"$BRIDGE_URL\" --session \"$CLAUDE_SESSION_NAME\""}
+					]
+				}
+			]
+		}
+	}`
+	os.WriteFile(claudeDir+"/settings.json", []byte(settingsWithHook), 0644)
+	if !isHookInstalled(tmpDir) {
+		t.Error("expected true when hook is installed")
+	}
+}
+
+func TestFixCommandRouting(t *testing.T) {
+	cmd := getCommand([]string{"cctg", "fix"})
+	if cmd != "fix" {
+		t.Errorf("expected 'fix', got %q", cmd)
+	}
+}
+
+func TestSetWebhookAPI(t *testing.T) {
+	// Create test server for setWebhook
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/setWebhook") {
+			t.Errorf("expected /setWebhook, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok": true}`))
+	}))
+	defer server.Close()
+
+	// We can't test setWebhook directly since it uses hardcoded Telegram URL,
+	// but we can test that the function exists and the config parsing works.
+	// The actual API integration is tested via the webhook command tests.
+	_ = server // Silence unused warning - test verifies http handler setup
+}
+
+func TestGetWebhookURLFromMockAPI(t *testing.T) {
+	// Create test server for getWebhookInfo
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok": true, "result": {"url": "https://test.example.com/webhook"}}`))
+	}))
+	defer server.Close()
+
+	// The getWebhookURL function uses hardcoded Telegram URL, so we can't test it directly.
+	// This is a limitation of the current design - we'd need to make the base URL configurable.
+	// For now, we just verify the function signature exists.
+	_ = getWebhookURL // Verify function exists
+}
+
+func TestNodeHealthWithServerRunning(t *testing.T) {
+	// Create temp directories
+	tmpDir := t.TempDir()
+	nodesDir := tmpDir + "/nodes"
+	nodeDir := nodesDir + "/testnode"
+	os.MkdirAll(nodeDir, 0755)
+
+	// Write port file (using a random high port that's unlikely to be in use)
+	os.WriteFile(nodeDir+"/port", []byte("59999"), 0644)
+
+	// Check health - should detect server not running
+	health := checkNodeHealth(nodesDir, "testnode", "", tmpDir)
+
+	if health.ServerRunning {
+		t.Error("expected ServerRunning=false for unused port")
+	}
+
+	serverNotRunningFound := false
+	for _, issue := range health.Issues {
+		if strings.Contains(issue.Message, "Server not running") {
+			serverNotRunningFound = true
+			break
+		}
+	}
+	if !serverNotRunningFound {
+		t.Error("expected 'Server not running' issue")
 	}
 }

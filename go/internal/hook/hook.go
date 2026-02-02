@@ -163,3 +163,32 @@ func extractResponseFromTmux(content string) string {
 
 // FallbackWarning is appended when using tmux fallback.
 const FallbackWarning = "\n\n⚠️ May be incomplete. Retry if needed."
+
+// GetTmuxSessionName gets the current tmux session name.
+func GetTmuxSessionName() string {
+	cmd := exec.Command("tmux", "display-message", "-p", "#{session_name}")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// GetTmuxEnv reads an environment variable from the tmux session.
+func GetTmuxEnv(sessionName, key string) string {
+	if sessionName == "" {
+		return ""
+	}
+	cmd := exec.Command("tmux", "show-environment", "-t", sessionName, key)
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	// Output is "KEY=value", extract value
+	line := strings.TrimSpace(string(output))
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return ""
+}
