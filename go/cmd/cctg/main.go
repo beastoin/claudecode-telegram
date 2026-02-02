@@ -338,19 +338,32 @@ func runHookInstall(claudeDir string, stdout io.Writer) error {
 		return nil
 	}
 
-	// Create the new cctg hook entry
-	newHook := map[string]interface{}{
-		"hooks": []map[string]interface{}{
-			{
-				"type":    "command",
-				"command": cctgHookCommand,
-			},
-		},
+	// Create the new hook entry
+	newHookEntry := map[string]interface{}{
+		"type":    "command",
+		"command": cctgHookCommand,
 	}
 
-	// Append to existing hooks (preserve user's other hooks)
-	existingStops = append(existingStops, newHook)
-	hooks["Stop"] = existingStops
+	// Append to existing hooks array inside the first Stop object (correct format)
+	// Format: { "hooks": { "Stop": [ { "hooks": [ {hook1}, {hook2} ] } ] } }
+	if len(existingStops) > 0 {
+		// Add to existing first object's hooks array
+		if firstStop, ok := existingStops[0].(map[string]interface{}); ok {
+			if innerHooks, ok := firstStop["hooks"].([]interface{}); ok {
+				firstStop["hooks"] = append(innerHooks, newHookEntry)
+			} else {
+				firstStop["hooks"] = []interface{}{newHookEntry}
+			}
+		}
+	} else {
+		// No existing Stop hooks - create new structure
+		existingStops = []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{newHookEntry},
+			},
+		}
+		hooks["Stop"] = existingStops
+	}
 
 	// Marshal with indentation
 	output, err := json.MarshalIndent(settings, "", "  ")
@@ -368,8 +381,17 @@ func runHookInstall(claudeDir string, stdout io.Writer) error {
 		return fmt.Errorf("failed to write settings.json: %w", err)
 	}
 
-	if len(existingStops) > 1 {
-		fmt.Fprintf(stdout, "Hook appended to %s (%d existing Stop hooks preserved)\n", settingsPath, len(existingStops)-1)
+	// Count existing hooks for message
+	existingCount := 0
+	if len(existingStops) > 0 {
+		if firstStop, ok := existingStops[0].(map[string]interface{}); ok {
+			if innerHooks, ok := firstStop["hooks"].([]interface{}); ok {
+				existingCount = len(innerHooks) - 1 // -1 because we just added one
+			}
+		}
+	}
+	if existingCount > 0 {
+		fmt.Fprintf(stdout, "Hook appended to %s (%d existing hooks preserved)\n", settingsPath, existingCount)
 	} else {
 		fmt.Fprintf(stdout, "Hook installed to %s\n", settingsPath)
 	}
