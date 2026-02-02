@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.16.4"
+VERSION = "0.17.0"
 
 import os
 import json
@@ -76,6 +76,11 @@ _tmux_send_locks_guard = threading.Lock()
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
+# Persistence files (in node directory, survives restart)
+NODE_DIR = SESSIONS_DIR.parent  # ~/.claude/telegram/nodes/<node>
+LAST_CHAT_ID_FILE = NODE_DIR / "last_chat_id"
+LAST_ACTIVE_FILE = NODE_DIR / "last_active"
+
 BOT_COMMANDS = [
     # Daily commands (frequency-first, natural workflow order)
     {"command": "team", "description": "Show your team"},
@@ -96,6 +101,54 @@ BLOCKED_COMMANDS = [
     "/doctor", "/init", "/login", "/logout", "/memory", "/permissions",
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistence (last chat ID and last active worker survive restart)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_last_chat_id(chat_id):
+    """Save last known chat ID to file for auto-notification on restart."""
+    try:
+        NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        LAST_CHAT_ID_FILE.write_text(str(chat_id))
+        LAST_CHAT_ID_FILE.chmod(0o600)
+    except Exception as e:
+        print(f"Failed to save last_chat_id: {e}")
+
+
+def load_last_chat_id():
+    """Load last known chat ID from file."""
+    try:
+        if LAST_CHAT_ID_FILE.exists():
+            chat_id = LAST_CHAT_ID_FILE.read_text().strip()
+            if chat_id:
+                return int(chat_id)
+    except Exception as e:
+        print(f"Failed to load last_chat_id: {e}")
+    return None
+
+
+def save_last_active(name):
+    """Save last active worker name to file for auto-focus on restart."""
+    try:
+        NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        LAST_ACTIVE_FILE.write_text(name)
+        LAST_ACTIVE_FILE.chmod(0o600)
+    except Exception as e:
+        print(f"Failed to save last_active: {e}")
+
+
+def load_last_active():
+    """Load last active worker name from file."""
+    try:
+        if LAST_ACTIVE_FILE.exists():
+            name = LAST_ACTIVE_FILE.read_text().strip()
+            if name:
+                return name
+    except Exception as e:
+        print(f"Failed to load last_active: {e}")
+    return None
 
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
@@ -1040,6 +1093,7 @@ def create_session(name):
     tmux_send_message(tmux_name, welcome)
 
     state["active"] = name
+    save_last_active(name)
     ensure_session_dir(name)
 
     return True, None
@@ -1113,6 +1167,7 @@ def switch_session(name):
         return False, f"Worker '{name}' not found"
 
     state["active"] = name
+    save_last_active(name)
     return True, None
 
 
@@ -1132,6 +1187,7 @@ def register_session(name, tmux_session):
     export_hook_env(new_tmux_name)
 
     state["active"] = name
+    save_last_active(name)
     state["pending_registration"] = None
     ensure_session_dir(name)
 
@@ -1480,6 +1536,7 @@ class Handler(BaseHTTPRequestHandler):
         # SECURITY: Auto-learn first user as admin
         if admin_chat_id is None:
             admin_chat_id = chat_id
+            save_last_chat_id(chat_id)
             print(f"Admin registered: {chat_id}")
 
         # Send startup notification on first admin interaction
@@ -1491,6 +1548,9 @@ class Handler(BaseHTTPRequestHandler):
         if chat_id != admin_chat_id:
             print(f"Rejected non-admin: {chat_id}")
             return  # Silent rejection
+
+        # Save chat_id for auto-notification on restart
+        save_last_chat_id(chat_id)
 
         # Check for JSON registration response
         if state["pending_registration"]:
@@ -1672,6 +1732,7 @@ class Handler(BaseHTTPRequestHandler):
             # Always switch focus when using /name (strong intent)
             prev_focus = state["active"]
             state["active"] = worker_name
+            save_last_active(worker_name)
             if not arg:
                 # Just /lee with no message - switch focus only
                 self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
@@ -2076,6 +2137,8 @@ def graceful_shutdown(signum, frame):
 
 
 def main():
+    global admin_chat_id
+
     if not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
         return
@@ -2095,6 +2158,21 @@ def main():
         print(f"Discovered sessions: {list(registered.keys())}")
     if unregistered:
         print(f"Unregistered sessions: {unregistered}")
+
+    # Load last active worker from file (if still exists)
+    last_active = load_last_active()
+    if last_active and last_active in registered:
+        state["active"] = last_active
+        print(f"Restored last active worker: {last_active}")
+    elif last_active:
+        print(f"Last active worker '{last_active}' no longer exists")
+
+    # Load last chat ID for auto-notification
+    last_chat_id = load_last_chat_id()
+    if last_chat_id:
+        if admin_chat_id is None:
+            admin_chat_id = last_chat_id
+            print(f"Restored admin from last_chat_id: {admin_chat_id}")
 
     setup_bot_commands()
     print(f"Multi-Session Bridge on :{PORT}")
@@ -2121,6 +2199,29 @@ def main():
         print("Workers can only access mounted directories")
     else:
         print("Sandbox mode: disabled (direct execution)")
+
+    # Send startup notification if we have a last known chat ID
+    if last_chat_id:
+        state["startup_notified"] = True
+        sessions = list(registered.keys())
+        active = state["active"]
+
+        lines = ["I'm online and ready."]
+        if sessions:
+            lines.append(f"Team: {', '.join(sessions)}")
+            if active:
+                lines.append(f"Focused: {active}")
+        else:
+            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
+
+        if SANDBOX_ENABLED:
+            lines.append(f"Sandbox: {Path.home()} → /workspace")
+
+        result = telegram_api("sendMessage", {"chat_id": last_chat_id, "text": "\n".join(lines)})
+        if result and result.get("ok"):
+            print(f"Sent startup notification to chat {last_chat_id}")
+        else:
+            print(f"Failed to send startup notification: {result}")
 
     try:
         ReuseAddrServer(("0.0.0.0", PORT), Handler).serve_forever()

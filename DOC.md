@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.16.4
+> Version: 0.17.0
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,26 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.17.0 - Persistence: last chat ID and last active worker
+
+**New features:**
+- **Last known chat ID persistence**: Saves chat ID to file; on restart, automatically sends "I'm online" message to last known chat
+- **Last active worker persistence**: Saves focused worker name to file; on restart, automatically restores focus to that worker
+
+**How it works:**
+- `~/.claude/telegram/nodes/<node>/last_chat_id` - stores last admin chat ID
+- `~/.claude/telegram/nodes/<node>/last_active` - stores last focused worker name
+- On bridge startup:
+  - Loads last chat ID and sends startup notification immediately
+  - Loads last active worker and sets as focused (if still exists)
+- Chat ID is updated on every admin message (keeps it fresh)
+- Active worker is saved on `/hire`, `/focus`, `/use`, and worker slash commands
+
+**Why:**
+- Previously, after bridge restart you had to send a message to the bot to know it was online
+- Previously, after bridge restart the focus was lost and you had to `/focus <name>` again
+- Now the bridge proactively notifies you and restores your workflow
 
 ### v0.16.4 - Orphan detection, status improvements, tmux delay fix
 

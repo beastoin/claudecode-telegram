@@ -74,6 +74,7 @@ cleanup() {
     [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
     [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"
     rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port"
+    rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active"
 }
 
 trap cleanup EXIT
@@ -1319,6 +1320,71 @@ test_response_endpoint() {
     send_message "/kill responsetest" >/dev/null 2>&1 || true
 }
 
+test_last_chat_id_persistence() {
+    local last_chat_file="$TEST_NODE_DIR/last_chat_id"
+
+    # Clean up first
+    rm -f "$last_chat_file"
+
+    # Send a message to trigger chat ID save
+    send_message "test persistence"
+    sleep 0.5
+
+    # Verify file was created with correct content
+    if [[ -f "$last_chat_file" ]]; then
+        local saved_id
+        saved_id=$(cat "$last_chat_file")
+        if [[ "$saved_id" == "$CHAT_ID" ]]; then
+            success "last_chat_id persistence works"
+        else
+            fail "last_chat_id mismatch: expected $CHAT_ID, got $saved_id"
+        fi
+    else
+        fail "last_chat_id file not created"
+    fi
+}
+
+test_last_active_persistence() {
+    local last_active_file="$TEST_NODE_DIR/last_active"
+
+    # Clean up first
+    rm -f "$last_active_file"
+
+    # Create a session to trigger active save
+    send_message "/new testpersist"
+    sleep 1
+
+    # Verify file was created with correct content
+    if [[ -f "$last_active_file" ]]; then
+        local saved_active
+        saved_active=$(cat "$last_active_file")
+        if [[ "$saved_active" == "testpersist" ]]; then
+            success "last_active persistence works"
+        else
+            fail "last_active mismatch: expected testpersist, got $saved_active"
+        fi
+    else
+        fail "last_active file not created"
+    fi
+
+    # Test switch also updates the file
+    send_message "/new testpersist2"
+    sleep 1
+    send_message "/focus testpersist"
+    sleep 0.5
+
+    saved_active=$(cat "$last_active_file")
+    if [[ "$saved_active" == "testpersist" ]]; then
+        success "last_active updated on focus switch"
+    else
+        fail "last_active not updated on switch: expected testpersist, got $saved_active"
+    fi
+
+    # Clean up test sessions
+    send_message "/kill testpersist" >/dev/null 2>&1 || true
+    send_message "/kill testpersist2" >/dev/null 2>&1 || true
+}
+
 test_response_without_pending() {
     info "Testing /response works without pending file (v0.6.2 behavior)..."
 
@@ -1459,6 +1525,8 @@ main() {
     test_notify_endpoint
     test_response_endpoint
     test_response_without_pending
+    test_last_chat_id_persistence
+    test_last_active_persistence
 
     # Tunnel tests (optional)
     log ""

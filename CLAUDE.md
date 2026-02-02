@@ -42,15 +42,23 @@ When making changes that result in a new version:
 
 ## Testing Requirements
 
-### Every new feature MUST have a test
+### TDD: Write tests FIRST
 
-**This is non-negotiable.** When adding any new feature:
+**This project uses Test-Driven Development.** The workflow is:
 
-1. **Write the test first** (or alongside the feature)
-2. **Focus on end-to-end tests** - test the full flow, not just units
-3. **Add to `test.sh`** - all tests live in one file for simplicity
-4. **Verify the test fails** without your feature (proves it tests something)
-5. **Run full test suite** before committing
+1. **Write the test first** - before any implementation
+2. **Add to `test.sh`** - all tests live in one file
+3. **Implement the feature** - make the test pass
+4. **Run tests ONCE** - all tests should pass on first run
+
+**Do NOT:**
+- Implement first, then write tests, then run tests again (wastes time)
+- Run tests multiple times during a single feature (one run is enough)
+
+### Test guidelines
+
+- **Focus on e2e tests** - test the full flow, not just units
+- **Verify test fails** without your feature (proves it tests something)
 
 **Why e2e tests matter:**
 - They catch integration bugs that unit tests miss
