@@ -848,10 +848,12 @@ def tmux_send_message(tmux_name, text):
 
     Uses per-session lock to prevent concurrent sends from interleaving.
     Sends text with -l flag (literal), then Enter key separately.
+    Small delay between text and Enter to prevent race condition.
     """
     lock = _get_tmux_send_lock(tmux_name)
     with lock:
         send_ok = tmux_send(tmux_name, text, literal=True)
+        time.sleep(0.2)  # Delay to let terminal process text before Enter
         enter_ok = tmux_send_enter(tmux_name)
         return send_ok and enter_ok
 
@@ -1213,10 +1215,16 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:
             update = json.loads(body)
+            # Debug: show what update type we received
+            update_types = [k for k in update.keys() if k != "update_id"]
+            if update_types and update_types[0] != "message":
+                print(f"Received update type: {update_types}")
             if "message" in update:
                 self.handle_message(update)
         except Exception as e:
             print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")

@@ -20,12 +20,9 @@ INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Get session name from tmux
+# Get session name from tmux (works even without TMUX env var)
 # ─────────────────────────────────────────────────────────────────────────────
-SESSION_NAME=""
-if [ -n "${TMUX:-}" ]; then
-    SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
-fi
+SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
 [ -z "$SESSION_NAME" ] && exit 0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,10 +34,17 @@ get_tmux_env() {
     val=$(tmux show-environment -t "$SESSION_NAME" "$1" 2>/dev/null) && echo "${val#*=}" || true
 }
 
-BRIDGE_URL="${BRIDGE_URL:-$(get_tmux_env BRIDGE_URL)}"
-TMUX_PREFIX="${TMUX_PREFIX:-$(get_tmux_env TMUX_PREFIX)}"
-SESSIONS_DIR="${SESSIONS_DIR:-$(get_tmux_env SESSIONS_DIR)}"
-BRIDGE_PORT="${PORT:-$(get_tmux_env PORT)}"
+# Read from tmux session env FIRST (session-specific config takes precedence)
+# Only fall back to shell env if tmux env is empty
+_tmux_bridge_url="$(get_tmux_env BRIDGE_URL)"
+_tmux_prefix="$(get_tmux_env TMUX_PREFIX)"
+_tmux_sessions_dir="$(get_tmux_env SESSIONS_DIR)"
+_tmux_port="$(get_tmux_env PORT)"
+
+BRIDGE_URL="${_tmux_bridge_url:-${BRIDGE_URL:-}}"
+TMUX_PREFIX="${_tmux_prefix:-${TMUX_PREFIX:-}}"
+SESSIONS_DIR="${_tmux_sessions_dir:-${SESSIONS_DIR:-}}"
+BRIDGE_PORT="${_tmux_port:-${PORT:-}}"
 
 # Fail closed: exit if required config missing (prevents cross-node leakage)
 if [ -z "$TMUX_PREFIX" ]; then

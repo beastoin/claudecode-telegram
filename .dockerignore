@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+*.egg-info
+.pytest_cache
+
+# Node
+node_modules
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Docs (not needed in image)
+*.md
+LICENSE
+demo.gif
+
+# Environment files (may contain secrets)
+.env
+.env.*
+
+# Test files
+test.sh
+tests/
+
+# Local development
+*.log
+*.tmp

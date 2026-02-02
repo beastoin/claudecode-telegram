@@ -439,6 +439,13 @@ cmd_run() {
     local bridge_pid=$!
     echo "$bridge_pid" > "$node_dir/bridge.pid"
     echo "$port" > "$node_dir/port"
+
+    # Save bot info for status command
+    local bot_info; bot_info=$(telegram_api "$token" "getMe" "{}")
+    if echo "$bot_info" | grep -q '"ok":true'; then
+        echo "$bot_info" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 > "$node_dir/bot_id"
+        echo "$bot_info" | grep -o '"username":"[^"]*"' | head -1 | cut -d'"' -f4 > "$node_dir/bot_username"
+    fi
     sleep 1
 
     # Set webhook
@@ -466,8 +473,13 @@ cmd_run() {
         if $ok; then
             success "Webhook configured"
         else
-            warn "Webhook setup failed (DNS may still be propagating)"
-            hint "./claudecode-telegram.sh webhook $tunnel_url"
+            error "Webhook setup failed (DNS may still be propagating)"
+            hint "Retry manually: ./claudecode-telegram.sh webhook $tunnel_url"
+            # Cleanup before exit
+            [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null
+            [[ -n "$tunnel_pid" ]] && kill "$tunnel_pid" 2>/dev/null
+            rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/pid"
+            exit 1
         fi
     fi
 
@@ -492,7 +504,7 @@ cmd_run() {
         log "Shutting down node '$node'..."
         [[ -n "${tunnel_pid:-}" ]] && kill "$tunnel_pid" 2>/dev/null || true
         [[ -n "${bridge_pid:-}" ]] && kill "$bridge_pid" 2>/dev/null || true
-        rm -f "$pid_file" "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port"
+        rm -f "$pid_file" "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
         exit 0
     }
     trap cleanup_and_exit EXIT INT TERM
@@ -640,7 +652,7 @@ stop_single_node() {
         done <<< "$sessions"
     fi
 
-    rm -f "$node_dir/port"
+    rm -f "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
 
     if [[ $killed -eq 0 ]]; then
         log "Node '$node' was not running"
@@ -713,13 +725,80 @@ cmd_restart() {
     # Fallback kills
     [[ -f "$node_dir/bridge.pid" ]] && kill "$(cat "$node_dir/bridge.pid")" 2>/dev/null || true
     [[ -f "$node_dir/tunnel.pid" ]] && kill "$(cat "$node_dir/tunnel.pid")" 2>/dev/null || true
-    rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port"
+    rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
 
     sleep 1
 
     # Start fresh with same args
     log ""
     NODE_NAME="$node" cmd_run "$@"
+}
+
+# Detect orphan processes (tunnels/bridges not owned by any node)
+detect_orphan_processes() {
+    local owned_tunnel_pids=() owned_bridge_pids=()
+    local all_nodes
+
+    # Collect all PIDs owned by nodes
+    all_nodes=$(list_all_nodes)
+    while IFS= read -r node; do
+        [[ -n "$node" ]] || continue
+        local node_dir; node_dir=$(get_node_dir "$node")
+        if [[ -f "$node_dir/tunnel.pid" ]]; then
+            local pid; pid=$(cat "$node_dir/tunnel.pid")
+            [[ -n "$pid" ]] && owned_tunnel_pids+=("$pid")
+        fi
+        if [[ -f "$node_dir/bridge.pid" ]]; then
+            local pid; pid=$(cat "$node_dir/bridge.pid")
+            [[ -n "$pid" ]] && owned_bridge_pids+=("$pid")
+        fi
+    done <<< "$all_nodes"
+
+    # Find all running cloudflared tunnel processes
+    local orphan_tunnels=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local pid port
+        pid=$(echo "$line" | awk '{print $1}')
+        port=$(echo "$line" | grep -o 'localhost:[0-9]*' | cut -d: -f2 || echo "?")
+        # Check if this PID is owned by a node
+        local owned=false
+        for owned_pid in "${owned_tunnel_pids[@]}"; do
+            [[ "$pid" == "$owned_pid" ]] && owned=true && break
+        done
+        if ! $owned; then
+            orphan_tunnels+=("$pid:$port")
+        fi
+    done < <(pgrep -af "cloudflared tunnel" 2>/dev/null || true)
+
+    # Find all running bridge.py processes
+    local orphan_bridges=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local pid; pid=$(echo "$line" | awk '{print $1}')
+        # Check if this PID is owned by a node
+        local owned=false
+        for owned_pid in "${owned_bridge_pids[@]}"; do
+            [[ "$pid" == "$owned_pid" ]] && owned=true && break
+        done
+        if ! $owned; then
+            orphan_bridges+=("$pid")
+        fi
+    done < <(pgrep -af "bridge.py" 2>/dev/null || true)
+
+    # Report orphans
+    if [[ ${#orphan_tunnels[@]} -gt 0 || ${#orphan_bridges[@]} -gt 0 ]]; then
+        log ""
+        log "$(red "⚠ ORPHAN PROCESSES DETECTED")"
+        for orphan in "${orphan_tunnels[@]}"; do
+            local pid="${orphan%%:*}" port="${orphan##*:}"
+            log "  tunnel: PID $pid (port $port) - $(yellow "kill $pid")"
+        done
+        for pid in "${orphan_bridges[@]}"; do
+            log "  bridge: PID $pid - $(yellow "kill $pid")"
+        done
+        log "  Fix: kill orphan processes or restart node"
+    fi
 }
 
 cmd_status() {
@@ -737,9 +816,8 @@ cmd_status() {
         log "$(bold "All Nodes")"
         log ""
 
-        # First pass: show status and count running nodes
-        local running_count=0
-        local running_nodes=""
+        # First pass: show status and track running nodes by bot_id
+        declare -A bot_nodes  # bot_id -> "node1 node2 ..."
 
         while IFS= read -r node; do
             [[ -n "$node" ]] || continue
@@ -747,23 +825,33 @@ cmd_status() {
             log ""
 
             if is_node_running "$node"; then
-                running_count=$((running_count + 1))
-                running_nodes+="$node "
+                local node_dir; node_dir=$(get_node_dir "$node")
+                local bid=""
+                [[ -f "$node_dir/bot_id" ]] && bid=$(cat "$node_dir/bot_id")
+                [[ -z "$bid" ]] && bid="unknown"
+                bot_nodes["$bid"]+="$node "
             fi
         done <<< "$all_nodes"
 
-        # Warn if multiple nodes running with same token
-        if [[ $running_count -gt 1 ]]; then
-            log "$(red "⚠ CONFLICT: $running_count nodes running with same bot token")"
-            log "  Running: ${running_nodes% }"
-            log "  Only ONE node receives webhook. Others miss messages."
-            log "  Fix: Use different TELEGRAM_BOT_TOKEN per node, or stop extras."
-        fi
+        # Warn if multiple nodes running with same bot_id
+        for bid in "${!bot_nodes[@]}"; do
+            local nodes="${bot_nodes[$bid]}"
+            local count=$(echo "$nodes" | wc -w)
+            if [[ $count -gt 1 ]]; then
+                log "$(red "⚠ CONFLICT: $count nodes running with same bot (id:$bid)")"
+                log "  Running: ${nodes% }"
+                log "  Only ONE node receives webhook. Others miss messages."
+                log "  Fix: Use different TELEGRAM_BOT_TOKEN per node, or stop extras."
+            fi
+        done
     else
         local node
         node=$(resolve_target_node)
         show_node_status "$node"
     fi
+
+    # Always check for orphan processes
+    detect_orphan_processes
 }
 
 show_node_status() {
@@ -775,7 +863,7 @@ show_node_status() {
 
     local running=false port="" tunnel_url=""
     local hook_ok=false settings_ok=false token_ok=false bot_ok=false
-    local bot_name="" webhook_url=""
+    local bot_name="" bot_id="" webhook_url=""
     local claude_sessions=()
 
     # Check if running
@@ -795,15 +883,33 @@ show_node_status() {
     [[ -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] && hook_ok=true
     [[ -f "$SETTINGS_FILE" ]] && grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null && settings_ok=true
 
-    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    # Read bot info from saved files (set at node start) or fall back to env token
+    local saved_bot_id="" saved_bot_username=""
+    [[ -f "$node_dir/bot_id" ]] && saved_bot_id=$(cat "$node_dir/bot_id")
+    [[ -f "$node_dir/bot_username" ]] && saved_bot_username=$(cat "$node_dir/bot_username")
+
+    if [[ -n "$saved_bot_id" && -n "$saved_bot_username" ]]; then
+        token_ok=true
+        bot_ok=true
+        bot_name="$saved_bot_username"
+        bot_id="$saved_bot_id"
+    elif [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         token_ok=true
         local r; r=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getMe" "{}")
         if echo "$r" | grep -q '"ok":true'; then
             bot_ok=true
             bot_name=$(echo "$r" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+            bot_id=$(echo "$r" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
         fi
+    fi
+
+    # Get actual webhook from Telegram API (not from local file)
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         local wr; wr=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getWebhookInfo" "{}")
         webhook_url=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+    elif [[ -n "$saved_bot_id" ]]; then
+        # No token available, can't check - show as unknown
+        webhook_url=""
     fi
 
     if $JSON_OUTPUT; then
@@ -886,9 +992,24 @@ EOF
     fi
 
     $hook_ok && log "  hook:     $(green "installed")" || log "  hook:     $(yellow "not installed")"
-    $token_ok && log "  token:    $(green "set") (${TELEGRAM_BOT_TOKEN:0:8}...)" || log "  token:    $(red "missing")"
-    $bot_ok && log "  bot:      $(green "online") (@$bot_name)" || { $token_ok && log "  bot:      $(red "error")"; }
-    [[ -n "$webhook_url" ]] && log "  webhook:  $(green "set")" || { $token_ok && log "  webhook:  $(yellow "not set")"; }
+    if $bot_ok; then
+        log "  bot:      $(green "online") (@$bot_name, id:$bot_id)"
+    elif $token_ok; then
+        log "  bot:      $(red "error")"
+    else
+        log "  bot:      $(yellow "not configured")"
+    fi
+    if [[ -n "$webhook_url" ]]; then
+        if [[ -n "$tunnel_url" && "$webhook_url" != "$tunnel_url" ]]; then
+            log "  webhook:  $(yellow "mismatch") (pointing to different URL)"
+            log "            actual:   $webhook_url"
+            log "            expected: $tunnel_url"
+        else
+            log "  webhook:  $(green "set")"
+        fi
+    elif $token_ok; then
+        log "  webhook:  $(yellow "not set")"
+    fi
 }
 
 cmd_webhook() {
@@ -1112,12 +1233,6 @@ MULTI-NODE
   ./claudecode-telegram.sh --node prod stop       # Stop prod only
   ./claudecode-telegram.sh --all status           # Status of all nodes
 
-NODE CONFIGURATION
-  Each node can have a config file at ~/.claude/telegram/nodes/<name>/config.env:
-    TELEGRAM_BOT_TOKEN=...
-    PORT=8080
-    ADMIN_CHAT_ID=...
-
 TELEGRAM COMMANDS
   /new <name>       Create new Claude instance
   /use <name>       Switch active Claude
@@ -1174,7 +1289,6 @@ ENVIRONMENT
 DIRECTORY STRUCTURE
   ~/.claude/telegram/nodes/
   ├── prod/
-  │   ├── config.env      # Node configuration
   │   ├── pid             # Main process PID
   │   ├── bridge.pid      # Bridge process PID
   │   ├── tunnel.pid      # Tunnel process PID
