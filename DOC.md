@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.16.2
+> Version: 0.16.4
 
 ## Current Philosophy (Summary)
 
@@ -253,6 +253,27 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.16.4 - Orphan detection, status improvements, tmux delay fix
+
+**Fixes:**
+- Add 0.2s delay between `tmux send-keys` text and Enter to prevent race condition where text and Enter interleave
+
+**New features:**
+- `status --all` now detects orphan processes (tunnels/bridges not owned by any node)
+- Conflict detection is per bot_id (not just running node count)
+- Webhook mismatch warning when tunnel URL differs from actual webhook URL
+
+**Improvements:**
+- Save bot_id/username at startup for faster status display
+- Exit cleanly on webhook setup failure (don't leave orphan processes)
+- Add .dockerignore for cleaner Docker builds
+
+### v0.16.3 - Hook reliability and status diagnostics
+
+**Fixes:**
+- Hook env var precedence: tmux session env takes priority over shell env
+- Hook session name detection works without TMUX env var
 
 ### v0.16.2 - Reliable message reaction
 
