@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Dict, Optional, Any
 
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 class ReuseAddrServer(ThreadingHTTPServer):
     """HTTP server with SO_REUSEADDR to avoid 'Address already in use' on restart."""
     allow_reuse_address = True
@@ -127,6 +131,10 @@ BLOCKED_COMMANDS = [
 ]
 
 
+# ============================================================
+# FILE PERSISTENCE
+# ============================================================
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Persistence (last chat ID and last active worker survive restart)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,6 +191,10 @@ RESERVED_NAMES = {
 }
 
 
+# ============================================================
+# TELEGRAM API
+# ============================================================
+
 def telegram_api(method, data):
     if not BOT_TOKEN:
         return None
@@ -198,6 +210,10 @@ def telegram_api(method, data):
         print(f"Telegram API error: {e}")
         return None
 
+
+# ============================================================
+# MEDIA HANDLING
+# ============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Image Handling
@@ -272,6 +288,10 @@ def cleanup_inbox(session_name):
             except Exception as e:
                 print(f"Failed to delete {f}: {e}")
 
+
+# ============================================================
+# INTER-WORKER PIPES
+# ============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Worker Pipe Functions (inter-worker communication)
@@ -780,6 +800,10 @@ def send_document(chat_id, doc_path, caption=None):
         return False
 
 
+# ============================================================
+# MESSAGE FORMATTING
+# ============================================================
+
 CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
@@ -968,6 +992,10 @@ def update_bot_commands():
         worker_count = len(registered)
         print(f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
 
+
+# ============================================================
+# TMUX SESSION MANAGEMENT
+# ============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session Management
@@ -1301,6 +1329,10 @@ def stop_docker_container(name):
     subprocess.run(["docker", "stop", container_name], capture_output=True)
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
+
+# ============================================================
+# DIRECT WORKERS
+# ============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Direct Worker Functions (JSON streaming mode, bypasses tmux)
@@ -1828,6 +1860,10 @@ def switch_session(name):
 
 
 
+# ============================================================
+# MESSAGE ROUTING
+# ============================================================
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Typing indicator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1874,6 +1910,10 @@ def send_shutdown_message():
         })
     print("Shutdown notifications sent")
 
+
+# ============================================================
+# HTTP HANDLER
+# ============================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP Handler
@@ -2313,6 +2353,10 @@ class Handler(BaseHTTPRequestHandler):
                 f"{context_text}"
             )
         return f"Manager reply:\n{reply_text}"
+
+    # ============================================================
+    # COMMAND HANDLERS
+    # ============================================================
 
     def handle_command(self, text, chat_id, msg_id):
         """Handle /commands. Returns True if handled."""
@@ -2804,6 +2848,10 @@ class Handler(BaseHTTPRequestHandler):
 
         self.reply(chat_id, "\n".join(lines))
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def graceful_shutdown(signum, frame):
     """Handle shutdown signals gracefully with diagnostic info."""
