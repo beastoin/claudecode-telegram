@@ -76,20 +76,20 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 98.5%** (138 of 140 features tested)
+**Current coverage: 98.6%** (139 of 141 features tested)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
-| Telegram Bot Commands | 15 | 100% |
+| Telegram Bot Commands | 16 | 100% |
 | CLI Commands & Flags | 37 | 97% |
 | Message Routing | 12 | 100% |
-| Security | 10 | 100% |
+| Security | 11 | 100% |
 | Hook Behavior | 15 | 100% |
 | Persistence Files | 14 | 100% |
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
 | Direct Mode | 14 | 100% |
-| Direct Mode E2E | 10 | 100% |
+| Direct Mode E2E | 13 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **Only 2 features untested:**
@@ -115,11 +115,19 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | /settings display | `test_settings_command` | `test_direct_mode_e2e_settings` | ✅ Parity |
 | /progress display | `test_progress_command` | `test_direct_mode_e2e_progress` | ✅ Parity |
 | Graceful shutdown | `test_graceful_shutdown` | `test_direct_mode_graceful_shutdown` | ✅ Parity |
-| Inter-worker messaging | tmux send-keys (no test) | ❌ Not implemented | ⚠️ Partial (tmux only) |
+| @all broadcast | `test_at_all_broadcast` | `test_direct_mode_at_all_broadcast` | ✅ Parity |
+| Reply routing | `test_reply_routing` | `test_direct_mode_reply_routing` | ✅ Parity |
+| Reply context | `test_reply_context` | `test_direct_mode_reply_context` | ✅ Parity |
+| Worker shortcut focus | `test_worker_shortcut_focus_only` | `test_direct_mode_worker_shortcut_focus` | ✅ Parity |
+| Worker shortcut + msg | `test_worker_shortcut_with_message` | `test_direct_mode_worker_shortcut_with_message` | ✅ Parity |
+| /learn command | `test_learn_command` | `test_direct_mode_learn` | ✅ Parity |
+| Unknown cmd passthrough | `test_unknown_command_passthrough` | `test_direct_mode_unknown_cmd_passthrough` | ✅ Parity |
+| Inter-worker messaging | `test_worker_to_worker_pipe` | `test_worker_to_worker_pipe_direct` | ✅ Parity |
+| Image/document handling | multiple | `test_direct_mode_image_handling` | ✅ Parity |
 
 ## Complete Test Inventory
 
-> **Total: 187 test functions**
+> **Total: 197 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -193,6 +201,9 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_direct_mode_e2e_full_flow` | Complete flow: hire -> message -> response -> end |
 | `test_direct_mode_e2e_focus_switch` | Create 2 workers, verify /focus switches between them |
 | `test_direct_mode_e2e_at_mention` | @worker routing without focus change |
+| `test_direct_mode_at_all_broadcast` | @all broadcast to multiple workers |
+| `test_direct_mode_reply_routing` | Reply to worker message routes correctly |
+| `test_direct_mode_reply_context` | Reply context included for non-bot messages |
 | `test_direct_mode_e2e_pause` | /pause sends interrupt to worker |
 | `test_direct_mode_e2e_relaunch` | /relaunch restarts worker subprocess |
 | `test_direct_mode_e2e_settings` | /settings shows direct mode indicator |
@@ -323,6 +334,7 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_relaunch_command` | /relaunch restarts worker |
 | `test_settings_command` | /settings shows config |
 | `test_end_command` | /end offboards worker |
+| `test_dynamic_bot_command_list_update` | Bot command list updates on /hire and /end |
 | `test_additional_commands` | Additional command tests |
 | `test_worker_shortcut_focus_only` | /<worker> switches focus |
 | `test_worker_shortcut_with_message` | /<worker> msg routes + focuses |
@@ -347,6 +359,7 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_response_without_pending` | /response works without pending |
 | `test_notify_endpoint` | POST /notify endpoint |
 | `test_notify_endpoint_missing_text` | /notify rejects missing text |
+| `test_webhook_secret_acceptance` | Webhook secret acceptance path |
 | `test_webhook_secret_validation` | Webhook secret validation |
 | `test_token_isolation` | Token not exposed to tmux |
 | `test_photo_message_no_focused` | Photo without focused worker |
@@ -500,3 +513,30 @@ run_unit_tests() {
     test_my_feature
 }
 ```
+
+## Missing Tests (To Be Implemented)
+
+This section tracks tests that should be added to ensure mode parity and complete coverage.
+
+### Critical (Mode Parity)
+
+All critical mode parity tests are now implemented. ✅
+
+### Important (No Test)
+
+These features have no tests in either mode and should be tested:
+
+| Feature | Description |
+|---------|-------------|
+| Multipart response chaining behavior | Reply chain for multipart messages (reply_to_message_id) |
+
+### Nice to Have
+
+Lower priority tests for edge cases and robustness:
+
+| Feature | Description |
+|---------|-------------|
+| Direct worker crash recovery | Worker process crash detection and cleanup |
+| Concurrent pipe writes | Multiple workers writing to same pipe simultaneously |
+| Pipe permissions | Named pipe has correct permissions (0o600) |
+| Path traversal protection | Prevent `../` in worker names for inbox paths |
