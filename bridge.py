@@ -404,7 +404,7 @@ def _forward_pipe_message(name: str, message: str):
     if name in direct_workers:
         worker = direct_workers[name]
         if worker.process.poll() is None:  # Still running
-            send_to_direct_worker(name, message)
+            send_to_direct_worker(name, message, None)
             return
 
     # Check tmux sessions
