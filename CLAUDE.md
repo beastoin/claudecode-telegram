@@ -94,13 +94,25 @@ TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ### Test Coverage
 
-| Category | What's tested |
-|----------|---------------|
-| Unit (FAST) | imports, message formatting, CLI flags, constants |
-| Integration | commands, admin security, routing, endpoints |
-| Tunnel (FULL) | cloudflare tunnel, webhook setup |
+**Current: 98.3%** (116 of 118 features, 159 test functions)
 
-See `TEST.md` for detailed test documentation.
+| Category | Tests | Coverage |
+|----------|-------|----------|
+| Unit (FAST) | 85 | imports, formatting, CLI flags, hook, persistence |
+| Integration | 72 | commands, security, routing, endpoints |
+| Tunnel (FULL) | 2 | cloudflare tunnel, webhook setup |
+
+See `TEST.md` for complete test inventory.
+
+### When Adding New Tests
+
+**IMPORTANT: Keep `TEST.md` test inventory updated.**
+
+When you add a new test:
+1. Add the test function to `test.sh` in the appropriate section
+2. Add the function to the appropriate runner (`run_unit_tests`, `run_cli_tests`, `run_integration_tests`, or `run_tunnel_tests`)
+3. **Update the test inventory in `TEST.md`** with the new test name and description
+4. Update the coverage stats if adding tests for previously untested features
 
 ## Design Philosophy
 
