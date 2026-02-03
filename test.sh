@@ -4539,6 +4539,149 @@ wait_for_direct_worker_killed() {
     return 1
 }
 
+# Helper to wait for worker to be initialized (received init event)
+# Note: Claude can take 10-20 seconds to initialize, so use longer timeout
+wait_for_direct_worker_initialized() {
+    local worker_name="$1"
+    local timeout="${2:-60}"  # 60 * 0.5 = 30 seconds max
+    local attempts=0
+
+    while [[ $attempts -lt $timeout ]]; do
+        if grep -q "Direct worker '$worker_name' initialized" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+        ((attempts++))
+    done
+    return 1
+}
+
+# Helper to check if subprocess is still running (not just created)
+check_direct_worker_process_running() {
+    local worker_name="$1"
+
+    # Check via Python that process.poll() is None
+    DIRECT_MODE=1 python3 -c "
+import sys
+sys.path.insert(0, '.')
+import bridge
+
+worker = bridge.direct_workers.get('$worker_name')
+if not worker:
+    print('NOT_FOUND')
+    sys.exit(1)
+
+poll_result = worker.process.poll()
+if poll_result is None:
+    print('RUNNING')
+else:
+    print(f'EXITED:{poll_result}')
+    sys.exit(1)
+" 2>/dev/null | grep -q "RUNNING"
+}
+
+# BEHAVIOR TEST: Verify subprocess stays alive after creation
+# This catches the bug where subprocess exits immediately after starting
+test_direct_mode_subprocess_stays_alive() {
+    info "Testing direct mode subprocess stays alive after creation..."
+
+    if ! check_claude_available; then
+        info "Skipping (claude CLI not available)"
+        return 0
+    fi
+
+    # Clean up any existing test worker
+    send_direct_mode_message "/end aliveworker" >/dev/null 2>&1 || true
+    sleep 0.3
+
+    # Create worker
+    local result
+    result=$(send_direct_mode_message "/hire aliveworker")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Subprocess alive: /hire failed: $result"
+        return
+    fi
+
+    # Wait for worker to start
+    if ! wait_for_direct_worker "aliveworker"; then
+        fail "Subprocess alive: Worker not created"
+        return
+    fi
+
+    # KEY BEHAVIOR TEST: Wait 3 seconds and verify process is STILL running
+    # This catches the bug where subprocess exits immediately
+    sleep 3
+
+    # Check if reader thread exited (indicates subprocess died)
+    if grep -q "Reader thread for worker 'aliveworker' exited" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null; then
+        fail "Subprocess alive: Reader thread exited (subprocess died!)"
+        send_direct_mode_message "/end aliveworker" >/dev/null 2>&1 || true
+        return
+    fi
+
+    success "Subprocess alive: Process still running after 3 seconds"
+
+    # Cleanup
+    send_direct_mode_message "/end aliveworker" >/dev/null 2>&1 || true
+}
+
+# BEHAVIOR TEST: Verify worker accepts messages after creation
+# This catches the bug where subprocess starts but stdin pipe is broken
+test_direct_mode_worker_accepts_messages() {
+    info "Testing direct mode worker accepts messages..."
+
+    if ! check_claude_available; then
+        info "Skipping (claude CLI not available)"
+        return 0
+    fi
+
+    # Clean up any existing test worker
+    send_direct_mode_message "/end msgworker" >/dev/null 2>&1 || true
+    sleep 0.3
+
+    # Create worker
+    local result
+    result=$(send_direct_mode_message "/hire msgworker")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Accepts messages: /hire failed: $result"
+        return
+    fi
+
+    # Wait for worker to start
+    if ! wait_for_direct_worker "msgworker"; then
+        fail "Accepts messages: Worker not created"
+        return
+    fi
+
+    # Focus the worker
+    send_direct_mode_message "/focus msgworker" >/dev/null
+    sleep 0.5
+
+    # KEY BEHAVIOR TEST: Send a message and verify it reaches the worker
+    result=$(send_direct_mode_message "test message from behavior test")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Accepts messages: Message send failed: $result"
+        send_direct_mode_message "/end msgworker" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Verify message was sent to worker (check log)
+    sleep 1
+    if grep -q "Sent to direct worker 'msgworker'" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null; then
+        success "Accepts messages: Worker received message via stdin"
+    else
+        fail "Accepts messages: Message not delivered to worker"
+        send_direct_mode_message "/end msgworker" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Cleanup
+    send_direct_mode_message "/end msgworker" >/dev/null 2>&1 || true
+}
+
 test_direct_mode_e2e_full_flow() {
     info "Testing direct mode E2E full flow (hire -> message -> response -> end)..."
 
@@ -5283,6 +5426,11 @@ run_direct_mode_e2e_tests() {
     test_direct_mode_vs_tmux_parity
 
     # E2E tests with Claude subprocess
+    log ""
+    log "── E2E Behavior Tests (subprocess lifecycle) ──────────────────────────"
+    test_direct_mode_subprocess_stays_alive
+    test_direct_mode_worker_accepts_messages
+
     log ""
     log "── E2E Full Flow Tests ─────────────────────────────────────────────────"
     test_direct_mode_e2e_full_flow

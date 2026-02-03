@@ -94,7 +94,7 @@ TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ### Test Coverage
 
-**Current: 98.3%** (116 of 118 features, 159 test functions)
+**Current: 98.3%** (116 of 118 features, 161 test functions)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
@@ -313,3 +313,41 @@ BRIDGE_PORT="__NODE_PORT__"
 1. Run `shellcheck` on all shell scripts
 2. Test on macOS before merging (primary target platform)
 3. Avoid GNU-specific extensions: `%N`, `stat -c`, `sed -i`, `grep -P`
+
+### Test behavior, not scaffolding
+
+**Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. Direct mode subprocess was dying immediately, but tests passed because they only checked:
+- `test_direct_worker_functions_exist` → functions exist
+- `test_direct_mode_bridge_starts` → bridge starts
+- `test_direct_mode_hire_creates_worker` → HTTP returns "OK"
+
+None of these verified that the subprocess actually stayed running or received the init event.
+
+**Rule:** Tests must verify the actual behavior users care about, not just that code structure exists.
+
+```bash
+# BAD - tests scaffolding
+test_function_exists() {
+    python3 -c "from bridge import create_worker; assert callable(create_worker)"
+}
+
+test_http_returns_ok() {
+    [[ $(curl -s /hire) == "OK" ]]  # Returns OK but subprocess may have died!
+}
+
+# GOOD - tests behavior
+test_subprocess_stays_alive() {
+    curl -s /hire  # Create worker
+    sleep 3        # Wait a bit
+    # Verify subprocess is STILL running, not just that it started
+    assert_no_log "Reader thread exited"
+}
+
+test_init_event_received() {
+    curl -s /hire  # Create worker
+    # Verify init event was received (proves Claude is ready)
+    wait_for_log "initialized"
+}
+```
+
+**Why this matters:** When tests pass but features are broken, you waste time debugging and lose trust in the test suite. Behavior tests catch real bugs; scaffolding tests give false confidence.

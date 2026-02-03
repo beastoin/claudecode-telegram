@@ -89,7 +89,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
 | Direct Mode | 14 | 100% |
-| Direct Mode E2E | 8 | 100% |
+| Direct Mode E2E | 10 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **Only 2 features untested:**
@@ -98,7 +98,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Complete Test Inventory
 
-> **Total: 181 test functions**
+> **Total: 183 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -166,6 +166,8 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 | Test | Description |
 |------|-------------|
+| `test_direct_mode_subprocess_stays_alive` | **BEHAVIOR:** Verify subprocess stays running, not just starts |
+| `test_direct_mode_worker_accepts_messages` | **BEHAVIOR:** Verify worker accepts messages via stdin |
 | `test_direct_mode_e2e_full_flow` | Complete flow: hire -> message -> response -> end |
 | `test_direct_mode_e2e_focus_switch` | Create 2 workers, verify /focus switches between them |
 | `test_direct_mode_e2e_at_mention` | @worker routing without focus change |
