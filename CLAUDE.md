@@ -42,23 +42,35 @@ When making changes that result in a new version:
 
 ## Testing Requirements
 
-### TDD: Write tests FIRST
+### Test Modes
 
-**This project uses Test-Driven Development.** The workflow is:
+Use the appropriate test mode for your workflow:
 
-1. **Write the test first** - before any implementation
-2. **Add to `test.sh`** - all tests live in one file
-3. **Implement the feature** - make the test pass
-4. **Run tests ONCE** - all tests should pass on first run
+| Mode | Command | Time | When to Use |
+|------|---------|------|-------------|
+| **FAST** | `FAST=1 ./test.sh` | ~15s | While coding (TDD inner loop) |
+| **Default** | `./test.sh` | ~2-3 min | Before committing |
+| **FULL** | `FULL=1 ./test.sh` | ~5 min | Before pushing |
 
-**Do NOT:**
-- Implement first, then write tests, then run tests again (wastes time)
-- Run tests multiple times during a single feature (one run is enough)
+### TDD Workflow
 
-### Test guidelines
+```bash
+# While developing - run frequently
+FAST=1 TEST_BOT_TOKEN='...' ./test.sh
 
-- **Focus on e2e tests** - test the full flow, not just units
-- **Verify test fails** without your feature (proves it tests something)
+# Before commit - full local validation
+TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
+
+# Before push - including tunnel tests
+FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
+```
+
+### Test Guidelines
+
+1. **Write tests alongside features** - add to `test.sh`
+2. **Focus on e2e tests** - test the full flow, not just units
+3. **Use FAST mode during development** - for quick feedback
+4. **Run default mode before committing** - catch integration issues
 
 **Why e2e tests matter:**
 - They catch integration bugs that unit tests miss
@@ -66,32 +78,27 @@ When making changes that result in a new version:
 - They give confidence when refactoring
 - They're the safety net for this project
 
-### Running tests
+### Running Tests
 
-**Rule: Always run tests and ensure all pass before pushing.**
+**Rule: Always run default tests before committing, FULL before pushing.**
 
 ```bash
-# Before any commit/push:
-TEST_BOT_TOKEN='8117592253:AAE1vEf5WW1VJyzWD9iQg9A5A1xfEFOG8KU' TEST_CHAT_ID='121604706' ./test.sh
-```
+# Quick validation while coding
+FAST=1 TEST_BOT_TOKEN='...' ./test.sh
 
-Alternative formats:
-```bash
-# Basic test (uses mock chat ID)
-TELEGRAM_BOT_TOKEN='your-test-token' ./test.sh
-
-# Full e2e test (sends real Telegram messages)
-TELEGRAM_BOT_TOKEN='your-test-token' ADMIN_CHAT_ID='your-chat-id' ./test.sh
+# Full test before commit
+TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 ```
 
 **Test isolation:** Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/` (port 8095, prefix `claude-test-`). You can run tests while production is active.
 
-### Test coverage
+### Test Coverage
 
 | Category | What's tested |
 |----------|---------------|
-| Unit | imports, version command |
-| Integration | all commands, admin security, session files, /response, /notify |
+| Unit (FAST) | imports, message formatting, CLI flags, constants |
+| Integration | commands, admin security, routing, endpoints |
+| Tunnel (FULL) | cloudflare tunnel, webhook setup |
 
 See `TEST.md` for detailed test documentation.
 

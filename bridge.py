@@ -63,7 +63,6 @@ FILE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
     "active": None,  # Currently active session name
-    "pending_registration": None,  # Unregistered tmux session awaiting name
     "startup_notified": False,  # Whether we've sent the startup message
 }
 
@@ -154,8 +153,6 @@ def load_last_active():
 RESERVED_NAMES = {
     # Bridge commands
     "team", "focus", "progress", "learn", "pause", "relaunch", "settings", "hire", "end",
-    # Aliases
-    "new", "use", "list", "kill", "status", "stop", "restart", "system",
     # Special
     "all", "start", "help",
 }
@@ -701,7 +698,7 @@ def update_bot_commands():
     commands = list(BOT_COMMANDS)  # Copy static commands
 
     # Add worker shortcuts (e.g., /lee, /chen)
-    registered, _ = scan_tmux_sessions()
+    registered = scan_tmux_sessions()
     for name in sorted(registered.keys()):
         commands.append({"command": name, "description": f"Message {name}"})
 
@@ -773,9 +770,8 @@ def is_pending(name):
 
 
 def scan_tmux_sessions():
-    """Scan tmux for claude-* sessions (registered) and other claude sessions (unregistered)."""
+    """Scan tmux for claude-* sessions (registered)."""
     registered = {}
-    unregistered = []
 
     try:
         result = subprocess.run(
@@ -783,37 +779,27 @@ def scan_tmux_sessions():
             capture_output=True, text=True
         )
         if result.returncode != 0:
-            return registered, unregistered
+            return registered
 
         for line in result.stdout.strip().split("\n"):
             if not line:
                 continue
             session_name = line.strip()
 
-            # Check if this session is running claude
-            pane_cmd = subprocess.run(
-                ["tmux", "display-message", "-t", session_name, "-p", "#{pane_current_command}"],
-                capture_output=True, text=True
-            )
-            cmd = pane_cmd.stdout.strip() if pane_cmd.returncode == 0 else ""
-
             if session_name.startswith(TMUX_PREFIX):
                 # Registered session
                 name = session_name[len(TMUX_PREFIX):]  # Remove prefix
                 registered[name] = {"tmux": session_name}
-            elif "claude" in cmd.lower() or session_name == "claude":
-                # Unregistered session running claude
-                unregistered.append(session_name)
     except Exception as e:
         print(f"Error scanning tmux: {e}")
 
-    return registered, unregistered
+    return registered
 
 
 def get_registered_sessions(registered=None):
     """Get registered sessions from tmux and reconcile active state."""
     if registered is None:
-        registered, _ = scan_tmux_sessions()
+        registered = scan_tmux_sessions()
 
     if state["active"] and state["active"] not in registered:
         state["active"] = None
@@ -1171,27 +1157,6 @@ def switch_session(name):
     return True, None
 
 
-def register_session(name, tmux_session):
-    """Register an unregistered tmux session under a name."""
-    new_tmux_name = f"{TMUX_PREFIX}{name}"
-
-    # Rename the tmux session
-    result = subprocess.run(
-        ["tmux", "rename-session", "-t", tmux_session, new_tmux_name],
-        capture_output=True
-    )
-    if result.returncode != 0:
-        return False, "Could not claim the running worker"
-
-    # Export env vars for hook (same as create_session)
-    export_hook_env(new_tmux_name)
-
-    state["active"] = name
-    save_last_active(name)
-    state["pending_registration"] = None
-    ensure_session_dir(name)
-
-    return True, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1552,11 +1517,6 @@ class Handler(BaseHTTPRequestHandler):
         # Save chat_id for auto-notification on restart
         save_last_chat_id(chat_id)
 
-        # Check for JSON registration response
-        if state["pending_registration"]:
-            if self.try_registration(text, chat_id):
-                return
-
         # Handle commands
         if text.startswith("/"):
             if self.handle_command(text, chat_id, msg_id):
@@ -1600,40 +1560,6 @@ class Handler(BaseHTTPRequestHandler):
 
         # Route to active session (no reply)
         self.route_to_active(text, chat_id, msg_id)
-
-    def try_registration(self, text, chat_id):
-        """Try to parse JSON registration."""
-        try:
-            data = json.loads(text.strip())
-            if "name" in data:
-                name = data["name"].strip().lower()
-                name = re.sub(r'[^a-z0-9-]', '', name)
-
-                if not name:
-                    self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
-                    return True
-
-                # Validate: name cannot clash with reserved commands
-                if name in RESERVED_NAMES:
-                    self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
-                    return True
-
-                registered = get_registered_sessions()
-                if name in registered:
-                    self.reply(chat_id, f"Worker name \"{name}\" is already on the team. Choose another.", outcome="Needs decision")
-                    return True
-
-                ok, err = register_session(name, state["pending_registration"])
-                if ok:
-                    self.reply(chat_id, f"{name.capitalize()} is now on your team and assigned.")
-                    # Update bot commands to include new worker
-                    update_bot_commands()
-                else:
-                    self.reply(chat_id, f"Could not claim that worker. {err}", outcome="Needs decision")
-                return True
-        except json.JSONDecodeError:
-            pass
-        return False
 
     def parse_at_mention(self, text):
         """Parse @name prefix from message."""
@@ -1702,21 +1628,21 @@ class Handler(BaseHTTPRequestHandler):
             cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        if cmd in ("/hire", "/new"):
+        if cmd == "/hire":
             return self.cmd_hire(arg, chat_id)
-        elif cmd in ("/focus", "/use"):
+        elif cmd == "/focus":
             return self.cmd_focus(arg, chat_id)
-        elif cmd in ("/team", "/list"):
+        elif cmd == "/team":
             return self.cmd_team(chat_id)
-        elif cmd in ("/end", "/kill"):
+        elif cmd == "/end":
             return self.cmd_end(arg, chat_id)
-        elif cmd in ("/progress", "/status"):
+        elif cmd == "/progress":
             return self.cmd_progress(chat_id)
-        elif cmd in ("/pause", "/stop"):
+        elif cmd == "/pause":
             return self.cmd_pause(chat_id)
-        elif cmd in ("/relaunch", "/restart"):
+        elif cmd == "/relaunch":
             return self.cmd_relaunch(chat_id)
-        elif cmd in ("/settings", "/system"):
+        elif cmd == "/settings":
             return self.cmd_settings(chat_id)
         elif cmd == "/learn":
             return self.cmd_learn(arg, chat_id, msg_id)
@@ -1794,10 +1720,10 @@ class Handler(BaseHTTPRequestHandler):
     def cmd_team(self, chat_id):
         """List all Claude instances."""
         # Refresh from tmux
-        registered, unregistered = scan_tmux_sessions()
+        registered = scan_tmux_sessions()
         registered = get_registered_sessions(registered)
 
-        if not registered and not unregistered:
+        if not registered:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
@@ -1811,12 +1737,6 @@ class Handler(BaseHTTPRequestHandler):
                 status.append("focused")
             status.append("working" if is_pending(name) else "available")
             lines.append(f"- {name} ({', '.join(status)})")
-
-        if unregistered:
-            lines.append("")
-            lines.append("Unclaimed running Claude (needs a name):")
-            for tmux in unregistered:
-                lines.append(f"- {tmux}")
 
         self.reply(chat_id, "\n".join(lines))
         return True
@@ -1922,7 +1842,6 @@ class Handler(BaseHTTPRequestHandler):
             "Team state",
             f"Focused worker: {state['active'] or '(none)'}",
             f"Workers: {team_list}",
-            f"Pending claim: {state['pending_registration'] or '(none)'}",
         ]
 
         # Sandbox details
@@ -2005,23 +1924,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
-        # Check for unregistered sessions
-        registered, unregistered = scan_tmux_sessions()
+        registered = scan_tmux_sessions()
         registered = get_registered_sessions(registered)
 
         if not state["active"]:
-            if unregistered:
-                # Prompt for registration
-                state["pending_registration"] = unregistered[0]
-                self.reply(
-                    chat_id,
-                    "Found a running Claude not yet on your team.\n"
-                    "Claim it to make it a long-lived worker by replying with:\n"
-                    '{"name": "your-worker-name"}',
-                    outcome="Needs decision"
-                )
-                return
-            elif registered:
+            if registered:
                 # Sessions exist but none active
                 names = ", ".join(registered.keys())
                 self.reply(chat_id, f"No one assigned. Your team: {names}\nWho should I talk to?")
@@ -2152,12 +2059,10 @@ def main():
     SESSIONS_DIR.chmod(0o700)
 
     # Discover existing sessions
-    registered, unregistered = scan_tmux_sessions()
+    registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
     if registered:
         print(f"Discovered sessions: {list(registered.keys())}")
-    if unregistered:
-        print(f"Unregistered sessions: {unregistered}")
 
     # Load last active worker from file (if still exists)
     last_active = load_last_active()

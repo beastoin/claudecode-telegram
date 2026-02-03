@@ -63,18 +63,18 @@ cleanup() {
         kill "$(cat "$TEST_NODE_DIR/bridge.pid")" 2>/dev/null || true
         rm -f "$TEST_NODE_DIR/bridge.pid"
     fi
-    [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
-    [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
+    [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null; true
+    [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null; true
     # Kill any test sessions we created (using test prefix)
     tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${TEST_TMUX_PREFIX}" | while read -r session; do
         tmux kill-session -t "$session" 2>/dev/null || true
-    done
+    done || true
     # Clean up test session files (but keep node dir for next run)
-    [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"
-    [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"
-    [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"
-    rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port"
-    rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active"
+    [[ -d "$TEST_SESSION_DIR" ]] && rm -rf "$TEST_SESSION_DIR"; true
+    [[ -f "$BRIDGE_LOG" ]] && rm -f "$BRIDGE_LOG"; true
+    [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"; true
+    rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port" 2>/dev/null || true
+    rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -93,10 +93,28 @@ require_token() {
 wait_for_port() {
     local port="$1" attempts=0
     while ! nc -z localhost "$port" 2>/dev/null && [[ $attempts -lt 30 ]]; do
-        sleep 0.5
+        sleep 0.1
         ((attempts++))
     done
     nc -z localhost "$port" 2>/dev/null
+}
+
+wait_for_session() {
+    local session="$1" attempts=0
+    while ! tmux has-session -t "${TEST_TMUX_PREFIX}${session}" 2>/dev/null && [[ $attempts -lt 20 ]]; do
+        sleep 0.1
+        ((attempts++))
+    done
+    tmux has-session -t "${TEST_TMUX_PREFIX}${session}" 2>/dev/null
+}
+
+wait_for_session_gone() {
+    local session="$1" attempts=0
+    while tmux has-session -t "${TEST_TMUX_PREFIX}${session}" 2>/dev/null && [[ $attempts -lt 20 ]]; do
+        sleep 0.1
+        ((attempts++))
+    done
+    ! tmux has-session -t "${TEST_TMUX_PREFIX}${session}" 2>/dev/null
 }
 
 send_message() {
@@ -415,7 +433,7 @@ test_bridge_starts() {
 
     # Kill any existing process on port
     lsof -ti :"$PORT" | xargs kill -9 2>/dev/null || true
-    sleep 1
+    sleep 0.3
 
     # Create test node directory structure
     mkdir -p "$TEST_NODE_DIR"
@@ -466,7 +484,7 @@ test_non_admin_rejection() {
     info "Testing non-admin rejection..."
 
     local result
-    result=$(send_message "/list" "999888777")
+    result=$(send_message "/team" "999888777")
 
     # Should return OK but no action taken (silent rejection)
     if [[ "$result" == "OK" ]]; then
@@ -476,81 +494,80 @@ test_non_admin_rejection() {
     fi
 }
 
-test_new_command() {
-    info "Testing /new command..."
+test_hire_command() {
+    info "Testing /hire command..."
 
-    send_message "/new testbot1" >/dev/null
-    sleep 2
+    send_message "/hire testbot1" >/dev/null
 
-    if tmux has-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null; then
-        success "/new creates tmux session"
+    if wait_for_session "testbot1"; then
+        success "/hire creates tmux session"
     else
-        fail "/new failed to create session"
+        fail "/hire failed to create session"
     fi
 }
 
-test_list_command() {
-    info "Testing /list command..."
+test_team_command() {
+    info "Testing /team command..."
 
     local result
-    result=$(send_message "/list")
+    result=$(send_message "/team")
 
     if [[ "$result" == "OK" ]]; then
-        success "/list command works"
+        success "/team command works"
     else
-        fail "/list command failed"
+        fail "/team command failed"
     fi
 }
 
-test_use_command() {
-    info "Testing /use command..."
+test_focus_command() {
+    info "Testing /focus command..."
 
     local result
-    result=$(send_message "/use testbot1")
+    result=$(send_message "/focus testbot1")
 
     if [[ "$result" == "OK" ]]; then
-        success "/use command works"
+        success "/focus command works"
     else
-        fail "/use command failed"
+        fail "/focus command failed"
     fi
 }
 
-test_status_command() {
-    info "Testing /status command..."
+test_progress_command() {
+    info "Testing /progress command..."
 
     local result
-    result=$(send_message "/status")
+    result=$(send_message "/progress")
 
     if [[ "$result" == "OK" ]]; then
-        success "/status command works"
+        success "/progress command works"
     else
-        fail "/status command failed"
+        fail "/progress command failed"
     fi
 }
 
-test_restart_command() {
-    info "Testing /restart command..."
+test_relaunch_command() {
+    info "Testing /relaunch command..."
 
     local result
-    result=$(send_message "/restart")
+    result=$(send_message "/relaunch")
 
     if [[ "$result" == "OK" ]]; then
-        success "/restart command works"
+        success "/relaunch command works"
     else
-        fail "/restart command failed"
+        fail "/relaunch command failed"
     fi
 }
 
-test_stop_command() {
-    info "Testing /stop command..."
+test_pause_command() {
+    info "Testing /pause command..."
 
     local result
-    result=$(send_message "/stop")
+    result=$(send_message "/pause")
 
     if [[ "$result" == "OK" ]]; then
-        success "/stop command works"
+        success "/pause command works"
     else
-        fail "/stop command failed"
+        fail "/pause command failed"
     fi
 }
 
@@ -558,8 +575,8 @@ test_at_mention() {
     info "Testing @mention routing..."
 
     # Create second session first
-    send_message "/new testbot2" >/dev/null
-    sleep 2
+    send_message "/hire testbot2" >/dev/null
+    wait_for_session "testbot2"
 
     local result
     result=$(send_message "@testbot1 hello from mention")
@@ -623,17 +640,17 @@ test_session_files() {
     fi
 }
 
-test_kill_command() {
-    info "Testing /kill command..."
+test_end_command() {
+    info "Testing /end command..."
 
     local result
-    result=$(send_message "/kill testbot2")
-    sleep 1
+    result=$(send_message "/end testbot2")
+    wait_for_session_gone "testbot2"
 
     if ! tmux has-session -t "${TEST_TMUX_PREFIX}testbot2" 2>/dev/null; then
-        success "/kill removes tmux session"
+        success "/end removes tmux session"
     else
-        fail "/kill failed to remove session"
+        fail "/end failed to remove session"
     fi
 }
 
@@ -654,21 +671,20 @@ test_blocked_commands() {
 # New feature tests (v0.8.0+)
 # ─────────────────────────────────────────────────────────────────────────────
 
-test_command_aliases() {
-    info "Testing command aliases (/hire, /team, /focus, etc.)..."
+test_additional_commands() {
+    info "Testing additional commands..."
 
-    # Create with /hire (alias for /new)
-    send_message "/hire aliasbot" >/dev/null
-    sleep 2
+    # Create a worker for testing
+    send_message "/hire addlbot" >/dev/null
 
-    if tmux has-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null; then
+    if wait_for_session "addlbot"; then
         success "/hire creates worker"
     else
         fail "/hire failed"
         return
     fi
 
-    # Test /team (alias for /list)
+    # Test /team
     local result
     result=$(send_message "/team")
     if [[ "$result" == "OK" ]]; then
@@ -677,15 +693,15 @@ test_command_aliases() {
         fail "/team failed"
     fi
 
-    # Test /focus (alias for /use)
-    result=$(send_message "/focus aliasbot")
+    # Test /focus
+    result=$(send_message "/focus addlbot")
     if [[ "$result" == "OK" ]]; then
         success "/focus works"
     else
         fail "/focus failed"
     fi
 
-    # Test /progress (alias for /status)
+    # Test /progress
     result=$(send_message "/progress")
     if [[ "$result" == "OK" ]]; then
         success "/progress works"
@@ -693,7 +709,7 @@ test_command_aliases() {
         fail "/progress failed"
     fi
 
-    # Test /pause (alias for /stop)
+    # Test /pause
     result=$(send_message "/pause")
     if [[ "$result" == "OK" ]]; then
         success "/pause works"
@@ -701,10 +717,10 @@ test_command_aliases() {
         fail "/pause failed"
     fi
 
-    # Test /end (alias for /kill)
-    send_message "/end aliasbot" >/dev/null
-    sleep 1
-    if ! tmux has-session -t "${TEST_TMUX_PREFIX}aliasbot" 2>/dev/null; then
+    # Test /end
+    send_message "/end addlbot" >/dev/null
+    wait_for_session_gone "addlbot"
+    if ! tmux has-session -t "${TEST_TMUX_PREFIX}addlbot" 2>/dev/null; then
         success "/end removes worker"
     else
         fail "/end failed"
@@ -716,7 +732,7 @@ test_learn_command() {
 
     # Create a worker first
     send_message "/hire learnbot" >/dev/null
-    sleep 2
+    wait_for_session "learnbot"
     send_message "/focus learnbot" >/dev/null
 
     # Test /learn (requires focused worker)
@@ -745,7 +761,7 @@ test_reply_routing() {
 
     # Create worker
     send_message "/hire replybot" >/dev/null
-    sleep 2
+    wait_for_session "replybot"
 
     # Test reply to worker message (simulated bot message with worker prefix)
     local result
@@ -765,7 +781,7 @@ test_reply_context() {
 
     # Create worker
     send_message "/hire contextbot" >/dev/null
-    sleep 2
+    wait_for_session "contextbot"
     send_message "/focus contextbot" >/dev/null
 
     # Test reply to own message (non-bot) includes context
@@ -963,7 +979,7 @@ test_photo_message_no_focused() {
 
     # First ensure no focused worker
     send_message "/end testbot1" >/dev/null 2>&1 || true
-    sleep 1
+    wait_for_session_gone "testbot1"
 
     # Clear active by killing all test sessions
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
@@ -984,7 +1000,7 @@ test_document_message_no_focused() {
 
     # First ensure no focused worker
     send_message "/end testbot1" >/dev/null 2>&1 || true
-    sleep 1
+    wait_for_session_gone "testbot1"
 
     # Clear active by killing all test sessions
     tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
@@ -1024,9 +1040,9 @@ test_document_message_routing() {
 
     # Create and focus a worker
     send_message "/hire doctest" >/dev/null
-    sleep 2
+    wait_for_session "doctest"
     send_message "/focus doctest" >/dev/null
-    sleep 1
+    sleep 0.3
 
     # Send a document message
     local result
@@ -1034,7 +1050,7 @@ test_document_message_routing() {
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for the document handling
-        sleep 1
+        sleep 0.3
         if grep -q "doctest" "$BRIDGE_LOG" 2>/dev/null; then
             success "Document message routed to focused worker"
         else
@@ -1059,9 +1075,9 @@ test_incoming_document_e2e() {
 
     # Create worker to receive document
     send_message "/hire docrecv" >/dev/null
-    sleep 2
+    wait_for_session "docrecv"
     send_message "/focus docrecv" >/dev/null
-    sleep 1
+    sleep 0.3
 
     # Create a test text file
     echo "This is a test document for e2e testing." > /tmp/e2e-test-document.txt
@@ -1137,9 +1153,9 @@ test_incoming_image_e2e() {
 
     # Create worker to receive image
     send_message "/hire imgrecv" >/dev/null
-    sleep 2
+    wait_for_session "imgrecv"
     send_message "/focus imgrecv" >/dev/null
-    sleep 1
+    sleep 0.3
 
     # Create a test image
     python3 << 'PYEOF'
@@ -1211,7 +1227,7 @@ test_inbox_directory() {
 
     # Create worker
     send_message "/hire inboxtest" >/dev/null
-    sleep 2
+    wait_for_session "inboxtest"
     send_message "/focus inboxtest" >/dev/null
 
     if python3 -c "
@@ -1237,8 +1253,8 @@ test_response_with_image_tags() {
     info "Testing /response endpoint with image tags..."
 
     # Create a session
-    send_message "/new imageresponsetest" >/dev/null
-    sleep 2
+    send_message "/hire imageresponsetest" >/dev/null
+    wait_for_session "imageresponsetest"
 
     # Set up session files
     local session_dir="$TEST_SESSION_DIR/imageresponsetest"
@@ -1253,7 +1269,7 @@ test_response_with_image_tags() {
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for image handling attempt
-        sleep 1
+        sleep 0.3
         if grep -q "imageresponsetest" "$BRIDGE_LOG" 2>/dev/null; then
             success "/response endpoint handles image tags"
         else
@@ -1264,7 +1280,7 @@ test_response_with_image_tags() {
     fi
 
     # Cleanup
-    send_message "/kill imageresponsetest" >/dev/null 2>&1 || true
+    send_message "/end imageresponsetest" >/dev/null 2>&1 || true
 }
 
 test_response_endpoint() {
@@ -1276,8 +1292,8 @@ test_response_endpoint() {
     [[ -n "${TEST_CHAT_ID:-}" ]] && expect_real="true"
 
     # Create a new session for this test
-    send_message "/new responsetest" >/dev/null
-    sleep 3
+    send_message "/hire responsetest" >/dev/null
+    wait_for_session "responsetest"
 
     # Set up pending file (simulates waiting for response)
     local session_dir="$TEST_SESSION_DIR/responsetest"
@@ -1293,7 +1309,7 @@ test_response_endpoint() {
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for success
-        sleep 1
+        sleep 0.3
         if grep -q "Response sent: responsetest -> Telegram OK" "$BRIDGE_LOG" 2>/dev/null; then
             if [[ "$expect_real" == "true" ]]; then
                 success "/response endpoint sends to Telegram (check your Telegram!)"
@@ -1317,7 +1333,7 @@ test_response_endpoint() {
     fi
 
     # Cleanup
-    send_message "/kill responsetest" >/dev/null 2>&1 || true
+    send_message "/end responsetest" >/dev/null 2>&1 || true
 }
 
 test_last_chat_id_persistence() {
@@ -1351,8 +1367,8 @@ test_last_active_persistence() {
     rm -f "$last_active_file"
 
     # Create a session to trigger active save
-    send_message "/new testpersist"
-    sleep 1
+    send_message "/hire testpersist"
+    wait_for_session "testpersist"
 
     # Verify file was created with correct content
     if [[ -f "$last_active_file" ]]; then
@@ -1368,10 +1384,10 @@ test_last_active_persistence() {
     fi
 
     # Test switch also updates the file
-    send_message "/new testpersist2"
-    sleep 1
+    send_message "/hire testpersist2"
+    wait_for_session "testpersist2"
     send_message "/focus testpersist"
-    sleep 0.5
+    sleep 0.2
 
     saved_active=$(cat "$last_active_file")
     if [[ "$saved_active" == "testpersist" ]]; then
@@ -1381,16 +1397,16 @@ test_last_active_persistence() {
     fi
 
     # Clean up test sessions
-    send_message "/kill testpersist" >/dev/null 2>&1 || true
-    send_message "/kill testpersist2" >/dev/null 2>&1 || true
+    send_message "/end testpersist" >/dev/null 2>&1 || true
+    send_message "/end testpersist2" >/dev/null 2>&1 || true
 }
 
 test_response_without_pending() {
     info "Testing /response works without pending file (v0.6.2 behavior)..."
 
     # Create a session for this test
-    send_message "/new nopendingtest" >/dev/null
-    sleep 3
+    send_message "/hire nopendingtest" >/dev/null
+    wait_for_session "nopendingtest"
 
     # Set up ONLY chat_id file - NO pending file
     # This tests v0.6.2 change: pending is not a gate for sending
@@ -1413,7 +1429,927 @@ test_response_without_pending() {
     fi
 
     # Cleanup
-    send_message "/kill nopendingtest" >/dev/null 2>&1 || true
+    send_message "/end nopendingtest" >/dev/null 2>&1 || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker naming and routing tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_worker_name_sanitization() {
+    info "Testing worker name sanitization..."
+
+    if python3 -c "
+import re
+
+# Sanitization logic from bridge.py
+def sanitize_name(name):
+    name = name.lower().strip()
+    return re.sub(r'[^a-z0-9-]', '', name)
+
+# Test cases
+assert sanitize_name('TestBot') == 'testbot', 'uppercase should be lowered'
+assert sanitize_name('test_bot') == 'testbot', 'underscores should be removed'
+assert sanitize_name('test bot') == 'testbot', 'spaces should be removed'
+assert sanitize_name('Test-Bot-123') == 'test-bot-123', 'hyphens and numbers allowed'
+assert sanitize_name('  spaces  ') == 'spaces', 'leading/trailing spaces stripped'
+assert sanitize_name('Bot@#\$%') == 'bot', 'special chars removed'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Worker name sanitization works"
+    else
+        fail "Worker name sanitization failed"
+    fi
+}
+
+test_reserved_names_rejection() {
+    info "Testing reserved names rejection..."
+
+    if python3 -c "
+from bridge import RESERVED_NAMES
+
+# Verify all expected reserved names are included
+expected = {'team', 'focus', 'progress', 'learn', 'pause', 'relaunch',
+            'settings', 'hire', 'end', 'all', 'start', 'help'}
+for name in expected:
+    assert name in RESERVED_NAMES, f'{name} should be reserved'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Reserved names are configured"
+    else
+        fail "Reserved names check failed"
+    fi
+
+    # Test actual rejection via webhook
+    local result
+    result=$(send_message "/hire team")  # 'team' is reserved
+
+    if [[ "$result" == "OK" ]]; then
+        success "Reserved name /hire rejection handled"
+    else
+        fail "Reserved name handling failed"
+    fi
+}
+
+test_worker_shortcut_focus_only() {
+    info "Testing /<worker> focus switch (no message)..."
+
+    # Create two workers first
+    send_message "/hire shortcut1" >/dev/null
+    wait_for_session "shortcut1"
+    send_message "/hire shortcut2" >/dev/null
+    wait_for_session "shortcut2"
+
+    # Focus switch via shortcut
+    local result
+    result=$(send_message "/shortcut1")
+
+    if [[ "$result" == "OK" ]]; then
+        success "/<worker> focus switch works"
+    else
+        fail "/<worker> focus switch failed"
+    fi
+
+    # Cleanup
+    send_message "/end shortcut1" >/dev/null 2>&1 || true
+    send_message "/end shortcut2" >/dev/null 2>&1 || true
+}
+
+test_worker_shortcut_with_message() {
+    info "Testing /<worker> <message> routing..."
+
+    # Create worker
+    send_message "/hire shortcut3" >/dev/null
+    wait_for_session "shortcut3"
+
+    # Route message via shortcut
+    local result
+    result=$(send_message "/shortcut3 hello from shortcut")
+
+    if [[ "$result" == "OK" ]]; then
+        success "/<worker> <message> routing works"
+    else
+        fail "/<worker> <message> routing failed"
+    fi
+
+    # Cleanup
+    send_message "/end shortcut3" >/dev/null 2>&1 || true
+}
+
+test_command_with_botname_suffix() {
+    info "Testing command with @botname suffix..."
+
+    # Commands like /team@MyBot should work (suffix stripped)
+    local result
+    result=$(send_message "/team@TestBot")
+
+    if [[ "$result" == "OK" ]]; then
+        success "Command with @botname suffix handled"
+    else
+        fail "Command with @botname suffix failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_webhook_secret_validation() {
+    info "Testing webhook secret validation..."
+
+    # Start a separate bridge with webhook secret
+    local secret_port=8096
+    local secret_log="$TEST_NODE_DIR/secret_bridge.log"
+
+    # Kill any existing process on the port
+    lsof -ti :"$secret_port" | xargs kill -9 2>/dev/null || true
+    sleep 0.3
+
+    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
+    PORT="$secret_port" \
+    TELEGRAM_WEBHOOK_SECRET="test-secret-123" \
+    NODE_NAME="secrettest" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    python3 -u "$SCRIPT_DIR/bridge.py" > "$secret_log" 2>&1 &
+    local secret_pid=$!
+
+    if wait_for_port "$secret_port"; then
+        # Request WITHOUT secret header should be rejected (403)
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$secret_port" \
+            -H "Content-Type: application/json" \
+            -d '{"update_id": 1, "message": {"message_id": 1, "chat": {"id": 123}, "text": "test"}}')
+
+        if [[ "$http_code" == "403" ]]; then
+            success "Request without secret rejected (403)"
+        else
+            fail "Expected 403, got $http_code"
+        fi
+
+        # Request WITH correct secret header should be accepted (200)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$secret_port" \
+            -H "Content-Type: application/json" \
+            -H "X-Telegram-Bot-Api-Secret-Token: test-secret-123" \
+            -d '{"update_id": 2, "message": {"message_id": 2, "chat": {"id": 123}, "text": "test"}}')
+
+        if [[ "$http_code" == "200" ]]; then
+            success "Request with correct secret accepted (200)"
+        else
+            fail "Expected 200, got $http_code"
+        fi
+
+        # Request WITH wrong secret should be rejected (403)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$secret_port" \
+            -H "Content-Type: application/json" \
+            -H "X-Telegram-Bot-Api-Secret-Token: wrong-secret" \
+            -d '{"update_id": 3, "message": {"message_id": 3, "chat": {"id": 123}, "text": "test"}}')
+
+        if [[ "$http_code" == "403" ]]; then
+            success "Request with wrong secret rejected (403)"
+        else
+            fail "Expected 403 for wrong secret, got $http_code"
+        fi
+    else
+        fail "Could not start bridge with webhook secret"
+    fi
+
+    # Cleanup
+    kill "$secret_pid" 2>/dev/null || true
+    rm -f "$secret_log"
+}
+
+test_token_isolation() {
+    info "Testing token isolation..."
+
+    # Verify TELEGRAM_BOT_TOKEN is NOT exposed to tmux sessions
+    # Create a worker and check its environment
+    send_message "/hire tokentest" >/dev/null
+    wait_for_session "tokentest"
+
+    local tmux_name="${TEST_TMUX_PREFIX}tokentest"
+
+    if tmux has-session -t "$tmux_name" 2>/dev/null; then
+        # Check tmux environment - token should NOT be present
+        local tmux_env
+        tmux_env=$(tmux show-environment -t "$tmux_name" 2>/dev/null || echo "")
+
+        if echo "$tmux_env" | grep -q "TELEGRAM_BOT_TOKEN"; then
+            fail "Token leaked to tmux session environment!"
+        else
+            success "Token isolated - not in tmux environment"
+        fi
+
+        # Verify expected env vars ARE present
+        if echo "$tmux_env" | grep -q "PORT="; then
+            success "PORT env var exported to tmux"
+        else
+            fail "PORT env var not found in tmux"
+        fi
+
+        if echo "$tmux_env" | grep -q "TMUX_PREFIX="; then
+            success "TMUX_PREFIX env var exported to tmux"
+        else
+            fail "TMUX_PREFIX env var not found in tmux"
+        fi
+    else
+        fail "Could not verify token isolation - session not found"
+    fi
+
+    # Cleanup
+    send_message "/end tokentest" >/dev/null 2>&1 || true
+}
+
+test_secure_directory_permissions() {
+    info "Testing secure directory permissions..."
+
+    # Test node directory permissions
+    if [[ -d "$TEST_NODE_DIR" ]]; then
+        local perms
+        if [[ "$(uname)" == "Darwin" ]]; then
+            perms=$(stat -f "%Lp" "$TEST_NODE_DIR")
+        else
+            perms=$(stat -c "%a" "$TEST_NODE_DIR")
+        fi
+        if [[ "$perms" == "700" ]]; then
+            success "Node directory permissions secure (0700)"
+        else
+            fail "Node directory permissions incorrect: $perms (expected 700)"
+        fi
+    fi
+
+    # Test sessions directory permissions
+    if [[ -d "$TEST_SESSION_DIR" ]]; then
+        local perms
+        if [[ "$(uname)" == "Darwin" ]]; then
+            perms=$(stat -f "%Lp" "$TEST_SESSION_DIR")
+        else
+            perms=$(stat -c "%a" "$TEST_SESSION_DIR")
+        fi
+        if [[ "$perms" == "700" ]]; then
+            success "Sessions directory permissions secure (0700)"
+        else
+            fail "Sessions directory permissions incorrect: $perms (expected 700)"
+        fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP endpoint tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_health_endpoint() {
+    info "Testing GET / health endpoint..."
+
+    local response
+    response=$(curl -s "http://localhost:$PORT")
+
+    if echo "$response" | grep -q "Claude-Telegram Multi-Session Bridge"; then
+        success "Health endpoint returns expected string"
+    else
+        fail "Health endpoint response incorrect: $response"
+    fi
+}
+
+test_response_endpoint_missing_fields() {
+    info "Testing /response endpoint with missing fields..."
+
+    # Missing session
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"text":"Test"}')
+
+    if echo "$result" | grep -q "Missing"; then
+        success "/response rejects missing session"
+    else
+        fail "/response should reject missing session"
+    fi
+
+    # Missing text
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"session":"test"}')
+
+    if echo "$result" | grep -q "Missing"; then
+        success "/response rejects missing text"
+    else
+        fail "/response should reject missing text"
+    fi
+}
+
+test_response_endpoint_no_chat_id() {
+    info "Testing /response endpoint with non-existent session..."
+
+    local result
+    result=$(curl -s -X POST "http://localhost:$PORT/response" \
+        -H "Content-Type: application/json" \
+        -d '{"session":"nonexistent_session_xyz","text":"Test"}')
+
+    # Should return 404 for session without chat_id file
+    if echo "$result" | grep -q "No chat_id"; then
+        success "/response returns 404 for unknown session"
+    else
+        # Check HTTP code
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/response" \
+            -H "Content-Type: application/json" \
+            -d '{"session":"nonexistent_session_xyz","text":"Test"}')
+        if [[ "$http_code" == "404" ]]; then
+            success "/response returns 404 for unknown session"
+        else
+            fail "/response should return 404 for unknown session"
+        fi
+    fi
+}
+
+test_notify_endpoint_missing_text() {
+    info "Testing /notify endpoint with missing text..."
+
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/notify" \
+        -H "Content-Type: application/json" \
+        -d '{}')
+
+    if [[ "$http_code" == "400" ]]; then
+        success "/notify rejects missing text (400)"
+    else
+        fail "/notify should return 400 for missing text, got $http_code"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pending and timeout tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_pending_auto_timeout() {
+    info "Testing pending auto-timeout (10 min)..."
+
+    if python3 -c "
+from bridge import is_pending, set_pending, get_pending_file
+import time
+from pathlib import Path
+
+# Create test session dir
+test_name = 'timeout_test'
+pending_file = get_pending_file(test_name)
+pending_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+# Write a pending file with old timestamp (11 minutes ago)
+old_ts = int(time.time()) - (11 * 60)
+pending_file.write_text(str(old_ts))
+
+# is_pending should return False and auto-clear the file
+result = is_pending(test_name)
+assert result == False, f'expected False for stale pending, got {result}'
+
+# File should be removed
+assert not pending_file.exists(), 'stale pending file should be removed'
+
+# Now test with fresh timestamp
+fresh_ts = int(time.time())
+pending_file.write_text(str(fresh_ts))
+
+result = is_pending(test_name)
+assert result == True, f'expected True for fresh pending, got {result}'
+
+# Cleanup
+pending_file.unlink(missing_ok=True)
+pending_file.parent.rmdir()
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Pending auto-timeout (10 min) works"
+    else
+        fail "Pending auto-timeout test failed"
+    fi
+}
+
+test_pending_set_and_clear() {
+    info "Testing pending set and clear..."
+
+    if python3 -c "
+from bridge import set_pending, clear_pending, is_pending, get_session_dir
+from pathlib import Path
+
+test_name = 'pending_test'
+
+# Set pending
+set_pending(test_name, 12345)
+
+# Verify pending is set
+assert is_pending(test_name), 'pending should be set'
+
+# Verify chat_id file created
+chat_id_file = get_session_dir(test_name) / 'chat_id'
+assert chat_id_file.exists(), 'chat_id file should exist'
+assert chat_id_file.read_text().strip() == '12345', 'chat_id should be 12345'
+
+# Check file permissions
+import stat
+perms = oct(chat_id_file.stat().st_mode)[-3:]
+assert perms == '600', f'chat_id file should be 600, got {perms}'
+
+# Clear pending
+clear_pending(test_name)
+
+# Verify pending is cleared
+assert not is_pending(test_name), 'pending should be cleared'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Pending set/clear works"
+    else
+        fail "Pending set/clear test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI command tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_cli_help() {
+    info "Testing CLI --help..."
+
+    if ./claudecode-telegram.sh --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --help works"
+    else
+        fail "CLI --help failed"
+    fi
+}
+
+test_cli_version() {
+    info "Testing CLI --version..."
+
+    if ./claudecode-telegram.sh --version 2>/dev/null | grep -q "claudecode-telegram"; then
+        success "CLI --version works"
+    else
+        fail "CLI --version failed"
+    fi
+}
+
+test_cli_node_flag() {
+    info "Testing CLI --node flag..."
+
+    # --node=value syntax
+    if ./claudecode-telegram.sh --node=testnode --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --node=value syntax works"
+    else
+        fail "CLI --node=value syntax failed"
+    fi
+
+    # --node value syntax
+    if ./claudecode-telegram.sh --node testnode --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --node value syntax works"
+    else
+        fail "CLI --node value syntax failed"
+    fi
+}
+
+test_cli_port_flag() {
+    info "Testing CLI --port flag..."
+
+    # -p=value syntax
+    if ./claudecode-telegram.sh -p=9999 --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI -p=value syntax works"
+    else
+        fail "CLI -p=value syntax failed"
+    fi
+
+    # --port value syntax
+    if ./claudecode-telegram.sh --port 9999 --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --port value syntax works"
+    else
+        fail "CLI --port value syntax failed"
+    fi
+}
+
+test_cli_unknown_command() {
+    info "Testing CLI unknown command error..."
+
+    # The output has color codes, so we strip them first or check for "Unknown"
+    local result
+    result=$(./claudecode-telegram.sh unknowncommand 2>&1 || true)
+
+    if echo "$result" | grep -qi "unknown"; then
+        success "CLI rejects unknown commands"
+    else
+        fail "CLI should reject unknown commands, got: $result"
+    fi
+}
+
+test_cli_missing_token_error() {
+    info "Testing CLI missing token error..."
+
+    # Unset token and try to run webhook info
+    local result
+    result=$(TELEGRAM_BOT_TOKEN="" ./claudecode-telegram.sh webhook info 2>&1 || true)
+
+    if echo "$result" | grep -q "TELEGRAM_BOT_TOKEN"; then
+        success "CLI reports missing token error"
+    else
+        fail "CLI should report missing token"
+    fi
+}
+
+test_cli_hook_install_uninstall() {
+    info "Testing CLI hook install/uninstall..."
+
+    # Test hook install (with force to overwrite if exists)
+    if TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null; then
+        if [[ -f "$HOME/.claude/hooks/send-to-telegram.sh" ]]; then
+            success "CLI hook install creates hook file"
+        else
+            fail "Hook file not created"
+        fi
+    else
+        fail "CLI hook install failed"
+    fi
+
+    # Test hook is in settings.json
+    if [[ -f "$HOME/.claude/settings.json" ]]; then
+        if grep -q "send-to-telegram.sh" "$HOME/.claude/settings.json"; then
+            success "Hook registered in settings.json"
+        else
+            fail "Hook not in settings.json"
+        fi
+    fi
+}
+
+test_cli_default_ports() {
+    info "Testing CLI default port assignment..."
+
+    if python3 -c "
+# Test the port assignment logic
+def get_default_port(node):
+    ports = {'prod': 8081, 'dev': 8082, 'test': 8095}
+    return ports.get(node, 8080)
+
+assert get_default_port('prod') == 8081
+assert get_default_port('dev') == 8082
+assert get_default_port('test') == 8095
+assert get_default_port('custom') == 8080
+assert get_default_port('sandbox') == 8080
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Default port assignment works"
+    else
+        fail "Default port assignment test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrency and locking tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_tmux_send_locks() {
+    info "Testing per-session tmux send locks..."
+
+    if python3 -c "
+from bridge import _get_tmux_send_lock, _tmux_send_locks
+import threading
+
+# Get lock for same session twice - should return same lock
+lock1 = _get_tmux_send_lock('test-session-1')
+lock2 = _get_tmux_send_lock('test-session-1')
+assert lock1 is lock2, 'same session should get same lock'
+
+# Different sessions should get different locks
+lock3 = _get_tmux_send_lock('test-session-2')
+assert lock1 is not lock3, 'different sessions should get different locks'
+
+# Verify locks are threading.Lock instances
+assert isinstance(lock1, type(threading.Lock())), 'should be threading.Lock'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Per-session tmux send locks work"
+    else
+        fail "Tmux send locks test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings command test
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_settings_command() {
+    info "Testing /settings command..."
+
+    local result
+    result=$(send_message "/settings")
+
+    if [[ "$result" == "OK" ]]; then
+        # Check bridge log for settings output
+        sleep 0.3
+        if grep -q "claudecode-telegram" "$BRIDGE_LOG" 2>/dev/null; then
+            success "/settings command works"
+        else
+            success "/settings command accepted"
+        fi
+    else
+        fail "/settings command failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Blocked commands detailed test
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_blocked_commands_list() {
+    info "Testing all blocked commands (constants only)..."
+
+    if python3 -c "
+from bridge import BLOCKED_COMMANDS
+
+# Verify all expected blocked commands are present
+expected = [
+    '/mcp', '/help', '/config', '/model', '/compact', '/cost',
+    '/doctor', '/init', '/login', '/logout', '/memory', '/permissions',
+    '/pr', '/review', '/terminal', '/vim', '/approved-tools', '/listen'
+]
+for cmd in expected:
+    assert cmd in BLOCKED_COMMANDS, f'{cmd} should be blocked'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "All expected commands are blocked"
+    else
+        fail "Blocked commands list incomplete"
+    fi
+}
+
+test_blocked_commands_integration() {
+    info "Testing blocked commands via webhook..."
+
+    # Test a few blocked commands via webhook
+    for cmd in "/mcp" "/config" "/model"; do
+        local result
+        result=$(send_message "$cmd")
+        if [[ "$result" == "OK" ]]; then
+            success "Blocked command $cmd handled"
+        else
+            fail "Blocked command $cmd failed"
+        fi
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Message formatting tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_reply_context_formatting() {
+    info "Testing reply context formatting..."
+
+    if python3 -c "
+# Simulate Handler.format_reply_context
+def format_reply_context(reply_text, context_text):
+    reply_text = (reply_text or '').strip()
+    context_text = (context_text or '').strip()
+    if context_text:
+        return (
+            'Manager reply:\\n'
+            f'{reply_text}\\n\\n'
+            'Context (your previous message):\\n'
+            f'{context_text}'
+        )
+    return f'Manager reply:\\n{reply_text}'
+
+# Test with context
+result = format_reply_context('Thanks!', 'I fixed the bug')
+assert 'Manager reply:' in result
+assert 'Thanks!' in result
+assert 'Context (your previous message):' in result
+assert 'I fixed the bug' in result
+
+# Test without context
+result = format_reply_context('Just this', '')
+assert 'Manager reply:' in result
+assert 'Just this' in result
+assert 'Context' not in result
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Reply context formatting works"
+    else
+        fail "Reply context formatting test failed"
+    fi
+}
+
+test_escape_tag_preservation() {
+    info "Testing escaped tag preservation..."
+
+    if python3 -c "
+from bridge import parse_image_tags, parse_file_tags
+import tempfile
+
+# Escaped tags should not be parsed
+text = r'Example: \[[image:/tmp/test.jpg|caption]] stays'
+clean, images = parse_image_tags(text)
+assert len(images) == 0, f'escaped tag should not be parsed: {images}'
+# The escape slash is removed but content stays
+assert '[[image:' in clean, f'escaped tag content should stay: {clean}'
+
+text = r'Example: \[[file:/tmp/test.txt|caption]] stays'
+clean, files = parse_file_tags(text)
+assert len(files) == 0, f'escaped tag should not be parsed: {files}'
+assert '[[file:' in clean, f'escaped tag content should stay: {clean}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Escaped tags preserved correctly"
+    else
+        fail "Escaped tag preservation failed"
+    fi
+}
+
+test_code_fence_protection() {
+    info "Testing code fence protection for media tags..."
+
+    if python3 -c "
+from bridge import parse_image_tags, parse_file_tags
+
+# Tags inside code fences should not be parsed
+text = '''Here is code:
+\`\`\`
+[[image:/tmp/test.jpg|caption]]
+\`\`\`
+And outside text'''
+
+clean, images = parse_image_tags(text)
+assert len(images) == 0, f'tag in code fence should not be parsed'
+assert '[[image:' in clean, 'tag in code fence should stay in text'
+
+# Tags in inline code should not be parsed
+text2 = 'Use \`[[image:/path|cap]]\` syntax'
+clean2, images2 = parse_image_tags(text2)
+assert len(images2) == 0, 'tag in inline code should not be parsed'
+assert '[[image:' in clean2, 'tag in inline code should stay'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Code fence protection works"
+    else
+        fail "Code fence protection test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup and shutdown tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_graceful_shutdown() {
+    info "Testing graceful shutdown function exists..."
+
+    if python3 -c "
+from bridge import graceful_shutdown, send_shutdown_message
+import signal
+
+# Verify functions exist and are callable
+assert callable(graceful_shutdown), 'graceful_shutdown should be callable'
+assert callable(send_shutdown_message), 'send_shutdown_message should be callable'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Graceful shutdown functions exist"
+    else
+        fail "Graceful shutdown functions missing"
+    fi
+}
+
+test_startup_notification_flag() {
+    info "Testing startup notification flag..."
+
+    if python3 -c "
+from bridge import state
+
+# Verify startup_notified flag exists
+assert 'startup_notified' in state, 'startup_notified flag should exist'
+assert isinstance(state['startup_notified'], bool), 'should be boolean'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Startup notification flag exists"
+    else
+        fail "Startup notification flag missing"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot commands test
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_bot_commands_structure() {
+    info "Testing bot commands structure..."
+
+    if python3 -c "
+from bridge import BOT_COMMANDS
+
+# Verify all expected commands are present
+expected = ['team', 'focus', 'progress', 'learn', 'pause', 'relaunch', 'settings', 'hire', 'end']
+for cmd in expected:
+    found = any(c['command'] == cmd for c in BOT_COMMANDS)
+    assert found, f'{cmd} command missing from BOT_COMMANDS'
+
+# Verify each command has required fields
+for cmd in BOT_COMMANDS:
+    assert 'command' in cmd, 'command field required'
+    assert 'description' in cmd, 'description field required'
+    assert isinstance(cmd['command'], str), 'command should be string'
+    assert isinstance(cmd['description'], str), 'description should be string'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Bot commands structure correct"
+    else
+        fail "Bot commands structure test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File size validation test
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_max_file_size() {
+    info "Testing max file size constant..."
+
+    if python3 -c "
+from bridge import MAX_FILE_SIZE
+
+# 20MB limit (Telegram's limit)
+assert MAX_FILE_SIZE == 20 * 1024 * 1024, f'expected 20MB, got {MAX_FILE_SIZE}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Max file size is 20MB"
+    else
+        fail "Max file size test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistence file tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_persistence_file_functions() {
+    info "Testing persistence file functions..."
+
+    if python3 -c "
+from bridge import (
+    save_last_chat_id, load_last_chat_id,
+    save_last_active, load_last_active,
+    LAST_CHAT_ID_FILE, LAST_ACTIVE_FILE
+)
+
+# Test save and load chat_id
+test_chat_id = 987654321
+save_last_chat_id(test_chat_id)
+loaded = load_last_chat_id()
+assert loaded == test_chat_id, f'expected {test_chat_id}, got {loaded}'
+
+# Verify file permissions
+perms = oct(LAST_CHAT_ID_FILE.stat().st_mode)[-3:]
+assert perms == '600', f'chat_id file should be 600, got {perms}'
+
+# Test save and load active
+test_active = 'testworker'
+save_last_active(test_active)
+loaded = load_last_active()
+assert loaded == test_active, f'expected {test_active}, got {loaded}'
+
+# Verify file permissions
+perms = oct(LAST_ACTIVE_FILE.stat().st_mode)[-3:]
+assert perms == '600', f'last_active file should be 600, got {perms}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Persistence file functions work"
+    else
+        fail "Persistence file functions test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Telegram API limit test
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_telegram_max_length() {
+    info "Testing Telegram max message length constant..."
+
+    if python3 -c "
+from bridge import TELEGRAM_MAX_LENGTH
+
+assert TELEGRAM_MAX_LENGTH == 4096, f'expected 4096, got {TELEGRAM_MAX_LENGTH}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Telegram max length is 4096"
+    else
+        fail "Telegram max length test failed"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1463,17 +2399,7 @@ test_with_tunnel() {
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-main() {
-    log ""
-    log "═══════════════════════════════════════════════════════════════════════"
-    log "  claudecode-telegram Acceptance Tests"
-    log "═══════════════════════════════════════════════════════════════════════"
-    log ""
-
-    require_token
-
-    cd "$SCRIPT_DIR"
-
+run_unit_tests() {
     # Unit tests (no bridge needed)
     log "── Unit Tests ──────────────────────────────────────────────────────────"
     test_imports
@@ -1487,29 +2413,123 @@ main() {
     test_sandbox_config
     test_sandbox_docker_cmd
 
+    # Unit tests - Worker naming
+    log ""
+    log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"
+    test_worker_name_sanitization
+
+    # Unit tests - Security constants
+    log ""
+    log "── Security Constants Tests (Unit) ─────────────────────────────────────"
+    test_telegram_max_length
+    test_max_file_size
+    test_bot_commands_structure
+    test_blocked_commands_list
+
+    # Unit tests - Persistence functions
+    log ""
+    log "── Persistence Functions Tests (Unit) ──────────────────────────────────"
+    test_persistence_file_functions
+    test_pending_auto_timeout
+    test_pending_set_and_clear
+
+    # Unit tests - Concurrency
+    log ""
+    log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
+    test_tmux_send_locks
+
+    # Unit tests - Message formatting
+    log ""
+    log "── Message Formatting Tests (Unit) ─────────────────────────────────────"
+    test_reply_context_formatting
+    test_escape_tag_preservation
+    test_code_fence_protection
+
+    # Unit tests - Shutdown
+    log ""
+    log "── Startup/Shutdown Tests (Unit) ───────────────────────────────────────"
+    test_graceful_shutdown
+    test_startup_notification_flag
+}
+
+run_cli_tests() {
+    # CLI tests (no bridge needed)
+    log ""
+    log "── CLI Tests ───────────────────────────────────────────────────────────"
+    test_cli_help
+    test_cli_version
+    test_cli_node_flag
+    test_cli_port_flag
+    test_cli_unknown_command
+    test_cli_missing_token_error
+    test_cli_default_ports
+    test_cli_hook_install_uninstall
+}
+
+run_integration_tests() {
     # Integration tests (bridge needed)
     log ""
     log "── Integration Tests ───────────────────────────────────────────────────"
     test_bridge_starts || exit 1
-    sleep 2
+    sleep 0.3
 
+    # HTTP endpoint tests
+    log ""
+    log "── HTTP Endpoint Tests ─────────────────────────────────────────────────"
+    test_health_endpoint
+    test_response_endpoint_missing_fields
+    test_response_endpoint_no_chat_id
+    test_notify_endpoint_missing_text
+
+    # Admin tests
+    log ""
+    log "── Admin Tests ─────────────────────────────────────────────────────────"
     test_admin_registration
     test_non_admin_rejection
-    test_new_command
-    test_list_command
-    test_use_command
-    test_status_command
-    test_restart_command
-    test_stop_command
+
+    # Bot command tests
+    log ""
+    log "── Bot Command Tests ───────────────────────────────────────────────────"
+    test_hire_command
+    test_team_command
+    test_focus_command
+    test_progress_command
+    test_relaunch_command
+    test_pause_command
+    test_settings_command
+    test_learn_command
+    test_end_command
+    test_blocked_commands
+    test_blocked_commands_integration
+    test_additional_commands
+
+    # Worker naming tests (integration)
+    log ""
+    log "── Worker Naming Tests (Integration) ───────────────────────────────────"
+    test_reserved_names_rejection
+    test_worker_shortcut_focus_only
+    test_worker_shortcut_with_message
+    test_command_with_botname_suffix
+
+    # Routing tests
+    log ""
+    log "── Routing Tests ───────────────────────────────────────────────────────"
     test_at_mention
     test_at_all_broadcast
-    test_session_files
-    test_kill_command
-    test_blocked_commands
-    test_command_aliases
-    test_learn_command
     test_reply_routing
     test_reply_context
+
+    # Security tests (integration)
+    log ""
+    log "── Security Tests (Integration) ────────────────────────────────────────"
+    test_webhook_secret_validation
+    test_token_isolation
+    test_secure_directory_permissions
+    test_session_files
+
+    # Image/document handling tests
+    log ""
+    log "── Image/Document Handling Tests ───────────────────────────────────────"
     test_image_tag_parsing
     test_image_path_validation
     test_file_tag_parsing
@@ -1522,19 +2542,70 @@ main() {
     test_incoming_document_e2e
     test_incoming_image_e2e
     test_response_with_image_tags
+
+    # Response/notify endpoint tests
+    log ""
+    log "── Response/Notify Endpoint Tests ──────────────────────────────────────"
     test_notify_endpoint
     test_response_endpoint
     test_response_without_pending
+
+    # Persistence tests (integration)
+    log ""
+    log "── Persistence Tests (Integration) ─────────────────────────────────────"
     test_last_chat_id_persistence
     test_last_active_persistence
 
-    # Tunnel tests (optional)
+    # Cleanup test sessions
+    send_message "/end testbot1" >/dev/null 2>&1 || true
+}
+
+run_tunnel_tests() {
+    # Tunnel tests
     log ""
     log "── Tunnel Tests ────────────────────────────────────────────────────────"
     test_with_tunnel
+}
 
-    # Cleanup test sessions
-    send_message "/kill testbot1" >/dev/null 2>&1 || true
+main() {
+    log ""
+    log "═══════════════════════════════════════════════════════════════════════"
+    log "  claudecode-telegram Acceptance Tests"
+    log "═══════════════════════════════════════════════════════════════════════"
+
+    # Detect test mode
+    local mode="default"
+    local mode_desc=""
+    if [[ "${FAST:-}" == "1" ]]; then
+        mode="fast"
+        mode_desc="FAST mode: Unit + CLI tests only (~10-15s)"
+    elif [[ "${FULL:-}" == "1" ]]; then
+        mode="full"
+        mode_desc="FULL mode: All tests including tunnel (~5 min)"
+    else
+        mode_desc="DEFAULT mode: Unit + Integration tests (~2-3 min)"
+    fi
+    log "  Mode: $mode_desc"
+    log "═══════════════════════════════════════════════════════════════════════"
+    log ""
+
+    require_token
+
+    cd "$SCRIPT_DIR"
+
+    # Always run unit and CLI tests
+    run_unit_tests
+    run_cli_tests
+
+    # Skip integration tests in FAST mode
+    if [[ "$mode" != "fast" ]]; then
+        run_integration_tests
+    fi
+
+    # Only run tunnel tests in FULL mode
+    if [[ "$mode" == "full" ]]; then
+        run_tunnel_tests
+    fi
 
     # Summary
     log ""

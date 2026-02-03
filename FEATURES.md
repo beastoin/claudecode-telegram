@@ -15,16 +15,6 @@
 - `/hire <name>` — create new worker (b8ffadb)
 - `/end <name>` — offboard worker (b8ffadb)
 
-### Aliases
-- `/new` → `/hire` (238c58b)
-- `/use` → `/focus` (238c58b)
-- `/list` → `/team` (238c58b)
-- `/kill` → `/end` (238c58b)
-- `/status` → `/progress` (958c890)
-- `/stop` → `/pause` (958c890)
-- `/restart` → `/relaunch` (8d0a939)
-- `/system` → `/settings` (5895f72)
-
 ### Dynamic worker shortcuts
 - `/<worker>` with **no** message → switch focus to that worker (1b5266f)
 - `/<worker> <message>` → route message to worker **and** switch focus (1b5266f)
@@ -205,11 +195,6 @@ These slash commands are rejected with a message:
 ### Worker shortcuts
 - `/<worker>` with no message → focus that worker (1b5266f)
 - `/<worker> <message>` → route to worker and focus them (1b5266f)
-
-### Unregistered tmux adoption
-- If a running `claude` tmux session exists without prefix, bot requests: (238c58b)
-  `{"name": "your-worker-name"}` to claim it
-- `/team` lists unclaimed running Claude sessions (if any) (238c58b)
 
 ## Security features
 - Token isolation: Telegram token stays in bridge only; hook never sees it (86228c8)
