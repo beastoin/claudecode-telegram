@@ -64,6 +64,7 @@ These slash commands are rejected with a message:
 - `--sandbox-image <img>` — Docker image (2e1c548)
 - `--mount <path>` — extra mount (host:container or same path) (df9de52)
 - `--mount-ro <path>` — extra read-only mount (df9de52)
+- `--no-tmux`, `--direct` — direct mode: bypass tmux, use Claude JSON streaming (NEW)
 
 ### Node selection & defaults
 - Target resolution: `--node` > `NODE_NAME` > auto-detect running nodes (fb276e8)
@@ -103,6 +104,7 @@ These slash commands are rejected with a message:
 - `SANDBOX_ENABLED` — enable Docker sandbox (`1`/`0`) (2e1c548)
 - `SANDBOX_IMAGE` — Docker image (default: `claudecode-telegram:latest`) (2e1c548)
 - `SANDBOX_MOUNTS` — extra mounts (comma-separated, supports `ro:` prefix) (2e1c548)
+- `DIRECT_MODE` — direct mode: bypass tmux, use JSON streaming (`1`/`0`, default `0`) (NEW)
 
 ### CLI (claudecode-telegram.sh)
 - `TELEGRAM_BOT_TOKEN` (required) (238c58b)
@@ -114,6 +116,7 @@ These slash commands are rejected with a message:
 - `SANDBOX_ENABLED` (optional) (2e1c548)
 - `SANDBOX_IMAGE` (optional) (2e1c548)
 - `SANDBOX_MOUNTS` (derived from flags) (df9de52)
+- `DIRECT_MODE` (optional, or from `--no-tmux`/`--direct` flag) (NEW)
 
 ### Hook (hooks/send-to-telegram.sh)
 - `BRIDGE_URL` — full bridge URL (preferred) (86228c8)
@@ -244,3 +247,4 @@ These slash commands are rejected with a message:
 - New workers receive a welcome message with file-tag instructions; direct (non-sandbox) mode auto-accepts the initial confirmation prompt (1b5266f)
 - Sandbox mode runs workers in Docker with default mount `~ → /workspace` (2e1c548)
 - Optional extra mounts via `--mount` and `--mount-ro` (df9de52)
+- Direct mode (`--no-tmux`/`--direct`) runs workers as subprocesses with JSON streaming, bypassing tmux (NEW)

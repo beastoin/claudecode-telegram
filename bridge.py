@@ -14,8 +14,10 @@ import time
 import re
 import urllib.request
 import uuid
+from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Dict, Optional, Any
 
 
 class ReuseAddrServer(ThreadingHTTPServer):
@@ -59,6 +61,24 @@ if _mounts_env:
 
 # Temporary file inbox (session-isolated, auto-cleaned)
 FILE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
+
+# Direct mode: bypass tmux, use Claude JSON streaming
+# When enabled, workers are subprocess.Popen processes instead of tmux sessions
+DIRECT_MODE = os.environ.get("DIRECT_MODE", "0") == "1"
+
+
+@dataclass
+class DirectWorker:
+    """Represents a Claude worker running as a subprocess with JSON streaming."""
+    name: str
+    process: subprocess.Popen
+    chat_id: Optional[int] = None
+    pending: bool = False
+    reader_thread: Optional[threading.Thread] = None
+
+
+# Dict of active direct workers: name -> DirectWorker
+direct_workers: Dict[str, DirectWorker] = {}
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
@@ -755,7 +775,15 @@ def clear_pending(name):
 
 
 def is_pending(name):
-    """Check if session has a pending request. Auto-clears after 10 min timeout."""
+    """Check if session has a pending request. Auto-clears after 10 min timeout.
+
+    In DIRECT_MODE, checks the DirectWorker.pending flag instead.
+    """
+    # Direct mode: check worker pending flag
+    if DIRECT_MODE:
+        worker = direct_workers.get(name)
+        return worker.pending if worker else False
+
     pending = get_pending_file(name)
     if not pending.exists():
         return False
@@ -797,7 +825,20 @@ def scan_tmux_sessions():
 
 
 def get_registered_sessions(registered=None):
-    """Get registered sessions from tmux and reconcile active state."""
+    """Get registered sessions from tmux (or direct workers) and reconcile active state.
+
+    In DIRECT_MODE, returns direct workers instead of tmux sessions.
+    """
+    # Direct mode: return direct workers
+    if DIRECT_MODE:
+        workers = get_direct_workers()
+        # Reconcile active state
+        if state["active"] and state["active"] not in workers:
+            state["active"] = None
+        if workers and not state["active"]:
+            state["active"] = list(workers.keys())[0]
+        return workers
+
     if registered is None:
         registered = scan_tmux_sessions()
 
@@ -1020,15 +1061,318 @@ def stop_docker_container(name):
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Direct Worker Functions (JSON streaming mode, bypasses tmux)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_direct_worker(name: str) -> tuple[bool, Optional[str]]:
+    """Create a new Claude worker using JSON streaming mode.
+
+    Spawns claude --output-format stream-json subprocess with stdin/stdout pipes.
+    Returns (success, error_message).
+    """
+    if name in direct_workers:
+        return False, f"Worker '{name}' already exists"
+
+    try:
+        # Start Claude in JSON streaming mode
+        process = subprocess.Popen(
+            ["claude", "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+        )
+
+        worker = DirectWorker(name=name, process=process)
+        direct_workers[name] = worker
+
+        # Start reader thread to process output
+        reader = threading.Thread(
+            target=read_direct_worker_output,
+            args=(name, process),
+            daemon=True
+        )
+        worker.reader_thread = reader
+        reader.start()
+
+        # Send welcome message
+        welcome = (
+            "You are connected to Telegram via claudecode-telegram bridge in direct mode. "
+            "Manager can send you messages. "
+            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
+            "Allowed paths: /tmp, current directory."
+        )
+        send_to_direct_worker(name, welcome, None)
+
+        print(f"Started direct worker '{name}' (PID {process.pid})")
+        return True, None
+
+    except FileNotFoundError:
+        return False, "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+    except Exception as e:
+        return False, f"Failed to start worker: {e}"
+
+
+def kill_direct_worker(name: str) -> tuple[bool, Optional[str]]:
+    """Terminate a direct worker subprocess.
+
+    Returns (success, error_message).
+    """
+    worker = direct_workers.get(name)
+    if not worker:
+        return False, f"Worker '{name}' not found"
+
+    try:
+        # Terminate the process
+        if worker.process.poll() is None:  # Still running
+            worker.process.terminate()
+            try:
+                worker.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                worker.process.kill()
+                worker.process.wait()
+
+        # Clean up inbox
+        cleanup_inbox(name)
+
+        # Remove from dict
+        del direct_workers[name]
+
+        print(f"Killed direct worker '{name}'")
+        return True, None
+
+    except Exception as e:
+        return False, f"Failed to kill worker: {e}"
+
+
+def send_to_direct_worker(name: str, text: str, chat_id: Optional[int]) -> bool:
+    """Send a message to a direct worker via stdin JSON.
+
+    Returns True if message was sent successfully.
+    """
+    worker = direct_workers.get(name)
+    if not worker:
+        print(f"Direct worker '{name}' not found")
+        return False
+
+    if worker.process.poll() is not None:
+        print(f"Direct worker '{name}' is not running")
+        return False
+
+    # Update chat_id for response routing
+    if chat_id:
+        worker.chat_id = chat_id
+
+    # Format message in Claude's expected JSON input format
+    message = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": text}]
+        }
+    }
+
+    try:
+        worker.process.stdin.write(json.dumps(message) + "\n")
+        worker.process.stdin.flush()
+        worker.pending = True
+        print(f"Sent to direct worker '{name}': {text[:50]}...")
+        return True
+    except Exception as e:
+        print(f"Failed to send to direct worker '{name}': {e}")
+        return False
+
+
+def read_direct_worker_output(name: str, process: subprocess.Popen):
+    """Read JSON output from a direct worker and send responses to Telegram.
+
+    Runs in a background thread, reading newline-delimited JSON from stdout.
+    """
+    worker = direct_workers.get(name)
+    accumulated_text = ""
+
+    try:
+        for line in iter(process.stdout.readline, ""):
+            if not line:
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                event = json.loads(line)
+                text = handle_direct_event(name, event)
+                if text:
+                    accumulated_text += text
+
+                # Check if this is a result/done event
+                event_type = event.get("type", "")
+                if event_type == "result":
+                    # Send accumulated response to Telegram
+                    if accumulated_text and worker and worker.chat_id:
+                        send_direct_worker_response(name, accumulated_text, worker.chat_id)
+                    accumulated_text = ""
+                    if worker:
+                        worker.pending = False
+
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error from worker '{name}': {e}")
+
+    except Exception as e:
+        print(f"Reader thread error for worker '{name}': {e}")
+
+    print(f"Reader thread for worker '{name}' exited")
+
+
+def handle_direct_event(name: str, event: dict) -> Optional[str]:
+    """Handle a single JSON event from Claude.
+
+    Returns text content if this event contains response text, else None.
+    """
+    event_type = event.get("type", "")
+
+    if event_type == "assistant":
+        # Extract text content from assistant message
+        message = event.get("message", {})
+        content = message.get("content", [])
+        texts = []
+        for item in content:
+            if item.get("type") == "text":
+                texts.append(item.get("text", ""))
+        return "".join(texts) if texts else None
+
+    elif event_type == "content_block_delta":
+        # Streaming delta - extract text
+        delta = event.get("delta", {})
+        if delta.get("type") == "text_delta":
+            return delta.get("text", "")
+
+    elif event_type == "error":
+        error = event.get("error", {})
+        error_msg = error.get("message", "Unknown error")
+        print(f"Error from worker '{name}': {error_msg}")
+        return f"[Error: {error_msg}]"
+
+    return None
+
+
+def send_direct_worker_response(name: str, text: str, chat_id: int):
+    """Send a direct worker's response to Telegram.
+
+    Handles message splitting, image/file tags similar to hook response.
+    """
+    # Parse image and file tags from text
+    clean_text, images = parse_image_tags(text)
+    clean_text, files = parse_file_tags(clean_text)
+
+    # Send text message if there's text content
+    if clean_text:
+        prefix_reserve = len(name) + 30
+        chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
+        formatted_parts = format_multipart_messages(name, chunks)
+
+        prev_msg_id = None
+        for i, part in enumerate(formatted_parts):
+            msg_data = {
+                "chat_id": chat_id,
+                "text": part,
+                "parse_mode": "HTML"
+            }
+            if prev_msg_id:
+                msg_data["reply_to_message_id"] = prev_msg_id
+
+            result = telegram_api("sendMessage", msg_data)
+            if result and result.get("ok"):
+                prev_msg_id = result.get("result", {}).get("message_id")
+                print(f"Direct response sent: {name} -> Telegram OK")
+            else:
+                print(f"Direct response failed: {name} -> {result}")
+
+            if i < len(formatted_parts) - 1:
+                time.sleep(0.05)
+
+    # Send images
+    for img_path, img_caption in images:
+        full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
+        if send_photo(chat_id, img_path, full_caption):
+            print(f"Image sent: {name} -> {img_path}")
+        else:
+            telegram_api("sendMessage", {
+                "chat_id": chat_id,
+                "text": f"<b>{name}:</b> [Image failed: {img_path}]",
+                "parse_mode": "HTML"
+            })
+
+    # Send files/documents
+    for file_path, file_caption in files:
+        full_caption = f"{name}: {file_caption}" if file_caption else f"{name}:"
+        if send_document(chat_id, file_path, full_caption):
+            print(f"File sent: {name} -> {file_path}")
+        else:
+            telegram_api("sendMessage", {
+                "chat_id": chat_id,
+                "text": f"<b>{name}:</b> [File failed: {file_path}]",
+                "parse_mode": "HTML"
+            })
+
+
+def is_direct_worker_running(name: str) -> bool:
+    """Check if a direct worker process is still alive."""
+    worker = direct_workers.get(name)
+    if not worker:
+        return False
+    return worker.process.poll() is None
+
+
+def get_direct_workers() -> Dict[str, dict]:
+    """Get all direct workers in a format similar to get_registered_sessions.
+
+    Returns dict of name -> {"process": Popen, "pending": bool, "chat_id": int|None}
+    """
+    result = {}
+    for name, worker in direct_workers.items():
+        if worker.process.poll() is None:  # Still running
+            result[name] = {
+                "process": worker.process,
+                "pending": worker.pending,
+                "chat_id": worker.chat_id,
+            }
+    return result
+
+
+def kill_all_direct_workers():
+    """Kill all direct workers. Called during shutdown."""
+    names = list(direct_workers.keys())
+    for name in names:
+        try:
+            kill_direct_worker(name)
+        except Exception as e:
+            print(f"Error killing direct worker '{name}': {e}")
+
+
 def create_session(name):
     """Create a new Claude instance.
 
     SECURITY: Token is NOT exported to Claude session. Hook forwards responses
     to bridge via localhost HTTP, bridge sends to Telegram. Token isolation.
 
+    In DIRECT_MODE, uses JSON streaming subprocess instead of tmux.
+
     Args:
         name: Worker name
     """
+    # Direct mode: use JSON streaming subprocess
+    if DIRECT_MODE:
+        ok, err = create_direct_worker(name)
+        if ok:
+            state["active"] = name
+            save_last_active(name)
+            ensure_session_dir(name)
+        return ok, err
+
     tmux_name = f"{TMUX_PREFIX}{name}"
 
     if tmux_exists(tmux_name):
@@ -1087,6 +1431,18 @@ def create_session(name):
 
 def kill_session(name):
     """Kill a Claude instance."""
+    # Direct mode: kill subprocess
+    if DIRECT_MODE:
+        ok, err = kill_direct_worker(name)
+        if ok:
+            if state["active"] == name:
+                state["active"] = None
+                # Set active to another worker if available
+                workers = get_direct_workers()
+                if workers:
+                    state["active"] = list(workers.keys())[0]
+        return ok, err
+
     registered = get_registered_sessions()
     if name not in registered:
         return False, f"Worker '{name}' not found"
@@ -1111,7 +1467,16 @@ def kill_session(name):
 
 
 def restart_claude(name):
-    """Restart claude in an existing tmux session."""
+    """Restart claude in an existing tmux session (or recreate direct worker)."""
+    # Direct mode: kill and recreate
+    if DIRECT_MODE:
+        if name in direct_workers:
+            if is_direct_worker_running(name):
+                return False, "Worker is already running"
+            # Worker exists but not running - recreate
+            kill_direct_worker(name)
+        return create_direct_worker(name)
+
     registered = get_registered_sessions()
     if name not in registered:
         return False, f"Worker '{name}' not found"
@@ -1770,21 +2135,32 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, "Can't find them. Check /team for who's available.")
             return True
 
-        tmux_name = session["tmux"]
-        exists = tmux_exists(tmux_name)
         pending = is_pending(name)
 
         status = []
         status.append(f"Progress for focused worker: {name}")
         status.append("Focused: yes")
         status.append(f"Working: {'yes' if pending else 'no'}")
-        status.append(f"Online: {'yes' if exists else 'no'}")
 
-        if exists:
-            claude_running = is_claude_running(tmux_name)
-            status.append(f"Ready: {'yes' if claude_running else 'no'}")
-            if not claude_running:
-                status.append("Needs attention: worker app is not running. Use /relaunch.")
+        # Direct mode: check subprocess status
+        if DIRECT_MODE:
+            running = is_direct_worker_running(name)
+            status.append(f"Online: {'yes' if running else 'no'}")
+            status.append(f"Ready: {'yes' if running else 'no'}")
+            if not running:
+                status.append("Needs attention: worker process is not running. Use /relaunch.")
+            status.append("Mode: direct (JSON streaming)")
+        else:
+            tmux_name = session["tmux"]
+            exists = tmux_exists(tmux_name)
+            status.append(f"Online: {'yes' if exists else 'no'}")
+
+            if exists:
+                claude_running = is_claude_running(tmux_name)
+                status.append(f"Ready: {'yes' if claude_running else 'no'}")
+                if not claude_running:
+                    status.append("Needs attention: worker app is not running. Use /relaunch.")
+            status.append("Mode: tmux")
 
         self.reply(chat_id, "\n".join(status))
         return True
@@ -1796,6 +2172,17 @@ class Handler(BaseHTTPRequestHandler):
             return True
 
         name = state["active"]
+
+        # Direct mode: terminate the process (can't interrupt, only kill)
+        if DIRECT_MODE:
+            worker = direct_workers.get(name)
+            if worker:
+                worker.pending = False
+                # Note: In direct mode, we can't send escape. We just clear pending.
+                # The user can use /end and /hire to restart if needed.
+            self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
+            return True
+
         registered = get_registered_sessions()
         session = registered.get(name)
         if session:
@@ -1879,11 +2266,6 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, "Can't find them. Check /team.")
             return True
 
-        tmux_name = session["tmux"]
-        if not tmux_exists(tmux_name) or not is_claude_running(tmux_name):
-            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
-            return True
-
         # Build prompt based on whether topic is provided
         topic = topic.strip() if topic else ""
         if topic:
@@ -1900,6 +2282,39 @@ class Handler(BaseHTTPRequestHandler):
                 "Fix: <the better approach>\n"
                 "Why: <root cause or insight>"
             )
+
+        # Direct mode
+        if DIRECT_MODE:
+            if not is_direct_worker_running(name):
+                self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
+                return True
+
+            worker = direct_workers.get(name)
+            if worker:
+                worker.pending = True
+                worker.chat_id = chat_id
+
+            threading.Thread(
+                target=send_typing_loop,
+                args=(chat_id, name),
+                daemon=True
+            ).start()
+
+            send_ok = send_to_direct_worker(name, prompt, chat_id)
+
+            if msg_id and send_ok:
+                telegram_api("setMessageReaction", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reaction": [{"type": "emoji", "emoji": "👀"}]
+                })
+            return True
+
+        # Tmux mode
+        tmux_name = session["tmux"]
+        if not tmux_exists(tmux_name) or not is_claude_running(tmux_name):
+            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
+            return True
 
         set_pending(name, chat_id)
 
@@ -1924,8 +2339,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_to_active(self, text, chat_id, msg_id):
         """Route message to active session or handle no-session cases."""
-        registered = scan_tmux_sessions()
-        registered = get_registered_sessions(registered)
+        # get_registered_sessions handles both tmux and direct mode
+        registered = get_registered_sessions()
 
         if not state["active"]:
             if registered:
@@ -1950,12 +2365,18 @@ class Handler(BaseHTTPRequestHandler):
 
         sent_to = []
         for name in sessions:
-            session = registered[name]
-            tmux_name = session["tmux"]
-            if tmux_exists(tmux_name) and is_claude_running(tmux_name):
-                # Route without setting as active
-                self.route_message(name, text, chat_id, msg_id, one_off=True)
-                sent_to.append(name)
+            # Direct mode: check subprocess status
+            if DIRECT_MODE:
+                if is_direct_worker_running(name):
+                    self.route_message(name, text, chat_id, msg_id, one_off=True)
+                    sent_to.append(name)
+            else:
+                session = registered[name]
+                tmux_name = session["tmux"]
+                if tmux_exists(tmux_name) and is_claude_running(tmux_name):
+                    # Route without setting as active
+                    self.route_message(name, text, chat_id, msg_id, one_off=True)
+                    sent_to.append(name)
 
         if not sent_to:
             self.reply(chat_id, "No one's online to share with.")
@@ -1968,6 +2389,38 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"Can't find {session_name}. Check /team for who's available.")
             return
 
+        # Direct mode: send to subprocess via JSON
+        if DIRECT_MODE:
+            if not is_direct_worker_running(session_name):
+                self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
+                return
+
+            print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
+
+            # Start typing indicator (direct mode uses pending in DirectWorker)
+            worker = direct_workers.get(session_name)
+            if worker:
+                worker.pending = True
+                worker.chat_id = chat_id
+
+            threading.Thread(
+                target=send_typing_loop,
+                args=(chat_id, session_name),
+                daemon=True
+            ).start()
+
+            send_ok = send_to_direct_worker(session_name, text, chat_id)
+
+            # Add 👀 reaction immediately for direct mode (no prompt to check)
+            if msg_id and send_ok:
+                telegram_api("setMessageReaction", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reaction": [{"type": "emoji", "emoji": "👀"}]
+                })
+            return
+
+        # Tmux mode
         tmux_name = session["tmux"]
 
         if not tmux_exists(tmux_name):
@@ -2039,6 +2492,12 @@ def graceful_shutdown(signum, frame):
         pass
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
+
+    # Kill all direct workers on shutdown
+    if DIRECT_MODE and direct_workers:
+        print(f"Killing {len(direct_workers)} direct worker(s)...")
+        kill_all_direct_workers()
+
     send_shutdown_message()
     sys.exit(0)
 

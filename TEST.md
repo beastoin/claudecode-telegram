@@ -71,18 +71,19 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 98.3%** (116 of 118 features tested)
+**Current coverage: 98.5%** (130 of 132 features tested)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
 | Telegram Bot Commands | 15 | 100% |
-| CLI Commands & Flags | 35 | 97% |
+| CLI Commands & Flags | 37 | 97% |
 | Message Routing | 12 | 100% |
 | Security | 10 | 100% |
 | Hook Behavior | 15 | 100% |
 | Persistence Files | 14 | 100% |
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
+| Direct Mode | 14 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **Only 2 features untested:**
@@ -91,7 +92,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Complete Test Inventory
 
-> **Total: 159 test functions**
+> **Total: 173 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -135,6 +136,25 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | `test_file_tag_welcome_instructions` | File tag parsers available |
 | `test_reply_context_formatting` | Reply context format |
 | `test_document_message_format` | Document message format |
+| `test_direct_mode_flag` | --no-tmux and --direct flags |
+| `test_direct_mode_env_var` | DIRECT_MODE env var |
+| `test_direct_worker_dataclass` | DirectWorker dataclass |
+| `test_direct_worker_functions_exist` | Direct worker functions exist |
+| `test_direct_mode_no_hook_install` | Direct mode skips hook install |
+| `test_direct_mode_handle_event` | handle_direct_event parses JSON |
+| `test_direct_mode_is_pending` | is_pending in direct mode |
+| `test_direct_mode_get_registered_sessions` | get_registered_sessions in direct mode |
+| `test_direct_mode_graceful_shutdown` | Shutdown kills direct workers |
+
+### Direct Mode Integration Tests (Default mode, bridge required)
+
+| Test | Description |
+|------|-------------|
+| `test_direct_mode_bridge_starts` | Direct mode bridge starts and responds |
+| `test_direct_mode_hire_creates_worker` | /hire creates direct worker subprocess |
+| `test_direct_mode_message_routing` | Messages routed to direct worker |
+| `test_direct_mode_team_shows_workers` | /team lists direct workers |
+| `test_direct_mode_end_kills_worker` | /end terminates direct worker |
 
 ### CLI Tests (FAST mode, no bridge)
 

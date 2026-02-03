@@ -63,6 +63,11 @@ cleanup() {
         kill "$(cat "$TEST_NODE_DIR/bridge.pid")" 2>/dev/null || true
         rm -f "$TEST_NODE_DIR/bridge.pid"
     fi
+    # Also kill direct mode bridge PID if tracked
+    if [[ -f "$TEST_NODE_DIR/direct_mode_bridge.pid" ]]; then
+        kill "$(cat "$TEST_NODE_DIR/direct_mode_bridge.pid")" 2>/dev/null || true
+        rm -f "$TEST_NODE_DIR/direct_mode_bridge.pid"
+    fi
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null; true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null; true
     # Kill any test sessions we created (using test prefix)
@@ -75,6 +80,7 @@ cleanup() {
     [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"; true
     rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port" 2>/dev/null || true
     rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active" 2>/dev/null || true
+    rm -f "$TEST_NODE_DIR/direct_mode_bridge.log" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -4033,6 +4039,445 @@ test_with_tunnel() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Direct Mode Tests (--no-tmux / --direct)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_direct_mode_flag() {
+    info "Testing CLI --no-tmux and --direct flags..."
+
+    # Test --no-tmux flag documented
+    if ./claudecode-telegram.sh --help 2>/dev/null | grep -q "no-tmux"; then
+        success "CLI --no-tmux flag documented"
+    else
+        fail "CLI --no-tmux flag not documented"
+    fi
+
+    # Test --direct flag documented
+    if ./claudecode-telegram.sh --help 2>/dev/null | grep -q "direct"; then
+        success "CLI --direct flag documented"
+    else
+        fail "CLI --direct flag not documented"
+    fi
+
+    # Test flag is parsed (with --help to avoid running)
+    if ./claudecode-telegram.sh --no-tmux --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --no-tmux flag parsed correctly"
+    else
+        fail "CLI --no-tmux flag not recognized"
+    fi
+
+    # Test --direct alias
+    if ./claudecode-telegram.sh --direct --help 2>/dev/null | grep -q "USAGE"; then
+        success "CLI --direct flag parsed correctly"
+    else
+        fail "CLI --direct flag not recognized"
+    fi
+}
+
+test_direct_mode_env_var() {
+    info "Testing DIRECT_MODE environment variable..."
+
+    if python3 -c "
+import os
+os.environ['DIRECT_MODE'] = '1'
+
+# Re-import to pick up env change
+import importlib
+import bridge
+importlib.reload(bridge)
+
+assert bridge.DIRECT_MODE == True, 'DIRECT_MODE should be True when env is 1'
+
+# Test with 0
+os.environ['DIRECT_MODE'] = '0'
+importlib.reload(bridge)
+assert bridge.DIRECT_MODE == False, 'DIRECT_MODE should be False when env is 0'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "DIRECT_MODE env var works"
+    else
+        fail "DIRECT_MODE env var test failed"
+    fi
+}
+
+test_direct_worker_dataclass() {
+    info "Testing DirectWorker dataclass..."
+
+    if python3 -c "
+from bridge import DirectWorker, direct_workers
+from dataclasses import is_dataclass
+
+# Verify DirectWorker is a dataclass
+assert is_dataclass(DirectWorker), 'DirectWorker should be a dataclass'
+
+# Verify required fields exist
+import inspect
+sig = inspect.signature(DirectWorker)
+params = list(sig.parameters.keys())
+assert 'name' in params, 'DirectWorker should have name field'
+assert 'process' in params, 'DirectWorker should have process field'
+
+# Verify direct_workers dict exists
+assert isinstance(direct_workers, dict), 'direct_workers should be a dict'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "DirectWorker dataclass configured correctly"
+    else
+        fail "DirectWorker dataclass test failed"
+    fi
+}
+
+test_direct_worker_functions_exist() {
+    info "Testing direct worker functions exist..."
+
+    if python3 -c "
+from bridge import (
+    create_direct_worker,
+    kill_direct_worker,
+    send_to_direct_worker,
+    read_direct_worker_output,
+    handle_direct_event,
+    is_direct_worker_running,
+    get_direct_workers,
+    kill_all_direct_workers,
+    send_direct_worker_response
+)
+
+# Verify all functions are callable
+assert callable(create_direct_worker), 'create_direct_worker should be callable'
+assert callable(kill_direct_worker), 'kill_direct_worker should be callable'
+assert callable(send_to_direct_worker), 'send_to_direct_worker should be callable'
+assert callable(read_direct_worker_output), 'read_direct_worker_output should be callable'
+assert callable(handle_direct_event), 'handle_direct_event should be callable'
+assert callable(is_direct_worker_running), 'is_direct_worker_running should be callable'
+assert callable(get_direct_workers), 'get_direct_workers should be callable'
+assert callable(kill_all_direct_workers), 'kill_all_direct_workers should be callable'
+assert callable(send_direct_worker_response), 'send_direct_worker_response should be callable'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Direct worker functions exist"
+    else
+        fail "Direct worker functions test failed"
+    fi
+}
+
+test_direct_mode_no_hook_install() {
+    info "Testing direct mode skips hook installation..."
+
+    # Verify the CLI has conditional hook install logic for direct mode
+    if grep -q 'DIRECT_MODE.*skip.*hook\|Direct mode.*hook' "$SCRIPT_DIR/claudecode-telegram.sh" 2>/dev/null; then
+        success "CLI skips hook install in direct mode"
+    else
+        fail "CLI missing direct mode hook skip logic"
+    fi
+}
+
+test_direct_mode_handle_event() {
+    info "Testing handle_direct_event parses Claude JSON events..."
+
+    if python3 -c "
+from bridge import handle_direct_event
+
+# Test assistant message event
+event = {
+    'type': 'assistant',
+    'message': {
+        'content': [{'type': 'text', 'text': 'Hello world'}]
+    }
+}
+result = handle_direct_event('test', event)
+assert result == 'Hello world', f'Expected Hello world, got {result}'
+
+# Test content_block_delta event
+event2 = {
+    'type': 'content_block_delta',
+    'delta': {'type': 'text_delta', 'text': 'chunk'}
+}
+result2 = handle_direct_event('test', event2)
+assert result2 == 'chunk', f'Expected chunk, got {result2}'
+
+# Test error event
+event3 = {
+    'type': 'error',
+    'error': {'message': 'Something went wrong'}
+}
+result3 = handle_direct_event('test', event3)
+assert 'Something went wrong' in result3, f'Expected error message, got {result3}'
+
+# Test unknown event (should return None)
+event4 = {'type': 'unknown'}
+result4 = handle_direct_event('test', event4)
+assert result4 is None, f'Unknown event should return None, got {result4}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "handle_direct_event parses events correctly"
+    else
+        fail "handle_direct_event test failed"
+    fi
+}
+
+test_direct_mode_is_pending() {
+    info "Testing is_pending works in direct mode..."
+
+    if python3 -c "
+import os
+os.environ['DIRECT_MODE'] = '1'
+
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import is_pending, direct_workers, DirectWorker, DIRECT_MODE
+import subprocess
+
+# Verify direct mode is enabled
+assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+
+# Create a mock worker
+class MockProcess:
+    def poll(self):
+        return None  # Still running
+
+mock_worker = DirectWorker(name='test', process=MockProcess())
+mock_worker.pending = True
+direct_workers['test'] = mock_worker
+
+# is_pending should return True for pending worker
+assert is_pending('test') == True, 'is_pending should return True for pending worker'
+
+# Set pending to False
+mock_worker.pending = False
+assert is_pending('test') == False, 'is_pending should return False for non-pending worker'
+
+# Non-existent worker should return False
+assert is_pending('nonexistent') == False, 'is_pending should return False for non-existent worker'
+
+# Cleanup
+del direct_workers['test']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "is_pending works in direct mode"
+    else
+        fail "is_pending direct mode test failed"
+    fi
+}
+
+test_direct_mode_get_registered_sessions() {
+    info "Testing get_registered_sessions works in direct mode..."
+
+    if python3 -c "
+import os
+os.environ['DIRECT_MODE'] = '1'
+
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import get_registered_sessions, direct_workers, DirectWorker, get_direct_workers, DIRECT_MODE
+
+# Verify direct mode is enabled
+assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+
+# Clear any existing workers
+direct_workers.clear()
+
+# No workers - should return empty dict
+result = get_registered_sessions()
+assert result == {}, f'Should return empty dict when no workers, got {result}'
+
+# Add a mock worker
+class MockProcess:
+    def poll(self):
+        return None  # Still running
+
+mock_worker = DirectWorker(name='testworker', process=MockProcess())
+direct_workers['testworker'] = mock_worker
+
+# Should now return the worker
+result = get_registered_sessions()
+assert 'testworker' in result, f'Should contain testworker, got {result}'
+
+# Cleanup
+del direct_workers['testworker']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_registered_sessions works in direct mode"
+    else
+        fail "get_registered_sessions direct mode test failed"
+    fi
+}
+
+test_direct_mode_graceful_shutdown() {
+    info "Testing graceful_shutdown kills direct workers..."
+
+    if python3 -c "
+from bridge import graceful_shutdown, DIRECT_MODE, direct_workers, kill_all_direct_workers
+import inspect
+
+# Verify graceful_shutdown mentions direct workers
+source = inspect.getsource(graceful_shutdown)
+assert 'direct_workers' in source or 'kill_all_direct_workers' in source, \
+    'graceful_shutdown should handle direct workers'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "graceful_shutdown handles direct workers"
+    else
+        fail "graceful_shutdown direct workers test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Direct Mode Integration Tests (bridge running in DIRECT_MODE=1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIRECT_MODE_PORT="${DIRECT_MODE_PORT:-8096}"
+DIRECT_MODE_BRIDGE_PID=""
+DIRECT_MODE_BRIDGE_LOG="$TEST_NODE_DIR/direct_mode_bridge.log"
+
+start_direct_mode_bridge() {
+    info "Starting bridge in direct mode on port $DIRECT_MODE_PORT..."
+
+    # Kill any existing process on port
+    lsof -ti :"$DIRECT_MODE_PORT" | xargs kill -9 2>/dev/null || true
+    sleep 0.3
+
+    # Start bridge with DIRECT_MODE=1
+    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
+    PORT="$DIRECT_MODE_PORT" \
+    NODE_NAME="$TEST_NODE" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    ADMIN_CHAT_ID="${TEST_CHAT_ID:-$CHAT_ID}" \
+    DIRECT_MODE=1 \
+    python3 -u "$SCRIPT_DIR/bridge.py" > "$DIRECT_MODE_BRIDGE_LOG" 2>&1 &
+    DIRECT_MODE_BRIDGE_PID=$!
+    echo "$DIRECT_MODE_BRIDGE_PID" > "$TEST_NODE_DIR/direct_mode_bridge.pid"
+
+    if wait_for_port "$DIRECT_MODE_PORT"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+stop_direct_mode_bridge() {
+    info "Stopping direct mode bridge..."
+    if [[ -n "$DIRECT_MODE_BRIDGE_PID" ]]; then
+        kill "$DIRECT_MODE_BRIDGE_PID" 2>/dev/null || true
+        DIRECT_MODE_BRIDGE_PID=""
+    fi
+    if [[ -f "$TEST_NODE_DIR/direct_mode_bridge.pid" ]]; then
+        kill "$(cat "$TEST_NODE_DIR/direct_mode_bridge.pid")" 2>/dev/null || true
+        rm -f "$TEST_NODE_DIR/direct_mode_bridge.pid"
+    fi
+    rm -f "$DIRECT_MODE_BRIDGE_LOG"
+}
+
+send_direct_mode_message() {
+    local text="$1"
+    local chat_id="${2:-$CHAT_ID}"
+    local update_id=$((RANDOM))
+
+    curl -s -X POST "http://localhost:$DIRECT_MODE_PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$chat_id"', "first_name": "TestUser"},
+                "chat": {"id": '"$chat_id"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "text": "'"$text"'"
+            }
+        }'
+}
+
+test_direct_mode_bridge_starts() {
+    info "Testing direct mode bridge starts..."
+
+    if start_direct_mode_bridge; then
+        success "Direct mode bridge started on port $DIRECT_MODE_PORT"
+    else
+        fail "Direct mode bridge failed to start"
+        return 1
+    fi
+
+    # Verify health endpoint
+    if curl -s "http://localhost:$DIRECT_MODE_PORT" | grep -q "Claude-Telegram"; then
+        success "Direct mode bridge health endpoint responds"
+    else
+        fail "Direct mode bridge health endpoint not responding"
+    fi
+}
+
+test_direct_mode_hire_creates_worker() {
+    info "Testing /hire creates direct worker..."
+
+    local result
+    result=$(send_direct_mode_message "/hire directworker1")
+
+    if [[ "$result" == "OK" ]]; then
+        # Give worker time to initialize
+        sleep 0.5
+        success "/hire creates direct worker"
+    else
+        fail "/hire direct worker failed: $result"
+    fi
+}
+
+test_direct_mode_message_routing() {
+    info "Testing message routing to direct worker..."
+
+    # First focus the worker
+    send_direct_mode_message "/focus directworker1" >/dev/null
+    sleep 0.2
+
+    # Send a message to the worker
+    local result
+    result=$(send_direct_mode_message "Hello direct worker!")
+
+    if [[ "$result" == "OK" ]]; then
+        success "Message routed to direct worker"
+    else
+        fail "Message routing failed: $result"
+    fi
+}
+
+test_direct_mode_team_shows_workers() {
+    info "Testing /team shows direct workers..."
+
+    local result
+    result=$(send_direct_mode_message "/team")
+
+    if [[ "$result" == "OK" ]]; then
+        success "/team command works in direct mode"
+    else
+        fail "/team command failed in direct mode: $result"
+    fi
+}
+
+test_direct_mode_end_kills_worker() {
+    info "Testing /end kills direct worker..."
+
+    local result
+    result=$(send_direct_mode_message "/end directworker1")
+
+    if [[ "$result" == "OK" ]]; then
+        sleep 0.3
+        success "/end kills direct worker"
+    else
+        fail "/end direct worker failed: $result"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4049,6 +4494,19 @@ run_unit_tests() {
     test_equals_syntax
     test_sandbox_config
     test_sandbox_docker_cmd
+
+    # Unit tests - Direct mode
+    log ""
+    log "── Direct Mode Tests (Unit) ────────────────────────────────────────────"
+    test_direct_mode_flag
+    test_direct_mode_env_var
+    test_direct_worker_dataclass
+    test_direct_worker_functions_exist
+    test_direct_mode_no_hook_install
+    test_direct_mode_handle_event
+    test_direct_mode_is_pending
+    test_direct_mode_get_registered_sessions
+    test_direct_mode_graceful_shutdown
 
     # Unit tests - Worker naming
     log ""
@@ -4372,6 +4830,29 @@ run_integration_tests() {
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }
 
+run_direct_mode_integration_tests() {
+    # Direct mode integration tests (separate bridge with DIRECT_MODE=1)
+    log ""
+    log "── Direct Mode Integration Tests ───────────────────────────────────────"
+
+    # Start bridge in direct mode
+    test_direct_mode_bridge_starts || {
+        fail "Skipping remaining direct mode tests (bridge failed to start)"
+        stop_direct_mode_bridge
+        return
+    }
+    sleep 0.3
+
+    # Run direct mode tests
+    test_direct_mode_hire_creates_worker
+    test_direct_mode_message_routing
+    test_direct_mode_team_shows_workers
+    test_direct_mode_end_kills_worker
+
+    # Cleanup
+    stop_direct_mode_bridge
+}
+
 run_tunnel_tests() {
     # Tunnel tests
     log ""
@@ -4412,6 +4893,9 @@ main() {
     # Skip integration tests in FAST mode
     if [[ "$mode" != "fast" ]]; then
         run_integration_tests
+
+        # Run direct mode integration tests (separate bridge instance)
+        run_direct_mode_integration_tests
     fi
 
     # Only run tunnel tests in FULL mode

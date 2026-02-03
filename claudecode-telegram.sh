@@ -48,6 +48,7 @@ ALL_NODES=false
 NODE_NAME="${NODE_NAME:-}"
 SANDBOX="${SANDBOX_ENABLED:-0}"  # Default: disabled (sandbox not stable yet)
 SANDBOX_MOUNTS=""  # Extra mounts from --mount/--mount-ro flags
+DIRECT_MODE="${DIRECT_MODE:-0}"  # Direct mode: bypass tmux, use JSON streaming
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Output
@@ -365,7 +366,10 @@ cmd_run() {
     log ""
 
     # 1. Install hook if needed (single hook for all nodes, reads env at runtime)
-    if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]]; then
+    # Skip hook installation in direct mode (workers use JSON streaming, not hooks)
+    if [[ "$DIRECT_MODE" == "1" ]]; then
+        log "$(dim "Direct mode: skipping hook installation (workers use JSON streaming)")"
+    elif [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]]; then
         log "Installing hook..."
         FORCE=true cmd_hook_install >/dev/null 2>&1 || true
         success "Hook installed"
@@ -383,6 +387,9 @@ cmd_run() {
     export SANDBOX_ENABLED="${SANDBOX:-0}"
     export SANDBOX_IMAGE="${SANDBOX_IMAGE:-claudecode-telegram:latest}"
     export SANDBOX_MOUNTS="${SANDBOX_MOUNTS:-}"
+
+    # Direct mode env var (bypass tmux, use JSON streaming)
+    export DIRECT_MODE="${DIRECT_MODE:-0}"
 
     if [[ "$SANDBOX_ENABLED" == "1" ]]; then
         log "$(green "Sandbox mode enabled") - workers run in Docker containers"
@@ -1276,6 +1283,7 @@ FLAGS
   --sandbox-image <img> Docker image (default: claudecode-telegram:latest)
   --mount <path>        Extra mount (host:container or just path)
   --mount-ro <path>     Extra mount, read-only
+  --no-tmux, --direct   Direct mode: bypass tmux, use Claude JSON streaming
 
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
@@ -1285,6 +1293,7 @@ ENVIRONMENT
   TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
   SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 0)
   SANDBOX_IMAGE           Docker image for workers
+  DIRECT_MODE             Direct mode: bypass tmux (1/0, default: 0)
 
 DIRECTORY STRUCTURE
   ~/.claude/telegram/nodes/
@@ -1337,6 +1346,7 @@ main() {
             --mount)      SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}$2"; shift 2;;
             --mount-ro=*) SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:${1#*=}"; shift;;
             --mount-ro)   SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:$2"; shift 2;;
+            --no-tmux|--direct) DIRECT_MODE=1; shift;;
             -*)           error "Unknown flag: $1"; exit 2;;
             *)            break;;
         esac
