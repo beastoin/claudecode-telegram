@@ -262,6 +262,42 @@ Key insight: We buffer during streaming, only send on `result`. This prevents fl
 ./claudecode-telegram.sh run --no-tmux
 ```
 
+## Future Features (Planned)
+
+### Inter-Worker Messaging
+
+**Status:** Not implemented
+
+Workers currently cannot communicate directly with each other. This feature would allow workers to send messages to other workers via a new bridge endpoint.
+
+**Planned design:**
+
+```
+POST /worker-message
+{
+  "from": "worker1",
+  "to": "worker2",
+  "message": "Can you review the API changes I just made?"
+}
+```
+
+**Key principles:**
+- **Works for both modes:** tmux and direct mode workers can send/receive
+- **Manager visibility:** All inter-worker messages are logged and forwarded to Telegram
+- **No hidden coordination:** Manager sees all worker-to-worker communication
+- **Responses go to Telegram:** When worker2 responds, the response is sent to Telegram as usual
+
+**Why this matters:**
+- Enables worker collaboration on complex tasks
+- Manager stays informed of all coordination
+- Workers can delegate subtasks to specialists
+
+**Missing tests:**
+- `test_worker_message_tmux` - inter-worker messaging in tmux mode
+- `test_worker_message_direct` - inter-worker messaging in direct mode
+
+---
+
 ## Security Model (v0.3.0+)
 
 ### Token Isolation

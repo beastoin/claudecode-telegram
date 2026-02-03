@@ -165,6 +165,7 @@ These slash commands are rejected with a message:
 - `POST /response` — hook → bridge response forwarding (86228c8)
 - `POST /notify` — internal notifications to all known chat IDs (e.g., tunnel watchdog) (656db47)
 - `GET /` — health string: `Claude-Telegram Multi-Session Bridge` (958c890)
+- `POST /worker-message` — **PLANNED** inter-worker messaging (not yet implemented)
 
 ## Message routing rules
 
@@ -248,3 +249,13 @@ These slash commands are rejected with a message:
 - Sandbox mode runs workers in Docker with default mount `~ → /workspace` (2e1c548)
 - Optional extra mounts via `--mount` and `--mount-ro` (df9de52)
 - Direct mode (`--no-tmux`/`--direct`) runs workers as subprocesses with JSON streaming, bypassing tmux (NEW)
+
+## Planned features (not yet implemented)
+
+### Inter-worker messaging
+- **Status:** Not implemented
+- **Description:** Allow workers to send messages to each other via bridge endpoint `/worker-message`
+- **Works for:** Both tmux and direct mode
+- **Manager visibility:** All messages logged, responses go to Telegram
+- **Planned API:** `POST /worker-message {"from": "worker1", "to": "worker2", "message": "..."}`
+- **Missing tests:** `test_worker_message_tmux`, `test_worker_message_direct`
