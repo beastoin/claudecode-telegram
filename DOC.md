@@ -169,6 +169,99 @@ One Telegram DM manages all Claude instances because:
 
 The `@name` syntax and `/use` command give you full control without the overhead of multiple chats.
 
+## Direct Mode (--no-tmux)
+
+Direct mode spawns Claude Code as a subprocess with JSON streaming instead of using tmux sessions. This enables tighter integration and avoids terminal emulation overhead.
+
+### Architecture Comparison
+
+**tmux mode (default):**
+```
+┌──────────┐     ┌──────────┐     ┌─────────────┐     ┌─────────────┐
+│ Telegram │────▶│  Bridge  │────▶│ tmux session│────▶│   Claude    │
+│ Webhook  │     │ (Python) │     │ send-keys   │     │ (terminal)  │
+└──────────┘     └──────────┘     └─────────────┘     └─────────────┘
+                       ▲                                     │
+                       │                              Stop Hook fires
+                       │          ┌─────────────┐           │
+                       └──────────│ Hook script │◀──────────┘
+                      POST /response  (bash)
+```
+
+**direct mode (--no-tmux):**
+```
+┌──────────┐     ┌──────────────────────────────────────────┐
+│ Telegram │────▶│              Bridge (Python)              │
+│ Webhook  │     │  ┌────────────────────────────────────┐  │
+└──────────┘     │  │         DirectWorker               │  │
+                 │  │  ┌──────────┐      ┌────────────┐  │  │
+                 │  │  │  stdin   │─JSON▶│   Claude   │  │  │
+                 │  │  │  (pipe)  │      │ subprocess │  │  │
+                 │  │  │          │◀JSON─│            │  │  │
+                 │  │  │  stdout  │      └────────────┘  │  │
+                 │  │  └──────────┘                      │  │
+                 │  └────────────────────────────────────┘  │
+      ◀──────────│                                          │
+   Response      └──────────────────────────────────────────┘
+```
+
+### Message Flow: tmux Mode
+
+1. **Telegram webhook** receives user message
+2. **Bridge** routes message to target worker's tmux session
+3. **tmux send-keys** types the message into Claude's terminal
+4. **Claude** processes and generates response
+5. **Stop Hook fires** when Claude finishes responding
+6. **Hook script** reads transcript, POSTs to `/response` endpoint
+7. **Bridge** sends response to Telegram
+
+### Message Flow: Direct Mode
+
+1. **Telegram webhook** receives user message
+2. **Bridge** writes JSON message to worker's stdin pipe:
+   ```json
+   {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]}}
+   ```
+3. **Claude subprocess** processes and streams JSON events to stdout:
+   ```json
+   {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello! How can I help?"}]}}
+   {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " I'm Claude..."}}
+   {"type": "result", ...}
+   ```
+4. **Reader thread** buffers text from `assistant` and `content_block_delta` events
+5. **On `result` event** - accumulated text is sent to Telegram
+6. No hook needed - bridge handles everything directly
+
+### Event Handling (Like Happy)
+
+The bridge handles Claude's JSON streaming events similar to the Happy codebase:
+
+| Event Type | Action |
+|------------|--------|
+| `assistant` | Extract text from message content, buffer it |
+| `content_block_delta` | Extract delta text, append to buffer |
+| `result` | **Send buffered text to Telegram**, clear buffer |
+| `error` | Log error, include in response |
+
+Key insight: We buffer during streaming, only send on `result`. This prevents flooding Telegram with partial messages.
+
+### When to Use Each Mode
+
+| Mode | Use Case | Pros | Cons |
+|------|----------|------|------|
+| **tmux (default)** | Production, debugging | Can attach to session, visible history, hook-based | Terminal overhead, needs hook setup |
+| **direct (--no-tmux)** | Lightweight, embedded | No tmux needed, cleaner integration, no hooks | Can't attach to see session, process-per-worker |
+
+### CLI Usage
+
+```bash
+# tmux mode (default)
+./claudecode-telegram.sh run
+
+# Direct mode
+./claudecode-telegram.sh run --no-tmux
+```
+
 ## Security Model (v0.3.0+)
 
 ### Token Isolation
