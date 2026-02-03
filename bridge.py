@@ -75,6 +75,7 @@ class DirectWorker:
     chat_id: Optional[int] = None
     pending: bool = False
     reader_thread: Optional[threading.Thread] = None
+    initialized: bool = False  # True after receiving init event from Claude
 
 
 # Dict of active direct workers: name -> DirectWorker
@@ -1075,9 +1076,9 @@ def create_direct_worker(name: str) -> tuple[bool, Optional[str]]:
         return False, f"Worker '{name}' already exists"
 
     try:
-        # Start Claude in JSON streaming mode
+        # Start Claude in JSON streaming mode (like Happy's approach)
         process = subprocess.Popen(
-            ["claude", "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions"],
+            ["claude", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1097,14 +1098,8 @@ def create_direct_worker(name: str) -> tuple[bool, Optional[str]]:
         worker.reader_thread = reader
         reader.start()
 
-        # Send welcome message
-        welcome = (
-            "You are connected to Telegram via claudecode-telegram bridge in direct mode. "
-            "Manager can send you messages. "
-            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-            "Allowed paths: /tmp, current directory."
-        )
-        send_to_direct_worker(name, welcome, None)
+        # Welcome message will be sent after init event is received
+        # (see read_direct_worker_output)
 
         print(f"Started direct worker '{name}' (PID {process.pid})")
         return True, None
@@ -1208,9 +1203,26 @@ def read_direct_worker_output(name: str, process: subprocess.Popen):
                 if text:
                     accumulated_text += text
 
-                # Check if this is a result/done event
+                # Check event type
                 event_type = event.get("type", "")
-                if event_type == "result":
+                event_subtype = event.get("subtype", "")
+
+                # Handle init event - Claude is ready
+                if event_type == "system" and event_subtype == "init":
+                    if worker and not worker.initialized:
+                        worker.initialized = True
+                        print(f"Direct worker '{name}' initialized")
+                        # Send welcome message now that Claude is ready
+                        welcome = (
+                            "You are connected to Telegram via claudecode-telegram bridge in direct mode. "
+                            "Manager can send you messages. "
+                            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
+                            "Allowed paths: /tmp, current directory."
+                        )
+                        send_to_direct_worker(name, welcome, None)
+
+                # Handle result/done event
+                elif event_type == "result":
                     # Send accumulated response to Telegram
                     if accumulated_text and worker and worker.chat_id:
                         send_direct_worker_response(name, accumulated_text, worker.chat_id)
