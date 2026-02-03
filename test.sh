@@ -4220,6 +4220,34 @@ print('OK')
     fi
 }
 
+test_direct_mode_html_escape() {
+    info "Testing escape_html escapes special characters..."
+
+    if python3 -c "
+from bridge import escape_html
+
+# Test basic escaping
+assert escape_html('hello') == 'hello', 'Plain text unchanged'
+assert escape_html('<script>') == '&lt;script&gt;', 'Angle brackets escaped'
+assert escape_html('a & b') == 'a &amp; b', 'Ampersand escaped'
+assert escape_html('1 < 2 > 0') == '1 &lt; 2 &gt; 0', 'Mixed escaping'
+
+# Test real-world cases (README content)
+code = 'if (x < 10 && y > 5)'
+expected = 'if (x &lt; 10 &amp;&amp; y &gt; 5)'
+assert escape_html(code) == expected, f'Code escaping failed: {escape_html(code)}'
+
+# Test already-escaped content (should double-escape)
+assert escape_html('&lt;') == '&amp;lt;', 'Already escaped gets re-escaped'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "escape_html escapes special characters correctly"
+    else
+        fail "escape_html test failed"
+    fi
+}
+
 test_direct_mode_is_pending() {
     info "Testing is_pending works in direct mode..."
 
@@ -5053,6 +5081,7 @@ run_unit_tests() {
     test_direct_worker_functions_exist
     test_direct_mode_no_hook_install
     test_direct_mode_handle_event
+    test_direct_mode_html_escape
     test_direct_mode_is_pending
     test_direct_mode_get_registered_sessions
     test_direct_mode_graceful_shutdown

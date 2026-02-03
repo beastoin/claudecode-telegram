@@ -94,7 +94,7 @@ TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ### Test Coverage
 
-**Current: 98.3%** (116 of 118 features, 161 test functions)
+**Current: 98.3%** (116 of 118 features, 162 test functions)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|

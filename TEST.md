@@ -98,7 +98,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Complete Test Inventory
 
-> **Total: 183 test functions**
+> **Total: 184 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -148,6 +148,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | `test_direct_worker_functions_exist` | Direct worker functions exist |
 | `test_direct_mode_no_hook_install` | Direct mode skips hook install |
 | `test_direct_mode_handle_event` | handle_direct_event parses JSON |
+| `test_direct_mode_html_escape` | escape_html escapes <, >, & for Telegram |
 | `test_direct_mode_is_pending` | is_pending in direct mode |
 | `test_direct_mode_get_registered_sessions` | get_registered_sessions in direct mode |
 | `test_direct_mode_graceful_shutdown` | Shutdown kills direct workers |

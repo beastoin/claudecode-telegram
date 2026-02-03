@@ -637,6 +637,14 @@ def parse_file_tags(text):
     return _parse_media_tags(text, "file", validate_document_path)
 
 
+def escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram's HTML parse mode.
+
+    Must escape &, <, > to prevent Telegram from interpreting them as HTML tags.
+    """
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def format_response_text(session_name, text):
     """Format response with session prefix. No escaping - Claude Code handles safety."""
     return f"<b>{session_name}:</b>\n{text}"
@@ -1274,11 +1282,14 @@ def handle_direct_event(name: str, event: dict) -> Optional[str]:
 def send_direct_worker_response(name: str, text: str, chat_id: int):
     """Send a direct worker's response to Telegram.
 
-    Handles message splitting, image/file tags similar to hook response.
+    Handles HTML escaping, message splitting, image/file tags.
     """
-    # Parse image and file tags from text
+    # Parse image and file tags from text (before escaping to preserve tag syntax)
     clean_text, images = parse_image_tags(text)
     clean_text, files = parse_file_tags(clean_text)
+
+    # Escape HTML special characters for Telegram's HTML parse mode
+    clean_text = escape_html(clean_text)
 
     # Send text message if there's text content
     if clean_text:
