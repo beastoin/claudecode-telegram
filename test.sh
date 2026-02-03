@@ -4136,6 +4136,510 @@ test_with_tunnel() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Worker Discovery Tests (inter-worker communication)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_workers_endpoint_exists() {
+    info "Testing GET /workers endpoint exists..."
+
+    local response
+    response=$(curl -s "http://localhost:$PORT/workers")
+
+    if echo "$response" | grep -q "workers"; then
+        success "/workers endpoint returns workers array"
+    else
+        fail "/workers endpoint missing or invalid response: $response"
+    fi
+}
+
+test_workers_endpoint_json_structure() {
+    info "Testing /workers endpoint returns valid JSON structure..."
+
+    if python3 -c "
+import urllib.request
+import json
+
+url = 'http://localhost:$PORT/workers'
+with urllib.request.urlopen(url) as response:
+    data = json.loads(response.read())
+
+# Should have 'workers' key
+assert 'workers' in data, 'Response should have workers key'
+assert isinstance(data['workers'], list), 'workers should be a list'
+
+# If workers exist, check structure
+for worker in data['workers']:
+    assert 'name' in worker, 'worker should have name'
+    assert 'protocol' in worker, 'worker should have protocol'
+    assert 'address' in worker, 'worker should have address'
+    assert 'send_example' in worker, 'worker should have send_example'
+    assert worker['protocol'] in ('tmux', 'pipe'), f\"protocol should be tmux or pipe, got {worker['protocol']}\"
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers endpoint returns valid JSON structure"
+    else
+        fail "/workers endpoint JSON structure invalid"
+    fi
+}
+
+test_workers_endpoint_shows_tmux_workers() {
+    info "Testing /workers endpoint shows tmux workers..."
+
+    # Create a worker first
+    send_message "/hire discoverworker1" >/dev/null
+    wait_for_session "discoverworker1"
+    sleep 0.3
+
+    if python3 -c "
+import urllib.request
+import json
+
+url = 'http://localhost:$PORT/workers'
+with urllib.request.urlopen(url) as response:
+    data = json.loads(response.read())
+
+# Find our test worker
+found = None
+for worker in data['workers']:
+    if worker['name'] == 'discoverworker1':
+        found = worker
+        break
+
+assert found, f'discoverworker1 should be in workers list, got: {[w[\"name\"] for w in data[\"workers\"]]}'
+assert found['protocol'] == 'tmux', f'tmux worker should have tmux protocol, got {found[\"protocol\"]}'
+assert '${TEST_TMUX_PREFIX}discoverworker1' in found['address'], f'address should be tmux session name'
+assert 'tmux send-keys' in found['send_example'], f'send_example should show tmux command'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers shows tmux workers with correct structure"
+    else
+        fail "/workers tmux worker structure incorrect"
+    fi
+
+    # Cleanup
+    send_message "/end discoverworker1" >/dev/null 2>&1 || true
+}
+
+test_workers_endpoint_empty_when_no_workers() {
+    info "Testing /workers endpoint returns empty list when no workers..."
+
+    # Kill all test workers
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${TEST_TMUX_PREFIX}" | while read -r session; do
+        tmux kill-session -t "$session" 2>/dev/null || true
+    done
+
+    sleep 0.3
+
+    if python3 -c "
+import urllib.request
+import json
+
+url = 'http://localhost:$PORT/workers'
+with urllib.request.urlopen(url) as response:
+    data = json.loads(response.read())
+
+# Should have empty workers list
+assert 'workers' in data, 'Response should have workers key'
+assert len(data['workers']) == 0, f'Should have no workers, got {len(data[\"workers\"])}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers returns empty list when no workers"
+    else
+        fail "/workers should return empty list"
+    fi
+}
+
+test_send_to_worker_integration() {
+    info "Testing send_to_worker with real tmux worker..."
+
+    # Create a worker first
+    send_message "/hire sendworkertest" >/dev/null
+    wait_for_session "sendworkertest"
+    sleep 0.3
+
+    local tmux_name="${TEST_TMUX_PREFIX}sendworkertest"
+
+    # Use send_to_worker to send a unique message
+    local unique_msg="test_send_to_worker_${RANDOM}"
+
+    # Note: Must set TMUX_PREFIX to match the test prefix for send_to_worker to find the session
+    if TMUX_PREFIX="$TEST_TMUX_PREFIX" python3 -c "
+import os
+# Force reload of bridge to pick up TMUX_PREFIX from env
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import send_to_worker, TMUX_PREFIX
+print('TMUX_PREFIX:', TMUX_PREFIX)
+
+# Send message using the generic function
+result = send_to_worker('sendworkertest', '$unique_msg')
+print('sent:', result)
+" 2>/dev/null | grep -q "sent: True"; then
+        # Verify message appeared in tmux pane
+        sleep 1
+        local pane_content
+        pane_content=$(tmux capture-pane -t "$tmux_name" -p 2>/dev/null || echo "")
+
+        if echo "$pane_content" | grep -q "$unique_msg"; then
+            success "send_to_worker delivered message to tmux worker"
+        else
+            fail "send_to_worker message not found in tmux pane"
+        fi
+    else
+        fail "send_to_worker returned False for existing worker"
+    fi
+
+    # Cleanup
+    send_message "/end sendworkertest" >/dev/null 2>&1 || true
+    wait_for_session_gone "sendworkertest" 2>/dev/null || true
+}
+
+test_worker_pipe_path_constant() {
+    info "Testing WORKER_PIPE_ROOT constant exists..."
+
+    if python3 -c "
+from bridge import WORKER_PIPE_ROOT
+from pathlib import Path
+
+assert isinstance(WORKER_PIPE_ROOT, Path), 'WORKER_PIPE_ROOT should be Path'
+assert '/tmp' in str(WORKER_PIPE_ROOT), 'WORKER_PIPE_ROOT should be under /tmp'
+assert 'claudecode-telegram' in str(WORKER_PIPE_ROOT), 'WORKER_PIPE_ROOT should contain claudecode-telegram'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "WORKER_PIPE_ROOT constant exists"
+    else
+        fail "WORKER_PIPE_ROOT constant missing or invalid"
+    fi
+}
+
+test_get_worker_pipe_path_function() {
+    info "Testing get_worker_pipe_path function..."
+
+    if python3 -c "
+from bridge import get_worker_pipe_path
+from pathlib import Path
+
+# Test function returns expected path
+path = get_worker_pipe_path('testworker')
+assert isinstance(path, Path), 'should return Path'
+assert 'testworker' in str(path), 'path should contain worker name'
+assert str(path).endswith('in.pipe'), 'path should end with in.pipe'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_worker_pipe_path function works"
+    else
+        fail "get_worker_pipe_path function missing or invalid"
+    fi
+}
+
+test_get_workers_function() {
+    info "Testing get_workers function exists and returns correct format..."
+
+    if python3 -c "
+from bridge import get_workers
+
+# Function should exist and return list of dicts
+workers = get_workers()
+assert isinstance(workers, list), 'get_workers should return list'
+
+# Each worker should have required fields
+for w in workers:
+    assert 'name' in w
+    assert 'protocol' in w
+    assert 'address' in w
+    assert 'send_example' in w
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_workers function works correctly"
+    else
+        fail "get_workers function missing or invalid"
+    fi
+}
+
+# Direct mode worker discovery test
+test_workers_endpoint_shows_direct_workers() {
+    info "Testing /workers endpoint shows direct mode workers..."
+
+    # This test requires direct mode bridge running
+    if [[ -z "$DIRECT_MODE_BRIDGE_PID" ]] || ! kill -0 "$DIRECT_MODE_BRIDGE_PID" 2>/dev/null; then
+        info "Skipping (direct mode bridge not running)"
+        return 0
+    fi
+
+    # Create a direct worker
+    send_direct_mode_message "/hire directdiscover1" >/dev/null
+    wait_for_direct_worker "directdiscover1"
+    sleep 0.3
+
+    if python3 -c "
+import urllib.request
+import json
+
+url = 'http://localhost:$DIRECT_MODE_PORT/workers'
+with urllib.request.urlopen(url) as response:
+    data = json.loads(response.read())
+
+# Find our test worker
+found = None
+for worker in data['workers']:
+    if worker['name'] == 'directdiscover1':
+        found = worker
+        break
+
+assert found, f'directdiscover1 should be in workers list'
+assert found['protocol'] == 'pipe', f'direct worker should have pipe protocol, got {found[\"protocol\"]}'
+assert 'in.pipe' in found['address'], 'address should be pipe path'
+assert 'echo' in found['send_example'], 'send_example should show echo command'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers shows direct workers with pipe protocol"
+    else
+        fail "/workers direct worker structure incorrect"
+    fi
+
+    # Cleanup
+    send_direct_mode_message "/end directdiscover1" >/dev/null 2>&1 || true
+}
+
+test_worker_pipe_creation_on_startup() {
+    info "Testing worker pipe created on worker startup..."
+
+    if python3 -c "
+from bridge import get_worker_pipe_path, ensure_worker_pipe
+from pathlib import Path
+import os
+
+# Test ensure_worker_pipe function creates pipe
+test_name = 'pipetest'
+pipe_path = get_worker_pipe_path(test_name)
+
+# Ensure parent directory exists
+pipe_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+# Create the pipe
+ensure_worker_pipe(test_name)
+
+# Verify pipe exists and is a FIFO
+assert pipe_path.exists(), f'Pipe should exist at {pipe_path}'
+assert os.path.exists(str(pipe_path)), 'Pipe should exist'
+
+# Check if it's a FIFO (named pipe)
+import stat
+mode = os.stat(str(pipe_path)).st_mode
+assert stat.S_ISFIFO(mode), 'Should be a FIFO (named pipe)'
+
+# Cleanup
+if pipe_path.exists():
+    pipe_path.unlink()
+if pipe_path.parent.exists():
+    pipe_path.parent.rmdir()
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Worker pipe created correctly"
+    else
+        fail "Worker pipe creation failed"
+    fi
+}
+
+test_worker_pipe_cleanup_on_end() {
+    info "Testing worker pipe cleaned up on worker end..."
+
+    if python3 -c "
+from bridge import get_worker_pipe_path, ensure_worker_pipe, cleanup_worker_pipe
+from pathlib import Path
+import os
+
+test_name = 'pipecleanuptest'
+pipe_path = get_worker_pipe_path(test_name)
+
+# Create the pipe
+pipe_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+ensure_worker_pipe(test_name)
+
+# Verify pipe exists
+assert pipe_path.exists(), 'Pipe should exist before cleanup'
+
+# Clean up
+cleanup_worker_pipe(test_name)
+
+# Verify pipe is removed
+assert not pipe_path.exists(), 'Pipe should be removed after cleanup'
+
+# Also cleanup parent dir if exists
+if pipe_path.parent.exists():
+    try:
+        pipe_path.parent.rmdir()
+    except:
+        pass
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Worker pipe cleaned up correctly"
+    else
+        fail "Worker pipe cleanup failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# send_to_worker Abstraction Tests (TDD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_send_to_worker_function_exists() {
+    info "Testing send_to_worker function exists..."
+
+    if python3 -c "
+from bridge import send_to_worker
+from typing import Optional
+
+# Verify function exists and is callable
+assert callable(send_to_worker), 'send_to_worker should be callable'
+
+# Verify function signature (name, message, chat_id=None)
+import inspect
+sig = inspect.signature(send_to_worker)
+params = list(sig.parameters.keys())
+assert 'name' in params, 'send_to_worker should have name parameter'
+assert 'message' in params, 'send_to_worker should have message parameter'
+assert 'chat_id' in params, 'send_to_worker should have chat_id parameter'
+
+# Verify return type is bool (from docstring or type hints)
+# The function should return True on success, False on failure
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "send_to_worker function exists with correct signature"
+    else
+        fail "send_to_worker function missing or incorrect signature"
+    fi
+}
+
+test_send_to_worker_not_found() {
+    info "Testing send_to_worker returns False for non-existent worker..."
+
+    if python3 -c "
+import os
+# Reset direct mode to ensure clean state
+os.environ['DIRECT_MODE'] = '0'
+
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import send_to_worker
+
+# Call with a worker that doesn't exist
+result = send_to_worker('nonexistent_worker_12345', 'test message')
+
+# Should return False
+assert result == False, f'Expected False for non-existent worker, got {result}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "send_to_worker returns False for non-existent worker"
+    else
+        fail "send_to_worker not returning False for non-existent worker"
+    fi
+}
+
+test_send_to_worker_direct_mode() {
+    info "Testing send_to_worker routes to direct worker correctly..."
+
+    if python3 -c "
+import os
+os.environ['DIRECT_MODE'] = '1'
+
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import send_to_worker, direct_workers, DirectWorker, DIRECT_MODE
+
+# Verify direct mode is enabled
+assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+
+# Create a mock worker
+class MockProcess:
+    stdin_written = []
+    def poll(self):
+        return None  # Still running
+    class stdin:
+        @classmethod
+        def write(cls, data):
+            MockProcess.stdin_written.append(data)
+        @classmethod
+        def flush(cls):
+            pass
+
+mock_worker = DirectWorker(name='testdirect', process=MockProcess())
+mock_worker.initialized = True
+direct_workers['testdirect'] = mock_worker
+
+# Call send_to_worker
+result = send_to_worker('testdirect', 'hello from test', chat_id=12345)
+
+# Should return True (message sent)
+assert result == True, f'Expected True, got {result}'
+
+# Verify message was written to stdin (via send_to_direct_worker)
+assert len(MockProcess.stdin_written) > 0, 'Should have written to stdin'
+
+# Verify chat_id was updated
+assert mock_worker.chat_id == 12345, f'chat_id should be updated to 12345, got {mock_worker.chat_id}'
+
+# Cleanup
+del direct_workers['testdirect']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "send_to_worker routes to direct worker correctly"
+    else
+        fail "send_to_worker direct mode routing failed"
+    fi
+}
+
+test_send_to_worker_tmux_mode() {
+    info "Testing send_to_worker routes to tmux worker correctly..."
+
+    if python3 -c "
+import os
+os.environ['DIRECT_MODE'] = '0'
+
+import importlib
+import bridge
+importlib.reload(bridge)
+
+from bridge import send_to_worker, DIRECT_MODE, TMUX_PREFIX, scan_tmux_sessions
+import subprocess
+
+# Verify tmux mode is enabled
+assert DIRECT_MODE == False, 'DIRECT_MODE should be False'
+
+# Get current tmux sessions to check if we have any test sessions
+sessions = scan_tmux_sessions()
+
+# For this test, we verify the function exists and returns False when no matching tmux session
+# (We can't easily create/mock tmux sessions in unit tests)
+result = send_to_worker('nonexistent_tmux_worker_xyz', 'test message')
+assert result == False, f'Expected False for non-existent tmux worker, got {result}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "send_to_worker tmux mode works correctly"
+    else
+        fail "send_to_worker tmux mode routing failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Direct Mode Tests (--no-tmux / --direct)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -5388,6 +5892,23 @@ run_unit_tests() {
     log ""
     log "── Test Environment Tests (Unit) ───────────────────────────────────────"
     test_test_env_vars_documented
+
+    # Unit tests - Worker discovery
+    log ""
+    log "── Worker Discovery Tests (Unit) ───────────────────────────────────────"
+    test_worker_pipe_path_constant
+    test_get_worker_pipe_path_function
+    test_get_workers_function
+    test_worker_pipe_creation_on_startup
+    test_worker_pipe_cleanup_on_end
+
+    # Unit tests - send_to_worker abstraction
+    log ""
+    log "── send_to_worker Abstraction Tests (Unit) ─────────────────────────────"
+    test_send_to_worker_function_exists
+    test_send_to_worker_not_found
+    test_send_to_worker_direct_mode
+    test_send_to_worker_tmux_mode
 }
 
 run_cli_tests() {
@@ -5546,6 +6067,19 @@ run_integration_tests() {
     log "── Misc Behavior Tests (Integration) ───────────────────────────────────"
     test_unknown_command_passthrough
 
+    # Worker discovery tests (integration)
+    log ""
+    log "── Worker Discovery Tests (Integration) ────────────────────────────────"
+    test_workers_endpoint_exists
+    test_workers_endpoint_json_structure
+    test_workers_endpoint_shows_tmux_workers
+    test_workers_endpoint_empty_when_no_workers
+
+    # send_to_worker integration tests
+    log ""
+    log "── send_to_worker Integration Tests ────────────────────────────────────"
+    test_send_to_worker_integration
+
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }
@@ -5568,6 +6102,11 @@ run_direct_mode_integration_tests() {
     test_direct_mode_message_routing
     test_direct_mode_team_shows_workers
     test_direct_mode_end_kills_worker
+
+    # Worker discovery tests in direct mode
+    log ""
+    log "── Worker Discovery Tests (Direct Mode) ────────────────────────────────"
+    test_workers_endpoint_shows_direct_workers
 
     # Cleanup basic tests
     stop_direct_mode_bridge

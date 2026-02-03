@@ -1281,6 +1281,44 @@ def send_to_direct_worker(name: str, text: str, chat_id: Optional[int]) -> bool:
         return False
 
 
+def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bool:
+    """Send a message to a worker using the appropriate protocol.
+
+    Automatically detects whether worker is tmux or direct mode and uses
+    the correct method (tmux send-keys or stdin JSON).
+
+    Args:
+        name: Worker name
+        message: Text message to send
+        chat_id: Optional chat_id for response routing (direct mode)
+
+    Returns:
+        True if message was sent successfully
+    """
+    # Check direct workers first (explicit dict lookup)
+    if name in direct_workers:
+        worker = direct_workers[name]
+        if worker.process.poll() is None:  # Still running
+            return send_to_direct_worker(name, message, chat_id)
+        else:
+            print(f"Direct worker '{name}' is not running")
+            return False
+
+    # Check tmux sessions
+    registered = scan_tmux_sessions()
+    if name in registered:
+        tmux_name = registered[name]["tmux"]
+        if tmux_exists(tmux_name):
+            return tmux_send_message(tmux_name, message)
+        else:
+            print(f"Tmux session '{tmux_name}' does not exist")
+            return False
+
+    # Worker not found in either mode
+    print(f"Worker '{name}' not found (checked direct workers and tmux sessions)")
+    return False
+
+
 def read_direct_worker_output(name: str, process: subprocess.Popen):
     """Read JSON output from a direct worker and send responses to Telegram.
 
@@ -1321,7 +1359,7 @@ def read_direct_worker_output(name: str, process: subprocess.Popen):
                             "Allowed paths: /tmp, current directory. "
                             f"To message other workers: curl {BRIDGE_URL}/workers for worker list with send commands."
                         )
-                        send_to_direct_worker(name, welcome, None)
+                        send_to_worker(name, welcome)
 
                 # Handle result/done event
                 elif event_type == "result":
@@ -1540,7 +1578,7 @@ def create_session(name):
     )
     if SANDBOX_ENABLED:
         welcome += " Running in sandbox mode (Docker container)."
-    tmux_send_message(tmux_name, welcome)
+    send_to_worker(name, welcome)
 
     state["active"] = name
     save_last_active(name)
