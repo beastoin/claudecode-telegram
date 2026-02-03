@@ -253,9 +253,9 @@ These slash commands are rejected with a message:
 ## Planned features (not yet implemented)
 
 ### Inter-worker messaging
-- **Status:** Not implemented
-- **Description:** Allow workers to send messages to each other via bridge endpoint `/worker-message`
-- **Works for:** Both tmux and direct mode
-- **Manager visibility:** All messages logged, responses go to Telegram
+- **Status:** Partial (tmux only)
+- **Current tmux mode:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message"` directly
+- **Direct mode:** ❌ No solution yet
+- **Planned:** Bridge endpoint `/worker-message` for unified API in both modes
 - **Planned API:** `POST /worker-message {"from": "worker1", "to": "worker2", "message": "..."}`
 - **Missing tests:** `test_worker_message_tmux`, `test_worker_message_direct`

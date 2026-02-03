@@ -115,7 +115,7 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | /settings display | `test_settings_command` | `test_direct_mode_e2e_settings` | ✅ Parity |
 | /progress display | `test_progress_command` | `test_direct_mode_e2e_progress` | ✅ Parity |
 | Graceful shutdown | `test_graceful_shutdown` | `test_direct_mode_graceful_shutdown` | ✅ Parity |
-| Inter-worker messaging | `test_worker_message_tmux` | `test_worker_message_direct` | ❌ Not implemented |
+| Inter-worker messaging | tmux send-keys (no test) | ❌ Not implemented | ⚠️ Partial (tmux only) |
 
 ## Complete Test Inventory
 
