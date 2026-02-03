@@ -9,45 +9,6 @@ Run multiple AI workers from Telegram—research, operations, and development in
 
 Claude Code - Telegram is a Telegram bot + bridge that lets you spin up and coordinate parallel AI workers from a single chat. Use it for research deep dives, operational tasks, or any workstream that benefits from fast, concurrent execution with persistent context.
 
-## Manager Outcomes
-
-- **Throughput while offline.** Run multiple workers in parallel so work continues after hours.
-- **Less context tax.** Long-lived workers keep state, so you don't re-explain.
-- **One place to coordinate.** Broadcast, delegate, and check status from a single chat.
-
-## Real Results (From Our Team)
-
-- **@chen** triaged 290 issues in one session and tagged priorities + root causes.
-- **@geni** did deep research on 2 OSS projects, tracing end-to-end flows and dependencies.
-- **Ops manager** keeps 5 workers running; code ships while they're offline.
-
-## Where Data Lives
-
-- **Messages stay in Telegram.** The bridge does not store message history elsewhere.
-- **Worker context is the chat.** Each worker continues from the same ongoing Telegram thread.
-- **Easy to resume.** Pick up any time from the existing chat history.
-
-## Why This Architecture
-
-- **Fewer places for data to live means lower risk.**
-- **Less to secure and less to monitor.**
-- **Easier reviews when you need to check what happened.**
-- **Fewer moving parts to break.**
-
-## Use Cases
-
-- **Ops:** incident updates, checklists, status notes.
-- **Research:** quick briefs, vendor comparisons, market scans.
-- **Triage:** sort tickets, label issues, route requests.
-- **Support:** draft replies, summarize threads, suggest next steps.
-
-## Compounding Team Knowledge
-
-- Keep a lightweight team memory with two shared files: `~/team-playbook.md` and `~/learnings/README.md`.
-- Daily: ops manager asks for learnings/help, team adds quick notes.
-- Result: the team gets smarter every day and repeats fewer mistakes.
-- **[See our playbook template with real examples](TEMPLATE-PLAYBOOK.md)**
-
 ## Quick Start
 
 ### For Managers (Telegram only)
@@ -140,6 +101,46 @@ claudecode-telegram/
 |-- DOC.md
 `-- test.sh
 ```
+
+## Manager Outcomes
+
+- **Throughput while offline.** Run multiple workers in parallel so work continues after hours.
+- **Less context tax.** Long-lived workers keep state, so you don't re-explain.
+- **One place to coordinate.** Broadcast, delegate, and check status from a single chat.
+
+## Real Results (From Our Team)
+
+- **@chen** triaged 290 issues in one session and tagged priorities + root causes.
+- **@geni** did deep research on 2 OSS projects, tracing end-to-end flows and dependencies.
+- **Ops manager** keeps 5 workers running; code ships while they're offline.
+
+## Where Data Lives
+
+- **Messages stay in Telegram.** The bridge does not store message history elsewhere.
+- **Worker context is the chat.** Each worker continues from the same ongoing Telegram thread.
+- **Easy to resume.** Pick up any time from the existing chat history.
+
+## Why This Architecture
+
+- **Fewer places for data to live means lower risk.**
+- **Less to secure and less to monitor.**
+- **Easier reviews when you need to check what happened.**
+- **Fewer moving parts to break.**
+
+## Use Cases
+
+- **Ops:** incident updates, checklists, status notes.
+- **Research:** quick briefs, vendor comparisons, market scans.
+- **Triage:** sort tickets, label issues, route requests.
+- **Support:** draft replies, summarize threads, suggest next steps.
+
+## Compounding Team Knowledge
+
+- Keep a lightweight team memory with two shared files: `~/team-playbook.md` and `~/learnings/README.md`.
+- Daily: ops manager asks for learnings/help, team adds quick notes.
+- Result: the team gets smarter every day and repeats fewer mistakes.
+- **[See our playbook template with real examples](TEMPLATE-PLAYBOOK.md)**
+
 
 ## Credits
 
