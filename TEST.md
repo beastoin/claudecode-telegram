@@ -96,6 +96,31 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 - `-f`, `--force` flag (tested implicitly in other tests)
 - Interactive prompt for multiple nodes (requires TTY input)
 
+## Feature Test Matrix (Mode Parity)
+
+Track test coverage for features across tmux and direct modes. When adding a feature to one mode, ensure equivalent test exists for the other.
+
+| Feature | Tmux Mode Test | Direct Mode Test | Status |
+|---------|---------------|------------------|--------|
+| Session/worker creation | `test_hire_command` | `test_direct_mode_hire_creates_worker` | ✅ Parity |
+| Session/worker survival | **MISSING** | `test_direct_mode_subprocess_stays_alive` | ⚠️ Need tmux test |
+| Message delivery verified | **MISSING** (HTTP OK only) | `test_direct_mode_worker_accepts_messages` | ⚠️ Need tmux test |
+| HTML escaping | **MISSING** | `test_direct_mode_html_escape` | ⚠️ Need `forward-to-bridge.py` test |
+| Focus switching | `test_focus_command` | `test_direct_mode_e2e_focus_switch` | ✅ Parity |
+| @mention routing | `test_at_mention` | `test_direct_mode_e2e_at_mention` | ✅ Parity |
+| Pause/interrupt | `test_pause_command` | `test_direct_mode_e2e_pause` | ✅ Parity |
+| Relaunch/restart | `test_relaunch_command` | `test_direct_mode_e2e_relaunch` | ✅ Parity |
+| End/kill session | `test_end_command` | `test_direct_mode_end_kills_worker` | ✅ Parity |
+| /team listing | `test_team_command` | `test_direct_mode_team_shows_workers` | ✅ Parity |
+| /settings display | `test_settings_command` | `test_direct_mode_e2e_settings` | ✅ Parity |
+| /progress display | `test_progress_command` | `test_direct_mode_e2e_progress` | ✅ Parity |
+| Graceful shutdown | `test_graceful_shutdown` | `test_direct_mode_graceful_shutdown` | ✅ Parity |
+
+**Missing tests to add:**
+- `test_tmux_mode_session_stays_alive` - verify tmux session remains after 3+ seconds
+- `test_tmux_mode_message_delivery` - verify message reaches tmux (not just HTTP OK)
+- `test_forward_to_bridge_html_escape` - test `esc()` function in `forward-to-bridge.py`
+
 ## Complete Test Inventory
 
 > **Total: 184 test functions**
