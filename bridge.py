@@ -289,6 +289,7 @@ def ensure_worker_pipe(name):
     """Create the named pipe for a worker if it doesn't exist.
 
     Creates: /tmp/claudecode-telegram/<worker>/in.pipe
+    Also starts a reader thread to forward messages to the worker.
     """
     pipe_path = get_worker_pipe_path(name)
     pipe_dir = pipe_path.parent
@@ -302,11 +303,17 @@ def ensure_worker_pipe(name):
         os.mkfifo(str(pipe_path), mode=0o600)
         print(f"Created worker pipe: {pipe_path}")
 
+    # Start the pipe reader thread to forward messages to worker
+    start_pipe_reader(name)
+
     return pipe_path
 
 
 def cleanup_worker_pipe(name):
     """Remove the named pipe for a worker."""
+    # Stop the pipe reader thread first
+    stop_pipe_reader(name)
+
     pipe_path = get_worker_pipe_path(name)
 
     if pipe_path.exists():
@@ -323,6 +330,138 @@ def cleanup_worker_pipe(name):
             pipe_dir.rmdir()
         except OSError:
             pass  # Directory not empty, that's OK
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipe Reader Threads (for inter-worker communication)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Dict to track pipe reader threads: name -> (thread, stop_event)
+_pipe_reader_threads: Dict[str, tuple] = {}
+
+
+def pipe_reader_loop(name: str, stop_event: threading.Event):
+    """Background thread that reads messages from a worker's input pipe.
+
+    When another worker writes to this worker's pipe:
+      echo "message" > /tmp/claudecode-telegram/bob/in.pipe
+
+    This thread reads the message and forwards it to the worker's tmux session
+    (or direct worker stdin).
+
+    The reader uses blocking open() - this means the thread will block until
+    a writer opens the pipe. This is correct behavior for FIFOs. When the
+    writer closes, we get EOF, close our end, and re-open to wait for the
+    next writer.
+    """
+    pipe_path = get_worker_pipe_path(name)
+    print(f"Pipe reader started for worker '{name}' at {pipe_path}")
+
+    while not stop_event.is_set():
+        try:
+            # Check if we should stop before blocking on open
+            if stop_event.is_set():
+                break
+
+            # Open pipe for reading (blocks until a writer connects)
+            # Use regular open() which blocks - this is the correct way to read FIFOs
+            with open(str(pipe_path), 'r') as pipe:
+                # Read until EOF (writer closes their end)
+                while not stop_event.is_set():
+                    line = pipe.readline()
+                    if not line:
+                        # EOF - writer closed, break to re-open
+                        break
+
+                    message = line.strip()
+                    if message:
+                        print(f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}")
+                        # Forward to worker using tmux_send_message or send_to_direct_worker
+                        _forward_pipe_message(name, message)
+
+        except FileNotFoundError:
+            # Pipe was removed, stop the reader
+            print(f"Pipe for '{name}' no longer exists, stopping reader")
+            break
+        except OSError as e:
+            if stop_event.is_set():
+                break
+            print(f"Pipe reader error for '{name}': {e}")
+            # Wait a bit before retrying
+            stop_event.wait(0.5)
+
+    print(f"Pipe reader stopped for worker '{name}'")
+
+
+def _forward_pipe_message(name: str, message: str):
+    """Forward a message from the pipe to the worker's session.
+
+    Uses tmux_send_message for tmux mode, or send_to_direct_worker for direct mode.
+    We call the lower-level functions directly to avoid any issues with
+    send_to_worker scanning sessions (which might be slow).
+    """
+    # Check direct workers first
+    if name in direct_workers:
+        worker = direct_workers[name]
+        if worker.process.poll() is None:  # Still running
+            send_to_direct_worker(name, message)
+            return
+
+    # Check tmux sessions
+    tmux_name = f"{TMUX_PREFIX}{name}"
+    if tmux_exists(tmux_name):
+        tmux_send_message(tmux_name, message)
+        return
+
+    print(f"Warning: Cannot forward pipe message to '{name}' - worker not found")
+
+
+def start_pipe_reader(name: str):
+    """Start a background thread to read from the worker's input pipe."""
+    if name in _pipe_reader_threads:
+        # Already running
+        return
+
+    pipe_path = get_worker_pipe_path(name)
+    if not pipe_path.exists():
+        print(f"Cannot start pipe reader: pipe does not exist for '{name}'")
+        return
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=pipe_reader_loop,
+        args=(name, stop_event),
+        daemon=True,
+        name=f"pipe-reader-{name}"
+    )
+    _pipe_reader_threads[name] = (thread, stop_event)
+    thread.start()
+    print(f"Started pipe reader thread for '{name}'")
+
+
+def stop_pipe_reader(name: str):
+    """Stop the pipe reader thread for a worker."""
+    if name not in _pipe_reader_threads:
+        return
+
+    thread, stop_event = _pipe_reader_threads.pop(name)
+    stop_event.set()
+
+    # Write a dummy byte to unblock the reader if it's waiting
+    pipe_path = get_worker_pipe_path(name)
+    if pipe_path.exists():
+        try:
+            # Open in non-blocking write mode to unblock reader
+            fd = os.open(str(pipe_path), os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b"\n")
+            os.close(fd)
+        except OSError:
+            pass  # Pipe may already be closed
+
+    # Wait for thread to finish (with timeout)
+    thread.join(timeout=1.0)
+    if thread.is_alive():
+        print(f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
 
 def get_workers():

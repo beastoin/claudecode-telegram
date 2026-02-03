@@ -322,4 +322,6 @@ cat /tmp/claudecode-telegram/<worker>/in.pipe
 3. **Phase 3:** Document worker-to-worker protocol in welcome message
 4. **Phase 4:** Add pipe reader thread to direct mode workers
 
-**Missing tests:** `test_worker_discovery_endpoint`, `test_worker_pipe_creation`, `test_worker_to_worker_pipe`
+**Missing tests:** `test_worker_discovery_endpoint`, `test_worker_pipe_creation`
+
+**Implemented tests:** `test_worker_to_worker_pipe` - verifies inter-worker pipe communication works end-to-end

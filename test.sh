@@ -4491,6 +4491,108 @@ print('OK')
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Worker-to-Worker Pipe Communication Tests (TDD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_worker_to_worker_pipe() {
+    info "Testing worker-to-worker pipe communication (e2e behavior)..."
+
+    # This is the missing test from FEATURES.md:
+    # End-to-end behavior test:
+    # 1. Start bridge (tmux mode - already running from test_bridge_starts)
+    # 2. Create Worker A (alice)
+    # 3. Create Worker B (bob)
+    # 4. Worker A writes message to Worker B's pipe
+    # 5. Verify Worker B received the message (check tmux pane)
+
+    # Clean up any existing test workers
+    send_message "/end alice" >/dev/null 2>&1 || true
+    send_message "/end bob" >/dev/null 2>&1 || true
+    wait_for_session_gone "alice" 2>/dev/null || true
+    wait_for_session_gone "bob" 2>/dev/null || true
+
+    # Step 2: Create Worker A (alice)
+    local result
+    result=$(send_message "/hire alice")
+    if [[ "$result" != "OK" ]]; then
+        fail "Worker-to-worker pipe: Failed to create worker alice: $result"
+        return
+    fi
+    if ! wait_for_session "alice"; then
+        fail "Worker-to-worker pipe: Worker alice session not created"
+        return
+    fi
+
+    # Step 3: Create Worker B (bob)
+    result=$(send_message "/hire bob")
+    if [[ "$result" != "OK" ]]; then
+        fail "Worker-to-worker pipe: Failed to create worker bob: $result"
+        send_message "/end alice" >/dev/null 2>&1 || true
+        return
+    fi
+    if ! wait_for_session "bob"; then
+        fail "Worker-to-worker pipe: Worker bob session not created"
+        send_message "/end alice" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Verify bob's pipe was created
+    local bob_pipe="/tmp/claudecode-telegram/bob/in.pipe"
+    if [[ ! -p "$bob_pipe" ]]; then
+        fail "Worker-to-worker pipe: Bob's pipe not created at $bob_pipe"
+        send_message "/end alice" >/dev/null 2>&1 || true
+        send_message "/end bob" >/dev/null 2>&1 || true
+        return
+    fi
+
+    success "Worker-to-worker pipe: Both workers created with pipes"
+
+    # Step 4: Write message from Alice to Bob's pipe
+    # This simulates Alice sending a message to Bob via the named pipe
+    local unique_msg="hello_from_alice_${RANDOM}"
+
+    # Write to pipe in background (named pipes block if no reader)
+    # The pipe reader thread should be reading from bob's pipe and forwarding to tmux
+    echo "$unique_msg" > "$bob_pipe" &
+    local write_pid=$!
+
+    # Wait a bit for the message to be processed
+    sleep 2
+
+    # Check if the write completed (it will hang if no one reads the pipe)
+    if ! kill -0 "$write_pid" 2>/dev/null; then
+        # Write completed (reader consumed the message)
+        success "Worker-to-worker pipe: Message written to bob's pipe (reader consumed it)"
+    else
+        # Write is still blocking - no reader on the pipe
+        kill "$write_pid" 2>/dev/null || true
+        fail "Worker-to-worker pipe: Write blocked - no pipe reader thread running"
+        send_message "/end alice" >/dev/null 2>&1 || true
+        send_message "/end bob" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Step 5: Verify Worker B (bob) received the message in tmux pane
+    local bob_tmux_name="${TEST_TMUX_PREFIX}bob"
+    local pane_content
+    pane_content=$(tmux capture-pane -t "$bob_tmux_name" -p 2>/dev/null || echo "")
+
+    if echo "$pane_content" | grep -q "$unique_msg"; then
+        success "Worker-to-worker pipe: Message appeared in bob's tmux session"
+    else
+        fail "Worker-to-worker pipe: Message NOT found in bob's tmux pane"
+        info "  Pane content (last 5 lines):"
+        echo "$pane_content" | tail -5 | sed 's/^/    /'
+    fi
+
+    # Cleanup
+    send_message "/end alice" >/dev/null 2>&1 || true
+    send_message "/end bob" >/dev/null 2>&1 || true
+    wait_for_session_gone "alice" 2>/dev/null || true
+    wait_for_session_gone "bob" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # send_to_worker Abstraction Tests (TDD)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -6079,6 +6181,11 @@ run_integration_tests() {
     log ""
     log "── send_to_worker Integration Tests ────────────────────────────────────"
     test_send_to_worker_integration
+
+    # Worker-to-worker pipe communication tests (e2e behavior)
+    log ""
+    log "── Worker-to-Worker Pipe Tests (Integration) ───────────────────────────"
+    test_worker_to_worker_pipe
 
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
