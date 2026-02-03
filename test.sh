@@ -608,6 +608,103 @@ test_at_all_broadcast() {
     fi
 }
 
+# BEHAVIOR TEST: Verify tmux session remains running after creation (parity with direct mode)
+test_tmux_mode_session_stays_alive() {
+    info "Testing tmux mode session stays alive after creation..."
+
+    # Clean up any existing test worker
+    send_message "/end tmuxalive" >/dev/null 2>&1 || true
+    wait_for_session_gone "tmuxalive" 2>/dev/null || true
+
+    # Create worker via /hire
+    local result
+    result=$(send_message "/hire tmuxalive")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Tmux session alive: /hire failed: $result"
+        return
+    fi
+
+    # Wait for tmux session to be created
+    if ! wait_for_session "tmuxalive"; then
+        fail "Tmux session alive: Session not created"
+        return
+    fi
+
+    local tmux_name="${TEST_TMUX_PREFIX}tmuxalive"
+
+    # KEY BEHAVIOR TEST: Wait 3 seconds and verify session is STILL running
+    sleep 3
+
+    if tmux has-session -t "$tmux_name" 2>/dev/null; then
+        success "Tmux session alive: Session still running after 3 seconds"
+    else
+        fail "Tmux session alive: Session died unexpectedly"
+        return
+    fi
+
+    # Cleanup
+    send_message "/end tmuxalive" >/dev/null 2>&1 || true
+    wait_for_session_gone "tmuxalive" 2>/dev/null || true
+}
+
+# BEHAVIOR TEST: Verify message actually reaches tmux session (parity with direct mode)
+test_tmux_mode_message_delivery() {
+    info "Testing tmux mode message delivery to session..."
+
+    # Clean up any existing test worker
+    send_message "/end tmuxmsg" >/dev/null 2>&1 || true
+    wait_for_session_gone "tmuxmsg" 2>/dev/null || true
+
+    # Create worker
+    local result
+    result=$(send_message "/hire tmuxmsg")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Message delivery: /hire failed: $result"
+        return
+    fi
+
+    # Wait for session to be created
+    if ! wait_for_session "tmuxmsg"; then
+        fail "Message delivery: Session not created"
+        return
+    fi
+
+    local tmux_name="${TEST_TMUX_PREFIX}tmuxmsg"
+
+    # Focus the worker
+    send_message "/focus tmuxmsg" >/dev/null
+    sleep 0.5
+
+    # KEY BEHAVIOR TEST: Send a unique message and verify it appears in tmux pane
+    local unique_msg="test_msg_${RANDOM}"
+    result=$(send_message "$unique_msg")
+
+    if [[ "$result" != "OK" ]]; then
+        fail "Message delivery: Message send failed: $result"
+        send_message "/end tmuxmsg" >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Wait for message to be delivered
+    sleep 1
+
+    # Capture tmux pane content and check for our message
+    local pane_content
+    pane_content=$(tmux capture-pane -t "$tmux_name" -p 2>/dev/null || echo "")
+
+    if echo "$pane_content" | grep -q "$unique_msg"; then
+        success "Message delivery: Message appeared in tmux session"
+    else
+        fail "Message delivery: Message not found in tmux pane"
+    fi
+
+    # Cleanup
+    send_message "/end tmuxmsg" >/dev/null 2>&1 || true
+    wait_for_session_gone "tmuxmsg" 2>/dev/null || true
+}
+
 test_session_files() {
     info "Testing session file permissions..."
 
@@ -4248,6 +4345,44 @@ print('OK')
     fi
 }
 
+# Test the esc() function in hooks/forward-to-bridge.py (tmux mode parity)
+test_forward_to_bridge_html_escape() {
+    info "Testing forward-to-bridge esc() escapes HTML special characters..."
+
+    if python3 -c "
+import sys
+from importlib.util import spec_from_loader, module_from_spec
+from importlib.machinery import SourceFileLoader
+
+# Load forward-to-bridge.py as a module (dash in name requires special handling)
+spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
+forward_to_bridge = module_from_spec(spec)
+spec.loader.exec_module(forward_to_bridge)
+
+esc = forward_to_bridge.esc
+
+# Test basic escaping
+assert esc('hello') == 'hello', 'Plain text unchanged'
+assert esc('<script>') == '&lt;script&gt;', 'Angle brackets escaped'
+assert esc('a & b') == 'a &amp; b', 'Ampersand escaped'
+assert esc('1 < 2 > 0') == '1 &lt; 2 &gt; 0', 'Mixed escaping'
+
+# Test real-world cases (code snippets)
+code = 'if (x < 10 && y > 5)'
+expected = 'if (x &lt; 10 &amp;&amp; y &gt; 5)'
+assert esc(code) == expected, f'Code escaping failed: {esc(code)}'
+
+# Test already-escaped content (should double-escape)
+assert esc('&lt;') == '&amp;lt;', 'Already escaped gets re-escaped'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "forward-to-bridge esc() escapes HTML correctly"
+    else
+        fail "forward-to-bridge esc() test failed"
+    fi
+}
+
 test_direct_mode_is_pending() {
     info "Testing is_pending works in direct mode..."
 
@@ -5082,6 +5217,7 @@ run_unit_tests() {
     test_direct_mode_no_hook_install
     test_direct_mode_handle_event
     test_direct_mode_html_escape
+    test_forward_to_bridge_html_escape
     test_direct_mode_is_pending
     test_direct_mode_get_registered_sessions
     test_direct_mode_graceful_shutdown
@@ -5350,6 +5486,12 @@ run_integration_tests() {
     test_at_all_broadcast
     test_reply_routing
     test_reply_context
+
+    # Tmux mode behavior tests (parity with direct mode)
+    log ""
+    log "── Tmux Mode Behavior Tests ────────────────────────────────────────────"
+    test_tmux_mode_session_stays_alive
+    test_tmux_mode_message_delivery
 
     # Security tests (integration)
     log ""

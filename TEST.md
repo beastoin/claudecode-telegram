@@ -103,9 +103,9 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | Feature | Tmux Mode Test | Direct Mode Test | Status |
 |---------|---------------|------------------|--------|
 | Session/worker creation | `test_hire_command` | `test_direct_mode_hire_creates_worker` | ✅ Parity |
-| Session/worker survival | **MISSING** | `test_direct_mode_subprocess_stays_alive` | ⚠️ Need tmux test |
-| Message delivery verified | **MISSING** (HTTP OK only) | `test_direct_mode_worker_accepts_messages` | ⚠️ Need tmux test |
-| HTML escaping | **MISSING** | `test_direct_mode_html_escape` | ⚠️ Need `forward-to-bridge.py` test |
+| Session/worker survival | `test_tmux_mode_session_stays_alive` | `test_direct_mode_subprocess_stays_alive` | ✅ Parity |
+| Message delivery verified | `test_tmux_mode_message_delivery` | `test_direct_mode_worker_accepts_messages` | ✅ Parity |
+| HTML escaping | `test_forward_to_bridge_html_escape` | `test_direct_mode_html_escape` | ✅ Parity |
 | Focus switching | `test_focus_command` | `test_direct_mode_e2e_focus_switch` | ✅ Parity |
 | @mention routing | `test_at_mention` | `test_direct_mode_e2e_at_mention` | ✅ Parity |
 | Pause/interrupt | `test_pause_command` | `test_direct_mode_e2e_pause` | ✅ Parity |
@@ -116,14 +116,9 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | /progress display | `test_progress_command` | `test_direct_mode_e2e_progress` | ✅ Parity |
 | Graceful shutdown | `test_graceful_shutdown` | `test_direct_mode_graceful_shutdown` | ✅ Parity |
 
-**Missing tests to add:**
-- `test_tmux_mode_session_stays_alive` - verify tmux session remains after 3+ seconds
-- `test_tmux_mode_message_delivery` - verify message reaches tmux (not just HTTP OK)
-- `test_forward_to_bridge_html_escape` - test `esc()` function in `forward-to-bridge.py`
-
 ## Complete Test Inventory
 
-> **Total: 184 test functions**
+> **Total: 187 test functions**
 >
 > Keep this list updated when adding new tests.
 
