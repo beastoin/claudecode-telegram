@@ -288,8 +288,18 @@ Response:
 ```json
 {
   "workers": [
-    {"name": "alice", "protocol": "tmux", "address": "claude-prod-alice"},
-    {"name": "bob", "protocol": "pipe", "address": "/tmp/claudecode-telegram/bob/in.pipe"}
+    {
+      "name": "alice",
+      "protocol": "tmux",
+      "address": "claude-prod-alice",
+      "send_example": "tmux send-keys -t claude-prod-alice 'your message here' Enter"
+    },
+    {
+      "name": "bob",
+      "protocol": "pipe",
+      "address": "/tmp/claudecode-telegram/bob/in.pipe",
+      "send_example": "echo 'your message here' > /tmp/claudecode-telegram/bob/in.pipe"
+    }
   ]
 }
 ```
