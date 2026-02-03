@@ -62,6 +62,10 @@ if _mounts_env:
 # Temporary file inbox (session-isolated, auto-cleaned)
 FILE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
 
+# Worker pipe root for inter-worker communication
+# Each worker gets a named pipe at WORKER_PIPE_ROOT/<name>/in.pipe
+WORKER_PIPE_ROOT = Path("/tmp/claudecode-telegram")
+
 # Direct mode: bypass tmux, use Claude JSON streaming
 # When enabled, workers are subprocess.Popen processes instead of tmux sessions
 DIRECT_MODE = os.environ.get("DIRECT_MODE", "0") == "1"
@@ -267,6 +271,95 @@ def cleanup_inbox(session_name):
                 f.unlink()
             except Exception as e:
                 print(f"Failed to delete {f}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker Pipe Functions (inter-worker communication)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_worker_pipe_path(name):
+    """Get the named pipe path for a worker.
+
+    Path: /tmp/claudecode-telegram/<worker>/in.pipe
+    """
+    return WORKER_PIPE_ROOT / name / "in.pipe"
+
+
+def ensure_worker_pipe(name):
+    """Create the named pipe for a worker if it doesn't exist.
+
+    Creates: /tmp/claudecode-telegram/<worker>/in.pipe
+    """
+    pipe_path = get_worker_pipe_path(name)
+    pipe_dir = pipe_path.parent
+
+    # Create directory with secure permissions
+    pipe_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    pipe_dir.chmod(0o700)
+
+    # Create FIFO (named pipe) if it doesn't exist
+    if not pipe_path.exists():
+        os.mkfifo(str(pipe_path), mode=0o600)
+        print(f"Created worker pipe: {pipe_path}")
+
+    return pipe_path
+
+
+def cleanup_worker_pipe(name):
+    """Remove the named pipe for a worker."""
+    pipe_path = get_worker_pipe_path(name)
+
+    if pipe_path.exists():
+        try:
+            pipe_path.unlink()
+            print(f"Removed worker pipe: {pipe_path}")
+        except Exception as e:
+            print(f"Failed to remove worker pipe {pipe_path}: {e}")
+
+    # Also try to remove parent directory if empty
+    pipe_dir = pipe_path.parent
+    if pipe_dir.exists():
+        try:
+            pipe_dir.rmdir()
+        except OSError:
+            pass  # Directory not empty, that's OK
+
+
+def get_workers():
+    """Get all active workers with their communication details.
+
+    Returns list of dicts with:
+    - name: worker name
+    - protocol: "tmux" or "pipe"
+    - address: tmux session name or pipe path
+    - send_example: example command to send a message
+    """
+    workers = []
+
+    if DIRECT_MODE:
+        # Direct mode: return subprocess workers with pipe protocol
+        for name, worker in direct_workers.items():
+            if worker.process.poll() is None:  # Still running
+                pipe_path = get_worker_pipe_path(name)
+                workers.append({
+                    "name": name,
+                    "protocol": "pipe",
+                    "address": str(pipe_path),
+                    "send_example": f"echo 'your message here' > {pipe_path}"
+                })
+    else:
+        # Tmux mode: return tmux sessions
+        registered = scan_tmux_sessions()
+        for name, info in registered.items():
+            tmux_name = info["tmux"]
+            workers.append({
+                "name": name,
+                "protocol": "tmux",
+                "address": tmux_name,
+                "send_example": f"tmux send-keys -t {tmux_name} 'your message here' Enter"
+            })
+
+    return workers
 
 
 def download_telegram_file(file_id, session_name):
@@ -1225,7 +1318,8 @@ def read_direct_worker_output(name: str, process: subprocess.Popen):
                             "You are connected to Telegram via claudecode-telegram bridge in direct mode. "
                             "Manager can send you messages. "
                             "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-                            "Allowed paths: /tmp, current directory."
+                            "Allowed paths: /tmp, current directory. "
+                            f"To message other workers: curl {BRIDGE_URL}/workers for worker list with send commands."
                         )
                         send_to_direct_worker(name, welcome, None)
 
@@ -1394,6 +1488,8 @@ def create_session(name):
             state["active"] = name
             save_last_active(name)
             ensure_session_dir(name)
+            # Create worker pipe for inter-worker communication
+            ensure_worker_pipe(name)
         return ok, err
 
     tmux_name = f"{TMUX_PREFIX}{name}"
@@ -1439,7 +1535,8 @@ def create_session(name):
         "You are connected to Telegram via claudecode-telegram bridge. "
         "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
         "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-        "Allowed paths: /tmp, current directory."
+        "Allowed paths: /tmp, current directory. "
+        f"To message other workers: curl {BRIDGE_URL}/workers for worker list with send commands."
     )
     if SANDBOX_ENABLED:
         welcome += " Running in sandbox mode (Docker container)."
@@ -1448,6 +1545,8 @@ def create_session(name):
     state["active"] = name
     save_last_active(name)
     ensure_session_dir(name)
+    # Create worker pipe for inter-worker communication
+    ensure_worker_pipe(name)
 
     return True, None
 
@@ -1464,6 +1563,8 @@ def kill_session(name):
                 workers = get_direct_workers()
                 if workers:
                     state["active"] = list(workers.keys())[0]
+            # Clean up worker pipe
+            cleanup_worker_pipe(name)
         return ok, err
 
     registered = get_registered_sessions()
@@ -1480,6 +1581,9 @@ def kill_session(name):
 
     # Clean up inbox images
     cleanup_inbox(name)
+
+    # Clean up worker pipe
+    cleanup_worker_pipe(name)
 
     # Clear active if it was the killed session
     if state["active"] == name:
@@ -1786,9 +1890,35 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode())
 
     def do_GET(self):
+        # Handle /workers endpoint for inter-worker discovery
+        if self.path == "/workers":
+            self.handle_workers_endpoint()
+            return
+
+        # Default health check endpoint
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Claude-Telegram Multi-Session Bridge")
+
+    def handle_workers_endpoint(self):
+        """Return list of active workers with communication details.
+
+        GET /workers
+        Response: {"workers": [{"name": ..., "protocol": ..., "address": ..., "send_example": ...}, ...]}
+        """
+        try:
+            workers = get_workers()
+            response = {"workers": workers}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode())
+        except Exception as e:
+            print(f"Workers endpoint error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
 
     def handle_message(self, update):
         global admin_chat_id
