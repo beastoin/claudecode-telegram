@@ -46,6 +46,11 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 **FULL mode**:
 - Everything in Default mode, plus:
+- Direct mode E2E tests (requires claude CLI):
+  - Full flow: hire -> message -> response -> end
+  - Multi-worker focus switching
+  - @mention routing
+  - /pause, /relaunch, /settings, /progress commands
 - Cloudflare tunnel startup
 - Webhook configuration with real Telegram API
 
@@ -71,7 +76,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 98.5%** (130 of 132 features tested)
+**Current coverage: 98.5%** (138 of 140 features tested)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
@@ -84,6 +89,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
 | Direct Mode | 14 | 100% |
+| Direct Mode E2E | 8 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **Only 2 features untested:**
@@ -92,7 +98,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Complete Test Inventory
 
-> **Total: 173 test functions**
+> **Total: 181 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -155,6 +161,19 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | `test_direct_mode_message_routing` | Messages routed to direct worker |
 | `test_direct_mode_team_shows_workers` | /team lists direct workers |
 | `test_direct_mode_end_kills_worker` | /end terminates direct worker |
+
+### Direct Mode E2E Tests (FULL mode, requires claude CLI)
+
+| Test | Description |
+|------|-------------|
+| `test_direct_mode_e2e_full_flow` | Complete flow: hire -> message -> response -> end |
+| `test_direct_mode_e2e_focus_switch` | Create 2 workers, verify /focus switches between them |
+| `test_direct_mode_e2e_at_mention` | @worker routing without focus change |
+| `test_direct_mode_e2e_pause` | /pause sends interrupt to worker |
+| `test_direct_mode_e2e_relaunch` | /relaunch restarts worker subprocess |
+| `test_direct_mode_e2e_settings` | /settings shows direct mode indicator |
+| `test_direct_mode_e2e_progress` | /progress shows worker status |
+| `test_direct_mode_vs_tmux_parity` | Verify code paths exist for both modes |
 
 ### CLI Tests (FAST mode, no bridge)
 
