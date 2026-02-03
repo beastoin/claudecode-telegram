@@ -14,6 +14,7 @@
 | **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves bridge process |
 | **Admin config** | Pre-set via `ADMIN_CHAT_ID` or auto-learn first user |
 | **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
+| **Decentralized worker comms** | Bridge provides discovery only; workers communicate directly via protocol |
 
 ---
 
@@ -264,37 +265,66 @@ Key insight: We buffer during streaming, only send on `result`. This prevents fl
 
 ## Future Features (Planned)
 
-### Inter-Worker Messaging
+### Inter-Worker Messaging (Decentralized Discovery)
 
-**Status:** Not implemented
+**Status:** Partial (tmux mode only via direct tmux send-keys)
 
-Workers currently cannot communicate directly with each other. This feature would allow workers to send messages to other workers via a new bridge endpoint.
+**Design philosophy:** Bridge provides discovery only; workers communicate directly using the provided protocol. The bridge does NOT route messages between workers - it only tells workers how to reach each other. This means:
+- **No manager visibility:** Private worker-to-worker conversations stay private
+- **Direct P2P communication:** Workers talk to each other without bridge involvement
+- **Protocol flexibility:** Each worker advertises how to reach it (tmux, pipe, etc.)
 
-**Planned design:**
+**Current state:**
+- **tmux mode:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message" Enter` directly
+- **Direct mode:** No solution yet (planned: named pipes)
+
+**Planned design - Discovery endpoint:**
 
 ```
-POST /worker-message
+GET /workers
+```
+
+Response:
+```json
 {
-  "from": "worker1",
-  "to": "worker2",
-  "message": "Can you review the API changes I just made?"
+  "workers": [
+    {"name": "alice", "protocol": "tmux", "address": "claude-prod-alice"},
+    {"name": "bob", "protocol": "pipe", "address": "/tmp/claudecode-telegram/bob/in.pipe"}
+  ]
 }
 ```
 
-**Key principles:**
-- **Works for both modes:** tmux and direct mode workers can send/receive
-- **Manager visibility:** All inter-worker messages are logged and forwarded to Telegram
-- **No hidden coordination:** Manager sees all worker-to-worker communication
-- **Responses go to Telegram:** When worker2 responds, the response is sent to Telegram as usual
+**Protocol types:**
 
-**Why this matters:**
-- Enables worker collaboration on complex tasks
-- Manager stays informed of all coordination
-- Workers can delegate subtasks to specialists
+| Protocol | Address Format | How to Send | Mode |
+|----------|---------------|-------------|------|
+| `tmux` | Session name | `tmux send-keys -t <address> "message" Enter` | tmux only |
+| `pipe` | Named pipe path | `echo "message" > <address>` | Both modes |
+
+**Recommended: Named pipes as unified protocol**
+
+Named pipes (FIFOs) work in both tmux and direct modes:
+```bash
+# Bridge creates on worker startup
+mkfifo /tmp/claudecode-telegram/<worker>/in.pipe
+
+# Worker A sends to Worker B
+echo "Hey bob, can you review PR #42?" > /tmp/claudecode-telegram/bob/in.pipe
+
+# Worker B reads (poll or inotifywait)
+cat /tmp/claudecode-telegram/<worker>/in.pipe
+```
+
+**Why this design:**
+- Workers collaborate without manager overhead
+- Standard Unix mechanism, no custom protocol
+- Works consistently in both tmux and direct modes
+- Bridge stays simple - just discovery, no message routing
 
 **Missing tests:**
-- `test_worker_message_tmux` - inter-worker messaging in tmux mode
-- `test_worker_message_direct` - inter-worker messaging in direct mode
+- `test_worker_discovery_endpoint` - GET /workers returns worker list
+- `test_worker_pipe_creation` - pipes created on worker startup
+- `test_worker_to_worker_pipe` - end-to-end worker communication via pipe
 
 ---
 

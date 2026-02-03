@@ -252,10 +252,65 @@ These slash commands are rejected with a message:
 
 ## Planned features (not yet implemented)
 
-### Inter-worker messaging
-- **Status:** Partial (tmux only)
-- **Current tmux mode:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message"` directly
+### Inter-worker messaging (Decentralized Discovery)
+
+**Design philosophy:** Bridge provides discovery only; workers communicate directly using the provided protocol. No message routing through bridge = no manager visibility into private worker conversations.
+
+#### Current state
+- **tmux mode:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message"` directly
 - **Direct mode:** ❌ No solution yet
-- **Planned:** Bridge endpoint `/worker-message` for unified API in both modes
-- **Planned API:** `POST /worker-message {"from": "worker1", "to": "worker2", "message": "..."}`
-- **Missing tests:** `test_worker_message_tmux`, `test_worker_message_direct`
+
+#### Planned: Discovery endpoint
+
+```
+GET /workers
+```
+
+Response:
+```json
+{
+  "workers": [
+    {"name": "alice", "protocol": "tmux", "address": "claude-prod-alice"},
+    {"name": "bob", "protocol": "pipe", "address": "/tmp/claudecode-telegram/bob/in.pipe"},
+    {"name": "charlie", "protocol": "direct", "address": "12345"}
+  ]
+}
+```
+
+#### Protocol types
+
+| Protocol | Address format | How to send | Mode |
+|----------|---------------|-------------|------|
+| `tmux` | Session name (e.g., `claude-prod-alice`) | `tmux send-keys -t <address> "message" Enter` | tmux mode |
+| `pipe` | Named pipe path (e.g., `/tmp/.../in.pipe`) | `echo "message" > <address>` | Both modes |
+| `direct` | Process ID | Write to stdin (requires bridge relay) | direct mode |
+
+#### Recommended: Named pipes as unified protocol
+
+Named pipes (FIFOs) work in both tmux and direct modes:
+
+```bash
+# Worker setup (done by bridge on worker creation)
+mkfifo /tmp/claudecode-telegram/<worker>/in.pipe
+
+# Sending worker
+echo "Hey alice, can you review PR #42?" > /tmp/claudecode-telegram/alice/in.pipe
+
+# Receiving worker (reads from pipe)
+cat /tmp/claudecode-telegram/<worker>/in.pipe
+```
+
+**Benefits:**
+- Works in both tmux and direct modes
+- No bridge involvement after discovery
+- Standard Unix mechanism, no custom protocol
+- Workers can poll or use `inotifywait` for async reads
+
+#### Implementation phases
+
+1. **Phase 1:** Add `GET /workers` discovery endpoint
+2. **Phase 2:** Create named pipes on worker creation
+3. **Phase 3:** Document worker-to-worker protocol in welcome message
+4. **Phase 4:** Add pipe reader thread to direct mode workers
+
+**Missing tests:** `test_worker_discovery_endpoint`, `test_worker_pipe_creation`, `test_worker_to_worker_pipe`
