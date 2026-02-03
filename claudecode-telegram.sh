@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.17.0"
+VERSION="0.17.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -286,7 +286,7 @@ start_tunnel() {
 }
 
 wait_for_tunnel_url() {
-    local log_file="$1" timeout="${2:-30}"
+    local log_file="$1" timeout="${2:-60}"
     local url="" attempts=0
     while [[ -z "$url" && $attempts -lt $timeout ]]; do
         sleep 1
@@ -296,6 +296,44 @@ wait_for_tunnel_url() {
     echo "$url"
 }
 
+# Restart tunnel with retry logic (handles Cloudflare rate limiting)
+restart_tunnel_with_retry() {
+    local port="$1" node_dir="$2" max_attempts="${3:-3}"
+    local attempt=1 backoff=5
+    local tunnel_pid="" new_url=""
+
+    while [[ $attempt -le $max_attempts ]]; do
+        [[ $attempt -gt 1 ]] && log "Tunnel restart attempt $attempt/$max_attempts (waiting ${backoff}s)..."
+        [[ $attempt -gt 1 ]] && sleep "$backoff"
+
+        # Kill any existing tunnel process
+        local old_pid
+        old_pid=$(cat "$node_dir/tunnel.pid" 2>/dev/null || true)
+        [[ -n "$old_pid" ]] && kill "$old_pid" 2>/dev/null || true
+
+        # Start new tunnel
+        local tunnel_log="$node_dir/tunnel.log"
+        : > "$tunnel_log"  # Truncate log
+        tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
+        echo "$tunnel_pid" > "$node_dir/tunnel.pid"
+
+        # Wait for URL (60s timeout)
+        new_url=$(wait_for_tunnel_url "$tunnel_log" 60)
+
+        if [[ -n "$new_url" ]]; then
+            echo "$new_url"
+            return 0
+        fi
+
+        # Failed, kill the process and retry
+        kill "$tunnel_pid" 2>/dev/null || true
+        ((attempt++))
+        ((backoff *= 2))  # Exponential backoff: 5, 10, 20...
+    done
+
+    return 1  # All attempts failed
+}
+
 is_tunnel_alive() {
     local pid="$1"
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
@@ -303,7 +341,7 @@ is_tunnel_alive() {
 
 is_tunnel_reachable() {
     local url="$1"
-    [[ -n "$url" ]] && curl -s --max-time 5 "$url" >/dev/null 2>&1
+    [[ -n "$url" ]] && curl -s --max-time 10 "$url" >/dev/null 2>&1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -536,19 +574,16 @@ cmd_run() {
                 warn "Tunnel $tunnel_problem, restarting..."
                 bridge_notify "$port" "⚠️ Tunnel connection lost. Reconnecting..."
 
-                tunnel_log="$node_dir/tunnel.log"
-                tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
-                echo "$tunnel_pid" > "$node_dir/tunnel.pid"
-
                 local new_url
-                new_url=$(wait_for_tunnel_url "$tunnel_log" 30)
+                new_url=$(restart_tunnel_with_retry "$port" "$node_dir" 3)
 
                 if [[ -z "$new_url" ]]; then
-                    error "Failed to restart tunnel"
-                    bridge_notify "$port" "❌ Tunnel restart failed. Bridge may be offline."
+                    error "Failed to restart tunnel after 3 attempts"
+                    bridge_notify "$port" "❌ Tunnel restart failed after 3 attempts. Bridge may be offline."
                     exit 1
                 fi
 
+                tunnel_pid=$(cat "$node_dir/tunnel.pid")
                 tunnel_url="$new_url"
                 echo "$tunnel_url" > "$node_dir/tunnel_url"
                 success "Tunnel restarted: $tunnel_url"
