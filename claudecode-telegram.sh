@@ -415,7 +415,7 @@ cmd_run() {
         log "$(dim "Hook already installed")"
     fi
 
-    log "$(dim "No default session - use /new <name> from Telegram")"
+    log "$(dim "No default session - use /hire <name> from Telegram")"
 
     # Set up env vars for bridge
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
@@ -529,9 +529,9 @@ cmd_run() {
     fi
 
     log ""
-    log "$(bold "Ready!") Send /new <name> to your bot to create a Claude instance"
+    log "$(bold "Ready!") Send /hire <name> to your bot to create a Claude instance"
     log ""
-    log "$(bold "Commands:") /new /use /list /kill /status /stop /restart"
+    log "$(bold "Commands:") /hire /focus /team /progress /pause /relaunch /end"
     log "$(dim "Ctrl+C to stop")"
     if [[ -n "$tunnel_pid" ]]; then
         log "$(dim "Tunnel watchdog: enabled (auto-restart on failure)")"
@@ -1276,12 +1276,14 @@ MULTI-NODE
   ./claudecode-telegram.sh --all status           # Status of all nodes
 
 TELEGRAM COMMANDS
-  /new <name>       Create new Claude instance
-  /use <name>       Switch active Claude
-  /list             List all instances
-  /kill <name>      Stop and remove instance
-  /status           Detailed status
-  /stop             Interrupt active Claude
+  /hire <name>      Create new Claude instance
+  /focus <name>     Switch active Claude
+  /team             List all instances
+  /end <name>       Stop and remove instance
+  /progress         Detailed status of focused worker
+  /pause            Interrupt active Claude
+  /relaunch         Restart focused worker
+  /learn            Ask focused worker what they learned
   @name <msg>       One-off message to specific Claude
   <message>         Send to active Claude
 

@@ -1813,45 +1813,69 @@ test_webhook_secret_acceptance() {
 }
 
 test_graceful_shutdown_notification() {
-    info "Testing graceful shutdown notification attempt..."
+    info "Testing graceful shutdown attempts notification..."
 
-    # Test that graceful_shutdown function exists and handles notification
+    # Test that graceful_shutdown tries to send notification when admin_chat_id is set
     if python3 -c "
-from bridge import graceful_shutdown
-import inspect
-src = inspect.getsource(graceful_shutdown)
-# Check graceful_shutdown mentions notification/offline message
-assert 'notify' in src.lower() or 'offline' in src.lower() or 'shutdown' in src.lower() or 'ADMIN' in src, \
-    'graceful_shutdown should attempt notification'
+import bridge
+import unittest.mock as mock
+import signal
+
+# Set up admin chat ID
+bridge.admin_chat_id = 12345
+
+# Mock telegram_api and sys.exit
+with mock.patch.object(bridge, 'telegram_api') as mock_api, \
+     mock.patch('sys.exit'):
+    mock_api.return_value = {'ok': True}
+    # Call graceful_shutdown with SIGTERM
+    bridge.graceful_shutdown(signal.SIGTERM, None)
+
+# Verify notification was attempted
+assert mock_api.called, 'telegram_api should be called for shutdown notification'
+# Check that sendMessage was called (notification attempt)
+call_found = any('sendMessage' in str(c) for c in mock_api.call_args_list)
+assert call_found, 'Should attempt to send shutdown message'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Graceful shutdown notification code exists"
+        success "Graceful shutdown attempts notification"
     else
-        # Fallback: just verify the function exists
-        if python3 -c "from bridge import graceful_shutdown; print('OK')" 2>/dev/null | grep -q "OK"; then
-            success "Graceful shutdown function exists"
-        else
-            fail "Graceful shutdown function missing"
-        fi
+        fail "Graceful shutdown notification test failed"
     fi
 }
 
 test_typing_indicator_loop() {
-    info "Testing typing indicator loop behavior..."
+    info "Testing typing indicator loop calls sendChatAction..."
 
-    # Test that typing indicator function exists in bridge
+    # Test that send_typing_loop calls telegram_api with sendChatAction
     if python3 -c "
-from bridge import send_typing_indicator
+import bridge
+import unittest.mock as mock
+
+# Set up a pending state that will clear after first check
+call_count = [0]
+def mock_is_pending(name):
+    call_count[0] += 1
+    return call_count[0] <= 1  # True first time, False after
+
+# Mock is_pending and telegram_api
+with mock.patch.object(bridge, 'is_pending', mock_is_pending), \
+     mock.patch.object(bridge, 'telegram_api') as mock_api, \
+     mock.patch('time.sleep'):  # Skip the sleep
+    mock_api.return_value = {'ok': True}
+    bridge.send_typing_loop(12345, 'test')
+
+# Verify sendChatAction was called
+assert mock_api.called, 'telegram_api should be called'
+call_args = mock_api.call_args
+assert call_args[0][0] == 'sendChatAction', f'Expected sendChatAction, got {call_args[0][0]}'
+assert call_args[0][1]['chat_id'] == 12345
+assert call_args[0][1]['action'] == 'typing'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Typing indicator function exists"
+        success "Typing indicator loop calls sendChatAction"
     else
-        # Check if there's any typing-related code
-        if grep -q "sendChatAction\|typing" "$SCRIPT_DIR/bridge.py" 2>/dev/null; then
-            success "Typing indicator code exists"
-        else
-            fail "Typing indicator code missing"
-        fi
+        fail "Typing indicator behavior test failed"
     fi
 }
 
@@ -3969,9 +3993,9 @@ test_multipart_chained_reply_to() {
     info "Testing multipart responses chained with reply_to_message_id..."
 
     if python3 -c "
-from bridge import Handler
+from bridge import send_response_to_telegram
 import inspect
-source = inspect.getsource(Handler)
+source = inspect.getsource(send_response_to_telegram)
 
 # Should use reply_to_message_id for chaining
 assert 'reply_to_message_id' in source

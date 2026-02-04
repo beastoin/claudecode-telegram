@@ -21,8 +21,13 @@ TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Get session name from tmux (works even without TMUX env var)
+# In Docker/sandbox mode, fall back to BRIDGE_SESSION env var
 # ─────────────────────────────────────────────────────────────────────────────
 SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+if [ -z "$SESSION_NAME" ] && [ -n "${BRIDGE_SESSION:-}" ]; then
+    # Docker mode: use BRIDGE_SESSION env var directly
+    SESSION_NAME="${TMUX_PREFIX:-claude-}${BRIDGE_SESSION}"
+fi
 [ -z "$SESSION_NAME" ] && exit 0
 
 # ─────────────────────────────────────────────────────────────────────────────

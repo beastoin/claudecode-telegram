@@ -46,7 +46,7 @@ Traditional approach:          This approach:
 
 ## Naming Convention: `claude-<name>`
 
-User says `/new backend` → tmux session `claude-backend`
+User says `/hire backend` → tmux session `claude-backend`
 
 This prefix pattern enables:
 - **Auto-discovery**: `tmux list-sessions | grep ^claude-` finds all managed sessions
@@ -89,8 +89,8 @@ Why files instead of IPC?
 ```
 Input                    → Routes to
 ─────────────────────────────────────
-/new backend             → creates claude-backend, sets active
-/use frontend            → sets active = frontend
+/hire backend            → creates claude-backend, sets active
+/focus frontend          → sets active = frontend
 @backend do something    → claude-backend (one-off)
 fix the bug              → active session (currently frontend)
 ```
@@ -124,7 +124,7 @@ This makes the bridge non-destructive. It adopts existing work rather than requi
 
 ## No Summaries, No Magic
 
-The `/list` command shows sessions and their pending status. That's it.
+The `/team` command shows sessions and their pending status. That's it.
 
 ```
   backend ← active
@@ -168,7 +168,7 @@ One Telegram DM manages all Claude instances because:
 2. **No channel/group management.** Just DM the bot.
 3. **Mobile-friendly.** One conversation, explicit routing via commands.
 
-The `@name` syntax and `/use` command give you full control without the overhead of multiple chats.
+The `@name` syntax and `/focus` command give you full control without the overhead of multiple chats.
 
 ## Direct Mode (--no-tmux)
 
@@ -436,7 +436,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
   - Loads last chat ID and sends startup notification immediately
   - Loads last active worker and sets as focused (if still exists)
 - Chat ID is updated on every admin message (keeps it fresh)
-- Active worker is saved on `/hire`, `/focus`, `/use`, and worker slash commands
+- Active worker is saved on `/hire`, `/focus`, and worker slash commands
 
 **Why:**
 - Previously, after bridge restart you had to send a message to the bot to know it was online

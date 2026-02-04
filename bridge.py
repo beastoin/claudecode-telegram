@@ -14,10 +14,10 @@ import time
 import re
 import urllib.request
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional
 
 
 # ============================================================
@@ -1066,6 +1066,67 @@ def is_pending(name):
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# grug say: one place for direct/tmux branching. no scatter.
+# Worker Helpers (centralize mode switching)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def worker_is_online(name: str, session: dict = None) -> bool:
+    """Check if worker is online and ready. Handles direct/tmux mode.
+
+    Args:
+        name: Worker name
+        session: Session dict from get_registered_sessions() (optional, avoids re-lookup)
+    """
+    if DIRECT_MODE:
+        return is_direct_worker_running(name)
+
+    if not session:
+        sessions = get_registered_sessions()
+        session = sessions.get(name)
+    if not session:
+        return False
+
+    tmux_name = session.get("tmux")
+    return tmux_name and tmux_exists(tmux_name) and is_claude_running(tmux_name)
+
+
+def worker_set_pending(name: str, chat_id: int):
+    """Set pending state for worker. Handles direct/tmux mode."""
+    if DIRECT_MODE:
+        worker = direct_workers.get(name)
+        if worker:
+            worker.pending = True
+            worker.chat_id = chat_id
+    else:
+        set_pending(name, chat_id)
+
+
+def worker_send(name: str, message: str, chat_id: int = None, session: dict = None) -> bool:
+    """Send message to worker. Handles direct/tmux mode.
+
+    Args:
+        name: Worker name
+        message: Message text to send
+        chat_id: Chat ID (required for direct mode)
+        session: Session dict (optional, avoids re-lookup for tmux mode)
+
+    Returns:
+        True if send succeeded
+    """
+    if DIRECT_MODE:
+        return send_to_direct_worker(name, message, chat_id)
+
+    if not session:
+        sessions = get_registered_sessions()
+        session = sessions.get(name)
+    if not session:
+        return False
+
+    tmux_name = session.get("tmux")
+    return tmux_send_message(tmux_name, message) if tmux_name else False
+
+
 def scan_tmux_sessions():
     """Scan tmux for claude-* sessions (registered)."""
     registered = {}
@@ -1307,7 +1368,7 @@ def get_docker_run_cmd(name):
         f"-e=PORT={PORT}",
         f"-e=TMUX_PREFIX={TMUX_PREFIX}",
         f"-e=SESSIONS_DIR={SESSIONS_DIR}",
-        f"-e=BRIDGE_SESSION={name}",  # Session name for hook (no tmux inside container)
+        f"-e=BRIDGE_SESSION={name}",  # Session name for hook (tmux unavailable inside container)
         "-e=TMUX_FALLBACK=1",
     ])
 
@@ -1582,17 +1643,23 @@ def handle_direct_event(name: str, event: dict) -> Optional[str]:
     return None
 
 
-def send_direct_worker_response(name: str, text: str, chat_id: int):
-    """Send a direct worker's response to Telegram.
+def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool = True, log_prefix: str = "Response"):
+    """Send a response to Telegram. Shared by direct workers and hook responses.
 
-    Handles HTML escaping, message splitting, image/file tags.
+    Args:
+        name: Session/worker name for message prefix
+        text: Response text (may contain image/file tags)
+        chat_id: Telegram chat ID
+        escape: If True, escape HTML special chars (direct workers). If False, text is pre-escaped (hooks).
+        log_prefix: Prefix for log messages (e.g., "Direct response", "Hook response")
     """
     # Parse image and file tags from text (before escaping to preserve tag syntax)
     clean_text, images = parse_image_tags(text)
     clean_text, files = parse_file_tags(clean_text)
 
-    # Escape HTML special characters for Telegram's HTML parse mode
-    clean_text = escape_html(clean_text)
+    # Escape HTML if needed (direct workers send raw text, hooks send pre-escaped HTML)
+    if escape:
+        clean_text = escape_html(clean_text)
 
     # Send text message if there's text content
     if clean_text:
@@ -1613,9 +1680,12 @@ def send_direct_worker_response(name: str, text: str, chat_id: int):
             result = telegram_api("sendMessage", msg_data)
             if result and result.get("ok"):
                 prev_msg_id = result.get("result", {}).get("message_id")
-                print(f"Direct response sent: {name} -> Telegram OK")
+                if len(formatted_parts) > 1:
+                    print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
+                else:
+                    print(f"{log_prefix} sent: {name} -> Telegram OK")
             else:
-                print(f"Direct response failed: {name} -> {result}")
+                print(f"{log_prefix} failed: {name} -> {result}")
 
             if i < len(formatted_parts) - 1:
                 time.sleep(0.05)
@@ -1643,6 +1713,11 @@ def send_direct_worker_response(name: str, text: str, chat_id: int):
                 "text": f"<b>{name}:</b> [File failed: {file_path}]",
                 "parse_mode": "HTML"
             })
+
+
+def send_direct_worker_response(name: str, text: str, chat_id: int):
+    """Send a direct worker's response to Telegram."""
+    send_response_to_telegram(name, text, chat_id, escape=True, log_prefix="Direct response")
 
 
 def is_direct_worker_running(name: str) -> bool:
@@ -2029,70 +2104,8 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Parse image and file tags from text
-            clean_text, images = parse_image_tags(text)
-            clean_text, files = parse_file_tags(clean_text)
-
-            # Send text message if there's text content
-            if clean_text:
-                # Split long messages to fit Telegram's 4096 char limit
-                # Reserve space for prefix: "<b>name (xx/xx):</b>\n" ≈ 30 chars + session name
-                prefix_reserve = len(session_name) + 30
-                chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
-                formatted_parts = format_multipart_messages(session_name, chunks)
-
-                prev_msg_id = None
-                for i, part in enumerate(formatted_parts):
-                    msg_data = {
-                        "chat_id": chat_id,
-                        "text": part,
-                        "parse_mode": "HTML"
-                    }
-                    # Chain messages with reply_to for visual grouping
-                    if prev_msg_id:
-                        msg_data["reply_to_message_id"] = prev_msg_id
-
-                    result = telegram_api("sendMessage", msg_data)
-                    if result and result.get("ok"):
-                        prev_msg_id = result.get("result", {}).get("message_id")
-                        if len(formatted_parts) > 1:
-                            print(f"Response sent: {session_name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
-                        else:
-                            print(f"Response sent: {session_name} -> Telegram OK")
-                    else:
-                        print(f"Response failed: {session_name} part {i+1} -> {result}")
-
-                    # Small delay between parts to ensure order
-                    if i < len(formatted_parts) - 1:
-                        time.sleep(0.05)
-
-            # Send images
-            for img_path, img_caption in images:
-                # Add session prefix to caption
-                full_caption = f"{session_name}: {img_caption}" if img_caption else f"{session_name}:"
-                if send_photo(chat_id, img_path, full_caption):
-                    print(f"Image sent: {session_name} -> {img_path}")
-                else:
-                    # Notify about failed image
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": f"<b>{session_name}:</b> [Image failed: {img_path}]",
-                        "parse_mode": "HTML"
-                    })
-
-            # Send files/documents
-            for file_path, file_caption in files:
-                # Add session prefix to caption
-                full_caption = f"{session_name}: {file_caption}" if file_caption else f"{session_name}:"
-                if send_document(chat_id, file_path, full_caption):
-                    print(f"File sent: {session_name} -> {file_path}")
-                else:
-                    # Notify about failed file
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": f"<b>{session_name}:</b> [File failed: {file_path}]",
-                        "parse_mode": "HTML"
-                    })
+            # Send response using shared helper (escape=False: hook sends pre-escaped HTML)
+            send_response_to_telegram(session_name, text, int(chat_id), escape=False, log_prefix="Response")
 
             # Clear pending
             clear_pending(session_name)
@@ -2657,58 +2670,30 @@ class Handler(BaseHTTPRequestHandler):
                 "Why: <root cause or insight>"
             )
 
-        # Direct mode
-        if DIRECT_MODE:
-            if not is_direct_worker_running(name):
-                self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
-                return True
-
-            worker = direct_workers.get(name)
-            if worker:
-                worker.pending = True
-                worker.chat_id = chat_id
-
-            threading.Thread(
-                target=send_typing_loop,
-                args=(chat_id, name),
-                daemon=True
-            ).start()
-
-            send_ok = send_to_direct_worker(name, prompt, chat_id)
-
-            if msg_id and send_ok:
-                telegram_api("setMessageReaction", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reaction": [{"type": "emoji", "emoji": "👀"}]
-                })
-            return True
-
-        # Tmux mode
-        tmux_name = session["tmux"]
-        if not tmux_exists(tmux_name) or not is_claude_running(tmux_name):
+        # Check if worker is online (handles direct/tmux mode)
+        if not worker_is_online(name, session):
             self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
             return True
 
-        set_pending(name, chat_id)
-
-        # Start typing indicator
+        # Set pending and start typing indicator
+        worker_set_pending(name, chat_id)
         threading.Thread(
             target=send_typing_loop,
             args=(chat_id, name),
             daemon=True
         ).start()
 
-        # Send prompt to worker (with lock to prevent interleaving)
-        send_ok = tmux_send_message(tmux_name, prompt)
+        # Send prompt to worker (handles direct/tmux mode)
+        send_ok = worker_send(name, prompt, chat_id, session)
 
-        # 👀 reaction only if Claude accepted the message (prompt is empty)
-        if msg_id and send_ok and tmux_prompt_empty(tmux_name):
-            telegram_api("setMessageReaction", {
-                "chat_id": chat_id,
-                "message_id": msg_id,
-                "reaction": [{"type": "emoji", "emoji": "👀"}]
-            })
+        # 👀 reaction if message was accepted
+        if msg_id and send_ok:
+            if DIRECT_MODE or tmux_prompt_empty(session.get("tmux", "")):
+                telegram_api("setMessageReaction", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reaction": [{"type": "emoji", "emoji": "👀"}]
+                })
         return True
 
     def route_to_active(self, text, chat_id, msg_id):
@@ -2763,66 +2748,33 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"Can't find {session_name}. Check /team for who's available.")
             return
 
-        # Direct mode: send to subprocess via JSON
-        if DIRECT_MODE:
-            if not is_direct_worker_running(session_name):
-                self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
-                return
-
-            print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
-
-            # Start typing indicator (direct mode uses pending in DirectWorker)
-            worker = direct_workers.get(session_name)
-            if worker:
-                worker.pending = True
-                worker.chat_id = chat_id
-
-            threading.Thread(
-                target=send_typing_loop,
-                args=(chat_id, session_name),
-                daemon=True
-            ).start()
-
-            send_ok = send_to_direct_worker(session_name, text, chat_id)
-
-            # Add 👀 reaction immediately for direct mode (no prompt to check)
-            if msg_id and send_ok:
-                telegram_api("setMessageReaction", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reaction": [{"type": "emoji", "emoji": "👀"}]
-                })
-            return
-
-        # Tmux mode
-        tmux_name = session["tmux"]
-
-        if not tmux_exists(tmux_name):
+        # Check if worker is online (handles direct/tmux mode)
+        if not worker_is_online(session_name, session):
             self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
             return
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
 
-        # Set pending
-        set_pending(session_name, chat_id)
-
-        # Start typing indicator
+        # Set pending and start typing indicator
+        worker_set_pending(session_name, chat_id)
         threading.Thread(
             target=send_typing_loop,
             args=(chat_id, session_name),
             daemon=True
         ).start()
 
-        # Send to tmux (with lock to prevent interleaving)
-        send_ok = tmux_send_message(tmux_name, text)
+        # Send message (handles direct/tmux mode)
+        send_ok = worker_send(session_name, text, chat_id, session)
 
-        # Add 👀 reaction only if Claude accepted the message (prompt is empty)
-        if msg_id and send_ok and tmux_prompt_empty(tmux_name):
-            telegram_api("setMessageReaction", {
-                "chat_id": chat_id,
-                "message_id": msg_id,
-                "reaction": [{"type": "emoji", "emoji": "👀"}]
-            })
+        # Add 👀 reaction if message was accepted
+        if msg_id and send_ok:
+            # In tmux mode, only react if prompt is empty (Claude accepted it)
+            if DIRECT_MODE or tmux_prompt_empty(session.get("tmux", "")):
+                telegram_api("setMessageReaction", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reaction": [{"type": "emoji", "emoji": "👀"}]
+                })
 
     def reply(self, chat_id, text, outcome=None):
         # No prefix - manager-friendly direct messages
