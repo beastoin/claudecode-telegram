@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 
 import os
 import json
@@ -74,6 +74,9 @@ WORKER_PIPE_ROOT = Path("/tmp/claudecode-telegram")
 # When enabled, workers are subprocess.Popen processes instead of tmux sessions
 DIRECT_MODE = os.environ.get("DIRECT_MODE", "0") == "1"
 
+DEFAULT_WORKER_BACKEND = "claude"
+CODEX_WORKER_BACKEND = "codex"
+
 
 @dataclass
 class DirectWorker:
@@ -84,6 +87,7 @@ class DirectWorker:
     pending: bool = False
     reader_thread: Optional[threading.Thread] = None
     initialized: bool = False  # True after receiving init event from Claude
+    backend: str = DEFAULT_WORKER_BACKEND
 
 
 # Dict of active direct workers: name -> DirectWorker
@@ -1067,6 +1071,92 @@ def is_pending(name):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Worker Backend Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_backend(backend: Optional[str]) -> str:
+    """Return a normalized backend name with a safe default."""
+    return backend or DEFAULT_WORKER_BACKEND
+
+
+def parse_hire_args(raw: str) -> tuple[str, str]:
+    """Parse /hire arguments and return (name, backend)."""
+    parts = [p for p in (raw or "").split() if p]
+    backend = DEFAULT_WORKER_BACKEND
+    name_parts = []
+    for part in parts:
+        if part == "--codex":
+            backend = CODEX_WORKER_BACKEND
+        else:
+            name_parts.append(part)
+
+    if len(name_parts) != 1:
+        return "", backend
+
+    name = name_parts[0]
+    if name.startswith(f"{CODEX_WORKER_BACKEND}-"):
+        backend = CODEX_WORKER_BACKEND
+        name = name[len(f"{CODEX_WORKER_BACKEND}-"):]
+
+    return name, backend
+
+
+def format_team_lines(registered: dict, active: Optional[str], pending_lookup=None) -> list[str]:
+    """Format /team response lines (backend-aware)."""
+    if pending_lookup is None:
+        pending_lookup = is_pending
+
+    lines = []
+    lines.append("Your team:")
+    lines.append(f"Focused: {active or '(none)'}")
+    lines.append("Workers:")
+    for name in sorted(registered.keys()):
+        session = registered[name]
+        backend = normalize_backend(session.get("backend"))
+        status = []
+        if name == active:
+            status.append("focused")
+        status.append("working" if pending_lookup(name) else "available")
+        status.append(f"backend={backend}")
+        lines.append(f"- {name} ({', '.join(status)})")
+    return lines
+
+
+def format_progress_lines(
+    name: str,
+    pending: bool,
+    backend: str,
+    online: bool,
+    ready: bool,
+    mode: str,
+    needs_attention: Optional[str] = None
+) -> list[str]:
+    """Format /progress response lines (backend-aware)."""
+    status = []
+    status.append(f"Progress for focused worker: {name}")
+    status.append("Focused: yes")
+    status.append(f"Working: {'yes' if pending else 'no'}")
+    status.append(f"Backend: {backend}")
+    status.append(f"Online: {'yes' if online else 'no'}")
+    status.append(f"Ready: {'yes' if ready else 'no'}")
+    if needs_attention:
+        status.append(f"Needs attention: {needs_attention}")
+    status.append(f"Mode: {mode}")
+    return status
+
+
+def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
+    """Get backend for a worker (direct or tmux)."""
+    if session and session.get("backend"):
+        return normalize_backend(session.get("backend"))
+    if DIRECT_MODE:
+        worker = direct_workers.get(name)
+        if worker:
+            return normalize_backend(worker.backend)
+    return DEFAULT_WORKER_BACKEND
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # grug say: one place for direct/tmux branching. no scatter.
 # Worker Helpers (centralize mode switching)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1088,7 +1178,14 @@ def worker_is_online(name: str, session: dict = None) -> bool:
         return False
 
     tmux_name = session.get("tmux")
-    return tmux_name and tmux_exists(tmux_name) and is_claude_running(tmux_name)
+    if not tmux_name or not tmux_exists(tmux_name):
+        return False
+
+    backend = get_worker_backend(name, session)
+    if backend == CODEX_WORKER_BACKEND:
+        return True
+
+    return is_claude_running(tmux_name)
 
 
 def worker_set_pending(name: str, chat_id: int):
@@ -1124,7 +1221,28 @@ def worker_send(name: str, message: str, chat_id: int = None, session: dict = No
         return False
 
     tmux_name = session.get("tmux")
-    return tmux_send_message(tmux_name, message) if tmux_name else False
+    if not tmux_name:
+        return False
+
+    backend = get_worker_backend(name, session)
+    if backend == CODEX_WORKER_BACKEND:
+        return send_to_codex_worker(tmux_name, message)
+
+    return tmux_send_message(tmux_name, message)
+
+
+def get_tmux_env_value(tmux_name: str, key: str) -> str:
+    """Get a tmux session environment variable value."""
+    result = subprocess.run(
+        ["tmux", "show-environment", "-t", tmux_name, key],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return ""
+    value = result.stdout.strip()
+    if "=" not in value:
+        return ""
+    return value.split("=", 1)[1]
 
 
 def scan_tmux_sessions():
@@ -1147,7 +1265,8 @@ def scan_tmux_sessions():
             if session_name.startswith(TMUX_PREFIX):
                 # Registered session
                 name = session_name[len(TMUX_PREFIX):]  # Remove prefix
-                registered[name] = {"tmux": session_name}
+                backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
+                registered[name] = {"tmux": session_name, "backend": backend}
     except Exception as e:
         print(f"Error scanning tmux: {e}")
 
@@ -1268,6 +1387,15 @@ def tmux_send_message(tmux_name, text):
         return send_ok and enter_ok
 
 
+def send_to_codex_worker(tmux_name: str, text: str) -> bool:
+    """Send a message to a codex-backed worker."""
+    adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
+    if adapter.exists():
+        result = subprocess.run(["python3", str(adapter), tmux_name, text])
+        return result.returncode == 0
+    return tmux_send_message(tmux_name, text)
+
+
 def tmux_send_escape(tmux_name):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
 
@@ -1295,7 +1423,7 @@ def tmux_prompt_empty(tmux_name, timeout=0.5):
     return False
 
 
-def export_hook_env(tmux_name):
+def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
     """Export env vars for hook inside tmux session.
 
     Uses tmux set-environment which persists in session and survives restarts.
@@ -1304,6 +1432,7 @@ def export_hook_env(tmux_name):
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)])
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX])
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)])
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)])
     # Only set BRIDGE_URL if user-provided (not default localhost)
     # This makes override semantics clear: set = override, unset = use PORT
     if _bridge_url_env:
@@ -1399,7 +1528,7 @@ def stop_docker_container(name):
 # Direct Worker Functions (JSON streaming mode, bypasses tmux)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def create_direct_worker(name: str) -> tuple[bool, Optional[str]]:
+def create_direct_worker(name: str, backend: str = DEFAULT_WORKER_BACKEND) -> tuple[bool, Optional[str]]:
     """Create a new Claude worker using JSON streaming mode.
 
     Spawns claude --output-format stream-json subprocess with stdin/stdout pipes.
@@ -1419,7 +1548,7 @@ def create_direct_worker(name: str) -> tuple[bool, Optional[str]]:
             bufsize=1,  # Line buffered
         )
 
-        worker = DirectWorker(name=name, process=process)
+        worker = DirectWorker(name=name, process=process, backend=backend)
         direct_workers[name] = worker
 
         # Start reader thread to process output
@@ -1539,8 +1668,12 @@ def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bo
     # Check tmux sessions
     registered = scan_tmux_sessions()
     if name in registered:
-        tmux_name = registered[name]["tmux"]
+        session = registered[name]
+        tmux_name = session["tmux"]
         if tmux_exists(tmux_name):
+            backend = get_worker_backend(name, session)
+            if backend == CODEX_WORKER_BACKEND:
+                return send_to_codex_worker(tmux_name, message)
             return tmux_send_message(tmux_name, message)
         else:
             print(f"Tmux session '{tmux_name}' does not exist")
@@ -1740,6 +1873,7 @@ def get_direct_workers() -> Dict[str, dict]:
                 "process": worker.process,
                 "pending": worker.pending,
                 "chat_id": worker.chat_id,
+                "backend": normalize_backend(worker.backend),
             }
     return result
 
@@ -1754,7 +1888,7 @@ def kill_all_direct_workers():
             print(f"Error killing direct worker '{name}': {e}")
 
 
-def create_session(name):
+def create_session(name, backend: str = DEFAULT_WORKER_BACKEND):
     """Create a new Claude instance.
 
     SECURITY: Token is NOT exported to Claude session. Hook forwards responses
@@ -1767,7 +1901,7 @@ def create_session(name):
     """
     # Direct mode: use JSON streaming subprocess
     if DIRECT_MODE:
-        ok, err = create_direct_worker(name)
+        ok, err = create_direct_worker(name, backend)
         if ok:
             state["active"] = name
             save_last_active(name)
@@ -1791,6 +1925,11 @@ def create_session(name):
 
     time.sleep(0.5)
 
+    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
+    # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
+    export_hook_env(tmux_name, backend)
+    time.sleep(0.3)
+
     if SANDBOX_ENABLED:
         # Sandbox mode: run Claude in Docker container
         docker_cmd = get_docker_run_cmd(name)
@@ -1798,12 +1937,6 @@ def create_session(name):
         print(f"Started worker '{name}' in sandbox mode")
     else:
         # Legacy mode: run Claude directly
-        # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
-        # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
-        export_hook_env(tmux_name)
-        time.sleep(0.3)
-
-        # Start claude
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
                        "claude --dangerously-skip-permissions", "Enter"])
 
@@ -1881,12 +2014,16 @@ def restart_claude(name):
     """Restart claude in an existing tmux session (or recreate direct worker)."""
     # Direct mode: kill and recreate
     if DIRECT_MODE:
+        backend = DEFAULT_WORKER_BACKEND
+        worker = direct_workers.get(name)
+        if worker:
+            backend = normalize_backend(worker.backend)
         if name in direct_workers:
             if is_direct_worker_running(name):
                 return False, "Worker is already running"
             # Worker exists but not running - recreate
             kill_direct_worker(name)
-        return create_direct_worker(name)
+        return create_direct_worker(name, backend)
 
     registered = get_registered_sessions()
     if name not in registered:
@@ -1900,6 +2037,10 @@ def restart_claude(name):
     if is_claude_running(tmux_name):
         return False, "Worker is already running"
 
+    backend = get_worker_backend(name, registered[name])
+    export_hook_env(tmux_name, backend)
+    time.sleep(0.3)
+
     if SANDBOX_ENABLED:
         # Stop any existing container first
         stop_docker_container(name)
@@ -1909,10 +2050,6 @@ def restart_claude(name):
         docker_cmd = get_docker_run_cmd(name)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
     else:
-        # Re-export env vars for hook (in case session was created by older version or bridge restarted)
-        export_hook_env(tmux_name)
-        time.sleep(0.3)
-
         # Start claude in the existing tmux session
         subprocess.run([
             "tmux", "send-keys", "-t", tmux_name,
@@ -2434,7 +2571,12 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
 
-        name = name.lower().strip()
+        parsed_name, backend = parse_hire_args(name)
+        if not parsed_name:
+            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
+            return True
+
+        name = parsed_name.lower().strip()
         name = re.sub(r'[^a-z0-9-]', '', name)
 
         if not name:
@@ -2446,7 +2588,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
             return True
 
-        ok, err = create_session(name)
+        ok, err = create_session(name, backend)
         if ok:
             self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
             # Update bot commands to include new worker
@@ -2479,17 +2621,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
-        lines = []
-        lines.append("Your team:")
-        lines.append(f"Focused: {state['active'] or '(none)'}")
-        lines.append("Workers:")
-        for name in sorted(registered.keys()):
-            status = []
-            if name == state["active"]:
-                status.append("focused")
-            status.append("working" if is_pending(name) else "available")
-            lines.append(f"- {name} ({', '.join(status)})")
-
+        lines = format_team_lines(registered, state["active"])
         self.reply(chat_id, "\n".join(lines))
         return True
 
@@ -2523,31 +2655,43 @@ class Handler(BaseHTTPRequestHandler):
             return True
 
         pending = is_pending(name)
-
-        status = []
-        status.append(f"Progress for focused worker: {name}")
-        status.append("Focused: yes")
-        status.append(f"Working: {'yes' if pending else 'no'}")
+        backend = get_worker_backend(name, session)
+        online = False
+        ready = False
+        needs_attention = None
+        mode = "tmux"
 
         # Direct mode: check subprocess status
         if DIRECT_MODE:
             running = is_direct_worker_running(name)
-            status.append(f"Online: {'yes' if running else 'no'}")
-            status.append(f"Ready: {'yes' if running else 'no'}")
+            online = running
+            ready = running
             if not running:
-                status.append("Needs attention: worker process is not running. Use /relaunch.")
-            status.append("Mode: direct (JSON streaming)")
+                needs_attention = "worker process is not running. Use /relaunch."
+            mode = "direct (JSON streaming)"
         else:
             tmux_name = session["tmux"]
             exists = tmux_exists(tmux_name)
-            status.append(f"Online: {'yes' if exists else 'no'}")
+            online = exists
 
             if exists:
-                claude_running = is_claude_running(tmux_name)
-                status.append(f"Ready: {'yes' if claude_running else 'no'}")
-                if not claude_running:
-                    status.append("Needs attention: worker app is not running. Use /relaunch.")
-            status.append("Mode: tmux")
+                if backend == CODEX_WORKER_BACKEND:
+                    ready = True
+                else:
+                    claude_running = is_claude_running(tmux_name)
+                    ready = claude_running
+                    if not claude_running:
+                        needs_attention = "worker app is not running. Use /relaunch."
+
+        status = format_progress_lines(
+            name=name,
+            pending=pending,
+            backend=backend,
+            online=online,
+            ready=ready,
+            mode=mode,
+            needs_attention=needs_attention
+        )
 
         self.reply(chat_id, "\n".join(status))
         return True

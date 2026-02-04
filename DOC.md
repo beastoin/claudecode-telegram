@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.17.0
+> Version: 0.18.0
 
 ## Current Philosophy (Summary)
 
@@ -422,6 +422,20 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.18.0 - Worker backend selection (codex + claude)
+
+**Breaking changes:** None.
+
+**New features:**
+- `/hire` now supports worker backend selection:
+  - `--codex` flag (e.g., `/hire --codex alice`)
+  - `codex-<name>` prefix (e.g., `/hire codex-alice`)
+- `/team` and `/progress` now show worker backend metadata.
+
+**Architecture changes:**
+- Backend metadata is stored per tmux session via `WORKER_BACKEND` and read during session scans.
+- Backend-aware routing paths in the bridge (`worker_is_online`, `worker_send`) for future backend adapters.
 
 ### v0.17.0 - Persistence: last chat ID and last active worker
 

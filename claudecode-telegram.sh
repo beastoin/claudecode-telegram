@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.17.1"
+VERSION="0.18.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────

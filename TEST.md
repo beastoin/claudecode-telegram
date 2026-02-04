@@ -76,13 +76,13 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 98.6%** (139 of 141 features tested)
+**Current coverage: 98.7%** (144 of 146 features tested)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
-| Telegram Bot Commands | 16 | 100% |
+| Telegram Bot Commands | 19 | 100% |
 | CLI Commands & Flags | 37 | 97% |
-| Message Routing | 12 | 100% |
+| Message Routing | 13 | 100% |
 | Security | 11 | 100% |
 | Hook Behavior | 15 | 100% |
 | Persistence Files | 14 | 100% |
@@ -127,7 +127,7 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 
 ## Complete Test Inventory
 
-> **Total: 197 test functions**
+> **Total: 202 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -156,6 +156,11 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_pending_set_and_clear` | set_pending and clear_pending functions |
 | `test_pending_auto_timeout` | 10 minute pending auto-cleanup |
 | `test_worker_name_sanitization` | Names sanitized to a-z, 0-9, hyphen |
+| `test_hire_backend_parsing` | /hire backend parsing (--codex, codex- prefix) |
+| `test_team_output_includes_backend` | /team output includes backend metadata |
+| `test_progress_output_includes_backend` | /progress output includes backend metadata |
+| `test_worker_send_uses_backend` | worker_send routes to backend handler |
+| `test_backend_env_metadata` | WORKER_BACKEND exported via tmux env |
 | `test_reserved_names_rejection` | Reserved names (commands, aliases) rejected |
 | `test_bot_commands_structure` | BOT_COMMANDS list structure |
 | `test_blocked_commands_list` | All blocked commands configured |

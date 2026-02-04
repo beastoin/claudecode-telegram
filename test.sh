@@ -512,6 +512,37 @@ test_hire_command() {
     fi
 }
 
+test_backend_env_metadata() {
+    info "Testing worker backend stored in tmux env..."
+
+    if python3 -c "
+import bridge
+import unittest.mock as mock
+
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    class Result:
+        returncode = 0
+        stdout = ''
+    return Result()
+
+with mock.patch.object(bridge, 'subprocess') as mock_subprocess:
+    mock_subprocess.run.side_effect = fake_run
+    bridge.export_hook_env('claude-test-backend', 'codex')
+
+found = any('WORKER_BACKEND' in cmd and 'codex' in cmd for cmd in calls)
+assert found, f'WORKER_BACKEND=codex not set in tmux env: {calls}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Backend env stored in tmux env"
+    else
+        fail "Backend env tmux export test failed"
+    fi
+}
+
 test_team_command() {
     info "Testing /team command..."
 
@@ -1655,6 +1686,130 @@ print('OK')
         success "Worker name sanitization works"
     else
         fail "Worker name sanitization failed"
+    fi
+}
+
+test_hire_backend_parsing() {
+    info "Testing /hire backend parsing..."
+
+    if python3 -c "
+from bridge import parse_hire_args, DEFAULT_WORKER_BACKEND
+
+name, backend = parse_hire_args('alice')
+assert name == 'alice', f'expected alice, got {name}'
+assert backend == DEFAULT_WORKER_BACKEND, f'expected default backend, got {backend}'
+
+name, backend = parse_hire_args('--codex alice')
+assert name == 'alice', f'expected alice, got {name}'
+assert backend == 'codex', f'expected codex backend, got {backend}'
+
+name, backend = parse_hire_args('alice --codex')
+assert name == 'alice', f'expected alice, got {name}'
+assert backend == 'codex', f'expected codex backend, got {backend}'
+
+name, backend = parse_hire_args('codex-amy')
+assert name == 'amy', f'expected amy, got {name}'
+assert backend == 'codex', f'expected codex backend, got {backend}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/hire backend parsing works"
+    else
+        fail "/hire backend parsing failed"
+    fi
+}
+
+test_team_output_includes_backend() {
+    info "Testing /team output includes backend..."
+
+    if python3 -c "
+from bridge import format_team_lines
+
+registered = {
+    'alice': {'backend': 'codex'},
+    'bob': {'backend': 'claude'},
+}
+
+lines = format_team_lines(registered, active='alice', pending_lookup=lambda name: False)
+text = '\\n'.join(lines)
+
+assert 'backend=codex' in text, f'expected codex backend in team output: {text}'
+assert 'backend=claude' in text, f'expected claude backend in team output: {text}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team output includes backend"
+    else
+        fail "/team backend output test failed"
+    fi
+}
+
+test_progress_output_includes_backend() {
+    info "Testing /progress output includes backend..."
+
+    if python3 -c "
+from bridge import format_progress_lines
+
+lines = format_progress_lines(
+    name='alice',
+    pending=False,
+    backend='codex',
+    online=True,
+    ready=True,
+    mode='tmux'
+)
+
+text = '\\n'.join(lines)
+assert 'Backend: codex' in text, f'expected Backend line in progress output: {text}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/progress output includes backend"
+    else
+        fail "/progress backend output test failed"
+    fi
+}
+
+test_worker_send_uses_backend() {
+    info "Testing worker_send routes via backend..."
+
+    if python3 -c "
+import bridge
+
+calls = {'claude': 0, 'codex': 0}
+
+def fake_tmux_send(tmux_name, message):
+    calls['claude'] += 1
+    return True
+
+def fake_codex_send(tmux_name, message):
+    calls['codex'] += 1
+    return True
+
+def fake_scan():
+    return {'alice': {'tmux': 'claude-test-alice', 'backend': 'codex'}}
+
+def fake_get_registered_sessions(registered=None):
+    return registered or fake_scan()
+
+bridge.DIRECT_MODE = False
+bridge.tmux_send_message = fake_tmux_send
+bridge.send_to_codex_worker = fake_codex_send
+bridge.scan_tmux_sessions = fake_scan
+bridge.get_registered_sessions = fake_get_registered_sessions
+
+session = fake_scan()['alice']
+ok = bridge.worker_send('alice', 'hello', session=session)
+
+assert ok is True, 'expected worker_send to succeed'
+assert calls['codex'] == 1, f'expected codex send, got {calls}'
+assert calls['claude'] == 0, f'expected no claude send, got {calls}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "worker_send routes via backend"
+    else
+        fail "worker_send backend routing test failed"
     fi
 }
 
@@ -6873,6 +7028,11 @@ run_unit_tests() {
     log ""
     log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"
     test_worker_name_sanitization
+    test_hire_backend_parsing
+    test_team_output_includes_backend
+    test_progress_output_includes_backend
+    test_worker_send_uses_backend
+    test_backend_env_metadata
 
     # Unit tests - Security constants
     log ""
