@@ -601,7 +601,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event):
     """Background thread that reads messages from a worker's input pipe.
 
     When another worker writes to this worker's pipe:
-      echo "message" > /tmp/claudecode-telegram/bob/in.pipe
+      echo "message" > /tmp/claudecode-telegram/<node>/bob/in.pipe
 
     This thread reads the message and forwards it to the worker's backend.
 

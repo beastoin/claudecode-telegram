@@ -2825,6 +2825,20 @@ test_hook_env_validation() {
     # Create mock input for hook
     local mock_input='{"transcript_path":"'$tmp_transcript'"}'
 
+    # The hook reads env vars from tmux session env first, then falls back to
+    # shell env. When running inside a tmux session with bridge env vars set
+    # (e.g., claude-prod-lee), the tmux values override our test values.
+    # Fix: temporarily unset tmux env vars so shell env takes effect.
+    local saved_tmux_vars=()
+    for var in TMUX_PREFIX SESSIONS_DIR PORT BRIDGE_URL; do
+        local val
+        val=$(tmux show-environment "$var" 2>/dev/null) || true
+        if [[ -n "$val" && "$val" != -* ]]; then
+            saved_tmux_vars+=("$val")
+            tmux set-environment -u "$var" 2>/dev/null || true
+        fi
+    done
+
     # Test 1: Missing TMUX_PREFIX
     local result
     result=$(echo "$mock_input" | TMUX_PREFIX="" SESSIONS_DIR="/tmp" PORT="8080" bash "$SCRIPT_DIR/hooks/send-to-telegram.sh" 2>&1) || true
@@ -2853,6 +2867,13 @@ test_hook_env_validation() {
     else
         fail "Hook should exit when BRIDGE_URL and PORT missing"
     fi
+
+    # Restore tmux env vars
+    for var_line in "${saved_tmux_vars[@]}"; do
+        local var_name="${var_line%%=*}"
+        local var_val="${var_line#*=}"
+        tmux set-environment "$var_name" "$var_val" 2>/dev/null || true
+    done
 
     rm -f "$tmp_transcript"
 }
@@ -5284,7 +5305,7 @@ test_worker_to_worker_pipe() {
     fi
 
     # Verify bob's pipe was created
-    local bob_pipe="/tmp/claudecode-telegram/bob/in.pipe"
+    local bob_pipe="/tmp/claudecode-telegram/${TEST_NODE}/bob/in.pipe"
     if [[ ! -p "$bob_pipe" ]]; then
         fail "Worker-to-worker pipe: Bob's pipe not created at $bob_pipe"
         send_message "/end alice" >/dev/null 2>&1 || true
