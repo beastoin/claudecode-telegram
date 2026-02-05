@@ -1922,7 +1922,11 @@ import bridge
 tmp = Path(tempfile.mkdtemp())
 bridge.SESSIONS_DIR = tmp
 bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
-bridge.worker_manager.scan_tmux_sessions = lambda: {}
+# Non-interactive workers now have tmux — mock scan to return alice with tmux
+prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {'alice': {'tmux': f'{prefix}alice', 'backend': 'codex'}}
+# Mock tmux_exists since no real tmux session
+bridge.tmux_exists = lambda name: True
 
 session_dir = tmp / 'alice'
 session_dir.mkdir()

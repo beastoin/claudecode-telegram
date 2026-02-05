@@ -1413,12 +1413,12 @@ class WorkerManager:
         return registered
 
     def get_registered_sessions(self, registered=None):
-        """Get registered sessions from tmux and non-interactive workers."""
+        """Get registered sessions from tmux (all backends have tmux now)."""
         self._sync_paths()
         if registered is None:
             registered = self.scan_tmux_sessions()
 
-        # Add non-interactive workers (have backend file but no tmux session)
+        # Fallback: pick up non-interactive workers with backend file but orphaned tmux
         if self.sessions_dir.exists():
             for session_dir in self.sessions_dir.iterdir():
                 if session_dir.is_dir():
@@ -1427,7 +1427,7 @@ class WorkerManager:
                         name = session_dir.name
                         if name not in registered:
                             backend = backend_file.read_text().strip()
-                            registered[name] = {"backend": backend, "mode": "exec"}
+                            registered[name] = {"backend": backend}
 
         if state["active"] and state["active"] not in registered:
             state["active"] = None
@@ -1503,32 +1503,6 @@ class WorkerManager:
 
         backend_obj = get_backend(backend)
 
-        # Exec-mode backends: stateless, no tmux
-        if not backend_obj.is_interactive:
-            state["active"] = name
-            save_last_active(name)
-            ensure_session_dir(name)
-            ensure_worker_pipe(name)
-            backend_file = self.sessions_dir / name / "backend"
-            backend_file.write_text(backend)
-            # Write chat_id BEFORE sending welcome so /response can find it
-            if chat_id:
-                set_pending(name, chat_id)
-            # Send welcome message as first message to exec worker
-            # Non-interactive: each message spawns a blocking CLI call via Popen
-            # (bridge doesn't block). Workers calling CLI directly should use nohup/&.
-            welcome = (
-                "You are connected to Telegram via claudecode-telegram bridge. "
-                "Your bridge URL is in $BRIDGE_URL env var. "
-                "You run in non-interactive mode — each message triggers a blocking CLI call, "
-                "responses arrive async in Telegram. Use nohup/& if calling CLI directly. "
-                "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
-                "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
-            )
-            self.send(name, welcome)
-            print(f"Created {backend} worker '{name}' (non-interactive mode)")
-            return True, None
-
         tmux_name = f"{self.tmux_prefix}{name}"
         if tmux_exists(tmux_name):
             return False, f"Worker '{name}' already exists"
@@ -1545,19 +1519,29 @@ class WorkerManager:
         export_hook_env(tmux_name, backend)
         time.sleep(0.3)
 
-        if SANDBOX_ENABLED:
+        ensure_session_dir(name)
+        ensure_worker_pipe(name)
+
+        if not backend_obj.is_interactive:
+            backend_file = self.sessions_dir / name / "backend"
+            backend_file.write_text(backend)
+
+        if SANDBOX_ENABLED and backend_obj.is_interactive:
             docker_cmd = get_docker_run_cmd(name)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
             print(f"Started worker '{name}' in sandbox mode")
         else:
             start_cmd = backend_obj.start_cmd()
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
-            time.sleep(1.5)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
-            time.sleep(0.3)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+            if backend_obj.is_interactive:
+                time.sleep(1.5)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
+                time.sleep(0.3)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
 
-        time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+        if backend_obj.is_interactive:
+            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
             "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
@@ -1566,14 +1550,23 @@ class WorkerManager:
             "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
             "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
         )
-        if SANDBOX_ENABLED:
+        if not backend_obj.is_interactive:
+            if chat_id:
+                set_pending(name, chat_id)
+            welcome += (
+                " Your bridge URL is in $BRIDGE_URL env var. "
+                "You run in non-interactive mode — each message triggers a blocking CLI call, "
+                "responses arrive async in Telegram. Use nohup/& if calling CLI directly."
+            )
+        if SANDBOX_ENABLED and backend_obj.is_interactive:
             welcome += " Running in sandbox mode (Docker container)."
         self.send(name, welcome)
 
         state["active"] = name
         save_last_active(name)
-        ensure_session_dir(name)
-        ensure_worker_pipe(name)
+
+        if not backend_obj.is_interactive:
+            print(f"Created {backend} worker '{name}' (non-interactive mode)")
 
         return True, None
 
@@ -1587,7 +1580,9 @@ class WorkerManager:
         session = registered[name]
         backend_name = get_worker_backend(name, session)
         backend = get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
+        # Clean non-interactive metadata (backend file, session IDs, pending)
         if not backend.is_interactive:
             session_dir = self.sessions_dir / name
             backend_file = session_dir / "backend"
@@ -1597,23 +1592,13 @@ class WorkerManager:
                 for session_id_file in session_dir.glob("*_session_id"):
                     session_id_file.unlink()
             except Exception as e:
-                return False, f"Failed to clean exec metadata: {e}"
-
-            cleanup_inbox(name)
-            cleanup_worker_pipe(name)
+                return False, f"Failed to clean non-interactive metadata: {e}"
             clear_pending(name)
 
-            if state["active"] == name:
-                state["active"] = None
-                self.get_registered_sessions()
-
-            return True, None
-
-        tmux_name = session["tmux"]
-
-        if SANDBOX_ENABLED:
+        if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
 
+        # All backends have tmux sessions now
         subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
         cleanup_inbox(name)
         cleanup_worker_pipe(name)
@@ -1625,7 +1610,7 @@ class WorkerManager:
         return True, None
 
     def restart(self, name: str):
-        """Restart claude in an existing tmux session."""
+        """Restart a worker in its existing tmux session."""
         self._sync_paths()
         registered = self.get_registered_sessions()
         if name not in registered:
@@ -1634,7 +1619,12 @@ class WorkerManager:
         session = registered[name]
         backend_name = get_worker_backend(name, session)
         backend = get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
+        if not tmux_exists(tmux_name):
+            return False, "Worker workspace is not running"
+
+        # Clean non-interactive state on restart
         if not backend.is_interactive:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -1642,18 +1632,13 @@ class WorkerManager:
                 session_id_file.unlink()
             ensure_worker_pipe(name)
             clear_pending(name)
-            return True, None
-
-        tmux_name = session["tmux"]
-        if not tmux_exists(tmux_name):
-            return False, "Worker workspace is not running"
-        if is_claude_running(tmux_name):
+        elif is_claude_running(tmux_name):
             return False, "Worker is already running"
 
         export_hook_env(tmux_name, backend_name)
         time.sleep(0.3)
 
-        if SANDBOX_ENABLED:
+        if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
             time.sleep(0.5)
             docker_cmd = get_docker_run_cmd(name)
@@ -1730,7 +1715,7 @@ def scan_tmux_sessions():
 
 
 def get_registered_sessions(registered=None):
-    """Get registered sessions from tmux and non-interactive workers."""
+    """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
     return worker_manager.get_registered_sessions(registered)
 
