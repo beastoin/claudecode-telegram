@@ -1519,10 +1519,10 @@ class WorkerManager:
             # (bridge doesn't block). Workers calling CLI directly should use nohup/&.
             welcome = (
                 "You are connected to Telegram via claudecode-telegram bridge. "
-                f"Your bridge URL is {BRIDGE_URL}. "
+                "Your bridge URL is in $BRIDGE_URL env var. "
                 "You run in non-interactive mode — each message triggers a blocking CLI call, "
                 "responses arrive async in Telegram. Use nohup/& if calling CLI directly. "
-                f"To message other workers: curl {BRIDGE_URL}/workers to discover workers and their protocols. "
+                "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
                 "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
             )
             self.send(name, welcome)
@@ -1563,7 +1563,7 @@ class WorkerManager:
             "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
             "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
             "Allowed paths: /tmp, current directory. "
-            f"To message other workers: curl {BRIDGE_URL}/workers to discover workers and their protocols. "
+            "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
             "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
         )
         if SANDBOX_ENABLED:
