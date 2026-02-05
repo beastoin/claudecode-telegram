@@ -188,26 +188,28 @@ kill $(cat ~/.claude/telegram/nodes/prod/pid)
 
 **Problem:** Ran `lsof -ti :8081 | xargs kill` thinking it was dev node, but port 8081 = prod. Killed production bridge while team was working.
 
-**Port assignments:**
-| Port | Node | Sandbox |
-|------|------|---------|
+**Default port assignments (overridable via `--port` or `PORT` env var):**
+| Default Port | Node | Sandbox |
+|--------------|------|---------|
 | 8080 | sandbox (or custom) | `--sandbox` |
 | 8081 | **prod** | `--no-sandbox` |
 | 8082 | dev | `--no-sandbox` |
 | 8095 | test (test.sh) | `--no-sandbox` |
+
+Ports are dynamic — always check the actual running port, not the defaults.
 
 **Why `--no-sandbox` for prod/dev/test?** Docker overhead is too slow. Sandbox node is for untrusted/experimental code.
 
 **Rule:** Before killing any port, verify which node owns it:
 ```bash
 # Check what's running on a port BEFORE killing
-lsof -ti :8081  # Just list, don't kill
+cat ~/.claude/telegram/nodes/*/port  # See actual port assignments
 
-# Or check node configs
-cat ~/.claude/telegram/nodes/*/port  # See all port assignments
+# Or check specific node
+cat ~/.claude/telegram/nodes/prod/port
 ```
 
-**Why:** Port numbers are not intuitive (8081 looks like it could be "secondary" or "dev"). Always verify before destructive operations.
+**Why:** Ports can be overridden, so never assume a port belongs to a specific node. Always verify before destructive operations.
 
 ### Use script commands or PID files to stop services
 

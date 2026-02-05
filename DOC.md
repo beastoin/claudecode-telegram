@@ -748,7 +748,7 @@ Now both work:
 ### v0.9.6 - Documentation updates & hook refinements
 
 **CLAUDE.md learnings added:**
-- Port ownership verification: always check before killing (prod=8081, dev=8082, test=8095)
+- Port ownership verification: always check actual port file before killing (ports are configurable defaults)
 - Dev before prod deployment order: local tests → dev node → manual verify → prod
 - tmux send race condition: per-session locks serialize concurrent sends
 
@@ -1003,13 +1003,13 @@ Here's the diagram:
 - **`clean` command**: Reset stale chat_id files
 - **Per-node state isolation**: Each node has its own sessions, PIDs, ports
 - **Smart auto-detection**: If only one node running, uses it; if multiple, prompts or errors
-- **Derived ports**: prod=8081, dev=8082, test=8095 (override with `--port`)
+- **Default ports**: prod=8081, dev=8082, test=8095 (override with `--port` or `PORT` env var)
 
 **Usage:**
 ```bash
-# Start nodes (PORT derived from node name)
-NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # port 8081
-NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # port 8082
+# Start nodes (PORT defaults derived from node name, overridable)
+NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # default port 8081
+NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # default port 8082
 
 # Stop specific node
 ./claudecode-telegram.sh --node dev stop
@@ -1022,12 +1022,14 @@ NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # port 8082
 ```
 
 **Recommended node configurations:**
-| Node | Token | Sandbox | Port | Purpose |
-|------|-------|---------|------|---------|
+| Node | Token | Sandbox | Default Port | Purpose |
+|------|-------|---------|--------------|---------|
 | test | TEST_BOT_TOKEN | `--no-sandbox` | 8095 | Automated tests (fast, no Docker) |
 | prod | PROD_BOT_TOKEN | `--no-sandbox` | 8081 | Production (performance) |
 | dev | DEV_BOT_TOKEN | `--no-sandbox` | 8082 | Development |
 | sandbox | TEST_BOT_TOKEN | `--sandbox` | 8080 | Untrusted/experimental code |
+
+Ports are defaults, not fixed — override with `--port <n>` or `PORT` env var.
 
 **Why `--no-sandbox` for prod/dev/test?** Docker overhead impacts performance. Use sandbox node for isolation when running untrusted code.
 
