@@ -99,17 +99,17 @@ A playbook tells your AI workers how to behave. Copy this template and customize
 **Our team example:**
 - @luck asks daily: "Any learnings? Anything you need help with?"
 - Team shares: "Never use pkill on multi-node setups - use PID-based killing"
-- Weekly: best learnings go into `~/learnings/README.md`
+- Weekly: best learnings go into `~/team/learnings.md`
 
 ---
 
 ## Quick Start Checklist
 
-1. Copy this template to `~/team-playbook.md`
+1. Copy this template to `~/team/playbook.md`
 2. List your team members and their projects
 3. Define your non-negotiables (tests, reviews, etc.)
-4. Set up `~/learnings/README.md` for capturing lessons
-5. Tell each worker: "Read ~/team-playbook.md"
+4. Set up `~/team/learnings.md` for capturing lessons
+5. Tell each worker: "Read ~/team/playbook.md"
 
 ---
 

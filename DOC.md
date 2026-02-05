@@ -671,8 +671,7 @@ Path: /tmp/claudecode-telegram/<node>/worker/inbox/abc123.pdf
 - `~/.claude` - Claude Code config
 - `~/.codex` - Codex config
 - `~/.gemini` - Gemini config
-- `~/learnings/` - Team learnings
-- `~/team-playbook.md` - Team playbook (read-only)
+- `~/team/` - Team playbook, learnings, per-agent state (read-only)
 - Project directory (specified via `--project-root`)
 
 **Security improvements:**
@@ -822,7 +821,7 @@ Now both work:
 - Aligns with "RAM state only" principle - no durable state outside tmux
 - Per-session files remain minimal coordination metadata (pending, chat_id)
 - Images are ephemeral input artifacts, cleaned up automatically
-- Team playbook management is external (e.g., `~/team-playbook.md`) - not bridge's responsibility
+- Team playbook management is external (e.g., `~/team/playbook.md`) - not bridge's responsibility
 
 ### v0.9.2 - Fix tmux send race condition
 
@@ -901,7 +900,7 @@ Here's the diagram:
 **Daily Learning workflow:**
 - `/learn` prompts the focused worker to share learnings (Problem/Fix/Why format)
 - Learnings shared with all online workers via tmux
-- Team playbook managed externally (e.g., `~/team-playbook.md`) - bridge doesn't persist
+- Team playbook managed externally (e.g., `~/team/playbook.md`) - bridge doesn't persist
 
 ### v0.7.0 - Threaded HTTP + session refactors
 

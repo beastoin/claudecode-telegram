@@ -472,6 +472,8 @@ ALLOWED_DOC_EXTENSIONS = {
     ".go", ".rs", ".java", ".kt", ".swift",
     ".rb", ".php", ".c", ".cpp", ".h", ".hpp",
     ".sh", ".html", ".css", ".scss",
+    # Archives
+    ".zip", ".tar", ".gz",
 }
 
 # Blocked extensions (secrets, keys, certificates)
