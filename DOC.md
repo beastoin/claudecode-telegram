@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.18.0
+> Version: 0.19.0
 
 ## Current Philosophy (Summary)
 
@@ -170,104 +170,21 @@ One Telegram DM manages all Claude instances because:
 
 The `@name` syntax and `/focus` command give you full control without the overhead of multiple chats.
 
-## Direct Mode (--no-tmux)
+## Bridge Architecture (v0.19.0)
 
-Direct mode spawns Claude Code as a subprocess with JSON streaming instead of using tmux sessions. This enables tighter integration and avoids terminal emulation overhead.
+The bridge is now organized around small, explicit classes:
 
-### Architecture Comparison
+- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_exec`, `start_cmd()`, `send()`, `is_online()`.
+- **Backend implementations**: `ClaudeBackend`, `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (all in `bridge.py`).
+- **WorkerManager**: worker lifecycle + routing (`hire`, `end`, `send`, `is_online`, `get_workers`, `scan_tmux_sessions`).
+- **TelegramAPI**: wraps all Telegram API calls (sendMessage/sendPhoto/sendDocument/etc.).
+- **CommandRouter**: all `/command` handlers and message routing; delegates to `WorkerManager` + `TelegramAPI`.
 
-**tmux mode (default):**
-```
-┌──────────┐     ┌──────────┐     ┌─────────────┐     ┌─────────────┐
-│ Telegram │────▶│  Bridge  │────▶│ tmux session│────▶│   Claude    │
-│ Webhook  │     │ (Python) │     │ send-keys   │     │ (terminal)  │
-└──────────┘     └──────────┘     └─────────────┘     └─────────────┘
-                       ▲                                     │
-                       │                              Stop Hook fires
-                       │          ┌─────────────┐           │
-                       └──────────│ Hook script │◀──────────┘
-                      POST /response  (bash)
-```
+Exec-mode detection is now backend-driven (`backend.is_exec`), not hardcoded to a specific backend.
 
-**direct mode (--no-tmux):**
-```
-┌──────────┐     ┌──────────────────────────────────────────┐
-│ Telegram │────▶│              Bridge (Python)              │
-│ Webhook  │     │  ┌────────────────────────────────────┐  │
-└──────────┘     │  │         DirectWorker               │  │
-                 │  │  ┌──────────┐      ┌────────────┐  │  │
-                 │  │  │  stdin   │─JSON▶│   Claude   │  │  │
-                 │  │  │  (pipe)  │      │ subprocess │  │  │
-                 │  │  │          │◀JSON─│            │  │  │
-                 │  │  │  stdout  │      └────────────┘  │  │
-                 │  │  └──────────┘                      │  │
-                 │  └────────────────────────────────────┘  │
-      ◀──────────│                                          │
-   Response      └──────────────────────────────────────────┘
-```
+## Inter-Worker Messaging (Decentralized Discovery)
 
-### Message Flow: tmux Mode
-
-1. **Telegram webhook** receives user message
-2. **Bridge** routes message to target worker's tmux session
-3. **tmux send-keys** types the message into Claude's terminal
-4. **Claude** processes and generates response
-5. **Stop Hook fires** when Claude finishes responding
-6. **Hook script** reads transcript, POSTs to `/response` endpoint
-7. **Bridge** sends response to Telegram
-
-### Message Flow: Direct Mode
-
-1. **Telegram webhook** receives user message
-2. **Bridge** writes JSON message to worker's stdin pipe:
-   ```json
-   {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]}}
-   ```
-3. **Claude subprocess** processes and streams JSON events to stdout:
-   ```json
-   {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello! How can I help?"}]}}
-   {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " I'm Claude..."}}
-   {"type": "result", ...}
-   ```
-4. **Reader thread** buffers text from `assistant` and `content_block_delta` events
-5. **On `result` event** - accumulated text is sent to Telegram
-6. No hook needed - bridge handles everything directly
-
-### Event Handling (Like Happy)
-
-The bridge handles Claude's JSON streaming events similar to the Happy codebase:
-
-| Event Type | Action |
-|------------|--------|
-| `assistant` | Extract text from message content, buffer it |
-| `content_block_delta` | Extract delta text, append to buffer |
-| `result` | **Send buffered text to Telegram**, clear buffer |
-| `error` | Log error, include in response |
-
-Key insight: We buffer during streaming, only send on `result`. This prevents flooding Telegram with partial messages.
-
-### When to Use Each Mode
-
-| Mode | Use Case | Pros | Cons |
-|------|----------|------|------|
-| **tmux (default)** | Production, debugging | Can attach to session, visible history, hook-based | Terminal overhead, needs hook setup |
-| **direct (--no-tmux)** | Lightweight, embedded | No tmux needed, cleaner integration, no hooks | Can't attach to see session, process-per-worker |
-
-### CLI Usage
-
-```bash
-# tmux mode (default)
-./claudecode-telegram.sh run
-
-# Direct mode
-./claudecode-telegram.sh run --no-tmux
-```
-
-## Future Features (Planned)
-
-### Inter-Worker Messaging (Decentralized Discovery)
-
-**Status:** Partial (tmux mode only via direct tmux send-keys)
+**Status:** Available (tmux send-keys + named pipes)
 
 **Design philosophy:** Bridge provides discovery only; workers communicate directly using the provided protocol. The bridge does NOT route messages between workers - it only tells workers how to reach each other. This means:
 - **No manager visibility:** Private worker-to-worker conversations stay private
@@ -275,10 +192,11 @@ Key insight: We buffer during streaming, only send on `result`. This prevents fl
 - **Protocol flexibility:** Each worker advertises how to reach it (tmux, pipe, etc.)
 
 **Current state:**
-- **tmux mode:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message" Enter` directly
-- **Direct mode:** No solution yet (planned: named pipes)
+- **tmux backends:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message" Enter` directly
+- **All backends:** Each worker gets a named pipe at `/tmp/claudecode-telegram/<node>/<worker>/in.pipe`
+  - Node name derived from `TMUX_PREFIX` (`claude-test-` → `test`, `claude-` → `default`)
 
-**Planned design - Discovery endpoint:**
+**Discovery endpoint:**
 
 ```
 GET /workers
@@ -297,8 +215,8 @@ Response:
     {
       "name": "bob",
       "protocol": "pipe",
-      "address": "/tmp/claudecode-telegram/bob/in.pipe",
-      "send_example": "echo 'your message here' > /tmp/claudecode-telegram/bob/in.pipe"
+      "address": "/tmp/claudecode-telegram/<node>/bob/in.pipe",
+      "send_example": "echo 'your message here' > /tmp/claudecode-telegram/<node>/bob/in.pipe"
     }
   ]
 }
@@ -306,34 +224,33 @@ Response:
 
 **Protocol types:**
 
-| Protocol | Address Format | How to Send | Mode |
+| Protocol | Address Format | How to Send | Backends |
 |----------|---------------|-------------|------|
 | `tmux` | Session name | `tmux send-keys -t <address> "message" Enter` | tmux only |
-| `pipe` | Named pipe path | `echo "message" > <address>` | Both modes |
+| `pipe` | Named pipe path | `echo "message" > <address>` | All backends |
 
 **Recommended: Named pipes as unified protocol**
 
-Named pipes (FIFOs) work in both tmux and direct modes:
+Named pipes (FIFOs) work across all backends:
 ```bash
 # Bridge creates on worker startup
-mkfifo /tmp/claudecode-telegram/<worker>/in.pipe
+mkfifo /tmp/claudecode-telegram/<node>/<worker>/in.pipe
 
 # Worker A sends to Worker B
-echo "Hey bob, can you review PR #42?" > /tmp/claudecode-telegram/bob/in.pipe
+echo "Hey bob, can you review PR #42?" > /tmp/claudecode-telegram/<node>/bob/in.pipe
 
 # Worker B reads (poll or inotifywait)
-cat /tmp/claudecode-telegram/<worker>/in.pipe
+cat /tmp/claudecode-telegram/<node>/<worker>/in.pipe
 ```
 
 **Why this design:**
 - Workers collaborate without manager overhead
 - Standard Unix mechanism, no custom protocol
-- Works consistently in both tmux and direct modes
+- Works consistently across tmux and exec backends
 - Bridge stays simple - just discovery, no message routing
 
-**Missing tests:**
-- `test_worker_discovery_endpoint` - GET /workers returns worker list
-- `test_worker_pipe_creation` - pipes created on worker startup
+**Tests:**
+- `test_worker_pipe_creation_on_startup` - pipes created on worker startup
 - `test_worker_to_worker_pipe` - end-to-end worker communication via pipe
 
 ---
@@ -422,6 +339,71 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.19.0 - OOP refactor + backend protocol
+
+**Breaking changes:**
+- Removed `DIRECT_MODE` support (`--no-tmux` / `--direct` flags and `DIRECT_MODE` env var)
+- `backends.py` removed (backend logic lives in `bridge.py`)
+
+**New features:**
+- **Backend Protocol** (`typing.Protocol`) with `name`, `is_exec`, `start_cmd()`, `send()`, `is_online()`
+- **Backend implementations**: `ClaudeBackend`, `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (all in `bridge.py`)
+- **WorkerManager**, **TelegramAPI**, **CommandRouter** classes for clearer separation of responsibilities
+- **Per-node pipe + inbox isolation**: `/tmp/claudecode-telegram/<node>/<worker>/...`
+- **Exec-mode welcome message** includes `BRIDGE_URL` and inter-worker messaging instructions
+
+**Fixes:**
+- `chat_id` race condition for exec-mode workers (write `chat_id` before welcome message to avoid `/response` 404s)
+
+**Architecture changes:**
+- OOP refactor: lifecycle in `WorkerManager`, command handling in `CommandRouter`, Telegram calls in `TelegramAPI`
+- Exec-mode detection is backend-driven (`backend.is_exec`), replacing hardcoded backend checks
+
+**Backend interface (grug-brain simple):**
+```python
+class Backend(Protocol):
+    name: str
+    is_exec: bool
+
+    def start_cmd(self) -> str: ...
+    def send(self, worker_name, tmux_name, text, bridge_url, sessions_dir) -> bool: ...
+    def is_online(self, tmux_name) -> bool: ...
+```
+
+### v0.18.3 - Codex learn reaction parity
+
+**Breaking changes:** None.
+
+**New features:**
+- None.
+
+**Architecture changes:**
+- Codex `/learn` reactions no longer depend on tmux prompt checks.
+
+### v0.18.2 - Codex parity cleanup
+
+**Breaking changes:** None.
+
+**New features:**
+- Bot command shortcuts now include codex exec workers.
+
+**Architecture changes:**
+- Codex reactions no longer depend on tmux prompt checks.
+- Codex pause now clears pending without tmux escape.
+
+### v0.18.1 - Codex backend hardening
+
+**Breaking changes:** None.
+
+**New features:**
+- `/workers` now lists codex exec workers with pipe send examples.
+- Codex responses are flagged for safe HTML escaping.
+
+**Architecture changes:**
+- Codex adapter serializes per-worker session access with a lock file.
+- Codex lifecycle now cleans metadata on `/end` and resets session ID on `/relaunch`.
+- Broadcast routing includes codex workers.
 
 ### v0.18.0 - Worker backend selection (codex + claude)
 
@@ -661,13 +643,13 @@ The hooks configuration must use nested structure per Claude Code docs:
 
 - **PDF, documents, code files** - all file types are accepted and downloaded to worker's inbox
 - **Metadata passed to Claude** - filename, size, mime type included in message
-- **Same inbox system** - files stored in `/tmp/claudecode-telegram/<session>/inbox/`
+- **Same inbox system** - files stored in `/tmp/claudecode-telegram/<node>/<session>/inbox/`
 - **Automatic cleanup** - files removed when worker is offboarded
 
 **Message format to Claude:**
 ```
 Manager sent file: document.pdf (1.5 MB, application/pdf)
-Path: /tmp/claudecode-telegram/worker/inbox/abc123.pdf
+Path: /tmp/claudecode-telegram/<node>/worker/inbox/abc123.pdf
 ```
 
 **Implementation:**
@@ -824,7 +806,7 @@ Now both work:
 ### v0.9.3 - Philosophy alignment: ephemeral image inbox, prompt-only /learn, hook polling
 
 **Philosophy fixes:**
-- **Image inbox moved to /tmp**: Images now stored in `/tmp/claudecode-telegram/<session>/inbox/` instead of `~/.claude/telegram/sessions/<session>/inbox/`
+- **Image inbox moved to /tmp**: Images now stored in `/tmp/claudecode-telegram/<node>/<session>/inbox/` instead of `~/.claude/telegram/sessions/<session>/inbox/`
 - **Inbox cleanup on session end**: `cleanup_inbox()` called when worker is offboarded via `/end`
 - **Removed playbook persistence**: `/learn` is prompt-only, doesn't write to disk
 - **Session isolation**: Each session's inbox is namespaced to prevent cross-session access
@@ -861,7 +843,7 @@ Now both work:
 
 **New features:**
 - **Incoming images**: Manager can send photos/images to workers
-  - Images downloaded to `/tmp/claudecode-telegram/<worker>/inbox/` (ephemeral)
+  - Images downloaded to `/tmp/claudecode-telegram/<node>/<worker>/inbox/` (ephemeral)
   - Path passed to Claude: "Manager sent image: /path/to/image.jpg"
   - Supports photos and image documents (files sent as attachments)
   - Optional caption included in message
@@ -885,7 +867,7 @@ Now both work:
 [photo attachment with optional caption]
 
 # Worker receives
-Manager sent image: /tmp/claudecode-telegram/worker/inbox/abc123.jpg
+Manager sent image: /tmp/claudecode-telegram/<node>/worker/inbox/abc123.jpg
 Please describe this screenshot
 
 # Worker responds with image

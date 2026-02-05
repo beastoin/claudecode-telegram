@@ -37,6 +37,7 @@ When making changes that result in a new version:
 | `claudecode-telegram.sh` | CLI wrapper, tunnel/webhook setup |
 | `hooks/send-to-telegram.sh` | Claude Stop hook, sends responses |
 | `test.sh` | Automated acceptance tests |
+| `CLAUDE.md` | Project instructions + operational learnings (AGENTS.md symlink) |
 | `DOC.md` | Design philosophy, changelog |
 | `TEST.md` | Testing documentation |
 
@@ -71,6 +72,7 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 2. **Focus on e2e tests** - test the full flow, not just units
 3. **Use FAST mode during development** - for quick feedback
 4. **Run default mode before committing** - catch integration issues
+5. **Treat tests as usage examples** - prefer real Telegram flows (hire → send → reply) and keep them deterministic
 
 **Why e2e tests matter:**
 - They catch integration bugs that unit tests miss
@@ -94,13 +96,14 @@ TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ### Test Coverage
 
-**Current: 98.3%** (116 of 118 features, 165 test functions)
+**Current: 210 test functions** (see `TEST.md` for inventory)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
-| Unit (FAST) | 85 | imports, formatting, CLI flags, hook, persistence |
-| Integration | 72 | commands, security, routing, endpoints |
-| Tunnel (FULL) | 2 | cloudflare tunnel, webhook setup |
+| Unit (FAST) | 115 | imports, formatting, core helpers |
+| CLI (FAST) | 30 | flags, commands, webhook/hook coverage |
+| Integration | 64 | commands, security, routing, endpoints |
+| Tunnel (FULL) | 1 | cloudflare tunnel, webhook setup |
 
 See `TEST.md` for complete test inventory.
 
@@ -170,6 +173,24 @@ SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 2. Update every location that references it
 3. Ensure all entry points (create, register, restart, discover) handle it consistently
 
+### Keep project memory current
+
+**Problem:** Fixes and gotchas get rediscovered when the memory is stale or scattered.
+
+**Rule:** Capture new operational learnings here, architecture changes in `DOC.md`, and test additions in `TEST.md`. Remove or update notes if behavior changes.
+
+**Why:** The agent (and future contributors) rely on these files as the source of truth.
+
+### Per-node pipe + inbox isolation
+
+**Problem:** Pipes/inboxes under `/tmp` were shared across nodes, causing collisions between prod/dev/test.
+
+**Rule:** Namespace all `/tmp` paths by node (derived from `TMUX_PREFIX`):
+```
+/tmp/claudecode-telegram/<node>/<worker>/in.pipe
+/tmp/claudecode-telegram/<node>/<worker>/inbox/
+```
+
 ### Watchdog for bridge requires careful testing
 
 **Problem:** Adding bridge auto-restart to the watchdog (like tunnel has) seems simple but has hidden complexity:
@@ -186,6 +207,7 @@ SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 3. Add longer delays between killing processes and checking ports
 4. Consider skipping watchdog tests in CI (mark as slow/optional)
 5. Ensure `start_bridge()` passes ALL required env vars, not just token/port
+6. Add explicit stop conditions (max retries or timeouts) and log when the watchdog gives up
 
 ### NEVER use pkill on multi-node setups
 
@@ -316,37 +338,40 @@ BRIDGE_PORT="__NODE_PORT__"
 
 ### Test behavior, not scaffolding
 
-**Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. Direct mode subprocess was dying immediately, but tests passed because they only checked:
-- `test_direct_worker_functions_exist` → functions exist
-- `test_direct_mode_bridge_starts` → bridge starts
-- `test_direct_mode_hire_creates_worker` → HTTP returns "OK"
+**Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. An exec-mode worker subprocess was dying immediately, but tests passed because they only checked:
+- `test_bridge_starts` → bridge starts
+- `test_hire_command` → HTTP returns "OK"
+- `test_send_to_worker_function_exists` → functions exist
 
-None of these verified that the subprocess actually stayed running or received the init event.
+None of these verified that the worker actually stayed running or could receive messages.
 
 **Rule:** Tests must verify the actual behavior users care about, not just that code structure exists.
 
 ```bash
 # BAD - tests scaffolding
-test_function_exists() {
-    python3 -c "from bridge import create_worker; assert callable(create_worker)"
+test_bridge_starts() {
+    curl -s /health >/dev/null  # 200 OK, but doesn't prove workers run
 }
 
-test_http_returns_ok() {
-    [[ $(curl -s /hire) == "OK" ]]  # Returns OK but subprocess may have died!
+test_hire_command() {
+    [[ $(curl -s /hire) == "OK" ]]  # Returns OK but worker may have died!
+}
+
+test_send_to_worker_function_exists() {
+    python3 -c "from bridge import send_to_worker; assert callable(send_to_worker)"
 }
 
 # GOOD - tests behavior
-test_subprocess_stays_alive() {
+test_tmux_mode_session_stays_alive() {
     curl -s /hire  # Create worker
     sleep 3        # Wait a bit
-    # Verify subprocess is STILL running, not just that it started
-    assert_no_log "Reader thread exited"
+    # Verify worker/session is STILL running, not just that it started
+    tmux has-session -t claude-test-worker
 }
 
-test_init_event_received() {
-    curl -s /hire  # Create worker
-    # Verify init event was received (proves Claude is ready)
-    wait_for_log "initialized"
+test_worker_to_worker_pipe() {
+    # Verify inter-worker pipe messages are delivered end-to-end
+    assert_no_log "Cannot forward pipe message"
 }
 ```
 

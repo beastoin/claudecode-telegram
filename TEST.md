@@ -46,11 +46,6 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 **FULL mode**:
 - Everything in Default mode, plus:
-- Direct mode E2E tests (requires claude CLI):
-  - Full flow: hire -> message -> response -> end
-  - Multi-worker focus switching
-  - @mention routing
-  - /pause, /relaunch, /settings, /progress commands
 - Cloudflare tunnel startup
 - Webhook configuration with real Telegram API
 
@@ -76,58 +71,43 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 98.7%** (144 of 146 features tested)
+**Current coverage: 210 test functions** (see inventory below)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
-| Telegram Bot Commands | 19 | 100% |
+| Telegram Bot Commands | 20 | 100% |
 | CLI Commands & Flags | 37 | 97% |
-| Message Routing | 13 | 100% |
+| Message Routing | 14 | 100% |
 | Security | 11 | 100% |
 | Hook Behavior | 15 | 100% |
 | Persistence Files | 14 | 100% |
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
-| Direct Mode | 14 | 100% |
-| Direct Mode E2E | 13 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **Only 2 features untested:**
 - `-f`, `--force` flag (tested implicitly in other tests)
 - Interactive prompt for multiple nodes (requires TTY input)
 
-## Feature Test Matrix (Mode Parity)
+## Feature Test Matrix (Backend Coverage)
 
-Track test coverage for features across tmux and direct modes. When adding a feature to one mode, ensure equivalent test exists for the other.
+Track test coverage across tmux and exec backends. When adding a feature, ensure it works for both backend types (or document exceptions).
 
-| Feature | Tmux Mode Test | Direct Mode Test | Status |
-|---------|---------------|------------------|--------|
-| Session/worker creation | `test_hire_command` | `test_direct_mode_hire_creates_worker` | ✅ Parity |
-| Session/worker survival | `test_tmux_mode_session_stays_alive` | `test_direct_mode_subprocess_stays_alive` | ✅ Parity |
-| Message delivery verified | `test_tmux_mode_message_delivery` | `test_direct_mode_worker_accepts_messages` | ✅ Parity |
-| HTML escaping | `test_forward_to_bridge_html_escape` | `test_direct_mode_html_escape` | ✅ Parity |
-| Focus switching | `test_focus_command` | `test_direct_mode_e2e_focus_switch` | ✅ Parity |
-| @mention routing | `test_at_mention` | `test_direct_mode_e2e_at_mention` | ✅ Parity |
-| Pause/interrupt | `test_pause_command` | `test_direct_mode_e2e_pause` | ✅ Parity |
-| Relaunch/restart | `test_relaunch_command` | `test_direct_mode_e2e_relaunch` | ✅ Parity |
-| End/kill session | `test_end_command` | `test_direct_mode_end_kills_worker` | ✅ Parity |
-| /team listing | `test_team_command` | `test_direct_mode_team_shows_workers` | ✅ Parity |
-| /settings display | `test_settings_command` | `test_direct_mode_e2e_settings` | ✅ Parity |
-| /progress display | `test_progress_command` | `test_direct_mode_e2e_progress` | ✅ Parity |
-| Graceful shutdown | `test_graceful_shutdown` | `test_direct_mode_graceful_shutdown` | ✅ Parity |
-| @all broadcast | `test_at_all_broadcast` | `test_direct_mode_at_all_broadcast` | ✅ Parity |
-| Reply routing | `test_reply_routing` | `test_direct_mode_reply_routing` | ✅ Parity |
-| Reply context | `test_reply_context` | `test_direct_mode_reply_context` | ✅ Parity |
-| Worker shortcut focus | `test_worker_shortcut_focus_only` | `test_direct_mode_worker_shortcut_focus` | ✅ Parity |
-| Worker shortcut + msg | `test_worker_shortcut_with_message` | `test_direct_mode_worker_shortcut_with_message` | ✅ Parity |
-| /learn command | `test_learn_command` | `test_direct_mode_learn` | ✅ Parity |
-| Unknown cmd passthrough | `test_unknown_command_passthrough` | `test_direct_mode_unknown_cmd_passthrough` | ✅ Parity |
-| Inter-worker messaging | `test_worker_to_worker_pipe` | `test_worker_to_worker_pipe_direct` | ✅ Parity |
-| Image/document handling | multiple | `test_direct_mode_image_handling` | ✅ Parity |
+| Feature | Test | Backend Coverage |
+|---------|------|------------------|
+| Session/worker creation | `test_hire_command` | tmux e2e; exec parsing via `test_hire_backend_parsing` |
+| Session/worker survival | `test_tmux_mode_session_stays_alive` | tmux e2e; exec lifecycle via backend unit tests |
+| Message delivery verified | `test_tmux_mode_message_delivery` | tmux e2e; exec forwarding via `test_pipe_forwarding_to_codex` |
+| HTML escaping | `test_forward_to_bridge_html_escape` | exec responses (codex/gemini/opencode) |
+| Focus switching | `test_focus_command` | all backends |
+| @mention routing | `test_at_mention` | all backends |
+| End/kill session | `test_end_command` | all backends |
+| Inter-worker messaging | `test_worker_to_worker_pipe` | all backends |
+| Image/document handling | `test_incoming_document_e2e` | all backends |
 
 ## Complete Test Inventory
 
-> **Total: 202 test functions**
+> **Total: 210 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -159,8 +139,28 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_hire_backend_parsing` | /hire backend parsing (--codex, codex- prefix) |
 | `test_team_output_includes_backend` | /team output includes backend metadata |
 | `test_progress_output_includes_backend` | /progress output includes backend metadata |
+| `test_codex_learn_reaction_bypasses_tmux` | /learn reaction bypasses tmux check for codex |
 | `test_worker_send_uses_backend` | worker_send routes to backend handler |
+| `test_backend_registry_exists` | Backend registry exists |
+| `test_get_registered_sessions_includes_exec_workers` | exec workers included in session scans |
 | `test_backend_env_metadata` | WORKER_BACKEND exported via tmux env |
+| `test_codex_end_cleans_session` | /end cleans codex session metadata + pipe |
+| `test_codex_relaunch_clears_session_id` | /relaunch clears codex session id |
+| `test_codex_pause_clears_pending` | /pause clears pending for codex workers |
+| `test_get_workers_includes_codex` | /workers includes codex exec workers |
+| `test_pipe_forwarding_to_codex` | Inter-worker pipe forwards to codex |
+| `test_worker_pipe_path_constant` | Worker pipe path root constant |
+| `test_get_worker_pipe_path_function` | Worker pipe path helper |
+| `test_get_workers_function` | get_workers() returns worker metadata |
+| `test_worker_pipe_creation_on_startup` | Worker pipe created on startup |
+| `test_worker_pipe_cleanup_on_end` | Worker pipe cleaned on /end |
+| `test_codex_response_requires_escape` | codex responses flagged for escape |
+| `test_update_bot_commands_includes_codex` | Bot commands include codex worker shortcuts |
+| `test_broadcast_includes_codex` | @all broadcast includes codex workers |
+| `test_send_to_worker_function_exists` | send_to_worker helper exists |
+| `test_send_to_worker_not_found` | send_to_worker handles missing worker |
+| `test_send_to_worker_uses_backend_registry` | send_to_worker routes via backend registry |
+| `test_send_to_worker_tmux_mode` | send_to_worker uses tmux for tmux backends |
 | `test_reserved_names_rejection` | Reserved names (commands, aliases) rejected |
 | `test_bot_commands_structure` | BOT_COMMANDS list structure |
 | `test_blocked_commands_list` | All blocked commands configured |
@@ -176,44 +176,6 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_file_tag_welcome_instructions` | File tag parsers available |
 | `test_reply_context_formatting` | Reply context format |
 | `test_document_message_format` | Document message format |
-| `test_direct_mode_flag` | --no-tmux and --direct flags |
-| `test_direct_mode_env_var` | DIRECT_MODE env var |
-| `test_direct_worker_dataclass` | DirectWorker dataclass |
-| `test_direct_worker_functions_exist` | Direct worker functions exist |
-| `test_direct_mode_no_hook_install` | Direct mode skips hook install |
-| `test_direct_mode_handle_event` | handle_direct_event parses JSON |
-| `test_direct_mode_html_escape` | escape_html escapes <, >, & for Telegram |
-| `test_direct_mode_is_pending` | is_pending in direct mode |
-| `test_direct_mode_get_registered_sessions` | get_registered_sessions in direct mode |
-| `test_direct_mode_graceful_shutdown` | Shutdown kills direct workers |
-
-### Direct Mode Integration Tests (Default mode, bridge required)
-
-| Test | Description |
-|------|-------------|
-| `test_direct_mode_bridge_starts` | Direct mode bridge starts and responds |
-| `test_direct_mode_hire_creates_worker` | /hire creates direct worker subprocess |
-| `test_direct_mode_message_routing` | Messages routed to direct worker |
-| `test_direct_mode_team_shows_workers` | /team lists direct workers |
-| `test_direct_mode_end_kills_worker` | /end terminates direct worker |
-
-### Direct Mode E2E Tests (FULL mode, requires claude CLI)
-
-| Test | Description |
-|------|-------------|
-| `test_direct_mode_subprocess_stays_alive` | **BEHAVIOR:** Verify subprocess stays running, not just starts |
-| `test_direct_mode_worker_accepts_messages` | **BEHAVIOR:** Verify worker accepts messages via stdin |
-| `test_direct_mode_e2e_full_flow` | Complete flow: hire -> message -> response -> end |
-| `test_direct_mode_e2e_focus_switch` | Create 2 workers, verify /focus switches between them |
-| `test_direct_mode_e2e_at_mention` | @worker routing without focus change |
-| `test_direct_mode_at_all_broadcast` | @all broadcast to multiple workers |
-| `test_direct_mode_reply_routing` | Reply to worker message routes correctly |
-| `test_direct_mode_reply_context` | Reply context included for non-bot messages |
-| `test_direct_mode_e2e_pause` | /pause sends interrupt to worker |
-| `test_direct_mode_e2e_relaunch` | /relaunch restarts worker subprocess |
-| `test_direct_mode_e2e_settings` | /settings shows direct mode indicator |
-| `test_direct_mode_e2e_progress` | /progress shows worker status |
-| `test_direct_mode_vs_tmux_parity` | Verify code paths exist for both modes |
 
 ### CLI Tests (FAST mode, no bridge)
 
@@ -353,6 +315,7 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_reply_routing` | Reply to worker message |
 | `test_reply_context` | Reply context payload |
 | `test_reply_with_explicit_context` | Explicit context format |
+| `test_send_to_worker_integration` | send_to_worker integration path |
 | `test_session_files` | Session file permissions |
 | `test_secure_directory_permissions` | Directory permissions 0700 |
 | `test_inbox_directory` | Inbox directory creation |
@@ -364,8 +327,14 @@ Track test coverage for features across tmux and direct modes. When adding a fea
 | `test_response_without_pending` | /response works without pending |
 | `test_notify_endpoint` | POST /notify endpoint |
 | `test_notify_endpoint_missing_text` | /notify rejects missing text |
+| `test_workers_endpoint_exists` | GET /workers endpoint exists |
+| `test_workers_endpoint_json_structure` | /workers JSON structure |
+| `test_workers_endpoint_shows_tmux_workers` | /workers includes tmux workers |
+| `test_workers_endpoint_empty_when_no_workers` | /workers empty when no workers |
 | `test_webhook_secret_acceptance` | Webhook secret acceptance path |
 | `test_webhook_secret_validation` | Webhook secret validation |
+| `test_graceful_shutdown_notification` | Shutdown notification sent |
+| `test_typing_indicator_loop` | Typing indicator loop runs |
 | `test_token_isolation` | Token not exposed to tmux |
 | `test_photo_message_no_focused` | Photo without focused worker |
 | `test_document_message_no_focused` | Document without focused worker |

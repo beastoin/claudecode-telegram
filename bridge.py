@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 
 import os
 import json
@@ -14,10 +14,9 @@ import time
 import re
 import urllib.request
 import uuid
-from dataclasses import dataclass
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Protocol
 
 
 # ============================================================
@@ -63,46 +62,245 @@ if _mounts_env:
             host = container = mount_spec
         SANDBOX_EXTRA_MOUNTS.append((host, container, readonly))
 
+# Derive node name from TMUX_PREFIX for per-node isolation in /tmp
+# "claude-test-" -> "test", "claude-" -> "default"
+_node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
+
 # Temporary file inbox (session-isolated, auto-cleaned)
-FILE_INBOX_ROOT = Path("/tmp/claudecode-telegram")
+FILE_INBOX_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 
 # Worker pipe root for inter-worker communication
 # Each worker gets a named pipe at WORKER_PIPE_ROOT/<name>/in.pipe
-WORKER_PIPE_ROOT = Path("/tmp/claudecode-telegram")
+WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 
-# Direct mode: bypass tmux, use Claude JSON streaming
-# When enabled, workers are subprocess.Popen processes instead of tmux sessions
-DIRECT_MODE = os.environ.get("DIRECT_MODE", "0") == "1"
-
-DEFAULT_WORKER_BACKEND = "claude"
-CODEX_WORKER_BACKEND = "codex"
+DEFAULT_BACKEND = "claude"
+DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 
 
-@dataclass
-class DirectWorker:
-    """Represents a Claude worker running as a subprocess with JSON streaming."""
+# ============================================================
+# CORE: Backend Protocol + implementations
+# ============================================================
+
+class Backend(Protocol):
+    """Minimal backend interface. 3 methods, no more."""
     name: str
-    process: subprocess.Popen
-    chat_id: Optional[int] = None
-    pending: bool = False
-    reader_thread: Optional[threading.Thread] = None
-    initialized: bool = False  # True after receiving init event from Claude
-    backend: str = DEFAULT_WORKER_BACKEND
+    is_exec: bool
+
+    def start_cmd(self) -> str:
+        """Return the shell command to start this CLI in tmux."""
+        ...
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        """Send a message to the worker. Returns True if sent."""
+        ...
+
+    def is_online(self, tmux_name: str) -> bool:
+        """Check if worker is alive and ready to receive messages."""
+        ...
 
 
-# Dict of active direct workers: name -> DirectWorker
-direct_workers: Dict[str, DirectWorker] = {}
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared tmux helpers (used by multiple backends)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-session locks to prevent concurrent tmux sends from interleaving
+_tmux_send_locks = {}
+_tmux_send_locks_guard = threading.Lock()
+
+
+def _get_tmux_send_lock(tmux_name: str):
+    """Get or create a lock for a specific tmux session."""
+    with _tmux_send_locks_guard:
+        if tmux_name not in _tmux_send_locks:
+            _tmux_send_locks[tmux_name] = threading.Lock()
+        return _tmux_send_locks[tmux_name]
+
+
+def tmux_exists(tmux_name: str) -> bool:
+    """Check if tmux session exists."""
+    return subprocess.run(
+        ["tmux", "has-session", "-t", tmux_name],
+        capture_output=True
+    ).returncode == 0
+
+
+def tmux_send_message(tmux_name: str, text: str) -> bool:
+    """Send text + Enter to tmux session with locking."""
+    lock = _get_tmux_send_lock(tmux_name)
+    with lock:
+        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "-l", text])
+        if result.returncode != 0:
+            return False
+        time.sleep(0.2)  # Delay to let terminal process text before Enter
+        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+        return result.returncode == 0
+
+
+def get_pane_command(tmux_name: str) -> str:
+    """Get the current command running in tmux pane."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
+        capture_output=True, text=True
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def is_process_running(tmux_name: str, process_name: str) -> bool:
+    """Check if a process is running in tmux session."""
+    cmd = get_pane_command(tmux_name)
+    if process_name.lower() in cmd.lower():
+        return True
+
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return False
+
+    pane_pid = result.stdout.strip()
+    if not pane_pid:
+        return False
+
+    result = subprocess.run(
+        ["pgrep", "-P", pane_pid, process_name],
+        capture_output=True
+    )
+    return result.returncode == 0
+
+
+def tmux_send_escape(tmux_name: str):
+    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+
+
+class ClaudeBackend:
+    """Claude Code CLI - interactive mode with hook for responses."""
+    name = "claude"
+    is_exec = False
+
+    def start_cmd(self) -> str:
+        return "claude --dangerously-skip-permissions"
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        if not tmux_exists(tmux_name):
+            return False
+        return tmux_send_message(tmux_name, text)
+
+    def is_online(self, tmux_name: str) -> bool:
+        if not tmux_exists(tmux_name):
+            return False
+        return is_process_running(tmux_name, "claude")
+
+
+class CodexBackend:
+    """OpenAI Codex CLI - non-interactive exec mode."""
+    name = "codex"
+    is_exec = True
+
+    def start_cmd(self) -> str:
+        return "echo 'Codex worker ready (exec mode)'"
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
+        if not adapter.exists():
+            print(f"Codex adapter not found: {adapter}")
+            return False
+
+        subprocess.Popen(
+            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+
+    def is_online(self, tmux_name: str) -> bool:
+        return True
+
+
+class GeminiBackend:
+    """Google Gemini CLI - non-interactive prompt mode (stub)."""
+    name = "gemini"
+    is_exec = True
+
+    def start_cmd(self) -> str:
+        return "echo 'Gemini worker ready (exec mode)'"
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        adapter = Path(__file__).parent / "hooks" / "gemini-adapter.py"
+        if not adapter.exists():
+            print(f"Gemini adapter not found: {adapter}")
+            return False
+
+        subprocess.Popen(
+            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+
+    def is_online(self, tmux_name: str) -> bool:
+        return True
+
+
+class OpenCodeBackend:
+    """OpenCode CLI - non-interactive run mode (stub)."""
+    name = "opencode"
+    is_exec = True
+
+    def start_cmd(self) -> str:
+        return "echo 'OpenCode worker ready (exec mode)'"
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        adapter = Path(__file__).parent / "hooks" / "opencode-adapter.py"
+        if not adapter.exists():
+            print(f"OpenCode adapter not found: {adapter}")
+            return False
+
+        subprocess.Popen(
+            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+
+    def is_online(self, tmux_name: str) -> bool:
+        return True
+
+
+BACKENDS = {
+    "claude": ClaudeBackend(),
+    "codex": CodexBackend(),
+    "gemini": GeminiBackend(),
+    "opencode": OpenCodeBackend(),
+}
+
+
+def get_backend(name: str) -> Backend:
+    return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
+
+
+def is_valid_backend(name: str) -> bool:
+    return name in BACKENDS
+
+
+def list_backends() -> list[str]:
+    return list(BACKENDS.keys())
+
+
+def is_claude_running(tmux_name: str) -> bool:
+    return is_process_running(tmux_name, "claude")
+
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
 state = {
     "active": None,  # Currently active session name
     "startup_notified": False,  # Whether we've sent the startup message
 }
-
-# Per-session locks to prevent concurrent tmux sends from interleaving
-# Without this, rapid messages from multiple threads can corrupt each other
-_tmux_send_locks = {}
-_tmux_send_locks_guard = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -199,20 +397,53 @@ RESERVED_NAMES = {
 # TELEGRAM API
 # ============================================================
 
+class TelegramAPI:
+    def __init__(self, token: str):
+        self.token = token
+
+    def api(self, method: str, data: dict):
+        if not self.token:
+            return None
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/{method}",
+            data=json.dumps(data).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            print(f"Telegram API error: {e}")
+            return None
+
+    def send_message(self, chat_id: int, text: str, **kwargs):
+        payload = {"chat_id": chat_id, "text": text}
+        payload.update(kwargs)
+        return self.api("sendMessage", payload)
+
+    def send_photo(self, chat_id: int, photo, **kwargs):
+        payload = {"chat_id": chat_id, "photo": photo}
+        payload.update(kwargs)
+        return self.api("sendPhoto", payload)
+
+    def send_document(self, chat_id: int, document, **kwargs):
+        payload = {"chat_id": chat_id, "document": document}
+        payload.update(kwargs)
+        return self.api("sendDocument", payload)
+
+    def set_reaction(self, chat_id: int, message_id: int, reaction: list[dict]):
+        payload = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
+        return self.api("setMessageReaction", payload)
+
+    def send_chat_action(self, chat_id: int, action: str):
+        return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+
+telegram = TelegramAPI(BOT_TOKEN)
+
+
 def telegram_api(method, data):
-    if not BOT_TOKEN:
-        return None
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-        data=json.dumps(data).encode(),
-        headers={"Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        print(f"Telegram API error: {e}")
-        return None
+    return telegram.api(method, data)
 
 
 # ============================================================
@@ -304,7 +535,7 @@ def cleanup_inbox(session_name):
 def get_worker_pipe_path(name):
     """Get the named pipe path for a worker.
 
-    Path: /tmp/claudecode-telegram/<worker>/in.pipe
+    Path: /tmp/claudecode-telegram/<node>/<worker>/in.pipe
     """
     return WORKER_PIPE_ROOT / name / "in.pipe"
 
@@ -312,7 +543,7 @@ def get_worker_pipe_path(name):
 def ensure_worker_pipe(name):
     """Create the named pipe for a worker if it doesn't exist.
 
-    Creates: /tmp/claudecode-telegram/<worker>/in.pipe
+    Creates: /tmp/claudecode-telegram/<node>/<worker>/in.pipe
     Also starts a reader thread to forward messages to the worker.
     """
     pipe_path = get_worker_pipe_path(name)
@@ -370,8 +601,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event):
     When another worker writes to this worker's pipe:
       echo "message" > /tmp/claudecode-telegram/bob/in.pipe
 
-    This thread reads the message and forwards it to the worker's tmux session
-    (or direct worker stdin).
+    This thread reads the message and forwards it to the worker's backend.
 
     The reader uses blocking open() - this means the thread will block until
     a writer opens the pipe. This is correct behavior for FIFOs. When the
@@ -400,8 +630,11 @@ def pipe_reader_loop(name: str, stop_event: threading.Event):
                     message = line.strip()
                     if message:
                         print(f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}")
-                        # Forward to worker using tmux_send_message or send_to_direct_worker
-                        _forward_pipe_message(name, message)
+                        # Forward to worker using backend routing
+                        try:
+                            _forward_pipe_message(name, message)
+                        except Exception as e:
+                            print(f"Error forwarding pipe message to '{name}': {e}")
 
         except FileNotFoundError:
             # Pipe was removed, stop the reader
@@ -414,30 +647,19 @@ def pipe_reader_loop(name: str, stop_event: threading.Event):
             # Wait a bit before retrying
             stop_event.wait(0.5)
 
+    # Clean up registry so start_pipe_reader can restart if needed
+    if name in _pipe_reader_threads:
+        _pipe_reader_threads.pop(name, None)
     print(f"Pipe reader stopped for worker '{name}'")
 
 
 def _forward_pipe_message(name: str, message: str):
     """Forward a message from the pipe to the worker's session.
 
-    Uses tmux_send_message for tmux mode, or send_to_direct_worker for direct mode.
-    We call the lower-level functions directly to avoid any issues with
-    send_to_worker scanning sessions (which might be slow).
+    Uses backend routing for tmux or exec-mode workers.
     """
-    # Check direct workers first
-    if name in direct_workers:
-        worker = direct_workers[name]
-        if worker.process.poll() is None:  # Still running
-            send_to_direct_worker(name, message, None)
-            return
-
-    # Check tmux sessions
-    tmux_name = f"{TMUX_PREFIX}{name}"
-    if tmux_exists(tmux_name):
-        tmux_send_message(tmux_name, message)
-        return
-
-    print(f"Warning: Cannot forward pipe message to '{name}' - worker not found")
+    if not worker_manager.send(name, message):
+        print(f"Warning: Cannot forward pipe message to '{name}' - worker not found")
 
 
 def start_pipe_reader(name: str):
@@ -489,40 +711,9 @@ def stop_pipe_reader(name: str):
 
 
 def get_workers():
-    """Get all active workers with their communication details.
-
-    Returns list of dicts with:
-    - name: worker name
-    - protocol: "tmux" or "pipe"
-    - address: tmux session name or pipe path
-    - send_example: example command to send a message
-    """
-    workers = []
-
-    if DIRECT_MODE:
-        # Direct mode: return subprocess workers with pipe protocol
-        for name, worker in direct_workers.items():
-            if worker.process.poll() is None:  # Still running
-                pipe_path = get_worker_pipe_path(name)
-                workers.append({
-                    "name": name,
-                    "protocol": "pipe",
-                    "address": str(pipe_path),
-                    "send_example": f"echo 'your message here' > {pipe_path}"
-                })
-    else:
-        # Tmux mode: return tmux sessions
-        registered = scan_tmux_sessions()
-        for name, info in registered.items():
-            tmux_name = info["tmux"]
-            workers.append({
-                "name": name,
-                "protocol": "tmux",
-                "address": tmux_name,
-                "send_example": f"tmux send-keys -t {tmux_name} 'your message here' Enter"
-            })
-
-    return workers
+    """Get all active workers with their communication details."""
+    _sync_worker_manager()
+    return worker_manager.get_workers()
 
 
 def download_telegram_file(file_id, session_name):
@@ -987,7 +1178,7 @@ def update_bot_commands():
     commands = list(BOT_COMMANDS)  # Copy static commands
 
     # Add worker shortcuts (e.g., /lee, /chen)
-    registered = scan_tmux_sessions()
+    registered = get_registered_sessions()
     for name in sorted(registered.keys()):
         commands.append({"command": name, "description": f"Message {name}"})
 
@@ -1048,15 +1239,7 @@ def clear_pending(name):
 
 
 def is_pending(name):
-    """Check if session has a pending request. Auto-clears after 10 min timeout.
-
-    In DIRECT_MODE, checks the DirectWorker.pending flag instead.
-    """
-    # Direct mode: check worker pending flag
-    if DIRECT_MODE:
-        worker = direct_workers.get(name)
-        return worker.pending if worker else False
-
+    """Check if session has a pending request. Auto-clears after 10 min timeout."""
     pending = get_pending_file(name)
     if not pending.exists():
         return False
@@ -1076,27 +1259,55 @@ def is_pending(name):
 
 def normalize_backend(backend: Optional[str]) -> str:
     """Return a normalized backend name with a safe default."""
-    return backend or DEFAULT_WORKER_BACKEND
+    return backend or DEFAULT_BACKEND
 
 
 def parse_hire_args(raw: str) -> tuple[str, str]:
-    """Parse /hire arguments and return (name, backend)."""
+    """Parse /hire arguments and return (name, backend).
+
+    Supports:
+    - /hire alice                    -> (alice, claude)
+    - /hire alice --backend codex    -> (alice, codex)
+    - /hire alice --codex            -> (alice, codex)  [legacy]
+    - /hire codex-alice              -> (alice, codex)  [prefix syntax]
+    """
     parts = [p for p in (raw or "").split() if p]
-    backend = DEFAULT_WORKER_BACKEND
+    backend = DEFAULT_BACKEND
     name_parts = []
-    for part in parts:
-        if part == "--codex":
-            backend = CODEX_WORKER_BACKEND
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--backend" and i + 1 < len(parts):
+            backend = parts[i + 1]
+            i += 2
+            continue
+        elif part == "--codex":
+            # Legacy support
+            backend = "codex"
+        elif part.startswith("--"):
+            # Skip unknown flags
+            pass
         else:
             name_parts.append(part)
+        i += 1
 
     if len(name_parts) != 1:
         return "", backend
 
     name = name_parts[0]
-    if name.startswith(f"{CODEX_WORKER_BACKEND}-"):
-        backend = CODEX_WORKER_BACKEND
-        name = name[len(f"{CODEX_WORKER_BACKEND}-"):]
+
+    # Check for backend prefix syntax (e.g., codex-alice, gemini-bob)
+    for backend_name in list_backends():
+        prefix = f"{backend_name}-"
+        if name.startswith(prefix):
+            backend = backend_name
+            name = name[len(prefix):]
+            break
+
+    # Validate backend
+    if not is_valid_backend(backend):
+        # Return invalid backend so caller can show error
+        return name, backend
 
     return name, backend
 
@@ -1146,89 +1357,349 @@ def format_progress_lines(
 
 
 def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
-    """Get backend for a worker (direct or tmux)."""
+    """Get backend for a worker."""
+    # Check session dict first
     if session and session.get("backend"):
         return normalize_backend(session.get("backend"))
-    if DIRECT_MODE:
-        worker = direct_workers.get(name)
-        if worker:
-            return normalize_backend(worker.backend)
-    return DEFAULT_WORKER_BACKEND
+    # Check backend file in session dir (for exec mode workers)
+    backend_file = SESSIONS_DIR / name / "backend"
+    if backend_file.exists():
+        return normalize_backend(backend_file.read_text().strip())
+    return DEFAULT_BACKEND
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# grug say: one place for direct/tmux branching. no scatter.
-# Worker Helpers (centralize mode switching)
+# CORE: WorkerManager
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WorkerManager:
+    def __init__(self, sessions_dir: Path, tmux_prefix: str):
+        self.sessions_dir = sessions_dir
+        self.tmux_prefix = tmux_prefix
+
+    def _sync_paths(self):
+        if self.sessions_dir != SESSIONS_DIR:
+            self.sessions_dir = SESSIONS_DIR
+        if self.tmux_prefix != TMUX_PREFIX:
+            self.tmux_prefix = TMUX_PREFIX
+
+    def scan_tmux_sessions(self):
+        """Scan tmux for claude-* sessions (registered)."""
+        self._sync_paths()
+        registered = {}
+
+        try:
+            result = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                return registered
+
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                session_name = line.strip()
+
+                if session_name.startswith(self.tmux_prefix):
+                    name = session_name[len(self.tmux_prefix):]
+                    backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
+                    registered[name] = {"tmux": session_name, "backend": backend}
+        except Exception as e:
+            print(f"Error scanning tmux: {e}")
+
+        return registered
+
+    def get_registered_sessions(self, registered=None):
+        """Get registered sessions from tmux and exec-mode workers."""
+        self._sync_paths()
+        if registered is None:
+            registered = self.scan_tmux_sessions()
+
+        # Add exec-mode workers (have backend file but no tmux session)
+        if self.sessions_dir.exists():
+            for session_dir in self.sessions_dir.iterdir():
+                if session_dir.is_dir():
+                    backend_file = session_dir / "backend"
+                    if backend_file.exists():
+                        name = session_dir.name
+                        if name not in registered:
+                            backend = backend_file.read_text().strip()
+                            registered[name] = {"backend": backend, "mode": "exec"}
+
+        if state["active"] and state["active"] not in registered:
+            state["active"] = None
+        if registered and not state["active"]:
+            state["active"] = list(registered.keys())[0]
+
+        return registered
+
+    def is_online(self, name: str, session: dict = None) -> bool:
+        """Check if worker is online and ready."""
+        self._sync_paths()
+        if not session:
+            sessions = self.get_registered_sessions()
+            session = sessions.get(name)
+        if not session:
+            return False
+
+        backend_name = normalize_backend(session.get("backend"))
+        backend = get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+
+        return backend.is_online(tmux_name)
+
+    def send(self, name: str, message: str, chat_id: int = None, session: dict = None) -> bool:
+        """Send message to worker using backend registry."""
+        self._sync_paths()
+        if not session:
+            sessions = self.get_registered_sessions()
+            session = sessions.get(name)
+        if not session:
+            return False
+
+        backend_name = normalize_backend(session.get("backend"))
+        backend = get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+
+        return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+
+    def get_workers(self):
+        """Get all active workers with their communication details."""
+        self._sync_paths()
+        workers = []
+        registered = self.get_registered_sessions()
+        for name, info in registered.items():
+            backend_name = get_worker_backend(name, info)
+            backend = get_backend(backend_name)
+            if backend.is_exec:
+                pipe_path = ensure_worker_pipe(name)
+                workers.append({
+                    "name": name,
+                    "protocol": "pipe",
+                    "address": str(pipe_path),
+                    "send_example": f"echo 'your message here' > {pipe_path}"
+                })
+            else:
+                tmux_name = info.get("tmux")
+                if not tmux_name:
+                    continue
+                workers.append({
+                    "name": name,
+                    "protocol": "tmux",
+                    "address": tmux_name,
+                    "send_example": f"tmux send-keys -t {tmux_name} 'your message here' Enter"
+                })
+        return workers
+
+    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None):
+        """Create a new worker instance."""
+        self._sync_paths()
+        if not is_valid_backend(backend):
+            return False, f"Unknown backend '{backend}'. Available: {', '.join(list_backends())}"
+
+        backend_obj = get_backend(backend)
+
+        # Exec-mode backends: stateless, no tmux
+        if backend_obj.is_exec:
+            state["active"] = name
+            save_last_active(name)
+            ensure_session_dir(name)
+            ensure_worker_pipe(name)
+            backend_file = self.sessions_dir / name / "backend"
+            backend_file.write_text(backend)
+            # Write chat_id BEFORE sending welcome so /response can find it
+            if chat_id:
+                set_pending(name, chat_id)
+            # Send welcome message as first message to exec worker
+            welcome = (
+                "You are connected to Telegram via claudecode-telegram bridge. "
+                f"Your bridge URL is {BRIDGE_URL}. "
+                f"To message other workers: curl {BRIDGE_URL}/workers to discover workers and their protocols. "
+                "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
+            )
+            self.send(name, welcome)
+            print(f"Created {backend} worker '{name}' (exec mode)")
+            return True, None
+
+        tmux_name = f"{self.tmux_prefix}{name}"
+        if tmux_exists(tmux_name):
+            return False, f"Worker '{name}' already exists"
+
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+            capture_output=True
+        )
+        if result.returncode != 0:
+            return False, "Could not start the worker workspace"
+
+        time.sleep(0.5)
+
+        export_hook_env(tmux_name, backend)
+        time.sleep(0.3)
+
+        if SANDBOX_ENABLED:
+            docker_cmd = get_docker_run_cmd(name)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+            print(f"Started worker '{name}' in sandbox mode")
+        else:
+            start_cmd = backend_obj.start_cmd()
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+            time.sleep(1.5)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
+            time.sleep(0.3)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+
+        time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+        welcome = (
+            "You are connected to Telegram via claudecode-telegram bridge. "
+            "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
+            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
+            "Allowed paths: /tmp, current directory. "
+            f"To message other workers: curl {BRIDGE_URL}/workers to discover workers and their protocols. "
+            "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
+        )
+        if SANDBOX_ENABLED:
+            welcome += " Running in sandbox mode (Docker container)."
+        self.send(name, welcome)
+
+        state["active"] = name
+        save_last_active(name)
+        ensure_session_dir(name)
+        ensure_worker_pipe(name)
+
+        return True, None
+
+    def end(self, name: str):
+        """Kill a worker instance."""
+        self._sync_paths()
+        registered = self.get_registered_sessions()
+        if name not in registered:
+            return False, f"Worker '{name}' not found"
+
+        session = registered[name]
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+
+        if backend.is_exec:
+            session_dir = self.sessions_dir / name
+            backend_file = session_dir / "backend"
+            try:
+                if backend_file.exists():
+                    backend_file.unlink()
+                for session_id_file in session_dir.glob("*_session_id"):
+                    session_id_file.unlink()
+            except Exception as e:
+                return False, f"Failed to clean exec metadata: {e}"
+
+            cleanup_inbox(name)
+            cleanup_worker_pipe(name)
+            clear_pending(name)
+
+            if state["active"] == name:
+                state["active"] = None
+                self.get_registered_sessions()
+
+            return True, None
+
+        tmux_name = session["tmux"]
+
+        if SANDBOX_ENABLED:
+            stop_docker_container(name)
+
+        subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+        cleanup_inbox(name)
+        cleanup_worker_pipe(name)
+
+        if state["active"] == name:
+            state["active"] = None
+            self.get_registered_sessions()
+
+        return True, None
+
+    def restart(self, name: str):
+        """Restart claude in an existing tmux session."""
+        self._sync_paths()
+        registered = self.get_registered_sessions()
+        if name not in registered:
+            return False, f"Worker '{name}' not found"
+
+        session = registered[name]
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+
+        if backend.is_exec:
+            session_dir = self.sessions_dir / name
+            session_dir.mkdir(parents=True, exist_ok=True)
+            for session_id_file in session_dir.glob("*_session_id"):
+                session_id_file.unlink()
+            ensure_worker_pipe(name)
+            clear_pending(name)
+            return True, None
+
+        tmux_name = session["tmux"]
+        if not tmux_exists(tmux_name):
+            return False, "Worker workspace is not running"
+        if is_claude_running(tmux_name):
+            return False, "Worker is already running"
+
+        export_hook_env(tmux_name, backend_name)
+        time.sleep(0.3)
+
+        if SANDBOX_ENABLED:
+            stop_docker_container(name)
+            time.sleep(0.5)
+            docker_cmd = get_docker_run_cmd(name)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+        else:
+            start_cmd = backend.start_cmd()
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+
+        return True, None
+
+
+worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)
+
+
+def _sync_worker_manager():
+    worker_manager.sessions_dir = SESSIONS_DIR
+    worker_manager.tmux_prefix = TMUX_PREFIX
+
+# ─────────────────────────────────────────────────────────────────────────────
+# grug say: one place for backend branching. no scatter.
+# Worker Helpers (centralize backend switching)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def worker_is_online(name: str, session: dict = None) -> bool:
-    """Check if worker is online and ready. Handles direct/tmux mode.
+    """Check if worker is online and ready.
 
     Args:
         name: Worker name
         session: Session dict from get_registered_sessions() (optional, avoids re-lookup)
     """
-    if DIRECT_MODE:
-        return is_direct_worker_running(name)
-
-    if not session:
-        sessions = get_registered_sessions()
-        session = sessions.get(name)
-    if not session:
-        return False
-
-    tmux_name = session.get("tmux")
-    if not tmux_name or not tmux_exists(tmux_name):
-        return False
-
-    backend = get_worker_backend(name, session)
-    if backend == CODEX_WORKER_BACKEND:
-        return True
-
-    return is_claude_running(tmux_name)
+    _sync_worker_manager()
+    return worker_manager.is_online(name, session)
 
 
 def worker_set_pending(name: str, chat_id: int):
-    """Set pending state for worker. Handles direct/tmux mode."""
-    if DIRECT_MODE:
-        worker = direct_workers.get(name)
-        if worker:
-            worker.pending = True
-            worker.chat_id = chat_id
-    else:
-        set_pending(name, chat_id)
+    """Set pending state for worker."""
+    set_pending(name, chat_id)
 
 
 def worker_send(name: str, message: str, chat_id: int = None, session: dict = None) -> bool:
-    """Send message to worker. Handles direct/tmux mode.
+    """Send message to worker using backend registry.
 
     Args:
         name: Worker name
         message: Message text to send
-        chat_id: Chat ID (required for direct mode)
-        session: Session dict (optional, avoids re-lookup for tmux mode)
+        chat_id: Chat ID (unused, kept for compatibility)
+        session: Session dict (optional, avoids re-lookup)
 
     Returns:
         True if send succeeded
     """
-    if DIRECT_MODE:
-        return send_to_direct_worker(name, message, chat_id)
-
-    if not session:
-        sessions = get_registered_sessions()
-        session = sessions.get(name)
-    if not session:
-        return False
-
-    tmux_name = session.get("tmux")
-    if not tmux_name:
-        return False
-
-    backend = get_worker_backend(name, session)
-    if backend == CODEX_WORKER_BACKEND:
-        return send_to_codex_worker(tmux_name, message)
-
-    return tmux_send_message(tmux_name, message)
+    _sync_worker_manager()
+    return worker_manager.send(name, message, chat_id, session)
 
 
 def get_tmux_env_value(tmux_name: str, key: str) -> str:
@@ -1246,158 +1717,15 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
 
 
 def scan_tmux_sessions():
-    """Scan tmux for claude-* sessions (registered)."""
-    registered = {}
-
-    try:
-        result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            return registered
-
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            session_name = line.strip()
-
-            if session_name.startswith(TMUX_PREFIX):
-                # Registered session
-                name = session_name[len(TMUX_PREFIX):]  # Remove prefix
-                backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
-                registered[name] = {"tmux": session_name, "backend": backend}
-    except Exception as e:
-        print(f"Error scanning tmux: {e}")
-
-    return registered
+    """Scan tmux for registered sessions."""
+    _sync_worker_manager()
+    return worker_manager.scan_tmux_sessions()
 
 
 def get_registered_sessions(registered=None):
-    """Get registered sessions from tmux (or direct workers) and reconcile active state.
-
-    In DIRECT_MODE, returns direct workers instead of tmux sessions.
-    """
-    # Direct mode: return direct workers
-    if DIRECT_MODE:
-        workers = get_direct_workers()
-        # Reconcile active state
-        if state["active"] and state["active"] not in workers:
-            state["active"] = None
-        if workers and not state["active"]:
-            state["active"] = list(workers.keys())[0]
-        return workers
-
-    if registered is None:
-        registered = scan_tmux_sessions()
-
-    if state["active"] and state["active"] not in registered:
-        state["active"] = None
-    if registered and not state["active"]:
-        state["active"] = list(registered.keys())[0]
-
-    return registered
-
-
-def tmux_exists(tmux_name):
-    """Check if tmux session exists."""
-    return subprocess.run(
-        ["tmux", "has-session", "-t", tmux_name],
-        capture_output=True
-    ).returncode == 0
-
-
-def get_pane_command(tmux_name):
-    """Get the current command running in tmux pane."""
-    result = subprocess.run(
-        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
-        capture_output=True, text=True
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def is_claude_running(tmux_name):
-    """Check if claude process is running in tmux session."""
-    # First try pane_current_command (fast path)
-    cmd = get_pane_command(tmux_name)
-    if "claude" in cmd.lower():
-        return True
-
-    # Fallback: check if claude is a child process of the pane
-    # This handles cases where pane_current_command returns unexpected values
-    result = subprocess.run(
-        ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        return False
-
-    pane_pid = result.stdout.strip()
-    if not pane_pid:
-        return False
-
-    # Check for claude as child process using pgrep
-    result = subprocess.run(
-        ["pgrep", "-P", pane_pid, "claude"],
-        capture_output=True
-    )
-    return result.returncode == 0
-
-
-def tmux_send(tmux_name, text, literal=True):
-    """Send text to tmux session. Returns True if successful."""
-    cmd = ["tmux", "send-keys", "-t", tmux_name]
-    if literal:
-        cmd.append("-l")
-    cmd.append(text)
-    result = subprocess.run(cmd)
-    return result.returncode == 0
-
-
-def tmux_send_enter(tmux_name):
-    """Send Enter key to tmux session."""
-    result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-    return result.returncode == 0
-
-
-def _get_tmux_send_lock(tmux_name):
-    """Get or create a lock for a specific tmux session.
-
-    Prevents concurrent sends to the same session from interleaving,
-    which causes messages to corrupt each other.
-    """
-    with _tmux_send_locks_guard:
-        if tmux_name not in _tmux_send_locks:
-            _tmux_send_locks[tmux_name] = threading.Lock()
-        return _tmux_send_locks[tmux_name]
-
-
-def tmux_send_message(tmux_name, text):
-    """Send text + Enter to tmux session with locking.
-
-    Uses per-session lock to prevent concurrent sends from interleaving.
-    Sends text with -l flag (literal), then Enter key separately.
-    Small delay between text and Enter to prevent race condition.
-    """
-    lock = _get_tmux_send_lock(tmux_name)
-    with lock:
-        send_ok = tmux_send(tmux_name, text, literal=True)
-        time.sleep(0.2)  # Delay to let terminal process text before Enter
-        enter_ok = tmux_send_enter(tmux_name)
-        return send_ok and enter_ok
-
-
-def send_to_codex_worker(tmux_name: str, text: str) -> bool:
-    """Send a message to a codex-backed worker."""
-    adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
-    if adapter.exists():
-        result = subprocess.run(["python3", str(adapter), tmux_name, text])
-        return result.returncode == 0
-    return tmux_send_message(tmux_name, text)
-
-
-def tmux_send_escape(tmux_name):
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+    """Get registered sessions from tmux and exec-mode workers."""
+    _sync_worker_manager()
+    return worker_manager.get_registered_sessions(registered)
 
 
 def tmux_prompt_empty(tmux_name, timeout=0.5):
@@ -1433,13 +1761,8 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX])
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)])
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)])
-    # Only set BRIDGE_URL if user-provided (not default localhost)
-    # This makes override semantics clear: set = override, unset = use PORT
-    if _bridge_url_env:
-        subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
-    else:
-        # Unset to clear any stale value from previous config
-        subprocess.run(["tmux", "set-environment", "-u", "-t", tmux_name, "BRIDGE_URL"], capture_output=True)
+    # Always export BRIDGE_URL so workers know where their bridge is
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
 
 
 def get_docker_run_cmd(name):
@@ -1520,277 +1843,25 @@ def stop_docker_container(name):
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
 
-# ============================================================
-# DIRECT WORKERS
-# ============================================================
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Direct Worker Functions (JSON streaming mode, bypasses tmux)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def create_direct_worker(name: str, backend: str = DEFAULT_WORKER_BACKEND) -> tuple[bool, Optional[str]]:
-    """Create a new Claude worker using JSON streaming mode.
-
-    Spawns claude --output-format stream-json subprocess with stdin/stdout pipes.
-    Returns (success, error_message).
-    """
-    if name in direct_workers:
-        return False, f"Worker '{name}' already exists"
-
-    try:
-        # Start Claude in JSON streaming mode (like Happy's approach)
-        process = subprocess.Popen(
-            ["claude", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # Line buffered
-        )
-
-        worker = DirectWorker(name=name, process=process, backend=backend)
-        direct_workers[name] = worker
-
-        # Start reader thread to process output
-        reader = threading.Thread(
-            target=read_direct_worker_output,
-            args=(name, process),
-            daemon=True
-        )
-        worker.reader_thread = reader
-        reader.start()
-
-        # Welcome message will be sent after init event is received
-        # (see read_direct_worker_output)
-
-        print(f"Started direct worker '{name}' (PID {process.pid})")
-        return True, None
-
-    except FileNotFoundError:
-        return False, "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
-    except Exception as e:
-        return False, f"Failed to start worker: {e}"
-
-
-def kill_direct_worker(name: str) -> tuple[bool, Optional[str]]:
-    """Terminate a direct worker subprocess.
-
-    Returns (success, error_message).
-    """
-    worker = direct_workers.get(name)
-    if not worker:
-        return False, f"Worker '{name}' not found"
-
-    try:
-        # Terminate the process
-        if worker.process.poll() is None:  # Still running
-            worker.process.terminate()
-            try:
-                worker.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                worker.process.kill()
-                worker.process.wait()
-
-        # Clean up inbox
-        cleanup_inbox(name)
-
-        # Remove from dict
-        del direct_workers[name]
-
-        print(f"Killed direct worker '{name}'")
-        return True, None
-
-    except Exception as e:
-        return False, f"Failed to kill worker: {e}"
-
-
-def send_to_direct_worker(name: str, text: str, chat_id: Optional[int]) -> bool:
-    """Send a message to a direct worker via stdin JSON.
-
-    Returns True if message was sent successfully.
-    """
-    worker = direct_workers.get(name)
-    if not worker:
-        print(f"Direct worker '{name}' not found")
-        return False
-
-    if worker.process.poll() is not None:
-        print(f"Direct worker '{name}' is not running")
-        return False
-
-    # Update chat_id for response routing
-    if chat_id:
-        worker.chat_id = chat_id
-
-    # Format message in Claude's expected JSON input format
-    message = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": text}]
-        }
-    }
-
-    try:
-        worker.process.stdin.write(json.dumps(message) + "\n")
-        worker.process.stdin.flush()
-        worker.pending = True
-        print(f"Sent to direct worker '{name}': {text[:50]}...")
-        return True
-    except Exception as e:
-        print(f"Failed to send to direct worker '{name}': {e}")
-        return False
-
-
 def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bool:
-    """Send a message to a worker using the appropriate protocol.
-
-    Automatically detects whether worker is tmux or direct mode and uses
-    the correct method (tmux send-keys or stdin JSON).
-
-    Args:
-        name: Worker name
-        message: Text message to send
-        chat_id: Optional chat_id for response routing (direct mode)
-
-    Returns:
-        True if message was sent successfully
-    """
-    # Check direct workers first (explicit dict lookup)
-    if name in direct_workers:
-        worker = direct_workers[name]
-        if worker.process.poll() is None:  # Still running
-            return send_to_direct_worker(name, message, chat_id)
-        else:
-            print(f"Direct worker '{name}' is not running")
-            return False
-
-    # Check tmux sessions
-    registered = scan_tmux_sessions()
-    if name in registered:
-        session = registered[name]
-        tmux_name = session["tmux"]
-        if tmux_exists(tmux_name):
-            backend = get_worker_backend(name, session)
-            if backend == CODEX_WORKER_BACKEND:
-                return send_to_codex_worker(tmux_name, message)
-            return tmux_send_message(tmux_name, message)
-        else:
-            print(f"Tmux session '{tmux_name}' does not exist")
-            return False
-
-    # Worker not found in either mode
-    print(f"Worker '{name}' not found (checked direct workers and tmux sessions)")
-    return False
-
-
-def read_direct_worker_output(name: str, process: subprocess.Popen):
-    """Read JSON output from a direct worker and send responses to Telegram.
-
-    Runs in a background thread, reading newline-delimited JSON from stdout.
-    """
-    worker = direct_workers.get(name)
-    accumulated_text = ""
-
-    try:
-        for line in iter(process.stdout.readline, ""):
-            if not line:
-                break
-
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                event = json.loads(line)
-                text = handle_direct_event(name, event)
-                if text:
-                    accumulated_text += text
-
-                # Check event type
-                event_type = event.get("type", "")
-                event_subtype = event.get("subtype", "")
-
-                # Handle init event - Claude is ready
-                if event_type == "system" and event_subtype == "init":
-                    if worker and not worker.initialized:
-                        worker.initialized = True
-                        print(f"Direct worker '{name}' initialized")
-                        # Send welcome message now that Claude is ready
-                        welcome = (
-                            "You are connected to Telegram via claudecode-telegram bridge in direct mode. "
-                            "Manager can send you messages. "
-                            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-                            "Allowed paths: /tmp, current directory. "
-                            f"To message other workers: curl {BRIDGE_URL}/workers for worker list with send commands."
-                        )
-                        send_to_worker(name, welcome)
-
-                # Handle result/done event
-                elif event_type == "result":
-                    # Send accumulated response to Telegram
-                    if accumulated_text and worker and worker.chat_id:
-                        send_direct_worker_response(name, accumulated_text, worker.chat_id)
-                    accumulated_text = ""
-                    if worker:
-                        worker.pending = False
-
-            except json.JSONDecodeError as e:
-                print(f"JSON decode error from worker '{name}': {e}")
-
-    except Exception as e:
-        print(f"Reader thread error for worker '{name}': {e}")
-
-    print(f"Reader thread for worker '{name}' exited")
-
-
-def handle_direct_event(name: str, event: dict) -> Optional[str]:
-    """Handle a single JSON event from Claude.
-
-    Returns text content if this event contains response text, else None.
-    """
-    event_type = event.get("type", "")
-
-    if event_type == "assistant":
-        # Extract text content from assistant message
-        message = event.get("message", {})
-        content = message.get("content", [])
-        texts = []
-        for item in content:
-            if item.get("type") == "text":
-                texts.append(item.get("text", ""))
-        return "".join(texts) if texts else None
-
-    elif event_type == "content_block_delta":
-        # Streaming delta - extract text
-        delta = event.get("delta", {})
-        if delta.get("type") == "text_delta":
-            return delta.get("text", "")
-
-    elif event_type == "error":
-        error = event.get("error", {})
-        error_msg = error.get("message", "Unknown error")
-        print(f"Error from worker '{name}': {error_msg}")
-        return f"[Error: {error_msg}]"
-
-    return None
+    """Send a message to a worker using the appropriate backend."""
+    _sync_worker_manager()
+    return worker_manager.send(name, message, chat_id)
 
 
 def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool = True, log_prefix: str = "Response"):
-    """Send a response to Telegram. Shared by direct workers and hook responses.
+    """Send a response to Telegram. Shared by hook responses.
 
     Args:
         name: Session/worker name for message prefix
         text: Response text (may contain image/file tags)
         chat_id: Telegram chat ID
-        escape: If True, escape HTML special chars (direct workers). If False, text is pre-escaped (hooks).
-        log_prefix: Prefix for log messages (e.g., "Direct response", "Hook response")
+        escape: If True, escape HTML special chars. If False, text is pre-escaped.
+        log_prefix: Prefix for log messages (e.g., "Response", "Hook response")
     """
     # Parse image and file tags from text (before escaping to preserve tag syntax)
     clean_text, images = parse_image_tags(text)
     clean_text, files = parse_file_tags(clean_text)
-
-    # Escape HTML if needed (direct workers send raw text, hooks send pre-escaped HTML)
     if escape:
         clean_text = escape_html(clean_text)
 
@@ -1831,8 +1902,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool =
         else:
             telegram_api("sendMessage", {
                 "chat_id": chat_id,
-                "text": f"<b>{name}:</b> [Image failed: {img_path}]",
-                "parse_mode": "HTML"
+                "text": f"{name}: [Image failed: {img_path}]"
             })
 
     # Send files/documents
@@ -1843,220 +1913,38 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool =
         else:
             telegram_api("sendMessage", {
                 "chat_id": chat_id,
-                "text": f"<b>{name}:</b> [File failed: {file_path}]",
-                "parse_mode": "HTML"
+                "text": f"{name}: [File failed: {file_path}]"
             })
 
 
-def send_direct_worker_response(name: str, text: str, chat_id: int):
-    """Send a direct worker's response to Telegram."""
-    send_response_to_telegram(name, text, chat_id, escape=True, log_prefix="Direct response")
+def should_escape_response(data: dict) -> bool:
+    """Determine whether a response payload should be HTML-escaped."""
+    if data.get("escape") is True:
+        return True
+    if data.get("source") == "codex":
+        return True
+    return False
 
 
-def is_direct_worker_running(name: str) -> bool:
-    """Check if a direct worker process is still alive."""
-    worker = direct_workers.get(name)
-    if not worker:
-        return False
-    return worker.process.poll() is None
+ 
 
 
-def get_direct_workers() -> Dict[str, dict]:
-    """Get all direct workers in a format similar to get_registered_sessions.
-
-    Returns dict of name -> {"process": Popen, "pending": bool, "chat_id": int|None}
-    """
-    result = {}
-    for name, worker in direct_workers.items():
-        if worker.process.poll() is None:  # Still running
-            result[name] = {
-                "process": worker.process,
-                "pending": worker.pending,
-                "chat_id": worker.chat_id,
-                "backend": normalize_backend(worker.backend),
-            }
-    return result
-
-
-def kill_all_direct_workers():
-    """Kill all direct workers. Called during shutdown."""
-    names = list(direct_workers.keys())
-    for name in names:
-        try:
-            kill_direct_worker(name)
-        except Exception as e:
-            print(f"Error killing direct worker '{name}': {e}")
-
-
-def create_session(name, backend: str = DEFAULT_WORKER_BACKEND):
-    """Create a new Claude instance.
-
-    SECURITY: Token is NOT exported to Claude session. Hook forwards responses
-    to bridge via localhost HTTP, bridge sends to Telegram. Token isolation.
-
-    In DIRECT_MODE, uses JSON streaming subprocess instead of tmux.
-
-    Args:
-        name: Worker name
-    """
-    # Direct mode: use JSON streaming subprocess
-    if DIRECT_MODE:
-        ok, err = create_direct_worker(name, backend)
-        if ok:
-            state["active"] = name
-            save_last_active(name)
-            ensure_session_dir(name)
-            # Create worker pipe for inter-worker communication
-            ensure_worker_pipe(name)
-        return ok, err
-
-    tmux_name = f"{TMUX_PREFIX}{name}"
-
-    if tmux_exists(tmux_name):
-        return False, f"Worker '{name}' already exists"
-
-    # Create tmux session
-    result = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
-        capture_output=True
-    )
-    if result.returncode != 0:
-        return False, "Could not start the worker workspace"
-
-    time.sleep(0.5)
-
-    # Export env vars for hook (PORT for bridge endpoint, TMUX_PREFIX for session detection, SESSIONS_DIR for pending files)
-    # SECURITY: Token is NOT exported - hook forwards to bridge via localhost HTTP
-    export_hook_env(tmux_name, backend)
-    time.sleep(0.3)
-
-    if SANDBOX_ENABLED:
-        # Sandbox mode: run Claude in Docker container
-        docker_cmd = get_docker_run_cmd(name)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
-        print(f"Started worker '{name}' in sandbox mode")
-    else:
-        # Legacy mode: run Claude directly
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                       "claude --dangerously-skip-permissions", "Enter"])
-
-        # Wait for confirmation dialog and accept it (select option 2: "Yes, I accept")
-        time.sleep(1.5)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])  # Select option 2
-        time.sleep(0.3)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])  # Confirm
-
-    # Send welcome message with feature info (after Claude starts)
-    time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)  # Container startup takes longer
-    welcome = (
-        "You are connected to Telegram via claudecode-telegram bridge. "
-        "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
-        "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-        "Allowed paths: /tmp, current directory. "
-        f"To message other workers: curl {BRIDGE_URL}/workers for worker list with send commands."
-    )
-    if SANDBOX_ENABLED:
-        welcome += " Running in sandbox mode (Docker container)."
-    send_to_worker(name, welcome)
-
-    state["active"] = name
-    save_last_active(name)
-    ensure_session_dir(name)
-    # Create worker pipe for inter-worker communication
-    ensure_worker_pipe(name)
-
-    return True, None
+def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None):
+    """Create a new worker instance."""
+    _sync_worker_manager()
+    return worker_manager.hire(name, backend, chat_id=chat_id)
 
 
 def kill_session(name):
-    """Kill a Claude instance."""
-    # Direct mode: kill subprocess
-    if DIRECT_MODE:
-        ok, err = kill_direct_worker(name)
-        if ok:
-            if state["active"] == name:
-                state["active"] = None
-                # Set active to another worker if available
-                workers = get_direct_workers()
-                if workers:
-                    state["active"] = list(workers.keys())[0]
-            # Clean up worker pipe
-            cleanup_worker_pipe(name)
-        return ok, err
-
-    registered = get_registered_sessions()
-    if name not in registered:
-        return False, f"Worker '{name}' not found"
-
-    tmux_name = registered[name]["tmux"]
-
-    # Stop docker container if in sandbox mode
-    if SANDBOX_ENABLED:
-        stop_docker_container(name)
-
-    subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-
-    # Clean up inbox images
-    cleanup_inbox(name)
-
-    # Clean up worker pipe
-    cleanup_worker_pipe(name)
-
-    # Clear active if it was the killed session
-    if state["active"] == name:
-        state["active"] = None
-        get_registered_sessions()
-
-    return True, None
+    """Kill a worker instance."""
+    _sync_worker_manager()
+    return worker_manager.end(name)
 
 
 def restart_claude(name):
-    """Restart claude in an existing tmux session (or recreate direct worker)."""
-    # Direct mode: kill and recreate
-    if DIRECT_MODE:
-        backend = DEFAULT_WORKER_BACKEND
-        worker = direct_workers.get(name)
-        if worker:
-            backend = normalize_backend(worker.backend)
-        if name in direct_workers:
-            if is_direct_worker_running(name):
-                return False, "Worker is already running"
-            # Worker exists but not running - recreate
-            kill_direct_worker(name)
-        return create_direct_worker(name, backend)
-
-    registered = get_registered_sessions()
-    if name not in registered:
-        return False, f"Worker '{name}' not found"
-
-    tmux_name = registered[name]["tmux"]
-
-    if not tmux_exists(tmux_name):
-        return False, "Worker workspace is not running"
-
-    if is_claude_running(tmux_name):
-        return False, "Worker is already running"
-
-    backend = get_worker_backend(name, registered[name])
-    export_hook_env(tmux_name, backend)
-    time.sleep(0.3)
-
-    if SANDBOX_ENABLED:
-        # Stop any existing container first
-        stop_docker_container(name)
-        time.sleep(0.5)
-
-        # Start new container
-        docker_cmd = get_docker_run_cmd(name)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
-    else:
-        # Start claude in the existing tmux session
-        subprocess.run([
-            "tmux", "send-keys", "-t", tmux_name,
-            "claude --dangerously-skip-permissions", "Enter"
-        ])
-
-    return True, None
+    """Restart claude in an existing tmux session."""
+    _sync_worker_manager()
+    return worker_manager.restart(name)
 
 
 def switch_session(name):
@@ -2124,12 +2012,570 @@ def send_shutdown_message():
 
 
 # ============================================================
-# HTTP HANDLER
+# NON-CORE: CommandRouter
 # ============================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP Handler
-# ─────────────────────────────────────────────────────────────────────────────
+class CommandRouter:
+    def __init__(self, telegram_api: TelegramAPI, workers: WorkerManager):
+        self.telegram = telegram_api
+        self.workers = workers
+
+    def reply(self, chat_id, text, outcome=None):
+        self.telegram.send_message(chat_id, text)
+
+    def send_startup_message(self, chat_id):
+        registered = self.workers.get_registered_sessions()
+        sessions = list(registered.keys())
+        active = state["active"]
+
+        lines = ["I'm online and ready."]
+        if sessions:
+            lines.append(f"Team: {', '.join(sessions)}")
+            if active:
+                lines.append(f"Focused: {active}")
+        else:
+            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
+
+        if SANDBOX_ENABLED:
+            lines.append(f"Sandbox: {Path.home()} → /workspace")
+
+        self.reply(chat_id, "\n".join(lines))
+
+    def handle_message(self, update):
+        global admin_chat_id
+
+        msg = update.get("message", {})
+        text = msg.get("text", "") or msg.get("caption", "")
+        chat_id = msg.get("chat", {}).get("id")
+        msg_id = msg.get("message_id")
+
+        photo = msg.get("photo")
+        document = msg.get("document")
+
+        doc_is_image = False
+        if document:
+            mime_type = document.get("mime_type", "")
+            doc_is_image = mime_type.startswith("image/")
+
+        if (photo or doc_is_image) and chat_id:
+            if photo:
+                largest = max(photo, key=lambda p: p.get("file_size", 0))
+                file_id = largest.get("file_id")
+            else:
+                file_id = document.get("file_id")
+
+            if file_id:
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return
+
+                if not state["active"]:
+                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    image_text = f"Manager sent image: {local_path}"
+                    if text:
+                        image_text = f"{text}\n\n{image_text}"
+                    self.route_to_active(image_text, chat_id, msg_id)
+                else:
+                    self.reply(chat_id, "Needs decision - Could not download image. Try again or send as file.")
+                return
+
+        if document and not doc_is_image and chat_id:
+            file_id = document.get("file_id")
+            if file_id:
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return
+
+                if not state["active"]:
+                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    file_name = document.get("file_name", "unknown")
+                    file_size = document.get("file_size", 0)
+                    mime_type = document.get("mime_type", "unknown")
+                    size_str = format_file_size(file_size)
+                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
+                    if text:
+                        file_text = f"{text}\n\n{file_text}"
+                    self.route_to_active(file_text, chat_id, msg_id)
+                else:
+                    self.reply(chat_id, "Needs decision - Could not download file. Try again.")
+                return
+
+        if not text or not chat_id:
+            return
+
+        if admin_chat_id is None:
+            admin_chat_id = chat_id
+            save_last_chat_id(chat_id)
+            print(f"Admin registered: {chat_id}")
+
+        if not state["startup_notified"]:
+            state["startup_notified"] = True
+            self.send_startup_message(chat_id)
+
+        if chat_id != admin_chat_id:
+            print(f"Rejected non-admin: {chat_id}")
+            return
+
+        save_last_chat_id(chat_id)
+
+        if text.startswith("/"):
+            if self.handle_command(text, chat_id, msg_id):
+                return
+
+        if text.lower().startswith("@all "):
+            message = text[5:]
+            self.route_to_all(message, chat_id, msg_id)
+            return
+
+        reply_to = msg.get("reply_to_message")
+        reply_context = ""
+        if reply_to:
+            _, reply_context = self.parse_reply_target(reply_to)
+
+        target_session, message = self.parse_at_mention(text)
+        if target_session:
+            if reply_context:
+                message = self.format_reply_context(message, reply_context)
+            self.route_message(target_session, message, chat_id, msg_id, one_off=True)
+            return
+
+        if reply_to and reply_context:
+            reply_target, _ = self.parse_reply_target(reply_to)
+            if reply_target:
+                routed_text = self.format_reply_context(text, reply_context)
+                self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
+                return
+            else:
+                routed_text = self.format_reply_context(text, reply_context)
+                self.route_to_active(routed_text, chat_id, msg_id)
+                return
+
+        self.route_to_active(text, chat_id, msg_id)
+
+    def parse_at_mention(self, text):
+        match = re.match(r'^@([a-zA-Z0-9-]+)\s+(.+)$', text, re.DOTALL)
+        if match:
+            name = match.group(1).lower()
+            message = match.group(2)
+            registered = self.workers.get_registered_sessions()
+            if name in registered:
+                return name, message
+        return None, text
+
+    def parse_worker_prefix(self, text):
+        if not text:
+            return None, ""
+        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
+        if not match:
+            return None, ""
+        name = match.group(1).lower()
+        message = match.group(2).strip()
+        registered = self.workers.get_registered_sessions()
+        if name not in registered:
+            return None, ""
+        return name, message
+
+    def parse_reply_target(self, reply_msg):
+        if not reply_msg:
+            return None, ""
+        reply_text = reply_msg.get("text") or reply_msg.get("caption") or ""
+
+        reply_from = reply_msg.get("from", {})
+        if reply_from and reply_from.get("is_bot"):
+            worker, _ = self.parse_worker_prefix(reply_text)
+            if worker:
+                return worker, reply_text
+
+        return None, reply_text
+
+    def format_reply_context(self, reply_text, context_text):
+        reply_text = (reply_text or "").strip()
+        context_text = (context_text or "").strip()
+        if context_text:
+            return (
+                "Manager reply:\n"
+                f"{reply_text}\n\n"
+                "Context (your previous message):\n"
+                f"{context_text}"
+            )
+        return f"Manager reply:\n{reply_text}"
+
+    def handle_command(self, text, chat_id, msg_id):
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        if "@" in cmd:
+            cmd = cmd.split("@")[0]
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == "/hire":
+            return self.cmd_hire(arg, chat_id)
+        elif cmd == "/focus":
+            return self.cmd_focus(arg, chat_id)
+        elif cmd == "/team":
+            return self.cmd_team(chat_id)
+        elif cmd == "/end":
+            return self.cmd_end(arg, chat_id)
+        elif cmd == "/progress":
+            return self.cmd_progress(chat_id)
+        elif cmd == "/pause":
+            return self.cmd_pause(chat_id)
+        elif cmd == "/relaunch":
+            return self.cmd_relaunch(chat_id)
+        elif cmd == "/settings":
+            return self.cmd_settings(chat_id)
+        elif cmd == "/learn":
+            return self.cmd_learn(arg, chat_id, msg_id)
+        elif cmd in BLOCKED_COMMANDS:
+            self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
+            return True
+
+        worker_name = cmd[1:]
+        registered = self.workers.get_registered_sessions()
+        if worker_name in registered:
+            prev_focus = state["active"]
+            state["active"] = worker_name
+            save_last_active(worker_name)
+            if not arg:
+                self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
+                return True
+            if prev_focus != worker_name:
+                self.telegram.send_message(chat_id, f"Now talking to {worker_name.capitalize()}.")
+            self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
+            return True
+
+        return False
+
+    def cmd_hire(self, name, chat_id):
+        if not name:
+            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
+            return True
+
+        parsed_name, backend = parse_hire_args(name)
+        if not parsed_name:
+            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
+            return True
+
+        name = parsed_name.lower().strip()
+        name = re.sub(r'[^a-z0-9-]', '', name)
+
+        if not name:
+            self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
+            return True
+
+        if name in RESERVED_NAMES:
+            self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
+            return True
+
+        ok, err = create_session(name, backend, chat_id=chat_id)
+        if ok:
+            self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
+            update_bot_commands()
+        else:
+            self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    def cmd_focus(self, name, chat_id):
+        if not name:
+            self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
+            return True
+
+        name = name.lower().strip()
+        ok, err = switch_session(name)
+        if ok:
+            self.reply(chat_id, f"Now talking to {name.capitalize()}.")
+        else:
+            self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    def cmd_team(self, chat_id):
+        registered = self.workers.scan_tmux_sessions()
+        registered = self.workers.get_registered_sessions(registered)
+
+        if not registered:
+            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+            return True
+
+        lines = format_team_lines(registered, state["active"])
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def cmd_end(self, name, chat_id):
+        if not name:
+            self.reply(chat_id, "Offboarding is permanent. Usage: /end <name>", outcome="Needs decision")
+            return True
+
+        name = name.lower().strip()
+        ok, err = kill_session(name)
+        if ok:
+            self.reply(chat_id, f"{name.capitalize()} removed from your team.")
+            update_bot_commands()
+        else:
+            self.reply(chat_id, f"Could not offboard \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    def cmd_progress(self, chat_id):
+        if not state["active"]:
+            self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
+            return True
+
+        name = state["active"]
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(name)
+        if not session:
+            self.reply(chat_id, "Can't find them. Check /team for who's available.")
+            return True
+
+        pending = is_pending(name)
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+        online = False
+        ready = False
+        needs_attention = None
+        mode = "tmux"
+
+        if backend.is_exec:
+            online = True
+            ready = True
+            mode = f"{backend_name} exec (stateless)"
+        else:
+            tmux_name = session.get("tmux")
+            if tmux_name:
+                exists = tmux_exists(tmux_name)
+                online = exists
+                if exists:
+                    claude_running = is_claude_running(tmux_name)
+                    ready = claude_running
+                    if not claude_running:
+                        needs_attention = "worker app is not running. Use /relaunch."
+
+        status = format_progress_lines(
+            name=name,
+            pending=pending,
+            backend=backend_name,
+            online=online,
+            ready=ready,
+            mode=mode,
+            needs_attention=needs_attention
+        )
+
+        self.reply(chat_id, "\n".join(status))
+        return True
+
+    def cmd_pause(self, chat_id):
+        if not state["active"]:
+            self.reply(chat_id, "No one assigned.")
+            return True
+
+        name = state["active"]
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(name)
+        if session:
+            backend_name = get_worker_backend(name, session)
+            backend = get_backend(backend_name)
+            if backend.is_exec:
+                clear_pending(name)
+                self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
+                return True
+            tmux_send_escape(session["tmux"])
+            clear_pending(name)
+
+        self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
+        return True
+
+    def cmd_relaunch(self, chat_id):
+        if not state["active"]:
+            self.reply(chat_id, "No one assigned.")
+            return True
+
+        name = state["active"]
+        ok, err = restart_claude(name)
+        if ok:
+            self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
+        else:
+            self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    def cmd_settings(self, chat_id):
+        def redact(s):
+            if not s:
+                return "(not set)"
+            if len(s) <= 8:
+                return "***"
+            return s[:4] + "..." + s[-4:]
+
+        registered = self.workers.get_registered_sessions()
+        team_list = ", ".join(registered.keys()) if registered else "(none)"
+        lines = [
+            f"claudecode-telegram v{VERSION}",
+            PERSISTENCE_NOTE,
+            "",
+            f"Bot token: {redact(BOT_TOKEN)}",
+            f"Admin: {admin_chat_id or '(auto-learn)'}",
+            f"Webhook verification: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
+            f"Team storage: {SESSIONS_DIR.parent}",
+            "",
+            "Team state",
+            f"Focused worker: {state['active'] or '(none)'}",
+            f"Workers: {team_list}",
+        ]
+
+        lines.append("")
+        if SANDBOX_ENABLED:
+            lines.append("Sandbox: enabled (Docker isolation)")
+            lines.append(f"Image: {SANDBOX_IMAGE}")
+            lines.append(f"Default mount: {Path.home()} → /workspace")
+            if SANDBOX_EXTRA_MOUNTS:
+                lines.append("Extra mounts:")
+                for host, container, ro in SANDBOX_EXTRA_MOUNTS:
+                    ro_flag = " (ro)" if ro else ""
+                    lines.append(f"  {host} → {container}{ro_flag}")
+            lines.append("")
+            lines.append("Note: Workers run in containers with access")
+            lines.append("only to mounted directories. System paths")
+            lines.append("outside mounts are not accessible.")
+        else:
+            lines.append("Sandbox: disabled (direct execution)")
+            lines.append("Workers run with full system access.")
+
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def cmd_learn(self, topic, chat_id, msg_id=None):
+        if not state["active"]:
+            self.reply(chat_id, "No one assigned. Who should I talk to?")
+            return True
+
+        name = state["active"]
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(name)
+        if not session:
+            self.reply(chat_id, "Can't find them. Check /team.")
+            return True
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+
+        topic = topic.strip() if topic else ""
+        if topic:
+            prompt = (
+                f"What did you learn about {topic} today? Please answer in Problem / Fix / Why format:\n"
+                "Problem: <what went wrong or was inefficient>\n"
+                "Fix: <the better approach>\n"
+                "Why: <root cause or insight>"
+            )
+        else:
+            prompt = (
+                "What did you learn today? Please answer in Problem / Fix / Why format:\n"
+                "Problem: <what went wrong or was inefficient>\n"
+                "Fix: <the better approach>\n"
+                "Why: <root cause or insight>"
+            )
+
+        if not self.workers.is_online(name, session):
+            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
+            return True
+
+        worker_set_pending(name, chat_id)
+        threading.Thread(
+            target=send_typing_loop,
+            args=(chat_id, name),
+            daemon=True
+        ).start()
+
+        send_ok = self.workers.send(name, prompt, chat_id, session)
+        if not send_ok:
+            clear_pending(name)
+            self.reply(chat_id, f"Could not send to {name.capitalize()}. Try /relaunch.", outcome="Needs decision")
+            return True
+
+        if msg_id and send_ok:
+            if backend.is_exec or tmux_prompt_empty(session.get("tmux", "")):
+                self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+        return True
+
+    def route_to_active(self, text, chat_id, msg_id):
+        registered = self.workers.get_registered_sessions()
+
+        if not state["active"]:
+            if registered:
+                names = ", ".join(registered.keys())
+                self.reply(chat_id, f"No one assigned. Your team: {names}\nWho should I talk to?")
+                return
+            else:
+                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+                return
+
+        self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
+
+    def route_to_all(self, text, chat_id, msg_id):
+        registered = self.workers.get_registered_sessions()
+        sessions = list(registered.keys())
+        if not sessions:
+            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+            return
+
+        sent_to = []
+        for name in sessions:
+            session = registered[name]
+            if self.workers.is_online(name, session):
+                self.route_message(name, text, chat_id, msg_id, one_off=True)
+                sent_to.append(name)
+
+        if not sent_to:
+            self.reply(chat_id, "No one's online to share with.")
+
+    def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(session_name)
+        if not session:
+            self.reply(chat_id, f"Can't find {session_name}. Check /team for who's available.")
+            return
+
+        if not self.workers.is_online(session_name, session):
+            self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
+            return
+
+        backend_name = get_worker_backend(session_name, session)
+        backend = get_backend(backend_name)
+
+        print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
+
+        worker_set_pending(session_name, chat_id)
+        threading.Thread(
+            target=send_typing_loop,
+            args=(chat_id, session_name),
+            daemon=True
+        ).start()
+
+        send_ok = self.workers.send(session_name, text, chat_id, session)
+        if not send_ok:
+            clear_pending(session_name)
+            self.reply(
+                chat_id,
+                f"Could not send to {session_name.capitalize()}. Try /relaunch.",
+                outcome="Needs decision"
+            )
+            return
+
+        if msg_id and send_ok:
+            if backend.is_exec or tmux_prompt_empty(session.get("tmux", "")):
+                self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+
+
+command_router = CommandRouter(telegram, worker_manager)
+
+# ============================================================
+# NON-CORE: HTTP Handler
+# ============================================================
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -2162,7 +2608,7 @@ class Handler(BaseHTTPRequestHandler):
             if update_types and update_types[0] != "message":
                 print(f"Received update type: {update_types}")
             if "message" in update:
-                self.handle_message(update)
+                command_router.handle_message(update)
         except Exception as e:
             print(f"Error: {e}")
             import traceback
@@ -2241,8 +2687,9 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Send response using shared helper (escape=False: hook sends pre-escaped HTML)
-            send_response_to_telegram(session_name, text, int(chat_id), escape=False, log_prefix="Response")
+            # Send response using shared helper
+            escape = should_escape_response(data)
+            send_response_to_telegram(session_name, text, int(chat_id), escape=escape, log_prefix="Response")
 
             # Clear pending
             clear_pending(session_name)
@@ -2287,663 +2734,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
-    def handle_message(self, update):
-        global admin_chat_id
-
-        msg = update.get("message", {})
-        text = msg.get("text", "") or msg.get("caption", "")
-        chat_id = msg.get("chat", {}).get("id")
-        msg_id = msg.get("message_id")
-
-        # Handle photo messages
-        photo = msg.get("photo")
-        document = msg.get("document")
-
-        # Check if document is an image
-        doc_is_image = False
-        if document:
-            mime_type = document.get("mime_type", "")
-            doc_is_image = mime_type.startswith("image/")
-
-        if (photo or doc_is_image) and chat_id:
-            # Get file_id from photo or document
-            if photo:
-                largest = max(photo, key=lambda p: p.get("file_size", 0))
-                file_id = largest.get("file_id")
-            else:
-                file_id = document.get("file_id")
-
-            if file_id:
-                # Admin check first
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return  # Silent rejection
-
-                # Download to focused worker's inbox
-                if not state["active"]:
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": "Needs decision - No focused worker. Use /focus <name> first."
-                    })
-                    return
-
-                local_path = download_telegram_file(file_id, state["active"])
-                if local_path:
-                    # Build message with image path
-                    image_text = f"Manager sent image: {local_path}"
-                    if text:
-                        image_text = f"{text}\n\n{image_text}"
-                    # Route to active session
-                    self.route_to_active(image_text, chat_id, msg_id)
-                else:
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": "Needs decision - Could not download image. Try again or send as file."
-                    })
-                return
-
-        # Handle non-image document attachments (PDF, txt, code files, etc.)
-        if document and not doc_is_image and chat_id:
-            file_id = document.get("file_id")
-            if file_id:
-                # Admin check first
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return  # Silent rejection
-
-                # Download to focused worker's inbox
-                if not state["active"]:
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": "Needs decision - No focused worker. Use /focus <name> first."
-                    })
-                    return
-
-                local_path = download_telegram_file(file_id, state["active"])
-                if local_path:
-                    # Build message with file metadata
-                    file_name = document.get("file_name", "unknown")
-                    file_size = document.get("file_size", 0)
-                    mime_type = document.get("mime_type", "unknown")
-                    size_str = format_file_size(file_size)
-                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
-                    if text:
-                        file_text = f"{text}\n\n{file_text}"
-                    # Route to active session
-                    self.route_to_active(file_text, chat_id, msg_id)
-                else:
-                    telegram_api("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": "Needs decision - Could not download file. Try again."
-                    })
-                return
-
-        if not text or not chat_id:
-            return
-
-        # SECURITY: Auto-learn first user as admin
-        if admin_chat_id is None:
-            admin_chat_id = chat_id
-            save_last_chat_id(chat_id)
-            print(f"Admin registered: {chat_id}")
-
-        # Send startup notification on first admin interaction
-        if not state["startup_notified"]:
-            state["startup_notified"] = True
-            self.send_startup_message(chat_id)
-
-        # SECURITY: Reject non-admin users (silent - don't reveal bot exists)
-        if chat_id != admin_chat_id:
-            print(f"Rejected non-admin: {chat_id}")
-            return  # Silent rejection
-
-        # Save chat_id for auto-notification on restart
-        save_last_chat_id(chat_id)
-
-        # Handle commands
-        if text.startswith("/"):
-            if self.handle_command(text, chat_id, msg_id):
-                return
-
-        # Handle @all broadcast
-        if text.lower().startswith("@all "):
-            message = text[5:]  # Remove "@all "
-            self.route_to_all(message, chat_id, msg_id)
-            return
-
-        # Check for reply context (used by both @mention and reply routing)
-        reply_to = msg.get("reply_to_message")
-        reply_context = ""
-        if reply_to:
-            _, reply_context = self.parse_reply_target(reply_to)
-
-        # Handle @name prefix for one-off routing (priority over reply target)
-        target_session, message = self.parse_at_mention(text)
-
-        if target_session:
-            # Include reply context if replying to a message
-            if reply_context:
-                message = self.format_reply_context(message, reply_context)
-            self.route_message(target_session, message, chat_id, msg_id, one_off=True)
-            return
-
-        # Handle reply-to-worker routing (when no @mention)
-        if reply_to and reply_context:
-            reply_target, _ = self.parse_reply_target(reply_to)
-            if reply_target:
-                # Reply to worker message → route to that worker
-                routed_text = self.format_reply_context(text, reply_context)
-                self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
-                return
-            else:
-                # Reply to non-worker message → route to focused with context
-                routed_text = self.format_reply_context(text, reply_context)
-                self.route_to_active(routed_text, chat_id, msg_id)
-                return
-
-        # Route to active session (no reply)
-        self.route_to_active(text, chat_id, msg_id)
-
-    def parse_at_mention(self, text):
-        """Parse @name prefix from message."""
-        match = re.match(r'^@([a-zA-Z0-9-]+)\s+(.+)$', text, re.DOTALL)
-        if match:
-            name = match.group(1).lower()
-            message = match.group(2)
-            registered = get_registered_sessions()
-            if name in registered:
-                return name, message
-        return None, text
-
-    def parse_worker_prefix(self, text):
-        """Parse worker_name: prefix from a message."""
-        if not text:
-            return None, ""
-        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
-        if not match:
-            return None, ""
-        name = match.group(1).lower()
-        message = match.group(2).strip()
-        registered = get_registered_sessions()
-        if name not in registered:
-            return None, ""
-        return name, message
-
-    def parse_reply_target(self, reply_msg):
-        """Extract worker target and context from a replied-to message.
-
-        Always returns context (the replied message text).
-        Only returns worker target if it's a bot message with worker prefix.
-        """
-        if not reply_msg:
-            return None, ""
-        reply_text = reply_msg.get("text") or reply_msg.get("caption") or ""
-
-        # Check if it's a bot message with worker prefix
-        reply_from = reply_msg.get("from", {})
-        if reply_from and reply_from.get("is_bot"):
-            worker, _ = self.parse_worker_prefix(reply_text)
-            if worker:
-                return worker, reply_text
-
-        # Not a worker message, but still return context
-        return None, reply_text
-
-    def format_reply_context(self, reply_text, context_text):
-        """Format a manager reply with context for the worker."""
-        reply_text = (reply_text or "").strip()
-        context_text = (context_text or "").strip()
-        if context_text:
-            return (
-                "Manager reply:\n"
-                f"{reply_text}\n\n"
-                "Context (your previous message):\n"
-                f"{context_text}"
-            )
-        return f"Manager reply:\n{reply_text}"
-
-    # ============================================================
-    # COMMAND HANDLERS
-    # ============================================================
-
-    def handle_command(self, text, chat_id, msg_id):
-        """Handle /commands. Returns True if handled."""
-        parts = text.split(maxsplit=1)
-        cmd = parts[0].lower()
-        # Strip @botname suffix (Telegram appends this in groups/autocomplete)
-        if "@" in cmd:
-            cmd = cmd.split("@")[0]
-        arg = parts[1].strip() if len(parts) > 1 else ""
-
-        if cmd == "/hire":
-            return self.cmd_hire(arg, chat_id)
-        elif cmd == "/focus":
-            return self.cmd_focus(arg, chat_id)
-        elif cmd == "/team":
-            return self.cmd_team(chat_id)
-        elif cmd == "/end":
-            return self.cmd_end(arg, chat_id)
-        elif cmd == "/progress":
-            return self.cmd_progress(chat_id)
-        elif cmd == "/pause":
-            return self.cmd_pause(chat_id)
-        elif cmd == "/relaunch":
-            return self.cmd_relaunch(chat_id)
-        elif cmd == "/settings":
-            return self.cmd_settings(chat_id)
-        elif cmd == "/learn":
-            return self.cmd_learn(arg, chat_id, msg_id)
-        elif cmd in BLOCKED_COMMANDS:
-            self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
-            return True
-
-        # Check if command is a worker shortcut: /lee hello -> route to lee AND switch focus
-        # Slash commands are "strong" actions - they imply intent to talk to that person
-        worker_name = cmd[1:]  # Remove leading /
-        registered = get_registered_sessions()
-        if worker_name in registered:
-            # Always switch focus when using /name (strong intent)
-            prev_focus = state["active"]
-            state["active"] = worker_name
-            save_last_active(worker_name)
-            if not arg:
-                # Just /lee with no message - switch focus only
-                self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
-                return True
-            # /lee hello -> route message to lee AND switch focus
-            # Notify focus change if switching from different worker
-            if prev_focus != worker_name:
-                telegram_api("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": f"Now talking to {worker_name.capitalize()}."
-                })
-            self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
-            return True
-
-        # Not a control command - might be a Claude command, pass through
-        return False
-
-    def cmd_hire(self, name, chat_id):
-        """Create new Claude instance."""
-        if not name:
-            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
-            return True
-
-        parsed_name, backend = parse_hire_args(name)
-        if not parsed_name:
-            self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
-            return True
-
-        name = parsed_name.lower().strip()
-        name = re.sub(r'[^a-z0-9-]', '', name)
-
-        if not name:
-            self.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
-            return True
-
-        # Validate: name cannot clash with reserved commands
-        if name in RESERVED_NAMES:
-            self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
-            return True
-
-        ok, err = create_session(name, backend)
-        if ok:
-            self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
-            # Update bot commands to include new worker
-            update_bot_commands()
-        else:
-            self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
-        return True
-
-    def cmd_focus(self, name, chat_id):
-        """Switch focused Claude."""
-        if not name:
-            self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
-            return True
-
-        name = name.lower().strip()
-        ok, err = switch_session(name)
-        if ok:
-            self.reply(chat_id, f"Now talking to {name.capitalize()}.")
-        else:
-            self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
-        return True
-
-    def cmd_team(self, chat_id):
-        """List all Claude instances."""
-        # Refresh from tmux
-        registered = scan_tmux_sessions()
-        registered = get_registered_sessions(registered)
-
-        if not registered:
-            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
-            return True
-
-        lines = format_team_lines(registered, state["active"])
-        self.reply(chat_id, "\n".join(lines))
-        return True
-
-    def cmd_end(self, name, chat_id):
-        """Kill a Claude instance."""
-        if not name:
-            self.reply(chat_id, "Offboarding is permanent. Usage: /end <name>", outcome="Needs decision")
-            return True
-
-        name = name.lower().strip()
-        ok, err = kill_session(name)
-        if ok:
-            self.reply(chat_id, f"{name.capitalize()} removed from your team.")
-            # Update bot commands to remove worker
-            update_bot_commands()
-        else:
-            self.reply(chat_id, f"Could not offboard \"{name}\". {err}", outcome="Needs decision")
-        return True
-
-    def cmd_progress(self, chat_id):
-        """Show detailed status of focused Claude."""
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
-            return True
-
-        name = state["active"]
-        registered = get_registered_sessions()
-        session = registered.get(name)
-        if not session:
-            self.reply(chat_id, "Can't find them. Check /team for who's available.")
-            return True
-
-        pending = is_pending(name)
-        backend = get_worker_backend(name, session)
-        online = False
-        ready = False
-        needs_attention = None
-        mode = "tmux"
-
-        # Direct mode: check subprocess status
-        if DIRECT_MODE:
-            running = is_direct_worker_running(name)
-            online = running
-            ready = running
-            if not running:
-                needs_attention = "worker process is not running. Use /relaunch."
-            mode = "direct (JSON streaming)"
-        else:
-            tmux_name = session["tmux"]
-            exists = tmux_exists(tmux_name)
-            online = exists
-
-            if exists:
-                if backend == CODEX_WORKER_BACKEND:
-                    ready = True
-                else:
-                    claude_running = is_claude_running(tmux_name)
-                    ready = claude_running
-                    if not claude_running:
-                        needs_attention = "worker app is not running. Use /relaunch."
-
-        status = format_progress_lines(
-            name=name,
-            pending=pending,
-            backend=backend,
-            online=online,
-            ready=ready,
-            mode=mode,
-            needs_attention=needs_attention
-        )
-
-        self.reply(chat_id, "\n".join(status))
-        return True
-
-    def cmd_pause(self, chat_id):
-        """Interrupt active Claude."""
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned.")
-            return True
-
-        name = state["active"]
-
-        # Direct mode: terminate the process (can't interrupt, only kill)
-        if DIRECT_MODE:
-            worker = direct_workers.get(name)
-            if worker:
-                worker.pending = False
-                # Note: In direct mode, we can't send escape. We just clear pending.
-                # The user can use /end and /hire to restart if needed.
-            self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
-            return True
-
-        registered = get_registered_sessions()
-        session = registered.get(name)
-        if session:
-            tmux_send_escape(session["tmux"])
-            clear_pending(name)
-
-        self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
-        return True
-
-    def cmd_relaunch(self, chat_id):
-        """Restart Claude in active session."""
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned.")
-            return True
-
-        name = state["active"]
-        ok, err = restart_claude(name)
-        if ok:
-            self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
-        else:
-            self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
-        return True
-
-    def cmd_settings(self, chat_id):
-        """Show system configuration (secrets redacted)."""
-        def redact(s):
-            if not s:
-                return "(not set)"
-            if len(s) <= 8:
-                return "***"
-            return s[:4] + "..." + s[-4:]
-
-        registered = get_registered_sessions()
-        team_list = ", ".join(registered.keys()) if registered else "(none)"
-        lines = [
-            f"claudecode-telegram v{VERSION}",
-            PERSISTENCE_NOTE,
-            "",
-            f"Bot token: {redact(BOT_TOKEN)}",
-            f"Admin: {admin_chat_id or '(auto-learn)'}",
-            f"Webhook verification: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
-            f"Team storage: {SESSIONS_DIR.parent}",
-            "",
-            "Team state",
-            f"Focused worker: {state['active'] or '(none)'}",
-            f"Workers: {team_list}",
-        ]
-
-        # Sandbox details
-        lines.append("")
-        if SANDBOX_ENABLED:
-            lines.append("Sandbox: enabled (Docker isolation)")
-            lines.append(f"Image: {SANDBOX_IMAGE}")
-            lines.append(f"Default mount: {Path.home()} → /workspace")
-            if SANDBOX_EXTRA_MOUNTS:
-                lines.append("Extra mounts:")
-                for host, container, ro in SANDBOX_EXTRA_MOUNTS:
-                    ro_flag = " (ro)" if ro else ""
-                    lines.append(f"  {host} → {container}{ro_flag}")
-            lines.append("")
-            lines.append("Note: Workers run in containers with access")
-            lines.append("only to mounted directories. System paths")
-            lines.append("outside mounts are not accessible.")
-        else:
-            lines.append("Sandbox: disabled (direct execution)")
-            lines.append("Workers run with full system access.")
-
-        self.reply(chat_id, "\n".join(lines))
-        return True
-
-    def cmd_learn(self, topic, chat_id, msg_id=None):
-        """Ask the focused worker what they learned today, optionally about a topic."""
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned. Who should I talk to?")
-            return True
-
-        name = state["active"]
-        registered = get_registered_sessions()
-        session = registered.get(name)
-        if not session:
-            self.reply(chat_id, "Can't find them. Check /team.")
-            return True
-
-        # Build prompt based on whether topic is provided
-        topic = topic.strip() if topic else ""
-        if topic:
-            prompt = (
-                f"What did you learn about {topic} today? Please answer in Problem / Fix / Why format:\n"
-                "Problem: <what went wrong or was inefficient>\n"
-                "Fix: <the better approach>\n"
-                "Why: <root cause or insight>"
-            )
-        else:
-            prompt = (
-                "What did you learn today? Please answer in Problem / Fix / Why format:\n"
-                "Problem: <what went wrong or was inefficient>\n"
-                "Fix: <the better approach>\n"
-                "Why: <root cause or insight>"
-            )
-
-        # Check if worker is online (handles direct/tmux mode)
-        if not worker_is_online(name, session):
-            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
-            return True
-
-        # Set pending and start typing indicator
-        worker_set_pending(name, chat_id)
-        threading.Thread(
-            target=send_typing_loop,
-            args=(chat_id, name),
-            daemon=True
-        ).start()
-
-        # Send prompt to worker (handles direct/tmux mode)
-        send_ok = worker_send(name, prompt, chat_id, session)
-
-        # 👀 reaction if message was accepted
-        if msg_id and send_ok:
-            if DIRECT_MODE or tmux_prompt_empty(session.get("tmux", "")):
-                telegram_api("setMessageReaction", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reaction": [{"type": "emoji", "emoji": "👀"}]
-                })
-        return True
-
-    def route_to_active(self, text, chat_id, msg_id):
-        """Route message to active session or handle no-session cases."""
-        # get_registered_sessions handles both tmux and direct mode
-        registered = get_registered_sessions()
-
-        if not state["active"]:
-            if registered:
-                # Sessions exist but none active
-                names = ", ".join(registered.keys())
-                self.reply(chat_id, f"No one assigned. Your team: {names}\nWho should I talk to?")
-                return
-            else:
-                # No sessions at all
-                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
-                return
-
-        self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
-
-    def route_to_all(self, text, chat_id, msg_id):
-        """Broadcast message to all running sessions."""
-        registered = get_registered_sessions()
-        sessions = list(registered.keys())
-        if not sessions:
-            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
-            return
-
-        sent_to = []
-        for name in sessions:
-            # Direct mode: check subprocess status
-            if DIRECT_MODE:
-                if is_direct_worker_running(name):
-                    self.route_message(name, text, chat_id, msg_id, one_off=True)
-                    sent_to.append(name)
-            else:
-                session = registered[name]
-                tmux_name = session["tmux"]
-                if tmux_exists(tmux_name) and is_claude_running(tmux_name):
-                    # Route without setting as active
-                    self.route_message(name, text, chat_id, msg_id, one_off=True)
-                    sent_to.append(name)
-
-        if not sent_to:
-            self.reply(chat_id, "No one's online to share with.")
-
-    def route_message(self, session_name, text, chat_id, msg_id, one_off=False):
-        """Route a message to a specific session."""
-        registered = get_registered_sessions()
-        session = registered.get(session_name)
-        if not session:
-            self.reply(chat_id, f"Can't find {session_name}. Check /team for who's available.")
-            return
-
-        # Check if worker is online (handles direct/tmux mode)
-        if not worker_is_online(session_name, session):
-            self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
-            return
-
-        print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
-
-        # Set pending and start typing indicator
-        worker_set_pending(session_name, chat_id)
-        threading.Thread(
-            target=send_typing_loop,
-            args=(chat_id, session_name),
-            daemon=True
-        ).start()
-
-        # Send message (handles direct/tmux mode)
-        send_ok = worker_send(session_name, text, chat_id, session)
-
-        # Add 👀 reaction if message was accepted
-        if msg_id and send_ok:
-            # In tmux mode, only react if prompt is empty (Claude accepted it)
-            if DIRECT_MODE or tmux_prompt_empty(session.get("tmux", "")):
-                telegram_api("setMessageReaction", {
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reaction": [{"type": "emoji", "emoji": "👀"}]
-                })
-
-    def reply(self, chat_id, text, outcome=None):
-        # No prefix - manager-friendly direct messages
-        telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
-
-    def send_startup_message(self, chat_id):
-        """Send bridge startup notification."""
-        registered = get_registered_sessions()
-        sessions = list(registered.keys())
-        active = state["active"]
-
-        lines = ["I'm online and ready."]
-        if sessions:
-            lines.append(f"Team: {', '.join(sessions)}")
-            if active:
-                lines.append(f"Focused: {active}")
-        else:
-            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
-
-        # Short sandbox note
-        if SANDBOX_ENABLED:
-            lines.append(f"Sandbox: {Path.home()} → /workspace")
-
-        self.reply(chat_id, "\n".join(lines))
-
 
 # ============================================================
 # MAIN
@@ -2966,11 +2756,6 @@ def graceful_shutdown(signum, frame):
         pass
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
-
-    # Kill all direct workers on shutdown
-    if DIRECT_MODE and direct_workers:
-        print(f"Killing {len(direct_workers)} direct worker(s)...")
-        kill_all_direct_workers()
 
     send_shutdown_message()
     sys.exit(0)

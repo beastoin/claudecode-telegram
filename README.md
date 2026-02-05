@@ -71,6 +71,8 @@ You can also drop a screenshot and ask, "What is wrong with this UI?"
 | `/team` | List workers + focus |
 | `/end <name>` | Remove a worker |
 
+Backend selection: `/hire alice --codex` (or `/hire codex-alice`), plus `--gemini`, `--opencode`, or `--backend <name>`.
+
 ## What to Expect (Message Flow)
 
 1. You send a task.

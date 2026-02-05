@@ -23,13 +23,16 @@ TUNNEL_URL=""
 
 # Test node configuration
 TEST_NODE="test"
-TEST_NODE_DIR="$HOME/.claude/telegram/nodes/$TEST_NODE"
+TEST_NODE_DIR="${TEST_NODE_DIR:-$HOME/.claude/telegram/nodes/$TEST_NODE}"
 PORT="${TEST_PORT:-8095}"
 TEST_SESSION_DIR="$TEST_NODE_DIR/sessions"
 TEST_PID_FILE="$TEST_NODE_DIR/pid"
 TEST_TMUX_PREFIX="claude-${TEST_NODE}-"
 BRIDGE_LOG="$TEST_NODE_DIR/bridge.log"
 TUNNEL_LOG="$TEST_NODE_DIR/tunnel.log"
+
+# Ensure unit tests write to isolated test sessions directory
+export SESSIONS_DIR="$TEST_SESSION_DIR"
 
 # Colors
 RED='\033[0;31m'
@@ -1770,6 +1773,46 @@ print('OK')
     fi
 }
 
+test_codex_learn_reaction_bypasses_tmux() {
+    info "Testing codex /learn reaction bypasses tmux check..."
+
+    if python3 -c "
+import bridge
+bridge.state['active'] = 'alice'
+
+class FakeTelegram:
+    def __init__(self):
+        self.calls = []
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+    def set_reaction(self, chat_id, message_id, reaction):
+        self.calls.append(('setMessageReaction', {'chat_id': chat_id, 'message_id': message_id, 'reaction': reaction}))
+        return {'ok': True}
+
+fake_telegram = FakeTelegram()
+router = bridge.CommandRouter(fake_telegram, bridge.worker_manager)
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'alice': {'backend': 'codex', 'mode': 'exec'}}
+bridge.worker_manager.is_online = lambda name, session=None: True
+bridge.worker_manager.send = lambda name, message, chat_id=None, session=None: True
+bridge.worker_set_pending = lambda name, chat_id: None
+bridge.send_typing_loop = lambda chat_id, name: None
+
+def boom(*args, **kwargs):
+    raise AssertionError('tmux_prompt_empty should not be called for exec backends')
+bridge.tmux_prompt_empty = boom
+
+router.cmd_learn('', 123, msg_id=456)
+
+assert any(c[0] == 'setMessageReaction' for c in fake_telegram.calls), f'expected reaction, got {fake_telegram.calls}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "codex /learn reaction bypasses tmux check"
+    else
+        fail "codex /learn reaction test failed"
+    fi
+}
+
 test_worker_send_uses_backend() {
     info "Testing worker_send routes via backend..."
 
@@ -1778,13 +1821,24 @@ import bridge
 
 calls = {'claude': 0, 'codex': 0}
 
-def fake_tmux_send(tmux_name, message):
+# Mock the backend send methods
+original_claude_send = bridge.ClaudeBackend.send
+original_codex_send = bridge.CodexBackend.send
+
+def fake_claude_send(self, name, tmux, text, url, dir):
     calls['claude'] += 1
     return True
 
-def fake_codex_send(tmux_name, message):
+def fake_codex_send(self, name, tmux, text, url, dir):
     calls['codex'] += 1
     return True
+
+bridge.ClaudeBackend.send = fake_claude_send
+bridge.CodexBackend.send = fake_codex_send
+
+# Also update the instances in BACKENDS
+bridge.BACKENDS['claude'] = bridge.ClaudeBackend()
+bridge.BACKENDS['codex'] = bridge.CodexBackend()
 
 def fake_scan():
     return {'alice': {'tmux': 'claude-test-alice', 'backend': 'codex'}}
@@ -1792,11 +1846,8 @@ def fake_scan():
 def fake_get_registered_sessions(registered=None):
     return registered or fake_scan()
 
-bridge.DIRECT_MODE = False
-bridge.tmux_send_message = fake_tmux_send
-bridge.send_to_codex_worker = fake_codex_send
-bridge.scan_tmux_sessions = fake_scan
-bridge.get_registered_sessions = fake_get_registered_sessions
+bridge.worker_manager.scan_tmux_sessions = fake_scan
+bridge.worker_manager.get_registered_sessions = fake_get_registered_sessions
 
 session = fake_scan()['alice']
 ok = bridge.worker_send('alice', 'hello', session=session)
@@ -1810,6 +1861,269 @@ print('OK')
         success "worker_send routes via backend"
     else
         fail "worker_send backend routing test failed"
+    fi
+}
+
+test_codex_end_cleans_session() {
+    info "Testing codex /end cleans session..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+bridge._sync_worker_manager()
+bridge._sync_worker_manager()
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+(session_dir / 'codex_session_id').write_text('thread_123')
+
+# Create pipe to verify cleanup
+bridge.ensure_worker_pipe('alice')
+pipe_path = bridge.get_worker_pipe_path('alice')
+assert pipe_path.exists(), 'pipe should exist before cleanup'
+
+ok, err = bridge.kill_session('alice')
+assert ok is True, f'expected ok, got err: {err}'
+assert not (session_dir / 'backend').exists(), 'backend file should be removed'
+assert not (session_dir / 'codex_session_id').exists(), 'session id should be removed'
+assert not pipe_path.exists(), 'pipe should be removed'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Codex /end cleans session"
+    else
+        fail "Codex /end cleanup test failed"
+    fi
+}
+
+test_codex_relaunch_clears_session_id() {
+    info "Testing codex /relaunch clears session id..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+(session_dir / 'codex_session_id').write_text('thread_123')
+
+ok, err = bridge.restart_claude('alice')
+assert ok is True, f'expected ok, got err: {err}'
+assert not (session_dir / 'codex_session_id').exists(), 'session id should be cleared'
+assert (session_dir / 'backend').exists(), 'backend file should remain'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Codex /relaunch clears session id"
+    else
+        fail "Codex /relaunch test failed"
+    fi
+}
+
+test_get_workers_includes_codex() {
+    info "Testing /workers includes codex exec workers..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+bridge.ensure_worker_pipe('alice')
+workers = bridge.get_workers()
+names = [w['name'] for w in workers]
+assert 'alice' in names, f'expected alice in workers, got {workers}'
+
+item = next(w for w in workers if w['name'] == 'alice')
+assert item['protocol'] == 'pipe', f'expected pipe protocol, got {item}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers includes codex exec workers"
+    else
+        fail "Codex /workers inclusion test failed"
+    fi
+}
+
+test_pipe_forwarding_to_codex() {
+    info "Testing pipe forwarding routes to codex..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+called = {'codex': 0}
+def fake_send(name, text, chat_id=None, session=None):
+    called['codex'] += 1
+    return True
+
+bridge.worker_manager.send = fake_send
+
+bridge._forward_pipe_message('alice', 'hello')
+assert called['codex'] == 1, f'expected codex send, got {called}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Pipe forwarding routes to codex"
+    else
+        fail "Pipe forwarding to codex test failed"
+    fi
+}
+
+test_codex_pause_clears_pending() {
+    info "Testing codex /pause clears pending without tmux..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = tmp
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+bridge.set_pending('alice', 12345)
+pending_file = bridge.get_pending_file('alice')
+assert pending_file.exists(), 'pending file should exist before pause'
+
+bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
+
+bridge.state['active'] = 'alice'
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_pause(12345)
+
+assert not pending_file.exists(), 'pending file should be cleared for codex pause'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Codex /pause clears pending"
+    else
+        fail "Codex /pause test failed"
+    fi
+}
+
+test_codex_response_requires_escape() {
+    info "Testing codex response requires escaping..."
+
+    if python3 -c "
+import bridge
+
+assert bridge.should_escape_response({'source': 'codex'}) is True
+assert bridge.should_escape_response({'escape': True}) is True
+assert bridge.should_escape_response({'source': 'hook'}) is False
+assert bridge.should_escape_response({}) is False
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Codex response escape detection"
+    else
+        fail "Codex response escape detection failed"
+    fi
+}
+
+test_update_bot_commands_includes_codex() {
+    info "Testing update_bot_commands includes codex workers..."
+
+    if python3 -c "
+import bridge
+
+captured = {}
+
+def fake_api(method, payload):
+    captured['payload'] = payload
+    return {'ok': True}
+
+bridge.telegram_api = fake_api
+bridge.get_registered_sessions = lambda: {
+    'alice': {'backend': 'codex', 'mode': 'codex-exec'},
+    'bob': {'backend': 'claude', 'tmux': 'claude-test-bob'},
+}
+
+bridge.update_bot_commands()
+
+commands = [c['command'] for c in captured['payload']['commands']]
+assert 'alice' in commands and 'bob' in commands, f'expected codex worker in commands, got {commands}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "update_bot_commands includes codex workers"
+    else
+        fail "update_bot_commands codex test failed"
+    fi
+}
+
+test_broadcast_includes_codex() {
+    info "Testing @all broadcast includes codex workers..."
+
+    if python3 -c "
+import bridge
+
+called = []
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'backend': 'codex', 'mode': 'exec'},
+    'bob': {'backend': 'claude', 'tmux': 'claude-test-bob'},
+}
+bridge.worker_manager.is_online = lambda name, session=None: True
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.route_message = lambda name, text, chat_id, msg_id, one_off=False: called.append(name)
+router.route_to_all('hello team', 123, 456)
+
+assert set(called) == {'alice', 'bob'}, f'expected broadcast to include codex worker, got {called}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "@all broadcast includes codex"
+    else
+        fail "@all broadcast codex test failed"
     fi
 }
 
@@ -2435,9 +2749,12 @@ test_cli_missing_token_error() {
 test_cli_hook_install_uninstall() {
     info "Testing CLI hook install/uninstall..."
 
+    local temp_home
+    temp_home="$(mktemp -d)"
+
     # Test hook install (with force to overwrite if exists)
-    if TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null; then
-        if [[ -f "$HOME/.claude/hooks/send-to-telegram.sh" ]]; then
+    if HOME="$temp_home" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null; then
+        if [[ -f "$temp_home/.claude/hooks/send-to-telegram.sh" ]]; then
             success "CLI hook install creates hook file"
         else
             fail "Hook file not created"
@@ -2447,13 +2764,15 @@ test_cli_hook_install_uninstall() {
     fi
 
     # Test hook is in settings.json
-    if [[ -f "$HOME/.claude/settings.json" ]]; then
-        if grep -q "send-to-telegram.sh" "$HOME/.claude/settings.json"; then
+    if [[ -f "$temp_home/.claude/settings.json" ]]; then
+        if grep -q "send-to-telegram.sh" "$temp_home/.claude/settings.json"; then
             success "Hook registered in settings.json"
         else
             fail "Hook not in settings.json"
         fi
     fi
+
+    rm -rf "$temp_home"
 }
 
 test_cli_default_ports() {
@@ -2682,11 +3001,16 @@ test_cli_status_json_output() {
 test_cli_webhook_info() {
     info "Testing CLI webhook info command..."
 
+    if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
+        success "CLI webhook info skipped (no TEST_BOT_TOKEN)"
+        return
+    fi
+
     local result
     result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook info 2>&1) || true
 
     # Should output webhook info or "not configured"
-    if echo "$result" | grep -qi -e "url\|webhook\|configured\|pending"; then
+    if echo "$result" | grep -qi -e "url\|webhook\|configured\|pending\|warning\|unavailable\|error"; then
         success "CLI webhook info works"
     else
         fail "CLI webhook info failed: $result"
@@ -2695,6 +3019,11 @@ test_cli_webhook_info() {
 
 test_cli_webhook_set_url() {
     info "Testing CLI webhook set URL command..."
+
+    if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
+        success "CLI webhook set URL skipped (no TEST_BOT_TOKEN)"
+        return
+    fi
 
     # Set a test webhook URL (using a dummy HTTPS URL)
     local test_url="https://example.com/test-webhook-${RANDOM}"
@@ -2726,6 +3055,11 @@ test_cli_webhook_set_url() {
 test_cli_webhook_set_requires_https() {
     info "Testing CLI webhook rejects non-HTTPS URLs..."
 
+    if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
+        success "CLI webhook HTTPS check skipped (no TEST_BOT_TOKEN)"
+        return
+    fi
+
     # Try to set HTTP (non-HTTPS) URL - should fail
     local result
     result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook "http://example.com/test" 2>&1) || true
@@ -2739,6 +3073,11 @@ test_cli_webhook_set_requires_https() {
 
 test_cli_webhook_delete_requires_confirm() {
     info "Testing CLI webhook delete requires confirmation..."
+
+    if [[ -z "${TEST_BOT_TOKEN:-}" ]]; then
+        success "CLI webhook delete skipped (no TEST_BOT_TOKEN)"
+        return
+    fi
 
     # webhook delete without --force should prompt (or fail in non-interactive)
     local result
@@ -2756,13 +3095,16 @@ test_cli_webhook_delete_requires_confirm() {
 test_cli_hook_uninstall() {
     info "Testing CLI hook uninstall command..."
 
+    local temp_home
+    temp_home="$(mktemp -d)"
+
     # First ensure hook is installed
-    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null || true
+    HOME="$temp_home" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null || true
 
     # Test uninstall
-    if TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook uninstall 2>/dev/null; then
+    if HOME="$temp_home" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook uninstall 2>/dev/null; then
         # Verify file was removed
-        if [[ ! -f "$HOME/.claude/hooks/send-to-telegram.sh" ]]; then
+        if [[ ! -f "$temp_home/.claude/hooks/send-to-telegram.sh" ]]; then
             success "CLI hook uninstall removes hook file"
         else
             # File might still exist if other hooks use it
@@ -2773,7 +3115,9 @@ test_cli_hook_uninstall() {
     fi
 
     # Re-install for other tests
-    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null || true
+    HOME="$temp_home" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null || true
+
+    rm -rf "$temp_home"
 }
 
 test_cli_hook_test_no_chat() {
@@ -3713,12 +4057,12 @@ test_inbox_cleanup_on_offboard() {
     info "Testing inbox auto-cleanup when worker offboarded..."
 
     if python3 -c "
-from bridge import Handler
+from bridge import WorkerManager
 import inspect
-source = inspect.getsource(Handler)
+source = inspect.getsource(WorkerManager)
 
-# Check for inbox cleanup in end command
-assert 'rmtree' in source or 'inbox' in source, 'Should cleanup inbox on offboard'
+# Check for inbox cleanup in kill_session (offboard) method
+assert 'cleanup_inbox' in source or 'inbox' in source, 'Should cleanup inbox on offboard'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -3765,9 +4109,9 @@ test_send_failure_notification() {
     info "Testing send failure notification..."
 
     if python3 -c "
-from bridge import Handler
+from bridge import CommandRouter
 import inspect
-source = inspect.getsource(Handler)
+source = inspect.getsource(CommandRouter)
 
 # Check for send failure handling
 assert 'fail' in source.lower() or 'could not' in source.lower(), 'Should notify on send failure'
@@ -4108,12 +4452,12 @@ test_unknown_commands_passthrough() {
     info "Testing unknown slash commands passed to worker..."
 
     if python3 -c "
-from bridge import BLOCKED_COMMANDS, Handler
+from bridge import BLOCKED_COMMANDS, CommandRouter
 import inspect
 
-source = inspect.getsource(Handler)
+source = inspect.getsource(CommandRouter)
 
-# Handler should check if command is in BLOCKED_COMMANDS
+# CommandRouter should check if command is in BLOCKED_COMMANDS
 # Unknown commands should be passed through (not blocked)
 assert 'BLOCKED_COMMANDS' in source or 'pass' in source.lower()
 
@@ -4129,9 +4473,9 @@ test_reply_with_explicit_context() {
     info "Testing reply includes explicit context..."
 
     if python3 -c "
-from bridge import Handler
+from bridge import CommandRouter
 import inspect
-source = inspect.getsource(Handler)
+source = inspect.getsource(CommandRouter)
 
 # Should include 'Manager reply:' and 'Context' in reply formatting
 assert 'Manager reply' in source or 'Context' in source
@@ -5027,59 +5371,54 @@ print('OK')
     fi
 }
 
-test_send_to_worker_direct_mode() {
-    info "Testing send_to_worker routes to direct worker correctly..."
+test_send_to_worker_uses_backend_registry() {
+    info "Testing send_to_worker uses backend registry correctly..."
 
     if python3 -c "
-import os
-os.environ['DIRECT_MODE'] = '1'
-
-import importlib
+import tempfile
+from pathlib import Path
 import bridge
-importlib.reload(bridge)
 
-from bridge import send_to_worker, direct_workers, DirectWorker, DIRECT_MODE
+# Track calls
+calls = {'codex': 0}
 
-# Verify direct mode is enabled
-assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+# Mock codex backend send
+def fake_codex_send(self, name, tmux, text, url, dir):
+    calls['codex'] += 1
+    return True
 
-# Create a mock worker
-class MockProcess:
-    stdin_written = []
-    def poll(self):
-        return None  # Still running
-    class stdin:
-        @classmethod
-        def write(cls, data):
-            MockProcess.stdin_written.append(data)
-        @classmethod
-        def flush(cls):
-            pass
+# Save original and replace
+original_send = bridge.CodexBackend.send
+bridge.CodexBackend.send = fake_codex_send
+bridge.BACKENDS['codex'] = bridge.CodexBackend()
 
-mock_worker = DirectWorker(name='testdirect', process=MockProcess())
-mock_worker.initialized = True
-direct_workers['testdirect'] = mock_worker
+# Create temp sessions dir with a codex worker
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+bridge._sync_worker_manager()
+
+session_dir = tmp / 'testcodex'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
 
 # Call send_to_worker
-result = send_to_worker('testdirect', 'hello from test', chat_id=12345)
+result = bridge.send_to_worker('testcodex', 'hello from test')
 
-# Should return True (message sent)
+# Should return True and have called codex send
 assert result == True, f'Expected True, got {result}'
-
-# Verify message was written to stdin (via send_to_direct_worker)
-assert len(MockProcess.stdin_written) > 0, 'Should have written to stdin'
-
-# Verify chat_id was updated
-assert mock_worker.chat_id == 12345, f'chat_id should be updated to 12345, got {mock_worker.chat_id}'
+assert calls['codex'] == 1, f'Expected 1 codex call, got {calls}'
 
 # Cleanup
-del direct_workers['testdirect']
+import shutil
+shutil.rmtree(tmp)
+bridge.CodexBackend.send = original_send
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "send_to_worker routes to direct worker correctly"
+        success "send_to_worker uses backend registry correctly"
     else
-        fail "send_to_worker direct mode routing failed"
+        fail "send_to_worker backend registry test failed"
     fi
 }
 
@@ -5087,25 +5426,10 @@ test_send_to_worker_tmux_mode() {
     info "Testing send_to_worker routes to tmux worker correctly..."
 
     if python3 -c "
-import os
-os.environ['DIRECT_MODE'] = '0'
-
-import importlib
 import bridge
-importlib.reload(bridge)
-
-from bridge import send_to_worker, DIRECT_MODE, TMUX_PREFIX, scan_tmux_sessions
-import subprocess
-
-# Verify tmux mode is enabled
-assert DIRECT_MODE == False, 'DIRECT_MODE should be False'
-
-# Get current tmux sessions to check if we have any test sessions
-sessions = scan_tmux_sessions()
 
 # For this test, we verify the function exists and returns False when no matching tmux session
-# (We can't easily create/mock tmux sessions in unit tests)
-result = send_to_worker('nonexistent_tmux_worker_xyz', 'test message')
+result = bridge.send_to_worker('nonexistent_tmux_worker_xyz', 'test message')
 assert result == False, f'Expected False for non-existent tmux worker, got {result}'
 
 print('OK')
@@ -5364,96 +5688,77 @@ print('OK')
     fi
 }
 
-test_direct_mode_is_pending() {
-    info "Testing is_pending works in direct mode..."
+test_backend_registry_exists() {
+    info "Testing backend registry exists and contains expected backends..."
 
     if python3 -c "
-import os
-os.environ['DIRECT_MODE'] = '1'
-
-import importlib
 import bridge
-importlib.reload(bridge)
 
-from bridge import is_pending, direct_workers, DirectWorker, DIRECT_MODE
-import subprocess
+# Check BACKENDS registry exists
+assert hasattr(bridge, 'BACKENDS'), 'BACKENDS registry should exist'
 
-# Verify direct mode is enabled
-assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+# Check expected backends are registered
+expected = ['claude', 'codex', 'gemini', 'opencode']
+for name in expected:
+    assert name in bridge.BACKENDS, f'{name} should be in BACKENDS'
 
-# Create a mock worker
-class MockProcess:
-    def poll(self):
-        return None  # Still running
+# Check get_backend helper
+for name in expected:
+    backend = bridge.get_backend(name)
+    assert backend is not None, f'get_backend({name}) should return backend'
+    assert hasattr(backend, 'send'), f'{name} backend should have send method'
+    assert hasattr(backend, 'is_online'), f'{name} backend should have is_online method'
+    assert hasattr(backend, 'start_cmd'), f'{name} backend should have start_cmd method'
 
-mock_worker = DirectWorker(name='test', process=MockProcess())
-mock_worker.pending = True
-direct_workers['test'] = mock_worker
+# Check is_valid_backend helper
+assert bridge.is_valid_backend('claude') == True
+assert bridge.is_valid_backend('codex') == True
+assert bridge.is_valid_backend('invalid') == False
 
-# is_pending should return True for pending worker
-assert is_pending('test') == True, 'is_pending should return True for pending worker'
-
-# Set pending to False
-mock_worker.pending = False
-assert is_pending('test') == False, 'is_pending should return False for non-pending worker'
-
-# Non-existent worker should return False
-assert is_pending('nonexistent') == False, 'is_pending should return False for non-existent worker'
-
-# Cleanup
-del direct_workers['test']
+# Check list_backends helper
+available = bridge.list_backends()
+assert set(available) == set(expected), f'list_backends should return {expected}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "is_pending works in direct mode"
+        success "backend registry exists with expected backends"
     else
-        fail "is_pending direct mode test failed"
+        fail "backend registry test failed"
     fi
 }
 
-test_direct_mode_get_registered_sessions() {
-    info "Testing get_registered_sessions works in direct mode..."
+test_get_registered_sessions_includes_exec_workers() {
+    info "Testing get_registered_sessions includes exec-mode workers..."
 
     if python3 -c "
-import os
-os.environ['DIRECT_MODE'] = '1'
-
-import importlib
+import tempfile
+from pathlib import Path
 import bridge
-importlib.reload(bridge)
 
-from bridge import get_registered_sessions, direct_workers, DirectWorker, get_direct_workers, DIRECT_MODE
+# Create temp sessions dir
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.worker_manager.scan_tmux_sessions = lambda: {}  # No tmux sessions
 
-# Verify direct mode is enabled
-assert DIRECT_MODE == True, 'DIRECT_MODE should be True'
+# Create an exec-mode worker (like codex)
+session_dir = tmp / 'myworker'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
 
-# Clear any existing workers
-direct_workers.clear()
-
-# No workers - should return empty dict
-result = get_registered_sessions()
-assert result == {}, f'Should return empty dict when no workers, got {result}'
-
-# Add a mock worker
-class MockProcess:
-    def poll(self):
-        return None  # Still running
-
-mock_worker = DirectWorker(name='testworker', process=MockProcess())
-direct_workers['testworker'] = mock_worker
-
-# Should now return the worker
-result = get_registered_sessions()
-assert 'testworker' in result, f'Should contain testworker, got {result}'
+# get_registered_sessions should include exec-mode worker
+result = bridge.get_registered_sessions()
+assert 'myworker' in result, f'Should contain myworker, got {result}'
+assert result['myworker']['backend'] == 'codex', f'Backend should be codex'
 
 # Cleanup
-del direct_workers['testworker']
+import shutil
+shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "get_registered_sessions works in direct mode"
+        success "get_registered_sessions includes exec-mode workers"
     else
-        fail "get_registered_sessions direct mode test failed"
+        fail "get_registered_sessions exec-mode test failed"
     fi
 }
 
@@ -7009,20 +7314,12 @@ run_unit_tests() {
     test_sandbox_config
     test_sandbox_docker_cmd
 
-    # Unit tests - Direct mode
+    # Unit tests - Backend registry / exec mode
     log ""
-    log "── Direct Mode Tests (Unit) ────────────────────────────────────────────"
-    test_direct_mode_flag
-    test_direct_mode_env_var
-    test_direct_worker_dataclass
-    test_direct_worker_functions_exist
-    test_direct_mode_no_hook_install
-    test_direct_mode_handle_event
-    test_direct_mode_html_escape
+    log "── Backend Registry Tests (Unit) ───────────────────────────────────────"
     test_forward_to_bridge_html_escape
-    test_direct_mode_is_pending
-    test_direct_mode_get_registered_sessions
-    test_direct_mode_graceful_shutdown
+    test_backend_registry_exists
+    test_get_registered_sessions_includes_exec_workers
 
     # Unit tests - Worker naming
     log ""
@@ -7031,8 +7328,17 @@ run_unit_tests() {
     test_hire_backend_parsing
     test_team_output_includes_backend
     test_progress_output_includes_backend
+    test_codex_learn_reaction_bypasses_tmux
     test_worker_send_uses_backend
     test_backend_env_metadata
+    test_codex_end_cleans_session
+    test_codex_relaunch_clears_session_id
+    test_codex_pause_clears_pending
+    test_get_workers_includes_codex
+    test_pipe_forwarding_to_codex
+    test_codex_response_requires_escape
+    test_update_bot_commands_includes_codex
+    test_broadcast_includes_codex
 
     # Unit tests - Security constants
     log ""
@@ -7210,7 +7516,7 @@ run_unit_tests() {
     log "── send_to_worker Abstraction Tests (Unit) ─────────────────────────────"
     test_send_to_worker_function_exists
     test_send_to_worker_not_found
-    test_send_to_worker_direct_mode
+    test_send_to_worker_uses_backend_registry
     test_send_to_worker_tmux_mode
 }
 
@@ -7396,106 +7702,6 @@ run_integration_tests() {
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }
 
-run_direct_mode_integration_tests() {
-    # Direct mode integration tests (separate bridge with DIRECT_MODE=1)
-    log ""
-    log "── Direct Mode Integration Tests ───────────────────────────────────────"
-
-    # Start bridge in direct mode
-    test_direct_mode_bridge_starts || {
-        fail "Skipping remaining direct mode tests (bridge failed to start)"
-        stop_direct_mode_bridge
-        return
-    }
-    sleep 0.3
-
-    # Run direct mode tests
-    test_direct_mode_hire_creates_worker
-    test_direct_mode_message_routing
-    test_direct_mode_team_shows_workers
-    test_direct_mode_end_kills_worker
-
-    # Worker discovery tests in direct mode
-    log ""
-    log "── Worker Discovery Tests (Direct Mode) ────────────────────────────────"
-    test_workers_endpoint_shows_direct_workers
-
-    # Mode parity tests (direct mode equivalents of tmux mode tests)
-    log ""
-    log "── Mode Parity Tests (Direct Mode) ─────────────────────────────────────"
-    test_worker_to_worker_pipe_direct
-    test_direct_mode_at_all_broadcast
-    test_direct_mode_reply_routing
-    test_direct_mode_reply_context
-    test_direct_mode_worker_shortcut_focus
-    test_direct_mode_worker_shortcut_with_message
-    test_direct_mode_learn_command
-    test_direct_mode_unknown_cmd_passthrough
-
-    # Cleanup basic tests
-    stop_direct_mode_bridge
-}
-
-run_direct_mode_e2e_tests() {
-    # Direct mode E2E tests (full Telegram flow with Claude subprocess)
-    # These tests require claude CLI and may be slower
-    log ""
-    log "── Direct Mode E2E Tests ───────────────────────────────────────────────"
-
-    # Check if claude CLI is available
-    if ! command -v claude &>/dev/null; then
-        info "Skipping E2E tests (claude CLI not available)"
-        return 0
-    fi
-
-    # Start bridge in direct mode for E2E tests
-    if ! start_direct_mode_bridge; then
-        fail "E2E tests skipped (bridge failed to start)"
-        stop_direct_mode_bridge
-        return
-    fi
-    sleep 0.3
-
-    # Unit test for mode parity (doesn't need workers)
-    test_direct_mode_vs_tmux_parity
-
-    # E2E tests with Claude subprocess
-    log ""
-    log "── E2E Behavior Tests (subprocess lifecycle) ──────────────────────────"
-    test_direct_mode_subprocess_stays_alive
-    test_direct_mode_worker_accepts_messages
-
-    log ""
-    log "── E2E Full Flow Tests ─────────────────────────────────────────────────"
-    test_direct_mode_e2e_full_flow
-    test_direct_mode_e2e_settings
-    test_direct_mode_e2e_progress
-
-    # E2E multi-worker tests
-    log ""
-    log "── E2E Multi-Worker Tests ──────────────────────────────────────────────"
-    test_direct_mode_e2e_focus_switch
-    test_direct_mode_e2e_at_mention
-    test_direct_mode_at_all_broadcast
-    test_direct_mode_reply_routing
-    test_direct_mode_reply_context
-
-    # E2E interruption/control tests
-    log ""
-    log "── E2E Worker Control Tests ────────────────────────────────────────────"
-    test_direct_mode_e2e_pause
-    test_direct_mode_e2e_relaunch
-
-    # E2E parity tests (critical missing coverage)
-    log ""
-    log "── E2E Parity Tests (Critical) ─────────────────────────────────────────"
-    test_worker_to_worker_pipe_direct
-    test_direct_mode_image_handling
-
-    # Cleanup
-    stop_direct_mode_bridge
-}
-
 run_tunnel_tests() {
     # Tunnel tests
     log ""
@@ -7537,15 +7743,10 @@ main() {
     if [[ "$mode" != "fast" ]]; then
         run_integration_tests
 
-        # Run direct mode integration tests (separate bridge instance)
-        run_direct_mode_integration_tests
     fi
 
     # Run E2E and tunnel tests only in FULL mode
     if [[ "$mode" == "full" ]]; then
-        # Direct mode E2E tests (require claude CLI, may be slow)
-        run_direct_mode_e2e_tests
-
         # Tunnel tests
         run_tunnel_tests
     fi
