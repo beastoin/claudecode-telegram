@@ -101,7 +101,7 @@ extract_from_transcript() {
     local tmp=$(mktemp)
     cat "$TRANSCRIPT_PATH" > "$tmp" 2>/dev/null
     local lines=$(tail -n "+$LAST_USER_LINE" "$tmp" | grep '"type":"assistant"') || { rm -f "$tmp"; return 1; }
-    TEXT=$(echo "$lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")') || { rm -f "$tmp"; return 1; }
+    TEXT=$(echo "$lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text | select(. != "(no content)")] | join("\n\n")') || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     [ -n "$TEXT" ] && [ "$TEXT" != "null" ]
 }
