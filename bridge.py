@@ -84,7 +84,7 @@ DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 class Backend(Protocol):
     """Minimal backend interface. 3 methods, no more."""
     name: str
-    is_exec: bool
+    is_interactive: bool
 
     def start_cmd(self) -> str:
         """Return the shell command to start this CLI in tmux."""
@@ -177,7 +177,7 @@ def tmux_send_escape(tmux_name: str):
 class ClaudeBackend:
     """Claude Code CLI - interactive mode with hook for responses."""
     name = "claude"
-    is_exec = False
+    is_interactive = True
 
     def start_cmd(self) -> str:
         return "claude --dangerously-skip-permissions"
@@ -195,12 +195,12 @@ class ClaudeBackend:
 
 
 class CodexBackend:
-    """OpenAI Codex CLI - non-interactive exec mode."""
+    """OpenAI Codex CLI - non-interactive mode."""
     name = "codex"
-    is_exec = True
+    is_interactive = False
 
     def start_cmd(self) -> str:
-        return "echo 'Codex worker ready (exec mode)'"
+        return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
@@ -221,12 +221,12 @@ class CodexBackend:
 
 
 class GeminiBackend:
-    """Google Gemini CLI - non-interactive prompt mode (stub)."""
+    """Google Gemini CLI - non-interactive mode (stub)."""
     name = "gemini"
-    is_exec = True
+    is_interactive = False
 
     def start_cmd(self) -> str:
-        return "echo 'Gemini worker ready (exec mode)'"
+        return "echo 'Gemini worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
@@ -247,12 +247,12 @@ class GeminiBackend:
 
 
 class OpenCodeBackend:
-    """OpenCode CLI - non-interactive run mode (stub)."""
+    """OpenCode CLI - non-interactive mode (stub)."""
     name = "opencode"
-    is_exec = True
+    is_interactive = False
 
     def start_cmd(self) -> str:
-        return "echo 'OpenCode worker ready (exec mode)'"
+        return "echo 'OpenCode worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
@@ -658,7 +658,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event):
 def _forward_pipe_message(name: str, message: str):
     """Forward a message from the pipe to the worker's session.
 
-    Uses backend routing for tmux or exec-mode workers.
+    Uses backend routing for tmux or non-interactive workers.
     """
     if not worker_manager.send(name, message):
         print(f"Warning: Cannot forward pipe message to '{name}' - worker not found")
@@ -1363,7 +1363,7 @@ def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
     # Check session dict first
     if session and session.get("backend"):
         return normalize_backend(session.get("backend"))
-    # Check backend file in session dir (for exec mode workers)
+    # Check backend file in session dir (for non-interactive mode workers)
     backend_file = SESSIONS_DIR / name / "backend"
     if backend_file.exists():
         return normalize_backend(backend_file.read_text().strip())
@@ -1413,12 +1413,12 @@ class WorkerManager:
         return registered
 
     def get_registered_sessions(self, registered=None):
-        """Get registered sessions from tmux and exec-mode workers."""
+        """Get registered sessions from tmux and non-interactive workers."""
         self._sync_paths()
         if registered is None:
             registered = self.scan_tmux_sessions()
 
-        # Add exec-mode workers (have backend file but no tmux session)
+        # Add non-interactive workers (have backend file but no tmux session)
         if self.sessions_dir.exists():
             for session_dir in self.sessions_dir.iterdir():
                 if session_dir.is_dir():
@@ -1474,13 +1474,14 @@ class WorkerManager:
         for name, info in registered.items():
             backend_name = get_worker_backend(name, info)
             backend = get_backend(backend_name)
-            if backend.is_exec:
+            if not backend.is_interactive:
                 pipe_path = ensure_worker_pipe(name)
                 workers.append({
                     "name": name,
                     "protocol": "pipe",
                     "address": str(pipe_path),
-                    "send_example": f"echo 'your message here' > {pipe_path}"
+                    "send_example": f"echo 'your message here' > {pipe_path}",
+                    "note": "Non-interactive. Responses arrive async in Telegram. To call CLI directly, use nohup/& to avoid blocking."
                 })
             else:
                 tmux_name = info.get("tmux")
@@ -1503,7 +1504,7 @@ class WorkerManager:
         backend_obj = get_backend(backend)
 
         # Exec-mode backends: stateless, no tmux
-        if backend_obj.is_exec:
+        if not backend_obj.is_interactive:
             state["active"] = name
             save_last_active(name)
             ensure_session_dir(name)
@@ -1514,14 +1515,18 @@ class WorkerManager:
             if chat_id:
                 set_pending(name, chat_id)
             # Send welcome message as first message to exec worker
+            # Non-interactive: each message spawns a blocking CLI call via Popen
+            # (bridge doesn't block). Workers calling CLI directly should use nohup/&.
             welcome = (
                 "You are connected to Telegram via claudecode-telegram bridge. "
                 f"Your bridge URL is {BRIDGE_URL}. "
+                "You run in non-interactive mode — each message triggers a blocking CLI call, "
+                "responses arrive async in Telegram. Use nohup/& if calling CLI directly. "
                 f"To message other workers: curl {BRIDGE_URL}/workers to discover workers and their protocols. "
                 "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
             )
             self.send(name, welcome)
-            print(f"Created {backend} worker '{name}' (exec mode)")
+            print(f"Created {backend} worker '{name}' (non-interactive mode)")
             return True, None
 
         tmux_name = f"{self.tmux_prefix}{name}"
@@ -1583,7 +1588,7 @@ class WorkerManager:
         backend_name = get_worker_backend(name, session)
         backend = get_backend(backend_name)
 
-        if backend.is_exec:
+        if not backend.is_interactive:
             session_dir = self.sessions_dir / name
             backend_file = session_dir / "backend"
             try:
@@ -1630,7 +1635,7 @@ class WorkerManager:
         backend_name = get_worker_backend(name, session)
         backend = get_backend(backend_name)
 
-        if backend.is_exec:
+        if not backend.is_interactive:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
@@ -1725,7 +1730,7 @@ def scan_tmux_sessions():
 
 
 def get_registered_sessions(registered=None):
-    """Get registered sessions from tmux and exec-mode workers."""
+    """Get registered sessions from tmux and non-interactive workers."""
     _sync_worker_manager()
     return worker_manager.get_registered_sessions(registered)
 
@@ -2345,7 +2350,7 @@ class CommandRouter:
         needs_attention = None
         mode = "tmux"
 
-        if backend.is_exec:
+        if not backend.is_interactive:
             online = True
             ready = True
             mode = f"{backend_name} exec (stateless)"
@@ -2384,7 +2389,7 @@ class CommandRouter:
         if session:
             backend_name = get_worker_backend(name, session)
             backend = get_backend(backend_name)
-            if backend.is_exec:
+            if not backend.is_interactive:
                 clear_pending(name)
                 self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
                 return True
@@ -2500,7 +2505,7 @@ class CommandRouter:
             return True
 
         if msg_id and send_ok:
-            if backend.is_exec or tmux_prompt_empty(session.get("tmux", "")):
+            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", "")):
                 self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
         return True
 
@@ -2569,7 +2574,7 @@ class CommandRouter:
             return
 
         if msg_id and send_ok:
-            if backend.is_exec or tmux_prompt_empty(session.get("tmux", "")):
+            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", "")):
                 self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 

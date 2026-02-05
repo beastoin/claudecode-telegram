@@ -103,15 +103,15 @@
 
 ## Backend System
 ### Backend protocol
-- MUST define a backend interface with: `name`, `is_exec`, `start_cmd()`, `send()`, and `is_online()`.
+- MUST define a backend interface with: `name`, `is_interactive`, `start_cmd()`, `send()`, and `is_online()`.
 - MUST keep all backend routing behind a single backend registry.
 
 ### Implementations
-- MUST implement `ClaudeBackend` as tmux-based with `claude --dangerously-skip-permissions` and tmux send-keys.
-- MUST implement `CodexBackend` as exec-mode using `hooks/codex-tmux-adapter.py`.
-- MUST implement `GeminiBackend` as exec-mode using `hooks/gemini-adapter.py`.
-- MUST implement `OpenCodeBackend` as exec-mode using `hooks/opencode-adapter.py`.
-- MUST treat exec-mode backends as stateless workers with no tmux session.
+- MUST implement `ClaudeBackend` as interactive (tmux-based) with `claude --dangerously-skip-permissions` and tmux send-keys.
+- MUST implement `CodexBackend` as non-interactive using `hooks/codex-tmux-adapter.py`.
+- MUST implement `GeminiBackend` as non-interactive using `hooks/gemini-adapter.py`.
+- MUST implement `OpenCodeBackend` as non-interactive using `hooks/opencode-adapter.py`.
+- MUST treat non-interactive backends as stateless workers with no tmux session.
 
 ### Hire syntax and backend selection
 - MUST accept `/hire <name>` with default backend `claude`.
@@ -123,7 +123,7 @@
 
 ### Per-session backend state
 - MUST store backend selection at `SESSIONS_DIR/<worker>/backend`.
-- MUST write the `chat_id` file before sending the welcome message for exec-mode workers.
+- MUST write the `chat_id` file before sending the welcome message for non-interactive workers.
 
 ## Environment Variables
 ### Bridge (bridge.py)
@@ -510,7 +510,7 @@ No one assigned.
 - Reaction is sent only when:
   - the incoming message has a `message_id`, AND
   - send succeeds, AND
-  - backend is exec-mode OR `tmux_prompt_empty()` returns true within 0.5s.
+  - backend is non-interactive OR `tmux_prompt_empty()` returns true within 0.5s.
   - `tmux_prompt_empty()` polls `tmux capture-pane` every 0.1s for a line matching `^❯\s*$`.
 
 ### 4096-char split + reply chaining
@@ -790,10 +790,10 @@ claude --dangerously-skip-permissions
   - tmux session exists AND
   - current pane command contains `claude` OR a child process named `claude` is running under the pane PID
 
-### CodexBackend (exec)
+### CodexBackend (non-interactive)
 - `start_cmd()`:
 ```
-echo 'Codex worker ready (exec mode)'
+echo 'Codex worker ready (non-interactive)'
 ```
 - `send()`:
   - `python3 hooks/codex-tmux-adapter.py <worker> "<text>" <bridge_url> <sessions_dir>`
@@ -801,20 +801,20 @@ echo 'Codex worker ready (exec mode)'
 - `is_online()`: always `true`
 - Pipe delivery path: `pipe_reader` → `_forward_pipe_message` → `WorkerManager.send` → adapter → `codex exec`
 
-### GeminiBackend (exec)
+### GeminiBackend (non-interactive)
 - `start_cmd()`:
 ```
-echo 'Gemini worker ready (exec mode)'
+echo 'Gemini worker ready (non-interactive)'
 ```
 - `send()`:
   - `python3 hooks/gemini-adapter.py <worker> "<text>" <bridge_url> <sessions_dir>`
 - `is_online()`: always `true`
 - Pipe delivery path: `pipe_reader` → `_forward_pipe_message` → `WorkerManager.send` → adapter → `gemini -p`
 
-### OpenCodeBackend (exec)
+### OpenCodeBackend (non-interactive)
 - `start_cmd()`:
 ```
-echo 'OpenCode worker ready (exec mode)'
+echo 'OpenCode worker ready (non-interactive)'
 ```
 - `send()`:
   - `python3 hooks/opencode-adapter.py <worker> "<text>" <bridge_url> <sessions_dir>`
@@ -956,7 +956,7 @@ Webhook deleted
 Telegram -> POST / (bridge)
   -> CommandRouter.cmd_hire
     -> WorkerManager.hire
-      -> tmux new-session (tmux backend) OR exec-mode metadata (exec backend)
+      -> tmux new-session (interactive) OR non-interactive metadata (non-interactive backend)
       -> export_hook_env (tmux env vars)
       -> start_cmd or docker run
       -> (tmux non-sandbox only) send-keys "2" then Enter

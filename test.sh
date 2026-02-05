@@ -5780,8 +5780,8 @@ print('OK')
     fi
 }
 
-test_get_registered_sessions_includes_exec_workers() {
-    info "Testing get_registered_sessions includes exec-mode workers..."
+test_get_registered_sessions_includes_noninteractive_workers() {
+    info "Testing get_registered_sessions includes non-interactive workers..."
 
     if python3 -c "
 import tempfile
@@ -5793,12 +5793,12 @@ tmp = Path(tempfile.mkdtemp())
 bridge.SESSIONS_DIR = tmp
 bridge.worker_manager.scan_tmux_sessions = lambda: {}  # No tmux sessions
 
-# Create an exec-mode worker (like codex)
+# Create a non-interactive worker (like codex)
 session_dir = tmp / 'myworker'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
 
-# get_registered_sessions should include exec-mode worker
+# get_registered_sessions should include non-interactive worker
 result = bridge.get_registered_sessions()
 assert 'myworker' in result, f'Should contain myworker, got {result}'
 assert result['myworker']['backend'] == 'codex', f'Backend should be codex'
@@ -5809,9 +5809,9 @@ shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "get_registered_sessions includes exec-mode workers"
+        success "get_registered_sessions includes non-interactive workers"
     else
-        fail "get_registered_sessions exec-mode test failed"
+        fail "get_registered_sessions non-interactive test failed"
     fi
 }
 
@@ -7371,12 +7371,12 @@ run_unit_tests() {
     test_sandbox_config
     test_sandbox_docker_cmd
 
-    # Unit tests - Backend registry / exec mode
+    # Unit tests - Backend registry / non-interactive mode
     log ""
     log "── Backend Registry Tests (Unit) ───────────────────────────────────────"
     test_forward_to_bridge_html_escape
     test_backend_registry_exists
-    test_get_registered_sessions_includes_exec_workers
+    test_get_registered_sessions_includes_noninteractive_workers
 
     # Unit tests - Worker naming
     log ""

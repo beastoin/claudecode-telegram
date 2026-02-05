@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Codex adapter - uses codex exec --json with session resume."""
+"""Codex adapter - non-interactive mode via codex exec --json with session resume.
+
+Blocking: each call blocks until codex finishes. Bridge spawns via Popen so it
+doesn't block. Prompts piped via stdin ('-') to handle long messages and avoid
+CLI flag parsing issues with messages starting with '-'.
+"""
 
 import json
 import os
@@ -103,16 +108,17 @@ def run_codex(message: str, session_id: str = "", workdir: str = "") -> tuple[st
     if workdir:
         cmd.extend(["-C", workdir])
 
-    if session_id:
-        # Resume existing session
-        cmd.extend(["resume", session_id, message])
+    if session_id and not session_id.startswith("-"):
+        # Resume existing session; read prompt from stdin via '-'
+        cmd.extend(["resume", session_id, "-"])
     else:
-        # New session
-        cmd.append(message)
+        # New session; read prompt from stdin via '-'
+        cmd.append("-")
 
     try:
         result = subprocess.run(
             cmd,
+            input=message,
             capture_output=True,
             text=True
             # No timeout - let codex run as long as needed

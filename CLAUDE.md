@@ -290,7 +290,7 @@ BRIDGE_PORT="__NODE_PORT__"
 
 ### Test behavior, not scaffolding
 
-**Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. An exec-mode worker subprocess was dying immediately, but tests passed because they only checked:
+**Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. A non-interactive worker subprocess was dying immediately, but tests passed because they only checked:
 - `test_bridge_starts` → bridge starts
 - `test_hire_command` → HTTP returns "OK"
 - `test_send_to_worker_function_exists` → functions exist

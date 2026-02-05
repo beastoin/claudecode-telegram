@@ -174,13 +174,13 @@ The `@name` syntax and `/focus` command give you full control without the overhe
 
 The bridge is now organized around small, explicit classes:
 
-- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_exec`, `start_cmd()`, `send()`, `is_online()`.
-- **Backend implementations**: `ClaudeBackend`, `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (all in `bridge.py`).
+- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_interactive`, `start_cmd()`, `send()`, `is_online()`.
+- **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive) — all in `bridge.py`.
 - **WorkerManager**: worker lifecycle + routing (`hire`, `end`, `send`, `is_online`, `get_workers`, `scan_tmux_sessions`).
 - **TelegramAPI**: wraps all Telegram API calls (sendMessage/sendPhoto/sendDocument/etc.).
 - **CommandRouter**: all `/command` handlers and message routing; delegates to `WorkerManager` + `TelegramAPI`.
 
-Exec-mode detection is now backend-driven (`backend.is_exec`), not hardcoded to a specific backend.
+Interactive vs non-interactive detection is backend-driven (`backend.is_interactive`), not hardcoded to a specific backend.
 
 ## Inter-Worker Messaging (Decentralized Discovery)
 
@@ -347,24 +347,24 @@ This prevents other users on multi-user systems from reading chat IDs or session
 - `backends.py` removed (backend logic lives in `bridge.py`)
 
 **New features:**
-- **Backend Protocol** (`typing.Protocol`) with `name`, `is_exec`, `start_cmd()`, `send()`, `is_online()`
-- **Backend implementations**: `ClaudeBackend`, `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (all in `bridge.py`)
+- **Backend Protocol** (`typing.Protocol`) with `name`, `is_interactive`, `start_cmd()`, `send()`, `is_online()`
+- **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive) — all in `bridge.py`
 - **WorkerManager**, **TelegramAPI**, **CommandRouter** classes for clearer separation of responsibilities
 - **Per-node pipe + inbox isolation**: `/tmp/claudecode-telegram/<node>/<worker>/...`
-- **Exec-mode welcome message** includes `BRIDGE_URL` and inter-worker messaging instructions
+- **Non-interactive welcome message** includes `BRIDGE_URL` and inter-worker messaging instructions
 
 **Fixes:**
-- `chat_id` race condition for exec-mode workers (write `chat_id` before welcome message to avoid `/response` 404s)
+- `chat_id` race condition for non-interactive workers (write `chat_id` before welcome message to avoid `/response` 404s)
 
 **Architecture changes:**
 - OOP refactor: lifecycle in `WorkerManager`, command handling in `CommandRouter`, Telegram calls in `TelegramAPI`
-- Exec-mode detection is backend-driven (`backend.is_exec`), replacing hardcoded backend checks
+- Interactive/non-interactive detection is backend-driven (`backend.is_interactive`), replacing hardcoded backend checks
 
 **Backend interface (grug-brain simple):**
 ```python
 class Backend(Protocol):
     name: str
-    is_exec: bool
+    is_interactive: bool
 
     def start_cmd(self) -> str: ...
     def send(self, worker_name, tmux_name, text, bridge_url, sessions_dir) -> bool: ...
