@@ -217,7 +217,7 @@ class CodexBackend:
         return True
 
     def is_online(self, tmux_name: str) -> bool:
-        return True
+        return tmux_exists(tmux_name)
 
 
 class GeminiBackend:
@@ -243,7 +243,7 @@ class GeminiBackend:
         return True
 
     def is_online(self, tmux_name: str) -> bool:
-        return True
+        return tmux_exists(tmux_name)
 
 
 class OpenCodeBackend:
@@ -269,7 +269,7 @@ class OpenCodeBackend:
         return True
 
     def is_online(self, tmux_name: str) -> bool:
-        return True
+        return tmux_exists(tmux_name)
 
 
 BACKENDS = {
@@ -1558,9 +1558,13 @@ class WorkerManager:
                 "You run in non-interactive mode — each message triggers a blocking CLI call, "
                 "responses arrive async in Telegram. Use nohup/& if calling CLI directly."
             )
-        if SANDBOX_ENABLED and backend_obj.is_interactive:
-            welcome += " Running in sandbox mode (Docker container)."
-        self.send(name, welcome)
+            # Echo welcome to tmux (visible for debugging) but don't call backend
+            # to avoid triggering a codex API call on hire
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
+        else:
+            if SANDBOX_ENABLED:
+                welcome += " Running in sandbox mode (Docker container)."
+            self.send(name, welcome)
 
         state["active"] = name
         save_last_active(name)
@@ -2335,20 +2339,22 @@ class CommandRouter:
         needs_attention = None
         mode = "tmux"
 
+        tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
         if not backend.is_interactive:
-            online = True
-            ready = True
-            mode = f"{backend_name} exec (stateless)"
+            # Non-interactive: online = tmux exists, ready = always (stateless)
+            online = tmux_exists(tmux_name)
+            ready = online  # Ready if tmux exists
+            mode = f"{backend_name} (non-interactive)"
+            if not online:
+                needs_attention = "tmux session missing. Use /end then /hire to recreate."
         else:
-            tmux_name = session.get("tmux")
-            if tmux_name:
-                exists = tmux_exists(tmux_name)
-                online = exists
-                if exists:
-                    claude_running = is_claude_running(tmux_name)
-                    ready = claude_running
-                    if not claude_running:
-                        needs_attention = "worker app is not running. Use /relaunch."
+            exists = tmux_exists(tmux_name)
+            online = exists
+            if exists:
+                claude_running = is_claude_running(tmux_name)
+                ready = claude_running
+                if not claude_running:
+                    needs_attention = "worker app is not running. Use /relaunch."
 
         status = format_progress_lines(
             name=name,
