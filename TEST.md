@@ -2,26 +2,15 @@
 
 ## Test Modes
 
-The test suite supports three modes for different use cases:
+The test suite supports three modes:
 
-| Mode | Command | Time | Use Case |
-|------|---------|------|----------|
-| **FAST** | `FAST=1 ./test.sh` | ~10-15s | TDD inner loop, quick validation |
-| **Default** | `./test.sh` | ~2-3 min | Pre-commit, full validation |
-| **FULL** | `FULL=1 ./test.sh` | ~5 min | Before push, includes tunnel tests |
+| Mode | Command | Time |
+|------|---------|------|
+| **FAST** | `FAST=1 ./test.sh` | ~10-15s |
+| **Default** | `./test.sh` | ~2-3 min |
+| **FULL** | `FULL=1 ./test.sh` | ~5 min |
 
-### TDD Workflow
-
-```bash
-# While coding - run after each change
-FAST=1 TEST_BOT_TOKEN='...' ./test.sh
-
-# Before committing
-TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
-
-# Before pushing
-FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
-```
+For workflow rules (when to run which mode), see `CLAUDE.md`.
 
 ### What Each Mode Tests
 
@@ -53,15 +42,15 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ```
         /\
-       /  \  FULL: Tunnel + Webhook (rare, slow)
+       /  \  FULL: Tunnel + Webhook
       /----\
-     /      \ Default: Bridge + Commands (every commit)
+     /      \ Default: Bridge + Commands
     /--------\
-   /          \ FAST: Unit + CLI (every code change)
+   /          \ FAST: Unit + CLI
   /-----------\
 ```
 
-The goal is to run FAST tests frequently during development, Default tests before commits, and FULL tests before pushing to catch integration issues.
+Workflow guidance lives in `CLAUDE.md`.
 
 ## Quick Start
 
@@ -84,6 +73,15 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | Image/Document Handling | 20 | 100% |
 | HTTP Endpoints | 8 | 100% |
 | Misc Behavior | 12 | 100% |
+
+**By suite/mode:**
+
+| Suite | Tests | Notes |
+|-------|-------|-------|
+| Unit (FAST) | 115 | imports, formatting, core helpers |
+| CLI (FAST) | 30 | flags, commands, webhook/hook coverage |
+| Integration | 64 | commands, security, routing, endpoints |
+| Tunnel (FULL) | 1 | cloudflare tunnel, webhook setup |
 
 **Only 2 features untested:**
 - `-f`, `--force` flag (tested implicitly in other tests)
@@ -478,6 +476,10 @@ Then add to the appropriate runner function:
 - `run_cli_tests()` for CLI-only tests
 - `run_integration_tests()` for tests that need the bridge running
 - `run_tunnel_tests()` for tests that need the tunnel
+
+Also update:
+- The **Complete Test Inventory** list above
+- The **Test Coverage** tables if new tests expand coverage
 
 Call from the runner function:
 

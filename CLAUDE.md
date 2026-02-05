@@ -43,15 +43,12 @@ When making changes that result in a new version:
 
 ## Testing Requirements
 
-### Test Modes
-
-Use the appropriate test mode for your workflow:
-
-| Mode | Command | Time | When to Use |
-|------|---------|------|-------------|
-| **FAST** | `FAST=1 ./test.sh` | ~15s | While coding (TDD inner loop) |
-| **Default** | `./test.sh` | ~2-3 min | Before committing |
-| **FULL** | `FULL=1 ./test.sh` | ~5 min | Before pushing |
+Workflow rules:
+- Use FAST mode during development (TDD inner loop); run default mode before committing; run FULL mode before pushing.
+- Write tests alongside features; focus on e2e behavior (not scaffolding).
+- Treat tests as usage examples; prefer real Telegram flows (hire → send → reply) and keep them deterministic.
+- When adding tests, follow `TEST.md`.
+- See `TEST.md` for mode definitions, env vars, isolation details, inventories, and manual/CI instructions.
 
 ### TDD Workflow
 
@@ -66,56 +63,11 @@ TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 ```
 
-### Test Guidelines
-
-1. **Write tests alongside features** - add to `test.sh`
-2. **Focus on e2e tests** - test the full flow, not just units
-3. **Use FAST mode during development** - for quick feedback
-4. **Run default mode before committing** - catch integration issues
-5. **Treat tests as usage examples** - prefer real Telegram flows (hire → send → reply) and keep them deterministic
-
 **Why e2e tests matter:**
 - They catch integration bugs that unit tests miss
 - They document how features actually work
 - They give confidence when refactoring
 - They're the safety net for this project
-
-### Running Tests
-
-**Rule: Always run default tests before committing, FULL before pushing.**
-
-```bash
-# Quick validation while coding
-FAST=1 TEST_BOT_TOKEN='...' ./test.sh
-
-# Full test before commit
-TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
-```
-
-**Test isolation:** Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/` (port 8095, prefix `claude-test-`). You can run tests while production is active.
-
-### Test Coverage
-
-**Current: 210 test functions** (see `TEST.md` for inventory)
-
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Unit (FAST) | 115 | imports, formatting, core helpers |
-| CLI (FAST) | 30 | flags, commands, webhook/hook coverage |
-| Integration | 64 | commands, security, routing, endpoints |
-| Tunnel (FULL) | 1 | cloudflare tunnel, webhook setup |
-
-See `TEST.md` for complete test inventory.
-
-### When Adding New Tests
-
-**IMPORTANT: Keep `TEST.md` test inventory updated.**
-
-When you add a new test:
-1. Add the test function to `test.sh` in the appropriate section
-2. Add the function to the appropriate runner (`run_unit_tests`, `run_cli_tests`, `run_integration_tests`, or `run_tunnel_tests`)
-3. **Update the test inventory in `TEST.md`** with the new test name and description
-4. Update the coverage stats if adding tests for previously untested features
 
 ## Design Philosophy
 
