@@ -1519,6 +1519,12 @@ class WorkerManager:
         export_hook_env(tmux_name, backend)
         time.sleep(0.3)
 
+        # Inject tmux session env vars into the running shell so processes
+        # spawned inside (claude, codex, etc.) inherit them as real env vars
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                        'eval "$(tmux show-environment -s)"', "Enter"])
+        time.sleep(0.3)
+
         ensure_session_dir(name)
         ensure_worker_pipe(name)
 
@@ -1640,6 +1646,11 @@ class WorkerManager:
             return False, "Worker is already running"
 
         export_hook_env(tmux_name, backend_name)
+        time.sleep(0.3)
+
+        # Inject tmux session env vars into the running shell
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                        'eval "$(tmux show-environment -s)"', "Enter"])
         time.sleep(0.3)
 
         if SANDBOX_ENABLED and backend.is_interactive:
