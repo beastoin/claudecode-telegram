@@ -1480,8 +1480,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "pipe",
                     "address": str(pipe_path),
-                    "send_example": f"echo 'your message here' > {pipe_path}",
-                    "note": "Non-interactive. Responses arrive async in Telegram. To call CLI directly, use nohup/& to avoid blocking."
+                    "send_example": f"echo 'your message here' > {pipe_path} &",
+                    "note": "Non-interactive. IMPORTANT: Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
                 })
             else:
                 tmux_name = info.get("tmux")
@@ -1554,7 +1554,9 @@ class WorkerManager:
             "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
             "Allowed paths: /tmp, current directory. "
             "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
-            "Use their protocol directly (tmux send-keys or pipe) - do NOT output normally or it goes to Telegram."
+            "For tmux workers: use tmux send-keys. "
+            "For pipe workers: use 'echo msg > pipe &' (background!) — writing to a pipe BLOCKS until read, so never use cat/echo without & or your session will freeze. "
+            "Do NOT output worker messages normally or they go to Telegram."
         )
         if not backend_obj.is_interactive:
             if chat_id:
