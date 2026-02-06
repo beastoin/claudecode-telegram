@@ -1526,7 +1526,8 @@ class WorkerManager:
         time.sleep(0.3)
 
         ensure_session_dir(name)
-        ensure_worker_pipe(name)
+        if not backend_obj.is_interactive:
+            ensure_worker_pipe(name)
 
         if not backend_obj.is_interactive:
             backend_file = self.sessions_dir / name / "backend"
@@ -2791,6 +2792,11 @@ def main():
     registered = get_registered_sessions(registered)
     if registered:
         print(f"Discovered sessions: {list(registered.keys())}")
+        for name, info in registered.items():
+            backend_name = get_worker_backend(name, info)
+            backend_obj = get_backend(backend_name)
+            if not backend_obj.is_interactive:
+                ensure_worker_pipe(name)
 
     # Load last active worker from file (if still exists)
     last_active = load_last_active()

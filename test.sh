@@ -5295,8 +5295,8 @@ test_worker_to_worker_pipe() {
         return
     fi
 
-    # Step 3: Create Worker B (bob)
-    result=$(send_message "/hire bob")
+    # Step 3: Create Worker B (bob) with non-interactive backend (pipes only for non-interactive)
+    result=$(send_message "/hire bob --backend codex")
     if [[ "$result" != "OK" ]]; then
         fail "Worker-to-worker pipe: Failed to create worker bob: $result"
         send_message "/end alice" >/dev/null 2>&1 || true
@@ -5344,17 +5344,16 @@ test_worker_to_worker_pipe() {
         return
     fi
 
-    # Step 5: Verify Worker B (bob) received the message in tmux pane
-    local bob_tmux_name="${TEST_TMUX_PREFIX}bob"
-    local pane_content
-    pane_content=$(tmux capture-pane -t "$bob_tmux_name" -p 2>/dev/null || echo "")
-
-    if echo "$pane_content" | grep -q "$unique_msg"; then
-        success "Worker-to-worker pipe: Message appeared in bob's tmux session"
+    # Step 5: Verify bridge logged the pipe message forwarding
+    # Non-interactive backends (codex) forward via adapter, not tmux send-keys,
+    # so we check the bridge log for the pipe reader's forwarding log line
+    sleep 1
+    if grep -q "Pipe message for 'bob': $unique_msg" "$BRIDGE_LOG" 2>/dev/null; then
+        success "Worker-to-worker pipe: Message forwarded by pipe reader (logged in bridge)"
     else
-        fail "Worker-to-worker pipe: Message NOT found in bob's tmux pane"
-        info "  Pane content (last 5 lines):"
-        echo "$pane_content" | tail -5 | sed 's/^/    /'
+        fail "Worker-to-worker pipe: Pipe message NOT logged in bridge output"
+        info "  Bridge log (last 5 lines):"
+        tail -5 "$BRIDGE_LOG" 2>/dev/null | sed 's/^/    /'
     fi
 
     # Cleanup
@@ -7220,8 +7219,8 @@ test_worker_to_worker_pipe_direct() {
         return
     }
 
-    # Create Worker B (bob)
-    result=$(send_direct_mode_message "/hire bob")
+    # Create Worker B (bob) with non-interactive backend (pipes only for non-interactive)
+    result=$(send_direct_mode_message "/hire bob --backend codex")
     if [[ "$result" != "OK" ]]; then
         fail "Pipe direct: Failed to create worker bob: $result"
         send_direct_mode_message "/end alice" >/dev/null 2>&1 || true
