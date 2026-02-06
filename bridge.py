@@ -2144,42 +2144,48 @@ class CommandRouter:
             self.route_to_all(message, chat_id, msg_id)
             return
 
-        reply_to = msg.get("reply_to_message")
+        # Extract reply context (quote-reply = context only, never routing)
         reply_context = ""
+        reply_to = msg.get("reply_to_message")
         if reply_to:
-            _, reply_context = self.parse_reply_target(reply_to)
+            reply_context = self.get_reply_context(reply_to)
 
-        target_session, message = self.parse_at_mention(text)
-        if target_session:
+        # Parse @mentions anywhere in text
+        targets, clean_text = self.parse_at_mentions(text)
+
+        if targets:
+            message = clean_text or text
             if reply_context:
                 message = self.format_reply_context(message, reply_context)
-            self.route_message(target_session, message, chat_id, msg_id, one_off=True)
+            for name in targets:
+                self.route_message(name, message, chat_id, msg_id, one_off=True)
             return
 
-        if reply_to and reply_context:
-            reply_target, _ = self.parse_reply_target(reply_to)
-            if reply_target:
-                routed_text = self.format_reply_context(text, reply_context)
-                self.route_message(reply_target, routed_text, chat_id, msg_id, one_off=True)
-                return
-            else:
-                routed_text = self.format_reply_context(text, reply_context)
-                self.route_to_active(routed_text, chat_id, msg_id)
-                return
+        # No @mentions → route to focused worker
+        routed_text = text
+        if reply_context:
+            routed_text = self.format_reply_context(text, reply_context)
+        self.route_to_active(routed_text, chat_id, msg_id)
 
-        self.route_to_active(text, chat_id, msg_id)
-
-    def parse_at_mention(self, text):
-        match = re.match(r'^@([a-zA-Z0-9-]+)\s+(.+)$', text, re.DOTALL)
-        if match:
+    def parse_at_mentions(self, text):
+        """Extract all @mentions from anywhere in text. Returns (targets, cleaned_text)."""
+        if not text:
+            return [], ""
+        registered = self.workers.get_registered_sessions()
+        found = []
+        for match in re.finditer(r'@([a-zA-Z0-9-]+)', text):
             name = match.group(1).lower()
-            message = match.group(2)
-            registered = self.workers.get_registered_sessions()
-            if name in registered:
-                return name, message
-        return None, text
+            if name in registered and name not in found:
+                found.append(name)
+        if not found:
+            return [], text
+        # Remove matched @mentions from text
+        cleaned = re.sub(r'@([a-zA-Z0-9-]+)', lambda m: '' if m.group(1).lower() in found else m.group(0), text)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return found, cleaned
 
     def parse_worker_prefix(self, text):
+        """Parse 'name: message' prefix from bot-sent messages."""
         if not text:
             return None, ""
         match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
@@ -2192,18 +2198,11 @@ class CommandRouter:
             return None, ""
         return name, message
 
-    def parse_reply_target(self, reply_msg):
+    def get_reply_context(self, reply_msg):
+        """Extract text from a replied-to message (context only, no routing)."""
         if not reply_msg:
-            return None, ""
-        reply_text = reply_msg.get("text") or reply_msg.get("caption") or ""
-
-        reply_from = reply_msg.get("from", {})
-        if reply_from and reply_from.get("is_bot"):
-            worker, _ = self.parse_worker_prefix(reply_text)
-            if worker:
-                return worker, reply_text
-
-        return None, reply_text
+            return ""
+        return reply_msg.get("text") or reply_msg.get("caption") or ""
 
     def format_reply_context(self, reply_text, context_text):
         reply_text = (reply_text or "").strip()
