@@ -5262,6 +5262,70 @@ print('OK')
     fi
 }
 
+test_pipe_reader_liveness_check() {
+    info "Testing pipe reader restarts when thread dies..."
+
+    if python3 -c "
+import threading, time
+from bridge import (
+    start_pipe_reader, stop_pipe_reader, _pipe_reader_threads,
+    get_worker_pipe_path, ensure_worker_pipe, cleanup_worker_pipe
+)
+
+test_name = 'liveness_test'
+pipe_path = get_worker_pipe_path(test_name)
+
+# Setup: create pipe
+pipe_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+ensure_worker_pipe(test_name)
+
+# Verify reader thread is alive
+assert test_name in _pipe_reader_threads, 'Thread should be registered'
+thread1, stop1 = _pipe_reader_threads[test_name]
+assert thread1.is_alive(), 'Thread should be alive initially'
+thread1_id = thread1.ident
+
+# Simulate crash: stop the thread but leave a dead entry in the registry
+stop1.set()
+# Unblock reader by writing to pipe
+import os
+try:
+    fd = os.open(str(pipe_path), os.O_WRONLY | os.O_NONBLOCK)
+    os.write(fd, b'\n')
+    os.close(fd)
+except OSError:
+    pass
+thread1.join(timeout=2.0)
+
+# Manually re-insert the dead thread to simulate a crash leaving stale entry
+_pipe_reader_threads[test_name] = (thread1, stop1)
+assert not thread1.is_alive(), 'Thread should be dead after stop'
+assert test_name in _pipe_reader_threads, 'Stale entry should exist'
+
+# Now call start_pipe_reader — it should detect dead thread and restart
+start_pipe_reader(test_name)
+
+assert test_name in _pipe_reader_threads, 'New thread should be registered'
+thread2, stop2 = _pipe_reader_threads[test_name]
+assert thread2.is_alive(), 'New thread should be alive'
+assert thread2.ident is not thread1_id, 'Should be a different thread'
+
+# Cleanup
+cleanup_worker_pipe(test_name)
+if pipe_path.parent.exists():
+    try:
+        pipe_path.parent.rmdir()
+    except:
+        pass
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Pipe reader detects dead thread and restarts"
+    else
+        fail "Pipe reader liveness check failed"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Worker-to-Worker Pipe Communication Tests (TDD)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7570,6 +7634,7 @@ run_unit_tests() {
     test_get_workers_function
     test_worker_pipe_creation_on_startup
     test_worker_pipe_cleanup_on_end
+    test_pipe_reader_liveness_check
 
     # Unit tests - send_to_worker abstraction
     log ""

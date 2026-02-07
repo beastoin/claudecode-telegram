@@ -667,8 +667,13 @@ def _forward_pipe_message(name: str, message: str):
 def start_pipe_reader(name: str):
     """Start a background thread to read from the worker's input pipe."""
     if name in _pipe_reader_threads:
-        # Already running
-        return
+        thread, _stop = _pipe_reader_threads[name]
+        if thread.is_alive():
+            # Already running
+            return
+        # Thread crashed or exited — clean up stale entry and restart
+        print(f"Pipe reader thread for '{name}' is dead, restarting")
+        _pipe_reader_threads.pop(name, None)
 
     pipe_path = get_worker_pipe_path(name)
     if not pipe_path.exists():
