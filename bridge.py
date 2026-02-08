@@ -1485,8 +1485,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "pipe",
                     "address": str(pipe_path),
-                    "send_example": f"echo 'your message here' > {pipe_path} &",
-                    "note": "Non-interactive. IMPORTANT: Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
+                    "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
+                    "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
                 })
             else:
                 tmux_name = info.get("tmux")
@@ -1496,7 +1496,7 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"tmux send-keys -t {tmux_name} 'your message here' Enter"
+                    "send_example": f"tmux send-keys -t {tmux_name} 'YOUR_NAME: your message here' Enter"
                 })
         return workers
 
@@ -1560,6 +1560,7 @@ class WorkerManager:
             "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
             "Allowed paths: /tmp, current directory. "
             "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
+            f"IMPORTANT: Always prefix your name when messaging workers (e.g., '{name}: your message'). "
             "For tmux workers: use tmux send-keys. "
             "For pipe workers: use 'echo msg > pipe &' (background!) — writing to a pipe BLOCKS until read, so never use cat/echo without & or your session will freeze. "
             "Do NOT output worker messages normally or they go to Telegram."
