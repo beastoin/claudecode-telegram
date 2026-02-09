@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.20.0
+> Version: 0.21.0
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.21.0 - Worker checkin + instruction refresh
+
+**New features:**
+- **`GET /checkin` endpoint**: Workers can `curl -s $BRIDGE_URL/checkin?name=lee` to refresh bridge instructions anytime. Returns plain text with labeled sections (RECEIVING FILES, SENDING FILES, MESSAGING WORKERS, NAME PREFIX, REFRESH INSTRUCTIONS).
+- **Welcome on resume/relaunch**: `restart()` now re-sends the welcome message after resume or relaunch, so workers always get fresh instructions.
+
+**Improvements:**
+- **Structured welcome message**: Instructions now have labeled sections instead of a wall of text. Each capability is clearly identified.
+- **`_build_welcome()` method**: Welcome message extracted into shared method used by `hire()`, `restart()`, and `/checkin`. Single source of truth for instructions.
+- **Self-documenting recovery**: Welcome message includes "REFRESH INSTRUCTIONS: curl -s $BRIDGE_URL/checkin?name=YOUR_NAME" so workers can recover instructions even after context compression.
 
 ### v0.20.0 - Session resume + worker messaging
 

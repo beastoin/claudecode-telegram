@@ -13,6 +13,7 @@ import threading
 import time
 import re
 import urllib.request
+from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -1533,6 +1534,27 @@ class WorkerManager:
                 })
         return workers
 
+    def _build_welcome(self, name: str, backend_obj) -> str:
+        """Build welcome/instructions message for a worker."""
+        welcome = (
+            "You are connected to Telegram via claudecode-telegram bridge. "
+            "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
+            "SENDING FILES: Use [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/photo.png|caption]] to send files to manager via Telegram. Allowed paths: /tmp, current directory. "
+            "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
+            f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
+            f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
+            "WARNING: Do NOT output worker messages normally — they go to Telegram. Use the send commands from /workers instead."
+        )
+        if not backend_obj.is_interactive:
+            welcome += (
+                " NON-INTERACTIVE MODE: Your bridge URL is in $BRIDGE_URL env var. "
+                "Each message triggers a blocking CLI call, responses arrive async in Telegram. "
+                "Use nohup/& if calling CLI directly."
+            )
+        if SANDBOX_ENABLED and backend_obj.is_interactive:
+            welcome += " Running in sandbox mode (Docker container)."
+        return welcome
+
     def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None):
         """Create a new worker instance."""
         self._sync_paths()
@@ -1595,31 +1617,14 @@ class WorkerManager:
         if backend_obj.is_interactive:
             time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
 
-        welcome = (
-            "You are connected to Telegram via claudecode-telegram bridge. "
-            "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
-            "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
-            "Allowed paths: /tmp, current directory. "
-            "MESSAGING OTHER WORKERS: "
-            "Run `curl -s $BRIDGE_URL/workers` — it returns each worker's name, protocol, and a ready-to-use send_example command. "
-            "ALWAYS call /workers before messaging — never guess addresses. "
-            f"ALWAYS prefix your name (e.g., '{name}: your message'). "
-            "Do NOT output worker messages normally or they go to Telegram."
-        )
+        welcome = self._build_welcome(name, backend_obj)
         if not backend_obj.is_interactive:
             if chat_id:
                 set_pending(name, chat_id)
-            welcome += (
-                " Your bridge URL is in $BRIDGE_URL env var. "
-                "You run in non-interactive mode — each message triggers a blocking CLI call, "
-                "responses arrive async in Telegram. Use nohup/& if calling CLI directly."
-            )
             # Echo welcome to tmux (visible for debugging) but don't call backend
             # to avoid triggering a codex API call on hire
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
         else:
-            if SANDBOX_ENABLED:
-                welcome += " Running in sandbox mode (Docker container)."
             self.send(name, welcome)
 
         state["active"] = name
@@ -1721,6 +1726,14 @@ class WorkerManager:
             if resume_cwd:
                 start_cmd = f'cd "{resume_cwd}" && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+
+        # Re-send welcome/instructions so worker gets fresh context after restart
+        welcome = self._build_welcome(name, backend)
+        if backend.is_interactive:
+            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+            self.send(name, welcome)
+        else:
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 
         return True, None
 
@@ -2807,9 +2820,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode())
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+
         # Handle /workers endpoint for inter-worker discovery
-        if self.path == "/workers":
+        if parsed.path == "/workers":
             self.handle_workers_endpoint()
+            return
+
+        # Handle /checkin endpoint for worker instruction refresh
+        if parsed.path == "/checkin":
+            self.handle_checkin_endpoint(parsed)
             return
 
         # Default health check endpoint
@@ -2833,6 +2853,37 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(response).encode())
         except Exception as e:
             print(f"Workers endpoint error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def handle_checkin_endpoint(self, parsed):
+        """Return worker instructions as plain text.
+
+        GET /checkin           — generic instructions (uses default backend)
+        GET /checkin?name=lee  — personalized instructions for worker 'lee'
+        """
+        try:
+            params = parse_qs(parsed.query)
+            name = params.get("name", ["worker"])[0]
+
+            # If worker exists, use their actual backend; otherwise default
+            _sync_worker_manager()
+            registered = worker_manager.get_registered_sessions()
+            if name in registered:
+                backend_name = get_worker_backend(name, registered[name])
+            else:
+                backend_name = DEFAULT_BACKEND
+            backend_obj = get_backend(backend_name)
+
+            welcome = worker_manager._build_welcome(name, backend_obj)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(welcome.encode())
+        except Exception as e:
+            print(f"Checkin endpoint error: {e}")
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
