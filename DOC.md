@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.19.0
+> Version: 0.20.0
 
 ## Current Philosophy (Summary)
 
@@ -340,6 +340,23 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.20.0 - Session resume + worker messaging
+
+**New features:**
+- **`/resume` command**: Resume a worker's previous Claude Code session with full context preserved. Falls back to fresh relaunch if no session ID is available.
+- **Session ID persistence**: Stop hook (`send-to-telegram.sh`) captures session UUID from transcript path and saves to `claude_session_id` file per worker.
+- **CWD persistence**: Working directory saved at hire time and in stop hook fallback, enabling cross-directory resume (`--resume` requires matching cwd).
+- **`/progress` shows resume status**: Displays "Resume: available (session abc12345...)" or "Resume: not available".
+
+**Improvements:**
+- **Simplified worker messaging instructions**: Welcome message now directs workers to call `GET /workers` for ready-to-use send commands, instead of listing all protocol details inline. Workers no longer need to memorize tmux vs pipe syntax.
+
+**How resume works:**
+1. Stop hook saves session UUID to `<session_dir>/claude_session_id` on every response
+2. Hire saves pane cwd to `<session_dir>/claude_session_cwd`
+3. `/resume` reads both files, runs `cd "<cwd>" && claude --resume <UUID> --dangerously-skip-permissions`
+4. `/relaunch` clears all `*_session_id` files for a fresh start
+
 ### v0.19.0 - OOP refactor + backend protocol
 
 **Breaking changes:**
@@ -366,7 +383,7 @@ class Backend(Protocol):
     name: str
     is_interactive: bool
 
-    def start_cmd(self) -> str: ...
+    def start_cmd(self, resume_id: str = "") -> str: ...
     def send(self, worker_name, tmux_name, text, bridge_url, sessions_dir) -> bool: ...
     def is_online(self, tmux_name) -> bool: ...
 ```

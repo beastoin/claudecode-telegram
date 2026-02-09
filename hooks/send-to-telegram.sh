@@ -78,6 +78,20 @@ fi
 
 # Determine file paths
 SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
+SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
+if [ -n "$SESSION_ID" ] && [ -d "$SESSION_DIR" ]; then
+    SESSION_ID_FILE="$SESSION_DIR/claude_session_id"
+    echo "$SESSION_ID" > "$SESSION_ID_FILE"
+    chmod 600 "$SESSION_ID_FILE"
+    CWD_FILE="$SESSION_DIR/claude_session_cwd"
+    if [ ! -f "$CWD_FILE" ]; then
+        PANE_CWD=$(tmux display-message -t "$SESSION_NAME" -p '#{pane_current_path}' 2>/dev/null || true)
+        if [ -n "$PANE_CWD" ]; then
+            echo "$PANE_CWD" > "$CWD_FILE"
+            chmod 600 "$CWD_FILE"
+        fi
+    fi
+fi
 CHAT_ID_FILE="$SESSION_DIR/chat_id"
 PENDING_FILE="$SESSION_DIR/pending"
 

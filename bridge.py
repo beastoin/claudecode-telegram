@@ -86,7 +86,7 @@ class Backend(Protocol):
     name: str
     is_interactive: bool
 
-    def start_cmd(self) -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         """Return the shell command to start this CLI in tmux."""
         ...
 
@@ -179,7 +179,9 @@ class ClaudeBackend:
     name = "claude"
     is_interactive = True
 
-    def start_cmd(self) -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
+        if resume_id:
+            return f"claude --resume {resume_id} --dangerously-skip-permissions"
         return "claude --dangerously-skip-permissions"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -199,7 +201,7 @@ class CodexBackend:
     name = "codex"
     is_interactive = False
 
-    def start_cmd(self) -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -225,7 +227,7 @@ class GeminiBackend:
     name = "gemini"
     is_interactive = False
 
-    def start_cmd(self) -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Gemini worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -251,7 +253,7 @@ class OpenCodeBackend:
     name = "opencode"
     is_interactive = False
 
-    def start_cmd(self) -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'OpenCode worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -319,6 +321,7 @@ BOT_COMMANDS = [
     {"command": "learn", "description": "Ask focused worker what they learned"},
     {"command": "pause", "description": "Pause focused worker"},
     {"command": "relaunch", "description": "Relaunch focused worker"},
+    {"command": "resume", "description": "Resume focused worker session"},
     # Occasional
     {"command": "settings", "description": "Show settings"},
     # Rare (onboarding/offboarding)
@@ -387,7 +390,7 @@ def load_last_active():
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
     # Bridge commands
-    "team", "focus", "progress", "learn", "pause", "relaunch", "settings", "hire", "end",
+    "team", "focus", "progress", "learn", "pause", "relaunch", "resume", "settings", "hire", "end",
     # Special
     "all", "start", "help",
 }
@@ -1226,6 +1229,33 @@ def get_chat_id_file(name):
     return get_session_dir(name) / "chat_id"
 
 
+def get_claude_session_id(name):
+    f = get_session_dir(name) / "claude_session_id"
+    if f.exists():
+        return f.read_text().strip()
+    return ""
+
+
+def get_claude_session_cwd(name):
+    f = get_session_dir(name) / "claude_session_cwd"
+    if f.exists():
+        return f.read_text().strip()
+    return ""
+
+
+def save_claude_session_cwd(name, cwd):
+    d = ensure_session_dir(name)
+    f = d / "claude_session_cwd"
+    f.write_text(cwd)
+    f.chmod(0o600)
+
+
+def clear_claude_session_id(name):
+    f = get_session_dir(name) / "claude_session_id"
+    if f.exists():
+        f.unlink()
+
+
 def set_pending(name, chat_id):
     """Mark session as having a pending request with secure permissions (0o600)."""
     d = ensure_session_dir(name)
@@ -1347,6 +1377,7 @@ def format_progress_lines(
     online: bool,
     ready: bool,
     mode: str,
+    resume_line: Optional[str] = None,
     needs_attention: Optional[str] = None
 ) -> list[str]:
     """Format /progress response lines (backend-aware)."""
@@ -1357,6 +1388,8 @@ def format_progress_lines(
     status.append(f"Backend: {backend}")
     status.append(f"Online: {'yes' if online else 'no'}")
     status.append(f"Ready: {'yes' if ready else 'no'}")
+    if resume_line:
+        status.append(resume_line)
     if needs_attention:
         status.append(f"Needs attention: {needs_attention}")
     status.append(f"Mode: {mode}")
@@ -1521,6 +1554,14 @@ class WorkerManager:
 
         time.sleep(0.5)
 
+        # After tmux new-session succeeds, capture the pane's cwd
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            save_claude_session_cwd(name, result.stdout.strip())
+
         export_hook_env(tmux_name, backend)
         time.sleep(0.3)
 
@@ -1559,10 +1600,10 @@ class WorkerManager:
             "Manager can send you files (images, PDFs, documents) - they'll appear as local paths. "
             "To send files back: [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/img.png|caption]]. "
             "Allowed paths: /tmp, current directory. "
-            "To message other workers: curl $BRIDGE_URL/workers to discover workers and their protocols. "
-            f"IMPORTANT: Always prefix your name when messaging workers (e.g., '{name}: your message'). "
-            "For tmux workers: use tmux send-keys. "
-            "For pipe workers: use 'echo msg > pipe &' (background!) — writing to a pipe BLOCKS until read, so never use cat/echo without & or your session will freeze. "
+            "MESSAGING OTHER WORKERS: "
+            "Run `curl -s $BRIDGE_URL/workers` — it returns each worker's name, protocol, and a ready-to-use send_example command. "
+            "ALWAYS call /workers before messaging — never guess addresses. "
+            f"ALWAYS prefix your name (e.g., '{name}: your message'). "
             "Do NOT output worker messages normally or they go to Telegram."
         )
         if not backend_obj.is_interactive:
@@ -1628,7 +1669,7 @@ class WorkerManager:
 
         return True, None
 
-    def restart(self, name: str):
+    def restart(self, name: str, mode: str = "relaunch"):
         """Restart a worker in its existing tmux session."""
         self._sync_paths()
         registered = self.get_registered_sessions()
@@ -1643,12 +1684,20 @@ class WorkerManager:
         if not tmux_exists(tmux_name):
             return False, "Worker workspace is not running"
 
-        # Clean non-interactive state on restart
-        if not backend.is_interactive:
-            session_dir = self.sessions_dir / name
+        resume_id = ""
+        resume_cwd = ""
+        session_dir = self.sessions_dir / name
+        if mode == "resume":
+            resume_id = get_claude_session_id(name)
+            resume_cwd = get_claude_session_cwd(name)
+        else:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
+
+        # Clean non-interactive state on restart
+        if not backend.is_interactive:
+            session_dir.mkdir(parents=True, exist_ok=True)
             ensure_worker_pipe(name)
             clear_pending(name)
         elif is_claude_running(tmux_name):
@@ -1668,7 +1717,9 @@ class WorkerManager:
             docker_cmd = get_docker_run_cmd(name)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
-            start_cmd = backend.start_cmd()
+            start_cmd = backend.start_cmd(resume_id)
+            if resume_cwd:
+                start_cmd = f'cd "{resume_cwd}" && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
 
         return True, None
@@ -1957,10 +2008,10 @@ def kill_session(name):
     return worker_manager.end(name)
 
 
-def restart_claude(name):
+def restart_claude(name, mode: str = "relaunch"):
     """Restart claude in an existing tmux session."""
     _sync_worker_manager()
-    return worker_manager.restart(name)
+    return worker_manager.restart(name, mode=mode)
 
 
 def switch_session(name):
@@ -2246,6 +2297,8 @@ class CommandRouter:
             return self.cmd_pause(chat_id)
         elif cmd == "/relaunch":
             return self.cmd_relaunch(chat_id)
+        elif cmd == "/resume":
+            return self.cmd_resume(chat_id)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
         elif cmd == "/learn":
@@ -2375,6 +2428,12 @@ class CommandRouter:
                 if not claude_running:
                     needs_attention = "worker app is not running. Use /relaunch."
 
+        resume_id = get_claude_session_id(name)
+        if resume_id:
+            resume_line = f"Resume: available (session {resume_id[:8]}...)"
+        else:
+            resume_line = "Resume: not available"
+
         status = format_progress_lines(
             name=name,
             pending=pending,
@@ -2382,6 +2441,7 @@ class CommandRouter:
             online=online,
             ready=ready,
             mode=mode,
+            resume_line=resume_line,
             needs_attention=needs_attention
         )
 
@@ -2415,11 +2475,37 @@ class CommandRouter:
             return True
 
         name = state["active"]
-        ok, err = restart_claude(name)
+        ok, err = restart_claude(name, mode="relaunch")
         if ok:
             self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
         else:
             self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    def cmd_resume(self, chat_id):
+        if not state["active"]:
+            self.reply(chat_id, "No one assigned.")
+            return True
+
+        name = state["active"]
+        session_dir = get_session_dir(name)
+        has_session_id = False
+        if session_dir.exists():
+            has_session_id = any(session_dir.glob("*_session_id"))
+
+        if not has_session_id:
+            ok, err = restart_claude(name, mode="relaunch")
+            if ok:
+                self.reply(chat_id, f"No resume info found. Relaunching {name.capitalize()} fresh...")
+            else:
+                self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
+            return True
+
+        ok, err = restart_claude(name, mode="resume")
+        if ok:
+            self.reply(chat_id, f"Resuming {name.capitalize()}...")
+        else:
+            self.reply(chat_id, f"Could not resume \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_settings(self, chat_id):
