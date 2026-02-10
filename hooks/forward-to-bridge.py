@@ -1,61 +1,16 @@
 #!/usr/bin/env python3
-"""Forward extracted Claude response to bridge."""
+"""Forward extracted Claude response to bridge as raw markdown.
+
+Bridge handles markdown→Telegram HTML conversion via markdown-it-py.
+"""
 
 import sys
-import re
 import json
 import urllib.request
 
 
-def esc(s):
-    """Escape HTML special characters."""
-    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-
-def markdown_to_html(text):
-    """Convert markdown to Telegram-compatible HTML."""
-    # Extract code blocks and inline code first (to protect from other formatting)
-    blocks, inlines = [], []
-
-    # Code blocks: ```lang\ncode```
-    text = re.sub(
-        r'```(\w*)\n?(.*?)```',
-        lambda m: (blocks.append((m.group(1) or '', m.group(2))), f"\x00B{len(blocks)-1}\x00")[1],
-        text, flags=re.DOTALL
-    )
-
-    # Inline code: `code`
-    text = re.sub(
-        r'`([^`\n]+)`',
-        lambda m: (inlines.append(m.group(1)), f"\x00I{len(inlines)-1}\x00")[1],
-        text
-    )
-
-    # Escape HTML
-    text = esc(text)
-
-    # Bold: **text**
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-
-    # Italic: *text* (but not **text**)
-    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', text)
-
-    # Restore code blocks
-    for i, (lang, code) in enumerate(blocks):
-        if lang:
-            text = text.replace(f"\x00B{i}\x00", f'<pre><code class="language-{lang}">{esc(code.strip())}</code></pre>')
-        else:
-            text = text.replace(f"\x00B{i}\x00", f'<pre>{esc(code.strip())}</pre>')
-
-    # Restore inline code
-    for i, code in enumerate(inlines):
-        text = text.replace(f"\x00I{i}\x00", f'<code>{esc(code)}</code>')
-
-    return text
-
-
 def forward_to_bridge(text, session, bridge_url):
-    """Send formatted text to bridge via HTTP POST."""
+    """Send raw markdown text to bridge via HTTP POST."""
     data = json.dumps({"session": session, "text": text}).encode()
     req = urllib.request.Request(
         bridge_url,
@@ -82,9 +37,7 @@ def main():
     if not text or text == "null":
         sys.exit(0)
 
-    # Bridge handles message splitting - don't truncate here
-    text = markdown_to_html(text)
-
+    # Bridge handles message splitting and markdown conversion
     try:
         forward_to_bridge(text, session, bridge_url)
     except Exception as e:

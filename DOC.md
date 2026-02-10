@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.21.1
+> Version: 0.21.2
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,16 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.21.2 - markdown-it-py renderer + send fallback
+
+**New features:**
+- **`markdown_to_telegram_html()`**: AST-based markdown→Telegram HTML converter using `markdown-it-py`. Handles bold, italic, strikethrough, code, code blocks, links, blockquotes, headings, lists, tables (as bullet lists), horizontal rules.
+- **400-fallback**: If Telegram rejects HTML (parse error), automatically retries as plain text. No more lost messages.
+
+**Changes:**
+- `forward-to-bridge.py` simplified to thin forwarder — sends raw markdown with `escape: True`. All formatting logic centralized in bridge.py.
+- Backward compatible: `escape=False` still passes through pre-formatted HTML unchanged.
 
 ### v0.21.1 - Remove file sending restrictions
 

@@ -2057,24 +2057,6 @@ print('OK')
     fi
 }
 
-test_codex_response_requires_escape() {
-    info "Testing codex response requires escaping..."
-
-    if python3 -c "
-import bridge
-
-assert bridge.should_escape_response({'source': 'codex'}) is True
-assert bridge.should_escape_response({'escape': True}) is True
-assert bridge.should_escape_response({'source': 'hook'}) is False
-assert bridge.should_escape_response({}) is False
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Codex response escape detection"
-    else
-        fail "Codex response escape detection failed"
-    fi
-}
 
 test_update_bot_commands_includes_codex() {
     info "Testing update_bot_commands includes codex workers..."
@@ -5770,41 +5752,97 @@ print('OK')
     fi
 }
 
-# Test the esc() function in hooks/forward-to-bridge.py (tmux mode parity)
-test_forward_to_bridge_html_escape() {
-    info "Testing forward-to-bridge esc() escapes HTML special characters..."
+# Test markdown_to_telegram_html converter (markdown-it-py based)
+test_markdown_to_telegram_html() {
+    info "Testing markdown_to_telegram_html converts markdown to Telegram HTML..."
 
     if python3 -c "
-import sys
+from bridge import markdown_to_telegram_html
+
+# Bold, italic, strikethrough, inline code
+r = markdown_to_telegram_html('**bold** *italic* ~~strike~~ \`code\`')
+assert '<b>bold</b>' in r, f'Bold: {r}'
+assert '<i>italic</i>' in r, f'Italic: {r}'
+assert '<s>strike</s>' in r, f'Strike: {r}'
+assert '<code>code</code>' in r, f'Code: {r}'
+
+# Code block with language
+r = markdown_to_telegram_html('\`\`\`python\nprint(1)\n\`\`\`')
+assert '<pre><code class=\"language-python\">' in r, f'Fence lang: {r}'
+
+# Link
+r = markdown_to_telegram_html('[click](http://example.com)')
+assert '<a href=\"http://example.com\">click</a>' in r, f'Link: {r}'
+
+# Heading as bold
+r = markdown_to_telegram_html('## Heading')
+assert '<b>Heading</b>' in r, f'Heading: {r}'
+
+# Bullet list
+r = markdown_to_telegram_html('- a\n- b')
+assert '\u2022 a' in r and '\u2022 b' in r, f'Bullets: {r}'
+
+# Table as pre-block with aligned columns
+r = markdown_to_telegram_html('| A | B |\n|---|---|\n| 1 | 2 |')
+assert '<pre>' in r and 'A' in r and '1' in r, f'Table: {r}'
+
+# Blockquote
+r = markdown_to_telegram_html('> quoted')
+assert '<blockquote>' in r, f'Blockquote: {r}'
+
+# HTML escaping
+r = markdown_to_telegram_html('a < b & c > d')
+assert '&lt;' in r and '&amp;' in r, f'Escape: {r}'
+
+# Empty
+assert markdown_to_telegram_html('') == '', 'Empty'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "markdown_to_telegram_html converts all markdown types correctly"
+    else
+        fail "markdown_to_telegram_html test failed"
+    fi
+}
+
+# Test forward-to-bridge.py sends escape:True (bridge converts markdown)
+test_forward_to_bridge_escape_flag() {
+    info "Testing forward-to-bridge sends escape:True in payload..."
+
+    if python3 -c "
+import sys, json
 from importlib.util import spec_from_loader, module_from_spec
 from importlib.machinery import SourceFileLoader
+from unittest.mock import patch, MagicMock
+from io import BytesIO
 
-# Load forward-to-bridge.py as a module (dash in name requires special handling)
+# Load forward-to-bridge.py as a module
 spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
 forward_to_bridge = module_from_spec(spec)
 spec.loader.exec_module(forward_to_bridge)
 
-esc = forward_to_bridge.esc
+# Capture the JSON payload sent to bridge
+captured = {}
+def mock_urlopen(req, **kwargs):
+    captured['data'] = json.loads(req.data)
+    resp = MagicMock()
+    resp.status = 200
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = lambda s, *a: None
+    return resp
 
-# Test basic escaping
-assert esc('hello') == 'hello', 'Plain text unchanged'
-assert esc('<script>') == '&lt;script&gt;', 'Angle brackets escaped'
-assert esc('a & b') == 'a &amp; b', 'Ampersand escaped'
-assert esc('1 < 2 > 0') == '1 &lt; 2 &gt; 0', 'Mixed escaping'
+with patch('urllib.request.urlopen', mock_urlopen):
+    forward_to_bridge.forward_to_bridge('**bold** text', 'test-session', 'http://localhost:8080/response')
 
-# Test real-world cases (code snippets)
-code = 'if (x < 10 && y > 5)'
-expected = 'if (x &lt; 10 &amp;&amp; y &gt; 5)'
-assert esc(code) == expected, f'Code escaping failed: {esc(code)}'
-
-# Test already-escaped content (should double-escape)
-assert esc('&lt;') == '&amp;lt;', 'Already escaped gets re-escaped'
+assert captured['data']['text'] == '**bold** text', 'Text should be raw markdown (not converted)'
+assert captured['data']['session'] == 'test-session', 'Session mismatch'
+assert 'escape' not in captured['data'], 'escape flag should not be sent'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "forward-to-bridge esc() escapes HTML correctly"
+        success "forward-to-bridge sends raw markdown to bridge"
     else
-        fail "forward-to-bridge esc() test failed"
+        fail "forward-to-bridge raw markdown test failed"
     fi
 }
 
@@ -7438,10 +7476,15 @@ run_unit_tests() {
     test_sandbox_config
     test_sandbox_docker_cmd
 
+    # Unit tests - Markdown conversion
+    log ""
+    log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
+    test_markdown_to_telegram_html
+    test_forward_to_bridge_escape_flag
+
     # Unit tests - Backend registry / non-interactive mode
     log ""
     log "── Backend Registry Tests (Unit) ───────────────────────────────────────"
-    test_forward_to_bridge_html_escape
     test_backend_registry_exists
     test_get_registered_sessions_includes_noninteractive_workers
 
@@ -7460,7 +7503,6 @@ run_unit_tests() {
     test_codex_pause_clears_pending
     test_get_workers_includes_codex
     test_pipe_forwarding_to_codex
-    test_codex_response_requires_escape
     test_update_bot_commands_includes_codex
     test_broadcast_includes_codex
 
