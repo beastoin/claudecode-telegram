@@ -809,21 +809,6 @@ def validate_photo_path(photo_path):
     if file_size > MAX_FILE_SIZE:
         return False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}"
 
-    # Security: path must be within allowed directories
-    # Allow: /tmp (includes image inbox), sessions dir, and current working directory
-    allowed_roots = [
-        Path("/tmp"),
-        SESSIONS_DIR,
-        Path.cwd(),
-    ]
-    photo_resolved = photo_path.resolve()
-    is_allowed = any(
-        str(photo_resolved).startswith(str(root.resolve()))
-        for root in allowed_roots
-    )
-    if not is_allowed:
-        return False, f"Photo path not in allowed directory: {photo_path}"
-
     return True, photo_path
 
 
@@ -920,10 +905,6 @@ def validate_document_path(doc_path):
     ext_lower = doc_path.suffix.lower()
     if ext_lower in BLOCKED_DOC_EXTENSIONS:
         return False, f"Blocked extension (sensitive): {doc_path.suffix}"
-
-    # Check extension is in allowlist
-    if ext_lower not in ALLOWED_DOC_EXTENSIONS:
-        return False, f"Extension not allowed: {doc_path.suffix}"
 
     # Security: check for blocked filenames
     if is_blocked_filename(doc_path.name):
@@ -1530,7 +1511,7 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"tmux send-keys -t {tmux_name} 'YOUR_NAME: your message here' Enter"
+                    "send_example": f"tmux send-keys -t {tmux_name} 'YOUR_NAME: your message here' Enter && sleep 1"
                 })
         return workers
 
@@ -1539,7 +1520,7 @@ class WorkerManager:
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
-            "SENDING FILES: Use [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/photo.png|caption]] to send files to manager via Telegram. Allowed paths: /tmp, current directory. "
+            "SENDING FILES: Use [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/photo.png|caption]] to send files to manager via Telegram. "
             "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.21.0
+> Version: 0.21.1
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,14 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.21.1 - Remove file sending restrictions
+
+**Changes:**
+- **Photos: no path restrictions** — removed allowed-directory check (was limited to /tmp, sessions dir, cwd). Any readable file can now be sent as a photo.
+- **Documents: blocklist-only** — removed extension allowlist. Documents now only check against the blocklist of sensitive extensions (.pem, .key, .env, etc.) instead of requiring a known extension.
+- **Inter-worker sleep fix** — `send_example` in `/workers` response now includes `&& sleep 1` to prevent tmux batching when sending multiple messages.
+- **Updated welcome text** — removed "Allowed paths: /tmp, current directory" since path restrictions are gone.
 
 ### v0.21.0 - Worker checkin + instruction refresh
 
