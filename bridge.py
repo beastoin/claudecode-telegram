@@ -1088,6 +1088,282 @@ def escape_html(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+def markdown_to_telegram_html(text: str) -> str:
+    """Convert markdown to Telegram-compatible HTML using markdown-it-py.
+
+    Handles: bold, italic, strikethrough, code, code blocks, links,
+    blockquotes, headings (as bold), lists, tables (as bullet lists), hr.
+    Unrecognized tokens degrade to plain text.
+    """
+    import re
+    from markdown_it import MarkdownIt
+
+    md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
+    tokens = md.parse(text)
+
+    result = []
+    list_depth = 0
+    ordered_counter = []  # stack of counters for ordered lists
+    in_table = False
+    table_row = []  # current row cells
+    table_headers = []  # header cells
+    table_rows = []  # all data rows
+    in_thead = False
+
+    _SAFE_HTML_TAG = re.compile(
+        r'^(?:</?(?:b|i|code|pre|s|u)>|</a>|<a href=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)>)$'
+    )
+
+    def _render_html_inline(raw):
+        if not raw:
+            return ""
+        if _SAFE_HTML_TAG.match(raw):
+            return raw
+        return escape_html(raw)
+
+    def _render_inline_plain(children):
+        """Render inline token children to plain text (for use inside <pre>)."""
+        out = []
+        for tok in children:
+            if tok.type in ("text", "code_inline"):
+                out.append(tok.content)
+            elif tok.type in ("softbreak", "hardbreak"):
+                out.append(" ")
+            elif tok.type == "image":
+                out.append(tok.content or "image")
+            elif tok.type in ("strong_open", "strong_close", "em_open", "em_close",
+                              "s_open", "s_close", "link_open", "link_close",
+                              "html_inline"):
+                pass
+            else:
+                if tok.content:
+                    out.append(tok.content)
+        return "".join(out)
+
+    def _render_inline(children):
+        """Render inline token children to HTML string."""
+        out = []
+        for tok in children:
+            if tok.type == "text":
+                out.append(escape_html(tok.content))
+            elif tok.type == "code_inline":
+                out.append(f"<code>{escape_html(tok.content)}</code>")
+            elif tok.type == "strong_open":
+                out.append("<b>")
+            elif tok.type == "strong_close":
+                out.append("</b>")
+            elif tok.type == "em_open":
+                out.append("<i>")
+            elif tok.type == "em_close":
+                out.append("</i>")
+            elif tok.type == "s_open":
+                out.append("<s>")
+            elif tok.type == "s_close":
+                out.append("</s>")
+            elif tok.type == "link_open":
+                href = escape_html((tok.attrs or {}).get("href", ""))
+                out.append(f'<a href="{href}">')
+            elif tok.type == "link_close":
+                out.append("</a>")
+            elif tok.type == "softbreak":
+                out.append("\n")
+            elif tok.type == "hardbreak":
+                out.append("\n")
+            elif tok.type == "image":
+                alt = escape_html(tok.content or "image")
+                src = escape_html((tok.attrs or {}).get("src", ""))
+                out.append(f'[{alt}]({src})')
+            elif tok.type == "html_inline":
+                out.append(_render_html_inline(tok.content))
+            else:
+                if tok.content:
+                    out.append(escape_html(tok.content))
+        return "".join(out)
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+
+        if tok.type == "paragraph_open":
+            pass
+        elif tok.type == "paragraph_close":
+            if not in_table:
+                result.append("\n")
+        elif tok.type == "inline":
+            if in_table:
+                table_row.append(_render_inline_plain(tok.children or []))
+            else:
+                result.append(_render_inline(tok.children or []))
+
+        # Headings -> bold
+        elif tok.type == "heading_open":
+            result.append("<b>")
+        elif tok.type == "heading_close":
+            result.append("</b>\n")
+
+        # Code blocks
+        elif tok.type == "fence":
+            lang = tok.info.strip() if tok.info else ""
+            code = escape_html(tok.content.rstrip("\n"))
+            if lang:
+                result.append(f'<pre><code class="language-{escape_html(lang)}">{code}</code></pre>\n')
+            else:
+                result.append(f"<pre>{code}</pre>\n")
+        elif tok.type == "code_block":
+            code = escape_html(tok.content.rstrip("\n"))
+            result.append(f"<pre>{code}</pre>\n")
+
+        # Blockquotes
+        elif tok.type == "blockquote_open":
+            result.append("<blockquote>")
+        elif tok.type == "blockquote_close":
+            if result and result[-1].endswith("\n"):
+                result[-1] = result[-1][:-1]
+            result.append("</blockquote>\n")
+
+        # Bullet lists
+        elif tok.type == "bullet_list_open":
+            list_depth += 1
+        elif tok.type == "bullet_list_close":
+            list_depth -= 1
+            if list_depth == 0:
+                result.append("\n")
+
+        # Ordered lists
+        elif tok.type == "ordered_list_open":
+            list_depth += 1
+            ordered_counter.append(0)
+        elif tok.type == "ordered_list_close":
+            list_depth -= 1
+            ordered_counter.pop()
+            if list_depth == 0:
+                result.append("\n")
+
+        # List items
+        elif tok.type == "list_item_open":
+            indent = "  " * (list_depth - 1)
+            if ordered_counter:
+                ordered_counter[-1] += 1
+                result.append(f"{indent}{ordered_counter[-1]}. ")
+            else:
+                result.append(f"{indent}\u2022 ")
+        elif tok.type == "list_item_close":
+            if result and not result[-1].endswith("\n"):
+                result.append("\n")
+
+        # Tables -> <pre> aligned columns
+        elif tok.type == "table_open":
+            in_table = True
+            table_headers = []
+            table_rows = []
+        elif tok.type == "table_close":
+            in_table = False
+            # Render as <pre> with aligned columns
+            all_rows = [table_headers] + table_rows
+            if all_rows and all_rows[0]:
+                num_cols = max(len(r) for r in all_rows)
+                col_widths = [0] * num_cols
+                for row in all_rows:
+                    for ci, cell in enumerate(row):
+                        if ci < num_cols:
+                            col_widths[ci] = max(col_widths[ci], len(cell))
+                lines = []
+                for ri, row in enumerate(all_rows):
+                    cols = []
+                    for ci in range(num_cols):
+                        cell = row[ci] if ci < len(row) else ""
+                        cols.append(escape_html(cell.ljust(col_widths[ci])))
+                    lines.append("  ".join(cols).rstrip())
+                    if ri == 0:
+                        lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
+                result.append(f"<pre>{''.join(chr(10).join(lines))}</pre>\n")
+            table_headers = []
+            table_rows = []
+        elif tok.type == "thead_open":
+            in_thead = True
+        elif tok.type == "thead_close":
+            in_thead = False
+        elif tok.type in ("tbody_open", "tbody_close"):
+            pass
+        elif tok.type == "tr_open":
+            table_row = []
+        elif tok.type == "tr_close":
+            if in_thead:
+                table_headers = table_row[:]
+            else:
+                table_rows.append(table_row[:])
+            table_row = []
+        elif tok.type in ("th_open", "th_close", "td_open", "td_close"):
+            pass
+
+        # Horizontal rule
+        elif tok.type == "hr":
+            result.append("\u2014\u2014\u2014\u2014\n")
+
+        # HTML blocks
+        elif tok.type == "html_block":
+            result.append(_render_html_inline(tok.content))
+
+        else:
+            if tok.content:
+                result.append(escape_html(tok.content))
+
+        i += 1
+
+    output = "".join(result).strip()
+    while "\n\n\n" in output:
+        output = output.replace("\n\n\n", "\n\n")
+
+    # Post-process: wrap runs of plain-text tabular lines in <pre>.
+    # Detects lines with 2+ internal multi-space gaps (column alignment)
+    # that are NOT already inside <pre> tags.
+    _MULTI_SPACE = re.compile(r'\S  +\S.*\S  +\S')  # 2+ columns with 2+ space gaps
+
+    def _wrap_plain_tables(text):
+        """Find consecutive tabular lines outside <pre> and wrap in <pre>."""
+        parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
+        out = []
+        for part in parts:
+            if part.startswith('<pre>'):
+                out.append(part)
+                continue
+            lines = part.split('\n')
+            i = 0
+            while i < len(lines):
+                if _MULTI_SPACE.search(lines[i]):
+                    # Start of tabular run
+                    run = [lines[i]]
+                    j = i + 1
+                    while j < len(lines) and (_MULTI_SPACE.search(lines[j]) or lines[j].strip() == ''):
+                        run.append(lines[j])
+                        j += 1
+                    # Only wrap if 2+ tabular lines
+                    tabular_count = sum(1 for l in run if _MULTI_SPACE.search(l))
+                    if tabular_count >= 2:
+                        # Strip trailing empty lines from run
+                        while run and run[-1].strip() == '':
+                            j -= 1
+                            run.pop()
+                        content = escape_html('\n'.join(run))
+                        out.append(f'<pre>{content}</pre>')
+                        i = j
+                    else:
+                        out.append(lines[i])
+                        i += 1
+                else:
+                    out.append(lines[i])
+                    i += 1
+            # Rejoin non-pre parts with newlines (but parts list alternates)
+            if out and not out[-1].startswith('<pre>') and not part.startswith('<pre>'):
+                pass  # already appended line by line
+        # Reconstruct: join lines that aren't pre blocks
+        # Actually, simpler approach: rebuild from parts
+        return '\n'.join(out) if out else text
+
+    output = _wrap_plain_tables(output)
+    return output
+
+
 def format_response_text(session_name, text):
     """Format response with session prefix. No escaping - Claude Code handles safety."""
     return f"<b>{session_name}:</b>\n{text}"
@@ -1910,21 +2186,19 @@ def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bo
     return worker_manager.send(name, message, chat_id)
 
 
-def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool = True, log_prefix: str = "Response"):
+def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response"):
     """Send a response to Telegram. Shared by hook responses.
 
     Args:
         name: Session/worker name for message prefix
         text: Response text (may contain image/file tags)
         chat_id: Telegram chat ID
-        escape: If True, escape HTML special chars. If False, text is pre-escaped.
         log_prefix: Prefix for log messages (e.g., "Response", "Hook response")
     """
-    # Parse image and file tags from text (before escaping to preserve tag syntax)
+    # Parse image and file tags from text (before converting to preserve tag syntax)
     clean_text, images = parse_image_tags(text)
     clean_text, files = parse_file_tags(clean_text)
-    if escape:
-        clean_text = escape_html(clean_text)
+    clean_text = markdown_to_telegram_html(clean_text)
 
     # Send text message if there's text content
     if clean_text:
@@ -1950,7 +2224,19 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool =
                 else:
                     print(f"{log_prefix} sent: {name} -> Telegram OK")
             else:
-                print(f"{log_prefix} failed: {name} -> {result}")
+                # Fallback: retry as plain text on HTML parse error
+                desc = (result or {}).get("description", "")
+                if "parse entities" in desc.lower() or "can't parse" in desc.lower():
+                    print(f"{log_prefix} HTML parse error, retrying as plain text: {desc}")
+                    plain_data = {k: v for k, v in msg_data.items() if k != "parse_mode"}
+                    result = telegram_api("sendMessage", plain_data)
+                    if result and result.get("ok"):
+                        prev_msg_id = result.get("result", {}).get("message_id")
+                        print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
+                    else:
+                        print(f"{log_prefix} failed (plain): {name} -> {result}")
+                else:
+                    print(f"{log_prefix} failed: {name} -> {result}")
 
             if i < len(formatted_parts) - 1:
                 time.sleep(0.05)
@@ -1978,13 +2264,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, escape: bool =
             })
 
 
-def should_escape_response(data: dict) -> bool:
-    """Determine whether a response payload should be HTML-escaped."""
-    if data.get("escape") is True:
-        return True
-    if data.get("source") == "codex":
-        return True
-    return False
 
 
  
@@ -2785,8 +3064,7 @@ class Handler(BaseHTTPRequestHandler):
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
             # Send response using shared helper
-            escape = should_escape_response(data)
-            send_response_to_telegram(session_name, text, int(chat_id), escape=escape, log_prefix="Response")
+            send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
 
             # Clear pending
             clear_pending(session_name)

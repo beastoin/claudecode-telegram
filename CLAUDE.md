@@ -211,6 +211,24 @@ cat ~/.claude/telegram/nodes/prod/port
 
 **Why:** Ports can be overridden, so never assume a port belongs to a specific node. Always verify before destructive operations.
 
+### Node credentials live in ~/.config/claudecode-telegram/
+
+**Problem:** During a prod restart, wasted time extracting the bot token from `/proc/<pid>/environ` when it was already stored in a config file.
+
+**Rule:** Token env files are at `~/.config/claudecode-telegram/<node>.env`. Use them for restarts:
+```bash
+# Load token and restart prod
+source ~/.config/claudecode-telegram/prod.env
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./claudecode-telegram.sh --node prod --no-sandbox --port 8080 run
+```
+
+| File | Purpose |
+|------|---------|
+| `~/.config/claudecode-telegram/prod.env` | Prod bot token |
+| `~/.config/claudecode-telegram/test.env` | Test bot token |
+
+**Why:** Faster, more reliable than extracting from running process memory. Works even if the bridge is already dead.
+
 ### Use script commands or PID files to stop services
 
 **Problem:** Used pkill to restart bridge, caused production outage.
