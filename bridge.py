@@ -212,11 +212,12 @@ class CodexBackend:
             print(f"Codex adapter not found: {adapter}")
             return False
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        _adapter_pids[worker_name] = proc
         return True
 
     def is_online(self, tmux_name: str) -> bool:
@@ -238,11 +239,12 @@ class GeminiBackend:
             print(f"Gemini adapter not found: {adapter}")
             return False
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        _adapter_pids[worker_name] = proc
         return True
 
     def is_online(self, tmux_name: str) -> bool:
@@ -264,11 +266,12 @@ class OpenCodeBackend:
             print(f"OpenCode adapter not found: {adapter}")
             return False
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        _adapter_pids[worker_name] = proc
         return True
 
     def is_online(self, tmux_name: str) -> bool:
@@ -281,6 +284,21 @@ BACKENDS = {
     "gemini": GeminiBackend(),
     "opencode": OpenCodeBackend(),
 }
+
+# Track inflight adapter processes per worker (non-interactive backends only)
+_adapter_pids: dict[str, subprocess.Popen] = {}
+
+
+def kill_adapter(name: str):
+    """Kill inflight adapter process for a worker."""
+    proc = _adapter_pids.pop(name, None)
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1)
 
 
 def get_backend(name: str) -> Backend:
@@ -1942,6 +1960,7 @@ class WorkerManager:
 
         # Clean non-interactive metadata (backend file, session IDs, pending)
         if not backend.is_interactive:
+            kill_adapter(name)
             session_dir = self.sessions_dir / name
             backend_file = session_dir / "backend"
             try:
@@ -2782,6 +2801,7 @@ class CommandRouter:
             backend_name = get_worker_backend(name, session)
             backend = get_backend(backend_name)
             if not backend.is_interactive:
+                kill_adapter(name)
                 clear_pending(name)
                 self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
                 return True

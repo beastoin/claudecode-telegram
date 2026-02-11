@@ -8,6 +8,7 @@ CLI flag parsing issues with messages starting with '-'.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import urllib.request
@@ -19,6 +20,14 @@ try:
     import fcntl  # type: ignore
 except Exception:  # pragma: no cover - non-POSIX fallback
     fcntl = None
+
+
+def _handle_sigterm(signum, frame):
+    """Exit cleanly on SIGTERM (bridge /pause or /end)."""
+    sys.exit(130)
+
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def get_session_id_file(worker_name: str, sessions_dir: str) -> Path:

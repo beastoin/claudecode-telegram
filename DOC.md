@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.21.3
+> Version: 0.21.4
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,15 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.21.4 - Adapter PID tracking (kill on /pause)
+
+**New features:**
+- **Adapter PID tracking**: Non-interactive backend `send()` methods now store the subprocess PID in `_adapter_pids` dict.
+- **`kill_adapter(name)`**: Terminates an inflight adapter process (terminate → wait → kill fallback).
+- **`/pause` kills adapter**: For non-interactive backends, `/pause` now kills the running adapter before clearing pending, preventing stale responses.
+- **`/end` kills adapter**: Worker removal also kills any inflight adapter.
+- **SIGTERM handler in codex adapter**: `codex-tmux-adapter.py` handles SIGTERM gracefully — exits without sending response to bridge.
 
 ### v0.21.3 - Non-interactive backend fixes
 

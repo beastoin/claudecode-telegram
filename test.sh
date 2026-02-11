@@ -2193,6 +2193,131 @@ print('OK')
     fi
 }
 
+test_adapter_pid_tracking() {
+    info "Testing adapter PID stored and kill_adapter terminates it..."
+
+    if python3 -c "
+import subprocess, time
+import bridge
+
+# Spawn a long-running process to simulate an adapter
+proc = subprocess.Popen(['sleep', '60'])
+bridge._adapter_pids['testworker'] = proc
+
+# Verify PID is stored and alive
+assert proc.poll() is None, 'process should be alive'
+assert 'testworker' in bridge._adapter_pids
+
+# Kill it
+bridge.kill_adapter('testworker')
+
+# Verify killed and removed from dict
+assert proc.poll() is not None, 'process should be dead after kill_adapter'
+assert 'testworker' not in bridge._adapter_pids, 'entry should be removed'
+
+# kill_adapter on unknown worker is a no-op
+bridge.kill_adapter('nonexistent')
+
+# kill_adapter on already-dead process is a no-op
+proc2 = subprocess.Popen(['true'])
+proc2.wait()
+bridge._adapter_pids['dead'] = proc2
+bridge.kill_adapter('dead')
+assert 'dead' not in bridge._adapter_pids
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Adapter PID tracking and kill_adapter work"
+    else
+        fail "Adapter PID tracking test failed"
+    fi
+}
+
+test_pause_kills_adapter() {
+    info "Testing /pause kills inflight adapter for codex worker..."
+
+    if python3 -c "
+import subprocess, tempfile, time
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = tmp
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+bridge.set_pending('alice', 12345)
+
+# Simulate an inflight adapter
+proc = subprocess.Popen(['sleep', '60'])
+bridge._adapter_pids['alice'] = proc
+assert proc.poll() is None, 'adapter should be alive before pause'
+
+bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
+bridge.state['active'] = 'alice'
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_pause(12345)
+
+assert proc.poll() is not None, 'adapter should be dead after pause'
+assert 'alice' not in bridge._adapter_pids, 'PID entry should be removed'
+assert not bridge.get_pending_file('alice').exists(), 'pending should be cleared'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/pause kills inflight adapter"
+    else
+        fail "/pause kills inflight adapter test failed"
+    fi
+}
+
+test_end_kills_adapter() {
+    info "Testing /end kills inflight adapter for codex worker..."
+
+    if python3 -c "
+import subprocess, tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = tmp
+bridge.worker_manager.tmux_prefix = 'claude-test-'
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+session_dir = tmp / 'bob'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+# Simulate an inflight adapter
+proc = subprocess.Popen(['sleep', '60'])
+bridge._adapter_pids['bob'] = proc
+assert proc.poll() is None, 'adapter should be alive before end'
+
+bridge.state['active'] = 'bob'
+ok, err = bridge.worker_manager.end('bob')
+
+assert proc.poll() is not None, 'adapter should be dead after end'
+assert 'bob' not in bridge._adapter_pids, 'PID entry should be removed'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/end kills inflight adapter"
+    else
+        fail "/end kills inflight adapter test failed"
+    fi
+}
+
 
 test_update_bot_commands_includes_codex() {
     info "Testing update_bot_commands includes codex workers..."
@@ -7645,6 +7770,9 @@ run_unit_tests() {
     test_codex_end_cleans_session
     test_codex_relaunch_clears_session_id
     test_codex_pause_clears_pending
+    test_adapter_pid_tracking
+    test_pause_kills_adapter
+    test_end_kills_adapter
     test_get_any_session_id
     test_progress_continuity_for_noninteractive
     test_noninteractive_backpressure
