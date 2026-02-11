@@ -1946,6 +1946,142 @@ print('OK')
     fi
 }
 
+test_get_any_session_id() {
+    info "Testing get_any_session_id finds codex/claude session ids..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+# No session dir
+sid, src = bridge.get_any_session_id('alice')
+assert sid == '' and src == '', f'Expected empty, got {sid}/{src}'
+
+# With codex_session_id
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'codex_session_id').write_text('thread_abc')
+sid, src = bridge.get_any_session_id('alice')
+assert sid == 'thread_abc', f'Expected thread_abc, got {sid}'
+assert src == 'codex', f'Expected codex, got {src}'
+
+# With claude_session_id
+(session_dir / 'codex_session_id').unlink()
+(session_dir / 'claude_session_id').write_text('sess_xyz')
+sid, src = bridge.get_any_session_id('alice')
+assert sid == 'sess_xyz', f'Expected sess_xyz, got {sid}'
+assert src == 'claude', f'Expected claude, got {src}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_any_session_id works"
+    else
+        fail "get_any_session_id test failed"
+    fi
+}
+
+test_progress_continuity_for_noninteractive() {
+    info "Testing /progress shows Continuity for non-interactive backends..."
+
+    if python3 -c "
+from bridge import format_progress_lines
+
+# Non-interactive with continuity line
+lines = format_progress_lines(
+    name='alice',
+    pending=True,
+    backend='codex',
+    online=True,
+    ready=True,
+    mode='codex (non-interactive)',
+    continuity_line='Continuity: on (codex thread abc12345...)'
+)
+text = '\\n'.join(lines)
+assert 'Continuity: on' in text, f'Expected Continuity line: {text}'
+assert 'Resume' not in text, f'Should not have Resume for non-interactive: {text}'
+
+# Interactive with resume line
+lines = format_progress_lines(
+    name='bob',
+    pending=False,
+    backend='claude',
+    online=True,
+    ready=True,
+    mode='tmux',
+    resume_line='Resume: available (session abc12345...)'
+)
+text = '\\n'.join(lines)
+assert 'Resume: available' in text, f'Expected Resume line: {text}'
+assert 'Continuity' not in text, f'Should not have Continuity for interactive: {text}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/progress shows Continuity for non-interactive"
+    else
+        fail "/progress Continuity test failed"
+    fi
+}
+
+test_noninteractive_backpressure() {
+    info "Testing non-interactive backpressure rejects while busy..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+
+# Setup alice as codex worker
+session_dir = tmp / 'alice'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+bridge.state['active'] = 'alice'
+
+prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {}
+bridge.worker_manager.get_registered_sessions = lambda: {'alice': {'tmux': f'{prefix}alice', 'backend': 'codex'}}
+bridge.worker_manager.is_online = lambda name, session=None: True
+bridge.worker_manager.send = lambda name, message, chat_id=None, session=None: True
+bridge.send_typing_loop = lambda chat_id, name: None
+
+replies = []
+class FakeTelegram:
+    def send_message(self, chat_id, text, **kwargs):
+        replies.append(text)
+        return {'ok': True}
+    def set_reaction(self, *a, **kw):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+
+# Set pending to simulate busy
+bridge.set_pending('alice', 123)
+
+# Try to route a message - should be rejected
+router.route_message('alice', 'hello', 123, None)
+assert any('still working' in r for r in replies), f'Expected backpressure rejection, got: {replies}'
+
+# Clear pending and try again
+bridge.clear_pending('alice')
+replies.clear()
+router.route_message('alice', 'hello', 123, None)
+assert not any('still working' in r for r in replies), f'Should NOT reject when not pending: {replies}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Non-interactive backpressure works"
+    else
+        fail "Non-interactive backpressure test failed"
+    fi
+}
+
 test_get_workers_includes_codex() {
     info "Testing /workers includes codex exec workers..."
 
@@ -7501,6 +7637,9 @@ run_unit_tests() {
     test_codex_end_cleans_session
     test_codex_relaunch_clears_session_id
     test_codex_pause_clears_pending
+    test_get_any_session_id
+    test_progress_continuity_for_noninteractive
+    test_noninteractive_backpressure
     test_get_workers_includes_codex
     test_pipe_forwarding_to_codex
     test_update_bot_commands_includes_codex

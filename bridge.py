@@ -1514,6 +1514,22 @@ def clear_claude_session_id(name):
         f.unlink()
 
 
+def get_any_session_id(name):
+    """Get any *_session_id value for a worker (backend-agnostic).
+
+    Returns (session_id, source) tuple where source is the prefix (e.g. 'claude', 'codex').
+    """
+    session_dir = get_session_dir(name)
+    if not session_dir.exists():
+        return "", ""
+    for f in sorted(session_dir.glob("*_session_id")):
+        val = f.read_text().strip()
+        if val:
+            source = f.name.replace("_session_id", "")
+            return val, source
+    return "", ""
+
+
 def set_pending(name, chat_id):
     """Mark session as having a pending request with secure permissions (0o600)."""
     d = ensure_session_dir(name)
@@ -1636,6 +1652,7 @@ def format_progress_lines(
     ready: bool,
     mode: str,
     resume_line: Optional[str] = None,
+    continuity_line: Optional[str] = None,
     needs_attention: Optional[str] = None
 ) -> list[str]:
     """Format /progress response lines (backend-aware)."""
@@ -1646,7 +1663,9 @@ def format_progress_lines(
     status.append(f"Backend: {backend}")
     status.append(f"Online: {'yes' if online else 'no'}")
     status.append(f"Ready: {'yes' if ready else 'no'}")
-    if resume_line:
+    if continuity_line:
+        status.append(continuity_line)
+    elif resume_line:
         status.append(resume_line)
     if needs_attention:
         status.append(f"Needs attention: {needs_attention}")
@@ -2701,11 +2720,23 @@ class CommandRouter:
                 if not claude_running:
                     needs_attention = "worker app is not running. Use /relaunch."
 
-        resume_id = get_claude_session_id(name)
-        if resume_id:
-            resume_line = f"Resume: available (session {resume_id[:8]}...)"
+        resume_line = None
+        continuity_line = None
+
+        if not backend.is_interactive:
+            # Non-interactive: show Continuity (thread) + In-flight
+            session_id, source = get_any_session_id(name)
+            if session_id:
+                continuity_line = f"Continuity: on ({source} thread {session_id[:8]}...)"
+            else:
+                continuity_line = "Continuity: off (next message starts new thread)"
         else:
-            resume_line = "Resume: not available"
+            # Interactive: show Resume
+            resume_id = get_claude_session_id(name)
+            if resume_id:
+                resume_line = f"Resume: available (session {resume_id[:8]}...)"
+            else:
+                resume_line = "Resume: not available"
 
         status = format_progress_lines(
             name=name,
@@ -2715,6 +2746,7 @@ class CommandRouter:
             ready=ready,
             mode=mode,
             resume_line=resume_line,
+            continuity_line=continuity_line,
             needs_attention=needs_attention
         )
 
@@ -2761,6 +2793,21 @@ class CommandRouter:
             return True
 
         name = state["active"]
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(name)
+        backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
+        backend = get_backend(backend_name)
+
+        # Non-interactive backends: resume is automatic via saved thread ID
+        if not backend.is_interactive:
+            session_id, source = get_any_session_id(name)
+            if session_id:
+                self.reply(chat_id, f"Resume is automatic for {backend_name}. Thread {session_id[:8]}... is active — next message continues it.")
+            else:
+                self.reply(chat_id, f"No thread found for {name.capitalize()}. Next message starts a new {backend_name} thread.")
+            return True
+
+        # Interactive backends: restart with --resume
         session_dir = get_session_dir(name)
         has_session_id = False
         if session_dir.exists():
@@ -2922,6 +2969,11 @@ class CommandRouter:
 
         backend_name = get_worker_backend(session_name, session)
         backend = get_backend(backend_name)
+
+        # Non-interactive backpressure: reject if already processing
+        if not backend.is_interactive and is_pending(session_name):
+            self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
+            return
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
 

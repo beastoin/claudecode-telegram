@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.21.2
+> Version: 0.21.3
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,14 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.21.3 - Non-interactive backend fixes
+
+**New features:**
+- **Backend-aware `/resume`**: Non-interactive backends (codex, gemini, opencode) get validation-only resume — reports thread continuity status instead of attempting a restart that does nothing.
+- **Backend-aware `/progress`**: Shows `Continuity: on/off` and thread ID for non-interactive backends instead of misleading `Resume: not available`.
+- **Backpressure for non-interactive**: Rejects new messages while a non-interactive worker is still processing, preventing silent adapter queuing.
+- **`get_any_session_id()`**: Generic helper finds any `*_session_id` file (codex, claude, etc.) instead of hardcoding claude-only.
 
 ### v0.21.2 - markdown-it-py renderer + send fallback
 
