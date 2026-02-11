@@ -208,17 +208,7 @@ class CodexBackend:
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
-        if not adapter.exists():
-            print(f"Codex adapter not found: {adapter}")
-            return False
-
-        proc = subprocess.Popen(
-            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        _adapter_pids[worker_name] = proc
-        return True
+        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
@@ -235,17 +225,7 @@ class GeminiBackend:
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         adapter = Path(__file__).parent / "hooks" / "gemini-adapter.py"
-        if not adapter.exists():
-            print(f"Gemini adapter not found: {adapter}")
-            return False
-
-        proc = subprocess.Popen(
-            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        _adapter_pids[worker_name] = proc
-        return True
+        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
@@ -262,17 +242,7 @@ class OpenCodeBackend:
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         adapter = Path(__file__).parent / "hooks" / "opencode-adapter.py"
-        if not adapter.exists():
-            print(f"OpenCode adapter not found: {adapter}")
-            return False
-
-        proc = subprocess.Popen(
-            ["python3", str(adapter), worker_name, text, bridge_url, str(sessions_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        _adapter_pids[worker_name] = proc
-        return True
+        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
@@ -286,12 +256,39 @@ BACKENDS = {
 }
 
 # Track inflight adapter processes per worker (non-interactive backends only)
-_adapter_pids: dict[str, subprocess.Popen] = {}
+# Each entry: (Popen, stderr_file_handle_or_None)
+_adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
+
+
+def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
+                   bridge_url: str, sessions_dir: Path) -> bool:
+    """Spawn an adapter process with stderr logged to per-worker file."""
+    if not adapter_path.exists():
+        print(f"Adapter not found: {adapter_path}")
+        return False
+
+    # Open per-worker log file for adapter stderr (append mode)
+    log_file = sessions_dir / worker_name / "adapter.log"
+    try:
+        stderr_fh = open(log_file, "a")
+    except OSError:
+        stderr_fh = None  # Fall back to DEVNULL if dir doesn't exist yet
+
+    proc = subprocess.Popen(
+        ["python3", str(adapter_path), worker_name, text, bridge_url, str(sessions_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
+    )
+    _adapter_pids[worker_name] = (proc, stderr_fh)
+    return True
 
 
 def kill_adapter(name: str):
     """Kill inflight adapter process for a worker."""
-    proc = _adapter_pids.pop(name, None)
+    entry = _adapter_pids.pop(name, None)
+    if entry is None:
+        return
+    proc, stderr_fh = entry
     if proc and proc.poll() is None:
         proc.terminate()
         try:
@@ -299,6 +296,11 @@ def kill_adapter(name: str):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=1)
+    if stderr_fh:
+        try:
+            stderr_fh.close()
+        except OSError:
+            pass
 
 
 def get_backend(name: str) -> Backend:
@@ -452,6 +454,11 @@ class TelegramAPI:
         payload = {"chat_id": chat_id, "document": document}
         payload.update(kwargs)
         return self.api("sendDocument", payload)
+
+    def send_animation(self, chat_id: int, animation, **kwargs):
+        payload = {"chat_id": chat_id, "animation": animation}
+        payload.update(kwargs)
+        return self.api("sendAnimation", payload)
 
     def set_reaction(self, chat_id: int, message_id: int, reaction: list[dict]):
         payload = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
@@ -893,6 +900,71 @@ def send_photo(chat_id, photo_path, caption=None):
                 return False
     except Exception as e:
         print(f"sendPhoto error: {e}")
+        return False
+
+
+def send_animation(chat_id, animation_path, caption=None):
+    """Send an animation (GIF) to Telegram using multipart/form-data.
+
+    SECURITY: Path is validated before sending.
+    Returns True on success, False on failure.
+    """
+    if not BOT_TOKEN:
+        return False
+
+    ok, validated = validate_photo_path(animation_path)
+    if not ok:
+        print(validated)
+        return False
+
+    animation_path = validated
+
+    boundary = uuid.uuid4().hex
+    content_type = "image/gif"
+
+    body_parts = []
+
+    # chat_id field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+    body_parts.append(b"")
+    body_parts.append(str(chat_id).encode())
+
+    # animation field
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(f'Content-Disposition: form-data; name="animation"; filename="{animation_path.name}"'.encode())
+    body_parts.append(f"Content-Type: {content_type}".encode())
+    body_parts.append(b"")
+    body_parts.append(animation_path.read_bytes())
+
+    # caption field (optional)
+    if caption:
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="caption"')
+        body_parts.append(b"")
+        body_parts.append(caption.encode())
+
+    body_parts.append(f"--{boundary}--".encode())
+    body_parts.append(b"")
+
+    body = b"\r\n".join(body_parts)
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendAnimation",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            result = json.loads(r.read())
+            if result.get("ok"):
+                print(f"Animation sent: {animation_path.name}")
+                return True
+            else:
+                print(f"sendAnimation failed: {result}")
+                return False
+    except Exception as e:
+        print(f"sendAnimation error: {e}")
         return False
 
 
@@ -2299,7 +2371,12 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
     # Send images
     for img_path, img_caption in images:
         full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
-        if send_photo(chat_id, img_path, full_caption):
+        # Use sendAnimation for GIFs to preserve animation
+        if Path(img_path).suffix.lower() == ".gif":
+            sent = send_animation(chat_id, img_path, full_caption)
+        else:
+            sent = send_photo(chat_id, img_path, full_caption)
+        if sent:
             print(f"Image sent: {name} -> {img_path}")
         else:
             telegram_api("sendMessage", {
@@ -2446,11 +2523,35 @@ class CommandRouter:
 
         photo = msg.get("photo")
         document = msg.get("document")
+        animation = msg.get("animation")
 
         doc_is_image = False
         if document:
             mime_type = document.get("mime_type", "")
             doc_is_image = mime_type.startswith("image/")
+
+        # Handle GIF/animation (Telegram sends these separately from photos)
+        if animation and chat_id:
+            file_id = animation.get("file_id")
+            if file_id:
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return
+
+                if not state["active"]:
+                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    gif_text = f"Manager sent GIF: {local_path}"
+                    if text:
+                        gif_text = f"{text}\n\n{gif_text}"
+                    self.route_to_active(gif_text, chat_id, msg_id)
+                else:
+                    self.reply(chat_id, "Needs decision - Could not download GIF. Try again.")
+                return
 
         if (photo or doc_is_image) and chat_id:
             if photo:

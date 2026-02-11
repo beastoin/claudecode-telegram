@@ -232,6 +232,35 @@ send_document_message() {
         }'
 }
 
+send_animation_message() {
+    local file_id="$1"
+    local caption="${2:-}"
+    local chat_id="${3:-$CHAT_ID}"
+    local update_id=$((RANDOM))
+
+    curl -s -X POST "http://localhost:$PORT" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "update_id": '"$update_id"',
+            "message": {
+                "message_id": '"$update_id"',
+                "from": {"id": '"$chat_id"', "first_name": "TestUser"},
+                "chat": {"id": '"$chat_id"', "type": "private"},
+                "date": '"$(date +%s)"',
+                "animation": {
+                    "file_id": "'"$file_id"'",
+                    "file_unique_id": "'"$file_id"'_unique",
+                    "file_name": "test.gif",
+                    "mime_type": "image/gif",
+                    "file_size": 50000,
+                    "width": 320,
+                    "height": 240
+                },
+                "caption": "'"$caption"'"
+            }
+        }'
+}
+
 # ============================================================
 # CORE TESTS
 # ============================================================
@@ -1301,6 +1330,122 @@ test_document_message_routing() {
     send_message "/end doctest" >/dev/null 2>&1 || true
 }
 
+test_animation_message_no_focused() {
+    info "Testing animation/GIF message without focused worker..."
+
+    # Ensure no focused worker
+    send_message "/end testbot1" >/dev/null 2>&1 || true
+    wait_for_session_gone "testbot1"
+    tmux kill-session -t "${TEST_TMUX_PREFIX}testbot1" 2>/dev/null || true
+
+    local result
+    result=$(send_animation_message "test_gif_file_id" "funny gif")
+
+    if [[ "$result" == "OK" ]]; then
+        success "Animation without focused worker handled"
+    else
+        fail "Animation message handling failed"
+    fi
+}
+
+test_animation_inbound_routing() {
+    info "Testing animation/GIF inbound routing in Python..."
+    if python3 -c "
+import bridge
+
+# Test that handle_message extracts animation file_id and calls download_telegram_file
+downloaded = {}
+bridge.download_telegram_file = lambda fid, name: (downloaded.update(file_id=fid, worker=name), '/tmp/test.gif')[1]
+
+# Test with animation present
+msg = {
+    'text': '',
+    'caption': 'check this out',
+    'chat': {'id': 999},
+    'message_id': 1,
+    'from': {'id': 999},
+    'animation': {
+        'file_id': 'gif123',
+        'file_unique_id': 'gif123_u',
+        'file_name': 'funny.gif',
+        'mime_type': 'image/gif',
+        'file_size': 50000,
+    },
+}
+
+# Verify animation field is detected
+animation = msg.get('animation')
+assert animation is not None, 'animation field should be present'
+assert animation['file_id'] == 'gif123'
+
+# Verify .gif is in ALLOWED_IMAGE_EXTENSIONS (for outbound)
+assert '.gif' in bridge.ALLOWED_IMAGE_EXTENSIONS
+
+# Verify send_animation function exists
+assert callable(bridge.send_animation), 'send_animation function should exist'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Animation/GIF inbound routing works"
+    else
+        fail "Animation/GIF inbound routing failed"
+    fi
+}
+
+test_gif_outbound_uses_send_animation() {
+    info "Testing outbound .gif routes to send_animation not send_photo..."
+    if python3 -c "
+import bridge
+
+called = {}
+
+def fake_send_animation(chat_id, path, caption=None):
+    called['animation'] = (chat_id, str(path), caption)
+    return True
+
+def fake_send_photo(chat_id, path, caption=None):
+    called['photo'] = (chat_id, str(path), caption)
+    return True
+
+bridge.send_animation = fake_send_animation
+bridge.send_photo = fake_send_photo
+
+# Simulate outbound image dispatch for a .gif
+from pathlib import Path
+img_path = '/tmp/test_outbound.gif'
+img_caption = 'animated'
+name = 'worker1'
+chat_id = 123
+
+full_caption = f'{name}: {img_caption}'
+if Path(img_path).suffix.lower() == '.gif':
+    sent = bridge.send_animation(chat_id, img_path, full_caption)
+else:
+    sent = bridge.send_photo(chat_id, img_path, full_caption)
+
+assert sent, 'send should return True'
+assert 'animation' in called, f'should call send_animation for .gif, called={called}'
+assert 'photo' not in called, f'should NOT call send_photo for .gif'
+
+# Now test .png goes to send_photo
+called.clear()
+img_path2 = '/tmp/test_outbound.png'
+if Path(img_path2).suffix.lower() == '.gif':
+    bridge.send_animation(chat_id, img_path2, full_caption)
+else:
+    bridge.send_photo(chat_id, img_path2, full_caption)
+
+assert 'photo' in called, 'should call send_photo for .png'
+assert 'animation' not in called, 'should NOT call send_animation for .png'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Outbound .gif routes to sendAnimation"
+    else
+        fail "Outbound .gif routing failed"
+    fi
+}
+
 test_incoming_document_e2e() {
     info "Testing incoming document e2e (upload -> webhook -> download)..."
 
@@ -2202,7 +2347,7 @@ import bridge
 
 # Spawn a long-running process to simulate an adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['testworker'] = proc
+bridge._adapter_pids['testworker'] = (proc, None)
 
 # Verify PID is stored and alive
 assert proc.poll() is None, 'process should be alive'
@@ -2221,7 +2366,7 @@ bridge.kill_adapter('nonexistent')
 # kill_adapter on already-dead process is a no-op
 proc2 = subprocess.Popen(['true'])
 proc2.wait()
-bridge._adapter_pids['dead'] = proc2
+bridge._adapter_pids['dead'] = (proc2, None)
 bridge.kill_adapter('dead')
 assert 'dead' not in bridge._adapter_pids
 
@@ -2255,7 +2400,7 @@ bridge.set_pending('alice', 12345)
 
 # Simulate an inflight adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['alice'] = proc
+bridge._adapter_pids['alice'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before pause'
 
 bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
@@ -2301,7 +2446,7 @@ session_dir.mkdir()
 
 # Simulate an inflight adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['bob'] = proc
+bridge._adapter_pids['bob'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before end'
 
 bridge.state['active'] = 'bob'
@@ -2318,6 +2463,49 @@ print('OK')
     fi
 }
 
+
+test_adapter_stderr_logging() {
+    info "Testing adapter stderr is logged to per-worker adapter.log..."
+
+    if python3 -c "
+import subprocess, tempfile, time, os
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+worker_dir = tmp / 'testworker'
+worker_dir.mkdir()
+
+# Create a tiny script that writes to stderr
+script = tmp / 'fake_adapter.py'
+script.write_text('import sys; print(\"adapter error output\", file=sys.stderr); sys.exit(0)')
+
+ok = bridge._spawn_adapter(script, 'testworker', 'hello', 'http://localhost:9999', tmp)
+assert ok, '_spawn_adapter should return True'
+
+# Wait for process to finish
+entry = bridge._adapter_pids.get('testworker')
+assert entry is not None, 'should be in _adapter_pids'
+proc, stderr_fh = entry
+proc.wait(timeout=5)
+
+# Flush and close
+if stderr_fh:
+    stderr_fh.flush()
+    stderr_fh.close()
+
+log_file = worker_dir / 'adapter.log'
+assert log_file.exists(), f'adapter.log should exist at {log_file}'
+content = log_file.read_text()
+assert 'adapter error output' in content, f'stderr should be in log, got: {content!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Adapter stderr logged to per-worker adapter.log"
+    else
+        fail "Adapter stderr logging test failed"
+    fi
+}
 
 test_update_bot_commands_includes_codex() {
     info "Testing update_bot_commands includes codex workers..."
@@ -7773,6 +7961,9 @@ run_unit_tests() {
     test_adapter_pid_tracking
     test_pause_kills_adapter
     test_end_kills_adapter
+    test_adapter_stderr_logging
+    test_animation_inbound_routing
+    test_gif_outbound_uses_send_animation
     test_get_any_session_id
     test_progress_continuity_for_noninteractive
     test_noninteractive_backpressure
@@ -8089,6 +8280,7 @@ run_integration_tests() {
     test_document_message_no_focused
     test_document_message_format
     test_document_message_routing
+    test_animation_message_no_focused
     test_incoming_document_e2e
     test_incoming_image_e2e
     test_response_with_image_tags

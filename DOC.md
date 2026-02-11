@@ -340,6 +340,15 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.21.5 - Adapter stderr logging
+
+**New features:**
+- **Adapter stderr logging**: Non-interactive backend adapters (codex, gemini, opencode) now log stderr to `<sessions_dir>/<worker>/adapter.log` (append mode). Previously stderr was sent to `/dev/null`, making adapter failures invisible.
+- **`_spawn_adapter()` helper**: Consolidated duplicate Popen logic from three backend classes into a single helper that handles adapter discovery, log file opening, process spawning, and PID tracking.
+
+**Changes:**
+- `_adapter_pids` now stores `(Popen, stderr_file_handle)` tuples instead of bare `Popen` objects. `kill_adapter()` closes the file handle on termination.
+
 ### v0.21.4 - Adapter PID tracking (kill on /pause)
 
 **New features:**
