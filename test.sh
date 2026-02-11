@@ -5930,6 +5930,14 @@ assert '<blockquote>' in r, f'Blockquote: {r}'
 r = markdown_to_telegram_html('a < b & c > d')
 assert '&lt;' in r and '&amp;' in r, f'Escape: {r}'
 
+# HTML block with safe tags (e.g. <pre>...</pre> in source)
+r = markdown_to_telegram_html('<pre>a > b & c</pre>')
+assert '<pre>' in r, f'HTML block pre open: {r}'
+assert '</pre>' in r, f'HTML block pre close: {r}'
+assert '&lt;pre&gt;' not in r, f'pre tag should NOT be escaped: {r}'
+assert '&gt;' in r, f'Content > should be escaped: {r}'
+assert '&amp;' in r, f'Content & should be escaped: {r}'
+
 # Empty
 assert markdown_to_telegram_html('') == '', 'Empty'
 

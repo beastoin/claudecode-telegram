@@ -1114,12 +1114,29 @@ def markdown_to_telegram_html(text: str) -> str:
         r'^(?:</?(?:b|i|code|pre|s|u)>|</a>|<a href=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)>)$'
     )
 
+    _SAFE_HTML_TAG_SPLIT = re.compile(
+        r'(</?(?:b|i|code|pre|s|u|blockquote)>|</a>|<a href=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)>)'
+    )
+
     def _render_html_inline(raw):
         if not raw:
             return ""
         if _SAFE_HTML_TAG.match(raw):
             return raw
         return escape_html(raw)
+
+    def _render_html_block(raw):
+        """Render HTML block: preserve safe Telegram tags, escape everything else."""
+        if not raw:
+            return ""
+        parts = _SAFE_HTML_TAG_SPLIT.split(raw)
+        out = []
+        for j, part in enumerate(parts):
+            if j % 2 == 1:
+                out.append(part)  # safe tag — keep as-is
+            else:
+                out.append(escape_html(part))  # content — escape
+        return "".join(out)
 
     def _render_inline_plain(children):
         """Render inline token children to plain text (for use inside <pre>)."""
@@ -1302,7 +1319,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
         # HTML blocks
         elif tok.type == "html_block":
-            result.append(_render_html_inline(tok.content))
+            result.append(_render_html_block(tok.content))
 
         else:
             if tok.content:
