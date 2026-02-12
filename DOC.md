@@ -91,18 +91,18 @@ Input                    → Routes to
 ─────────────────────────────────────
 /hire backend            → creates claude-backend, sets active
 /focus frontend          → sets active = frontend
-@backend do something    → claude-backend (one-off)
+@backend do something    → claude-backend (routes + auto-focus)
 fix the bug              → active session (currently frontend)
 ```
 
-The `@name` syntax allows one-off messages without switching context. You're working on frontend but need backend to do something? `@backend run the tests` — no context switch needed.
+Single `@name` mentions route the message and set focus. If you want to ping multiple workers without changing focus, mention more than one (e.g., `@backend @frontend ...`).
 
 ## Feedback Philosophy
 
 - 👀 means the message hit the worker.
 - The worker reply is the confirmation: `worker_name: response`.
 - Text replies only for errors and state/info commands (`/hire`, `/end`, `/focus`, `/team`, `/progress`).
-- Regular messages, `@mentions`, and `/learn` are silent.
+- Regular messages and `@mentions` are silent.
 - Managers want clean chat; the emoji is instant feedback.
 - If no worker reply is coming, then we speak.
 
@@ -343,7 +343,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ### v0.23.0 - Worker health watchdog
 
 **Breaking changes:**
-- None.
+- `/learn` command removed.
 
 **New features:**
 - **Worker health watchdog thread** (Phase 1): Background daemon samples tmux pane PIDs, Claude PIDs, child counts, and CPU stats every 4s to compute worker health states.
@@ -353,11 +353,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 - **Hook event tracking**: Hook responses record timestamps to improve stuck-pending detection.
 - **Proactive Telegram alerts** (Phase 2): Watchdog sends alerts to admin when workers enter DEAD/STUCK/POISONED states, with 3-min cooldown per worker. Sends "resolved" alerts when workers recover.
 - **POISONED state detection** (Phase 3): When a worker is STUCK, watchdog inspects tmux pane output (interactive) or `adapter.log` (non-interactive) for repeated error signatures (API errors, overloaded, rate limits). 3+ matches of any pattern = POISONED.
+- **Explicit resume/relaunch targeting**: `/relaunch <name>` and `/resume <name>` accept a worker name and auto-focus when provided.
+- **Single @mention auto-focus**: A lone `@name` mention routes the message and sets focus to that worker.
+- **GIF support**: Incoming Telegram animations are forwarded to workers; outgoing GIFs use `sendAnimation` to preserve motion.
+- **Expanded poison patterns**: Added more error signatures (rate limits, context length, timeouts, 5xx) to POISONED detection.
 
 **Architecture changes:**
 - **Watchdog state cache**: In-memory state dictionaries track last child activity, last hook response, last Claude presence, previous states, and alert timestamps.
 - **`compute_state()` pure function**: All state logic in a single testable function with no side effects.
 - **`_handle_watchdog_transition()`**: Extracted transition logic for alert/resolved decisions, enabling unit testing.
+- **Thread-safe watchdog**: Shared watchdog state transitions guarded by a dedicated lock.
+- **Adapter-aware watchdog**: Non-interactive workers report BUSY_TOOL while an adapter process is alive.
 
 ### v0.21.5 - Adapter stderr logging
 
@@ -876,7 +882,7 @@ Now both work:
 ### v0.9.4 - Slash command routing: /lee, /chen, etc.
 
 **New feature: Direct worker routing via slash commands**
-- `/lee hello` routes message directly to lee (one-off, no focus change)
+- `/lee hello` routes message directly to lee and sets focus
 - `/lee` (no message) switches focus to lee (same as `/focus lee`)
 - Telegram autocomplete shows all workers as commands
 

@@ -457,7 +457,6 @@ BOT_COMMANDS = [
     {"command": "team", "description": "Show your team"},
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
     {"command": "progress", "description": "Check focused worker status"},
-    {"command": "learn", "description": "Ask focused worker what they learned"},
     {"command": "pause", "description": "Pause focused worker"},
     {"command": "relaunch", "description": "Relaunch focused worker"},
     {"command": "resume", "description": "Resume focused worker session"},
@@ -529,7 +528,7 @@ def load_last_active():
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
     # Bridge commands
-    "team", "focus", "progress", "learn", "pause", "relaunch", "resume", "settings", "hire", "end",
+    "team", "focus", "progress", "pause", "relaunch", "resume", "settings", "hire", "end",
     # Special
     "all", "start", "help",
 }
@@ -3264,8 +3263,6 @@ class CommandRouter:
             return self.cmd_resume(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
-        elif cmd == "/learn":
-            return self.cmd_learn(arg, chat_id, msg_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
@@ -3590,58 +3587,6 @@ class CommandRouter:
             lines.append("Workers run with full system access.")
 
         self.reply(chat_id, "\n".join(lines))
-        return True
-
-    def cmd_learn(self, topic, chat_id, msg_id=None):
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned. Who should I talk to?")
-            return True
-
-        name = state["active"]
-        registered = self.workers.get_registered_sessions()
-        session = registered.get(name)
-        if not session:
-            self.reply(chat_id, "Can't find them. Check /team.")
-            return True
-        backend_name = get_worker_backend(name, session)
-        backend = get_backend(backend_name)
-
-        topic = topic.strip() if topic else ""
-        if topic:
-            prompt = (
-                f"What did you learn about {topic} today? Please answer in Problem / Fix / Why format:\n"
-                "Problem: <what went wrong or was inefficient>\n"
-                "Fix: <the better approach>\n"
-                "Why: <root cause or insight>"
-            )
-        else:
-            prompt = (
-                "What did you learn today? Please answer in Problem / Fix / Why format:\n"
-                "Problem: <what went wrong or was inefficient>\n"
-                "Fix: <the better approach>\n"
-                "Why: <root cause or insight>"
-            )
-
-        if not self.workers.is_online(name, session):
-            self.reply(chat_id, f"{name.capitalize()} is offline. Try /relaunch.")
-            return True
-
-        worker_set_pending(name, chat_id)
-        threading.Thread(
-            target=send_typing_loop,
-            args=(chat_id, name),
-            daemon=True
-        ).start()
-
-        send_ok = self.workers.send(name, prompt, chat_id, session)
-        if not send_ok:
-            clear_pending(name)
-            self.reply(chat_id, f"Could not send to {name.capitalize()}. Try /relaunch.", outcome="Needs decision")
-            return True
-
-        if msg_id and send_ok:
-            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", "")):
-                self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
         return True
 
     def route_to_active(self, text, chat_id, msg_id):

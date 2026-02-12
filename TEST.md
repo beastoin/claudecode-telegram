@@ -60,11 +60,11 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 210 test functions** (see inventory below)
+**Current coverage: 225 test functions** (see inventory below)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
-| Telegram Bot Commands | 20 | 100% |
+| Telegram Bot Commands | 19 | 100% |
 | CLI Commands & Flags | 37 | 97% |
 | Message Routing | 14 | 100% |
 | Security | 11 | 100% |
@@ -105,7 +105,7 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 
 ## Complete Test Inventory
 
-> **Total: 210 test functions**
+> **Total: 225 test functions**
 >
 > Keep this list updated when adding new tests.
 
@@ -130,6 +130,9 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_escape_tag_preservation` | Escaped `\[[image:...]]` preserved |
 | `test_response_prefix_formatting` | Response prefix formatting |
 | `test_response_with_image_tags` | Response with image tags |
+| `test_animation_message_no_focused` | GIF/animation requires focused worker |
+| `test_animation_inbound_routing` | GIF/animation inbound routing |
+| `test_gif_outbound_uses_send_animation` | Outbound .gif uses sendAnimation |
 | `test_persistence_file_functions` | save/load last_chat_id and last_active |
 | `test_pending_set_and_clear` | set_pending and clear_pending functions |
 | `test_pending_auto_timeout` | 10 minute pending auto-cleanup |
@@ -137,14 +140,22 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_hire_backend_parsing` | /hire backend parsing (--codex, codex- prefix) |
 | `test_team_output_includes_backend` | /team output includes backend metadata |
 | `test_progress_output_includes_backend` | /progress output includes backend metadata |
-| `test_codex_learn_reaction_bypasses_tmux` | /learn reaction bypasses tmux check for codex |
 | `test_worker_send_uses_backend` | worker_send routes to backend handler |
 | `test_backend_registry_exists` | Backend registry exists |
 | `test_get_registered_sessions_includes_exec_workers` | exec workers included in session scans |
 | `test_backend_env_metadata` | WORKER_BACKEND exported via tmux env |
 | `test_codex_end_cleans_session` | /end cleans codex session metadata + pipe |
 | `test_codex_relaunch_clears_session_id` | /relaunch clears codex session id |
+| `test_relaunch_with_name` | /relaunch accepts explicit worker name |
+| `test_resume_with_name` | /resume accepts explicit worker name |
 | `test_codex_pause_clears_pending` | /pause clears pending for codex workers |
+| `test_adapter_pid_tracking` | Adapter PID tracking and kill_adapter |
+| `test_pause_kills_adapter` | /pause kills inflight adapter |
+| `test_end_kills_adapter` | /end kills inflight adapter |
+| `test_adapter_stderr_logging` | Adapter stderr logged to per-worker adapter.log |
+| `test_poisoned_detection` | Poisoned detection via adapter.log |
+| `test_compute_state_non_interactive` | compute_state handles non-interactive backends |
+| `test_watchdog_alert_on_stuck` | Watchdog alert fires on stuck transition |
 | `test_get_workers_includes_codex` | /workers includes codex exec workers |
 | `test_pipe_forwarding_to_codex` | Inter-worker pipe forwards to codex |
 | `test_worker_pipe_path_constant` | Worker pipe path root constant |
@@ -294,7 +305,6 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_team_command` | /team lists workers |
 | `test_focus_command` | /focus switches worker |
 | `test_progress_command` | /progress shows status |
-| `test_learn_command` | /learn prompts worker |
 | `test_pause_command` | /pause sends Escape |
 | `test_relaunch_command` | /relaunch restarts worker |
 | `test_settings_command` | /settings shows config |

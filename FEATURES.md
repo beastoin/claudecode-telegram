@@ -1,4 +1,4 @@
-# claudecode-telegram Product Specification (v0.19.0)
+# claudecode-telegram Product Specification (v0.23.0)
 
 ## Overview
 - MUST provide a Telegram bot plus an HTTP bridge that routes manager messages to multiple workers and returns worker responses to Telegram.
@@ -9,9 +9,9 @@
 - MUST implement `/team` to list all workers, the focused worker, each worker's availability, and each worker's backend.
 - MUST implement `/focus <name>` to set the focused worker and persist the focus.
 - MUST implement `/progress` to report focused worker status including pending, backend, online/ready state, and mode.
-- MUST implement `/learn [topic]` to prompt the focused worker with a Problem/Fix/Why template (topic optional).
 - MUST implement `/pause` to interrupt the focused worker and clear pending state.
-- MUST implement `/relaunch` to restart the focused worker for its backend.
+- MUST implement `/relaunch [name]` to restart a worker for its backend (defaults to focused worker).
+- MUST implement `/resume [name]` to resume a worker session when possible (defaults to focused worker).
 - MUST implement `/settings` to show configuration with secrets redacted and sandbox status.
 - MUST implement `/hire <name>` to create a worker and set focus to it.
 - MUST implement `/end <name>` to offboard a worker and remove its resources.
@@ -27,7 +27,7 @@
 
 ### Worker naming rules
 - MUST normalize worker names to lowercase and strip to `a-z`, `0-9`, and `-` only.
-- MUST reject reserved names: `team`, `focus`, `progress`, `learn`, `pause`, `relaunch`, `settings`, `hire`, `end`, `all`, `start`, `help`.
+- MUST reject reserved names: `team`, `focus`, `progress`, `pause`, `relaunch`, `resume`, `settings`, `hire`, `end`, `all`, `start`, `help`.
 
 ## CLI Commands & Flags
 ### Commands
@@ -113,6 +113,11 @@
 - MUST implement `OpenCodeBackend` as non-interactive using `hooks/opencode-adapter.py`.
 - MUST treat non-interactive backends as stateless workers with no tmux session.
 
+### Non-interactive adapter lifecycle
+- MUST log adapter stderr to `SESSIONS_DIR/<worker>/adapter.log` (append mode).
+- MUST track inflight adapter PIDs per worker and terminate them on `/pause` and `/end`.
+- MUST expose adapter-alive state to the watchdog so non-interactive workers can report BUSY_TOOL while adapters run.
+
 ### Hire syntax and backend selection
 - MUST accept `/hire <name>` with default backend `claude`.
 - MUST accept `/hire <name> --backend <name>` to select a backend.
@@ -124,6 +129,7 @@
 ### Per-session backend state
 - MUST store backend selection at `SESSIONS_DIR/<worker>/backend`.
 - MUST write the `chat_id` file before sending the welcome message for non-interactive workers.
+- MUST write adapter stderr to `SESSIONS_DIR/<worker>/adapter.log` for non-interactive workers.
 
 ## Environment Variables
 ### Bridge (bridge.py)
@@ -215,6 +221,9 @@
 - MUST include entries with `name`, `protocol`, `address`, and `send_example`.
 - MUST return an empty list when no workers exist.
 
+### `GET /health/workers`
+- MUST return JSON `{ "workers": [ ... ] }` with watchdog `state`, `reason`, and `age_seconds` for each worker.
+
 ## Message Routing
 ### Admin and access control
 - MUST accept messages only from the admin chat ID.
@@ -229,7 +238,7 @@
 
 ### Mentions and broadcasts
 - MUST route `@all <message>` to all online workers without changing focus.
-- MUST route `@<name> <message>` to the named worker without changing focus when the worker exists.
+- MUST route `@<name> <message>` to the named worker; when there is exactly one @mention, it MUST also set focus to that worker.
 
 ### Reply routing
 - MUST route replies to bot messages prefixed with `<name>:` back to that worker.
@@ -241,6 +250,10 @@
 ### Attachments (Telegram to worker)
 - MUST require a focused worker for attachments and prompt the admin to use `/focus` when none is set.
 - MUST prepend captions to forwarded attachment messages when captions are present.
+
+### Media handling
+- MUST accept incoming Telegram animations (GIFs), download them to the worker inbox, and route a "Manager sent GIF" message to the focused worker.
+- MUST send outgoing GIFs via `sendAnimation` to preserve animation.
 
 ### Worker shortcuts
 - MUST treat `/<worker>` as a focus shortcut and `/<worker> <message>` as focus + send.

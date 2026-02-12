@@ -994,34 +994,7 @@ test_additional_commands() {
     fi
 }
 
-test_learn_command() {
-    info "Testing /learn command..."
 
-    # Create a worker first
-    send_message "/hire learnbot" >/dev/null
-    wait_for_session "learnbot"
-    send_message "/focus learnbot" >/dev/null
-
-    # Test /learn (requires focused worker)
-    local result
-    result=$(send_message "/learn")
-    if [[ "$result" == "OK" ]]; then
-        success "/learn works"
-    else
-        fail "/learn failed"
-    fi
-
-    # Test /learn with topic
-    result=$(send_message "/learn git")
-    if [[ "$result" == "OK" ]]; then
-        success "/learn <topic> works"
-    else
-        fail "/learn <topic> failed"
-    fi
-
-    # Cleanup
-    send_message "/end learnbot" >/dev/null 2>&1 || true
-}
 
 test_reply_routing() {
     info "Testing reply-to-worker routing..."
@@ -1927,45 +1900,7 @@ print('OK')
     fi
 }
 
-test_codex_learn_reaction_bypasses_tmux() {
-    info "Testing codex /learn reaction bypasses tmux check..."
 
-    if python3 -c "
-import bridge
-bridge.state['active'] = 'alice'
-
-class FakeTelegram:
-    def __init__(self):
-        self.calls = []
-    def send_message(self, *args, **kwargs):
-        return {'ok': True}
-    def set_reaction(self, chat_id, message_id, reaction):
-        self.calls.append(('setMessageReaction', {'chat_id': chat_id, 'message_id': message_id, 'reaction': reaction}))
-        return {'ok': True}
-
-fake_telegram = FakeTelegram()
-router = bridge.CommandRouter(fake_telegram, bridge.worker_manager)
-
-bridge.worker_manager.get_registered_sessions = lambda registered=None: {'alice': {'backend': 'codex', 'mode': 'exec'}}
-bridge.worker_manager.is_online = lambda name, session=None: True
-bridge.worker_manager.send = lambda name, message, chat_id=None, session=None: True
-bridge.worker_set_pending = lambda name, chat_id: None
-bridge.send_typing_loop = lambda chat_id, name: None
-
-def boom(*args, **kwargs):
-    raise AssertionError('tmux_prompt_empty should not be called for exec backends')
-bridge.tmux_prompt_empty = boom
-
-router.cmd_learn('', 123, msg_id=456)
-
-assert any(c[0] == 'setMessageReaction' for c in fake_telegram.calls), f'expected reaction, got {fake_telegram.calls}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "codex /learn reaction bypasses tmux check"
-    else
-        fail "codex /learn reaction test failed"
-    fi
-}
 
 test_worker_send_uses_backend() {
     info "Testing worker_send routes via backend..."
@@ -2803,7 +2738,7 @@ test_reserved_names_rejection() {
 from bridge import RESERVED_NAMES
 
 # Verify all expected reserved names are included
-expected = {'team', 'focus', 'progress', 'learn', 'pause', 'relaunch',
+expected = {'team', 'focus', 'progress', 'pause', 'relaunch',
             'settings', 'hire', 'end', 'all', 'start', 'help'}
 for name in expected:
     assert name in RESERVED_NAMES, f'{name} should be reserved'
@@ -5447,7 +5382,7 @@ test_bot_commands_structure() {
 from bridge import BOT_COMMANDS
 
 # Verify all expected commands are present
-expected = ['team', 'focus', 'progress', 'learn', 'pause', 'relaunch', 'settings', 'hire', 'end']
+expected = ['team', 'focus', 'progress', 'pause', 'relaunch', 'settings', 'hire', 'end']
 for cmd in expected:
     found = any(c['command'] == cmd for c in BOT_COMMANDS)
     assert found, f'{cmd} command missing from BOT_COMMANDS'
@@ -7192,37 +7127,7 @@ test_direct_mode_worker_shortcut_with_message() {
     send_direct_mode_message "/end shortmsg2" >/dev/null 2>&1 || true
 }
 
-test_direct_mode_learn_command() {
-    info "Testing /learn command in direct mode..."
 
-    # Test that /learn <prompt> sends prompt to worker
-    # (matches tmux mode test_learn_command)
-
-    # Clean up any existing test worker
-    send_direct_mode_message "/end learnworker" >/dev/null 2>&1 || true
-    sleep 0.3
-
-    # Create and focus worker
-    local result
-    result=$(send_direct_mode_message "/hire learnworker")
-    wait_for_direct_worker "learnworker" || {
-        fail "Learn direct: learnworker not started"
-        return
-    }
-    send_direct_mode_message "/focus learnworker" >/dev/null
-    sleep 0.2
-
-    # Send /learn command
-    result=$(send_direct_mode_message "/learn Remember that X equals 42")
-    if [[ "$result" == "OK" ]]; then
-        success "Learn direct: /learn command accepted"
-    else
-        fail "Learn direct: /learn command failed: $result"
-    fi
-
-    # Cleanup
-    send_direct_mode_message "/end learnworker" >/dev/null 2>&1 || true
-}
 
 test_direct_mode_unknown_cmd_passthrough() {
     info "Testing unknown command passthrough in direct mode..."
@@ -8211,7 +8116,6 @@ run_unit_tests() {
     test_hire_backend_parsing
     test_team_output_includes_backend
     test_progress_output_includes_backend
-    test_codex_learn_reaction_bypasses_tmux
     test_worker_send_uses_backend
     test_backend_env_metadata
     test_codex_end_cleans_session
@@ -8494,7 +8398,6 @@ run_integration_tests() {
     test_relaunch_command
     test_pause_command
     test_settings_command
-    test_learn_command
     test_end_command
     test_dynamic_bot_command_list_update
     test_blocked_commands
