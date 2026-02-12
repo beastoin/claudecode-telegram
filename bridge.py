@@ -279,7 +279,8 @@ def _ps_stats(pids) -> dict:
 
 def mark_hook_event(session_name: str) -> None:
     """Record timestamp of last hook response for a session."""
-    _last_hook_ts[session_name] = time.time()
+    with _watchdog_lock:
+        _last_hook_ts[session_name] = time.time()
 
 
 class ClaudeBackend:
@@ -439,6 +440,8 @@ _last_seen_claude = {}
 _last_hook_ts = {}
 _last_alert_ts = {}
 _prev_worker_states = {}
+_consecutive_probe_failures = {}
+_watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -1808,10 +1811,26 @@ def compute_state(
     last_hook_ts: Optional[float],
     last_seen_claude: Optional[float],
     now: float,
+    is_interactive: bool = True,
+    adapter_alive: bool = False,
     poisoned_reason: Optional[str] = None,
 ) -> tuple[str, str]:
     if not tmux_exists:
         return "OFFLINE", "tmux missing"
+
+    if not is_interactive:
+        if adapter_alive:
+            return "BUSY_TOOL", "adapter running"
+        if pending:
+            if pending_age < STALE_PENDING:
+                return "WAITING", f"age={int(pending_age)}s"
+            hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+            if pending_age >= STALE_PENDING and not hook_since_pending:
+                if poisoned_reason is not None:
+                    return "POISONED", f"{poisoned_reason}"
+                return "STUCK", f"age={int(pending_age)}s"
+            return "WAITING", f"age={int(pending_age)}s"
+        return "READY", "idle"
 
     if not claude_pid and last_seen_claude is not None:
         if (now - last_seen_claude) > START_GRACE:
@@ -1843,11 +1862,20 @@ def compute_state(
 
 POISON_PATTERNS = [
     re.compile(r"error.*overloaded", re.IGNORECASE),
+    re.compile(r"error.*401", re.IGNORECASE),
+    re.compile(r"error.*403", re.IGNORECASE),
+    re.compile(r"error.*429", re.IGNORECASE),
     re.compile(r"image.*dimensions.*exceed", re.IGNORECASE),
     re.compile(r"context.*(length|window).*exceed", re.IGNORECASE),
+    re.compile(r"context_length_exceeded", re.IGNORECASE),
     re.compile(r"rate.?limit", re.IGNORECASE),
     re.compile(r"invalid.*api.?key", re.IGNORECASE),
+    re.compile(r"invalid_request_error", re.IGNORECASE),
+    re.compile(r"insufficient_quota", re.IGNORECASE),
+    re.compile(r"model.*not.*found", re.IGNORECASE),
     re.compile(r"APIError", re.IGNORECASE),
+    re.compile(r"connection.*reset", re.IGNORECASE),
+    re.compile(r"timeout.*error", re.IGNORECASE),
     re.compile(r"error.*529", re.IGNORECASE),
     re.compile(r"error.*503", re.IGNORECASE),
 ]
@@ -1906,7 +1934,8 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         return
 
     now = time.time()
-    last = _last_alert_ts.get(name)
+    with _watchdog_lock:
+        last = _last_alert_ts.get(name)
     if last and (now - last) < ALERT_COOLDOWN:
         return
 
@@ -1920,7 +1949,8 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     text = f"[watchdog] {name}: {state} ({reason}). Suggested: {action}"
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
-        _last_alert_ts[name] = now
+        with _watchdog_lock:
+            _last_alert_ts[name] = now
     except Exception as e:
         print(f"Watchdog alert error: {e}")
 
@@ -1931,7 +1961,8 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
-    prev_state = _prev_worker_states.get(name)
+    with _watchdog_lock:
+        prev_state = _prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states:
         return
 
@@ -1954,7 +1985,8 @@ def _handle_watchdog_transition(
 
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
-    prev_state = _prev_worker_states.get(name)
+    with _watchdog_lock:
+        prev_state = _prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
 
     def eligible_for_alert() -> bool:
@@ -1972,7 +2004,20 @@ def _handle_watchdog_transition(
     if state_changed and prev_state in bad_states and state in good_states:
         _send_resolved_alert(name, state)
 
-    _prev_worker_states[name] = state
+    with _watchdog_lock:
+        _prev_worker_states[name] = state
+
+
+def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
+    """Update worker state and preserve since for unchanged states."""
+    with _watchdog_lock:
+        prev = _worker_states.get(name)
+        if prev and prev[0] == state:
+            since = prev[2]
+        else:
+            since = now
+        _worker_states[name] = (state, reason, since)
+    return since
 
 
 def watchdog_loop():
@@ -1982,10 +2027,23 @@ def watchdog_loop():
             registered = get_registered_sessions()
             pane_pids = _tmux_pane_pids()
 
+            registered_names = set(registered.keys())
+            probe_failed = bool(registered_names) and not pane_pids
+            if probe_failed:
+                for name in registered_names:
+                    _consecutive_probe_failures[name] = _consecutive_probe_failures.get(name, 0) + 1
+            else:
+                for name in registered_names:
+                    _consecutive_probe_failures[name] = 0
+
             claude_pids = {}
             tmux_present = {}
+            backend_info = {}
 
             for name, session in registered.items():
+                backend_name = get_worker_backend(name, session)
+                backend = get_backend(backend_name)
+                backend_info[name] = backend
                 tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
                 pane_pid = pane_pids.get(tmux_name)
                 tmux_exists = bool(pane_pid)
@@ -1994,34 +2052,57 @@ def watchdog_loop():
                 if not tmux_exists:
                     continue
 
-                claude_pid = _get_claude_pid(pane_pid)
-                if claude_pid:
-                    claude_pids[name] = claude_pid
-                    _last_seen_claude[name] = now
-                else:
-                    if name not in _last_seen_claude:
-                        _last_seen_claude[name] = now
+                if backend.is_interactive:
+                    claude_pid = _get_claude_pid(pane_pid)
+                    if claude_pid:
+                        claude_pids[name] = claude_pid
+                        with _watchdog_lock:
+                            _last_seen_claude[name] = now
+                    else:
+                        with _watchdog_lock:
+                            if name not in _last_seen_claude:
+                                _last_seen_claude[name] = now
 
             stats = _ps_stats(claude_pids.values())
-            registered_names = set(registered.keys())
 
             for name, session in registered.items():
+                tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
                 tmux_exists = tmux_present.get(name, False)
-                claude_pid = claude_pids.get(name)
+                if probe_failed and not tmux_exists and _consecutive_probe_failures.get(name, 0) < 3:
+                    continue
+
+                backend = backend_info.get(name)
+                if backend is None:
+                    backend_name = get_worker_backend(name, session)
+                    backend = get_backend(backend_name)
+                is_interactive = backend.is_interactive
+
+                adapter_alive = False
+                if not is_interactive:
+                    entry = _adapter_pids.get(name)
+                    if entry:
+                        proc, _stderr = entry
+                        adapter_alive = proc.poll() is None
+
+                claude_pid = claude_pids.get(name) if is_interactive else None
                 cpu = 0.0
                 if claude_pid and claude_pid in stats:
                     cpu = stats[claude_pid].get("cpu", 0.0)
 
                 children = _child_count(claude_pid) if claude_pid else 0
                 if children > 0:
-                    _last_child_ts[name] = now
+                    with _watchdog_lock:
+                        _last_child_ts[name] = now
 
                 pending_ts = _pending_timestamp(name)
                 pending = pending_ts is not None
                 pending_age = now - pending_ts if pending_ts else 0.0
-                last_child_ts = _last_child_ts.get(name, 0.0)
-                last_hook_ts = _last_hook_ts.get(name)
-                last_seen_claude = _last_seen_claude.get(name)
+                with _watchdog_lock:
+                    last_child_ts = _last_child_ts.get(name, 0.0)
+                    last_hook_ts = _last_hook_ts.get(name)
+                    last_seen_claude = _last_seen_claude.get(name)
+                if not is_interactive:
+                    last_seen_claude = None
 
                 state_args = dict(
                     tmux_exists=tmux_exists,
@@ -2035,6 +2116,8 @@ def watchdog_loop():
                     last_hook_ts=last_hook_ts,
                     last_seen_claude=last_seen_claude,
                     now=now,
+                    is_interactive=is_interactive,
+                    adapter_alive=adapter_alive,
                 )
                 state, reason = compute_state(**state_args)
 
@@ -2045,32 +2128,31 @@ def watchdog_loop():
                         poisoned_reason=poisoned_reason
                     )
 
-                prev = _worker_states.get(name)
-                if prev and prev[0] == state and prev[1] == reason:
-                    since = prev[2]
-                else:
-                    since = now
-                _worker_states[name] = (state, reason, since)
+                since = _record_worker_state(name, state, reason, now)
                 _handle_watchdog_transition(name, state, reason, since, now=now)
 
-            for name in list(_worker_states.keys()):
+            with _watchdog_lock:
+                for name in list(_worker_states.keys()):
+                    if name not in registered_names:
+                        _worker_states.pop(name, None)
+                for name in list(_last_child_ts.keys()):
+                    if name not in registered_names:
+                        _last_child_ts.pop(name, None)
+                for name in list(_last_seen_claude.keys()):
+                    if name not in registered_names:
+                        _last_seen_claude.pop(name, None)
+                for name in list(_last_hook_ts.keys()):
+                    if name not in registered_names:
+                        _last_hook_ts.pop(name, None)
+                for name in list(_prev_worker_states.keys()):
+                    if name not in registered_names:
+                        _prev_worker_states.pop(name, None)
+                for name in list(_last_alert_ts.keys()):
+                    if name not in registered_names:
+                        _last_alert_ts.pop(name, None)
+            for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
-                    _worker_states.pop(name, None)
-            for name in list(_last_child_ts.keys()):
-                if name not in registered_names:
-                    _last_child_ts.pop(name, None)
-            for name in list(_last_seen_claude.keys()):
-                if name not in registered_names:
-                    _last_seen_claude.pop(name, None)
-            for name in list(_last_hook_ts.keys()):
-                if name not in registered_names:
-                    _last_hook_ts.pop(name, None)
-            for name in list(_prev_worker_states.keys()):
-                if name not in registered_names:
-                    _prev_worker_states.pop(name, None)
-            for name in list(_last_alert_ts.keys()):
-                if name not in registered_names:
-                    _last_alert_ts.pop(name, None)
+                    _consecutive_probe_failures.pop(name, None)
         except Exception as e:
             print(f"Watchdog error: {e}")
 
@@ -2136,11 +2218,15 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
     return name, backend
 
 
-def _format_watchdog_status(name: str, pending_lookup=None) -> str:
+def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Optional[dict] = None) -> str:
     if pending_lookup is None:
         pending_lookup = is_pending
 
-    entry = _worker_states.get(name)
+    if state_snapshot is None:
+        with _watchdog_lock:
+            entry = _worker_states.get(name)
+    else:
+        entry = state_snapshot.get(name)
     if not entry:
         return "working" if pending_lookup(name) else "available"
 
@@ -2179,13 +2265,15 @@ def format_team_lines(registered: dict, active: Optional[str], pending_lookup=No
     lines.append("Your team:")
     lines.append(f"Focused: {active or '(none)'}")
     lines.append("Workers:")
+    with _watchdog_lock:
+        state_snapshot = dict(_worker_states)
     for name in sorted(registered.keys()):
         session = registered[name]
         backend = normalize_backend(session.get("backend"))
         status = []
         if name == active:
             status.append("focused")
-        watchdog_status = _format_watchdog_status(name, pending_lookup)
+        watchdog_status = _format_watchdog_status(name, pending_lookup, state_snapshot=state_snapshot)
         status.append(watchdog_status)
         status.append(f"backend={backend}")
         lines.append(f"- {name} ({', '.join(status)})")
@@ -2485,11 +2573,11 @@ class WorkerManager:
                     session_id_file.unlink()
             except Exception as e:
                 return False, f"Failed to clean non-interactive metadata: {e}"
-            clear_pending(name)
 
         if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
 
+        clear_pending(name)
         # All backends have tmux sessions now
         subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
         cleanup_inbox(name)
@@ -3168,9 +3256,9 @@ class CommandRouter:
         elif cmd == "/pause":
             return self.cmd_pause(chat_id)
         elif cmd == "/relaunch":
-            return self.cmd_relaunch(chat_id)
+            return self.cmd_relaunch(chat_id, arg)
         elif cmd == "/resume":
-            return self.cmd_resume(chat_id)
+            return self.cmd_resume(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
         elif cmd == "/learn":
@@ -3355,12 +3443,36 @@ class CommandRouter:
         self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
         return True
 
-    def cmd_relaunch(self, chat_id):
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned.")
+    def cmd_relaunch(self, chat_id, args=""):
+        args = (args or "").strip()
+        if args:
+            name = args.lower()
+        else:
+            if not state["active"]:
+                registered = self.workers.get_registered_sessions()
+                if len(registered) == 1:
+                    name = next(iter(registered))
+                    state["active"] = name
+                    save_last_active(name)
+                else:
+                    self.reply(chat_id, "No one assigned.")
+                    return True
+            else:
+                name = state["active"]
+
+        registered = self.workers.get_registered_sessions()
+        if name not in registered:
+            if registered:
+                names = ", ".join(registered.keys())
+                self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names}")
+            else:
+                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
-        name = state["active"]
+        if args:
+            state["active"] = name
+            save_last_active(name)
+
         ok, err = restart_claude(name, mode="relaunch")
         if ok:
             self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
@@ -3368,14 +3480,37 @@ class CommandRouter:
             self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_resume(self, chat_id):
-        if not state["active"]:
-            self.reply(chat_id, "No one assigned.")
-            return True
+    def cmd_resume(self, chat_id, args=""):
+        args = (args or "").strip()
+        if args:
+            name = args.lower()
+        else:
+            if not state["active"]:
+                registered = self.workers.get_registered_sessions()
+                if len(registered) == 1:
+                    name = next(iter(registered))
+                    state["active"] = name
+                    save_last_active(name)
+                else:
+                    self.reply(chat_id, "No one assigned.")
+                    return True
+            else:
+                name = state["active"]
 
-        name = state["active"]
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
+        if name not in registered:
+            if registered:
+                names = ", ".join(registered.keys())
+                self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names}")
+            else:
+                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+            return True
+
+        if args:
+            state["active"] = name
+            save_last_active(name)
+
         backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
         backend = get_backend(backend_name)
 
@@ -3789,9 +3924,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             now = time.time()
             registered = get_registered_sessions()
+            with _watchdog_lock:
+                state_snapshot = dict(_worker_states)
             workers = {}
             for name in sorted(registered.keys()):
-                entry = _worker_states.get(name)
+                entry = state_snapshot.get(name)
                 if entry:
                     state, reason, since = entry
                     workers[name] = {

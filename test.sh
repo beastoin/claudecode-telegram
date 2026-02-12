@@ -2092,6 +2092,89 @@ print('OK')
     fi
 }
 
+test_relaunch_with_name() {
+    info "Testing /relaunch with name argument..."
+
+    if python3 -c "
+import bridge
+
+bridge.state['active'] = 'alice'
+
+calls = {}
+
+def fake_restart(name, mode='relaunch'):
+    calls['name'] = name
+    calls['mode'] = mode
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob'}}
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_relaunch(123, 'bob')
+
+assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
+assert calls.get('mode') == 'relaunch', 'expected relaunch mode, got %s' % calls
+assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/relaunch accepts name argument"
+    else
+        fail "/relaunch name argument test failed"
+    fi
+}
+
+test_resume_with_name() {
+    info "Testing /resume with name argument..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+session_dir = tmp / 'bob'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('sess_123')
+
+bridge.state['active'] = 'alice'
+
+calls = {}
+
+def fake_restart(name, mode='relaunch'):
+    calls['name'] = name
+    calls['mode'] = mode
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'}}
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_resume(123, 'bob')
+
+assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
+assert calls.get('mode') == 'resume', 'expected resume mode, got %s' % calls
+assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/resume accepts name argument"
+    else
+        fail "/resume name argument test failed"
+    fi
+}
+
 test_get_any_session_id() {
     info "Testing get_any_session_id finds codex/claude session ids..."
 
@@ -2464,6 +2547,40 @@ print('OK')
     fi
 }
 
+test_end_clears_pending() {
+    info "Testing /end clears pending file..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+bridge.FILE_INBOX_ROOT = tmp / 'inbox'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = tmp
+bridge.worker_manager.tmux_prefix = 'claude-test-'
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'}
+}
+
+bridge.set_pending('alice', 12345)
+pending_file = bridge.get_pending_file('alice')
+assert pending_file.exists(), 'pending should exist before end'
+
+ok, err = bridge.worker_manager.end('alice')
+assert ok is True, f'end failed: {err}'
+assert not pending_file.exists(), 'pending should be cleared by /end'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/end clears pending file"
+    else
+        fail "/end clears pending file test failed"
+    fi
+}
+
 
 test_adapter_stderr_logging() {
     info "Testing adapter stderr is logged to per-worker adapter.log..."
@@ -2539,6 +2656,80 @@ print('OK')
         success "Poisoned detection via adapter.log works"
     else
         fail "Poisoned detection test failed"
+    fi
+}
+
+test_compute_state_non_interactive() {
+    info "Testing compute_state for non-interactive backends..."
+
+    if python3 -c "
+import time
+import bridge
+
+now = time.time()
+
+state, reason = bridge.compute_state(
+    tmux_exists=True,
+    claude_pid=None,
+    pending=True,
+    pending_ts=None,
+    pending_age=5,
+    children=0,
+    last_child_ts=0.0,
+    cpu=0.0,
+    last_hook_ts=None,
+    last_seen_claude=None,
+    now=now,
+    is_interactive=False,
+    adapter_alive=True,
+)
+assert state == 'BUSY_TOOL', f'expected BUSY_TOOL, got {state} ({reason})'
+
+state, reason = bridge.compute_state(
+    tmux_exists=True,
+    claude_pid=None,
+    pending=False,
+    pending_ts=None,
+    pending_age=0.0,
+    children=0,
+    last_child_ts=0.0,
+    cpu=0.0,
+    last_hook_ts=None,
+    last_seen_claude=None,
+    now=now,
+    is_interactive=False,
+    adapter_alive=False,
+)
+assert state == 'READY', f'expected READY, got {state} ({reason})'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "compute_state handles non-interactive backends"
+    else
+        fail "compute_state non-interactive test failed"
+    fi
+}
+
+test_since_preserved_on_reason_change() {
+    info "Testing watchdog since preserved when reason changes..."
+
+    if python3 -c "
+import time
+import bridge
+
+bridge._worker_states.clear()
+now = time.time()
+
+first_since = bridge._record_worker_state('alice', 'DEAD', 'claude missing 1s', now)
+second_since = bridge._record_worker_state('alice', 'DEAD', 'claude missing 5s', now + 5)
+
+assert first_since == second_since, 'since should remain when state is unchanged'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog since preserved on reason change"
+    else
+        fail "Watchdog since preservation test failed"
     fi
 }
 
@@ -8025,12 +8216,17 @@ run_unit_tests() {
     test_backend_env_metadata
     test_codex_end_cleans_session
     test_codex_relaunch_clears_session_id
+    test_relaunch_with_name
+    test_resume_with_name
     test_codex_pause_clears_pending
     test_adapter_pid_tracking
     test_pause_kills_adapter
     test_end_kills_adapter
+    test_end_clears_pending
     test_adapter_stderr_logging
     test_poisoned_detection
+    test_compute_state_non_interactive
+    test_since_preserved_on_reason_change
     test_animation_inbound_routing
     test_gif_outbound_uses_send_animation
     test_get_any_session_id
