@@ -3178,9 +3178,10 @@ class CommandRouter:
                 message = self.format_reply_context(message, reply_context)
             for name in targets:
                 self.route_message(name, message, chat_id, msg_id, one_off=True)
-            if len(targets) == 1:
+            if len(targets) == 1 and state["active"] != targets[0]:
                 state["active"] = targets[0]
                 save_last_active(targets[0])
+                self.reply(chat_id, f"Now talking to {targets[0].capitalize()}.")
             return
 
         # No @mentions → route to focused worker
