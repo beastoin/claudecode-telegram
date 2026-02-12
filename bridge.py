@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.19.0"
+VERSION = "0.23.0"
 
 import os
 import json
@@ -76,6 +76,15 @@ WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 
 DEFAULT_BACKEND = "claude"
 DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
+PENDING_TIMEOUT = 600
+WATCHDOG_INTERVAL = 4
+START_GRACE = 30
+THINK_GRACE = 30
+TOOL_GAP_GRACE = 12
+STALE_PENDING = 300
+CPU_ACTIVE = 15.0
+CPU_IDLE = 7.0
+ALERT_COOLDOWN = 180
 
 
 # ============================================================
@@ -173,6 +182,104 @@ def is_process_running(tmux_name: str, process_name: str) -> bool:
 
 def tmux_send_escape(tmux_name: str):
     subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+
+
+def _tmux_pane_pids() -> dict:
+    """Return a map of tmux session_name -> pane_pid for all panes."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return {}
+
+    if result.returncode != 0:
+        return {}
+
+    pane_map = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        session_name, pane_pid = parts[0], parts[1]
+        if pane_pid.isdigit():
+            pane_map[session_name] = pane_pid
+    return pane_map
+
+
+def _get_claude_pid(pane_pid: str) -> Optional[str]:
+    """Return Claude PID for a pane, or None if not found."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pane_pid), "-f", "claude"],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    output = result.stdout.strip().splitlines()
+    if not output:
+        return None
+    return output[0].strip()
+
+
+def _child_count(pid: str) -> int:
+    """Return child process count for pid."""
+    if not pid:
+        return 0
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return 0
+
+    if result.returncode != 0:
+        return 0
+
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _ps_stats(pids) -> dict:
+    """Return {pid: {'cpu': float, 'state': str}} for given pids."""
+    pid_list = [str(pid) for pid in pids if pid]
+    if not pid_list:
+        return {}
+
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return {}
+
+    if result.returncode != 0:
+        return {}
+
+    stats = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3:
+            continue
+        pid = parts[0]
+        try:
+            cpu = float(parts[1])
+        except ValueError:
+            cpu = 0.0
+        state = parts[2]
+        stats[pid] = {"cpu": cpu, "state": state}
+    return stats
+
+
+def mark_hook_event(session_name: str) -> None:
+    """Record timestamp of last hook response for a session."""
+    _last_hook_ts[session_name] = time.time()
 
 
 class ClaudeBackend:
@@ -324,6 +431,14 @@ state = {
     "active": None,  # Currently active session name
     "startup_notified": False,  # Whether we've sent the startup message
 }
+
+# Watchdog state
+_worker_states = {}  # name -> (state, reason, since)
+_last_child_ts = {}
+_last_seen_claude = {}
+_last_hook_ts = {}
+_last_alert_ts = {}
+_prev_worker_states = {}
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -1663,12 +1778,303 @@ def is_pending(name):
         return False
     try:
         ts = int(pending.read_text().strip())
-        if (time.time() - ts) > 600:  # 10 min timeout - auto-clear stale pending
+        if (time.time() - ts) > PENDING_TIMEOUT:  # 10 min timeout - auto-clear stale pending
             pending.unlink()
             return False
         return True
     except:
         return False
+
+
+def _pending_timestamp(name: str) -> Optional[int]:
+    pending = get_pending_file(name)
+    if not pending.exists():
+        return None
+    try:
+        return int(pending.read_text().strip())
+    except Exception:
+        return None
+
+
+def compute_state(
+    tmux_exists: bool,
+    claude_pid: Optional[str],
+    pending: bool,
+    pending_ts: Optional[int],
+    pending_age: float,
+    children: int,
+    last_child_ts: float,
+    cpu: float,
+    last_hook_ts: Optional[float],
+    last_seen_claude: Optional[float],
+    now: float,
+    poisoned_reason: Optional[str] = None,
+) -> tuple[str, str]:
+    if not tmux_exists:
+        return "OFFLINE", "tmux missing"
+
+    if not claude_pid and last_seen_claude is not None:
+        if (now - last_seen_claude) > START_GRACE:
+            return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
+
+    if pending and children > 0:
+        return "BUSY_TOOL", f"children={children}"
+
+    if pending and children == 0:
+        if (pending_age <= THINK_GRACE) or ((now - last_child_ts) <= TOOL_GAP_GRACE) or (cpu >= CPU_ACTIVE):
+            return "BUSY_THINKING", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        if pending_age < STALE_PENDING:
+            return "WAITING", f"age={int(pending_age)}s"
+        hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+        if pending_age >= STALE_PENDING and cpu < CPU_IDLE and not hook_since_pending:
+            if poisoned_reason is not None:
+                return "POISONED", f"{poisoned_reason}"
+            return "STUCK", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        return "WAITING", f"age={int(pending_age)}s"
+
+    if not pending and children > 0:
+        return "UNTRACKED_BUSY", f"children={children}"
+
+    if claude_pid and not pending:
+        return "READY", "idle"
+
+    return "OFFLINE", "tmux alive, claude missing"
+
+
+POISON_PATTERNS = [
+    re.compile(r"error.*overloaded", re.IGNORECASE),
+    re.compile(r"image.*dimensions.*exceed", re.IGNORECASE),
+    re.compile(r"context.*(length|window).*exceed", re.IGNORECASE),
+    re.compile(r"rate.?limit", re.IGNORECASE),
+    re.compile(r"invalid.*api.?key", re.IGNORECASE),
+    re.compile(r"APIError", re.IGNORECASE),
+    re.compile(r"error.*529", re.IGNORECASE),
+    re.compile(r"error.*503", re.IGNORECASE),
+]
+
+
+def _capture_pane_text(tmux_name: str, lines: int = 50) -> str:
+    """Return the last N lines of a tmux pane, or empty string on error."""
+    if lines <= 0:
+        return ""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
+            capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
+    """Read the last N lines of adapter.log for a worker, or empty string."""
+    if tail_lines <= 0:
+        return ""
+    log_path = get_session_dir(name) / "adapter.log"
+    if not log_path.exists():
+        return ""
+    try:
+        with log_path.open("r", errors="ignore") as fh:
+            lines = fh.readlines()
+        return "".join(lines[-tail_lines:])
+    except Exception:
+        return ""
+
+
+def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
+    backend_name = get_worker_backend(name)
+    backend = get_backend(backend_name)
+    text_parts = []
+    if backend.is_interactive:
+        text_parts.append(_capture_pane_text(tmux_name))
+    else:
+        text_parts.append(_check_adapter_log(name))
+    combined = "\n".join([part for part in text_parts if part])
+    if not combined:
+        return None
+    for pattern in POISON_PATTERNS:
+        if len(pattern.findall(combined)) >= 3:
+            return pattern.pattern
+    return None
+
+
+def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
+    if admin_chat_id is None:
+        return
+
+    now = time.time()
+    last = _last_alert_ts.get(name)
+    if last and (now - last) < ALERT_COOLDOWN:
+        return
+
+    actions = {
+        "OFFLINE": f"/hire {name}",
+        "DEAD": f"/relaunch {name}",
+        "STUCK": f"/relaunch {name}",
+        "POISONED": f"/relaunch {name} (context may be poisoned)",
+    }
+    action = actions.get(state, "check /team")
+    text = f"[watchdog] {name}: {state} ({reason}). Suggested: {action}"
+    try:
+        telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
+        _last_alert_ts[name] = now
+    except Exception as e:
+        print(f"Watchdog alert error: {e}")
+
+
+def _send_resolved_alert(name: str, new_state: str) -> None:
+    if admin_chat_id is None:
+        return
+
+    good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
+    prev_state = _prev_worker_states.get(name)
+    if prev_state not in bad_states or new_state not in good_states:
+        return
+
+    text = f"[watchdog] {name}: resolved -> {new_state}"
+    try:
+        telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
+    except Exception as e:
+        print(f"Watchdog resolved alert error: {e}")
+
+
+def _handle_watchdog_transition(
+    name: str,
+    state: str,
+    reason: str,
+    since: float,
+    now: Optional[float] = None,
+) -> None:
+    if now is None:
+        now = time.time()
+
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
+    good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
+    prev_state = _prev_worker_states.get(name)
+    state_changed = prev_state is None or prev_state != state
+
+    def eligible_for_alert() -> bool:
+        if state in {"OFFLINE", "DEAD"}:
+            return since is not None and (now - since) >= START_GRACE
+        return True
+
+    if state in bad_states:
+        if state_changed:
+            if eligible_for_alert():
+                _send_watchdog_alert(name, state, reason)
+        elif state in {"OFFLINE", "DEAD"} and eligible_for_alert():
+            _send_watchdog_alert(name, state, reason)
+
+    if state_changed and prev_state in bad_states and state in good_states:
+        _send_resolved_alert(name, state)
+
+    _prev_worker_states[name] = state
+
+
+def watchdog_loop():
+    while True:
+        try:
+            now = time.time()
+            registered = get_registered_sessions()
+            pane_pids = _tmux_pane_pids()
+
+            claude_pids = {}
+            tmux_present = {}
+
+            for name, session in registered.items():
+                tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+                pane_pid = pane_pids.get(tmux_name)
+                tmux_exists = bool(pane_pid)
+                tmux_present[name] = tmux_exists
+
+                if not tmux_exists:
+                    continue
+
+                claude_pid = _get_claude_pid(pane_pid)
+                if claude_pid:
+                    claude_pids[name] = claude_pid
+                    _last_seen_claude[name] = now
+                else:
+                    if name not in _last_seen_claude:
+                        _last_seen_claude[name] = now
+
+            stats = _ps_stats(claude_pids.values())
+            registered_names = set(registered.keys())
+
+            for name, session in registered.items():
+                tmux_exists = tmux_present.get(name, False)
+                claude_pid = claude_pids.get(name)
+                cpu = 0.0
+                if claude_pid and claude_pid in stats:
+                    cpu = stats[claude_pid].get("cpu", 0.0)
+
+                children = _child_count(claude_pid) if claude_pid else 0
+                if children > 0:
+                    _last_child_ts[name] = now
+
+                pending_ts = _pending_timestamp(name)
+                pending = pending_ts is not None
+                pending_age = now - pending_ts if pending_ts else 0.0
+                last_child_ts = _last_child_ts.get(name, 0.0)
+                last_hook_ts = _last_hook_ts.get(name)
+                last_seen_claude = _last_seen_claude.get(name)
+
+                state_args = dict(
+                    tmux_exists=tmux_exists,
+                    claude_pid=claude_pid,
+                    pending=pending,
+                    pending_ts=pending_ts,
+                    pending_age=pending_age,
+                    children=children,
+                    last_child_ts=last_child_ts,
+                    cpu=cpu,
+                    last_hook_ts=last_hook_ts,
+                    last_seen_claude=last_seen_claude,
+                    now=now,
+                )
+                state, reason = compute_state(**state_args)
+
+                if state == "STUCK":
+                    poisoned_reason = _detect_poisoned(name, tmux_name)
+                    state, reason = compute_state(
+                        **state_args,
+                        poisoned_reason=poisoned_reason
+                    )
+
+                prev = _worker_states.get(name)
+                if prev and prev[0] == state and prev[1] == reason:
+                    since = prev[2]
+                else:
+                    since = now
+                _worker_states[name] = (state, reason, since)
+                _handle_watchdog_transition(name, state, reason, since, now=now)
+
+            for name in list(_worker_states.keys()):
+                if name not in registered_names:
+                    _worker_states.pop(name, None)
+            for name in list(_last_child_ts.keys()):
+                if name not in registered_names:
+                    _last_child_ts.pop(name, None)
+            for name in list(_last_seen_claude.keys()):
+                if name not in registered_names:
+                    _last_seen_claude.pop(name, None)
+            for name in list(_last_hook_ts.keys()):
+                if name not in registered_names:
+                    _last_hook_ts.pop(name, None)
+            for name in list(_prev_worker_states.keys()):
+                if name not in registered_names:
+                    _prev_worker_states.pop(name, None)
+            for name in list(_last_alert_ts.keys()):
+                if name not in registered_names:
+                    _last_alert_ts.pop(name, None)
+        except Exception as e:
+            print(f"Watchdog error: {e}")
+
+        time.sleep(WATCHDOG_INTERVAL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1730,6 +2136,40 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
     return name, backend
 
 
+def _format_watchdog_status(name: str, pending_lookup=None) -> str:
+    if pending_lookup is None:
+        pending_lookup = is_pending
+
+    entry = _worker_states.get(name)
+    if not entry:
+        return "working" if pending_lookup(name) else "available"
+
+    state, _reason, since = entry
+    now = time.time()
+
+    if state == "READY":
+        return "ready"
+    if state == "BUSY_TOOL":
+        return "working (tools)"
+    if state == "BUSY_THINKING":
+        return "working (thinking)"
+    if state == "WAITING":
+        return "working (waiting)"
+    if state == "STUCK":
+        minutes = max(0, int((now - since) / 60)) if since else 0
+        return f"STUCK {minutes}m"
+    if state == "POISONED":
+        minutes = max(0, int((now - since) / 60)) if since else 0
+        return f"POISONED {minutes}m"
+    if state == "DEAD":
+        return "DEAD"
+    if state == "OFFLINE":
+        return "offline"
+    if state == "UNTRACKED_BUSY":
+        return "working (untracked)"
+    return state.lower()
+
+
 def format_team_lines(registered: dict, active: Optional[str], pending_lookup=None) -> list[str]:
     """Format /team response lines (backend-aware)."""
     if pending_lookup is None:
@@ -1745,7 +2185,8 @@ def format_team_lines(registered: dict, active: Optional[str], pending_lookup=No
         status = []
         if name == active:
             status.append("focused")
-        status.append("working" if pending_lookup(name) else "available")
+        watchdog_status = _format_watchdog_status(name, pending_lookup)
+        status.append(watchdog_status)
         status.append(f"backend={backend}")
         lines.append(f"- {name} ({', '.join(status)})")
     return lines
@@ -1767,6 +2208,8 @@ def format_progress_lines(
     status.append(f"Progress for focused worker: {name}")
     status.append("Focused: yes")
     status.append(f"Working: {'yes' if pending else 'no'}")
+    watchdog_status = _format_watchdog_status(name)
+    status.append(f"State: {watchdog_status}")
     status.append(f"Backend: {backend}")
     status.append(f"Online: {'yes' if online else 'no'}")
     status.append(f"Ready: {'yes' if ready else 'no'}")
@@ -3258,6 +3701,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # Clear pending
             clear_pending(session_name)
+            mark_hook_event(session_name)
 
             self.send_response(200)
             self.end_headers()
@@ -3279,6 +3723,9 @@ class Handler(BaseHTTPRequestHandler):
         # Handle /checkin endpoint for worker instruction refresh
         if parsed.path == "/checkin":
             self.handle_checkin_endpoint(parsed)
+            return
+        if parsed.path == "/health/workers":
+            self.handle_health_workers_endpoint()
             return
 
         # Default health check endpoint
@@ -3333,6 +3780,36 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(welcome.encode())
         except Exception as e:
             print(f"Checkin endpoint error: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def handle_health_workers_endpoint(self):
+        """Return watchdog worker states as JSON (debug endpoint)."""
+        try:
+            now = time.time()
+            registered = get_registered_sessions()
+            workers = {}
+            for name in sorted(registered.keys()):
+                entry = _worker_states.get(name)
+                if entry:
+                    state, reason, since = entry
+                    workers[name] = {
+                        "state": state,
+                        "reason": reason,
+                        "since": since,
+                        "age_sec": int(now - since) if since else None,
+                    }
+                else:
+                    workers[name] = {"state": "unknown"}
+
+            response = {"workers": workers}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode())
+        except Exception as e:
+            print(f"Health workers endpoint error: {e}")
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
@@ -3453,6 +3930,9 @@ def main():
             print(f"Sent startup notification to chat {last_chat_id}")
         else:
             print(f"Failed to send startup notification: {result}")
+
+    watchdog = threading.Thread(target=watchdog_loop, daemon=True)
+    watchdog.start()
 
     try:
         ReuseAddrServer(("0.0.0.0", PORT), Handler).serve_forever()

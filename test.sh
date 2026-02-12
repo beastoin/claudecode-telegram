@@ -443,6 +443,7 @@ import os
 from pathlib import Path
 os.environ['SANDBOX_ENABLED'] = '1'
 os.environ['PORT'] = '8095'
+os.environ['BRIDGE_URL'] = ''
 
 from bridge import get_docker_run_cmd
 
@@ -2504,6 +2505,40 @@ print('OK')
         success "Adapter stderr logged to per-worker adapter.log"
     else
         fail "Adapter stderr logging test failed"
+    fi
+}
+
+test_poisoned_detection() {
+    info "Testing poisoned detection via adapter.log..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+name = 'alice'
+session_dir = tmp / name
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+log_file = session_dir / 'adapter.log'
+log_file.write_text('\\n'.join(['error 529 overloaded'] * 5))
+
+text = bridge._check_adapter_log(name, tail_lines=20)
+assert 'error 529 overloaded' in text, f'unexpected log content: {text!r}'
+
+reason = bridge._detect_poisoned(name, 'claude-test-alice')
+assert reason is not None, 'expected poisoned detection'
+assert 'error.*overloaded' in reason, f'expected pattern match, got {reason!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Poisoned detection via adapter.log works"
+    else
+        fail "Poisoned detection test failed"
     fi
 }
 
@@ -4640,6 +4675,39 @@ print('OK')
         success "Typing indicator function exists"
     else
         fail "Typing indicator test failed"
+    fi
+}
+
+test_watchdog_alert_on_stuck() {
+    info "Testing watchdog alerts on stuck transition..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'alice': 'READY'}
+bridge._worker_states = {'alice': ('STUCK', 'age=400s cpu=0.0', 600)}
+
+sent = {}
+def fake_api(method, data):
+    sent['method'] = method
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('alice', 'STUCK', 'age=400s cpu=0.0', since=600, now=1000)
+
+assert sent.get('method') == 'sendMessage', 'telegram_api not called'
+assert sent['data']['chat_id'] == 123, 'admin chat id should be used'
+assert 'STUCK' in sent['data']['text'], 'alert should include state'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog stuck alert fires on transition"
+    else
+        fail "Watchdog stuck alert test failed"
     fi
 }
 
@@ -7962,6 +8030,7 @@ run_unit_tests() {
     test_pause_kills_adapter
     test_end_kills_adapter
     test_adapter_stderr_logging
+    test_poisoned_detection
     test_animation_inbound_routing
     test_gif_outbound_uses_send_animation
     test_get_any_session_id
@@ -8076,6 +8145,7 @@ run_unit_tests() {
     log "── Misc Behavior Gaps Tests (Unit) ─────────────────────────────────────"
     test_eye_reaction_on_acceptance
     test_typing_indicator_sent_while_pending
+    test_watchdog_alert_on_stuck
     test_admin_restored_from_last_chat_id
     test_new_worker_welcome_message
     test_extra_mounts_docker_cmd

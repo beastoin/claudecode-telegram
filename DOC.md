@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.21.4
+> Version: 0.23.0
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,25 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.23.0 - Worker health watchdog
+
+**Breaking changes:**
+- None.
+
+**New features:**
+- **Worker health watchdog thread** (Phase 1): Background daemon samples tmux pane PIDs, Claude PIDs, child counts, and CPU stats every 4s to compute worker health states.
+- **8 worker states**: OFFLINE, DEAD, READY, BUSY_TOOL, BUSY_THINKING, WAITING, STUCK, POISONED — with detailed reasons.
+- **Detailed `/team` display**: Shows "ready", "working (tools/thinking/waiting)", "STUCK Xm", "POISONED Xm", "DEAD", and "offline".
+- **`GET /health/workers` endpoint**: Returns JSON with watchdog state, reason, and age for debugging.
+- **Hook event tracking**: Hook responses record timestamps to improve stuck-pending detection.
+- **Proactive Telegram alerts** (Phase 2): Watchdog sends alerts to admin when workers enter DEAD/STUCK/POISONED states, with 3-min cooldown per worker. Sends "resolved" alerts when workers recover.
+- **POISONED state detection** (Phase 3): When a worker is STUCK, watchdog inspects tmux pane output (interactive) or `adapter.log` (non-interactive) for repeated error signatures (API errors, overloaded, rate limits). 3+ matches of any pattern = POISONED.
+
+**Architecture changes:**
+- **Watchdog state cache**: In-memory state dictionaries track last child activity, last hook response, last Claude presence, previous states, and alert timestamps.
+- **`compute_state()` pure function**: All state logic in a single testable function with no side effects.
+- **`_handle_watchdog_transition()`**: Extracted transition logic for alert/resolved decisions, enabling unit testing.
 
 ### v0.21.5 - Adapter stderr logging
 
