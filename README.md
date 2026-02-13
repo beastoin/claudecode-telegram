@@ -84,7 +84,7 @@ Backend selection: `/hire alice --codex` (or `/hire codex-alice`), plus `--gemin
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | Bot doesn't respond | Bridge down or you're not admin | Ask operator to run `./claudecode-telegram.sh status` |
-| 👀 but no reply | Worker is busy or stuck | Run `/progress`, then `/relaunch` if needed |
+| 👀 but no reply | Worker is busy or stuck | Run `/progress`, then `/restart` if needed |
 | "No one assigned" | No focused worker | `/team` then `/focus <name>` |
 
 ## Gotchas & Limits

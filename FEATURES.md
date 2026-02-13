@@ -10,8 +10,7 @@
 - MUST implement `/focus <name>` to set the focused worker and persist the focus.
 - MUST implement `/progress` to report focused worker status including pending, backend, online/ready state, and mode.
 - MUST implement `/pause` to interrupt the focused worker and clear pending state.
-- MUST implement `/relaunch [name]` to restart a worker for its backend (defaults to focused worker).
-- MUST implement `/resume [name]` to resume a worker session when possible (defaults to focused worker).
+- MUST implement `/restart [--clean] [name]` to restart a worker (defaults to resume; `--clean` for fresh start). Defaults to focused worker.
 - MUST implement `/settings` to show configuration with secrets redacted and sandbox status.
 - MUST implement `/hire <name>` to create a worker and set focus to it.
 - MUST implement `/end <name>` to offboard a worker and remove its resources.
@@ -288,10 +287,12 @@
 - MUST recognize `[[image:/path|caption]]` and `[[file:/path|caption]]` tags in worker responses.
 - MUST ignore tags inside fenced code blocks and inline code.
 - MUST preserve escaped tags such as `\[[image:...]]`.
-- MUST send photos with `sendPhoto` and documents with `sendDocument`.
+- MUST route media to the correct Telegram API method by extension:
+  - `[[image:]]`: `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp` → `sendPhoto`; `.gif`, `.mp4` → `sendAnimation`
+  - `[[file:]]`: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` → `sendVideo`; `.mp3`, `.m4a`, `.flac`, `.aac`, `.wav` → `sendAudio`; `.ogg`, `.opus`, `.oga` → `sendVoice`; `.tgs` → `sendSticker`; all others → `sendDocument`
 
 ### Outgoing validation
-- MUST allow image extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`.
+- MUST allow image extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, `.mp4`.
 - MUST restrict image paths to `/tmp`, `SESSIONS_DIR`, or the current working directory.
 - MUST allow document extensions from the configured allowlist (docs/data/code).
 - MUST block document extensions containing secrets/keys (e.g., `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.der`, `.jks`, `.keystore`, `.kdb`, `.pgp`, `.gpg`, `.asc`).
@@ -387,7 +388,7 @@ Working: <yes|no>
 Backend: <backend>
 Online: <yes|no>
 Ready: <yes|no>
-Needs attention: worker app is not running. Use /relaunch.
+Needs attention: worker app is not running. Use /restart.
 Mode: <mode>
 ```
 Where `<mode>` is either `tmux` or `<backend> exec (stateless)`.
@@ -500,17 +501,17 @@ No one assigned. Your team: <names>
 Who should I talk to?
 No team members yet. Add someone with /hire <name>.
 Can't find <name>. Check /team for who's available.
-<Name> is offline. Try /relaunch.
-Could not send to <Name>. Try /relaunch.
+<Name> is offline. Try /restart.
+Could not send to <Name>. Try /restart.
 No one's online to share with.
 ```
-- Pause/relaunch:
+- Pause/restart:
 ```
 <Name> is paused. I'll pick up where we left off.
 Bringing <Name> back online...
-Could not relaunch "<name>". <error-from-backend>
+Could not restart "<name>". <error-from-backend>
 ```
-- No active worker (pause/relaunch):
+- No active worker (pause/restart):
 ```
 No one assigned.
 ```
@@ -1019,7 +1020,7 @@ creating -> online -> pending -> online -> pending -> ...
 - `online`: worker exists and is ready (`tmux` + `claude` running, or exec backend).
 - `pending`: a manager message has been sent; `pending` file exists.
 - `pending` auto-clears after 10 minutes; transitions back to `online`.
-- `/pause`, `/relaunch`, `/end`, or `/response` also clear pending.
+- `/pause`, `/restart`, `/end`, or `/response` also clear pending.
 
 ### Admin states
 ```

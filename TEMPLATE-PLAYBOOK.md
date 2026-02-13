@@ -27,7 +27,7 @@ A playbook tells your AI workers how to behave. Copy this template and customize
 ## Operations Manager (@dan)
 - Assign tasks, track workload, coordinate team
 - "check team": Review all workers' status
-- Can run: /clear, /compact, /resume (when workers are stuck)
+- Can run: /clear, /compact, /restart (when workers are stuck)
 ```
 
 **Our team example:**
@@ -131,7 +131,7 @@ A playbook tells your AI workers how to behave. Copy this template and customize
 ## Operations Manager (@ops)
 - Assign tasks, track workload, coordinate team
 - "check team": Review all workers' status
-- Can run: /clear, /compact, /resume (when workers are stuck)
+- Can run: /clear, /compact, /restart (when workers are stuck)
 
 ## Non-Negotiables
 - Always run tests before commit/push

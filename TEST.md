@@ -145,9 +145,9 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_get_registered_sessions_includes_exec_workers` | exec workers included in session scans |
 | `test_backend_env_metadata` | WORKER_BACKEND exported via tmux env |
 | `test_codex_end_cleans_session` | /end cleans codex session metadata + pipe |
-| `test_codex_relaunch_clears_session_id` | /relaunch clears codex session id |
-| `test_relaunch_with_name` | /relaunch accepts explicit worker name |
-| `test_resume_with_name` | /resume accepts explicit worker name |
+| `test_codex_relaunch_clears_session_id` | /restart --clean clears codex session id |
+| `test_restart_with_name` | /restart defaults to resume with explicit worker name |
+| `test_restart_clean_with_name` | /restart --clean does fresh relaunch with explicit worker name |
 | `test_codex_pause_clears_pending` | /pause clears pending for codex workers |
 | `test_adapter_pid_tracking` | Adapter PID tracking and kill_adapter |
 | `test_pause_kills_adapter` | /pause kills inflight adapter |
@@ -306,7 +306,7 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_focus_command` | /focus switches worker |
 | `test_progress_command` | /progress shows status |
 | `test_pause_command` | /pause sends Escape |
-| `test_relaunch_command` | /relaunch restarts worker |
+| `test_relaunch_command` | /restart restarts worker |
 | `test_settings_command` | /settings shows config |
 | `test_end_command` | /end offboards worker |
 | `test_dynamic_bot_command_list_update` | Bot command list updates on /hire and /end |

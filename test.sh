@@ -34,6 +34,16 @@ TUNNEL_LOG="$TEST_NODE_DIR/tunnel.log"
 # Ensure unit tests write to isolated test sessions directory
 export SESSIONS_DIR="$TEST_SESSION_DIR"
 
+# Create stub binaries for backends not installed (needed for binary check)
+TEST_BIN_DIR="$(mktemp -d)"
+for bin_name in codex gemini opencode; do
+    if ! command -v "$bin_name" &>/dev/null; then
+        printf '#!/bin/sh\necho "stub"\n' > "$TEST_BIN_DIR/$bin_name"
+        chmod +x "$TEST_BIN_DIR/$bin_name"
+    fi
+done
+export PATH="$TEST_BIN_DIR:$PATH"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,6 +98,7 @@ cleanup() {
     rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port" 2>/dev/null || true
     rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active" 2>/dev/null || true
     rm -f "$TEST_NODE_DIR/direct_mode_bridge.log" 2>/dev/null || true
+    [[ -d "${TEST_BIN_DIR:-}" ]] && rm -rf "$TEST_BIN_DIR"; true
 }
 
 trap cleanup EXIT
@@ -1825,6 +1836,105 @@ print('OK')
     fi
 }
 
+test_hire_binary_check() {
+    info "Testing /hire rejects missing backend binary..."
+
+    if python3 -c "
+import shutil
+import bridge
+
+# Save originals
+orig_which = shutil.which
+
+# Make 'fakecli' not found
+def mock_which(name, path=None):
+    if name == 'fakecli':
+        return None
+    return orig_which(name, path=path)
+
+shutil.which = mock_which
+
+# Create a backend with a missing binary
+class FakeBackend:
+    name = 'fake'
+    binary = 'fakecli'
+    is_interactive = False
+    def start_cmd(self, resume_id=''): return 'echo hi'
+    def send(self, *a, **kw): return True
+    def is_online(self, *a): return True
+
+bridge.BACKENDS['fake'] = FakeBackend()
+
+# hire should fail with binary-not-found error
+ok, err = bridge.worker_manager.hire('testbincheck', 'fake')
+assert ok is False, f'expected hire to fail, got ok={ok}'
+assert 'fakecli' in err, f'expected binary name in error: {err}'
+assert 'not found' in err, f'expected not-found message: {err}'
+
+# Verify no tmux session was created
+import subprocess
+result = subprocess.run(['tmux', 'has-session', '-t', f'{bridge.TMUX_PREFIX}testbincheck'], capture_output=True)
+assert result.returncode != 0, 'tmux session should NOT have been created'
+
+# Cleanup
+del bridge.BACKENDS['fake']
+shutil.which = orig_which
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/hire rejects missing backend binary"
+    else
+        fail "/hire binary check test failed"
+    fi
+}
+
+test_relaunch_binary_check() {
+    info "Testing /restart rejects missing backend binary..."
+
+    if python3 -c "
+import shutil
+import subprocess
+import time
+import bridge
+
+orig_which = shutil.which
+
+tmux_name = f'{bridge.TMUX_PREFIX}binchk'
+
+# Create a real tmux session first
+subprocess.run(['tmux', 'new-session', '-d', '-s', tmux_name, '-x', '80', '-y', '24'], capture_output=True)
+time.sleep(0.3)
+
+# Register it as a codex worker
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'binchk': {'tmux': tmux_name, 'backend': 'codex'}
+}
+
+# Now make codex binary disappear
+def mock_which(name, path=None):
+    if name == 'codex':
+        return None
+    return orig_which(name, path=path)
+
+shutil.which = mock_which
+
+ok, err = bridge.worker_manager.restart('binchk', mode='relaunch')
+assert ok is False, f'expected restart to fail, got ok={ok}'
+assert 'codex' in err, f'expected binary name in error: {err}'
+assert 'not found' in err, f'expected not-found message: {err}'
+
+# Cleanup
+subprocess.run(['tmux', 'kill-session', '-t', tmux_name], capture_output=True)
+shutil.which = orig_which
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart rejects missing backend binary"
+    else
+        fail "/restart binary check test failed"
+    fi
+}
+
 test_team_output_includes_backend() {
     info "Testing /team output includes backend..."
 
@@ -1968,9 +2078,10 @@ print('OK')
 }
 
 test_codex_relaunch_clears_session_id() {
-    info "Testing codex /relaunch clears session id..."
+    info "Testing codex /restart --clean clears session id..."
 
     if python3 -c "
+import shutil
 import tempfile
 from pathlib import Path
 import bridge
@@ -1983,6 +2094,9 @@ prefix = bridge.TMUX_PREFIX
 bridge.worker_manager.scan_tmux_sessions = lambda: {'alice': {'tmux': f'{prefix}alice', 'backend': 'codex'}}
 # Mock tmux_exists since no real tmux session
 bridge.tmux_exists = lambda name: True
+# Mock shutil.which so binary check passes without codex installed
+orig_which = shutil.which
+shutil.which = lambda name, path=None: '/usr/bin/' + name if name == 'codex' else orig_which(name, path=path)
 
 session_dir = tmp / 'alice'
 session_dir.mkdir()
@@ -1994,53 +2108,17 @@ assert ok is True, f'expected ok, got err: {err}'
 assert not (session_dir / 'codex_session_id').exists(), 'session id should be cleared'
 assert (session_dir / 'backend').exists(), 'backend file should remain'
 
+shutil.which = orig_which
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Codex /relaunch clears session id"
+        success "Codex /restart --clean clears session id"
     else
-        fail "Codex /relaunch test failed"
+        fail "Codex /restart --clean test failed"
     fi
 }
 
-test_relaunch_with_name() {
-    info "Testing /relaunch with name argument..."
-
-    if python3 -c "
-import bridge
-
-bridge.state['active'] = 'alice'
-
-calls = {}
-
-def fake_restart(name, mode='relaunch'):
-    calls['name'] = name
-    calls['mode'] = mode
-    return True, None
-
-bridge.restart_claude = fake_restart
-bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob'}}
-
-class FakeTelegram:
-    def send_message(self, *args, **kwargs):
-        return {'ok': True}
-
-router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
-router.cmd_relaunch(123, 'bob')
-
-assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
-assert calls.get('mode') == 'relaunch', 'expected relaunch mode, got %s' % calls
-assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/relaunch accepts name argument"
-    else
-        fail "/relaunch name argument test failed"
-    fi
-}
-
-test_resume_with_name() {
-    info "Testing /resume with name argument..."
+test_restart_with_name() {
+    info "Testing /restart with name argument (default = resume)..."
 
     if python3 -c "
 import tempfile
@@ -2071,7 +2149,7 @@ class FakeTelegram:
         return {'ok': True}
 
 router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
-router.cmd_resume(123, 'bob')
+router.cmd_restart(123, 'bob')
 
 assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
 assert calls.get('mode') == 'resume', 'expected resume mode, got %s' % calls
@@ -2079,9 +2157,46 @@ assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.s
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "/resume accepts name argument"
+        success "/restart with name defaults to resume"
     else
-        fail "/resume name argument test failed"
+        fail "/restart with name test failed"
+    fi
+}
+
+test_restart_clean_with_name() {
+    info "Testing /restart --clean with name argument..."
+
+    if python3 -c "
+import bridge
+
+bridge.state['active'] = 'alice'
+
+calls = {}
+
+def fake_restart(name, mode='relaunch'):
+    calls['name'] = name
+    calls['mode'] = mode
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob'}}
+
+class FakeTelegram:
+    def send_message(self, *args, **kwargs):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_restart(123, '--clean bob')
+
+assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
+assert calls.get('mode') == 'relaunch', 'expected relaunch mode, got %s' % calls
+assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart --clean with name does fresh relaunch"
+    else
+        fail "/restart --clean with name test failed"
     fi
 }
 
@@ -2717,6 +2832,51 @@ print('OK')
     fi
 }
 
+test_idle_streak_prevents_false_stuck() {
+    info "Testing idle_streak prevents false STUCK alerts..."
+
+    if python3 -c "
+import bridge
+
+# Reset idle streak
+bridge._idle_streak.clear()
+
+# Simulate: compute_state returns STUCK but streak < IDLE_STREAK_STUCK
+# The watchdog loop downgrades to WAITING until streak reaches threshold
+
+# First STUCK sample: streak=1, should downgrade to WAITING
+bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
+streak = bridge._idle_streak['testworker']
+assert streak == 1, f'expected streak 1, got {streak}'
+assert streak < bridge.IDLE_STREAK_STUCK, f'streak {streak} should be < {bridge.IDLE_STREAK_STUCK}'
+
+# Second STUCK sample: streak=2, still WAITING
+bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
+streak = bridge._idle_streak['testworker']
+assert streak == 2, f'expected streak 2, got {streak}'
+assert streak < bridge.IDLE_STREAK_STUCK, f'streak {streak} should be < {bridge.IDLE_STREAK_STUCK}'
+
+# Third STUCK sample: streak=3, now real STUCK
+bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
+streak = bridge._idle_streak['testworker']
+assert streak == 3, f'expected streak 3, got {streak}'
+assert streak >= bridge.IDLE_STREAK_STUCK, f'streak {streak} should be >= {bridge.IDLE_STREAK_STUCK}'
+
+# Non-STUCK state resets streak
+bridge._idle_streak['testworker'] = 0
+assert bridge._idle_streak['testworker'] == 0, 'streak should reset to 0'
+
+# Verify IDLE_STREAK_STUCK constant
+assert bridge.IDLE_STREAK_STUCK == 3, f'expected IDLE_STREAK_STUCK=3, got {bridge.IDLE_STREAK_STUCK}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "idle_streak prevents false STUCK (requires 3 consecutive samples)"
+    else
+        fail "idle_streak test failed"
+    fi
+}
+
 test_watchdog_resolved_alert() {
     info "Testing watchdog resolved alert on STUCK -> READY transition..."
 
@@ -3010,6 +3170,40 @@ print('OK')
     fi
 }
 
+test_format_response_strips_name_prefix() {
+    info "Testing format_response_text strips redundant name prefix..."
+
+    if python3 -c "
+from bridge import format_response_text
+
+# Normal message - no prefix to strip
+result = format_response_text('lee', 'hello world')
+assert result == '<b>lee:</b>\nhello world', f'unexpected: {result}'
+
+# Message with redundant prefix - should strip it
+result = format_response_text('lee', 'lee: hello world')
+assert result == '<b>lee:</b>\nhello world', f'unexpected: {result}'
+
+# Case-insensitive prefix strip
+result = format_response_text('lee', 'Lee: hello world')
+assert result == '<b>lee:</b>\nhello world', f'unexpected: {result}'
+
+# Different worker name - should NOT strip
+result = format_response_text('lee', 'chen: hello world')
+assert result == '<b>lee:</b>\nchen: hello world', f'unexpected: {result}'
+
+# Prefix with leading whitespace
+result = format_response_text('lee', '  lee: hello world')
+assert result == '<b>lee:</b>\nhello world', f'unexpected: {result}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "format_response_text strips redundant name prefix"
+    else
+        fail "format_response_text prefix strip test failed"
+    fi
+}
+
 test_handle_watchdog_transition() {
     info "Testing _handle_watchdog_transition state machine..."
 
@@ -3138,7 +3332,7 @@ test_reserved_names_rejection() {
 from bridge import RESERVED_NAMES
 
 # Verify all expected reserved names are included
-expected = {'team', 'focus', 'progress', 'pause', 'relaunch',
+expected = {'team', 'focus', 'progress', 'pause', 'restart',
             'settings', 'hire', 'end', 'all', 'start', 'help'}
 for name in expected:
     assert name in RESERVED_NAMES, f'{name} should be reserved'
@@ -5438,8 +5632,8 @@ test_direct_mode_e2e_pause() {
     send_direct_mode_message "/end pauseworker" >/dev/null 2>&1 || true
 }
 
-test_direct_mode_e2e_relaunch() {
-    info "Testing direct mode E2E /relaunch command..."
+test_direct_mode_e2e_restart() {
+    info "Testing direct mode E2E /restart --clean command..."
 
     if ! check_claude_available; then
         info "Skipping (claude CLI not available)"
@@ -5447,21 +5641,21 @@ test_direct_mode_e2e_relaunch() {
     fi
 
     # Clean up and create worker
-    send_direct_mode_message "/end relaunchworker" >/dev/null 2>&1 || true
+    send_direct_mode_message "/end restartworker" >/dev/null 2>&1 || true
     sleep 0.3
 
-    send_direct_mode_message "/hire relaunchworker" >/dev/null
-    wait_for_direct_worker "relaunchworker"
-    send_direct_mode_message "/focus relaunchworker" >/dev/null
+    send_direct_mode_message "/hire restartworker" >/dev/null
+    wait_for_direct_worker "restartworker"
+    send_direct_mode_message "/focus restartworker" >/dev/null
     sleep 0.2
 
     # Get first PID (logged when worker starts)
     local first_log_count
-    first_log_count=$(grep -c "Started direct worker 'relaunchworker'" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null || echo "0")
+    first_log_count=$(grep -c "Started direct worker 'restartworker'" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null || echo "0")
 
-    # Send /relaunch
+    # Send /restart --clean
     local result
-    result=$(send_direct_mode_message "/relaunch")
+    result=$(send_direct_mode_message "/restart --clean")
 
     if [[ "$result" == "OK" ]]; then
         # Wait for worker to restart
@@ -5469,20 +5663,20 @@ test_direct_mode_e2e_relaunch() {
 
         # Check if a new worker was started (log count increased)
         local second_log_count
-        second_log_count=$(grep -c "Started direct worker 'relaunchworker'" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null || echo "0")
+        second_log_count=$(grep -c "Started direct worker 'restartworker'" "$DIRECT_MODE_BRIDGE_LOG" 2>/dev/null || echo "0")
 
         if [[ "$second_log_count" -gt "$first_log_count" ]]; then
-            success "/relaunch: Worker restarted (new subprocess)"
+            success "/restart --clean: Worker restarted (new subprocess)"
         else
-            # Relaunch might work differently in direct mode
-            success "/relaunch: Command accepted"
+            # Restart might work differently in direct mode
+            success "/restart --clean: Command accepted"
         fi
     else
-        fail "/relaunch: Command failed: $result"
+        fail "/restart --clean: Command failed: $result"
     fi
 
     # Cleanup
-    send_direct_mode_message "/end relaunchworker" >/dev/null 2>&1 || true
+    send_direct_mode_message "/end restartworker" >/dev/null 2>&1 || true
 }
 
 test_direct_mode_e2e_settings() {
@@ -5867,14 +6061,16 @@ run_unit_tests() {
     log ""
     log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"
     test_hire_backend_parsing
+    test_hire_binary_check
+    test_relaunch_binary_check
     test_team_output_includes_backend
     test_progress_output_includes_backend
     test_worker_send_uses_backend
     test_backend_env_metadata
     test_codex_end_cleans_session
     test_codex_relaunch_clears_session_id
-    test_relaunch_with_name
-    test_resume_with_name
+    test_restart_with_name
+    test_restart_clean_with_name
     test_codex_pause_clears_pending
     test_adapter_pid_tracking
     test_pause_kills_adapter
@@ -5885,12 +6081,14 @@ run_unit_tests() {
     test_compute_state_non_interactive
     test_since_preserved_on_reason_change
     test_compute_state_interactive
+    test_idle_streak_prevents_false_stuck
     test_watchdog_resolved_alert
     test_handle_watchdog_transition
     test_parse_at_mentions
     test_format_watchdog_status
     test_switch_session
     test_send_response_html_formatting
+    test_format_response_strips_name_prefix
     test_get_any_session_id
     test_progress_continuity_for_noninteractive
     test_noninteractive_backpressure

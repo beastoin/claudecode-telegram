@@ -91,11 +91,11 @@ Input                    → Routes to
 ─────────────────────────────────────
 /hire backend            → creates claude-backend, sets active
 /focus frontend          → sets active = frontend
-@backend do something    → claude-backend (routes + auto-focus)
+@backend do something    → claude-backend (one-off, focus unchanged)
 fix the bug              → active session (currently frontend)
 ```
 
-Single `@name` mentions route the message and set focus. If you want to ping multiple workers without changing focus, mention more than one (e.g., `@backend @frontend ...`).
+`@name` mentions route messages without changing focus. Use `/focus <name>` to switch.
 
 ## Feedback Philosophy
 
@@ -353,8 +353,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 - **Hook event tracking**: Hook responses record timestamps to improve stuck-pending detection.
 - **Proactive Telegram alerts** (Phase 2): Watchdog sends alerts to admin when workers enter DEAD/STUCK/POISONED states, with 3-min cooldown per worker. Sends "resolved" alerts when workers recover.
 - **POISONED state detection** (Phase 3): When a worker is STUCK, watchdog inspects tmux pane output (interactive) or `adapter.log` (non-interactive) for repeated error signatures (API errors, overloaded, rate limits). 3+ matches of any pattern = POISONED.
-- **Explicit resume/relaunch targeting**: `/relaunch <name>` and `/resume <name>` accept a worker name and auto-focus when provided.
-- **Single @mention auto-focus**: A lone `@name` mention routes the message and sets focus to that worker.
+- **Explicit restart targeting**: `/restart [--clean] <name>` accepts a worker name argument.
 - **GIF support**: Incoming Telegram animations are forwarded to workers; outgoing GIFs use `sendAnimation` to preserve motion.
 - **Expanded poison patterns**: Added more error signatures (rate limits, context length, timeouts, 5xx) to POISONED detection.
 
@@ -386,7 +385,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ### v0.21.3 - Non-interactive backend fixes
 
 **New features:**
-- **Backend-aware `/resume`**: Non-interactive backends (codex, gemini, opencode) get validation-only resume — reports thread continuity status instead of attempting a restart that does nothing.
+- **Backend-aware `/restart`**: Non-interactive backends (codex, gemini, opencode) get validation-only resume — reports thread continuity status instead of attempting a restart that does nothing.
 - **Backend-aware `/progress`**: Shows `Continuity: on/off` and thread ID for non-interactive backends instead of misleading `Resume: not available`.
 - **Backpressure for non-interactive**: Rejects new messages while a non-interactive worker is still processing, preventing silent adapter queuing.
 - **`get_any_session_id()`**: Generic helper finds any `*_session_id` file (codex, claude, etc.) instead of hardcoding claude-only.
@@ -413,7 +412,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 **New features:**
 - **`GET /checkin` endpoint**: Workers can `curl -s $BRIDGE_URL/checkin?name=lee` to refresh bridge instructions anytime. Returns plain text with labeled sections (RECEIVING FILES, SENDING FILES, MESSAGING WORKERS, NAME PREFIX, REFRESH INSTRUCTIONS).
-- **Welcome on resume/relaunch**: `restart()` now re-sends the welcome message after resume or relaunch, so workers always get fresh instructions.
+- **Welcome on restart**: `restart()` now re-sends the welcome message after resume or relaunch, so workers always get fresh instructions.
 
 **Improvements:**
 - **Structured welcome message**: Instructions now have labeled sections instead of a wall of text. Each capability is clearly identified.
@@ -423,7 +422,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ### v0.20.0 - Session resume + worker messaging
 
 **New features:**
-- **`/resume` command**: Resume a worker's previous Claude Code session with full context preserved. Falls back to fresh relaunch if no session ID is available.
+- **`/restart` command**: Restart a worker (default = resume previous session with full context; `--clean` = fresh start). Falls back to fresh start if no session ID is available.
 - **Session ID persistence**: Stop hook (`send-to-telegram.sh`) captures session UUID from transcript path and saves to `claude_session_id` file per worker.
 - **CWD persistence**: Working directory saved at hire time and in stop hook fallback, enabling cross-directory resume (`--resume` requires matching cwd).
 - **`/progress` shows resume status**: Displays "Resume: available (session abc12345...)" or "Resume: not available".
@@ -434,8 +433,8 @@ This prevents other users on multi-user systems from reading chat IDs or session
 **How resume works:**
 1. Stop hook saves session UUID to `<session_dir>/claude_session_id` on every response
 2. Hire saves pane cwd to `<session_dir>/claude_session_cwd`
-3. `/resume` reads both files, runs `cd "<cwd>" && claude --resume <UUID> --dangerously-skip-permissions`
-4. `/relaunch` clears all `*_session_id` files for a fresh start
+3. `/restart` reads both files, runs `cd "<cwd>" && claude --resume <UUID> --dangerously-skip-permissions`
+4. `/restart --clean` clears all `*_session_id` files for a fresh start
 
 ### v0.19.0 - OOP refactor + backend protocol
 
@@ -499,7 +498,7 @@ class Backend(Protocol):
 
 **Architecture changes:**
 - Codex adapter serializes per-worker session access with a lock file.
-- Codex lifecycle now cleans metadata on `/end` and resets session ID on `/relaunch`.
+- Codex lifecycle now cleans metadata on `/end` and resets session ID on `/restart --clean`.
 - Broadcast routing includes codex workers.
 
 ### v0.18.0 - Worker backend selection (codex + claude)
@@ -718,10 +717,15 @@ The hooks configuration must use nested structure per Claude Code docs:
 [[file:/tmp/data.csv]]  (caption optional)
 ```
 
-**Allowed extensions:**
-- Docs: `.md`, `.txt`, `.rst`, `.pdf`
-- Data: `.json`, `.csv`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.xml`, `.log`, `.sql`, `.patch`, `.diff`
-- Code: `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.go`, `.rs`, `.java`, `.kt`, `.swift`, `.rb`, `.php`, `.c`, `.cpp`, `.h`, `.hpp`, `.sh`, `.html`, `.css`, `.scss`
+**Allowed extensions (auto-routed to best Telegram API method):**
+- Docs: `.md`, `.txt`, `.rst`, `.pdf` → sendDocument
+- Data: `.json`, `.csv`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.xml`, `.log`, `.sql`, `.patch`, `.diff` → sendDocument
+- Code: `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.go`, `.rs`, `.java`, `.kt`, `.swift`, `.rb`, `.php`, `.c`, `.cpp`, `.h`, `.hpp`, `.sh`, `.html`, `.css`, `.scss` → sendDocument
+- Archives: `.zip`, `.tar`, `.gz` → sendDocument
+- Video: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` → sendVideo (player UI)
+- Audio: `.mp3`, `.m4a`, `.flac`, `.aac`, `.wav` → sendAudio (player UI)
+- Voice: `.ogg`, `.opus`, `.oga` → sendVoice (voice bubble)
+- Stickers: `.tgs` → sendSticker (animated sticker)
 
 **Security (blocked):**
 - Extensions: `.pem`, `.key`, `.p12`, `.pfx`, `.crt`, `.cer`, `.der`, `.jks`, `.keystore`, `.kdb`, `.pgp`, `.gpg`, `.asc`
@@ -953,7 +957,7 @@ Now both work:
 
 **Security:**
 - Path allowlist: Only files in /tmp, sessions dir, or cwd can be sent
-- Extension validation: Only .jpg, .jpeg, .png, .gif, .webp, .bmp allowed
+- Extension validation: .jpg, .jpeg, .png, .gif, .webp, .bmp, .mp4 (animations) allowed
 - Size limit: 20MB max (Telegram's limit)
 - Inbox directories use 0o700 permissions, session-namespaced
 
@@ -982,7 +986,7 @@ Here's the diagram:
 | `/kill` | `/end` |
 | `/status` | `/progress` |
 | `/stop` | `/pause` |
-| `/restart` | `/relaunch` |
+| `/restart` | `/restart` |
 | `/system` | `/settings` |
 
 **New command:**

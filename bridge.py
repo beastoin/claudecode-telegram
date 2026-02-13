@@ -6,6 +6,7 @@ VERSION = "0.23.0"
 import os
 import json
 import mimetypes
+import shutil
 import signal
 import subprocess
 import sys
@@ -84,6 +85,7 @@ TOOL_GAP_GRACE = 12
 STALE_PENDING = 300
 CPU_ACTIVE = 15.0
 CPU_IDLE = 7.0
+IDLE_STREAK_STUCK = 3
 ALERT_COOLDOWN = 180
 
 
@@ -94,6 +96,7 @@ ALERT_COOLDOWN = 180
 class Backend(Protocol):
     """Minimal backend interface. 3 methods, no more."""
     name: str
+    binary: str  # CLI binary name (e.g. "claude", "codex")
     is_interactive: bool
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -286,6 +289,7 @@ def mark_hook_event(session_name: str) -> None:
 class ClaudeBackend:
     """Claude Code CLI - interactive mode with hook for responses."""
     name = "claude"
+    binary = "claude"
     is_interactive = True
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -308,6 +312,7 @@ class ClaudeBackend:
 class CodexBackend:
     """OpenAI Codex CLI - non-interactive mode."""
     name = "codex"
+    binary = "codex"
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -325,6 +330,7 @@ class CodexBackend:
 class GeminiBackend:
     """Google Gemini CLI - non-interactive mode (stub)."""
     name = "gemini"
+    binary = "gemini"
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -342,6 +348,7 @@ class GeminiBackend:
 class OpenCodeBackend:
     """OpenCode CLI - non-interactive mode (stub)."""
     name = "opencode"
+    binary = "opencode"
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -439,6 +446,7 @@ _last_child_ts = {}
 _last_seen_claude = {}
 _last_hook_ts = {}
 _last_alert_ts = {}
+_idle_streak = {}
 _prev_worker_states = {}
 _consecutive_probe_failures = {}
 _watchdog_lock = threading.Lock()
@@ -458,8 +466,7 @@ BOT_COMMANDS = [
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
     {"command": "progress", "description": "Check focused worker status"},
     {"command": "pause", "description": "Pause focused worker"},
-    {"command": "relaunch", "description": "Relaunch focused worker"},
-    {"command": "resume", "description": "Resume focused worker session"},
+    {"command": "restart", "description": "Restart worker (--clean for fresh)"},
     # Occasional
     {"command": "settings", "description": "Show settings"},
     # Rare (onboarding/offboarding)
@@ -528,7 +535,7 @@ def load_last_active():
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
     # Bridge commands
-    "team", "focus", "progress", "pause", "relaunch", "resume", "settings", "hire", "end",
+    "team", "focus", "progress", "pause", "restart", "settings", "hire", "end",
     # Special
     "all", "start", "help",
 }
@@ -603,8 +610,13 @@ def telegram_api(method, data):
 # Max file size: 20MB (Telegram limit)
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
-# Allowed image extensions for outgoing
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+# Allowed image extensions for outgoing (sendPhoto + sendAnimation + sendVideo)
+ALLOWED_IMAGE_EXTENSIONS = {
+    # Photos (sendPhoto)
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp",
+    # Animations (sendAnimation) - autoplay, loop, silent
+    ".gif", ".mp4",
+}
 
 # Allowed document extensions for outgoing (common code, docs, data files)
 ALLOWED_DOC_EXTENSIONS = {
@@ -620,6 +632,14 @@ ALLOWED_DOC_EXTENSIONS = {
     ".sh", ".html", ".css", ".scss",
     # Archives
     ".zip", ".tar", ".gz",
+    # Audio (sendAudio — shows player UI)
+    ".mp3", ".m4a", ".flac", ".aac", ".wav",
+    # Voice (sendVoice — shows voice bubble)
+    ".ogg", ".opus", ".oga",
+    # Video (sendVideo — shows video player)
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",
+    # Stickers (sendSticker)
+    ".tgs",
 }
 
 # Blocked extensions (secrets, keys, certificates)
@@ -1037,7 +1057,7 @@ def send_animation(chat_id, animation_path, caption=None):
     animation_path = validated
 
     boundary = uuid.uuid4().hex
-    content_type = "image/gif"
+    content_type = "video/mp4" if animation_path.suffix.lower() == ".mp4" else "image/gif"
 
     body_parts = []
 
@@ -1192,6 +1212,107 @@ def send_document(chat_id, doc_path, caption=None):
     except Exception as e:
         print(f"sendDocument error: {e}")
         return False
+
+
+def _send_media_multipart(chat_id, file_path, field_name, api_method, caption=None):
+    """Generic multipart upload for any Telegram media method.
+
+    Args:
+        chat_id: Telegram chat ID
+        file_path: Path object to the file
+        field_name: API field name (e.g. "video", "audio", "voice")
+        api_method: API method (e.g. "sendVideo", "sendAudio", "sendVoice")
+        caption: Optional caption
+    Returns True on success.
+    """
+    if not BOT_TOKEN:
+        return False
+
+    boundary = uuid.uuid4().hex
+    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+
+    body_parts = []
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+    body_parts.append(b"")
+    body_parts.append(str(chat_id).encode())
+
+    body_parts.append(f"--{boundary}".encode())
+    body_parts.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"'.encode())
+    body_parts.append(f"Content-Type: {content_type}".encode())
+    body_parts.append(b"")
+    body_parts.append(file_path.read_bytes())
+
+    if caption:
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="caption"')
+        body_parts.append(b"")
+        body_parts.append(caption.encode())
+
+    body_parts.append(f"--{boundary}--".encode())
+    body_parts.append(b"")
+    body = b"\r\n".join(body_parts)
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/{api_method}",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            result = json.loads(r.read())
+            if result.get("ok"):
+                print(f"{api_method} sent: {file_path.name}")
+                return True
+            else:
+                print(f"{api_method} failed: {result}")
+                return False
+    except Exception as e:
+        print(f"{api_method} error: {e}")
+        return False
+
+
+# Media extensions routed to specialized Telegram API methods
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
+VOICE_EXTENSIONS = {".ogg", ".opus", ".oga"}
+STICKER_EXTENSIONS = {".tgs"}  # animated stickers; static .webp handled by sendPhoto
+
+
+def send_video(chat_id, video_path, caption=None):
+    """Send video via sendVideo (shows player with controls)."""
+    ok, validated = validate_document_path(video_path)
+    if not ok:
+        print(validated)
+        return False
+    return _send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
+
+
+def send_audio(chat_id, audio_path, caption=None):
+    """Send audio via sendAudio (shows audio player UI)."""
+    ok, validated = validate_document_path(audio_path)
+    if not ok:
+        print(validated)
+        return False
+    return _send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
+
+
+def send_voice(chat_id, voice_path, caption=None):
+    """Send voice message via sendVoice (shows voice bubble)."""
+    ok, validated = validate_document_path(voice_path)
+    if not ok:
+        print(validated)
+        return False
+    return _send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
+
+
+def send_sticker(chat_id, sticker_path):
+    """Send sticker via sendSticker."""
+    sticker_path = Path(sticker_path)
+    if not sticker_path.exists() or not sticker_path.is_file():
+        print(f"Sticker not found: {sticker_path}")
+        return False
+    return _send_media_multipart(chat_id, sticker_path, "sticker", "sendSticker")
 
 
 # ============================================================
@@ -1590,6 +1711,11 @@ def markdown_to_telegram_html(text: str) -> str:
 
 def format_response_text(session_name, text):
     """Format response with session prefix. No escaping - Claude Code handles safety."""
+    # Strip redundant worker name prefix to avoid "lee:\nlee: message" double prefix
+    stripped = text.lstrip()
+    prefix = f"{session_name}:"
+    if stripped.lower().startswith(prefix.lower()):
+        text = stripped[len(prefix):].lstrip()
     return f"<b>{session_name}:</b>\n{text}"
 
 
@@ -1940,9 +2066,9 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
 
     actions = {
         "OFFLINE": f"/hire {name}",
-        "DEAD": f"/relaunch {name}",
-        "STUCK": f"/relaunch {name}",
-        "POISONED": f"/relaunch {name} (context may be poisoned)",
+        "DEAD": f"/restart --clean {name}",
+        "STUCK": f"/restart --clean {name}",
+        "POISONED": f"/restart --clean {name} (context may be poisoned)",
     }
     action = actions.get(state, "check /team")
     text = f"[watchdog] {name}: {state} ({reason}). Suggested: {action}"
@@ -2121,11 +2247,23 @@ def watchdog_loop():
                 state, reason = compute_state(**state_args)
 
                 if state == "STUCK":
-                    poisoned_reason = _detect_poisoned(name, tmux_name)
-                    state, reason = compute_state(
-                        **state_args,
-                        poisoned_reason=poisoned_reason
-                    )
+                    _idle_streak[name] = _idle_streak.get(name, 0) + 1
+                    streak = _idle_streak[name]
+                    if streak < IDLE_STREAK_STUCK:
+                        state = "WAITING"
+                    else:
+                        poisoned_reason = _detect_poisoned(name, tmux_name)
+                        state, reason = compute_state(
+                            **state_args,
+                            poisoned_reason=poisoned_reason
+                        )
+                    reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+                elif state == "POISONED":
+                    streak = _idle_streak.get(name, 0)
+                    if streak:
+                        reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+                else:
+                    _idle_streak[name] = 0
 
                 since = _record_worker_state(name, state, reason, now)
                 _handle_watchdog_transition(name, state, reason, since, now=now)
@@ -2149,6 +2287,9 @@ def watchdog_loop():
                 for name in list(_last_alert_ts.keys()):
                     if name not in registered_names:
                         _last_alert_ts.pop(name, None)
+                for name in list(_idle_streak.keys()):
+                    if name not in registered_names:
+                        _idle_streak.pop(name, None)
             for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
                     _consecutive_probe_failures.pop(name, None)
@@ -2452,7 +2593,7 @@ class WorkerManager:
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
-            "SENDING FILES: Use [[file:/path/to/doc.pdf|caption]] or [[image:/path/to/photo.png|caption]] to send files to manager via Telegram. "
+            "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
             "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
@@ -2476,13 +2617,20 @@ class WorkerManager:
 
         backend_obj = get_backend(backend)
 
+        # Check binary exists before creating tmux session
+        if not shutil.which(backend_obj.binary):
+            return False, f"'{backend_obj.binary}' not found in PATH. Install it first."
+
         tmux_name = f"{self.tmux_prefix}{name}"
         if tmux_exists(tmux_name):
             return False, f"Worker '{name}' already exists"
 
+        # Strip CLAUDECODE from env so new tmux shell doesn't inherit it
+        # (Claude Code refuses to start if it detects a parent session)
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
-            capture_output=True
+            capture_output=True, env=clean_env
         )
         if result.returncode != 0:
             return False, "Could not start the worker workspace"
@@ -2500,10 +2648,9 @@ class WorkerManager:
         export_hook_env(tmux_name, backend)
         time.sleep(0.3)
 
-        # Inject tmux session env vars into the running shell so processes
-        # spawned inside (claude, codex, etc.) inherit them as real env vars
+        # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                        'eval "$(tmux show-environment -s)"', "Enter"])
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
         time.sleep(0.3)
 
         ensure_session_dir(name)
@@ -2519,7 +2666,7 @@ class WorkerManager:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
             print(f"Started worker '{name}' in sandbox mode")
         else:
-            start_cmd = backend_obj.start_cmd()
+            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend_obj.is_interactive:
                 time.sleep(1.5)
@@ -2603,6 +2750,10 @@ class WorkerManager:
         if not tmux_exists(tmux_name):
             return False, "Worker workspace is not running"
 
+        # Check binary still exists before restarting
+        if not shutil.which(backend.binary):
+            return False, f"'{backend.binary}' not found in PATH. Install it first."
+
         resume_id = ""
         resume_cwd = ""
         session_dir = self.sessions_dir / name
@@ -2620,14 +2771,26 @@ class WorkerManager:
             ensure_worker_pipe(name)
             clear_pending(name)
         elif is_claude_running(tmux_name):
-            return False, "Worker is already running"
+            # Kill running claude first, then restart (resume keeps session ID, relaunch clears it)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""])
+            time.sleep(0.5)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"])
+            time.sleep(1.0)
+            # If still running, force kill
+            if is_claude_running(tmux_name):
+                pane_pid = _tmux_pane_pids().get(tmux_name)
+                if pane_pid:
+                    claude_pid = _get_claude_pid(pane_pid)
+                    if claude_pid:
+                        subprocess.run(["kill", claude_pid], capture_output=True)
+                        time.sleep(0.5)
 
         export_hook_env(tmux_name, backend_name)
         time.sleep(0.3)
 
-        # Inject tmux session env vars into the running shell
+        # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                        'eval "$(tmux show-environment -s)"', "Enter"])
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
         time.sleep(0.3)
 
         if SANDBOX_ENABLED and backend.is_interactive:
@@ -2638,7 +2801,9 @@ class WorkerManager:
         else:
             start_cmd = backend.start_cmd(resume_id)
             if resume_cwd:
-                start_cmd = f'cd "{resume_cwd}" && {start_cmd}'
+                start_cmd = f'cd "{resume_cwd}" && unset CLAUDECODE && {start_cmd}'
+            else:
+                start_cmd = f'unset CLAUDECODE && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
 
         # Re-send welcome/instructions so worker gets fresh context after restart
@@ -2901,8 +3066,8 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
     # Send images
     for img_path, img_caption in images:
         full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
-        # Use sendAnimation for GIFs to preserve animation
-        if Path(img_path).suffix.lower() == ".gif":
+        # Use sendAnimation for GIFs and MP4s to preserve animation
+        if Path(img_path).suffix.lower() in (".gif", ".mp4"):
             sent = send_animation(chat_id, img_path, full_caption)
         else:
             sent = send_photo(chat_id, img_path, full_caption)
@@ -2914,10 +3079,21 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                 "text": f"{name}: [Image failed: {img_path}]"
             })
 
-    # Send files/documents
+    # Send files — route to specialized API method by extension
     for file_path, file_caption in files:
         full_caption = f"{name}: {file_caption}" if file_caption else f"{name}:"
-        if send_document(chat_id, file_path, full_caption):
+        ext = Path(file_path).suffix.lower()
+        if ext in VIDEO_EXTENSIONS:
+            sent = send_video(chat_id, file_path, full_caption)
+        elif ext in AUDIO_EXTENSIONS:
+            sent = send_audio(chat_id, file_path, full_caption)
+        elif ext in VOICE_EXTENSIONS:
+            sent = send_voice(chat_id, file_path, full_caption)
+        elif ext in STICKER_EXTENSIONS:
+            sent = send_sticker(chat_id, file_path)
+        else:
+            sent = send_document(chat_id, file_path, full_caption)
+        if sent:
             print(f"File sent: {name} -> {file_path}")
         else:
             telegram_api("sendMessage", {
@@ -3178,10 +3354,6 @@ class CommandRouter:
                 message = self.format_reply_context(message, reply_context)
             for name in targets:
                 self.route_message(name, message, chat_id, msg_id, one_off=True)
-            if len(targets) == 1 and state["active"] != targets[0]:
-                state["active"] = targets[0]
-                save_last_active(targets[0])
-                self.reply(chat_id, f"Now talking to {targets[0].capitalize()}.")
             return
 
         # No @mentions → route to focused worker
@@ -3258,10 +3430,8 @@ class CommandRouter:
             return self.cmd_progress(chat_id)
         elif cmd == "/pause":
             return self.cmd_pause(chat_id)
-        elif cmd == "/relaunch":
-            return self.cmd_relaunch(chat_id, arg)
-        elif cmd == "/resume":
-            return self.cmd_resume(chat_id, arg)
+        elif cmd == "/restart":
+            return self.cmd_restart(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
         elif cmd in BLOCKED_COMMANDS:
@@ -3387,7 +3557,7 @@ class CommandRouter:
                 claude_running = is_claude_running(tmux_name)
                 ready = claude_running
                 if not claude_running:
-                    needs_attention = "worker app is not running. Use /relaunch."
+                    needs_attention = "worker app is not running. Use /restart."
 
         resume_line = None
         continuity_line = None
@@ -3444,47 +3614,22 @@ class CommandRouter:
         self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
         return True
 
-    def cmd_relaunch(self, chat_id, args=""):
+    def cmd_restart(self, chat_id, args=""):
         args = (args or "").strip()
-        if args:
-            name = args.lower()
-        else:
-            if not state["active"]:
-                registered = self.workers.get_registered_sessions()
-                if len(registered) == 1:
-                    name = next(iter(registered))
-                    state["active"] = name
-                    save_last_active(name)
-                else:
-                    self.reply(chat_id, "No one assigned.")
-                    return True
+
+        # Parse --clean flag
+        clean = False
+        tokens = args.split()
+        remaining = []
+        for t in tokens:
+            if t == "--clean":
+                clean = True
             else:
-                name = state["active"]
+                remaining.append(t)
+        name_arg = remaining[0].lower() if remaining else ""
 
-        registered = self.workers.get_registered_sessions()
-        if name not in registered:
-            if registered:
-                names = ", ".join(registered.keys())
-                self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names}")
-            else:
-                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
-            return True
-
-        if args:
-            state["active"] = name
-            save_last_active(name)
-
-        ok, err = restart_claude(name, mode="relaunch")
-        if ok:
-            self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
-        else:
-            self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
-        return True
-
-    def cmd_resume(self, chat_id, args=""):
-        args = (args or "").strip()
-        if args:
-            name = args.lower()
+        if name_arg:
+            name = name_arg
         else:
             if not state["active"]:
                 registered = self.workers.get_registered_sessions()
@@ -3508,10 +3653,20 @@ class CommandRouter:
                 self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
-        if args:
+        if name_arg:
             state["active"] = name
             save_last_active(name)
 
+        # --clean: fresh start (clear session IDs)
+        if clean:
+            ok, err = restart_claude(name, mode="relaunch")
+            if ok:
+                self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
+            else:
+                self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+            return True
+
+        # Default: resume behavior
         backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
         backend = get_backend(backend_name)
 
@@ -3533,16 +3688,16 @@ class CommandRouter:
         if not has_session_id:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
-                self.reply(chat_id, f"No resume info found. Relaunching {name.capitalize()} fresh...")
+                self.reply(chat_id, f"No resume info found. Restarting {name.capitalize()} fresh...")
             else:
-                self.reply(chat_id, f"Could not relaunch \"{name}\". {err}", outcome="Needs decision")
+                self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
 
         ok, err = restart_claude(name, mode="resume")
         if ok:
             self.reply(chat_id, f"Resuming {name.capitalize()}...")
         else:
-            self.reply(chat_id, f"Could not resume \"{name}\". {err}", outcome="Needs decision")
+            self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_settings(self, chat_id):
@@ -3629,7 +3784,7 @@ class CommandRouter:
             return
 
         if not self.workers.is_online(session_name, session):
-            self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /relaunch.")
+            self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /restart.")
             return
 
         backend_name = get_worker_backend(session_name, session)
@@ -3654,7 +3809,7 @@ class CommandRouter:
             clear_pending(session_name)
             self.reply(
                 chat_id,
-                f"Could not send to {session_name.capitalize()}. Try /relaunch.",
+                f"Could not send to {session_name.capitalize()}. Try /restart.",
                 outcome="Needs decision"
             )
             return
@@ -3754,7 +3909,7 @@ class Handler(BaseHTTPRequestHandler):
         Claude ever having access to the bot token. Hook POSTs here,
         bridge sends to Telegram.
 
-        FILE SUPPORT: Parses [[image:/path|caption]] and [[file:/path|caption]] tags.
+        FILE SUPPORT: Parses [[image:/path|caption]] (photos, animations) and [[file:/path|caption]] (documents, video, audio, voice, stickers) tags.
         """
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
