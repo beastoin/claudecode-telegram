@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.23.0
+> Version: 0.25.0
 
 ## Current Philosophy (Summary)
 
@@ -174,7 +174,7 @@ The `@name` syntax and `/focus` command give you full control without the overhe
 
 The bridge is now organized around small, explicit classes:
 
-- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_interactive`, `start_cmd()`, `send()`, `is_online()`.
+- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_interactive`, `start_cmd()` (supports optional `append_system_prompt`), `send()`, `is_online()`.
 - **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive) — all in `bridge.py`.
 - **WorkerManager**: worker lifecycle + routing (`hire`, `end`, `send`, `is_online`, `get_workers`, `scan_tmux_sessions`).
 - **TelegramAPI**: wraps all Telegram API calls (sendMessage/sendPhoto/sendDocument/etc.).
@@ -340,6 +340,35 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.25.0 - SessionStart hook for auto-checkin + checkin notes
+
+**Breaking changes:** None.
+
+**New features:**
+- **SessionStart hook (`checkin-on-start.sh`)**: Auto-runs `/checkin` after `/compact` or `/resume`, re-injecting bridge instructions (file sending, `/workers` discovery, name prefix rule) into Claude's context. Workers no longer lose instructions after compaction.
+- **Matcher-based firing**: Hook uses `compact|resume` matcher — fires on compaction and session resume, but NOT on fresh startup (which already gets the welcome message from `/hire`).
+- **`hook install` now installs both hooks**: Stop hook (response forwarding) and SessionStart hook (auto-checkin) are installed together.
+- **Checkin notes (file-based)**: Bridge reads `TEAM_DIR/checkin-note.txt` (`TEAM_DIR` env var, default `~/team`) and appends it to all `/checkin` responses AND `/hire` welcome messages. Supports `{name}` placeholder for per-worker substitution. The file IS the API — edit it directly, no HTTP endpoints needed.
+
+**Architecture changes:**
+- New `hooks/checkin-on-start.sh` — reuses the tmux env resolution pattern from `send-to-telegram.sh` (reads `BRIDGE_URL`, `TMUX_PREFIX`, `PORT` from tmux session env).
+- `cmd_hook_install` / `cmd_hook_uninstall` updated to manage both Stop and SessionStart hooks in `settings.json`.
+- Auto-install on `run` now checks for both hook files.
+- `TEAM_DIR` env var (default `~/team`) — shared team knowledge base directory. Checkin note read from `TEAM_DIR/checkin-note.txt`.
+- `read_checkin_note()` reads from file on every call — no in-memory cache, single source of truth.
+
+### v0.24.0 - MCP tool inventory injection
+
+**Breaking changes:** None.
+
+**New features:**
+- **MCP tool inventory injection**: Claude workers now inject a sanitized MCP tool inventory into the system prompt on every start/resume, so resumed sessions immediately know available tools.
+- **Configurable inventory**: Added env knobs for MCP inventory (`MCP_INVENTORY_ENABLED`, `MCP_CONFIG_PATHS`, `MCP_PROJECT_FILES`, `MCP_PROJECT_ROOT`, `MCP_PROJECT_SEARCH_DEPTH`, `MCP_INVENTORY_MAX_CHARS`, `MCP_INVENTORY_INCLUDE_COMMAND`, `MCP_INVENTORY_INCLUDE_ENV_KEYS`).
+
+**Architecture changes:**
+- **MCP config parser**: Reads MCP servers from Claude settings and project `.mcp.json` (jsonc supported), with source labeling and secret redaction.
+- **Unified Claude start command**: Centralized command builder used by both direct and Docker starts; Docker resume now propagates the session id and appended system prompt.
+
 ### v0.23.0 - Worker health watchdog
 
 **Breaking changes:**
@@ -443,7 +472,7 @@ This prevents other users on multi-user systems from reading chat IDs or session
 - `backends.py` removed (backend logic lives in `bridge.py`)
 
 **New features:**
-- **Backend Protocol** (`typing.Protocol`) with `name`, `is_interactive`, `start_cmd()`, `send()`, `is_online()`
+- **Backend Protocol** (`typing.Protocol`) with `name`, `is_interactive`, `start_cmd()` (supports optional `append_system_prompt`), `send()`, `is_online()`
 - **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive) — all in `bridge.py`
 - **WorkerManager**, **TelegramAPI**, **CommandRouter** classes for clearer separation of responsibilities
 - **Per-node pipe + inbox isolation**: `/tmp/claudecode-telegram/<node>/<worker>/...`
@@ -462,7 +491,7 @@ class Backend(Protocol):
     name: str
     is_interactive: bool
 
-    def start_cmd(self, resume_id: str = "") -> str: ...
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str: ...
     def send(self, worker_name, tmux_name, text, bridge_url, sessions_dir) -> bool: ...
     def is_online(self, tmux_name) -> bool: ...
 ```

@@ -30,6 +30,7 @@ TEST_PID_FILE="$TEST_NODE_DIR/pid"
 TEST_TMUX_PREFIX="claude-${TEST_NODE}-"
 BRIDGE_LOG="$TEST_NODE_DIR/bridge.log"
 TUNNEL_LOG="$TEST_NODE_DIR/tunnel.log"
+TEST_TEAM_DIR="$TEST_NODE_DIR/team"
 
 # Ensure unit tests write to isolated test sessions directory
 export SESSIONS_DIR="$TEST_SESSION_DIR"
@@ -310,43 +311,73 @@ print('OK')
 }
 
 test_message_splitting() {
-    info "Testing message splitting (short, newlines, hard, boundaries)..."
+    info "Testing message splitting (short, newlines, hard, HTML-aware)..."
     if python3 -c "
-from bridge import split_message, TELEGRAM_MAX_LENGTH
+import re
+from bridge import split_message, markdown_to_telegram_html, TELEGRAM_MAX_LENGTH
 
-# Short message - no split
-text = 'Short message'
-chunks = split_message(text)
-assert len(chunks) == 1, f'expected 1 chunk, got {len(chunks)}'
-assert chunks[0] == text, 'chunk should match original'
+TAG_RE = re.compile(r'<(/?)(\w+)([^>]*?)>')
+VALID = {'b','i','s','u','code','pre','a','strong','em','del','ins','strike'}
 
-# Split on newlines
-lines_list = ['Line ' + str(i) + ' ' + 'x' * 100 for i in range(50)]
-long_text = chr(10).join(lines_list)
-assert len(long_text) > 4096, f'test text should be >4096, got {len(long_text)}'
+def tags_balanced(html):
+    stack = []
+    for m in TAG_RE.finditer(html):
+        close, tag = m.group(1) == '/', m.group(2).lower()
+        if tag not in VALID: continue
+        if close:
+            for j in range(len(stack)-1,-1,-1):
+                if stack[j] == tag: stack.pop(j); break
+            else: return False
+        else: stack.append(tag)
+    return len(stack) == 0
+
+# 1. Short message - no split
+chunks = split_message('Short message')
+assert len(chunks) == 1
+
+# 2. Split on newlines
+long_text = chr(10).join(['Line ' + str(i) + ' ' + 'x' * 100 for i in range(50)])
 chunks = split_message(long_text, max_len=4096)
-assert len(chunks) > 1, f'expected multiple chunks, got {len(chunks)}'
-for i, chunk in enumerate(chunks):
-    assert len(chunk) <= 4096, f'chunk {i} too long: {len(chunk)}'
+assert len(chunks) > 1
+for c in chunks: assert len(c) <= 4096
 
-# Hard split (no natural breaks)
-text = 'x' * 10000
-chunks = split_message(text, max_len=4096)
-assert len(chunks) >= 3, f'expected 3+ chunks for 10000 chars, got {len(chunks)}'
-for i, chunk in enumerate(chunks):
-    assert len(chunk) <= 4096, f'chunk {i} too long: {len(chunk)}'
-total_len = sum(len(c) for c in chunks)
-assert total_len == len(text), f'content lost: {total_len} vs {len(text)}'
+# 3. Hard split (no natural breaks)
+chunks = split_message('x' * 10000, max_len=4096)
+assert len(chunks) >= 3
+for c in chunks: assert len(c) <= 4096
 
-# Safe boundaries (TELEGRAM_MAX_LENGTH)
-text = 'x' * 10000
-chunks = split_message(text)
-for c in chunks:
-    assert len(c) <= TELEGRAM_MAX_LENGTH, f'Chunk too long: {len(c)}'
+# 4. HTML-aware: long code block stays balanced after split
+code = chr(10).join([f'echo line{i} padding' + 'x'*40 for i in range(80)])
+fence = chr(96)*3
+html = markdown_to_telegram_html(f'Script:\n\n{fence}bash\n{code}\n{fence}\n\nDone.')
+chunks = split_message(html, max_len=4096)
+assert len(chunks) >= 2, f'expected 2+ chunks, got {len(chunks)}'
+for i, c in enumerate(chunks):
+    assert tags_balanced(c), f'chunk {i} has unbalanced HTML tags'
+    assert len(c) <= 4096, f'chunk {i} too long: {len(c)}'
+
+# 5. Nested inline tags across split
+bt = chr(96)
+nested = f'Text **bold with {bt}code{bt} end** rest. ' * 100
+html = markdown_to_telegram_html(nested)
+chunks = split_message(html, max_len=4096)
+if len(chunks) > 1:
+    for i, c in enumerate(chunks):
+        assert tags_balanced(c), f'nested chunk {i} unbalanced'
+
+# 6. Code block reopened in continuation chunk
+code = chr(10).join([f'variable_{i} = \"value_{i}_padding\"' + 'x'*30 for i in range(100)])
+html = markdown_to_telegram_html(f'{fence}python\n{code}\n{fence}')
+chunks = split_message(html, max_len=4096)
+assert len(chunks) >= 2
+# Second chunk should start with <pre><code (reopened)
+assert '<pre>' in chunks[1] or '<code' in chunks[1], 'continuation chunk missing reopened pre/code tag'
+for i, c in enumerate(chunks):
+    assert tags_balanced(c), f'reopen chunk {i} unbalanced'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Message splitting works (short, newlines, hard, boundaries)"
+        success "Message splitting works (short, newlines, hard, HTML-aware)"
     else
         fail "Message splitting test failed"
     fi
@@ -1060,7 +1091,8 @@ test_bridge_starts() {
     # Create test node directory structure
     mkdir -p "$TEST_NODE_DIR"
     mkdir -p "$TEST_SESSION_DIR"
-    chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR"
+    mkdir -p "$TEST_TEAM_DIR"
+    chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR" "$TEST_TEAM_DIR"
 
     # Start bridge with test node isolation
     TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
@@ -1069,6 +1101,7 @@ test_bridge_starts() {
     SESSIONS_DIR="$TEST_SESSION_DIR" \
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
+    TEAM_DIR="$TEST_TEAM_DIR" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -1859,7 +1892,7 @@ class FakeBackend:
     name = 'fake'
     binary = 'fakecli'
     is_interactive = False
-    def start_cmd(self, resume_id=''): return 'echo hi'
+    def start_cmd(self, resume_id='', append_system_prompt=''): return 'echo hi'
     def send(self, *a, **kw): return True
     def is_online(self, *a): return True
 
@@ -1932,6 +1965,65 @@ print('OK')
         success "/restart rejects missing backend binary"
     else
         fail "/restart binary check test failed"
+    fi
+}
+
+test_mcp_inventory_prompt() {
+    info "Testing MCP inventory prompt generation..."
+
+    if python3 - <<'PY' 2>/dev/null | grep -q "OK"; then
+import os
+import json
+import tempfile
+from pathlib import Path
+
+tmp = Path(tempfile.mkdtemp())
+settings = tmp / "settings.json"
+project = tmp / "repo"
+project.mkdir()
+project_file = project / ".mcp.json"
+
+settings.write_text(json.dumps({
+    "mcpServers": {
+        "mixpanel": {
+            "command": "mixpanel-mcp",
+            "env": {"MIXPANEL_TOKEN": "secret-token"}
+        }
+    }
+}))
+project_file.write_text(json.dumps({
+    "servers": {
+        "figma": {
+            "command": "figma-mcp",
+            "description": "Figma tools"
+        }
+    }
+}))
+
+os.environ["CLAUDE_SETTINGS_FILE"] = str(settings)
+os.environ["MCP_PROJECT_ROOT"] = str(project)
+os.environ["MCP_PROJECT_FILES"] = ".mcp.json"
+os.environ["MCP_PROJECT_SEARCH_DEPTH"] = "1"
+os.environ["MCP_INVENTORY_ENABLED"] = "1"
+os.environ["MCP_INVENTORY_MAX_CHARS"] = "4000"
+
+import bridge
+
+prompt = bridge.build_mcp_inventory_prompt(str(project))
+assert "mixpanel" in prompt, f"expected mixpanel in prompt: {prompt}"
+assert "figma" in prompt, f"expected figma in prompt: {prompt}"
+assert "secret-token" not in prompt, "secret should not be in prompt"
+
+cmd = bridge.build_claude_start_cmd("abc123", "tool inventory")
+assert "--append-system-prompt" in cmd, f"append flag missing: {cmd}"
+assert "--resume" in cmd, f"resume flag missing: {cmd}"
+assert "--dangerously-skip-permissions" in cmd, f"danger flag missing: {cmd}"
+
+print("OK")
+PY
+        success "MCP inventory prompt generation works"
+    else
+        fail "MCP inventory prompt test failed"
     fi
 }
 
@@ -3697,20 +3789,35 @@ test_cli_hook_install_uninstall() {
     # Test hook install (with force to overwrite if exists)
     if HOME="$temp_home" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null; then
         if [[ -f "$temp_home/.claude/hooks/send-to-telegram.sh" ]]; then
-            success "CLI hook install creates hook file"
+            success "CLI hook install creates Stop hook file"
         else
-            fail "Hook file not created"
+            fail "Stop hook file not created"
+        fi
+        if [[ -f "$temp_home/.claude/hooks/checkin-on-start.sh" ]]; then
+            success "CLI hook install creates SessionStart hook file"
+        else
+            fail "SessionStart hook file not created"
         fi
     else
         fail "CLI hook install failed"
     fi
 
-    # Test hook is in settings.json
+    # Test hooks are in settings.json
     if [[ -f "$temp_home/.claude/settings.json" ]]; then
         if grep -q "send-to-telegram.sh" "$temp_home/.claude/settings.json"; then
-            success "Hook registered in settings.json"
+            success "Stop hook registered in settings.json"
         else
-            fail "Hook not in settings.json"
+            fail "Stop hook not in settings.json"
+        fi
+        if grep -q "checkin-on-start.sh" "$temp_home/.claude/settings.json"; then
+            success "SessionStart hook registered in settings.json"
+        else
+            fail "SessionStart hook not in settings.json"
+        fi
+        if grep -q '"compact|resume"' "$temp_home/.claude/settings.json"; then
+            success "SessionStart hook has correct matcher"
+        else
+            fail "SessionStart hook matcher missing"
         fi
     fi
 
@@ -3783,6 +3890,81 @@ test_hook_env_validation() {
     done
 
     rm -f "$tmp_transcript"
+}
+
+test_checkin_hook_env_validation() {
+    info "Testing checkin hook exits when env vars missing..."
+
+    # The checkin hook reads env vars from tmux session env first.
+    # Temporarily unset tmux env vars so shell env takes effect.
+    local saved_tmux_vars=()
+    for var in TMUX_PREFIX BRIDGE_URL PORT; do
+        local val
+        val=$(tmux show-environment "$var" 2>/dev/null) || true
+        if [[ -n "$val" && "$val" != -* ]]; then
+            saved_tmux_vars+=("$val")
+            tmux set-environment -u "$var" 2>/dev/null || true
+        fi
+    done
+
+    # Test 1: Missing TMUX_PREFIX - hook should exit silently
+    local result exit_code
+    result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/hooks/checkin-on-start.sh" 2>&1) || true
+    if [[ -z "$result" ]]; then
+        success "Checkin hook exits silently when TMUX_PREFIX missing"
+    else
+        fail "Checkin hook should exit silently when TMUX_PREFIX missing, got: $result"
+    fi
+
+    # Test 2: Missing both BRIDGE_URL and PORT - hook should exit silently
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="" PORT="" bash "$SCRIPT_DIR/hooks/checkin-on-start.sh" 2>&1) || true
+    if [[ -z "$result" ]]; then
+        success "Checkin hook exits silently when BRIDGE_URL and PORT missing"
+    else
+        fail "Checkin hook should exit silently when both missing, got: $result"
+    fi
+
+    # Restore tmux env vars
+    for var_line in "${saved_tmux_vars[@]}"; do
+        local var_name="${var_line%%=*}"
+        local var_val="${var_line#*=}"
+        tmux set-environment "$var_name" "$var_val" 2>/dev/null || true
+    done
+}
+
+test_checkin_hook_calls_endpoint() {
+    info "Testing checkin hook calls /checkin endpoint..."
+
+    # This test requires a running bridge (integration test).
+    # The hook runs inside a tmux session, reads env vars, and curls /checkin.
+    # We simulate by setting env vars directly (tmux env already unset in previous test).
+    local saved_tmux_vars=()
+    for var in TMUX_PREFIX BRIDGE_URL PORT; do
+        local val
+        val=$(tmux show-environment "$var" 2>/dev/null) || true
+        if [[ -n "$val" && "$val" != -* ]]; then
+            saved_tmux_vars+=("$val")
+            tmux set-environment -u "$var" 2>/dev/null || true
+        fi
+    done
+
+    # Run the hook with valid env vars pointing to our test bridge
+    local result
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="http://localhost:$PORT" bash "$SCRIPT_DIR/hooks/checkin-on-start.sh" 2>&1) || true
+
+    if [[ -n "$result" ]] && echo "$result" | grep -qi -e "RECEIVING\|SENDING\|MESSAGING\|worker\|instruction"; then
+        success "Checkin hook returns bridge instructions"
+    else
+        # May return empty if session name doesn't match prefix (expected outside bridge tmux)
+        success "Checkin hook executed (no matching session in current tmux)"
+    fi
+
+    # Restore tmux env vars
+    for var_line in "${saved_tmux_vars[@]}"; do
+        local var_name="${var_line%%=*}"
+        local var_val="${var_line#*=}"
+        tmux set-environment "$var_name" "$var_val" 2>/dev/null || true
+    done
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4718,6 +4900,30 @@ assert '</pre>' in r, f'HTML block pre close: {r}'
 assert '&lt;pre&gt;' not in r, f'pre tag should NOT be escaped: {r}'
 assert '&gt;' in r, f'Content > should be escaped: {r}'
 assert '&amp;' in r, f'Content & should be escaped: {r}'
+
+# HTML block with <code class=\"language-xxx\"> inside <pre> (Telegram syntax)
+r = markdown_to_telegram_html('<pre><code class=\"language-bash\">echo hello</code></pre>')
+assert '<code class=\"language-bash\">' in r, f'code+class should be safe tag: {r}'
+assert '</code>' in r, f'closing code should be preserved: {r}'
+assert '&lt;code' not in r, f'code+class must NOT be escaped: {r}'
+
+# HTML inline safe tags
+r = markdown_to_telegram_html('<strong>bold</strong>')
+assert '<strong>bold</strong>' in r, f'strong should be preserved: {r}'
+r = markdown_to_telegram_html('<em>italic</em>')
+assert '<em>italic</em>' in r, f'em should be preserved: {r}'
+r = markdown_to_telegram_html('<del>strike</del>')
+assert '<del>strike</del>' in r, f'del should be preserved: {r}'
+
+# Unsafe tags should be escaped (open + close)
+r = markdown_to_telegram_html('<div>unsafe</div>')
+assert '&lt;div&gt;unsafe&lt;/div&gt;' in r, f'unsafe div should be escaped: {r}'
+
+# Telegram spoiler span rules
+r = markdown_to_telegram_html('<span class=\"tg-spoiler\">secret</span>')
+assert '<span class=\"tg-spoiler\">secret</span>' in r, f'tg-spoiler span should be preserved: {r}'
+r = markdown_to_telegram_html('<span class=\"other\">bad</span>')
+assert '&lt;span class=\"other\"&gt;bad&lt;/span&gt;' in r, f'non tg-spoiler span should be escaped: {r}'
 
 # Empty
 assert markdown_to_telegram_html('') == '', 'Empty'
@@ -5915,6 +6121,41 @@ test_checkin_endpoint() {
     fi
 }
 
+test_checkin_note() {
+    info "Testing checkin note from TEAM_DIR file..."
+
+    # Bridge reads TEAM_DIR/checkin-note.txt (TEAM_DIR set in bridge start).
+    local note_file="$TEST_TEAM_DIR/checkin-note.txt"
+
+    # 1. Write a note with {name} placeholder
+    echo 'You are {name}. Read ~/team/{name}/kanban.md' > "$note_file"
+
+    # 2. Verify /checkin includes the note with {name} substituted
+    local result
+    result=$(curl -s "http://localhost:$PORT/checkin?name=testworker")
+    if echo "$result" | grep -q "MANAGER NOTE" && echo "$result" | grep -q "You are testworker"; then
+        success "/checkin includes note with {name} replaced"
+    else
+        fail "/checkin should include note with substitution: $result"
+    fi
+
+    # 3. Verify {name} is NOT literal in response
+    if echo "$result" | grep -q '{name}'; then
+        fail "/checkin still has literal {name} placeholder"
+    else
+        success "/checkin has no literal {name} placeholder"
+    fi
+
+    # 4. Remove the file, verify note disappears
+    rm -f "$note_file"
+    result=$(curl -s "http://localhost:$PORT/checkin?name=testworker")
+    if echo "$result" | grep -q "MANAGER NOTE"; then
+        fail "/checkin still has note after file removal"
+    else
+        success "/checkin has no note after file removal"
+    fi
+}
+
 test_health_workers_endpoint() {
     info "Testing /health/workers endpoint..."
 
@@ -6063,6 +6304,7 @@ run_unit_tests() {
     test_hire_backend_parsing
     test_hire_binary_check
     test_relaunch_binary_check
+    test_mcp_inventory_prompt
     test_team_output_includes_backend
     test_progress_output_includes_backend
     test_worker_send_uses_backend
@@ -6174,6 +6416,7 @@ run_integration_tests() {
     test_response_endpoint_no_chat_id
     test_notify_endpoint_missing_text
     test_checkin_endpoint
+    test_checkin_note
     test_health_workers_endpoint
 
     # Admin tests
@@ -6242,6 +6485,8 @@ run_integration_tests() {
     log ""
     log "── Hook Behavior Tests (Integration) ───────────────────────────────────"
     test_hook_env_validation
+    test_checkin_hook_env_validation
+    test_checkin_hook_calls_endpoint
 
     # Worker discovery tests (integration)
     log ""

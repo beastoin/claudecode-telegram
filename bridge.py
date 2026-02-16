@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 
 import os
 import json
@@ -13,7 +13,10 @@ import sys
 import threading
 import time
 import re
+import urllib.error
 import urllib.request
+import shlex
+from html.parser import HTMLParser
 from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -34,6 +37,26 @@ PORT = int(os.environ.get("PORT", "8080"))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
+CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
+
+# MCP tool inventory (system prompt injection)
+MCP_INVENTORY_ENABLED = os.environ.get("MCP_INVENTORY_ENABLED", "1") != "0"
+MCP_CONFIG_PATHS = [
+    Path(p.strip()).expanduser()
+    for p in os.environ.get("MCP_CONFIG_PATHS", "").split(",")
+    if p.strip()
+]
+MCP_PROJECT_FILES = [
+    name.strip()
+    for name in os.environ.get("MCP_PROJECT_FILES", ".mcp.json,.mcp.jsonc").split(",")
+    if name.strip()
+]
+MCP_PROJECT_ROOT = os.environ.get("MCP_PROJECT_ROOT", "").strip()
+MCP_PROJECT_SEARCH_DEPTH = int(os.environ.get("MCP_PROJECT_SEARCH_DEPTH", "6"))
+MCP_INVENTORY_MAX_CHARS = int(os.environ.get("MCP_INVENTORY_MAX_CHARS", "2000"))
+MCP_INVENTORY_INCLUDE_COMMAND = os.environ.get("MCP_INVENTORY_INCLUDE_COMMAND", "0") == "1"
+MCP_INVENTORY_INCLUDE_ENV_KEYS = os.environ.get("MCP_INVENTORY_INCLUDE_ENV_KEYS", "1") != "0"
 
 # BRIDGE_URL: primary hook target for remote workers, falls back to localhost:PORT
 # User can set BRIDGE_URL=https://remote-bridge.example.com for distributed setups
@@ -78,6 +101,12 @@ WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 DEFAULT_BACKEND = "claude"
 DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 PENDING_TIMEOUT = 600
+
+# Team directory: shared knowledge base (soul docs, kanban, playbook, etc.)
+TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
+# Checkin note: read from TEAM_DIR/checkin-note.txt on each checkin/hire/restart.
+# Supports {name} placeholder for per-worker substitution.
+_CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
 WATCHDOG_INTERVAL = 4
 START_GRACE = 30
 THINK_GRACE = 30
@@ -93,13 +122,188 @@ ALERT_COOLDOWN = 180
 # CORE: Backend Protocol + implementations
 # ============================================================
 
+def _strip_json_comments(text: str) -> str:
+    """Remove // and /* */ comments for jsonc-like files."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = re.sub(r"(^|\s)//.*$", r"\1", text, flags=re.MULTILINE)
+    return text
+
+
+def _read_json_file(path: Path) -> Optional[dict]:
+    try:
+        raw = path.read_text()
+    except Exception:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(_strip_json_comments(raw))
+        except json.JSONDecodeError:
+            return None
+
+
+def _extract_mcp_servers(config: dict) -> dict:
+    if not isinstance(config, dict):
+        return {}
+
+    candidates = []
+    if isinstance(config.get("mcpServers"), dict):
+        candidates.append(config["mcpServers"])
+    if isinstance(config.get("mcp"), dict):
+        mcp = config["mcp"]
+        if isinstance(mcp.get("servers"), dict):
+            candidates.append(mcp["servers"])
+        if isinstance(mcp.get("mcpServers"), dict):
+            candidates.append(mcp["mcpServers"])
+    if isinstance(config.get("servers"), dict):
+        candidates.append(config["servers"])
+
+    servers = {}
+    for candidate in candidates:
+        for name, data in candidate.items():
+            if isinstance(data, dict):
+                servers[name] = data
+            else:
+                servers[name] = {"_raw": data}
+    return servers
+
+
+def _find_project_mcp_files(start_dir: Path) -> list[Path]:
+    if not start_dir:
+        return []
+    try:
+        current = start_dir.resolve()
+    except Exception:
+        current = start_dir
+
+    found = []
+    depth = max(MCP_PROJECT_SEARCH_DEPTH, 0)
+    for _ in range(depth + 1):
+        for name in MCP_PROJECT_FILES:
+            candidate = current / name
+            if candidate.exists():
+                found.append(candidate)
+        if current.parent == current:
+            break
+        current = current.parent
+    return found
+
+
+def _format_mcp_source(path: Path) -> str:
+    try:
+        if path.resolve() == CLAUDE_SETTINGS_FILE.resolve():
+            return "settings.json"
+    except Exception:
+        pass
+    return path.name
+
+
+def _normalize_server_info(name: str, data: dict, source: str) -> dict:
+    info = {"name": name, "source": source}
+    if isinstance(data, dict):
+        description = data.get("description") or data.get("desc")
+        if isinstance(description, str) and description.strip():
+            info["description"] = description.strip()
+        env = data.get("env") or data.get("environment") or {}
+        if MCP_INVENTORY_INCLUDE_ENV_KEYS and isinstance(env, dict):
+            env_keys = sorted(k for k in env.keys() if isinstance(k, str))
+            if env_keys:
+                info["env_keys"] = env_keys
+        if MCP_INVENTORY_INCLUDE_COMMAND:
+            command = data.get("command")
+            if isinstance(command, str) and command.strip():
+                info["command"] = command.strip()
+    return info
+
+
+def build_mcp_inventory_prompt(cwd: Optional[str] = None) -> str:
+    if not MCP_INVENTORY_ENABLED:
+        return ""
+
+    paths = []
+    if MCP_CONFIG_PATHS:
+        paths.extend(MCP_CONFIG_PATHS)
+    else:
+        paths.append(CLAUDE_SETTINGS_FILE)
+
+    project_root = Path(MCP_PROJECT_ROOT).expanduser() if MCP_PROJECT_ROOT else None
+    if not project_root and cwd:
+        project_root = Path(cwd).expanduser()
+    if project_root:
+        paths.extend(_find_project_mcp_files(project_root))
+
+    # De-dupe while preserving order
+    seen = set()
+    unique_paths = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+
+    servers = {}
+    for path in unique_paths:
+        if not path.exists():
+            continue
+        config = _read_json_file(path)
+        if not config:
+            continue
+        for name, data in _extract_mcp_servers(config).items():
+            servers[name] = _normalize_server_info(name, data, _format_mcp_source(path))
+
+    if not servers:
+        return ""
+
+    lines = [
+        "MCP tool inventory (auto-loaded at startup).",
+        "Use only tools listed here. If tools change, restart this worker to reload MCP.",
+        "To see exact tool names/params, run `/mcp list` in Claude Code.",
+        "Servers:",
+    ]
+    for name in sorted(servers.keys()):
+        info = servers[name]
+        line = f"- {name} (source: {info.get('source', 'unknown')})"
+        description = info.get("description")
+        if description:
+            line += f" — {description}"
+        env_keys = info.get("env_keys") if MCP_INVENTORY_INCLUDE_ENV_KEYS else None
+        if env_keys:
+            line += f" [env: {', '.join(env_keys)}]"
+        command = info.get("command") if MCP_INVENTORY_INCLUDE_COMMAND else None
+        if command:
+            line += f" [cmd: {command}]"
+        lines.append(line)
+
+    prompt = "\n".join(lines)
+    if len(prompt) <= MCP_INVENTORY_MAX_CHARS:
+        return prompt
+
+    short_lines = lines[:4] + [f"- {name}" for name in sorted(servers.keys())]
+    prompt = "\n".join(short_lines)
+    if len(prompt) > MCP_INVENTORY_MAX_CHARS:
+        prompt = prompt[: max(MCP_INVENTORY_MAX_CHARS - 3, 0)] + "..."
+    return prompt
+
+
+def build_claude_start_cmd(resume_id: str = "", append_system_prompt: str = "") -> str:
+    cmd = ["claude"]
+    if resume_id:
+        cmd.extend(["--resume", resume_id])
+    if append_system_prompt:
+        cmd.extend(["--append-system-prompt", append_system_prompt])
+    cmd.append("--dangerously-skip-permissions")
+    return " ".join(shlex.quote(part) for part in cmd)
+
+
 class Backend(Protocol):
     """Minimal backend interface. 3 methods, no more."""
     name: str
     binary: str  # CLI binary name (e.g. "claude", "codex")
     is_interactive: bool
 
-    def start_cmd(self, resume_id: str = "") -> str:
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
         """Return the shell command to start this CLI in tmux."""
         ...
 
@@ -292,10 +496,8 @@ class ClaudeBackend:
     binary = "claude"
     is_interactive = True
 
-    def start_cmd(self, resume_id: str = "") -> str:
-        if resume_id:
-            return f"claude --resume {resume_id} --dangerously-skip-permissions"
-        return "claude --dangerously-skip-permissions"
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
+        return build_claude_start_cmd(resume_id, append_system_prompt)
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
@@ -315,7 +517,7 @@ class CodexBackend:
     binary = "codex"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "") -> str:
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
         return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -333,7 +535,7 @@ class GeminiBackend:
     binary = "gemini"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "") -> str:
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
         return "echo 'Gemini worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -351,7 +553,7 @@ class OpenCodeBackend:
     binary = "opencode"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "") -> str:
+    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
         return "echo 'OpenCode worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -532,6 +734,19 @@ def load_last_active():
         print(f"Failed to load last_active: {e}")
     return None
 
+def read_checkin_note():
+    """Read checkin note from file. Returns empty string if file missing."""
+    try:
+        path = _CHECKIN_NOTE_PATH
+        if os.path.isfile(path):
+            text = open(path).read().strip()
+            if text:
+                return text
+    except Exception as e:
+        print(f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}")
+    return ""
+
+
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
     # Bridge commands
@@ -560,6 +775,15 @@ class TelegramAPI:
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            print(f"Telegram API error: {e}")
+            try:
+                raw = e.read()
+                body = json.loads(raw)
+                return body  # Return error response so callers can inspect description
+            except Exception:
+                # Non-JSON error body (proxy, middlebox, empty) — return structured error
+                return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code} (non-JSON body)"}
         except Exception as e:
             print(f"Telegram API error: {e}")
             return None
@@ -1437,34 +1661,115 @@ def markdown_to_telegram_html(text: str) -> str:
     table_headers = []  # header cells
     table_rows = []  # all data rows
     in_thead = False
+    _rejected_open_tags = []
 
-    _SAFE_HTML_TAG = re.compile(
-        r'^(?:</?(?:b|i|code|pre|s|u)>|</a>|<a href=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)>)$'
-    )
+    class _TelegramHTMLSanitizer(HTMLParser):
+        SAFE_TAGS = frozenset({
+            "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+            "code", "pre", "a", "blockquote", "span", "tg-emoji", "tg-spoiler",
+        })
+        SAFE_ATTRS = {
+            "a": frozenset({"href"}),
+            "code": frozenset({"class"}),
+            "blockquote": frozenset({"expandable"}),
+            "span": frozenset({"class"}),
+            "tg-emoji": frozenset({"emoji-id"}),
+        }
 
-    _SAFE_HTML_TAG_SPLIT = re.compile(
-        r'(</?(?:b|i|code|pre|s|u|blockquote)>|</a>|<a href=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)>)'
-    )
+        def __init__(self, rejected_open_tags):
+            super().__init__(convert_charrefs=False)
+            self._out = []
+            self._rejected_open_tags = rejected_open_tags
 
-    def _render_html_inline(raw):
-        if not raw:
-            return ""
-        if _SAFE_HTML_TAG.match(raw):
-            return raw
-        return escape_html(raw)
+        def _escape_attr(self, value):
+            return escape_html(value).replace('"', "&quot;")
 
-    def _render_html_block(raw):
-        """Render HTML block: preserve safe Telegram tags, escape everything else."""
-        if not raw:
-            return ""
-        parts = _SAFE_HTML_TAG_SPLIT.split(raw)
-        out = []
-        for j, part in enumerate(parts):
-            if j % 2 == 1:
-                out.append(part)  # safe tag — keep as-is
+        def _attrs_are_safe(self, tag, attrs):
+            allowed = self.SAFE_ATTRS.get(tag, frozenset())
+            seen = set()
+            for name, value in attrs:
+                if name in seen or name not in allowed:
+                    return False
+                seen.add(name)
+                if tag == "a" and name == "href":
+                    if value is None:
+                        return False
+                elif tag == "code" and name == "class":
+                    if value is None or not value.startswith("language-"):
+                        return False
+                elif tag == "blockquote" and name == "expandable":
+                    if value not in (None, "", "expandable"):
+                        return False
+                elif tag == "span" and name == "class":
+                    if value != "tg-spoiler":
+                        return False
+                elif tag == "tg-emoji" and name == "emoji-id":
+                    if value is None:
+                        return False
+            return True
+
+        def _render_start_tag(self, tag, attrs):
+            if not attrs:
+                return f"<{tag}>"
+            rendered = []
+            for name, value in attrs:
+                if value is None:
+                    rendered.append(name)
+                else:
+                    rendered.append(f'{name}="{self._escape_attr(value)}"')
+            return f"<{tag} {' '.join(rendered)}>"
+
+        def handle_starttag(self, tag, attrs):
+            accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
+            if accepted:
+                self._out.append(self._render_start_tag(tag, attrs))
             else:
-                out.append(escape_html(part))  # content — escape
-        return "".join(out)
+                self._out.append(escape_html(self.get_starttag_text() or f"<{tag}>"))
+                # Track rejected start tags so matching closing tags are escaped too.
+                self._rejected_open_tags.append(tag)
+
+        def handle_endtag(self, tag):
+            rejected_match = False
+            for idx in range(len(self._rejected_open_tags) - 1, -1, -1):
+                if self._rejected_open_tags[idx] == tag:
+                    rejected_match = True
+                    del self._rejected_open_tags[idx]
+                    break
+            if tag in self.SAFE_TAGS and not rejected_match:
+                self._out.append(f"</{tag}>")
+            else:
+                self._out.append(escape_html(f"</{tag}>"))
+
+        def handle_startendtag(self, tag, attrs):
+            accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
+            if accepted:
+                start = self._render_start_tag(tag, attrs)
+                self._out.append(f"{start[:-1]}/>")
+            else:
+                self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
+
+        def handle_data(self, data):
+            self._out.append(escape_html(data))
+
+        def handle_entityref(self, name):
+            self._out.append(f"&{name};")
+
+        def handle_charref(self, name):
+            self._out.append(f"&#{name};")
+
+        def handle_comment(self, data):
+            self._out.append(escape_html(f"<!--{data}-->"))
+
+        def html(self):
+            return "".join(self._out)
+
+    def _sanitize_html(raw):
+        if not raw:
+            return ""
+        sanitizer = _TelegramHTMLSanitizer(_rejected_open_tags)
+        sanitizer.feed(raw)
+        sanitizer.close()
+        return sanitizer.html()
 
     def _render_inline_plain(children):
         """Render inline token children to plain text (for use inside <pre>)."""
@@ -1519,7 +1824,7 @@ def markdown_to_telegram_html(text: str) -> str:
                 src = escape_html((tok.attrs or {}).get("src", ""))
                 out.append(f'[{alt}]({src})')
             elif tok.type == "html_inline":
-                out.append(_render_html_inline(tok.content))
+                out.append(_sanitize_html(tok.content))
             else:
                 if tok.content:
                     out.append(escape_html(tok.content))
@@ -1647,7 +1952,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
         # HTML blocks
         elif tok.type == "html_block":
-            result.append(_render_html_block(tok.content))
+            result.append(_sanitize_html(tok.content))
 
         else:
             if tok.content:
@@ -1727,54 +2032,122 @@ TELEGRAM_MAX_LENGTH = 4096
 
 
 def split_message(text, max_len=TELEGRAM_MAX_LENGTH):
-    """Split text into chunks that fit within Telegram's message limit.
+    """Split HTML text into chunks that fit within Telegram's message limit.
 
+    HTML-aware: tracks open tags and closes/reopens them at split boundaries.
     Splits on safe boundaries: blank lines → newlines → spaces → hard cut.
-    Returns list of text chunks.
+    Returns list of valid HTML text chunks.
     """
+    import re
     if len(text) <= max_len:
         return [text]
 
+    # Regex for Telegram-supported HTML tags
+    TAG_RE = re.compile(r'<(/?)(\w+)([^>]*)>')
+    TRACKED_TAGS = frozenset(('b', 'i', 's', 'u', 'code', 'pre', 'a',
+                              'strong', 'em', 'del', 'ins', 'strike', 'blockquote'))
+
+    def _closing_tags(stack):
+        """Generate closing tags for all open tags (reverse order)."""
+        return "".join(f"</{tag}>" for tag, _ in reversed(stack))
+
+    def _opening_tags(stack):
+        """Generate opening tags for all open tags (original order)."""
+        return "".join(full for _, full in stack)
+
+    def _scan_tags(text):
+        """Return the tag stack state after scanning text."""
+        stack = []
+        for m in TAG_RE.finditer(text):
+            is_close = m.group(1) == '/'
+            tag_name = m.group(2).lower()
+            if tag_name not in TRACKED_TAGS:
+                continue
+            if is_close:
+                for j in range(len(stack) - 1, -1, -1):
+                    if stack[j][0] == tag_name:
+                        stack.pop(j)
+                        break
+            else:
+                stack.append((tag_name, m.group(0)))
+        return stack
+
+    def _find_split(text, budget):
+        """Find best split point within budget chars.
+
+        Priority: blank line → newline → space → hard cut.
+        Avoids splitting inside HTML tags. Always returns >= 1.
+        """
+        if budget <= 0:
+            budget = 1
+        search = text[:budget]
+
+        # Don't split inside a tag — find last '>' before budget
+        last_tag_start = search.rfind('<')
+        last_tag_end = search.rfind('>')
+        if last_tag_start > last_tag_end:
+            search = text[:last_tag_start]
+            budget = last_tag_start
+
+        for sep in ('\n\n', '\n', ' '):
+            pos = search.rfind(sep)
+            if pos > budget // 3:
+                return pos + 1
+
+        return max(budget, 1)  # Guarantee forward progress
+
     chunks = []
     remaining = text
+    carry_stack = []  # Tags open from previous chunk
 
     while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining)
+        prefix = _opening_tags(carry_stack)
+        available = max_len - len(prefix)
+
+        # Close carry tags in final chunk too
+        if len(prefix) + len(remaining) + len(_closing_tags(carry_stack)) <= max_len:
+            suffix = _closing_tags(_scan_tags(prefix + remaining))
+            chunks.append(prefix + remaining + suffix)
             break
 
-        # Find best split point within max_len
-        split_at = find_split_point(remaining, max_len)
-        chunks.append(remaining[:split_at].rstrip())
+        # Find split point with iterative backoff to guarantee max_len
+        budget = available - 100  # Initial conservative reserve
+        if budget < 100:
+            budget = 100
+
+        for _attempt in range(5):
+            split_at = _find_split(remaining, budget)
+            chunk_text = remaining[:split_at].rstrip()
+            full_chunk = prefix + chunk_text
+            open_stack = _scan_tags(full_chunk)
+            suffix = _closing_tags(open_stack)
+
+            if len(full_chunk) + len(suffix) <= max_len:
+                break
+            # Shrink budget and retry
+            overshoot = len(full_chunk) + len(suffix) - max_len
+            budget = max(budget - overshoot - 20, 100)
+        else:
+            # Last resort: hard cut to fit
+            hard_limit = max_len - len(prefix) - len(suffix) - 10
+            if hard_limit < 1:
+                hard_limit = 1
+            chunk_text = remaining[:hard_limit].rstrip()
+            full_chunk = prefix + chunk_text
+            open_stack = _scan_tags(full_chunk)
+            suffix = _closing_tags(open_stack)
+            split_at = hard_limit
+
+        chunks.append(full_chunk + suffix)
+        carry_stack = open_stack
         remaining = remaining[split_at:].lstrip()
 
+        # Safety: prevent infinite loop
+        if split_at == 0:
+            # Force progress by consuming at least 1 char
+            remaining = remaining[1:]
+
     return chunks
-
-
-def find_split_point(text, max_len):
-    """Find the best point to split text within max_len.
-
-    Priority: blank line → newline → space → hard cut.
-    """
-    search_area = text[:max_len]
-
-    # Try blank line (paragraph break)
-    pos = search_area.rfind('\n\n')
-    if pos > max_len // 2:  # Only use if reasonably far into text
-        return pos + 1  # Include one newline in current chunk
-
-    # Try newline
-    pos = search_area.rfind('\n')
-    if pos > max_len // 2:
-        return pos + 1
-
-    # Try space
-    pos = search_area.rfind(' ')
-    if pos > max_len // 2:
-        return pos + 1
-
-    # Hard cut at max_len
-    return max_len
 
 
 def format_multipart_messages(session_name, chunks):
@@ -2607,6 +2980,14 @@ class WorkerManager:
             )
         if SANDBOX_ENABLED and backend_obj.is_interactive:
             welcome += " Running in sandbox mode (Docker container)."
+
+        # Append manager note if set (with {name} substitution)
+        note = read_checkin_note()
+        if note:
+            rendered = note.replace("{name}", name)
+            welcome += f"\n\nMANAGER NOTE:\n{rendered}"
+            print(f"Checkin note included for {name}")
+
         return welcome
 
     def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None):
@@ -2638,12 +3019,14 @@ class WorkerManager:
         time.sleep(0.5)
 
         # After tmux new-session succeeds, capture the pane's cwd
+        pane_cwd = ""
         result = subprocess.run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
             capture_output=True, text=True
         )
         if result.returncode == 0 and result.stdout.strip():
-            save_claude_session_cwd(name, result.stdout.strip())
+            pane_cwd = result.stdout.strip()
+            save_claude_session_cwd(name, pane_cwd)
 
         export_hook_env(tmux_name, backend)
         time.sleep(0.3)
@@ -2661,12 +3044,16 @@ class WorkerManager:
             backend_file = self.sessions_dir / name / "backend"
             backend_file.write_text(backend)
 
+        append_prompt = ""
+        if backend_obj.name == "claude":
+            append_prompt = build_mcp_inventory_prompt(pane_cwd)
+
         if SANDBOX_ENABLED and backend_obj.is_interactive:
-            docker_cmd = get_docker_run_cmd(name)
+            docker_cmd = get_docker_run_cmd(name, append_system_prompt=append_prompt)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
             print(f"Started worker '{name}' in sandbox mode")
         else:
-            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
+            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd(append_system_prompt=append_prompt)}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend_obj.is_interactive:
                 time.sleep(1.5)
@@ -2793,13 +3180,18 @@ class WorkerManager:
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
         time.sleep(0.3)
 
+        append_prompt = ""
+        if backend.name == "claude":
+            inventory_cwd = resume_cwd or get_claude_session_cwd(name)
+            append_prompt = build_mcp_inventory_prompt(inventory_cwd)
+
         if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
             time.sleep(0.5)
-            docker_cmd = get_docker_run_cmd(name)
+            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
-            start_cmd = backend.start_cmd(resume_id)
+            start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
             if resume_cwd:
                 start_cmd = f'cd "{resume_cwd}" && unset CLAUDECODE && {start_cmd}'
             else:
@@ -2924,7 +3316,7 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
 
 
-def get_docker_run_cmd(name):
+def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
     """Build docker run command for sandbox mode.
 
     Default: mounts ~ to /workspace (rw)
@@ -2990,7 +3382,7 @@ def get_docker_run_cmd(name):
     cmd_parts.append(SANDBOX_IMAGE)
 
     # Run claude with --dangerously-skip-permissions (same as non-sandbox)
-    cmd_parts.append("claude --dangerously-skip-permissions")
+    cmd_parts.append(build_claude_start_cmd(resume_id, append_system_prompt))
 
     return " ".join(cmd_parts)
 
@@ -3046,11 +3438,17 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                 else:
                     print(f"{log_prefix} sent: {name} -> Telegram OK")
             else:
-                # Fallback: retry as plain text on HTML parse error
+                # Fallback: retry as plain text on HTTP 400 (HTML parse error)
                 desc = (result or {}).get("description", "")
-                if "parse entities" in desc.lower() or "can't parse" in desc.lower():
-                    print(f"{log_prefix} HTML parse error, retrying as plain text: {desc}")
+                error_code = (result or {}).get("error_code", 0)
+                is_400 = error_code == 400
+                if is_400:
+                    print(f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
+                    # Strip HTML tags and decode entities for readable plain text
+                    plain_text = re.sub(r'<[^>]+>', '', part)
+                    plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
                     plain_data = {k: v for k, v in msg_data.items() if k != "parse_mode"}
+                    plain_data["text"] = plain_text
                     result = telegram_api("sendMessage", plain_data)
                     if result and result.get("ok"):
                         prev_msg_id = result.get("result", {}).get("message_id")
@@ -3951,6 +4349,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
+
     def do_GET(self):
         parsed = urlparse(self.path)
 
@@ -4115,6 +4514,17 @@ def main():
         print(f"Restored last active worker: {last_active}")
     elif last_active:
         print(f"Last active worker '{last_active}' no longer exists")
+
+    # Log team dir and checkin note status
+    if os.path.isdir(TEAM_DIR):
+        print(f"Team dir: {TEAM_DIR}")
+        _startup_note = read_checkin_note()
+        if _startup_note:
+            print(f"  Checkin note: {_CHECKIN_NOTE_PATH} ({len(_startup_note)} chars)")
+        else:
+            print(f"  No checkin note at {_CHECKIN_NOTE_PATH}")
+    else:
+        print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
 
     # Load last chat ID for auto-notification
     last_chat_id = load_last_chat_id()

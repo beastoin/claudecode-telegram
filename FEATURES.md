@@ -1,4 +1,4 @@
-# claudecode-telegram Product Specification (v0.23.0)
+# claudecode-telegram Product Specification (v0.25.0)
 
 ## Overview
 - MUST provide a Telegram bot plus an HTTP bridge that routes manager messages to multiple workers and returns worker responses to Telegram.
@@ -38,8 +38,8 @@
 - MUST implement `webhook <url>` to set webhook for the node.
 - MUST implement `webhook info` to show current webhook status.
 - MUST implement `webhook delete` to remove the webhook.
-- MUST implement `hook install` to install the Stop hook.
-- MUST implement `hook uninstall` to remove the Stop hook.
+- MUST implement `hook install` to install the Stop hook and SessionStart hook.
+- MUST implement `hook uninstall` to remove both hooks.
 - MUST implement `hook test` to send a test message to the most recent chat_id for the node.
 - MUST implement `help` to show usage, commands, flags, env vars, and exit codes.
 
@@ -74,7 +74,7 @@
 ### Run/tunnel behavior
 - MUST require `tmux` and `python3` for `run`.
 - MUST require `cloudflared` when tunnel is not disabled and no tunnel URL is provided.
-- MUST auto-install the Stop hook on first run if it is missing.
+- MUST auto-install hooks (Stop + SessionStart) on first run if any are missing.
 - MUST set `TELEGRAM_BOT_TOKEN`, `PORT`, `SESSIONS_DIR`, and `TMUX_PREFIX` when launching the bridge.
 - MUST start the tunnel (or use provided URL), wait for URL, and set Telegram webhook with retries.
 - MUST clean up bridge/tunnel processes if webhook setup fails.
@@ -89,9 +89,10 @@
 
 ### Hook install/uninstall behavior
 - MUST install the Stop hook by copying `hooks/send-to-telegram.sh` to `~/.claude/hooks/`.
-- MUST install `hooks/forward-to-bridge.py` alongside the hook.
-- MUST update `~/.claude/settings.json` using `jq` when available, or create a minimal file if missing.
-- MUST uninstall by removing the hook file and removing the hook entry from `settings.json` when possible.
+- MUST install the SessionStart hook by copying `hooks/checkin-on-start.sh` to `~/.claude/hooks/`.
+- MUST install `hooks/forward-to-bridge.py` alongside the hooks.
+- MUST register both Stop and SessionStart hooks in `~/.claude/settings.json` using `jq` when available, or create a minimal file if missing.
+- MUST uninstall by removing both hook files and removing both hook entries from `settings.json` when possible.
 
 ### Exit codes
 - MUST use exit code `0` for success.
@@ -102,7 +103,7 @@
 
 ## Backend System
 ### Backend protocol
-- MUST define a backend interface with: `name`, `is_interactive`, `start_cmd()`, `send()`, and `is_online()`.
+- MUST define a backend interface with: `name`, `is_interactive`, `start_cmd()` (supports optional `append_system_prompt`), `send()`, and `is_online()`.
 - MUST keep all backend routing behind a single backend registry.
 
 ### Implementations
@@ -123,7 +124,7 @@
 - MUST accept legacy `/hire <name> --codex` to select `codex`.
 - MUST accept backend-prefix syntax (e.g., `codex-alice`, `gemini-bob`) and map to the corresponding backend.
 - MUST reject unknown backends and list available backends.
-- MUST send a welcome message on hire that includes the bridge URL and inter-worker discovery instructions.
+- MUST send a welcome message on hire that includes the bridge URL, inter-worker discovery instructions, and the checkin note (if `TEAM_DIR/checkin-note.txt` exists).
 
 ### Per-session backend state
 - MUST store backend selection at `SESSIONS_DIR/<worker>/backend`.
@@ -142,6 +143,16 @@
 - MUST accept `SANDBOX_ENABLED` (`1`/`0`).
 - MUST accept `SANDBOX_IMAGE` (default `claudecode-telegram:latest`).
 - MUST accept `SANDBOX_MOUNTS` (comma-separated, supports `ro:` prefix).
+- MUST accept `CLAUDE_DIR` (default `~/.claude`).
+- MUST accept `CLAUDE_SETTINGS_FILE` (default `~/.claude/settings.json`).
+- MUST accept `MCP_INVENTORY_ENABLED` (`1`/`0`, default `1`).
+- MUST accept `MCP_CONFIG_PATHS` (comma-separated override list of MCP config files).
+- MUST accept `MCP_PROJECT_FILES` (comma-separated, default `.mcp.json,.mcp.jsonc`).
+- MUST accept `MCP_PROJECT_ROOT` (optional project root for MCP search).
+- MUST accept `MCP_PROJECT_SEARCH_DEPTH` (default `6`).
+- MUST accept `MCP_INVENTORY_MAX_CHARS` (default `2000`).
+- MUST accept `MCP_INVENTORY_INCLUDE_COMMAND` (`1`/`0`, default `0`).
+- MUST accept `MCP_INVENTORY_INCLUDE_ENV_KEYS` (`1`/`0`, default `1`).
 
 ### CLI (claudecode-telegram.sh)
 - MUST accept `TELEGRAM_BOT_TOKEN`.
@@ -219,6 +230,11 @@
 - MUST return JSON `{ "workers": [ ... ] }`.
 - MUST include entries with `name`, `protocol`, `address`, and `send_example`.
 - MUST return an empty list when no workers exist.
+
+### `GET /checkin`
+- MUST accept optional `?name=<worker>` query parameter (default: `"worker"`).
+- MUST return plain text worker instructions from `_build_welcome()`.
+- MUST read the checkin note from `TEAM_DIR/checkin-note.txt` (env var `TEAM_DIR`, default `~/team`) and append under a `MANAGER NOTE:` header with `{name}` replaced.
 
 ### `GET /health/workers`
 - MUST return JSON `{ "workers": [ ... ] }` with watchdog `state`, `reason`, and `age_seconds` for each worker.
@@ -311,6 +327,16 @@
 - MUST fall back to tmux capture (last 500 lines) when transcript extraction fails, unless `TMUX_FALLBACK=0`.
 - MUST append a short warning when tmux fallback is used.
 - MUST forward responses to `POST /response` with a 5-second timeout and clear the `pending` file.
+
+### SessionStart hook (checkin-on-start.sh)
+- MUST fire on `compact` and `resume` events (configured via `matcher: "compact|resume"` in settings.json).
+- MUST NOT fire on fresh `startup` (workers get instructions from the welcome message on `/hire`).
+- MUST read `BRIDGE_URL`, `TMUX_PREFIX`, and `PORT` from tmux session env first, falling back to shell env.
+- MUST exit silently if not in a bridge tmux session (missing `TMUX_PREFIX`, or session name doesn't match prefix).
+- MUST exit silently if both `BRIDGE_URL` and `PORT` are missing.
+- MUST derive the worker name by stripping the `TMUX_PREFIX` from the tmux session name.
+- MUST call `GET /checkin?name=<worker>` and print the result to stdout for context injection.
+- MUST use a 3-second timeout on the curl request.
 
 ### Forwarder (forward-to-bridge.py)
 - MUST convert markdown to Telegram-compatible HTML (bold, italic, inline code, fenced code blocks).
@@ -718,6 +744,26 @@ Only `transcript_path` is used; all other fields are ignored.
   - `timeout 5 python3 forward-to-bridge.py <tmpfile> <bridge_session> <bridge_endpoint>`
 - Forwarding runs in the background; pending file is removed immediately after spawn.
 
+### SessionStart hook (hooks/checkin-on-start.sh)
+**Trigger:** `compact` and `resume` events (via `matcher: "compact|resume"` in settings.json).
+
+**Session name resolution:**
+1) `tmux display-message -p '#{session_name}'`
+2) Exit silently if empty (not in tmux)
+
+**Config resolution order (fail-closed):**
+1) Read `BRIDGE_URL`, `TMUX_PREFIX`, `PORT` from tmux session env
+2) Fallback to shell env
+3) Exit silently if `TMUX_PREFIX` missing, or if both `BRIDGE_URL` and `PORT` missing
+4) If `SESSION_NAME` does not start with `TMUX_PREFIX`, exit silently (not our session)
+
+**Worker name derivation:**
+- Strip `TMUX_PREFIX` from `SESSION_NAME` (e.g., `claude-prod-kelvin` → `kelvin`)
+
+**Checkin call:**
+- `curl -s --max-time 3 $BRIDGE_URL/checkin?name=$WORKER_NAME`
+- stdout is injected into Claude's post-compaction context by Claude Code
+
 ### forward-to-bridge.py (markdown → HTML)
 Conversion rules (in order):
 1) Extract fenced code blocks: ```lang\ncode``` → placeholder
@@ -794,7 +840,7 @@ opencode run "<message>" --format json
 ### ClaudeBackend (tmux)
 - `start_cmd()`:
 ```
-claude --dangerously-skip-permissions
+claude [--resume <id>] [--append-system-prompt <text>] --dangerously-skip-permissions
 ```
 - `send()`:
   - `tmux send-keys -t <session> -l "<text>"`

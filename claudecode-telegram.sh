@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.23.0"
+VERSION="0.25.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,11 +35,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${PORT:=8080}"
 : "${TUNNEL_URL:=}"
 
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
+CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$CLAUDE_DIR/settings.json}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 NODES_DIR="$CLAUDE_DIR/telegram/nodes"
 HOOK_SCRIPT="send-to-telegram.sh"
+CHECKIN_HOOK_SCRIPT="checkin-on-start.sh"
 
 # CLI flags
 VERBOSE=false
@@ -429,13 +431,13 @@ cmd_run() {
     log "$(bold "Node:") $node"
     log ""
 
-    # 1. Install hook if needed (single hook for all nodes, reads env at runtime)
-    if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]]; then
-        log "Installing hook..."
+    # 1. Install hooks if needed (single hook for all nodes, reads env at runtime)
+    if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] || [[ ! -f "$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT" ]]; then
+        log "Installing hooks..."
         FORCE=true cmd_hook_install >/dev/null 2>&1 || true
-        success "Hook installed"
+        success "Hooks installed"
     else
-        log "$(dim "Hook already installed")"
+        log "$(dim "Hooks already installed")"
     fi
 
     log "$(dim "No default session - use /hire <name> from Telegram")"
@@ -443,6 +445,7 @@ cmd_run() {
     # Set up env vars for bridge
     export TELEGRAM_BOT_TOKEN="$token" PORT="$port"
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
+    export CLAUDE_DIR="$CLAUDE_DIR" CLAUDE_SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 
     # Sandbox mode env vars
     export SANDBOX_ENABLED="${SANDBOX:-0}"
@@ -1212,14 +1215,23 @@ cmd_hook_install() {
         cp "$helper_src" "$helper_dst" && chmod 755 "$helper_dst"
     fi
 
+    # Copy checkin hook (SessionStart - re-injects instructions after compact/resume)
+    local checkin_src="$SCRIPT_DIR/hooks/$CHECKIN_HOOK_SCRIPT"
+    local checkin_dst="$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT"
+    if [[ -f "$checkin_src" ]]; then
+        cp "$checkin_src" "$checkin_dst" && chmod 755 "$checkin_dst"
+        success "Checkin hook installed: $checkin_dst"
+    fi
+
     mkdir -p "$CLAUDE_DIR"
     local hook_cmd="$HOME/.claude/hooks/$HOOK_SCRIPT"
+    local checkin_cmd="$HOME/.claude/hooks/$CHECKIN_HOOK_SCRIPT"
 
     # Add to settings.json
-    # Claude Code hooks structure: hooks.Stop[].hooks[] (matcher group with hooks array)
+    # Claude Code hooks structure: hooks.<Event>[].hooks[] (matcher group with hooks array)
     if [[ -f "$SETTINGS_FILE" ]]; then
         if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
-            log "$(dim "Already in settings.json")"
+            log "$(dim "Stop hook already in settings.json")"
         elif check_cmd jq; then
             if jq -e '.hooks.Stop[0].hooks' "$SETTINGS_FILE" >/dev/null 2>&1; then
                 jq --arg cmd "$hook_cmd" \
@@ -1232,14 +1244,35 @@ cmd_hook_install() {
                     "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
                     && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
             fi
-            success "Updated settings.json"
+            success "Updated settings.json (Stop hook)"
         else
             warn "Install jq to auto-update settings.json"
         fi
+
+        # Add SessionStart hook for checkin (compact/resume)
+        if grep -q "$CHECKIN_HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
+            log "$(dim "SessionStart hook already in settings.json")"
+        elif check_cmd jq; then
+            jq --arg cmd "$checkin_cmd" \
+                '.hooks.SessionStart = [{"matcher":"compact|resume","hooks":[{"type":"command","command":$cmd}]}]' \
+                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            success "Updated settings.json (SessionStart hook)"
+        fi
     else
-        cat > "$SETTINGS_FILE" << EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}]}}
+        if check_cmd jq; then
+            # Create with both hooks using jq for proper escaping
+            jq -n --arg stop "$hook_cmd" --arg checkin "$checkin_cmd" '{
+                hooks: {
+                    Stop: [{hooks: [{type: "command", command: $stop}]}],
+                    SessionStart: [{matcher: "compact|resume", hooks: [{type: "command", command: $checkin}]}]
+                }
+            }' > "$SETTINGS_FILE"
+        else
+            cat > "$SETTINGS_FILE" << EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume","hooks":[{"type":"command","command":"$checkin_cmd"}]}]}}
 EOF
+        fi
         success "Created settings.json"
     fi
 
@@ -1249,15 +1282,21 @@ EOF
 
 cmd_hook_uninstall() {
     local hook_file="$HOOKS_DIR/$HOOK_SCRIPT"
+    local checkin_file="$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT"
 
-    log "Uninstalling hook..."
+    log "Uninstalling hooks..."
 
-    # Remove hook file
+    # Remove hook files
     if [[ -f "$hook_file" ]]; then
         rm -f "$hook_file"
         success "Removed: $hook_file"
     else
         log "$(dim "Hook file not found: $hook_file")"
+    fi
+
+    if [[ -f "$checkin_file" ]]; then
+        rm -f "$checkin_file"
+        success "Removed: $checkin_file"
     fi
 
     # Remove helper
@@ -1270,9 +1309,18 @@ cmd_hook_uninstall() {
                 .hooks.Stop[0].hooks = [.hooks.Stop[0].hooks[] | select(.command | contains($hook) | not)]
             ' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
                 && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            success "Removed from settings.json"
+            success "Removed Stop hook from settings.json"
         else
-            log "$(dim "Not in settings.json")"
+            log "$(dim "Stop hook not in settings.json")"
+        fi
+
+        if grep -q "$CHECKIN_HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
+            jq 'del(.hooks.SessionStart)' \
+                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            success "Removed SessionStart hook from settings.json"
+        else
+            log "$(dim "SessionStart hook not in settings.json")"
         fi
     fi
 
@@ -1350,8 +1398,8 @@ SHELL COMMANDS
   webhook <url>     Set Telegram webhook URL
   webhook info      Show current webhook
   webhook delete    Remove webhook
-  hook install      Install Claude Code Stop hook
-  hook uninstall    Remove hook
+  hook install      Install Claude Code hooks (Stop + SessionStart)
+  hook uninstall    Remove hooks
   hook test         Send test message to Telegram
 
 FLAGS
