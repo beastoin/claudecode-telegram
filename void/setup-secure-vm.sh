@@ -466,6 +466,8 @@ Credentials are loaded from /run/secrets/env into the daemon's own environment
 (never exposed via shared volume).
 """
 import ipaddress
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -486,7 +488,9 @@ REQUESTS_DIR = IPC_DIR / "requests"
 RESPONSES_DIR = IPC_DIR / "responses"
 HEARTBEAT_FILE = IPC_DIR / "heartbeat"
 SECRETS_ENV = Path("/run/secrets/env")
+IPC_KEY_PATH = Path("/run/secrets/ipc.key")
 POLL_INTERVAL = 0.1  # seconds
+REQUEST_MAX_AGE_SECONDS = 30
 
 DEFAULT_CONFIG = {
     "allowed_tools": ["gh", "gcloud"],
@@ -508,12 +512,19 @@ DEFAULT_CONFIG = {
         r"AKIA[0-9A-Z]{16}",
         r"ASIA[0-9A-Z]{16}",
         r"glpat-[A-Za-z0-9_-]{20,}",
+        r"github_pat_[A-Za-z0-9_]{22,}",
         r"-----BEGIN (?:RSA|EC|OPENSSH|PGP|PRIVATE) KEY-----",
         r"(?i)kubeconfig",
         r"gho_[A-Za-z0-9_]{36}",
         r"ghp_[A-Za-z0-9_]{36}",
         r"ya29\.[A-Za-z0-9_-]+",
         r"Bearer [A-Za-z0-9._-]+",
+        r"Basic [A-Za-z0-9+/=]{20,}",
+        r"xox[bpras]-[A-Za-z0-9-]{10,}",
+        r"npm_[A-Za-z0-9]{36}",
+        r"sk-[A-Za-z0-9]{20,}",
+        r"sk-ant-[A-Za-z0-9-]{20,}",
+        r"AGE-SECRET-KEY-[A-Z0-9]{59}",
     ],
     "max_browser_sessions": 2,
     "browser_cgroup": "/sys/fs/cgroup/void",
@@ -591,12 +602,45 @@ FORBIDDEN_TOKENS = {
     "console", "errors", "trace", "state", "html",
 }
 
+ALLOWED_GH_SUBCOMMANDS = {
+    "pr": {"list", "view", "create", "merge", "close", "comment", "review", "diff", "checks", "ready", "edit"},
+    "issue": {"list", "view", "create", "close", "comment", "edit", "reopen"},
+    "repo": {"view", "list", "clone"},
+    "run": {"list", "view", "watch"},
+    "release": {"list", "view"},
+    "search": {"repos", "issues", "prs", "commits", "code"},
+    "status": None,
+    "label": {"list", "create"},
+}
+
+ALLOWED_GCLOUD_SUBCOMMANDS = {
+    ("projects", "list"),
+    ("compute", "instances", "list"),
+    ("compute", "instances", "describe"),
+    ("container", "clusters", "list"),
+    ("container", "clusters", "get-credentials"),
+    ("run", "services", "list"),
+    ("run", "services", "describe"),
+    ("run", "jobs", "list"),
+    ("logging", "read"),
+    ("storage", "ls"),
+    ("storage", "cp"),
+    ("auth", "activate-service-account"),
+}
+
 BROWSER_SCRUB_PATTERNS = [
     r'([?&](?:access_token|token|id_token|refresh_token|api[_-]?key|key|sig|signature|auth|authorization|code|client_secret)=)[^&#\s]+',
     r'\bBearer\s+[A-Za-z0-9._~+\-/]+=*',
+    r'\bBasic\s+[A-Za-z0-9+/=]{20,}\b',
     r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b',
     r'\bAIza[0-9A-Za-z_-]{35}\b',
     r'\bgh[pousr]_[A-Za-z0-9]{20,}\b',
+    r'\bgithub_pat_[A-Za-z0-9_]{22,}\b',
+    r'\bxox[bpras]-[A-Za-z0-9-]{10,}\b',
+    r'\bnpm_[A-Za-z0-9]{36}\b',
+    r'\bsk-[A-Za-z0-9]{20,}\b',
+    r'\bsk-ant-[A-Za-z0-9-]{20,}\b',
+    r'\bAGE-SECRET-KEY-[A-Z0-9]{59}\b',
 ]
 
 BROWSER_METADATA_HOSTS = {
@@ -651,6 +695,53 @@ def load_secrets_env():
                 os.environ[key] = value
 
 
+def load_ipc_key():
+    if not IPC_KEY_PATH.exists():
+        return None
+    try:
+        key_hex = IPC_KEY_PATH.read_text(encoding="utf-8").strip()
+        if not key_hex:
+            return None
+        return bytes.fromhex(key_hex)
+    except Exception:
+        return None
+
+
+def canonical_json_for_hmac(payload):
+    base = dict(payload)
+    base.pop("hmac", None)
+    return json.dumps(base, sort_keys=True, separators=(",", ":"))
+
+
+def compute_payload_hmac(payload, key_bytes):
+    msg = canonical_json_for_hmac(payload).encode("utf-8")
+    return hmac.new(key_bytes, msg, hashlib.sha256).hexdigest()
+
+
+def verify_signed_payload(payload, key_bytes):
+    provided = payload.get("hmac")
+    if not isinstance(provided, str):
+        return False
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", provided):
+        return False
+    expected = compute_payload_hmac(payload, key_bytes)
+    return hmac.compare_digest(provided.lower(), expected.lower())
+
+
+def check_request_freshness(req):
+    ts = req.get("timestamp")
+    try:
+        ts_value = float(ts)
+    except (TypeError, ValueError):
+        return False, "Missing or invalid request timestamp"
+    now = time.time()
+    if ts_value > now + 5:
+        return False, "Request timestamp is too far in the future"
+    if now - ts_value > REQUEST_MAX_AGE_SECONDS:
+        return False, f"Request expired (>{REQUEST_MAX_AGE_SECONDS}s old)"
+    return True, None
+
+
 def scrub_text(text, patterns):
     out = text
     for pattern in patterns:
@@ -682,6 +773,8 @@ def build_browser_env():
         "XDG_CACHE_HOME": "/var/lib/void/.cache",
         "XDG_CONFIG_HOME": "/var/lib/void/.config",
         "XDG_DATA_HOME": "/var/lib/void/.local/share",
+        "CHROMIUM_FLAGS": "--disable-webrtc",
+        "PLAYWRIGHT_CHROMIUM_ARGS": "--disable-webrtc",
     }
 
 
@@ -932,6 +1025,79 @@ def browser_session_close_target(session, params):
     return session
 
 
+def check_gh_subcommand(argv):
+    if len(argv) < 2:
+        return False, "gh subcommand is required"
+    top = argv[1]
+    allowed_second = ALLOWED_GH_SUBCOMMANDS.get(top)
+    if allowed_second is None and top != "status":
+        return False, f"gh command group not allowed: {top}"
+    if top == "status":
+        return True, None
+    if len(argv) < 3:
+        return False, f"gh {top} subcommand is required"
+    second = argv[2]
+    if second not in allowed_second:
+        return False, f"gh {top} subcommand not allowed: {second}"
+    return True, None
+
+
+def gcloud_non_flag_tokens(argv):
+    parts = []
+    for tok in argv[1:]:
+        if tok == "--":
+            break
+        if tok.startswith("-"):
+            continue
+        parts.append(tok)
+    return parts
+
+
+def gcloud_is_storage_cp_download(argv):
+    tokens = argv[1:]
+    saw_storage = False
+    saw_cp = False
+    tail = []
+    for tok in tokens:
+        if not saw_storage:
+            if tok == "storage":
+                saw_storage = True
+            continue
+        if not saw_cp:
+            if tok == "cp":
+                saw_cp = True
+            continue
+        tail.append(tok)
+
+    operands = [tok for tok in tail if tok and not tok.startswith("-")]
+    if len(operands) < 2:
+        return False, "gcloud storage cp requires source and destination"
+    sources = operands[:-1]
+    destination = operands[-1]
+    if destination.startswith("gs://"):
+        return False, "gcloud storage cp upload denied by policy"
+    if not all(src.startswith("gs://") for src in sources):
+        return False, "gcloud storage cp only supports gs:// sources (download-only)"
+    return True, None
+
+
+def check_gcloud_subcommand(argv):
+    parts = gcloud_non_flag_tokens(argv)
+    if not parts:
+        return False, "gcloud subcommand is required"
+
+    if len(parts) >= 2 and tuple(parts[:2]) == ("storage", "cp"):
+        return gcloud_is_storage_cp_download(argv)
+
+    for allowed_cmd in ALLOWED_GCLOUD_SUBCOMMANDS:
+        if allowed_cmd == ("storage", "cp"):
+            continue
+        if len(parts) >= len(allowed_cmd) and tuple(parts[:len(allowed_cmd)]) == allowed_cmd:
+            return True, None
+
+    return False, f"gcloud subcommand not allowed: {' '.join(parts[:3])}"
+
+
 def check_command(argv, cfg, logger):
     """Validate command against ACL. Returns (ok, error_message)."""
     if not argv:
@@ -942,6 +1108,17 @@ def check_command(argv, cfg, logger):
     if tool not in allowed:
         logger.info("DENIED tool=%s reason=tool_not_allowed", tool)
         return False, f"Tool not allowed: {tool}. Allowed: {', '.join(sorted(allowed))}"
+
+    if tool == "gh":
+        sub_ok, sub_err = check_gh_subcommand(argv)
+    elif tool == "gcloud":
+        sub_ok, sub_err = check_gcloud_subcommand(argv)
+    else:
+        sub_ok, sub_err = False, f"Unsupported tool: {tool}"
+
+    if not sub_ok:
+        logger.info("DENIED tool=%s reason=subcommand_not_allowed detail=%s", tool, sub_err)
+        return False, "Command denied by subcommand allowlist"
 
     # Check command deny patterns
     cmd_str = " ".join(argv)
@@ -959,7 +1136,7 @@ def check_command(argv, cfg, logger):
     return True, None
 
 
-def process_request(req_path, cfg, logger):
+def process_request(req_path, cfg, logger, ipc_key):
     """Process a single request file and write response."""
     try:
         with open(req_path, "r") as f:
@@ -968,162 +1145,187 @@ def process_request(req_path, cfg, logger):
         logger.error("Failed to read request %s: %s", req_path, e)
         return
 
-    req_id = req.get("id", req_path.stem)
-    request_tool = req.get("tool")
+    req_id = str(req.get("id", req_path.stem))
 
-    if request_tool == "browser":
-        action = req.get("action", "")
-        session = str(req.get("session", "default")).strip() or "default"
-        params = req.get("params", {})
-        if not isinstance(params, dict):
-            params = {}
-        params = dict(params)
-        params["session"] = session
-        timeout = browser_timeout_for_action(action, req.get("timeout"))
-        action_tuple = normalize_browser_action(action)
-
-        logger.info("REQUEST id=%s tool=browser action=%s session=%s", req_id, " ".join(action_tuple), session)
-
-        ok, argv, error_msg = validate_browser_command(action, params, cfg)
-        if not ok:
+    if not verify_signed_payload(req, ipc_key):
+        logger.info("DENIED id=%s reason=invalid_hmac", req_id)
+        response = {
+            "id": req_id,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "Request authentication failed",
+            "error": "auth",
+        }
+    else:
+        fresh_ok, fresh_err = check_request_freshness(req)
+        if not fresh_ok:
+            logger.info("DENIED id=%s reason=expired_request detail=%s", req_id, fresh_err)
             response = {
                 "id": req_id,
                 "exit_code": 1,
                 "stdout": "",
-                "stderr": error_msg,
-                "error": "denied",
+                "stderr": fresh_err,
+                "error": "expired",
             }
         else:
-            session_ok, session_error = browser_session_allowed(action_tuple, session, cfg)
-            if not session_ok:
-                logger.info("DENIED id=%s tool=browser reason=session_limit", req_id)
-                response = {
-                    "id": req_id,
-                    "exit_code": 1,
-                    "stdout": "",
-                    "stderr": session_error,
-                    "error": "denied",
-                }
-            else:
-                env = build_browser_env()
-                cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
-                preexec = browser_preexec_for_cgroup(cgroup_path)
-                try:
-                    proc = subprocess.run(
-                        argv,
-                        shell=False,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=min(timeout, MAX_BROWSER_TIMEOUT),
-                        env=env,
-                        user="void",
-                        preexec_fn=preexec,
-                    )
-                    scrub_patterns = cfg.get("sensitive_output_regex", [])
-                    response = {
-                        "id": req_id,
-                        "exit_code": proc.returncode,
-                        "stdout": scrub_browser_output(proc.stdout, scrub_patterns),
-                        "stderr": scrub_text(scrub_browser_text(proc.stderr), scrub_patterns),
-                        "error": None,
-                    }
-                    if proc.returncode == 0:
-                        if action_tuple == ("session", "close"):
-                            active_browser_sessions.discard(browser_session_close_target(session, params))
-                        elif action_tuple != ("session", "list"):
-                            active_browser_sessions.add(session)
-                    logger.info("COMPLETED id=%s tool=browser exit_code=%d", req_id, proc.returncode)
-                except subprocess.TimeoutExpired:
-                    response = {
-                        "id": req_id,
-                        "exit_code": 124,
-                        "stdout": "",
-                        "stderr": f"Browser command timed out after {timeout}s",
-                        "error": "timeout",
-                    }
-                    logger.info("TIMEOUT id=%s tool=browser timeout=%d", req_id, timeout)
-                except FileNotFoundError:
-                    response = {
-                        "id": req_id,
-                        "exit_code": 127,
-                        "stdout": "",
-                        "stderr": "Command not found: agent-browser",
-                        "error": "not_found",
-                    }
-                    logger.info("NOT_FOUND id=%s tool=browser", req_id)
-                except Exception as e:
+            request_tool = req.get("tool")
+            if request_tool == "browser":
+                action = req.get("action", "")
+                session = str(req.get("session", "default")).strip() or "default"
+                params = req.get("params", {})
+                if not isinstance(params, dict):
+                    params = {}
+                params = dict(params)
+                params["session"] = session
+                timeout = browser_timeout_for_action(action, req.get("timeout"))
+                action_tuple = normalize_browser_action(action)
+
+                logger.info("REQUEST id=%s tool=browser action=%s session=%s", req_id, " ".join(action_tuple), session)
+
+                ok, argv, error_msg = validate_browser_command(action, params, cfg)
+                if not ok:
                     response = {
                         "id": req_id,
                         "exit_code": 1,
                         "stdout": "",
-                        "stderr": f"Browser execution failed: {e}",
-                        "error": "internal",
+                        "stderr": error_msg,
+                        "error": "denied",
                     }
-                    logger.error("EXCEPTION id=%s tool=browser error=%s", req_id, e)
-    else:
-        argv = req.get("argv", [])
-        timeout = min(req.get("timeout", 60), 300)  # cap at 5 minutes
-        logger.info("REQUEST id=%s argv=%s", req_id, argv[:3])  # log first 3 args only
+                else:
+                    session_ok, session_error = browser_session_allowed(action_tuple, session, cfg)
+                    if not session_ok:
+                        logger.info("DENIED id=%s tool=browser reason=session_limit", req_id)
+                        response = {
+                            "id": req_id,
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": session_error,
+                            "error": "denied",
+                        }
+                    else:
+                        env = build_browser_env()
+                        cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
+                        preexec = browser_preexec_for_cgroup(cgroup_path)
+                        try:
+                            proc = subprocess.run(
+                                argv,
+                                shell=False,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                                timeout=min(timeout, MAX_BROWSER_TIMEOUT),
+                                env=env,
+                                user="void",
+                                preexec_fn=preexec,
+                            )
+                            scrub_patterns = cfg.get("sensitive_output_regex", [])
+                            response = {
+                                "id": req_id,
+                                "exit_code": proc.returncode,
+                                "stdout": scrub_browser_output(proc.stdout, scrub_patterns),
+                                "stderr": scrub_text(scrub_browser_text(proc.stderr), scrub_patterns),
+                                "error": None,
+                            }
+                            if proc.returncode == 0:
+                                if action_tuple == ("session", "close"):
+                                    active_browser_sessions.discard(browser_session_close_target(session, params))
+                                elif action_tuple != ("session", "list"):
+                                    active_browser_sessions.add(session)
+                            logger.info("COMPLETED id=%s tool=browser exit_code=%d", req_id, proc.returncode)
+                        except subprocess.TimeoutExpired:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 124,
+                                "stdout": "",
+                                "stderr": f"Browser command timed out after {timeout}s",
+                                "error": "timeout",
+                            }
+                            logger.info("TIMEOUT id=%s tool=browser timeout=%d", req_id, timeout)
+                        except FileNotFoundError:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 127,
+                                "stdout": "",
+                                "stderr": "Command not found: agent-browser",
+                                "error": "not_found",
+                            }
+                            logger.info("NOT_FOUND id=%s tool=browser", req_id)
+                        except Exception as e:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": f"Browser execution failed: {e}",
+                                "error": "internal",
+                            }
+                            logger.error("EXCEPTION id=%s tool=browser error=%s", req_id, e)
+            else:
+                argv = req.get("argv", [])
+                timeout = min(req.get("timeout", 60), 300)  # cap at 5 minutes
+                logger.info("REQUEST id=%s argv=%s", req_id, argv[:3])  # log first 3 args only
 
-        ok, error_msg = check_command(argv, cfg, logger)
-        if not ok:
-            response = {
-                "id": req_id,
-                "exit_code": 1,
-                "stdout": "",
-                "stderr": error_msg,
-                "error": "denied",
-            }
-        else:
-            tool = os.path.basename(argv[0])
-            env = build_command_env()
-            try:
-                proc = subprocess.run(
-                    argv,
-                    shell=False,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=env,
-                )
-                scrub_patterns = cfg.get("sensitive_output_regex", [])
-                response = {
-                    "id": req_id,
-                    "exit_code": proc.returncode,
-                    "stdout": scrub_text(proc.stdout, scrub_patterns),
-                    "stderr": scrub_text(proc.stderr, scrub_patterns),
-                    "error": None,
-                }
-                logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
-            except subprocess.TimeoutExpired:
-                response = {
-                    "id": req_id,
-                    "exit_code": 124,
-                    "stdout": "",
-                    "stderr": f"Command timed out after {timeout}s",
-                    "error": "timeout",
-                }
-                logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
-            except FileNotFoundError:
-                response = {
-                    "id": req_id,
-                    "exit_code": 127,
-                    "stdout": "",
-                    "stderr": f"Command not found: {argv[0]}",
-                    "error": "not_found",
-                }
-                logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
-            except Exception as e:
-                response = {
-                    "id": req_id,
-                    "exit_code": 1,
-                    "stdout": "",
-                    "stderr": "Command execution failed",
-                    "error": "internal",
-                }
-                logger.error("EXCEPTION id=%s error=%s", req_id, e)
+                ok, error_msg = check_command(argv, cfg, logger)
+                if not ok:
+                    response = {
+                        "id": req_id,
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": error_msg,
+                        "error": "denied",
+                    }
+                else:
+                    tool = os.path.basename(argv[0])
+                    env = build_command_env()
+                    try:
+                        proc = subprocess.run(
+                            argv,
+                            shell=False,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            env=env,
+                        )
+                        scrub_patterns = cfg.get("sensitive_output_regex", [])
+                        response = {
+                            "id": req_id,
+                            "exit_code": proc.returncode,
+                            "stdout": scrub_text(proc.stdout, scrub_patterns),
+                            "stderr": scrub_text(proc.stderr, scrub_patterns),
+                            "error": None,
+                        }
+                        logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
+                    except subprocess.TimeoutExpired:
+                        response = {
+                            "id": req_id,
+                            "exit_code": 124,
+                            "stdout": "",
+                            "stderr": f"Command timed out after {timeout}s",
+                            "error": "timeout",
+                        }
+                        logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
+                    except FileNotFoundError:
+                        response = {
+                            "id": req_id,
+                            "exit_code": 127,
+                            "stdout": "",
+                            "stderr": f"Command not found: {argv[0]}",
+                            "error": "not_found",
+                        }
+                        logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
+                    except Exception as e:
+                        response = {
+                            "id": req_id,
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": "Command execution failed",
+                            "error": "internal",
+                        }
+                        logger.error("EXCEPTION id=%s error=%s", req_id, e)
+
+    response.setdefault("id", req_id)
+    response["timestamp"] = int(time.time())
+    response["hmac"] = compute_payload_hmac(response, ipc_key)
 
     # Atomic write: write .tmp, rename to .json
     resp_path = RESPONSES_DIR / f"{req_path.stem}.json"
@@ -1155,6 +1357,11 @@ def main():
     cfg = load_config()
     logger.info("Allowed tools: %s", cfg.get("allowed_tools", []))
 
+    ipc_key = load_ipc_key()
+    if not ipc_key:
+        logger.error("IPC key missing or invalid at %s", IPC_KEY_PATH)
+        return 1
+
     # Ensure IPC directories exist
     REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
     RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1168,7 +1375,7 @@ def main():
             for req_file in sorted(REQUESTS_DIR.glob("*.json")):
                 if not running:
                     break
-                process_request(req_file, cfg, logger)
+                process_request(req_file, cfg, logger, ipc_key)
         except Exception as e:
             logger.error("Poll loop error: %s", e)
 
@@ -1215,12 +1422,19 @@ sensitive_output_regex:
   - 'AKIA[0-9A-Z]{16}'
   - 'ASIA[0-9A-Z]{16}'
   - 'glpat-[A-Za-z0-9_-]{20,}'
+  - 'github_pat_[A-Za-z0-9_]{22,}'
   - '-----BEGIN (?:RSA|EC|OPENSSH|PGP|PRIVATE) KEY-----'
   - '(?i)kubeconfig'
   - 'gho_[A-Za-z0-9_]{36}'
   - 'ghp_[A-Za-z0-9_]{36}'
   - 'ya29\.[A-Za-z0-9_-]+'
   - 'Bearer [A-Za-z0-9._-]+'
+  - 'Basic [A-Za-z0-9+/=]{20,}'
+  - 'xox[bpras]-[A-Za-z0-9-]{10,}'
+  - 'npm_[A-Za-z0-9]{36}'
+  - 'sk-[A-Za-z0-9]{20,}'
+  - 'sk-ant-[A-Za-z0-9-]{20,}'
+  - 'AGE-SECRET-KEY-[A-Z0-9]{59}'
 max_browser_sessions: 2
 browser_cgroup: /sys/fs/cgroup/void
 YAML_PROXY
@@ -1445,6 +1659,12 @@ if [[ -z "\$IPC_DIR" || ! -d "\$IPC_DIR" ]]; then
   exit 1
 fi
 
+IPC_KEY="\$(grep -E '^IPC_KEY=' "\$RUNTIME_ENV" | head -n1 | cut -d'=' -f2-)"
+if [[ -z "\$IPC_KEY" ]]; then
+  echo "Error: IPC key missing from runtime state. Restart VM." >&2
+  exit 1
+fi
+
 # Generate unique request ID
 req_id="req-\$(date +%s)-\$\$-\$RANDOM"
 
@@ -1481,6 +1701,7 @@ if [[ "\$tool" == "browse" ]]; then
   request=\$(python3 - "\$req_id" "\$session" "\${browser_args[@]}" <<'PY_BROWSER_REQUEST'
 import json
 import sys
+import time
 
 
 def fail(msg):
@@ -1542,6 +1763,7 @@ request = {
     "action": action,
     "params": params,
     "timeout": timeout,
+    "timestamp": int(time.time()),
 }
 print(json.dumps(request))
 PY_BROWSER_REQUEST
@@ -1555,14 +1777,37 @@ print(json.dumps([line.rstrip("\n") for line in sys.stdin]))
 
   timeout=60
   request=\$(python3 -c "
-import json
+import json, time
 print(json.dumps({
     'id': '\${req_id}',
     'argv': \${argv_json},
-    'timeout': \${timeout}
+    'timeout': \${timeout},
+    'timestamp': int(time.time())
 }))
 ")
 fi
+
+request=\$(printf '%s' "\$request" | python3 - "\$IPC_KEY" <<'PY_SIGN_REQUEST'
+import hashlib
+import hmac
+import json
+import sys
+
+key_hex = sys.argv[1].strip()
+try:
+    key = bytes.fromhex(key_hex)
+except ValueError:
+    print("Error: invalid IPC key in runtime state", file=sys.stderr)
+    raise SystemExit(1)
+
+req = json.load(sys.stdin)
+payload = dict(req)
+payload.pop("hmac", None)
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+req["hmac"] = hmac.new(key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+print(json.dumps(req))
+PY_SIGN_REQUEST
+)
 
 # Atomic write: .tmp then rename to .json
 echo "\$request" > "\${IPC_DIR}/requests/\${req_id}.tmp"
@@ -1583,17 +1828,45 @@ while [[ ! -f "\$resp_file" ]]; do
   fi
 done
 
-# Parse response: print stdout/stderr, exit with the command's exit code
-python3 -c "
-import json, sys
-with open('\${resp_file}') as f:
+# Parse response: verify auth, print stdout/stderr, exit with the command's exit code
+python3 - "\${resp_file}" "\${IPC_KEY}" <<'PY_VERIFY_RESPONSE'
+import hashlib
+import hmac
+import json
+import sys
+
+resp_file = sys.argv[1]
+key_hex = sys.argv[2].strip()
+
+try:
+    key = bytes.fromhex(key_hex)
+except ValueError:
+    print("Error: invalid IPC key in runtime state", file=sys.stderr)
+    raise SystemExit(1)
+
+with open(resp_file, "r", encoding="utf-8") as f:
     resp = json.load(f)
-if resp.get('stdout'):
-    sys.stdout.write(resp['stdout'])
-if resp.get('stderr'):
-    sys.stderr.write(resp['stderr'])
-sys.exit(resp.get('exit_code', 1))
-"
+
+provided = resp.get("hmac")
+if not isinstance(provided, str):
+    print("Error: missing response authentication", file=sys.stderr)
+    raise SystemExit(1)
+
+payload = dict(resp)
+payload.pop("hmac", None)
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+expected = hmac.new(key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+if not hmac.compare_digest(provided.lower(), expected.lower()):
+    print("Error: invalid response authentication", file=sys.stderr)
+    raise SystemExit(1)
+
+if resp.get("stdout"):
+    sys.stdout.write(resp["stdout"])
+if resp.get("stderr"):
+    sys.stderr.write(resp["stderr"])
+sys.exit(resp.get("exit_code", 1))
+PY_VERIFY_RESPONSE
 proxy_exit=\$?
 
 # Clean up
@@ -1618,6 +1891,7 @@ write_runtime_state() {
   local mapper="$3"
   local log_file="$4"
   local ipc_dir="$5"
+  local ipc_key="$6"
   if ((DRY_RUN)); then
     printf "[dry-run] write runtime state to %s\n" "$RUNTIME_ENV_FILE" >&2
     return
@@ -1628,6 +1902,7 @@ LUKS_MOUNT=${luks_mount}
 LUKS_MAPPER=${mapper}
 VM_LOG=${log_file}
 IPC_DIR=${ipc_dir}
+IPC_KEY=${ipc_key}
 EOF_RUNTIME
   chmod 0644 "$RUNTIME_ENV_FILE"
 }
@@ -2024,6 +2299,18 @@ fi
 
 swapoff -a 2>/dev/null || true
 
+mkdir -p /run/secrets
+if ! mountpoint -q /run/secrets; then
+  mount -t tmpfs -o size=50M,mode=0700,nosuid,noexec tmpfs /run/secrets
+fi
+
+mkdir -p /ipc/requests /ipc/responses
+IPC_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+printf '%s\n' "$IPC_KEY" > /run/secrets/ipc.key
+chmod 0600 /run/secrets/ipc.key
+printf '%s\n' "$IPC_KEY" > /ipc/ipc.key
+chmod 0600 /ipc/ipc.key
+
 if [ -d /sys/fs/cgroup ]; then
   CG=/sys/fs/cgroup/void
   mkdir -p "$CG" 2>/dev/null || true
@@ -2033,7 +2320,6 @@ if [ -d /sys/fs/cgroup ]; then
   echo "192" > "$CG/pids.max" 2>/dev/null || true
 fi
 
-mkdir -p /ipc/requests /ipc/responses
 exec python3 /usr/local/bin/command-proxy-daemon
 GUEST_BOOT_NOSECRETS
   else
@@ -2051,6 +2337,13 @@ mkdir -p /run/secrets
 if ! mountpoint -q /run/secrets; then
   mount -t tmpfs -o size=50M,mode=0700,nosuid,noexec tmpfs /run/secrets
 fi
+
+mkdir -p /ipc/requests /ipc/responses
+IPC_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+printf '%s\n' "$IPC_KEY" > /run/secrets/ipc.key
+chmod 0600 /run/secrets/ipc.key
+printf '%s\n' "$IPC_KEY" > /ipc/ipc.key
+chmod 0600 /ipc/ipc.key
 
 cp /secrets_in/env /run/secrets/env
 chmod 0600 /run/secrets/env
@@ -2094,7 +2387,6 @@ if [ -d /sys/fs/cgroup ]; then
   echo "192" > "$CG/pids.max" 2>/dev/null || true
 fi
 
-mkdir -p /ipc/requests /ipc/responses
 exec python3 /usr/local/bin/command-proxy-daemon
 GUEST_BOOT
   fi
@@ -2111,7 +2403,8 @@ GUEST_BOOT
   log_info "Attaching volumes to VM: ${vol_args[*]}"
   run "$krunvm_bin" changevm "$VM_NAME" "${vol_args[@]}"
 
-  write_runtime_state "${secrets_dir:-none}" "${luks_mount:-none}" "$LUKS_MAPPER" "$VM_LOG_FILE" "$ipc_dir"
+  local ipc_key="pending"
+  write_runtime_state "${secrets_dir:-none}" "${luks_mount:-none}" "$LUKS_MAPPER" "$VM_LOG_FILE" "$ipc_dir" "$ipc_key"
 
   # Install host-side proxy script
   log_info "Installing void to /usr/local/bin/void..."
@@ -2132,6 +2425,7 @@ GUEST_BOOT
   if ! ((DRY_RUN)); then
     log_info "Waiting for daemon heartbeat..."
     local heartbeat_file="${ipc_dir}/heartbeat"
+    local ipc_key_file="${ipc_dir}/ipc.key"
     local i
     for ((i=0; i<60; i++)); do
       if [[ -f "$heartbeat_file" ]]; then
@@ -2143,7 +2437,25 @@ GUEST_BOOT
     if [[ ! -f "$heartbeat_file" ]]; then
       log_warn "No heartbeat after 60s. Daemon may still be starting. Check ${VM_LOG_FILE}."
     fi
+
+    log_info "Waiting for IPC authentication key..."
+    for ((i=0; i<30; i++)); do
+      if [[ -s "$ipc_key_file" ]]; then
+        ipc_key="$(tr -d '[:space:]' < "$ipc_key_file" 2>/dev/null || true)"
+        if [[ "$ipc_key" =~ ^[0-9a-fA-F]{64}$ ]]; then
+          break
+        fi
+      fi
+      sleep 1
+    done
+    if [[ ! "$ipc_key" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      die "IPC key unavailable or invalid after boot. Check ${VM_LOG_FILE}."
+    fi
+  else
+    ipc_key="$(printf '0%.0s' {1..64})"
   fi
+
+  write_runtime_state "${secrets_dir:-none}" "${luks_mount:-none}" "$LUKS_MAPPER" "$VM_LOG_FILE" "$ipc_dir" "$ipc_key"
 
   log_info "VM started successfully."
   log_info "Use 'void gh ...', 'void gcloud ...', or 'void browse ...' to run commands."
@@ -2475,7 +2787,10 @@ check("test_browser_wait_denies_download", not ok, err or "")
 env = module.build_browser_env()
 check(
     "test_browser_env_is_sanitized",
-    "GH_TOKEN" not in env and "GOOGLE_APPLICATION_CREDENTIALS" not in env and env.get("HOME") == "/var/lib/void",
+    "GH_TOKEN" not in env
+    and "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    and env.get("HOME") == "/var/lib/void"
+    and env.get("PLAYWRIGHT_CHROMIUM_ARGS") == "--disable-webrtc",
     str(env),
 )
 
@@ -2593,48 +2908,70 @@ check("test_deny_gcloud_verbosity_debug", not ok and "denied" in (err or "").low
 ok, err = module.check_command([], cfg, logger)
 check("test_deny_empty_command", not ok, err or "")
 
+# 36. deny gh api (not in allowlist)
+ok, err = module.check_command(["gh", "api", "/user"], cfg, logger)
+check("test_deny_gh_api_subcommand", not ok and "denied" in (err or "").lower(), err or "")
+
+# 37. deny gh extension install (not in allowlist)
+ok, err = module.check_command(["gh", "extension", "install", "owner/ext"], cfg, logger)
+check("test_deny_gh_extension_install", not ok and "denied" in (err or "").lower(), err or "")
+
+# 38. deny gcloud secrets access (not in allowlist)
+ok, err = module.check_command(["gcloud", "secrets", "versions", "access", "latest"], cfg, logger)
+check("test_deny_gcloud_secrets_versions_access", not ok and "denied" in (err or "").lower(), err or "")
+
 # ── gh/gcloud output scrubbing tests ─────────────────────────────────
 
 scrub_patterns = cfg.get("sensitive_output_regex", [])
 
-# 36. scrub JWT
+# 39. scrub JWT
 jwt_text = "token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 scrubbed = module.scrub_text(jwt_text, scrub_patterns)
 check("test_scrub_jwt_token", "eyJ" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 37. scrub GitHub PAT
+# 40. scrub GitHub PAT
 ghp_text = "auth: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
 scrubbed = module.scrub_text(ghp_text, scrub_patterns)
 check("test_scrub_github_pat", "ghp_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 38. scrub GitHub OAuth token
+# 41. scrub GitHub OAuth token
 gho_text = "token=gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
 scrubbed = module.scrub_text(gho_text, scrub_patterns)
 check("test_scrub_github_oauth_token", "gho_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 39. scrub Google access token
+# 42. scrub Google access token
 ya29_text = "access_token: ya29.a0ARrdaM-something_long"
 scrubbed = module.scrub_text(ya29_text, scrub_patterns)
 check("test_scrub_google_access_token", "ya29." not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 40. scrub Bearer token
+# 43. scrub Bearer token
 bearer_text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
 scrubbed = module.scrub_text(bearer_text, scrub_patterns)
 check("test_scrub_bearer_token", "Bearer eyJ" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 41. scrub AWS key
+# 44. scrub AWS key
 aws_text = "aws_key=AKIAIOSFODNN7EXAMPLE"
 scrubbed = module.scrub_text(aws_text, scrub_patterns)
 check("test_scrub_aws_key", "AKIAIOSFODNN7EXAMPLE" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
-# 42. scrub PEM private key (PKCS#8 format)
+# 45. scrub PEM private key (PKCS#8 format)
 pem_text = "-----BEGIN PRIVATE KEY-----\nMIIE..."
 scrubbed = module.scrub_text(pem_text, scrub_patterns)
 check("test_scrub_pem_key", "BEGIN PRIVATE KEY" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
+# 46. scrub fine-grained GitHub PAT
+github_pat_text = "token github_pat_abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+scrubbed = module.scrub_text(github_pat_text, scrub_patterns)
+check("test_scrub_github_fine_grained_pat", "github_pat_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 47. scrub OpenAI API key format
+openai_key_text = "api_key=sk-1234567890ABCDEFGHIJKLMNOPQRST"
+scrubbed = module.scrub_text(openai_key_text, scrub_patterns)
+check("test_scrub_openai_api_key", "sk-1234567890" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
 # ── gh/gcloud environment tests ──────────────────────────────────────
 
-# 43. command env passes through GH_ vars
+# 48. command env passes through GH_ vars
 import os as _os
 _orig_gh = _os.environ.get("GH_TOKEN")
 _os.environ["GH_TOKEN"] = "test-value-123"
@@ -2649,7 +2986,7 @@ if _orig_gh is None:
 else:
     _os.environ["GH_TOKEN"] = _orig_gh
 
-# 44. command env passes through GOOGLE_ vars
+# 49. command env passes through GOOGLE_ vars
 _orig_gac = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/run/secrets/sa.json"
 cmd_env = module.build_command_env()
@@ -2663,7 +3000,7 @@ if _orig_gac is None:
 else:
     _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _orig_gac
 
-# 45. command env does NOT pass random vars
+# 50. command env does NOT pass random vars
 _os.environ["MY_SECRET"] = "leaked"
 cmd_env = module.build_command_env()
 check(
@@ -2673,23 +3010,37 @@ check(
 )
 _os.environ.pop("MY_SECRET", None)
 
+# 51. unsigned requests fail HMAC verification
+import time as _time
+unsigned = {
+    "id": "unsigned-1",
+    "argv": ["gh", "pr", "list"],
+    "timeout": 60,
+    "timestamp": int(_time.time()),
+}
+check(
+    "test_verify_signed_payload_rejects_unsigned_request",
+    not module.verify_signed_payload(unsigned, bytes.fromhex("11" * 32)),
+    str(unsigned),
+)
+
 # ── Host proxy tests ─────────────────────────────────────────────────
 
-# 46. host proxy allows gh
+# 52. host proxy allows gh
 check(
     "test_host_proxy_allows_gh",
     "gh|gcloud|browse" in host_proxy,
     "gh not in allowed tools pattern",
 )
 
-# 47. host proxy rejects unknown tools
+# 53. host proxy rejects unknown tools
 check(
     "test_host_proxy_rejects_unknown_tools",
     "only 'gh', 'gcloud', and 'browse' are allowed" in host_proxy,
     "missing tool rejection message",
 )
 
-# 48. host proxy builds argv JSON for gh/gcloud
+# 54. host proxy builds argv JSON for gh/gcloud
 check(
     "test_host_proxy_builds_argv_json",
     "argv_json" in host_proxy and "json.dumps" in host_proxy,

@@ -84,6 +84,258 @@ void browse --session qa open https://docs.github.com  # named session
 
 Uses [Vercel agent-browser](https://github.com/vercel-labs/agent-browser) (headless Chromium with snapshot-based AI workflow).
 
+## CLI Reference
+
+Copy/paste-ready commands for every allowlisted action.
+
+### gh CLI Reference
+
+#### `gh pr`
+
+```bash
+void gh pr list --repo owner/repo --state open
+void gh pr view 123 --repo owner/repo
+void gh pr create --repo owner/repo --title "Add health check" --body "Adds /health endpoint" --base main --head feature/health-check
+void gh pr merge 123 --repo owner/repo --squash --delete-branch
+void gh pr close 123 --repo owner/repo --comment "Closing in favor of #456"
+void gh pr comment 123 --repo owner/repo --body "Smoke test passed."
+void gh pr review 123 --repo owner/repo --approve --body "LGTM"
+void gh pr diff 123 --repo owner/repo
+void gh pr checks 123 --repo owner/repo
+void gh pr ready 123 --repo owner/repo
+void gh pr edit 123 --repo owner/repo --title "Add readiness probe"
+```
+
+#### `gh issue`
+
+```bash
+void gh issue list --repo owner/repo --state open
+void gh issue view 456 --repo owner/repo
+void gh issue create --repo owner/repo --title "Bug: webhook retries forever" --body "Steps to reproduce..." --label bug
+void gh issue close 456 --repo owner/repo --comment "Fixed by #789"
+void gh issue comment 456 --repo owner/repo --body "Can reproduce on v1.2.3"
+void gh issue edit 456 --repo owner/repo --title "Bug: webhook retry loop"
+void gh issue reopen 456 --repo owner/repo
+```
+
+#### `gh repo`
+
+```bash
+void gh repo view owner/repo
+void gh repo list owner --limit 20
+void gh repo clone owner/repo
+```
+
+#### `gh run`
+
+```bash
+void gh run list --repo owner/repo --limit 10
+void gh run view 123456789 --repo owner/repo
+void gh run watch 123456789 --repo owner/repo
+```
+
+#### `gh release`
+
+```bash
+void gh release list --repo owner/repo --limit 10
+void gh release view v1.2.3 --repo owner/repo
+```
+
+#### `gh search`
+
+```bash
+void gh search repos "terraform aws modules" --limit 10
+void gh search issues "repo:owner/repo label:bug timeout" --limit 20
+void gh search prs "repo:owner/repo is:open author:octocat" --limit 20
+void gh search commits "repo:owner/repo fix race condition" --limit 20
+void gh search code "TODO" --repo owner/repo --limit 20
+```
+
+#### `gh status`
+
+```bash
+void gh status
+```
+
+#### `gh label`
+
+```bash
+void gh label list --repo owner/repo
+void gh label create "needs-triage" --repo owner/repo --color FFAA00 --description "Needs initial triage"
+```
+
+### gcloud CLI Reference
+
+```bash
+void gcloud projects list
+
+void gcloud compute instances list --project my-project --zones us-central1-a
+void gcloud compute instances describe web-1 --project my-project --zone us-central1-a
+
+void gcloud container clusters list --project my-project --location us-central1
+void gcloud container clusters get-credentials prod-cluster --project my-project --location us-central1
+
+void gcloud run services list --project my-project --region us-central1
+void gcloud run services describe api --project my-project --region us-central1
+void gcloud run jobs list --project my-project --region us-central1
+
+void gcloud logging read 'resource.type="cloud_run_revision" AND severity>=ERROR' --project my-project --limit 50
+
+void gcloud storage ls gs://my-bucket/path/
+void gcloud storage cp gs://my-bucket/reports/daily.csv ./daily.csv
+
+void gcloud auth activate-service-account ci-bot@my-project.iam.gserviceaccount.com --key-file ./sa-key.json
+```
+
+`gcloud storage cp` is download-only by policy: source must be `gs://...`, destination must be local.
+
+### browse CLI Reference
+
+#### Navigation
+
+```bash
+void browse open https://example.com
+void browse back
+void browse forward
+void browse reload
+```
+
+#### Snapshot / Screenshot
+
+```bash
+void browse snapshot
+void browse screenshot
+```
+
+#### Interaction
+
+```bash
+void browse click @e2
+void browse dblclick @e3
+void browse fill @e4 "search query"
+void browse type @e4 "additional text"
+void browse press Enter
+void browse hover @e5
+void browse scroll down 1200
+void browse select @e6 "United States"
+void browse check @e7
+void browse uncheck @e7
+void browse upload @e8 ./evidence.png
+void browse drag @e9 @e10
+```
+
+#### Reading
+
+```bash
+void browse get text @e1
+void browse get title
+void browse get url
+void browse get value @e4
+void browse get attr @e1 href
+void browse get count "button"
+void browse get box @e1
+```
+
+#### State Checks
+
+```bash
+void browse is visible @e1
+void browse is enabled @e4
+void browse is checked @e7
+```
+
+#### Waiting
+
+```bash
+void browse wait 2000
+```
+
+#### Semantic Locators
+
+```bash
+void browse find role button "Sign in"
+void browse find label "Email"
+void browse find text "Welcome back"
+void browse find placeholder "Search docs"
+```
+
+#### Tab Management
+
+```bash
+void browse tab list
+void browse tab new https://docs.github.com
+void browse tab close 2
+void browse tab switch 1
+```
+
+#### Session Management
+
+```bash
+void browse session list
+void browse session close qa
+void browse --session qa open https://cloud.google.com/run
+void browse --session qa snapshot
+```
+
+#### Display
+
+```bash
+void browse set viewport 1366 768
+void browse set device "iPhone 14"
+void browse set media dark
+```
+
+### Denied Commands
+
+Allowlist enforcement blocks anything outside approved subcommands. Deny patterns and global deny regex then block sensitive variants inside approved tools.
+
+```bash
+void gh api /user                                      # DENIED - gh api not in allowlist
+void gh extension install owner/tool                  # DENIED - gh extension not in allowlist
+void gcloud secrets versions access latest --secret x # DENIED - gcloud secrets not in allowlist
+
+void gh auth token                                    # DENIED - explicit command_deny_patterns match
+void gh auth login                                    # DENIED - explicit command_deny_patterns match
+void gcloud auth print-access-token                   # DENIED - explicit command_deny_patterns match
+void gcloud auth print-identity-token                 # DENIED - explicit command_deny_patterns match
+void gcloud config set project my-project             # DENIED - explicit command_deny_patterns match
+
+void gh pr list --repo owner/repo --verbosity=debug   # DENIED - global_deny_regex blocks debug verbosity
+void gcloud logging read 'severity>=ERROR' --log-http # DENIED - global_deny_regex blocks --log-http
+```
+
+## Guidelines
+
+### For AI Agents
+
+- Use `void` as a strict broker: only run `void gh ...`, `void gcloud ...`, and `void browse ...`.
+- Always check exit codes. Non-zero means denied by policy or runtime failure.
+- Parse structured output where possible (`gh ... --json ...`) instead of scraping text.
+- Use the browser loop: `open -> snapshot -> interact -> snapshot` until task completion.
+- Use named browser sessions (`--session <name>`) for parallel tasks and close them when done.
+- Respect rate limits and timeouts; avoid flooding API/browser commands in tight loops.
+- Handle errors explicitly: denied/failed commands return `exit_code=1` and details in `stderr`.
+
+### For Operators
+
+- To allow new commands, update policy in guest config (`/etc/credential-proxy/config.yaml`) and source templates in `void/setup-secure-vm.sh` (`ALLOWED_GH_SUBCOMMANDS`, `ALLOWED_GCLOUD_SUBCOMMANDS`, `ALLOWED_BROWSER_COMMANDS`, `write_proxy_config()`), then re-run `./setup-secure-vm.sh --yes configure` and restart.
+- Rotate credentials by updating Bitwarden Secrets Manager values and restarting VM (`./setup-secure-vm.sh --yes restart`) so secrets are re-pulled at boot.
+- Monitor command activity and denials in `/var/log/credential-proxy.log` inside the VM.
+- Add users with `./setup-secure-vm.sh grant <username>`.
+- Back up and recover VM secrets state from:
+  - LUKS image: `/var/lib/setup-secure-vm/vms/<vm-name>/secrets.img`
+  - LUKS key: `/var/lib/setup-secure-vm/vms/<vm-name>/luks.key` (default vm-name is `secrets-vm`)
+- Update Chromium/browser tooling by re-running `./setup-secure-vm.sh --yes configure` (or `fresh` for full rebuild).
+
+### Security Guidelines
+
+- Never share the IPC directory with untrusted host processes.
+- Keep the LUKS key file permissions at `0400`.
+- Monitor `/var/log/credential-proxy.log` for `DENIED` entries.
+- Rotate Bitwarden machine account tokens periodically.
+- Keep libkrun and Chromium up to date.
+- Review the allowed subcommand/action lists periodically as new `gh`/`gcloud` features ship.
+
 ## Security Model
 
 Three independent defense layers:
@@ -125,6 +377,13 @@ All output is scrubbed before crossing the VM boundary:
 - PEM private keys
 - URL query parameters with secret names (`?token=`, `?api_key=`, etc.)
 
+## Threat Model
+
+- `void` protects against credential leakage from AI agent workloads at the guest-to-host `stdout`/`stderr` boundary.
+- `void` does **not** protect against a compromised host root user. Host root can read the LUKS key, virtiofs/shared mounts, and process memory.
+- For hardware-backed protection, seal the LUKS key with TPM.
+- The shared IPC directory is the trust boundary for request/response transport; keep directory/file permissions strict and avoid broad host access.
+
 ## Subcommands
 
 | Command | Description |
@@ -159,7 +418,7 @@ All output is scrubbed before crossing the VM boundary:
 
 ## Testing
 
-48 embedded security tests run without a VM:
+54 embedded security tests run without a VM:
 
 ```bash
 ./setup-secure-vm.sh --yes test
@@ -168,9 +427,10 @@ All output is scrubbed before crossing the VM boundary:
 Test categories:
 - **Browser whitelist** (13): ACL enforcement for allowed/denied commands
 - **Browser security** (7): env isolation, firewall rules, output scrubbing, session limits, timeouts
-- **gh/gcloud ACL** (14): allowed tools, denied tools, deny patterns
-- **Output scrubbing** (7): JWT, GitHub PAT/OAuth, Google tokens, Bearer, AWS, PEM
+- **gh/gcloud ACL** (17): allowed tools, denied tools, deny patterns, subcommand allowlist enforcement
+- **Output scrubbing** (9): JWT, GitHub PAT/OAuth, fine-grained PAT, Google tokens, Bearer, AWS, PEM, OpenAI key format
 - **Environment isolation** (3): credential passthrough, random var exclusion
+- **IPC authentication** (1): unsigned request rejection
 - **Host proxy** (4): tool allowlist, rejection, argv JSON, browse routing
 
 ## Bitwarden Secrets Setup
@@ -188,7 +448,7 @@ For multi-line secrets (e.g., gcloud SA key JSON), store as separate `.json` sec
 ## Architecture
 
 ```
-setup-secure-vm.sh (3034 lines, single file)
+setup-secure-vm.sh (3385 lines, single file)
   |
   |-- cmd_deps()        Install Rust, Python, gcloud, gh, bws CLI
   |-- cmd_build()       Build libkrunfw + libkrun + krunvm from source
@@ -197,7 +457,7 @@ setup-secure-vm.sh (3034 lines, single file)
   |-- cmd_start()       Unlock LUKS, fetch Bitwarden secrets, boot VM
   |-- cmd_stop()        Stop VM, cleanup mounts
   |-- cmd_clean()       Nuclear 8-step teardown
-  |-- cmd_test()        48 embedded Python security tests
+  |-- cmd_test()        54 embedded Python security tests
   |
   |-- write_proxy_daemon()        Guest-side Python daemon (PID 1)
   |-- write_proxy_config()        ACL config (YAML)
