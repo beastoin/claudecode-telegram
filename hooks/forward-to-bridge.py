@@ -2,20 +2,33 @@
 """Forward extracted Claude response to bridge as raw markdown.
 
 Bridge handles markdown→Telegram HTML conversion via markdown-it-py.
+Requests are HMAC-signed with HOOK_SECRET for endpoint authentication.
 """
 
+import hashlib
+import hmac
+import os
 import sys
 import json
 import urllib.request
 
 
+def compute_hook_signature(body: bytes, secret: str) -> str:
+    """Compute HMAC-SHA256 signature for hook request."""
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
 def forward_to_bridge(text, session, bridge_url):
     """Send raw markdown text to bridge via HTTP POST."""
     data = json.dumps({"session": session, "text": text}).encode()
+    headers = {"Content-Type": "application/json"}
+    hook_secret = os.environ.get("HOOK_SECRET", "")
+    if hook_secret:
+        headers["X-Hook-Signature"] = compute_hook_signature(data, hook_secret)
     req = urllib.request.Request(
         bridge_url,
         data=data,
-        headers={"Content-Type": "application/json"}
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         if r.status != 200:

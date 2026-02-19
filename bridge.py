@@ -3,9 +3,12 @@
 
 VERSION = "0.24.0"
 
+import hashlib
+import hmac
 import os
 import json
 import mimetypes
+import secrets
 import shutil
 import signal
 import subprocess
@@ -34,7 +37,10 @@ class ReuseAddrServer(ThreadingHTTPServer):
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
+BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
+# Internal endpoint auth: generated per-run, exported to workers via tmux set-environment
+HOOK_SECRET = os.environ.get("HOOK_SECRET", "") or secrets.token_hex(16)
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
@@ -821,6 +827,23 @@ telegram = TelegramAPI(BOT_TOKEN)
 
 def telegram_api(method, data):
     return telegram.api(method, data)
+
+
+def verify_hook_hmac(headers, body: bytes) -> bool:
+    """Verify HMAC-SHA256 signature on internal endpoint requests.
+
+    Hook sends: X-Hook-Signature: sha256=<hex>
+    Computed over raw request body using HOOK_SECRET.
+    Returns True if valid or if HOOK_SECRET is empty (disabled).
+    """
+    if not HOOK_SECRET:
+        return True
+    sig_header = headers.get("X-Hook-Signature", "")
+    if not sig_header.startswith("sha256="):
+        return False
+    provided = sig_header[7:]
+    expected = hmac.new(HOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(provided.lower(), expected.lower())
 
 
 # ============================================================
@@ -3314,6 +3337,8 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)])
     # Always export BRIDGE_URL so workers know where their bridge is
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
+    # HMAC secret for hook endpoint authentication
+    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "HOOK_SECRET", HOOK_SECRET])
 
 
 def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
@@ -4227,13 +4252,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         # Route based on path
         if self.path == "/response":
-            # Hook forwarding response (internal, no auth needed - localhost only)
-            self.handle_hook_response()
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not verify_hook_hmac(self.headers, body):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Invalid hook signature")
+                return
+            self.handle_hook_response(body)
             return
 
         if self.path == "/notify":
-            # Internal endpoint for system notifications (localhost only)
-            self.handle_notify()
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not verify_hook_hmac(self.headers, body):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Invalid hook signature")
+                return
+            self.handle_notify(body)
             return
 
         # Telegram webhook - optional secret verification
@@ -4263,15 +4298,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
-    def handle_notify(self):
-        """Handle system notification request (internal, localhost only).
+    def handle_notify(self, body: bytes = b""):
+        """Handle system notification request (internal, HMAC-authenticated).
 
         SECURITY: This endpoint allows the shell script to trigger
         notifications without having access to the bot token.
         Used for tunnel watchdog alerts.
         """
         try:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             data = json.loads(body)
             text = data.get("text", "")
 
@@ -4300,17 +4334,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
-    def handle_hook_response(self):
+    def handle_hook_response(self, body: bytes = b""):
         """Handle response forwarded from Claude hook.
 
         SECURITY: This is how Claude responses get to Telegram without
         Claude ever having access to the bot token. Hook POSTs here,
-        bridge sends to Telegram.
+        bridge sends to Telegram. HMAC-authenticated.
 
         FILE SUPPORT: Parses [[image:/path|caption]] (photos, animations) and [[file:/path|caption]] (documents, video, audio, voice, stickers) tags.
         """
         try:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             data = json.loads(body)
             session_name = data.get("session")
             text = data.get("text", "")
@@ -4534,7 +4567,7 @@ def main():
             print(f"Restored admin from last_chat_id: {admin_chat_id}")
 
     setup_bot_commands()
-    print(f"Multi-Session Bridge on :{PORT}")
+    print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
     print(f"Hook endpoint: http://localhost:{PORT}/response")
     print(f"Active: {state['active'] or 'none'}")
     print(f"Sessions: {list(registered.keys()) or 'none'}")
@@ -4542,6 +4575,7 @@ def main():
         print("Webhook verification: enabled")
     else:
         print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
+    print(f"Hook endpoint auth: {'enabled' if HOOK_SECRET else 'disabled'}")
     if admin_chat_id:
         print(f"Admin: {admin_chat_id} (pre-configured)")
     else:
@@ -4586,7 +4620,7 @@ def main():
     watchdog.start()
 
     try:
-        ReuseAddrServer(("0.0.0.0", PORT), Handler).serve_forever()
+        ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

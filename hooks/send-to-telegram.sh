@@ -45,11 +45,13 @@ _tmux_bridge_url="$(get_tmux_env BRIDGE_URL)"
 _tmux_prefix="$(get_tmux_env TMUX_PREFIX)"
 _tmux_sessions_dir="$(get_tmux_env SESSIONS_DIR)"
 _tmux_port="$(get_tmux_env PORT)"
+_tmux_hook_secret="$(get_tmux_env HOOK_SECRET)"
 
 BRIDGE_URL="${_tmux_bridge_url:-${BRIDGE_URL:-}}"
 TMUX_PREFIX="${_tmux_prefix:-${TMUX_PREFIX:-}}"
 SESSIONS_DIR="${_tmux_sessions_dir:-${SESSIONS_DIR:-}}"
 BRIDGE_PORT="${_tmux_port:-${PORT:-}}"
+export HOOK_SECRET="${_tmux_hook_secret:-${HOOK_SECRET:-}}"
 
 # Fail closed: exit if required config missing (prevents cross-node leakage)
 if [ -z "$TMUX_PREFIX" ]; then

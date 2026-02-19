@@ -295,9 +295,20 @@ telegram_set_webhook() {
 
 bridge_notify() {
     local port="$1" message="$2"
-    curl -s -X POST "http://localhost:$port/notify" \
-        -H "Content-Type: application/json" \
-        -d "{\"text\":\"$message\"}" >/dev/null 2>&1 || true
+    local body
+    body=$(printf '{"text":"%s"}' "$message")
+    if [ -n "${HOOK_SECRET:-}" ]; then
+        local sig
+        sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$HOOK_SECRET" -hex 2>/dev/null | sed 's/^.* //')
+        curl -s -X POST "http://localhost:$port/notify" \
+            -H "Content-Type: application/json" \
+            -H "X-Hook-Signature: sha256=$sig" \
+            -d "$body" >/dev/null 2>&1 || true
+    else
+        curl -s -X POST "http://localhost:$port/notify" \
+            -H "Content-Type: application/json" \
+            -d "$body" >/dev/null 2>&1 || true
+    fi
 }
 
 start_tunnel() {
