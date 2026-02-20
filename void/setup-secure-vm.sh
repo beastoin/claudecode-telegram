@@ -2,7 +2,7 @@
 set -euo pipefail
 cd /tmp 2>/dev/null || cd /
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 DRY_RUN=0
 VERBOSE=0
@@ -87,6 +87,7 @@ Quick Start:
 
     void gh pr list                  # GitHub CLI
     void gcloud projects list        # Google Cloud CLI
+    void session login github        # Human login portal
 
     Credentials stay inside the VM. Only stdout/stderr cross the boundary.
 
@@ -144,6 +145,7 @@ Examples:
   ./setup-secure-vm.sh clean --yes                                      # remove everything
   void gh pr list                                               # run gh in VM
   void gcloud projects list                                     # run gcloud in VM
+  void session list                                             # list browser sessions
 EOF_USAGE
 }
 
@@ -471,8 +473,12 @@ import hmac
 import json
 import logging
 import os
+import pwd
 import re
+import secrets
 import signal
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -489,6 +495,10 @@ RESPONSES_DIR = IPC_DIR / "responses"
 HEARTBEAT_FILE = IPC_DIR / "heartbeat"
 SECRETS_ENV = Path("/run/secrets/env")
 IPC_KEY_PATH = Path("/run/secrets/ipc.key")
+SESSIONS_ROOT = Path("/secrets")
+SESSION_DB_FALLBACK = Path("/var/lib/void/.session-meta.json")
+LOGIN_PORTAL_SCRIPT = Path("/usr/local/bin/void-login-portal.py")
+LOGIN_NODE_SCRIPT = Path("/usr/local/bin/void-login-browser.js")
 POLL_INTERVAL = 0.1  # seconds
 REQUEST_MAX_AGE_SECONDS = 30
 
@@ -528,6 +538,17 @@ DEFAULT_CONFIG = {
     ],
     "max_browser_sessions": 2,
     "browser_cgroup": "/sys/fs/cgroup/void",
+    "login_port_base": 9222,
+    "login_port_max": 9322,
+    "login_session_timeout": 1800,
+    "session_origin_allowlist": {
+        "github": ["github.com", "*.github.com"],
+        "gmail": ["accounts.google.com", "mail.google.com", "*.google.com"],
+    },
+    "session_login_urls": {
+        "github": "https://github.com/login",
+        "gmail": "https://accounts.google.com/",
+    },
 }
 
 MAX_BROWSER_TIMEOUT = 45
@@ -538,6 +559,7 @@ BROWSER_LONG_ACTIONS = {
     ("snapshot",),
     ("screenshot",),
     ("wait",),
+    ("session", "login"),
 }
 
 ALLOWED_BROWSER_COMMANDS = {
@@ -588,6 +610,7 @@ ALLOWED_BROWSER_COMMANDS = {
     ("tab", "close"): "tab_close",
     ("tab", "switch"): "tab_switch",
     # Session management
+    ("session", "login"): "session_login",
     ("session", "list"): "no_args",
     ("session", "close"): "session_close",
     # Display settings
@@ -649,6 +672,8 @@ BROWSER_METADATA_HOSTS = {
 }
 
 active_browser_sessions = set()
+session_metadata = {}
+login_portals = {}
 running = True
 
 
@@ -665,6 +690,490 @@ def load_config():
     merged = dict(DEFAULT_CONFIG)
     merged.update(loaded)
     return merged
+
+
+def session_db_path():
+    if SESSIONS_ROOT.exists() and SESSIONS_ROOT.is_dir():
+        return SESSIONS_ROOT / ".void-session-meta.json"
+    return SESSION_DB_FALLBACK
+
+
+def load_session_metadata(logger):
+    global session_metadata
+    db_path = session_db_path()
+    if not db_path.exists():
+        session_metadata = {}
+        return
+    try:
+        raw = json.loads(db_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to read session metadata %s: %s", db_path, e)
+        session_metadata = {}
+        return
+    if not isinstance(raw, dict):
+        session_metadata = {}
+        return
+    cleaned = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", key):
+            continue
+        if isinstance(value, dict):
+            cleaned[key] = {
+                "created": int(value.get("created", 0) or 0),
+                "last_used": int(value.get("last_used", 0) or 0),
+            }
+    session_metadata = cleaned
+
+
+def save_session_metadata(logger):
+    db_path = session_db_path()
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = db_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(session_metadata, sort_keys=True), encoding="utf-8")
+        tmp.replace(db_path)
+    except Exception as e:
+        logger.warning("Failed to persist session metadata %s: %s", db_path, e)
+
+
+def touch_session_metadata(session, logger, created_if_missing=False):
+    now = int(time.time())
+    meta = session_metadata.get(session)
+    if not isinstance(meta, dict):
+        if not created_if_missing:
+            meta = {"created": now, "last_used": now}
+        else:
+            meta = {"created": now, "last_used": now}
+        session_metadata[session] = meta
+    else:
+        if created_if_missing and not meta.get("created"):
+            meta["created"] = now
+        meta["last_used"] = now
+    save_session_metadata(logger)
+
+
+def format_ts(ts):
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return "-"
+    if ts <= 0:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ts))
+
+
+def resolve_session_allowlist(session, cfg):
+    if session == "default":
+        return []
+    configured = cfg.get("session_origin_allowlist", {})
+    if isinstance(configured, dict):
+        patterns = configured.get(session)
+        if isinstance(patterns, list):
+            cleaned = [str(p).strip().lower() for p in patterns if str(p).strip()]
+            if cleaned:
+                return cleaned
+
+    if session == "github":
+        return ["github.com", "*.github.com"]
+    if session in {"gmail", "google"}:
+        return ["accounts.google.com", "mail.google.com", "*.google.com"]
+    if "." in session:
+        return [session.lower(), f"*.{session.lower()}"]
+    return [f"{session.lower()}.com", f"*.{session.lower()}.com"]
+
+
+def host_matches_pattern(hostname, pattern):
+    host = (hostname or "").lower().strip(".")
+    pat = (pattern or "").lower().strip(".")
+    if not host or not pat:
+        return False
+    if pat.startswith("*."):
+        suffix = pat[1:]
+        return host.endswith(suffix) and host != suffix[1:]
+    return host == pat
+
+
+def session_url_allowed(session, url, cfg):
+    if session == "default":
+        return True
+    try:
+        parsed = urlparse(str(url))
+    except Exception:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    allowlist = resolve_session_allowlist(session, cfg)
+    if not allowlist:
+        return False
+    return any(host_matches_pattern(host, pattern) for pattern in allowlist)
+
+
+def portal_status_path(service):
+    return IPC_DIR / f"login-portal-{service}.json"
+
+
+def service_profile_dir(session):
+    if session == "default":
+        return Path("/var/lib/void")
+    return SESSIONS_ROOT / session / "browser-context"
+
+
+def ensure_session_profile_dir(session):
+    profile_dir = service_profile_dir(session)
+    if session != "default" and not SESSIONS_ROOT.exists():
+        raise RuntimeError("Encrypted /secrets volume is not mounted")
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError):
+        if session == "default":
+            profile_dir = Path("/tmp/void-browser-default")
+            profile_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            raise
+    # Verify the directory is actually writable (catches LUKS I/O errors)
+    try:
+        test_file = profile_dir / ".write-test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+    except OSError as e:
+        raise RuntimeError(f"Session profile dir not writable: {e}")
+    for sub in (".cache", ".config", ".local/share"):
+        try:
+            (profile_dir / sub).mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError):
+            if session == "default":
+                profile_dir = Path("/tmp/void-browser-default")
+                (profile_dir / sub).mkdir(parents=True, exist_ok=True)
+            else:
+                raise
+    try:
+        pw = pwd.getpwnam("void")
+        uid, gid = pw.pw_uid, pw.pw_gid
+        root = profile_dir if session == "default" else (SESSIONS_ROOT / session)
+        for p in [root, profile_dir, profile_dir / ".cache", profile_dir / ".config", profile_dir / ".local", profile_dir / ".local/share"]:
+            if p.exists():
+                os.chown(p, uid, gid)
+                os.chmod(p, 0o700)
+    except Exception:
+        pass
+    return profile_dir
+
+
+def port_available(host, port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def choose_login_port(service, requested_port, cfg):
+    host = "127.0.0.1"
+    try:
+        req = int(requested_port) if requested_port is not None else 0
+    except (TypeError, ValueError):
+        req = 0
+    if req > 0 and req <= 65535 and port_available(host, req):
+        return req
+
+    try:
+        base = int(cfg.get("login_port_base", 9222))
+    except (TypeError, ValueError):
+        base = 9222
+    try:
+        max_port = int(cfg.get("login_port_max", base + 100))
+    except (TypeError, ValueError):
+        max_port = base + 100
+    if max_port < base:
+        max_port = base
+
+    spread = max_port - base + 1
+    offset = (sum(ord(ch) for ch in service) % spread) if spread > 0 else 0
+    ordered = [base + offset]
+    ordered.extend(p for p in range(base, max_port + 1) if p != ordered[0])
+    for candidate in ordered:
+        if port_available(host, candidate):
+            return candidate
+    return None
+
+
+def choose_login_url(service, cfg):
+    configured = cfg.get("session_login_urls", {})
+    if isinstance(configured, dict):
+        raw = configured.get(service)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    if service == "github":
+        return "https://github.com/login"
+    if service in {"gmail", "google"}:
+        return "https://accounts.google.com/"
+    patterns = resolve_session_allowlist(service, cfg)
+    first = next((p for p in patterns if not p.startswith("*.")), "")
+    if first:
+        return f"https://{first}/"
+    return f"https://{service}.com/"
+
+
+def cleanup_login_portals(logger):
+    dead = []
+    for service, info in login_portals.items():
+        proc = info.get("proc")
+        if proc is None:
+            dead.append(service)
+            continue
+        if proc.poll() is None:
+            continue
+        dead.append(service)
+        logger.info("Login portal exited service=%s exit=%s", service, proc.returncode)
+    for service in dead:
+        login_portals.pop(service, None)
+
+
+def start_login_portal(session, params, cfg, logger):
+    cleanup_login_portals(logger)
+    running_info = login_portals.get(session)
+    if running_info and running_info.get("proc") and running_info["proc"].poll() is None:
+        touch_session_metadata(session, logger, created_if_missing=True)
+        return True, running_info.get("url"), None
+
+    if not LOGIN_PORTAL_SCRIPT.exists():
+        return False, None, f"Login portal script missing: {LOGIN_PORTAL_SCRIPT}"
+    if not LOGIN_NODE_SCRIPT.exists():
+        return False, None, f"Login browser bridge missing: {LOGIN_NODE_SCRIPT}"
+
+    try:
+        profile_dir = ensure_session_profile_dir(session)
+    except RuntimeError as e:
+        return False, None, str(e)
+
+    requested_port = params.get("port")
+    port = choose_login_port(session, requested_port, cfg)
+    if not port:
+        return False, None, "No available login portal port in configured range"
+
+    status_file = portal_status_path(session)
+    try:
+        status_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    token = secrets.token_urlsafe(18)
+    url = choose_login_url(session, cfg)
+    allow_hosts = resolve_session_allowlist(session, cfg)
+    try:
+        max_seconds = int(cfg.get("login_session_timeout", 1800))
+    except (TypeError, ValueError):
+        max_seconds = 1800
+    if max_seconds < 60:
+        max_seconds = 60
+
+    cmd = [
+        "python3",
+        str(LOGIN_PORTAL_SCRIPT),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+        "--service",
+        session,
+        "--profile-dir",
+        str(profile_dir),
+        "--token",
+        token,
+        "--start-url",
+        url,
+        "--status-file",
+        str(status_file),
+        "--node-script",
+        str(LOGIN_NODE_SCRIPT),
+        "--max-seconds",
+        str(max_seconds),
+    ]
+    for host in allow_hosts:
+        cmd.extend(["--allow-host", host])
+
+    env = build_browser_env(session)
+    cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
+    preexec = browser_preexec_for_cgroup(cgroup_path)
+    portal_log = IPC_DIR / f"login-portal-{session}.log"
+    try:
+        log_fd = open(portal_log, "w", encoding="utf-8")
+    except Exception:
+        log_fd = subprocess.DEVNULL
+    logger.info("LOGIN_PORTAL cmd=%s", cmd)
+    logger.info("LOGIN_PORTAL env_keys=%s", list(env.keys()))
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd if log_fd != subprocess.DEVNULL else subprocess.DEVNULL,
+            stderr=log_fd if log_fd != subprocess.DEVNULL else subprocess.DEVNULL,
+            env=env,
+            user="void",
+            preexec_fn=preexec,
+        )
+    except Exception as e:
+        if log_fd != subprocess.DEVNULL:
+            log_fd.close()
+        return False, None, f"Failed to launch login portal: {e}"
+
+    ready_url = ""
+    ready_error = ""
+    deadline = time.time() + 300  # generous for virtiofs import latency
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        if status_file.exists():
+            try:
+                data = json.loads(status_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            if data.get("ready"):
+                ready_url = str(data.get("url") or "").strip()
+                break
+            err = str(data.get("error") or "").strip()
+            if err:
+                ready_error = err
+                break
+        time.sleep(0.2)
+
+    if not ready_url:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if not ready_error and status_file.exists():
+            try:
+                data = json.loads(status_file.read_text(encoding="utf-8"))
+                ready_error = str(data.get("error") or "").strip()
+            except Exception:
+                ready_error = ""
+        if not ready_error:
+            ready_error = "Login portal failed to become ready"
+        # Include portal log in error message for debugging
+        if portal_log.exists():
+            try:
+                log_tail = portal_log.read_text(encoding="utf-8", errors="replace").strip()
+                if log_tail:
+                    ready_error = f"{ready_error}\nPortal log:\n{log_tail[-2000:]}"
+            except Exception:
+                pass
+        if log_fd != subprocess.DEVNULL:
+            try:
+                log_fd.close()
+            except Exception:
+                pass
+        return False, None, ready_error
+
+    login_portals[session] = {
+        "proc": proc,
+        "port": port,
+        "url": ready_url,
+        "started": int(time.time()),
+        "status_file": str(status_file),
+    }
+    touch_session_metadata(session, logger, created_if_missing=True)
+    return True, ready_url, None
+
+
+def stop_login_portal(session, logger):
+    info = login_portals.pop(session, None)
+    if not info:
+        try:
+            portal_status_path(session).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+    proc = info.get("proc")
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    status_file = info.get("status_file")
+    if status_file:
+        try:
+            Path(status_file).unlink(missing_ok=True)
+        except Exception:
+            pass
+    logger.info("Login portal stopped for session=%s", session)
+
+
+def render_session_table(cfg):
+    services = set(session_metadata.keys()) | set(login_portals.keys())
+    if SESSIONS_ROOT.exists() and SESSIONS_ROOT.is_dir():
+        for child in SESSIONS_ROOT.iterdir():
+            if not child.is_dir():
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", child.name):
+                continue
+            if (child / "browser-context").exists():
+                services.add(child.name)
+
+    rows = [("SERVICE", "CREATED", "LAST_USED", "PORTAL", "ALLOWLIST")]
+    for service in sorted(services):
+        meta = session_metadata.get(service, {})
+        created = format_ts(meta.get("created", 0))
+        last_used = format_ts(meta.get("last_used", 0))
+        portal_state = "active" if service in login_portals else "-"
+        allowlist = ",".join(resolve_session_allowlist(service, cfg))
+        rows.append((service, created, last_used, portal_state, allowlist))
+
+    widths = [0, 0, 0, 0, 0]
+    for row in rows:
+        for idx, col in enumerate(row):
+            widths[idx] = max(widths[idx], len(col))
+    lines = []
+    for idx, row in enumerate(rows):
+        lines.append("  ".join(col.ljust(widths[i]) for i, col in enumerate(row)))
+        if idx == 0:
+            lines.append("  ".join("-" * widths[i] for i in range(len(widths))))
+    return "\n".join(lines) + "\n"
+
+
+def extract_url_from_browser_output(stdout):
+    if not stdout:
+        return ""
+    try:
+        payload = json.loads(stdout)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("url", "value", "text", "result"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.startswith("https://"):
+                return val
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, str) and item.startswith("https://"):
+                return item
+            if isinstance(item, dict):
+                for key in ("url", "value", "text"):
+                    val = item.get(key)
+                    if isinstance(val, str) and val.startswith("https://"):
+                        return val
+    match = re.search(r"https://[^\s\"']+", stdout)
+    if match:
+        return match.group(0)
+    return ""
 
 
 def build_logger():
@@ -763,18 +1272,20 @@ def build_command_env():
     }
 
 
-def build_browser_env():
+def build_browser_env(session="default"):
     """Sanitized env for browser execution with no credential passthrough."""
+    profile_dir = ensure_session_profile_dir(session)
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "HOME": "/var/lib/void",
+        "HOME": str(profile_dir),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "XDG_CACHE_HOME": "/var/lib/void/.cache",
-        "XDG_CONFIG_HOME": "/var/lib/void/.config",
-        "XDG_DATA_HOME": "/var/lib/void/.local/share",
+        "XDG_CACHE_HOME": str(profile_dir / ".cache"),
+        "XDG_CONFIG_HOME": str(profile_dir / ".config"),
+        "XDG_DATA_HOME": str(profile_dir / ".local/share"),
         "CHROMIUM_FLAGS": "--disable-webrtc",
         "PLAYWRIGHT_CHROMIUM_ARGS": "--disable-webrtc",
+        "PLAYWRIGHT_BROWSERS_PATH": "/var/lib/void/.cache/ms-playwright",
     }
 
 
@@ -961,6 +1472,10 @@ def validate_browser_command(action, params, cfg):
         if len(args) > 1:
             return False, None, "Action accepts at most one argument"
         compiled_args = args
+    elif schema == "session_login":
+        if len(args) > 1:
+            return False, None, "session login accepts at most one optional URL"
+        compiled_args = args
     elif schema == "viewport":
         if len(args) not in (1, 2):
             return False, None, "set viewport requires width/height"
@@ -979,6 +1494,19 @@ def validate_browser_command(action, params, cfg):
     })
     if forbidden:
         return False, None, f"Forbidden token detected: {forbidden}"
+
+    if session != "default":
+        if schema == "open_url":
+            target_url = compiled_args[0] if compiled_args else ""
+            if not session_url_allowed(session, target_url, cfg):
+                return False, None, f"Session '{session}' URL denied by origin allowlist"
+        elif schema == "tab_new" and compiled_args:
+            target_url = compiled_args[0]
+            url_error = validate_browser_url(target_url)
+            if url_error:
+                return False, None, url_error
+            if not session_url_allowed(session, target_url, cfg):
+                return False, None, f"Session '{session}' URL denied by origin allowlist"
 
     argv = ["agent-browser", "--json", "--session", session, *action_tuple, *compiled_args]
     return True, argv, None
@@ -1000,7 +1528,7 @@ def browser_preexec_for_cgroup(cgroup_path):
 
 
 def browser_session_allowed(action_tuple, session, cfg):
-    if action_tuple in {("session", "list"), ("session", "close")}:
+    if action_tuple in {("session", "login"), ("session", "list"), ("session", "close")}:
         return True, None
     if session in active_browser_sessions:
         return True, None
@@ -1023,6 +1551,43 @@ def browser_session_close_target(session, params):
     if isinstance(name, str) and name.strip():
         return name.strip()
     return session
+
+
+def enforce_session_origin_for_action(action_tuple, session, cfg, env, cgroup_path):
+    if session == "default":
+        return True, None
+    if action_tuple in {
+        ("session", "login"),
+        ("session", "list"),
+        ("session", "close"),
+        ("open",),
+        ("tab", "new"),
+        ("get", "url"),
+    }:
+        return True, None
+    preexec = browser_preexec_for_cgroup(cgroup_path)
+    try:
+        probe = subprocess.run(
+            ["agent-browser", "--json", "--session", session, "get", "url"],
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=6,
+            env=env,
+            user="void",
+            preexec_fn=preexec,
+        )
+    except Exception:
+        return False, f"Session '{session}' origin policy check failed"
+    if probe.returncode != 0:
+        return False, f"Session '{session}' origin policy check failed"
+    current_url = extract_url_from_browser_output(probe.stdout)
+    if not current_url:
+        return False, f"Session '{session}' origin policy denied (unknown current URL)"
+    if not session_url_allowed(session, current_url, cfg):
+        return False, f"Session '{session}' origin policy denied current URL: {current_url}"
+    return True, None
 
 
 def check_gh_subcommand(argv):
@@ -1181,84 +1746,242 @@ def process_request(req_path, cfg, logger, ipc_key):
                 action_tuple = normalize_browser_action(action)
 
                 logger.info("REQUEST id=%s tool=browser action=%s session=%s", req_id, " ".join(action_tuple), session)
-
-                ok, argv, error_msg = validate_browser_command(action, params, cfg)
-                if not ok:
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", session):
                     response = {
                         "id": req_id,
                         "exit_code": 1,
                         "stdout": "",
-                        "stderr": error_msg,
+                        "stderr": "Invalid browser session name",
                         "error": "denied",
                     }
-                else:
-                    session_ok, session_error = browser_session_allowed(action_tuple, session, cfg)
-                    if not session_ok:
-                        logger.info("DENIED id=%s tool=browser reason=session_limit", req_id)
-                        response = {
-                            "id": req_id,
-                            "exit_code": 1,
-                            "stdout": "",
-                            "stderr": session_error,
-                            "error": "denied",
-                        }
-                    else:
-                        env = build_browser_env()
-                        cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
-                        preexec = browser_preexec_for_cgroup(cgroup_path)
-                        try:
-                            proc = subprocess.run(
-                                argv,
-                                shell=False,
-                                check=False,
-                                capture_output=True,
-                                text=True,
-                                timeout=min(timeout, MAX_BROWSER_TIMEOUT),
-                                env=env,
-                                user="void",
-                                preexec_fn=preexec,
-                            )
-                            scrub_patterns = cfg.get("sensitive_output_regex", [])
-                            response = {
-                                "id": req_id,
-                                "exit_code": proc.returncode,
-                                "stdout": scrub_browser_output(proc.stdout, scrub_patterns),
-                                "stderr": scrub_text(scrub_browser_text(proc.stderr), scrub_patterns),
-                                "error": None,
-                            }
-                            if proc.returncode == 0:
-                                if action_tuple == ("session", "close"):
-                                    active_browser_sessions.discard(browser_session_close_target(session, params))
-                                elif action_tuple != ("session", "list"):
-                                    active_browser_sessions.add(session)
-                            logger.info("COMPLETED id=%s tool=browser exit_code=%d", req_id, proc.returncode)
-                        except subprocess.TimeoutExpired:
-                            response = {
-                                "id": req_id,
-                                "exit_code": 124,
-                                "stdout": "",
-                                "stderr": f"Browser command timed out after {timeout}s",
-                                "error": "timeout",
-                            }
-                            logger.info("TIMEOUT id=%s tool=browser timeout=%d", req_id, timeout)
-                        except FileNotFoundError:
-                            response = {
-                                "id": req_id,
-                                "exit_code": 127,
-                                "stdout": "",
-                                "stderr": "Command not found: agent-browser",
-                                "error": "not_found",
-                            }
-                            logger.info("NOT_FOUND id=%s tool=browser", req_id)
-                        except Exception as e:
+                elif action_tuple == ("session", "list"):
+                    cleanup_login_portals(logger)
+                    response = {
+                        "id": req_id,
+                        "exit_code": 0,
+                        "stdout": render_session_table(cfg),
+                        "stderr": "",
+                        "error": None,
+                    }
+                elif action_tuple == ("session", "login"):
+                    args = parse_browser_args(params) or []
+                    if args:
+                        login_url = args[0]
+                        url_error = validate_browser_url(login_url)
+                        if url_error:
                             response = {
                                 "id": req_id,
                                 "exit_code": 1,
                                 "stdout": "",
-                                "stderr": f"Browser execution failed: {e}",
+                                "stderr": url_error,
+                                "error": "denied",
+                            }
+                        elif not session_url_allowed(session, login_url, cfg):
+                            response = {
+                                "id": req_id,
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": f"Session '{session}' URL denied by origin allowlist",
+                                "error": "denied",
+                            }
+                        else:
+                            params["url"] = login_url
+                            portal_ok, portal_url, portal_err = start_login_portal(session, params, cfg, logger)
+                            if not portal_ok:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 1,
+                                    "stdout": "",
+                                    "stderr": portal_err or "Failed to start login portal",
+                                    "error": "internal",
+                                }
+                            else:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 0,
+                                    "stdout": (
+                                        f"Login portal ready for session '{session}'.\n"
+                                        f"Open: {portal_url}\n"
+                                        "Click Done in the portal when finished.\n"
+                                    ),
+                                    "stderr": "",
+                                    "error": None,
+                                }
+                    else:
+                        portal_ok, portal_url, portal_err = start_login_portal(session, params, cfg, logger)
+                        if not portal_ok:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": portal_err or "Failed to start login portal",
                                 "error": "internal",
                             }
-                            logger.error("EXCEPTION id=%s tool=browser error=%s", req_id, e)
+                        else:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 0,
+                                "stdout": (
+                                    f"Login portal ready for session '{session}'.\n"
+                                    f"Open: {portal_url}\n"
+                                    "Click Done in the portal when finished.\n"
+                                ),
+                                "stderr": "",
+                                "error": None,
+                            }
+                elif action_tuple == ("session", "close"):
+                    target = browser_session_close_target(session, params)
+                    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", target):
+                        response = {
+                            "id": req_id,
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": "Invalid browser session name",
+                            "error": "denied",
+                        }
+                    else:
+                        stop_login_portal(target, logger)
+                        scrub_patterns = cfg.get("sensitive_output_regex", [])
+                        close_stderr = ""
+                        try:
+                            env = build_browser_env(target)
+                            cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
+                            preexec = browser_preexec_for_cgroup(cgroup_path)
+                            probe = subprocess.run(
+                                ["agent-browser", "--json", "--session", target, "session", "close", target],
+                                shell=False,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                                env=env,
+                                user="void",
+                                preexec_fn=preexec,
+                            )
+                            close_stderr = scrub_text(scrub_browser_text(probe.stderr), scrub_patterns)
+                        except Exception:
+                            close_stderr = ""
+
+                        profile = service_profile_dir(target)
+                        try:
+                            if profile.exists():
+                                shutil.rmtree(profile, ignore_errors=True)
+                            if profile.parent.exists():
+                                profile.parent.rmdir()
+                        except Exception:
+                            pass
+
+                        active_browser_sessions.discard(target)
+                        session_metadata.pop(target, None)
+                        save_session_metadata(logger)
+                        stderr_out = close_stderr.strip()
+                        if stderr_out:
+                            stderr_out = f"{stderr_out}\n"
+                        response = {
+                            "id": req_id,
+                            "exit_code": 0,
+                            "stdout": f"Closed session '{target}' and wiped stored browser context.\n",
+                            "stderr": stderr_out,
+                            "error": None,
+                        }
+                else:
+                    ok, argv, error_msg = validate_browser_command(action, params, cfg)
+                    if not ok:
+                        response = {
+                            "id": req_id,
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": error_msg,
+                            "error": "denied",
+                        }
+                    else:
+                        session_ok, session_error = browser_session_allowed(action_tuple, session, cfg)
+                        if not session_ok:
+                            logger.info("DENIED id=%s tool=browser reason=session_limit", req_id)
+                            response = {
+                                "id": req_id,
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": session_error,
+                                "error": "denied",
+                            }
+                        else:
+                            try:
+                                env = build_browser_env(session)
+                            except RuntimeError as e:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 1,
+                                    "stdout": "",
+                                    "stderr": str(e),
+                                    "error": "denied",
+                                }
+                            else:
+                                cgroup_path = cfg.get("browser_cgroup", "/sys/fs/cgroup/void")
+                                origin_ok, origin_err = enforce_session_origin_for_action(
+                                    action_tuple, session, cfg, env, cgroup_path
+                                )
+                                if not origin_ok:
+                                    response = {
+                                        "id": req_id,
+                                        "exit_code": 1,
+                                        "stdout": "",
+                                        "stderr": origin_err,
+                                        "error": "denied",
+                                    }
+                                else:
+                                    preexec = browser_preexec_for_cgroup(cgroup_path)
+                                    try:
+                                        proc = subprocess.run(
+                                            argv,
+                                            shell=False,
+                                            check=False,
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=min(timeout, MAX_BROWSER_TIMEOUT),
+                                            env=env,
+                                            user="void",
+                                            preexec_fn=preexec,
+                                        )
+                                        scrub_patterns = cfg.get("sensitive_output_regex", [])
+                                        response = {
+                                            "id": req_id,
+                                            "exit_code": proc.returncode,
+                                            "stdout": scrub_browser_output(proc.stdout, scrub_patterns),
+                                            "stderr": scrub_text(scrub_browser_text(proc.stderr), scrub_patterns),
+                                            "error": None,
+                                        }
+                                        if proc.returncode == 0:
+                                            active_browser_sessions.add(session)
+                                            touch_session_metadata(session, logger, created_if_missing=True)
+                                        logger.info("COMPLETED id=%s tool=browser exit_code=%d", req_id, proc.returncode)
+                                    except subprocess.TimeoutExpired:
+                                        response = {
+                                            "id": req_id,
+                                            "exit_code": 124,
+                                            "stdout": "",
+                                            "stderr": f"Browser command timed out after {timeout}s",
+                                            "error": "timeout",
+                                        }
+                                        logger.info("TIMEOUT id=%s tool=browser timeout=%d", req_id, timeout)
+                                    except FileNotFoundError:
+                                        response = {
+                                            "id": req_id,
+                                            "exit_code": 127,
+                                            "stdout": "",
+                                            "stderr": "Command not found: agent-browser",
+                                            "error": "not_found",
+                                        }
+                                        logger.info("NOT_FOUND id=%s tool=browser", req_id)
+                                    except Exception as e:
+                                        response = {
+                                            "id": req_id,
+                                            "exit_code": 1,
+                                            "stdout": "",
+                                            "stderr": f"Browser execution failed: {e}",
+                                            "error": "internal",
+                                        }
+                                        logger.error("EXCEPTION id=%s tool=browser error=%s", req_id, e)
             else:
                 argv = req.get("argv", [])
                 timeout = min(req.get("timeout", 60), 300)  # cap at 5 minutes
@@ -1356,6 +2079,7 @@ def main():
 
     cfg = load_config()
     logger.info("Allowed tools: %s", cfg.get("allowed_tools", []))
+    load_session_metadata(logger)
 
     ipc_key = load_ipc_key()
     if not ipc_key:
@@ -1376,6 +2100,7 @@ def main():
                 if not running:
                     break
                 process_request(req_file, cfg, logger, ipc_key)
+            cleanup_login_portals(logger)
         except Exception as e:
             logger.error("Poll loop error: %s", e)
 
@@ -1390,6 +2115,8 @@ def main():
 
         time.sleep(POLL_INTERVAL)
 
+    for session_name in list(login_portals.keys()):
+        stop_login_portal(session_name, logger)
     logger.info("Daemon shutting down")
     return 0
 
@@ -1437,8 +2164,1557 @@ sensitive_output_regex:
   - 'AGE-SECRET-KEY-[A-Z0-9]{59}'
 max_browser_sessions: 2
 browser_cgroup: /sys/fs/cgroup/void
+login_port_base: 9222
+login_port_max: 9322
+login_session_timeout: 1800
+session_origin_allowlist:
+  github:
+    - github.com
+    - '*.github.com'
+  gmail:
+    - accounts.google.com
+    - mail.google.com
+    - '*.google.com'
+session_login_urls:
+  github: https://github.com/login
+  gmail: https://accounts.google.com/
 YAML_PROXY
   chmod 0640 "$target"
+}
+
+write_login_browser_bridge_script() {
+  local target="$1"
+  cat >"$target" <<'LOGIN_BRIDGE_JS'
+#!/usr/bin/env python3
+"""
+Deprecated login bridge stub.
+
+The login portal now launches Chromium directly via CDP and does not use this
+script anymore. Keep this file as a compatibility placeholder because daemon
+startup still checks that the path exists.
+"""
+import argparse
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description="void-login-browser bridge stub")
+    parser.add_argument("--profile-dir")
+    parser.add_argument("--start-url")
+    parser.add_argument("--comm-dir")
+    parser.parse_args()
+    sys.stderr.write("void-login-browser bridge is deprecated; portal uses direct CDP\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+LOGIN_BRIDGE_JS
+  chmod 0755 "$target"
+}
+
+write_login_portal_script() {
+  local target="$1"
+  cat >"$target" <<'LOGIN_PORTAL_PY'
+#!/usr/bin/env python3
+import sys
+import time as _time
+_portal_start = _time.monotonic()
+def _plog(msg):
+    elapsed = _time.monotonic() - _portal_start
+    print(f"[portal +{elapsed:.1f}s] {msg}", flush=True)
+_plog("python started, importing stdlib...")
+import argparse
+import asyncio
+import contextlib
+import json
+import os
+import re
+import signal
+import threading
+import time
+from http import HTTPStatus
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+_plog("stdlib imported, importing websockets...")
+import websockets
+_plog("all imports done")
+
+HTML_PAGE = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Void Human Login Mode</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, sans-serif; background: #0f172a; color: #e2e8f0; }
+    #top { display: flex; gap: 8px; align-items: center; padding: 10px; background: #111827; position: sticky; top: 0; z-index: 2; }
+    #status { font-size: 12px; opacity: 0.95; min-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #done { border: 0; padding: 8px 12px; border-radius: 6px; background: #22c55e; color: #052e16; font-weight: 600; cursor: pointer; }
+    #nav { border: 0; padding: 8px 12px; border-radius: 6px; background: #38bdf8; color: #082f49; font-weight: 600; cursor: pointer; }
+    #url { flex: 1; border: 1px solid #334155; border-radius: 6px; padding: 8px; background: #0f172a; color: #e2e8f0; min-width: 120px; }
+    #viewport-wrap { display: flex; justify-content: center; padding: 10px; }
+    #viewport {
+      width: min(96vw, 1280px);
+      height: auto;
+      border: 1px solid #334155;
+      background: #020617;
+      user-select: none;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      outline: none;
+    }
+    #hint { padding: 0 12px 12px; font-size: 12px; color: #93c5fd; }
+    #ime {
+      position: fixed;
+      left: -9999px;
+      bottom: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="top">
+    <button id="done">Done</button>
+    <button id="nav">Go</button>
+    <input id="url" type="text" autocomplete="off" spellcheck="false" />
+    <div id="status">connecting...</div>
+  </div>
+  <div id="viewport-wrap"><img id="viewport" alt="Browser viewport" /></div>
+  <textarea id="ime" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+  <div id="hint">Click to interact. Keyboard input is forwarded to the VM browser. Press Done when login completes.</div>
+  <script>
+    const statusEl = document.getElementById("status");
+    const img = document.getElementById("viewport");
+    const doneBtn = document.getElementById("done");
+    const navBtn = document.getElementById("nav");
+    const urlInput = document.getElementById("url");
+    const ime = document.getElementById("ime");
+    const qp = new URLSearchParams(location.search);
+    const token = qp.get("token") || "";
+    const wsPath = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(token)}`;
+    const screenshotUrl = `${location.origin}/screenshot?token=${encodeURIComponent(token)}`;
+    let ws = null;
+    let reconnectDelay = 250;
+    let reconnectTimer = null;
+    let suppressClickUntil = 0;
+    const activePointers = new Map();
+    let frameW = 0;
+    let frameH = 0;
+    let pollTimer = null;
+    let pollActive = false;
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    function send(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    function connect() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      ws = new WebSocket(wsPath);
+      ws.onopen = () => {
+        reconnectDelay = 250;
+        setStatus("connected");
+        startScreenshotPoll();
+      };
+      ws.onclose = () => {
+        setStatus("disconnected, reconnecting...");
+        stopScreenshotPoll();
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(4000, Math.floor(reconnectDelay * 1.7));
+      };
+      ws.onerror = () => setStatus("connection error");
+      ws.onmessage = onMessage;
+    }
+
+    function onMessage(ev) {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "notice") {
+          setStatus(msg.message || "notice");
+        }
+      } catch (_) {}
+    }
+
+    function startScreenshotPoll() {
+      if (pollActive) return;
+      pollActive = true;
+      pollScreenshot();
+    }
+
+    function stopScreenshotPoll() {
+      pollActive = false;
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    }
+
+    function pollScreenshot() {
+      if (!pollActive) return;
+      const t0 = Date.now();
+      fetch(screenshotUrl)
+        .then(r => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+        .then(blob => {
+          const objectUrl = URL.createObjectURL(blob);
+          const prev = img.src;
+          img.src = objectUrl;
+          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+          setStatus("live");
+          const elapsed = Date.now() - t0;
+          const delay = Math.max(50, 300 - elapsed);
+          pollTimer = setTimeout(pollScreenshot, delay);
+        })
+        .catch(() => {
+          pollTimer = setTimeout(pollScreenshot, 500);
+        });
+    }
+
+    connect();
+
+    doneBtn.addEventListener("click", () => send({ type: "done" }));
+    navBtn.addEventListener("click", () => {
+      const nextUrl = (urlInput.value || "").trim();
+      if (nextUrl) send({ type: "goto", url: nextUrl });
+    });
+    urlInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        const nextUrl = (urlInput.value || "").trim();
+        if (nextUrl) send({ type: "goto", url: nextUrl });
+      }
+    });
+
+    function focusIme() {
+      try { ime.focus({ preventScroll: true }); } catch (_) { ime.focus(); }
+    }
+
+    function clientToImagePoint(cx, cy) {
+      const rect = img.getBoundingClientRect();
+      if (!img.naturalWidth || !img.naturalHeight || rect.width <= 0 || rect.height <= 0) return;
+      const sx = img.naturalWidth / rect.width;
+      const sy = img.naturalHeight / rect.height;
+      return {
+        x: Math.round((cx - rect.left) * sx),
+        y: Math.round((cy - rect.top) * sy)
+      };
+    }
+
+    function buttonName(button) {
+      if (button === 2) return "right";
+      if (button === 1) return "middle";
+      return "left";
+    }
+
+    function sendMouse(eventType, ev) {
+      const pt = clientToImagePoint(ev.clientX, ev.clientY);
+      if (!pt) return;
+      send({
+        type: "mouse",
+        event: eventType,
+        x: pt.x,
+        y: pt.y,
+        button: buttonName(ev.button),
+        buttons: ev.buttons || 0,
+        ctrlKey: ev.ctrlKey,
+        shiftKey: ev.shiftKey,
+        altKey: ev.altKey,
+        metaKey: ev.metaKey
+      });
+    }
+
+    function sendTouch(eventType, ev) {
+      const pt = clientToImagePoint(ev.clientX, ev.clientY);
+      if (!pt) return;
+      send({
+        type: "touch",
+        event: eventType,
+        pointerId: ev.pointerId || 1,
+        x: pt.x,
+        y: pt.y
+      });
+    }
+
+    img.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      suppressClickUntil = Date.now() + 400;
+      activePointers.set(ev.pointerId, ev.pointerType);
+      focusIme();
+      try { img.setPointerCapture(ev.pointerId); } catch (_) {}
+      if (ev.pointerType === "touch") {
+        sendTouch("start", ev);
+      } else {
+        sendMouse("move", ev);
+        sendMouse("down", ev);
+      }
+    }, { passive: false });
+
+    img.addEventListener("pointermove", (ev) => {
+      if (!activePointers.has(ev.pointerId)) return;
+      ev.preventDefault();
+      if (ev.pointerType === "touch") {
+        sendTouch("move", ev);
+      } else {
+        sendMouse("move", ev);
+      }
+    }, { passive: false });
+
+    function endPointer(ev, kind) {
+      if (!activePointers.has(ev.pointerId)) return;
+      ev.preventDefault();
+      activePointers.delete(ev.pointerId);
+      if (kind === "cancel") {
+        if (ev.pointerType === "touch") sendTouch("cancel", ev);
+      } else if (ev.pointerType === "touch") {
+        sendTouch("end", ev);
+      } else {
+        sendMouse("up", ev);
+      }
+      try { img.releasePointerCapture(ev.pointerId); } catch (_) {}
+    }
+
+    img.addEventListener("pointerup", (ev) => endPointer(ev, "up"), { passive: false });
+    img.addEventListener("pointercancel", (ev) => endPointer(ev, "cancel"), { passive: false });
+
+    img.addEventListener("click", (ev) => {
+      if (Date.now() < suppressClickUntil) return;
+      const pt = clientToImagePoint(ev.clientX, ev.clientY);
+      if (!pt) return;
+      focusIme();
+      send({ type: "click", x: pt.x, y: pt.y, button: "left" });
+    });
+
+    img.addEventListener("wheel", (ev) => {
+      ev.preventDefault();
+      const pt = clientToImagePoint(ev.clientX, ev.clientY);
+      send({
+        type: "scroll",
+        dx: Math.round(ev.deltaX),
+        dy: Math.round(ev.deltaY),
+        x: pt ? pt.x : Math.round(frameW / 2),
+        y: pt ? pt.y : Math.round(frameH / 2)
+      });
+    }, { passive: false });
+
+    function sendKey(ev) {
+      send({
+        type: "key",
+        key: ev.key,
+        code: ev.code,
+        ctrlKey: ev.ctrlKey,
+        shiftKey: ev.shiftKey,
+        altKey: ev.altKey,
+        metaKey: ev.metaKey,
+        repeat: ev.repeat
+      });
+    }
+
+    function isControlKey(ev) {
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return true;
+      const k = ev.key || "";
+      if (k.length !== 1) return true;
+      return false;
+    }
+
+    window.addEventListener("keydown", (ev) => {
+      if (document.activeElement === urlInput) return;
+      if (document.activeElement === ime && !isControlKey(ev)) return;
+      ev.preventDefault();
+      sendKey(ev);
+    });
+
+    ime.addEventListener("keydown", (ev) => {
+      if (!isControlKey(ev)) return;
+      ev.preventDefault();
+      sendKey(ev);
+    });
+
+    ime.addEventListener("input", () => {
+      const text = ime.value || "";
+      if (text) send({ type: "type", text });
+      ime.value = "";
+    });
+
+    window.addEventListener("paste", (ev) => {
+      const text = ev.clipboardData ? ev.clipboardData.getData("text") : "";
+      if (!text) return;
+      ev.preventDefault();
+      send({ type: "type", text });
+    });
+
+    window.addEventListener("focus", () => focusIme());
+    focusIme();
+  </script>
+</body>
+</html>
+"""
+
+LOGIN_HINTS = ("login", "signin", "sign-in", "oauth", "auth", "consent", "challenge")
+DEVTOOLS_RE = re.compile(r"DevTools listening on\s+(ws://\S+)")
+DEFAULT_VIEWPORT_W = 1280
+DEFAULT_VIEWPORT_H = 800
+
+
+class CDPError(RuntimeError):
+    pass
+
+
+class CDPDisconnected(CDPError):
+    pass
+
+
+def host_matches_pattern(hostname, pattern):
+    host = (hostname or "").lower().strip(".")
+    pat = (pattern or "").lower().strip(".")
+    if not host or not pat:
+        return False
+    if pat.startswith("*."):
+        suffix = pat[1:]
+        return host.endswith(suffix) and host != suffix[1:]
+    return host == pat
+
+
+def url_host_allowed(url, allow_hosts):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return any(host_matches_pattern(host, pat) for pat in allow_hosts)
+
+
+def looks_like_login_url(url):
+    low = (url or "").lower()
+    return any(token in low for token in LOGIN_HINTS)
+
+
+def as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def as_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def write_status(path, payload):
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def normalize_navigation_url(raw_url):
+    url = str(raw_url or "").strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "https://" + url.lstrip("/")
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if not parsed.hostname:
+        return ""
+    return url
+
+
+def find_chromium_binary():
+    root = Path("/var/lib/void/.cache/ms-playwright")
+    if root.exists():
+        # Prefer headless shell (renders screenshots correctly) over full chrome
+        for name in ("chrome-headless-shell", "chrome"):
+            matches = sorted(root.rglob(name))
+            for candidate in matches:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+    for fallback in ("/usr/bin/chromium", "/usr/bin/chromium-browser"):
+        if os.path.isfile(fallback) and os.access(fallback, os.X_OK):
+            return fallback
+    raise RuntimeError("chrome/chrome-headless-shell not found under /var/lib/void/.cache/ms-playwright/")
+
+
+class CDPConnection:
+    """CDP over pipe (--remote-debugging-pipe).
+
+    Chrome uses fd 3 (read) and fd 4 (write) for pipe-based CDP.
+    Messages are JSON separated by null bytes (\\x00).
+    Uses a blocking thread reader (krunvm asyncio pipe readers don't work).
+    """
+
+    def __init__(self, read_fd, write_fd):
+        self._read_fd = read_fd    # fd to read Chrome responses from
+        self._write_fd = write_fd  # fd to write Chrome commands to
+        self._next_id = 0
+        self._pending = {}
+        self._reader_thread = None
+        self._send_lock = asyncio.Lock()
+        self.events = asyncio.Queue(maxsize=2048)
+        self._closed = asyncio.Event()
+        self._loop = None
+
+    @property
+    def closed(self):
+        return self._closed.is_set()
+
+    async def connect(self):
+        self._loop = asyncio.get_running_loop()
+        _plog("CDP pipe: starting blocking reader thread")
+        self._reader_thread = threading.Thread(target=self._blocking_reader, daemon=True)
+        self._reader_thread.start()
+
+    def _blocking_reader(self):
+        """Blocking read from Chrome's CDP pipe in a separate thread."""
+        buf = b""
+        _msg_count = 0
+        try:
+            while True:
+                chunk = os.read(self._read_fd, 65536)
+                if not chunk:
+                    _plog("CDP reader: pipe EOF")
+                    break
+                buf += chunk
+                while b"\0" in buf:
+                    msg_bytes, buf = buf.split(b"\0", 1)
+                    if not msg_bytes:
+                        continue
+                    try:
+                        msg = json.loads(msg_bytes)
+                    except Exception:
+                        continue
+                    _msg_count += 1
+                    method = msg.get("method", "")
+                    if _msg_count <= 30:
+                        preview = str(msg)[:200] if not method else f"method={method}"
+                        _plog(f"CDP reader msg #{_msg_count}: {preview}")
+                    if "id" in msg:
+                        call_id = msg.get("id")
+                        fut = self._pending.pop(call_id, None)
+                        if fut and not fut.done():
+                            if "error" in msg:
+                                err = msg.get("error", {})
+                                message = err.get("message") if isinstance(err, dict) else str(err)
+                                self._loop.call_soon_threadsafe(
+                                    fut.set_exception, CDPError(message or "CDP call failed"))
+                            else:
+                                self._loop.call_soon_threadsafe(
+                                    fut.set_result, msg.get("result", {}))
+                        continue
+                    # Event message
+                    try:
+                        self.events.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        with contextlib.suppress(asyncio.QueueEmpty):
+                            self.events.get_nowait()
+                        with contextlib.suppress(asyncio.QueueFull):
+                            self.events.put_nowait(msg)
+        except Exception as exc:
+            self._fail_pending(CDPDisconnected(str(exc)))
+        finally:
+            self._loop.call_soon_threadsafe(self._closed.set)
+            self._fail_pending(CDPDisconnected("CDP pipe closed"))
+
+    def _fail_pending(self, exc):
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                try:
+                    self._loop.call_soon_threadsafe(fut.set_exception, exc)
+                except Exception:
+                    pass
+        self._pending.clear()
+
+    async def call(self, method, params=None, session_id=None, timeout=10):
+        if self.closed:
+            raise CDPDisconnected("CDP pipe is not connected")
+        payload = {"method": method, "params": params or {}}
+        if session_id:
+            payload["sessionId"] = session_id
+        loop = asyncio.get_running_loop()
+        async with self._send_lock:
+            self._next_id += 1
+            call_id = self._next_id
+            payload["id"] = call_id
+            fut = loop.create_future()
+            self._pending[call_id] = fut
+            try:
+                data = json.dumps(payload).encode() + b"\0"
+                os.write(self._write_fd, data)
+            except Exception as exc:
+                self._pending.pop(call_id, None)
+                if not fut.done():
+                    fut.set_exception(CDPDisconnected(str(exc)))
+                raise CDPDisconnected(str(exc)) from exc
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            self._pending.pop(call_id, None)
+            if not fut.done():
+                fut.cancel()
+            raise CDPError(f"CDP timeout on {method}") from exc
+
+    async def close(self):
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._fail_pending(CDPDisconnected("CDP pipe closed"))
+        with contextlib.suppress(Exception):
+            os.close(self._write_fd)
+        with contextlib.suppress(Exception):
+            os.close(self._read_fd)
+
+
+class ChromiumCDP:
+    def __init__(self, profile_dir, start_url):
+        self.profile_dir = profile_dir
+        self.start_url = start_url
+        self.chromium_path = ""
+        self.proc = None
+        self.cdp = None
+        self.page_session_id = ""
+        self.target_id = ""
+        self.current_url = ""
+        self.current_title = ""
+        self.viewport_width = DEFAULT_VIEWPORT_W
+        self.viewport_height = DEFAULT_VIEWPORT_H
+        self._active_touches = {}
+        self._stderr_task = None
+        self._stderr_lines = []
+        self._devtools_ws_url = ""
+        self._event_task = None
+        self._location_task = None
+        self._frame_queue = asyncio.Queue(maxsize=2)
+        self._latest_frame = None
+        self._first_frame_event = asyncio.Event()
+        self._last_frame_ts = 0.0
+        self._detached = False
+        self._screenshot_task = None
+        self._restart_lock = asyncio.Lock()
+
+    async def start(self):
+        self.chromium_path = find_chromium_binary()
+        os.makedirs(self.profile_dir, mode=0o700, exist_ok=True)
+        self._first_frame_event = asyncio.Event()
+        self._devtools_ws_url = ""
+        self._detached = False
+        self._active_touches.clear()
+        self.current_url = ""
+        self.current_title = ""
+        self._last_frame_ts = 0.0
+        while True:
+            try:
+                self._frame_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        try:
+            await self._start_once(no_sandbox=False)
+        except Exception as first_error:
+            err_text = "\n".join(self._stderr_lines[-40:]).lower()
+            sandbox_markers = ("no usable sandbox", "setuid sandbox", "namespace sandbox")
+            if any(marker in err_text for marker in sandbox_markers):
+                _plog("chromium sandbox unavailable; retrying with --no-sandbox")
+                await self.stop()
+                await self._start_once(no_sandbox=True)
+            else:
+                await self.stop()
+                raise first_error
+
+    async def _start_once(self, no_sandbox):
+        self._stderr_lines = []
+        self._devtools_ws_url = ""
+        pipe_reader, pipe_write_fd = await self._launch_chromium(no_sandbox=no_sandbox)
+        self.cdp = CDPConnection(pipe_reader, pipe_write_fd)
+        await self.cdp.connect()
+        _plog("CDP pipe connected, initializing page session...")
+        await self._init_page_session()
+        _plog(f"page session ready: target={self.target_id} session={self.page_session_id}")
+        self._event_task = asyncio.create_task(self._event_loop())
+        self._location_task = asyncio.create_task(self._location_loop())
+        if self.start_url:
+            _plog(f"navigating to {self.start_url}")
+            await self.goto(self.start_url)
+            _plog("navigation sent, waiting for page to load...")
+            await asyncio.sleep(3)  # Let the page render before capturing
+        # Start screenshot polling AFTER navigation
+        self._screenshot_task = asyncio.create_task(self._screenshot_loop())
+        _plog("screenshot polling started, waiting for first frame...")
+        await asyncio.wait_for(self._first_frame_event.wait(), timeout=30)
+        _plog("first frame received!")
+        await self._refresh_location()
+
+    async def _launch_chromium(self, no_sandbox):
+        # chrome-headless-shell doesn't need --headless; full chrome does
+        is_headless_shell = "headless-shell" in self.chromium_path
+        cmd = [
+            self.chromium_path,
+        ]
+        if not is_headless_shell:
+            cmd.append("--headless=new")
+        cmd += [
+            "--remote-debugging-pipe",
+            f"--user-data-dir={self.profile_dir}",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--disable-popup-blocking",
+            "--disable-breakpad",
+            "--metrics-recording-only",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--disable-webrtc",
+            "--no-sandbox",
+            f"--window-size={DEFAULT_VIEWPORT_W},{DEFAULT_VIEWPORT_H}",
+            "about:blank",
+        ]
+        _plog(f"launching chromium (pipe mode): {self.chromium_path}")
+        # Chrome reads from fd 3, writes to fd 4 (from Chrome's POV).
+        # We create two pipes: parent_write→chrome_read(3), chrome_write(4)→parent_read.
+        chrome_read_fd, parent_write_fd = os.pipe()   # parent writes commands
+        parent_read_fd, chrome_write_fd = os.pipe()    # parent reads responses
+        _plog(f"pipe fds: chrome_read={chrome_read_fd} parent_write={parent_write_fd} "
+              f"parent_read={parent_read_fd} chrome_write={chrome_write_fd}")
+
+        def _pass_fds():
+            """In child: dup pipes to fd 3 and 4 for Chrome."""
+            if chrome_read_fd != 3:
+                os.dup2(chrome_read_fd, 3)
+            if chrome_write_fd != 4:
+                os.dup2(chrome_write_fd, 4)
+            # Close originals that aren't 3 or 4
+            for fd in (chrome_read_fd, parent_write_fd, parent_read_fd, chrome_write_fd):
+                if fd > 4:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+        import subprocess as _sp
+        proc = _sp.Popen(
+            cmd,
+            stdin=_sp.DEVNULL,
+            stdout=_sp.DEVNULL,
+            stderr=_sp.PIPE,
+            close_fds=False,
+            preexec_fn=_pass_fds,
+        )
+        # Close child-side fds in parent
+        os.close(chrome_read_fd)
+        os.close(chrome_write_fd)
+
+        self.proc = proc
+        self._stderr_task = asyncio.create_task(self._stderr_reader())
+
+        # Give Chrome a moment to start, then check it's alive
+        await asyncio.sleep(0.5)
+        rc = proc.poll()
+        if rc is not None:
+            stderr_out = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+            raise RuntimeError(f"Chromium exited immediately (code {rc}): {stderr_out[:2000]}")
+        _plog("chromium launched and alive, CDP pipe ready")
+        return parent_read_fd, parent_write_fd
+
+    async def _stderr_reader(self):
+        if not self.proc or not self.proc.stderr:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                line = await loop.run_in_executor(None, self.proc.stderr.readline)
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    self._stderr_lines.append(text)
+                    if len(self._stderr_lines) > 400:
+                        self._stderr_lines = self._stderr_lines[-200:]
+                    _plog(f"[chromium] {text}")
+        except Exception as exc:
+            _plog(f"stderr reader error: {exc}")
+
+    async def _init_page_session(self):
+        target = await self.cdp.call("Target.createTarget", {"url": "about:blank"}, timeout=8)
+        self.target_id = str(target.get("targetId") or "")
+        if not self.target_id:
+            raise RuntimeError("CDP Target.createTarget returned empty targetId")
+        attached = await self.cdp.call(
+            "Target.attachToTarget",
+            {"targetId": self.target_id, "flatten": True},
+            timeout=8,
+        )
+        self.page_session_id = str(attached.get("sessionId") or "")
+        if not self.page_session_id:
+            raise RuntimeError("CDP Target.attachToTarget returned empty sessionId")
+        await self._cdp_call("Page.enable", timeout=8)
+        await self._cdp_call("Runtime.enable", timeout=8)
+        await self._cdp_call("Network.enable", timeout=8)
+        await self._cdp_call("Page.setLifecycleEventsEnabled", {"enabled": True}, timeout=8)
+
+    async def _cdp_call(self, method, params=None, timeout=8):
+        if not self.cdp or not self.page_session_id:
+            raise RuntimeError("CDP session not ready")
+        return await self.cdp.call(
+            method,
+            params=params or {},
+            session_id=self.page_session_id,
+            timeout=timeout,
+        )
+
+    async def _event_loop(self):
+        _plog("event loop started")
+        _event_count = 0
+        try:
+            while self.cdp and not self.cdp.closed:
+                event = await self.cdp.events.get()
+                _event_count += 1
+                method = str(event.get("method") or "")
+                params = event.get("params") or {}
+                event_session = str(event.get("sessionId") or "")
+                if _event_count <= 20:
+                    _plog(f"event #{_event_count}: method={method} session={event_session[:12]}...")
+                if method == "Target.detachedFromTarget":
+                    if str(params.get("sessionId") or "") == self.page_session_id:
+                        self._detached = True
+                    continue
+                if event_session and event_session != self.page_session_id:
+                    continue
+                if method == "Page.screencastFrame":
+                    frame_data = str(params.get("data") or "")
+                    frame_session = params.get("sessionId")
+                    meta = params.get("metadata") or {}
+                    self.viewport_width = max(1, as_int(meta.get("deviceWidth"), self.viewport_width))
+                    self.viewport_height = max(1, as_int(meta.get("deviceHeight"), self.viewport_height))
+                    self._last_frame_ts = time.time()
+                    frame = {
+                        "format": "jpeg",
+                        "data": frame_data,
+                        "width": self.viewport_width,
+                        "height": self.viewport_height,
+                        "ts": self._last_frame_ts,
+                    }
+                    self._latest_frame = frame
+                    if not self._first_frame_event.is_set():
+                        self._first_frame_event.set()
+                    if self._frame_queue.full():
+                        with contextlib.suppress(asyncio.QueueEmpty):
+                            self._frame_queue.get_nowait()
+                    with contextlib.suppress(asyncio.QueueFull):
+                        self._frame_queue.put_nowait(frame)
+                    if frame_session is not None:
+                        asyncio.create_task(self._ack_screencast_frame(frame_session))
+                elif method == "Page.frameNavigated":
+                    frame = params.get("frame") or {}
+                    url = str(frame.get("url") or "")
+                    if url:
+                        self.current_url = url
+                elif method == "Page.navigatedWithinDocument":
+                    url = str(params.get("url") or "")
+                    if url:
+                        self.current_url = url
+        except Exception as exc:
+            _plog(f"CDP event loop stopped: {exc}")
+
+    async def _ack_screencast_frame(self, frame_session_id):
+        if not self.cdp or self.cdp.closed:
+            return
+        with contextlib.suppress(Exception):
+            await self._cdp_call(
+                "Page.screencastFrameAck",
+                {"sessionId": frame_session_id},
+                timeout=2,
+            )
+
+    async def _location_loop(self):
+        while True:
+            try:
+                await self._refresh_location()
+            except Exception:
+                if not self.cdp or self.cdp.closed:
+                    return
+            await asyncio.sleep(0.35)
+
+    async def _refresh_location(self):
+        result = await self._cdp_call(
+            "Runtime.evaluate",
+            {
+                "expression": "(() => ({url: location.href || '', title: document.title || ''}))()",
+                "returnByValue": True,
+                "awaitPromise": False,
+            },
+            timeout=4,
+        )
+        value = ((result.get("result") or {}).get("value") or {})
+        if isinstance(value, dict):
+            url = str(value.get("url") or "")
+            title = str(value.get("title") or "")
+            if url:
+                self.current_url = url
+            self.current_title = title
+
+    async def _screenshot_loop(self):
+        """Poll Page.captureScreenshot in a loop (screencast doesn't work in headless)."""
+        _plog("screenshot polling loop started")
+        while True:
+            try:
+                if not self.cdp or self.cdp.closed:
+                    return
+                result = await self._cdp_call(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "jpeg",
+                        "quality": 65,
+                    },
+                    timeout=8,
+                )
+                data = str(result.get("data") or "")
+                if data:
+                    self._last_frame_ts = time.time()
+                    frame = {
+                        "format": "jpeg",
+                        "data": data,
+                        "width": self.viewport_width,
+                        "height": self.viewport_height,
+                        "ts": self._last_frame_ts,
+                    }
+                    self._latest_frame = frame
+                    if not self._first_frame_event.is_set():
+                        _plog(f"first screenshot captured ({len(data)} bytes)")
+                        self._first_frame_event.set()
+                    if self._frame_queue.full():
+                        with contextlib.suppress(asyncio.QueueEmpty):
+                            self._frame_queue.get_nowait()
+                    with contextlib.suppress(asyncio.QueueFull):
+                        self._frame_queue.put_nowait(frame)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                if not self.cdp or self.cdp.closed:
+                    return
+                _plog(f"screenshot error: {exc}")
+            await asyncio.sleep(0.3)
+
+    def unhealthy(self):
+        if self.proc is None:
+            return True
+        if self.proc.poll() is not None:
+            return True
+        if not self.cdp or self.cdp.closed:
+            return True
+        if self._detached:
+            return True
+        if self._first_frame_event.is_set() and (time.time() - self._last_frame_ts > 8):
+            return True
+        return False
+
+    async def restart(self):
+        async with self._restart_lock:
+            await self.stop()
+            await self.start()
+
+    def latest_frame_message(self):
+        if not self._latest_frame:
+            return None
+        return {
+            "type": "frame",
+            "url": self.current_url,
+            "title": self.current_title,
+            "width": self._latest_frame.get("width", self.viewport_width),
+            "height": self._latest_frame.get("height", self.viewport_height),
+            "image": f"data:image/{self._latest_frame.get('format', 'jpeg')};base64,{self._latest_frame.get('data', '')}",
+        }
+
+    async def next_frame_message(self, timeout=0.25):
+        frame = await asyncio.wait_for(self._frame_queue.get(), timeout=timeout)
+        return {
+            "type": "frame",
+            "url": self.current_url,
+            "title": self.current_title,
+            "width": frame.get("width", self.viewport_width),
+            "height": frame.get("height", self.viewport_height),
+            "image": f"data:image/{frame.get('format', 'jpeg')};base64,{frame.get('data', '')}",
+        }
+
+    def _resolve_coords(self, x, y):
+        max_x = max(1, self.viewport_width - 1)
+        max_y = max(1, self.viewport_height - 1)
+        nx = clamp(as_int(x, 0), 0, max_x)
+        ny = clamp(as_int(y, 0), 0, max_y)
+        return nx, ny
+
+    def _modifiers(self, payload):
+        mods = 0
+        if bool(payload.get("altKey")):
+            mods |= 1
+        if bool(payload.get("ctrlKey")):
+            mods |= 2
+        if bool(payload.get("metaKey")):
+            mods |= 4
+        if bool(payload.get("shiftKey")):
+            mods |= 8
+        return mods
+
+    async def click(self, x, y, button="left", payload=None):
+        mods = self._modifiers(payload or {})
+        await self.mouse("move", x, y, button=button, modifiers=mods, buttons=0)
+        await self.mouse("down", x, y, button=button, modifiers=mods)
+        await self.mouse("up", x, y, button=button, modifiers=mods)
+
+    async def mouse(self, event_type, x, y, button="left", buttons=None, modifiers=0):
+        event_map = {"move": "mouseMoved", "down": "mousePressed", "up": "mouseReleased"}
+        cdp_type = event_map.get(str(event_type or "").lower())
+        if not cdp_type:
+            return
+        btn = str(button or "left").lower()
+        if btn not in {"left", "right", "middle", "back", "forward", "none"}:
+            btn = "left"
+        mx, my = self._resolve_coords(x, y)
+        if buttons is None:
+            button_mask = {"left": 1, "right": 2, "middle": 4}.get(btn, 0)
+        else:
+            button_mask = as_int(buttons, 0)
+        params = {
+            "type": cdp_type,
+            "x": mx,
+            "y": my,
+            "button": btn if btn != "none" else "left",
+            "buttons": button_mask,
+            "modifiers": modifiers,
+            "clickCount": 1,
+        }
+        await self._cdp_call("Input.dispatchMouseEvent", params, timeout=4)
+
+    async def scroll(self, dx, dy, x=None, y=None, payload=None):
+        sx, sy = self._resolve_coords(
+            x if x is not None else self.viewport_width // 2,
+            y if y is not None else self.viewport_height // 2,
+        )
+        params = {
+            "type": "mouseWheel",
+            "x": sx,
+            "y": sy,
+            "deltaX": as_float(dx, 0),
+            "deltaY": as_float(dy, 0),
+            "modifiers": self._modifiers(payload or {}),
+        }
+        await self._cdp_call("Input.dispatchMouseEvent", params, timeout=4)
+
+    async def touch(self, event_type, pointer_id, x, y):
+        pid = as_int(pointer_id, 1)
+        if pid < 1:
+            pid = 1
+        tx, ty = self._resolve_coords(x, y)
+        kind = str(event_type or "").lower()
+        if kind == "start":
+            self._active_touches[pid] = (tx, ty)
+            cdp_kind = "touchStart"
+        elif kind == "move":
+            self._active_touches[pid] = (tx, ty)
+            cdp_kind = "touchMove"
+        elif kind == "end":
+            self._active_touches.pop(pid, None)
+            cdp_kind = "touchEnd"
+        elif kind == "cancel":
+            self._active_touches.clear()
+            cdp_kind = "touchCancel"
+        else:
+            return
+        points = [
+            {"x": px, "y": py, "radiusX": 1, "radiusY": 1, "force": 1, "id": tid}
+            for tid, (px, py) in sorted(self._active_touches.items(), key=lambda item: item[0])
+        ]
+        await self._cdp_call(
+            "Input.dispatchTouchEvent",
+            {"type": cdp_kind, "touchPoints": points},
+            timeout=4,
+        )
+
+    async def insert_text(self, text):
+        raw = str(text or "")
+        if not raw:
+            return
+        await self._cdp_call("Input.insertText", {"text": raw}, timeout=4)
+
+    async def key_press(self, payload):
+        key = str(payload.get("key") or "")
+        code = str(payload.get("code") or "")
+        if not key:
+            return
+        if key == "Unidentified":
+            return
+        modifiers = self._modifiers(payload)
+        key_alias = {
+            "Esc": "Escape",
+            "Del": "Delete",
+            "Left": "ArrowLeft",
+            "Right": "ArrowRight",
+            "Up": "ArrowUp",
+            "Down": "ArrowDown",
+            "Spacebar": " ",
+        }
+        key = key_alias.get(key, key)
+        printable = len(key) == 1 and not (modifiers & 0b0111)
+        if printable:
+            await self.insert_text(key)
+            return
+        vk_map = {
+            "Backspace": 8,
+            "Tab": 9,
+            "Enter": 13,
+            "Shift": 16,
+            "Control": 17,
+            "Alt": 18,
+            "Pause": 19,
+            "CapsLock": 20,
+            "Escape": 27,
+            " ": 32,
+            "PageUp": 33,
+            "PageDown": 34,
+            "End": 35,
+            "Home": 36,
+            "ArrowLeft": 37,
+            "ArrowUp": 38,
+            "ArrowRight": 39,
+            "ArrowDown": 40,
+            "Insert": 45,
+            "Delete": 46,
+            "Meta": 91,
+            "ContextMenu": 93,
+        }
+        vk = vk_map.get(key, 0)
+        if not vk:
+            if code.startswith("Key") and len(code) == 4:
+                vk = ord(code[-1].upper())
+            elif code.startswith("Digit") and len(code) == 6:
+                vk = ord(code[-1])
+            elif len(key) == 1:
+                vk = ord(key.upper())
+        base = {
+            "key": key,
+            "code": code,
+            "windowsVirtualKeyCode": vk,
+            "nativeVirtualKeyCode": vk,
+            "modifiers": modifiers,
+            "autoRepeat": bool(payload.get("repeat")),
+            "isKeypad": False,
+            "isSystemKey": False,
+        }
+        await self._cdp_call("Input.dispatchKeyEvent", dict(base, type="rawKeyDown"), timeout=4)
+        await self._cdp_call("Input.dispatchKeyEvent", dict(base, type="keyUp"), timeout=4)
+
+    async def goto(self, url):
+        target_url = normalize_navigation_url(url)
+        if not target_url:
+            raise RuntimeError("invalid_url")
+        # Send navigation without waiting — krunvm network can be very slow
+        payload = {"method": "Page.navigate", "params": {"url": target_url}}
+        if self.page_session_id:
+            payload["sessionId"] = self.page_session_id
+        async with self.cdp._send_lock:
+            self.cdp._next_id += 1
+            payload["id"] = self.cdp._next_id
+            data = json.dumps(payload).encode() + b"\0"
+            os.write(self.cdp._write_fd, data)
+        _plog(f"navigate sent (fire-and-forget): {target_url}")
+
+    async def close(self):
+        await self.stop()
+
+    async def stop(self):
+        for task_attr in ("_event_task", "_location_task", "_screenshot_task"):
+            task = getattr(self, task_attr, None)
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                setattr(self, task_attr, None)
+        if self.cdp:
+            with contextlib.suppress(Exception):
+                await self.cdp.close()
+        self.cdp = None
+        self.page_session_id = ""
+        self.target_id = ""
+        if self.proc and self.proc.poll() is None:
+            with contextlib.suppress(Exception):
+                self.proc.terminate()
+            loop = asyncio.get_running_loop()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(loop.run_in_executor(None, self.proc.wait), timeout=4)
+            if self.proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    self.proc.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(loop.run_in_executor(None, self.proc.wait), timeout=2)
+        self.proc = None
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._stderr_task
+            self._stderr_task = None
+
+
+async def run(args, external_stop):
+    started = time.time()
+    stop_event = asyncio.Event()
+    stop_reason = {"value": "done"}
+    allow_hosts = [h.strip() for h in args.allow_host if h.strip()]
+    clients = set()
+    last_client_ts = {"value": time.time()}
+
+    status_path = Path(args.status_file)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    write_status(status_path, {"ready": False})
+
+    _ = args.node_script  # kept for CLI compatibility
+
+    browser = ChromiumCDP(args.profile_dir, args.start_url)
+    ready_written = False
+
+    try:
+        await browser.start()
+    except Exception as e:
+        write_status(status_path, {"ready": False, "error": str(e)})
+        raise
+
+    initial_url = browser.current_url or args.start_url
+
+    async def broadcast(payload):
+        if not clients:
+            return
+        raw = json.dumps(payload)
+        dead = []
+        for client in list(clients):
+            try:
+                await client.send(raw)
+            except Exception:
+                dead.append(client)
+        for item in dead:
+            clients.discard(item)
+
+    async def send_notice(websocket, message):
+        try:
+            await websocket.send(json.dumps({"type": "notice", "message": message}))
+        except Exception:
+            pass
+
+    async def handle_client_message(websocket, payload):
+        msg_type = str(payload.get("type") or "").lower()
+        if msg_type == "done":
+            stop_reason["value"] = "manual_done"
+            stop_event.set()
+            return
+        if msg_type == "goto":
+            raw_url = str(payload.get("url") or "").strip()
+            next_url = normalize_navigation_url(raw_url)
+            if not next_url:
+                await send_notice(websocket, "invalid url")
+                return
+            await browser.goto(next_url)
+            return
+        if msg_type == "click":
+            await browser.click(
+                payload.get("x", 0),
+                payload.get("y", 0),
+                button=payload.get("button", "left"),
+                payload=payload,
+            )
+            return
+        if msg_type == "mouse":
+            await browser.mouse(
+                payload.get("event", ""),
+                payload.get("x", 0),
+                payload.get("y", 0),
+                button=payload.get("button", "left"),
+                buttons=payload.get("buttons", 0),
+                modifiers=browser._modifiers(payload),
+            )
+            return
+        if msg_type == "touch":
+            await browser.touch(
+                payload.get("event", ""),
+                payload.get("pointerId", 1),
+                payload.get("x", 0),
+                payload.get("y", 0),
+            )
+            return
+        if msg_type == "scroll":
+            await browser.scroll(
+                payload.get("dx", 0),
+                payload.get("dy", 0),
+                x=payload.get("x"),
+                y=payload.get("y"),
+                payload=payload,
+            )
+            return
+        if msg_type == "key":
+            await browser.key_press(payload)
+            return
+        if msg_type == "type":
+            await browser.insert_text(payload.get("text", ""))
+            return
+        if msg_type == "ping":
+            await send_notice(websocket, "pong")
+            return
+        await send_notice(websocket, f"unknown command: {msg_type}")
+
+    async def ws_handler(websocket, path=None):
+        ws_path = path if path is not None else getattr(websocket, "path", "")
+        parsed = urlparse(ws_path)
+        if parsed.path != "/ws":
+            await websocket.close(code=4404, reason="not found")
+            return
+        token = parse_qs(parsed.query).get("token", [""])[0]
+        if token != args.token:
+            await websocket.close(code=4403, reason="forbidden")
+            return
+        clients.add(websocket)
+        last_client_ts["value"] = time.time()
+        await send_notice(websocket, "connected")
+        latest = browser.latest_frame_message()
+        if latest:
+            with contextlib.suppress(Exception):
+                await websocket.send(json.dumps(latest))
+        try:
+            async for message in websocket:
+                last_client_ts["value"] = time.time()
+                try:
+                    payload = json.loads(message)
+                except Exception:
+                    await send_notice(websocket, "invalid json")
+                    continue
+                try:
+                    await asyncio.wait_for(handle_client_message(websocket, payload), timeout=8)
+                except asyncio.TimeoutError:
+                    await send_notice(websocket, "command timeout")
+                except Exception as exc:
+                    _plog(f"command failure: {exc}")
+                    await send_notice(websocket, f"command failed: {exc}")
+        finally:
+            clients.discard(websocket)
+
+    async def process_request(path, headers):
+        parsed = urlparse(path)
+        if parsed.path == "/health":
+            body = b"ok\n"
+            return HTTPStatus.OK, [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))], body
+        if parsed.path in {"/", "/index.html"}:
+            body = HTML_PAGE.encode("utf-8")
+            return HTTPStatus.OK, [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Cache-Control", "no-store"),
+                ("Content-Length", str(len(body))),
+            ], body
+        if parsed.path == "/ws":
+            return None
+        if parsed.path == "/screenshot":
+            qs = parse_qs(parsed.query)
+            t = qs.get("token", [""])[0]
+            if t != args.token:
+                body = b"forbidden"
+                return HTTPStatus.FORBIDDEN, [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))], body
+            frame = browser.latest_frame_message()
+            if not frame:
+                body = b"no frame"
+                return HTTPStatus.SERVICE_UNAVAILABLE, [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))], body
+            img_str = frame.get("image", "")
+            if "," in img_str:
+                img_str = img_str.split(",", 1)[1]
+            import base64 as _b64
+            img_bytes = _b64.b64decode(img_str)
+            return HTTPStatus.OK, [
+                ("Content-Type", "image/jpeg"),
+                ("Content-Length", str(len(img_bytes))),
+                ("Cache-Control", "no-store"),
+            ], img_bytes
+        body = b"not found\n"
+        return HTTPStatus.NOT_FOUND, [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))], body
+
+    stable_counter = 0
+    stable_url = ""
+    restart_failures = 0
+
+    try:
+        async with websockets.serve(
+            ws_handler,
+            args.host,
+            args.port,
+            process_request=process_request,
+            max_size=2 * 1024 * 1024,
+            compression=None,
+        ):
+            portal_url = f"http://{args.host}:{args.port}/?token={args.token}"
+            write_status(
+                status_path,
+                {
+                    "ready": True,
+                    "url": portal_url,
+                    "service": args.service,
+                    "pid": os.getpid(),
+                    "started": int(time.time()),
+                    "initial_url": initial_url,
+                },
+            )
+            ready_written = True
+
+            while not stop_event.is_set():
+                now = time.time()
+                if external_stop.is_set():
+                    stop_reason["value"] = "signal"
+                    break
+                if now - started > args.max_seconds:
+                    stop_reason["value"] = "timeout"
+                    break
+                if not clients and now - last_client_ts["value"] > 180:
+                    stop_reason["value"] = "idle"
+                    break
+
+                if browser.unhealthy():
+                    restart_failures += 1
+                    await broadcast({"type": "notice", "message": "browser disconnected, reconnecting..."})
+                    try:
+                        await browser.restart()
+                        restart_failures = 0
+                        stable_counter = 0
+                        stable_url = ""
+                        await broadcast({"type": "notice", "message": "browser reconnected"})
+                    except Exception as exc:
+                        _plog(f"browser restart failed: {exc}")
+                        await broadcast({"type": "notice", "message": f"browser restart failed: {exc}"})
+                        if restart_failures >= 5:
+                            stop_reason["value"] = "browser_failed"
+                            break
+                        await asyncio.sleep(min(6, restart_failures))
+                        continue
+
+                try:
+                    frame_msg = await browser.next_frame_message(timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as exc:
+                    _plog(f"frame read failure: {exc}")
+                    await asyncio.sleep(0.2)
+                    continue
+
+                await broadcast(frame_msg)
+
+                current_url = str(frame_msg.get("url") or "")
+                host_ok = url_host_allowed(current_url, allow_hosts) if allow_hosts else False
+                if host_ok and current_url != args.start_url and not looks_like_login_url(current_url):
+                    if current_url == stable_url:
+                        stable_counter += 1
+                    else:
+                        stable_url = current_url
+                        stable_counter = 1
+                else:
+                    stable_counter = 0
+                    stable_url = ""
+                if stable_counter >= 4:
+                    stop_reason["value"] = "auto_complete"
+                    break
+    except Exception as exc:
+        if not ready_written:
+            write_status(status_path, {"ready": False, "error": str(exc)})
+        raise
+    finally:
+        await browser.close()
+        if ready_written:
+            write_status(
+                status_path,
+                {
+                    "ready": False,
+                    "closed": True,
+                    "reason": stop_reason["value"],
+                    "service": args.service,
+                    "stopped": int(time.time()),
+                },
+            )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Void human login portal")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--service", required=True)
+    parser.add_argument("--profile-dir", required=True)
+    parser.add_argument("--token", required=True)
+    parser.add_argument("--start-url", required=True)
+    parser.add_argument("--status-file", required=True)
+    parser.add_argument("--node-script", required=True)
+    parser.add_argument("--allow-host", action="append", default=[])
+    parser.add_argument("--max-seconds", type=int, default=1800)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.max_seconds < 60:
+        args.max_seconds = 60
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    stop = asyncio.Event()
+
+    def _on_signal(*_):
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _on_signal)
+        except NotImplementedError:
+            pass
+
+    async def runner():
+        task = asyncio.create_task(run(args, stop))
+        done, pending = await asyncio.wait(
+            {task, asyncio.create_task(stop.wait())},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task not in done:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        for p in pending:
+            p.cancel()
+
+    try:
+        loop.run_until_complete(runner())
+    finally:
+        loop.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"void-login-portal failed: {e}", flush=True)
+        raise
+LOGIN_PORTAL_PY
+  chmod 0755 "$target"
 }
 
 write_firewall_script() {
@@ -1533,12 +3809,14 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   cryptsetup iptables ca-certificates curl gnupg \
-  python3 python3-yaml sudo jq
+  python3 python3-yaml python3-websockets sudo jq
 
 install -d -m 0755 /usr/local/bin
 install -d -m 0750 /etc/credential-proxy
 
 install -m 0755 /provision/command-proxy-daemon.py /usr/local/bin/command-proxy-daemon
+install -m 0755 /provision/void-login-portal.py /usr/local/bin/void-login-portal.py
+install -m 0755 /provision/void-login-browser.js /usr/local/bin/void-login-browser.js
 install -m 0640 /provision/config.yaml /etc/credential-proxy/config.yaml
 install -m 0755 /provision/firewall.sh /root/firewall.sh
 
@@ -1603,6 +3881,8 @@ prepare_provision_bundle() {
   track_tmp_path "$bundle_dir"
 
   write_proxy_daemon "${bundle_dir}/command-proxy-daemon.py"
+  write_login_portal_script "${bundle_dir}/void-login-portal.py"
+  write_login_browser_bridge_script "${bundle_dir}/void-login-browser.js"
   write_proxy_config "${bundle_dir}/config.yaml"
   write_firewall_script "${bundle_dir}/firewall.sh"
   write_guest_provision_script "${bundle_dir}/provision.sh"
@@ -1629,14 +3909,19 @@ write_host_proxy_script() {
 set -euo pipefail
 
 # void — Host-side client for the VM command proxy daemon.
-# Usage: void <gh|gcloud|browse> [args...]
+# Usage: void <gh|gcloud|browse|session> [args...]
 
 RUNTIME_ENV="${runtime_env}"
 
 usage() {
-  echo "Usage: void <gh|gcloud|browse> [args...]" >&2
+  echo "Usage: void <gh|gcloud|browse|session> [args...]" >&2
   echo "" >&2
-  echo "Executes gh, gcloud, or browse commands securely inside the VM." >&2
+  echo "Executes gh, gcloud, browse, or session commands securely inside the VM." >&2
+  echo "" >&2
+  echo "Session commands:" >&2
+  echo "  void session login <service> [--port N]" >&2
+  echo "  void session list" >&2
+  echo "  void session close <service>" >&2
   echo "Credentials never leave the VM boundary." >&2
   exit 2
 }
@@ -1647,9 +3932,9 @@ fi
 
 tool="\$1"
 case "\$tool" in
-  gh|gcloud|browse) ;;
+  gh|gcloud|browse|session) ;;
   -h|--help) usage ;;
-  *) echo "Error: only 'gh', 'gcloud', and 'browse' are allowed (got: \$tool)" >&2; exit 1 ;;
+  *) echo "Error: only 'gh', 'gcloud', 'browse', and 'session' are allowed (got: \$tool)" >&2; exit 1 ;;
 esac
 
 # Read IPC directory from runtime state
@@ -1669,6 +3954,48 @@ if [[ -z "\$IPC_KEY" ]]; then
   echo "Error: IPC key missing from runtime state. Restart VM." >&2
   exit 1
 fi
+
+maybe_start_local_port_forward() {
+  local port="\$1"
+  if ! [[ "\$port" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if ! command -v socat >/dev/null 2>&1; then
+    return 0
+  fi
+  local vm_name
+  vm_name="\$(grep -E '^VM_NAME=' "\$RUNTIME_ENV" | head -n1 | cut -d'=' -f2-)"
+  [[ -n "\$vm_name" ]] || return 0
+
+  local krunvm_bin=""
+  krunvm_bin="\$(command -v krunvm 2>/dev/null || true)"
+  if [[ -z "\$krunvm_bin" && -x /root/.cargo/bin/krunvm ]]; then
+    krunvm_bin="/root/.cargo/bin/krunvm"
+  fi
+  [[ -n "\$krunvm_bin" ]] || return 0
+
+  local guest_ip=""
+  guest_ip="\$("\$krunvm_bin" ip "\$vm_name" 2>/dev/null | awk 'NF{print \$1; exit}' || true)"
+  [[ -n "\$guest_ip" ]] || return 0
+
+  if bash -lc "</dev/tcp/127.0.0.1/\${port}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local pid_file="/tmp/void-session-forward-\${vm_name}-\${port}.pid"
+  if [[ -f "\$pid_file" ]]; then
+    local old_pid
+    old_pid="\$(cat "\$pid_file" 2>/dev/null || true)"
+    if [[ -n "\$old_pid" ]] && kill -0 "\$old_pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    rm -f "\$pid_file"
+  fi
+
+  nohup socat "TCP-LISTEN:\${port},bind=127.0.0.1,reuseaddr,fork" "TCP:\${guest_ip}:\${port}" \
+    >/tmp/void-session-forward-\${vm_name}-\${port}.log 2>&1 &
+  echo "\$!" > "\$pid_file"
+}
 
 # Generate unique request ID
 req_id="req-\$(date +%s)-\$\$-\$RANDOM"
@@ -1777,6 +4104,144 @@ PY_BROWSER_REQUEST
     echo "Error: failed to build browser request" >&2
     exit 2
   fi
+elif [[ "\$tool" == "session" ]]; then
+  shift
+  if [[ \$# -lt 1 ]]; then
+    echo "Error: session requires a subcommand (login|list|close)" >&2
+    exit 2
+  fi
+  session_subcmd="\$1"
+  shift
+  case "\$session_subcmd" in
+    login)
+      if [[ \$# -lt 1 ]]; then
+        echo "Error: usage: void session login <service> [--port N]" >&2
+        exit 2
+      fi
+      service="\$1"
+      shift
+      port="\${VOID_SESSION_PORT:-9222}"
+      while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+          --port)
+            [[ \$# -ge 2 ]] || { echo "Error: --port requires a value" >&2; exit 2; }
+            port="\$2"
+            shift 2
+            ;;
+          --port=*)
+            port="\${1#*=}"
+            shift
+            ;;
+          *)
+            echo "Error: unsupported argument for session login: \$1" >&2
+            exit 2
+            ;;
+        esac
+      done
+      maybe_start_local_port_forward "\$port"
+      request=\$(python3 - "\$req_id" "\$service" "\$port" <<'PY_SESSION_LOGIN'
+import json
+import re
+import sys
+import time
+
+req_id = sys.argv[1]
+service = sys.argv[2].strip()
+port_raw = sys.argv[3].strip()
+
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", service):
+    print("Error: invalid service name", file=sys.stderr)
+    raise SystemExit(2)
+
+port = None
+if port_raw:
+    try:
+        p = int(port_raw)
+    except ValueError:
+        print("Error: --port must be an integer", file=sys.stderr)
+        raise SystemExit(2)
+    if p < 1 or p > 65535:
+        print("Error: --port must be in 1..65535", file=sys.stderr)
+        raise SystemExit(2)
+    port = p
+
+params = {"args": []}
+if port is not None:
+    params["port"] = port
+
+request = {
+    "id": req_id,
+    "tool": "browser",
+    "session": service,
+    "action": "session login",
+    "params": params,
+    "timeout": 30,
+    "timestamp": int(time.time()),
+}
+print(json.dumps(request))
+PY_SESSION_LOGIN
+) || exit \$?
+      ;;
+    list)
+      if [[ \$# -ne 0 ]]; then
+        echo "Error: usage: void session list" >&2
+        exit 2
+      fi
+      request=\$(python3 - "\$req_id" <<'PY_SESSION_LIST'
+import json
+import sys
+import time
+
+req_id = sys.argv[1]
+request = {
+    "id": req_id,
+    "tool": "browser",
+    "session": "default",
+    "action": "session list",
+    "params": {"args": []},
+    "timeout": 10,
+    "timestamp": int(time.time()),
+}
+print(json.dumps(request))
+PY_SESSION_LIST
+) || exit \$?
+      ;;
+    close)
+      if [[ \$# -ne 1 ]]; then
+        echo "Error: usage: void session close <service>" >&2
+        exit 2
+      fi
+      service="\$1"
+      request=\$(python3 - "\$req_id" "\$service" <<'PY_SESSION_CLOSE'
+import json
+import re
+import sys
+import time
+
+req_id = sys.argv[1]
+service = sys.argv[2].strip()
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", service):
+    print("Error: invalid service name", file=sys.stderr)
+    raise SystemExit(2)
+
+request = {
+    "id": req_id,
+    "tool": "browser",
+    "session": service,
+    "action": "session close",
+    "params": {"args": [service], "name": service},
+    "timeout": 20,
+    "timestamp": int(time.time()),
+}
+print(json.dumps(request))
+PY_SESSION_CLOSE
+) || exit \$?
+      ;;
+    *)
+      echo "Error: unsupported session subcommand: \$session_subcmd" >&2
+      exit 2
+      ;;
+  esac
 else
   # Build JSON request for gh/gcloud passthrough mode.
   argv_json=\$(printf '%s\n' "\$@" | python3 -c '
@@ -1821,8 +4286,8 @@ print(json.dumps(req))
 echo "\$request" > "\${IPC_DIR}/requests/\${req_id}.tmp"
 mv "\${IPC_DIR}/requests/\${req_id}.tmp" "\${IPC_DIR}/requests/\${req_id}.json"
 
-# Poll for response (timeout 90s to allow for command timeout + overhead)
-poll_timeout=90
+# Poll for response (timeout 360s to allow for virtiofs import latency + portal cold start)
+poll_timeout=360
 elapsed=0
 resp_file="\${IPC_DIR}/responses/\${req_id}.json"
 
@@ -1905,6 +4370,7 @@ write_runtime_state() {
     return
   fi
   cat >"$RUNTIME_ENV_FILE" <<EOF_RUNTIME
+VM_NAME=${VM_NAME}
 SECRETS_DIR=${secrets_dir}
 LUKS_MOUNT=${luks_mount}
 LUKS_MAPPER=${mapper}
@@ -2172,6 +4638,22 @@ cmd_configure() {
   log_info "Running guest provisioning..."
   run "$krunvm_bin" start "$VM_NAME" -- /provision/bootstrap.sh
 
+  # Install Chromium into persistent container layer via buildah.
+  # The krunvm provision above runs inside the guest whose overlay is ephemeral,
+  # so Chromium installed there is lost on VM restart. buildah run writes to
+  # the persistent container layer that survives krunvm stop/start.
+  local container_id
+  container_id="$(buildah containers -q | head -1)"
+  if [[ -n "$container_id" ]]; then
+    log_info "Installing Chromium into persistent container layer..."
+    run buildah run "$container_id" -- env \
+      PLAYWRIGHT_BROWSERS_PATH=/var/lib/void/.cache/ms-playwright \
+      npx --yes playwright install chromium
+    run buildah run "$container_id" -- chown -R 999:0 /var/lib/void/.cache/ms-playwright
+  else
+    log_warn "No buildah container found; skipping persistent Chromium install."
+  fi
+
   # Browser cgroup limits are set in the boot script (boot.sh) on each start.
   # No separate configure step needed — cgroups are virtual and reset on reboot.
 
@@ -2244,7 +4726,25 @@ SECRETS_GUIDE
   [[ "$DRY_RUN" -eq 1 ]] && mktemp_base="/tmp"
 
   local secrets_dir=""
-  local luks_mount=""
+  local luks_mount
+  luks_mount="$(mktemp -d "${mktemp_base}/luks.${VM_NAME}.XXXXXX")"
+  # NOT tracked for EXIT cleanup — must persist while VM is running.
+  # Cleaned up by cmd_stop() via runtime.env LUKS_MOUNT.
+
+  if [[ "$DRY_RUN" -eq 1 ]] || ! cryptsetup status "$LUKS_MAPPER" >/dev/null 2>&1; then
+    local luks_keyfile="${VM_STATE_DIR}/luks.key"
+    if [[ -f "$luks_keyfile" ]]; then
+      log_info "Unlocking LUKS image with key file..."
+      run cryptsetup open --key-file "$luks_keyfile" "$LUKS_IMAGE" "$LUKS_MAPPER"
+    else
+      log_warn "Unlocking LUKS image; passphrase required."
+      run cryptsetup open "$LUKS_IMAGE" "$LUKS_MAPPER"
+    fi
+  else
+    log_info "LUKS mapper already open: ${LUKS_MAPPER}"
+  fi
+
+  run mount "/dev/mapper/${LUKS_MAPPER}" "$luks_mount"
 
   if ((NO_SECRETS)); then
     log_warn "Skipping Bitwarden secrets injection (--no-secrets)."
@@ -2260,26 +4760,6 @@ SECRETS_GUIDE
     fetch_bitwarden_env "$project_id" "$env_file"
     run chmod 0600 "$env_file"
     unset BWS_ACCESS_TOKEN || true
-
-    luks_mount="$(mktemp -d "${mktemp_base}/luks.${VM_NAME}.XXXXXX")"
-    # NOT tracked for EXIT cleanup — must persist while VM is running.
-    # Cleaned up by cmd_stop() via runtime.env LUKS_MOUNT.
-
-    if [[ "$DRY_RUN" -eq 1 ]] || ! cryptsetup status "$LUKS_MAPPER" >/dev/null 2>&1; then
-      local luks_keyfile="${VM_STATE_DIR}/luks.key"
-      if [[ -f "$luks_keyfile" ]]; then
-        log_info "Unlocking LUKS image with key file..."
-        run cryptsetup open --key-file "$luks_keyfile" "$LUKS_IMAGE" "$LUKS_MAPPER"
-      else
-        log_warn "Unlocking LUKS image; passphrase required."
-        run cryptsetup open "$LUKS_IMAGE" "$LUKS_MAPPER"
-      fi
-    else
-      log_info "LUKS mapper already open: ${LUKS_MAPPER}"
-    fi
-
-    run mount "/dev/mapper/${LUKS_MAPPER}" "$luks_mount"
-
   fi
 
   # Create shared IPC directory for host↔guest communication.
@@ -2404,8 +4884,9 @@ GUEST_BOOT
   # Multiple calls would overwrite previous volume mappings.
   local vol_args=()
   if [[ -n "${secrets_dir:-}" ]]; then
-    vol_args+=(--volume "${secrets_dir}:/secrets_in" --volume "${luks_mount}:/secrets")
+    vol_args+=(--volume "${secrets_dir}:/secrets_in")
   fi
+  vol_args+=(--volume "${luks_mount}:/secrets")
   vol_args+=(--volume "${ipc_dir}:/ipc" --volume "${boot_dir}:/boot")
 
   log_info "Attaching volumes to VM: ${vol_args[*]}"
@@ -2466,7 +4947,7 @@ GUEST_BOOT
   write_runtime_state "${secrets_dir:-none}" "${luks_mount:-none}" "$LUKS_MAPPER" "$VM_LOG_FILE" "$ipc_dir" "$ipc_key"
 
   log_info "VM started successfully."
-  log_info "Use 'void gh ...', 'void gcloud ...', or 'void browse ...' to run commands."
+  log_info "Use 'void gh ...', 'void gcloud ...', 'void browse ...', or 'void session ...'."
 }
 
 cmd_stop() {
@@ -2606,7 +5087,7 @@ cmd_grant() {
       done
     fi
 
-    log_info "User '${username}' can now run: void gh ... / void gcloud ... / void browse ..."
+    log_info "User '${username}' can now run: void gh ... / void gcloud ... / void browse ... / void session ..."
   done
 }
 
@@ -2997,7 +5478,7 @@ check(
     "test_browser_env_is_sanitized",
     "GH_TOKEN" not in env
     and "GOOGLE_APPLICATION_CREDENTIALS" not in env
-    and env.get("HOME") == "/var/lib/void"
+    and env.get("HOME") in {"/var/lib/void", "/tmp/void-browser-default"}
     and env.get("PLAYWRIGHT_CHROMIUM_ARGS") == "--disable-webrtc",
     str(env),
 )
@@ -3050,11 +5531,23 @@ check(
     f"slow={slow_timeout} fast={fast_timeout}",
 )
 
+# 21. session login action is allowed
+ok, argv, err = module.validate_browser_command(
+    "session login", {"session": "github", "args": []}, cfg
+)
+check("test_browser_allows_session_login", ok and argv and "session" in argv, err or "")
+
+# 22. per-session origin policy blocks off-domain open
+ok, _, err = module.validate_browser_command(
+    "open", {"session": "github", "url": "https://example.com"}, cfg
+)
+check("test_browser_denies_offdomain_session_open", not ok and "allowlist" in (err or "").lower(), err or "")
+
 # Host proxy regression check for browse wiring
 host_proxy = host_proxy_path.read_text(encoding="utf-8")
 check(
     "test_host_proxy_allows_browse_tool",
-    "gh|gcloud|browse" in host_proxy and "\"tool\": \"browser\"" in host_proxy,
+    "gh|gcloud|browse|session" in host_proxy and "\"tool\": \"browser\"" in host_proxy,
     "browse tool mapping missing",
 )
 
@@ -3237,14 +5730,14 @@ check(
 # 52. host proxy allows gh
 check(
     "test_host_proxy_allows_gh",
-    "gh|gcloud|browse" in host_proxy,
+    "gh|gcloud|browse|session" in host_proxy,
     "gh not in allowed tools pattern",
 )
 
 # 53. host proxy rejects unknown tools
 check(
     "test_host_proxy_rejects_unknown_tools",
-    "only 'gh', 'gcloud', and 'browse' are allowed" in host_proxy,
+    "only 'gh', 'gcloud', 'browse', and 'session' are allowed" in host_proxy,
     "missing tool rejection message",
 )
 
