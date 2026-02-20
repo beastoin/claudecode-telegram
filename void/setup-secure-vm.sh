@@ -1483,6 +1483,8 @@ $IPT -A OUTPUT -d 192.168.0.0/16 -j DROP
 $IPT -A OUTPUT -d 100.64.0.0/10 -j DROP
 
 # Browser egress policy: UID-scoped whitelist-only HTTPS + DNS to resolvers.
+# IMPORTANT: DNS rules MUST come before private IP blocks, because the VM's
+# DNS resolver may be on a private IP (e.g., libkrun gateway at 10.0.2.3).
 BROWSER_UID="$(id -u void 2>/dev/null || true)"
 if [[ -n "$BROWSER_UID" ]]; then
   $IPT -N VOID_BROWSER_EGRESS 2>/dev/null || true
@@ -1490,14 +1492,7 @@ if [[ -n "$BROWSER_UID" ]]; then
   $IPT -A OUTPUT -m owner --uid-owner "$BROWSER_UID" -j VOID_BROWSER_EGRESS
   $IPT -A VOID_BROWSER_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-  for cidr in \
-    0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
-    169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 \
-    224.0.0.0/4 240.0.0.0/4; do
-    $IPT -A VOID_BROWSER_EGRESS -d "$cidr" -j REJECT
-  done
-  $IPT -A VOID_BROWSER_EGRESS -d 169.254.169.254/32 -j REJECT
-
+  # 1. Allow DNS to resolvers FIRST (before private IP blocks)
   while read -r ns; do
     [[ -z "$ns" ]] && continue
     [[ "$ns" == *:* ]] && continue
@@ -1505,6 +1500,16 @@ if [[ -n "$BROWSER_UID" ]]; then
     $IPT -A VOID_BROWSER_EGRESS -p tcp -d "$ns" --dport 53 -j ACCEPT
   done < <(awk '/^nameserver/{print $2}' /etc/resolv.conf)
 
+  # 2. Block private/reserved ranges (after DNS is allowed)
+  $IPT -A VOID_BROWSER_EGRESS -d 169.254.169.254/32 -j REJECT
+  for cidr in \
+    0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 \
+    169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 \
+    224.0.0.0/4 240.0.0.0/4; do
+    $IPT -A VOID_BROWSER_EGRESS -d "$cidr" -j REJECT
+  done
+
+  # 3. Allow HTTPS egress, reject everything else
   $IPT -A VOID_BROWSER_EGRESS -p tcp --dport 443 -j ACCEPT
   $IPT -A VOID_BROWSER_EGRESS -j REJECT
 fi
@@ -1767,7 +1772,11 @@ request = {
 }
 print(json.dumps(request))
 PY_BROWSER_REQUEST
-)
+) || exit \$?
+  if [[ -z "\$request" ]]; then
+    echo "Error: failed to build browser request" >&2
+    exit 2
+  fi
 else
   # Build JSON request for gh/gcloud passthrough mode.
   argv_json=\$(printf '%s\n' "\$@" | python3 -c '
@@ -1787,27 +1796,26 @@ print(json.dumps({
 ")
 fi
 
-request=\$(printf '%s' "\$request" | python3 - "\$IPC_KEY" <<'PY_SIGN_REQUEST'
-import hashlib
-import hmac
-import json
-import sys
+if [[ -z "\$request" ]]; then
+  echo "Error: empty request — cannot proceed" >&2
+  exit 2
+fi
 
+request=\$(python3 -c "
+import hashlib, hmac, json, sys
 key_hex = sys.argv[1].strip()
 try:
     key = bytes.fromhex(key_hex)
 except ValueError:
-    print("Error: invalid IPC key in runtime state", file=sys.stderr)
+    print('Error: invalid IPC key in runtime state', file=sys.stderr)
     raise SystemExit(1)
-
-req = json.load(sys.stdin)
+req = json.loads(sys.argv[2])
 payload = dict(req)
-payload.pop("hmac", None)
-canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-req["hmac"] = hmac.new(key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+payload.pop('hmac', None)
+canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+req['hmac'] = hmac.new(key, canonical.encode('utf-8'), hashlib.sha256).hexdigest()
 print(json.dumps(req))
-PY_SIGN_REQUEST
-)
+" "\$IPC_KEY" "\$request")
 
 # Atomic write: .tmp then rename to .json
 echo "\$request" > "\${IPC_DIR}/requests/\${req_id}.tmp"
@@ -2639,24 +2647,224 @@ cmd_status() {
     fi
   fi
 
+  # ── Basic status ──
+  echo "=== Void VM Status ==="
   echo "version=${VERSION}"
   echo "vm_name=${VM_NAME}"
   echo "vm_exists=${vm_present}"
   echo "vm_running=${vm_running}"
-  echo "luks_image=${LUKS_IMAGE}"
-  echo "luks_mapper=${LUKS_MAPPER}"
   echo "luks_mapper_open=${mapper_open}"
   echo "ipc_active=${ipc_active}"
   echo "daemon_alive=${daemon_alive}"
-  echo "ipc_dir=${ipc_dir:-none}"
-  echo "runtime_state_file=${RUNTIME_ENV_FILE}"
-  echo "vm_log_file=${VM_LOG_FILE}"
+  echo ""
 
+  # ── Heartbeat detail ──
+  if [[ -n "$ipc_dir" && -f "${ipc_dir}/heartbeat" ]]; then
+    local hb_time now hb_age
+    hb_time="$(cat "${ipc_dir}/heartbeat" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    hb_age=$((now - hb_time))
+    echo "=== Heartbeat ==="
+    echo "last_heartbeat=$(date -d "@$hb_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$hb_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$hb_time")"
+    echo "age_seconds=${hb_age}"
+    echo ""
+  fi
+
+  # ── IPC queues ──
+  if [[ -n "$ipc_dir" && -d "$ipc_dir" ]]; then
+    echo "=== IPC ==="
+    echo "ipc_dir=${ipc_dir}"
+    echo "pending_requests=$(ls "${ipc_dir}/requests/"*.json 2>/dev/null | wc -l)"
+    echo "stored_responses=$(ls "${ipc_dir}/responses/"*.json 2>/dev/null | wc -l)"
+    if [[ -f "${ipc_dir}/ipc.key" ]]; then
+      echo "ipc_key=present ($(wc -c < "${ipc_dir}/ipc.key" 2>/dev/null || echo 0) bytes)"
+    else
+      echo "ipc_key=MISSING"
+    fi
+    echo ""
+  fi
+
+  # ── krunvm list ──
   if command_exists krunvm || [[ -x /root/.cargo/bin/krunvm ]]; then
     local krunvm_bin
     krunvm_bin="$(command -v krunvm 2>/dev/null || true)"
     [[ -n "$krunvm_bin" ]] || krunvm_bin="/root/.cargo/bin/krunvm"
-    "$krunvm_bin" list || true
+    echo "=== krunvm list ==="
+    "$krunvm_bin" list 2>&1 || echo "(krunvm list failed)"
+    echo ""
+  fi
+
+  # ── VM process ──
+  echo "=== VM Process ==="
+  local vm_pids
+  vm_pids="$(pgrep -f "krun.*${VM_NAME}" 2>/dev/null || true)"
+  if [[ -n "$vm_pids" ]]; then
+    echo "vm_pids=${vm_pids}"
+    ps -p "$vm_pids" -o pid,user,vsz,rss,etime,args --no-headers 2>/dev/null || true
+  else
+    echo "vm_pids=none"
+  fi
+  echo ""
+
+  # ── DNS check (inside VM via test command) ──
+  echo "=== Network (quick probe) ==="
+  if [[ "$daemon_alive" == "yes" && -n "$ipc_dir" ]]; then
+    # Send a harmless gcloud command to test connectivity
+    local probe_id="status-probe-$$"
+    local probe_req="${ipc_dir}/requests/${probe_id}.json"
+    local probe_resp="${ipc_dir}/responses/${probe_id}.json"
+    local ipc_key_hex=""
+    if [[ -f "${ipc_dir}/ipc.key" ]]; then
+      ipc_key_hex="$(cat "${ipc_dir}/ipc.key" 2>/dev/null || true)"
+    fi
+    # Build signed probe request
+    local probe_ts
+    probe_ts="$(date +%s)"
+    local probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"gcloud\",\"auth\",\"list\"],\"timeout\":10,\"timestamp\":${probe_ts}}"
+    if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
+      local probe_hmac
+      probe_hmac="$(python3 -c "
+import hmac, hashlib, json
+key = bytes.fromhex('${ipc_key_hex}')
+payload = '${probe_json}'.encode()
+print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+" 2>/dev/null || true)"
+      if [[ -n "$probe_hmac" ]]; then
+        probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"gcloud\",\"auth\",\"list\"],\"timeout\":10,\"timestamp\":${probe_ts},\"hmac\":\"${probe_hmac}\"}"
+      fi
+    fi
+    echo "$probe_json" > "$probe_req" 2>/dev/null
+    # Wait up to 15s for response
+    local waited=0
+    while [[ ! -f "$probe_resp" && $waited -lt 15 ]]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ -f "$probe_resp" ]]; then
+      echo "gcloud_auth_probe=ok (${waited}s)"
+      local probe_exit
+      probe_exit="$(python3 -c "import json;print(json.load(open('${probe_resp}'))['exit_code'])" 2>/dev/null || echo "?")"
+      local probe_stdout
+      probe_stdout="$(python3 -c "import json;print(json.load(open('${probe_resp}')).get('stdout','')[:200])" 2>/dev/null || echo "")"
+      local probe_stderr
+      probe_stderr="$(python3 -c "import json;print(json.load(open('${probe_resp}')).get('stderr','')[:200])" 2>/dev/null || echo "")"
+      echo "exit_code=${probe_exit}"
+      [[ -n "$probe_stdout" ]] && echo "stdout=${probe_stdout}"
+      [[ -n "$probe_stderr" ]] && echo "stderr=${probe_stderr}"
+      rm -f "$probe_resp"
+    else
+      echo "gcloud_auth_probe=TIMEOUT (15s)"
+    fi
+    rm -f "$probe_req"
+    echo ""
+
+    # Browser probe
+    echo "=== Browser (quick probe) ==="
+    local bprobe_id="status-browser-probe-$$"
+    local bprobe_req="${ipc_dir}/requests/${bprobe_id}.json"
+    local bprobe_resp="${ipc_dir}/responses/${bprobe_id}.json"
+    local bprobe_ts
+    bprobe_ts="$(date +%s)"
+    local bprobe_json="{\"id\":\"${bprobe_id}\",\"tool\":\"browser\",\"action\":\"session list\",\"timeout\":10,\"timestamp\":${bprobe_ts}}"
+    if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
+      local bprobe_hmac
+      bprobe_hmac="$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('${ipc_key_hex}')
+payload = '${bprobe_json}'.encode()
+print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+" 2>/dev/null || true)"
+      if [[ -n "$bprobe_hmac" ]]; then
+        bprobe_json="{\"id\":\"${bprobe_id}\",\"tool\":\"browser\",\"action\":\"session list\",\"timeout\":10,\"timestamp\":${bprobe_ts},\"hmac\":\"${bprobe_hmac}\"}"
+      fi
+    fi
+    echo "$bprobe_json" > "$bprobe_req" 2>/dev/null
+    waited=0
+    while [[ ! -f "$bprobe_resp" && $waited -lt 15 ]]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ -f "$bprobe_resp" ]]; then
+      echo "browser_session_probe=ok (${waited}s)"
+      local bprobe_exit
+      bprobe_exit="$(python3 -c "import json;print(json.load(open('${bprobe_resp}'))['exit_code'])" 2>/dev/null || echo "?")"
+      local bprobe_stdout
+      bprobe_stdout="$(python3 -c "import json;print(json.load(open('${bprobe_resp}')).get('stdout','')[:200])" 2>/dev/null || echo "")"
+      echo "exit_code=${bprobe_exit}"
+      [[ -n "$bprobe_stdout" ]] && echo "stdout=${bprobe_stdout}"
+      rm -f "$bprobe_resp"
+    else
+      echo "browser_session_probe=TIMEOUT (15s)"
+    fi
+    rm -f "$bprobe_req"
+    echo ""
+
+    # DNS probe via browser open
+    echo "=== DNS (browser open probe) ==="
+    local dprobe_id="status-dns-probe-$$"
+    local dprobe_req="${ipc_dir}/requests/${dprobe_id}.json"
+    local dprobe_resp="${ipc_dir}/responses/${dprobe_id}.json"
+    local dprobe_ts
+    dprobe_ts="$(date +%s)"
+    local dprobe_json="{\"id\":\"${dprobe_id}\",\"tool\":\"browser\",\"action\":\"open\",\"params\":{\"url\":\"https://example.com\"},\"timeout\":15,\"timestamp\":${dprobe_ts}}"
+    if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
+      local dprobe_hmac
+      dprobe_hmac="$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('${ipc_key_hex}')
+payload = '${dprobe_json}'.encode()
+print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+" 2>/dev/null || true)"
+      if [[ -n "$dprobe_hmac" ]]; then
+        dprobe_json="{\"id\":\"${dprobe_id}\",\"tool\":\"browser\",\"action\":\"open\",\"params\":{\"url\":\"https://example.com\"},\"timeout\":15,\"timestamp\":${dprobe_ts},\"hmac\":\"${dprobe_hmac}\"}"
+      fi
+    fi
+    echo "$dprobe_json" > "$dprobe_req" 2>/dev/null
+    waited=0
+    while [[ ! -f "$dprobe_resp" && $waited -lt 20 ]]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if [[ -f "$dprobe_resp" ]]; then
+      local dprobe_exit
+      dprobe_exit="$(python3 -c "import json;print(json.load(open('${dprobe_resp}'))['exit_code'])" 2>/dev/null || echo "?")"
+      local dprobe_stdout
+      dprobe_stdout="$(python3 -c "import json;print(json.load(open('${dprobe_resp}')).get('stdout','')[:300])" 2>/dev/null || echo "")"
+      local dprobe_stderr
+      dprobe_stderr="$(python3 -c "import json;print(json.load(open('${dprobe_resp}')).get('stderr','')[:300])" 2>/dev/null || echo "")"
+      if [[ "$dprobe_exit" == "0" ]]; then
+        echo "dns_and_browse=OK (${waited}s)"
+      else
+        echo "dns_and_browse=FAILED (${waited}s, exit_code=${dprobe_exit})"
+      fi
+      [[ -n "$dprobe_stdout" ]] && echo "stdout=${dprobe_stdout}"
+      [[ -n "$dprobe_stderr" ]] && echo "stderr=${dprobe_stderr}"
+      rm -f "$dprobe_resp"
+    else
+      echo "dns_and_browse=TIMEOUT (20s) — likely DNS resolution failure inside VM"
+    fi
+    rm -f "$dprobe_req"
+    echo ""
+  else
+    echo "daemon not alive — skipping probes"
+    echo ""
+  fi
+
+  # ── Daemon log tail ──
+  echo "=== Daemon Log (last 20 lines) ==="
+  if [[ -f "$VM_LOG_FILE" ]]; then
+    tail -20 "$VM_LOG_FILE"
+  else
+    echo "(no log file at ${VM_LOG_FILE})"
+  fi
+  echo ""
+
+  # ── Runtime env ──
+  echo "=== Runtime State ==="
+  if [[ -f "$RUNTIME_ENV_FILE" ]]; then
+    cat "$RUNTIME_ENV_FILE"
+  else
+    echo "(no runtime state file)"
   fi
 }
 
