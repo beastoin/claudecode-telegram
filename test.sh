@@ -5254,6 +5254,109 @@ print('OK')
     fi
 }
 
+test_forward_self_heal_on_403() {
+    info "Testing forward-to-bridge self-heals on 403 (stale HOOK_SECRET)..."
+
+    if python3 -c "
+import sys, json, os
+from importlib.util import spec_from_loader, module_from_spec
+from importlib.machinery import SourceFileLoader
+from unittest.mock import patch, MagicMock
+import urllib.error
+
+# Load forward-to-bridge.py as a module
+spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
+ftb = module_from_spec(spec)
+spec.loader.exec_module(ftb)
+
+# Track calls
+calls = {'response': 0, 'checkin': 0}
+
+def mock_urlopen(req, **kwargs):
+    url = req.full_url if hasattr(req, 'full_url') else str(req)
+    if '/checkin' in url:
+        calls['checkin'] += 1
+        resp = MagicMock()
+        resp.status = 200
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+    # /response endpoint
+    calls['response'] += 1
+    if calls['response'] == 1:
+        # First call: reject with 403 (stale secret)
+        raise urllib.error.HTTPError(url, 403, 'Invalid hook signature', {}, None)
+    # Second call: accept (fresh secret)
+    resp = MagicMock()
+    resp.status = 200
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = lambda s, *a: None
+    return resp
+
+def mock_read_secret(session):
+    return 'fresh_secret_abc'
+
+os.environ['HOOK_SECRET'] = 'stale_secret_xyz'
+
+with patch('urllib.request.urlopen', mock_urlopen), \
+     patch.object(ftb, 'read_hook_secret_from_tmux', mock_read_secret):
+    result = ftb.forward_to_bridge('test msg', 'lee', 'http://localhost:8080/response')
+
+assert result == True, f'expected True, got {result}'
+assert calls['response'] == 2, f'expected 2 /response calls, got {calls[\"response\"]}'
+assert calls['checkin'] == 1, f'expected 1 /checkin call, got {calls[\"checkin\"]}'
+
+# Clean up
+del os.environ['HOOK_SECRET']
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "forward-to-bridge self-heals on 403"
+    else
+        fail "forward-to-bridge self-heal test failed"
+    fi
+}
+
+test_forward_no_self_heal_on_other_errors() {
+    info "Testing forward-to-bridge does NOT self-heal on non-403 errors..."
+
+    if python3 -c "
+import sys, os
+from importlib.util import spec_from_loader, module_from_spec
+from importlib.machinery import SourceFileLoader
+from unittest.mock import patch
+import urllib.error
+
+spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
+ftb = module_from_spec(spec)
+spec.loader.exec_module(ftb)
+
+calls = {'response': 0}
+
+def mock_urlopen(req, **kwargs):
+    calls['response'] += 1
+    raise urllib.error.HTTPError(str(req), 500, 'Server Error', {}, None)
+
+os.environ['HOOK_SECRET'] = 'some_secret'
+
+try:
+    with patch('urllib.request.urlopen', mock_urlopen):
+        ftb.forward_to_bridge('test', 'lee', 'http://localhost:8080/response')
+    assert False, 'should have raised'
+except urllib.error.HTTPError as e:
+    assert e.code == 500, f'expected 500, got {e.code}'
+
+# Should NOT retry on 500
+assert calls['response'] == 1, f'expected 1 call (no retry), got {calls[\"response\"]}'
+
+del os.environ['HOOK_SECRET']
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "forward-to-bridge does not self-heal on non-403"
+    else
+        fail "forward-to-bridge non-403 test failed"
+    fi
+}
+
 test_backend_registry_exists() {
     info "Testing backend registry exists and contains expected backends..."
 
@@ -6568,6 +6671,8 @@ run_unit_tests() {
     log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
     test_markdown_to_telegram_html
     test_forward_to_bridge_escape_flag
+    test_forward_self_heal_on_403
+    test_forward_no_self_heal_on_other_errors
 
     # Unit tests - Backend registry / non-interactive mode
     log ""
