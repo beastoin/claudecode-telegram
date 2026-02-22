@@ -124,6 +124,37 @@ wait_for_port() {
     nc -z localhost "$port" 2>/dev/null
 }
 
+# Compute HMAC-SHA256 signature for hook endpoint requests
+hook_sign() {
+    local body="$1"
+    local secret="${TEST_HOOK_SECRET:-test_hook_secret_for_hmac}"
+    echo -n "$body" | openssl dgst -sha256 -hmac "$secret" | sed 's/^.* //'
+}
+
+# curl wrapper that adds HMAC signature for /response and /notify endpoints
+hook_curl() {
+    local url="$1"; shift
+    local body="$1"; shift
+    local sig
+    sig=$(hook_sign "$body")
+    curl -s -X POST "$url" \
+        -H "Content-Type: application/json" \
+        -H "X-Hook-Signature: sha256=$sig" \
+        -d "$body" "$@"
+}
+
+# Same but returns HTTP code only
+hook_curl_code() {
+    local url="$1"; shift
+    local body="$1"; shift
+    local sig
+    sig=$(hook_sign "$body")
+    curl -s -o /dev/null -w "%{http_code}" -X POST "$url" \
+        -H "Content-Type: application/json" \
+        -H "X-Hook-Signature: sha256=$sig" \
+        -d "$body" "$@"
+}
+
 wait_for_session() {
     local session="$1" attempts=0
     while ! tmux has-session -t "${TEST_TMUX_PREFIX}${session}" 2>/dev/null && [[ $attempts -lt 20 ]]; do
@@ -1095,6 +1126,8 @@ test_bridge_starts() {
     chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR" "$TEST_TEAM_DIR"
 
     # Start bridge with test node isolation
+    # Use fixed HOOK_SECRET so tests can sign requests
+    TEST_HOOK_SECRET="test_hook_secret_for_hmac"
     TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
     PORT="$PORT" \
     NODE_NAME="$TEST_NODE" \
@@ -1102,6 +1135,7 @@ test_bridge_starts() {
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     TEAM_DIR="$TEST_TEAM_DIR" \
+    HOOK_SECRET="$TEST_HOOK_SECRET" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -1427,9 +1461,7 @@ test_notify_endpoint() {
     info "Testing /notify endpoint..."
 
     local result
-    result=$(curl -s -X POST "http://localhost:$PORT/notify" \
-        -H "Content-Type: application/json" \
-        -d '{"text":"Test notification"}')
+    result=$(hook_curl "http://localhost:$PORT/notify" '{"text":"Test notification"}')
 
     if echo "$result" | grep -q "Sent to"; then
         success "/notify endpoint works"
@@ -1665,10 +1697,9 @@ test_response_with_image_tags() {
     echo "$CHAT_ID" > "$session_dir/chat_id"
 
     # Test response with image tag (image won't exist, but parsing should work)
-    local result
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"session":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}')
+    local result body
+    body='{"session":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}'
+    result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for image handling attempt
@@ -1705,10 +1736,9 @@ test_response_endpoint() {
     echo "$test_chat_id" > "$session_dir/chat_id"
 
     # Simulate hook calling /response endpoint
-    local result
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"session":"responsetest","text":"Test response from hook"}')
+    local result body
+    body='{"session":"responsetest","text":"Test response from hook"}'
+    result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for success
@@ -1820,10 +1850,9 @@ test_response_without_pending() {
     rm -f "$session_dir/pending"
 
     # Simulate hook calling /response endpoint
-    local result
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"session":"nopendingtest","text":"Test without pending"}')
+    local result body
+    body='{"session":"nopendingtest","text":"Test without pending"}'
+    result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
         success "/response works without pending file (proactive messaging enabled)"
@@ -3872,9 +3901,7 @@ test_response_endpoint_missing_fields() {
 
     # Missing session
     local result
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"text":"Test"}')
+    result=$(hook_curl "http://localhost:$PORT/response" '{"text":"Test"}')
 
     if echo "$result" | grep -q "Missing"; then
         success "/response rejects missing session"
@@ -3883,9 +3910,7 @@ test_response_endpoint_missing_fields() {
     fi
 
     # Missing text
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"session":"test"}')
+    result=$(hook_curl "http://localhost:$PORT/response" '{"session":"test"}')
 
     if echo "$result" | grep -q "Missing"; then
         success "/response rejects missing text"
@@ -3897,10 +3922,9 @@ test_response_endpoint_missing_fields() {
 test_response_endpoint_no_chat_id() {
     info "Testing /response endpoint with non-existent session..."
 
+    local body='{"session":"nonexistent_session_xyz","text":"Test"}'
     local result
-    result=$(curl -s -X POST "http://localhost:$PORT/response" \
-        -H "Content-Type: application/json" \
-        -d '{"session":"nonexistent_session_xyz","text":"Test"}')
+    result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     # Should return 404 for session without chat_id file
     if echo "$result" | grep -q "No chat_id"; then
@@ -3908,9 +3932,7 @@ test_response_endpoint_no_chat_id() {
     else
         # Check HTTP code
         local http_code
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/response" \
-            -H "Content-Type: application/json" \
-            -d '{"session":"nonexistent_session_xyz","text":"Test"}')
+        http_code=$(hook_curl_code "http://localhost:$PORT/response" "$body")
         if [[ "$http_code" == "404" ]]; then
             success "/response returns 404 for unknown session"
         else
@@ -3923,9 +3945,7 @@ test_notify_endpoint_missing_text() {
     info "Testing /notify endpoint with missing text..."
 
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/notify" \
-        -H "Content-Type: application/json" \
-        -d '{}')
+    http_code=$(hook_curl_code "http://localhost:$PORT/notify" '{}')
 
     if [[ "$http_code" == "400" ]]; then
         success "/notify rejects missing text (400)"

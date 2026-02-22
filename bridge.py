@@ -4529,6 +4529,10 @@ class Handler(BaseHTTPRequestHandler):
             registered = worker_manager.get_registered_sessions()
             if name in registered:
                 backend_name = get_worker_backend(name, registered[name])
+                # Re-export hook env on checkin (fixes stale HOOK_SECRET after restart)
+                tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
+                if tmux_exists(tmux_name):
+                    export_hook_env(tmux_name, backend_name)
             else:
                 backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
@@ -4629,6 +4633,10 @@ def main():
             backend_obj = get_backend(backend_name)
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
+            # Re-export hook env so workers get the new HOOK_SECRET
+            tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
+            if tmux_exists(tmux_name):
+                export_hook_env(tmux_name, backend_name)
 
     # Load last active worker from file (if still exists)
     last_active = load_last_active()
