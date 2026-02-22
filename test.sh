@@ -2292,6 +2292,263 @@ print('OK')
     fi
 }
 
+test_restart_all_sequential() {
+    info "Testing /restart all restarts workers sequentially..."
+
+    if python3 -c "
+import time
+import bridge
+
+restart_log = []
+
+def fake_restart(name, mode='relaunch'):
+    restart_log.append((name, mode, time.monotonic()))
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'chen': {'tmux': 'claude-test-chen', 'backend': 'claude'},
+    'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'},
+    'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
+}
+bridge.state['active'] = 'lee'
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+router.cmd_restart(123, 'all')
+
+# Wait for background thread to finish
+router._restart_all_thread.join(timeout=20)
+
+# Should restart all 3 workers
+assert len(restart_log) == 3, f'expected 3 restarts, got {len(restart_log)}: {restart_log}'
+
+# All should be resume mode (no --clean)
+for name, mode, _ in restart_log:
+    assert mode == 'resume', f'{name} mode was {mode}, expected resume'
+
+# Focused worker (lee) should be last
+assert restart_log[-1][0] == 'lee', f'expected lee last, got {restart_log[-1][0]}'
+
+# Non-focused workers should be sorted
+non_focused = [n for n, _, _ in restart_log[:-1]]
+assert non_focused == sorted(non_focused), f'expected sorted: {non_focused}'
+
+# Should have 'done' message
+assert any('done' in m.lower() or 'all' in m.lower() for m in tg.messages), f'no done msg: {tg.messages}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart all restarts workers sequentially"
+    else
+        fail "/restart all sequential test failed"
+    fi
+}
+
+test_restart_all_clean() {
+    info "Testing /restart all --clean uses relaunch mode..."
+
+    if python3 -c "
+import time
+import bridge
+
+restart_log = []
+
+def fake_restart(name, mode='relaunch'):
+    restart_log.append((name, mode))
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'},
+}
+bridge.state['active'] = None
+
+class FakeTelegram:
+    def send_message(self, *a, **kw):
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_restart(123, 'all --clean')
+
+# Thread may finish fast (1 worker, no delay); poll for completion
+for _ in range(40):
+    with router._restart_all_lock:
+        if not router._restart_all_running:
+            break
+    time.sleep(0.05)
+
+assert len(restart_log) == 1, f'expected 1 restart, got {len(restart_log)}'
+assert restart_log[0][1] == 'relaunch', f'expected relaunch, got {restart_log[0][1]}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart all --clean uses relaunch mode"
+    else
+        fail "/restart all --clean test failed"
+    fi
+}
+
+test_restart_all_handles_failure() {
+    info "Testing /restart all continues on failure..."
+
+    if python3 -c "
+import time
+import bridge
+
+restart_log = []
+
+def fake_restart(name, mode='relaunch'):
+    restart_log.append(name)
+    if name == 'bob':
+        return False, 'workspace not running'
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
+    'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'},
+    'charlie': {'tmux': 'claude-test-charlie', 'backend': 'claude'},
+}
+bridge.state['active'] = None
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+router.cmd_restart(123, 'all')
+
+# Wait for completion
+for _ in range(100):
+    with router._restart_all_lock:
+        if not router._restart_all_running:
+            break
+    time.sleep(0.1)
+
+# All 3 should be attempted despite bob failing
+assert len(restart_log) == 3, f'expected 3 attempts, got {len(restart_log)}'
+# Should report bob's failure
+assert any('bob' in m.lower() and 'failed' in m.lower() for m in tg.messages), f'no failure msg for bob: {tg.messages}'
+# Should report summary with failure
+assert any('1 failed' in m for m in tg.messages), f'no failure summary: {tg.messages}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart all continues on failure"
+    else
+        fail "/restart all failure handling test failed"
+    fi
+}
+
+test_restart_cancel() {
+    info "Testing /restart cancel when no sequence running..."
+
+    if python3 -c "
+import bridge
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+router.cmd_restart(123, 'cancel')
+
+assert any('not running' in m.lower() or 'no restart' in m.lower() for m in tg.messages), f'expected not-running msg: {tg.messages}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart cancel when no sequence running"
+    else
+        fail "/restart cancel test failed"
+    fi
+}
+
+test_restart_all_no_workers() {
+    info "Testing /restart all with no workers..."
+
+    if python3 -c "
+import bridge
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {}
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+router.cmd_restart(123, 'all')
+
+assert any('no team' in m.lower() or 'hire' in m.lower() for m in tg.messages), f'expected no-workers msg: {tg.messages}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart all with no workers"
+    else
+        fail "/restart all no workers test failed"
+    fi
+}
+
+test_restart_all_rejects_duplicate() {
+    info "Testing /restart all rejects when already running..."
+
+    if python3 -c "
+import bridge
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
+}
+bridge.state['active'] = None
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+
+# Simulate already running
+with router._restart_all_lock:
+    router._restart_all_running = True
+
+router.cmd_restart(123, 'all')
+
+assert any('already running' in m.lower() for m in tg.messages), f'expected already-running msg: {tg.messages}'
+
+# Clean up
+with router._restart_all_lock:
+    router._restart_all_running = False
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart all rejects when already running"
+    else
+        fail "/restart all duplicate rejection test failed"
+    fi
+}
+
 test_get_any_session_id() {
     info "Testing get_any_session_id finds codex/claude session ids..."
 
@@ -6313,6 +6570,12 @@ run_unit_tests() {
     test_codex_relaunch_clears_session_id
     test_restart_with_name
     test_restart_clean_with_name
+    test_restart_all_sequential
+    test_restart_all_clean
+    test_restart_all_handles_failure
+    test_restart_cancel
+    test_restart_all_no_workers
+    test_restart_all_rejects_duplicate
     test_codex_pause_clears_pending
     test_adapter_pid_tracking
     test_pause_kills_adapter

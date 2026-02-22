@@ -758,7 +758,7 @@ RESERVED_NAMES = {
     # Bridge commands
     "team", "focus", "progress", "pause", "restart", "settings", "hire", "end",
     # Special
-    "all", "start", "help",
+    "all", "cancel", "start", "help",
 }
 
 
@@ -3620,6 +3620,11 @@ class CommandRouter:
     def __init__(self, telegram_api: TelegramAPI, workers: WorkerManager):
         self.telegram = telegram_api
         self.workers = workers
+        # Restart-all state
+        self._restart_all_lock = threading.Lock()
+        self._restart_all_running = False
+        self._restart_all_abort = threading.Event()
+        self._restart_all_thread = None
 
     def reply(self, chat_id, text, outcome=None):
         self.telegram.send_message(chat_id, text)
@@ -4051,6 +4056,14 @@ class CommandRouter:
                 remaining.append(t)
         name_arg = remaining[0].lower() if remaining else ""
 
+        # Branch: /restart cancel
+        if name_arg == "cancel":
+            return self._cmd_restart_cancel(chat_id)
+
+        # Branch: /restart all [--clean]
+        if name_arg == "all":
+            return self._cmd_restart_all(chat_id, clean)
+
         if name_arg:
             name = name_arg
         else:
@@ -4121,6 +4134,83 @@ class CommandRouter:
             self.reply(chat_id, f"Resuming {name.capitalize()}...")
         else:
             self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+        return True
+
+    # ── Restart All (sequential) ──────────────────────────────────
+
+    def _cmd_restart_all(self, chat_id, clean: bool):
+        registered = self.workers.get_registered_sessions()
+        if not registered:
+            self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+            return True
+
+        with self._restart_all_lock:
+            if self._restart_all_running:
+                self.reply(chat_id, "A /restart all is already running. Use /restart cancel to stop it.")
+                return True
+            self._restart_all_running = True
+            self._restart_all_abort.clear()
+
+        # Snapshot worker names now; sort alphabetically, focused worker last
+        names = sorted(registered.keys())
+        active = state.get("active")
+        if active and active in names:
+            names.remove(active)
+            names.append(active)
+
+        mode = "relaunch" if clean else "resume"
+        self.reply(chat_id, f"Restarting {len(names)} workers sequentially ({mode})...")
+
+        self._restart_all_thread = threading.Thread(
+            target=self._run_restart_all_sequence,
+            args=(chat_id, names, mode),
+            daemon=True,
+        )
+        self._restart_all_thread.start()
+        return True
+
+    def _run_restart_all_sequence(self, chat_id, names, mode):
+        delay_s = 2.5
+        failed = []
+        try:
+            total = len(names)
+            for i, name in enumerate(names, 1):
+                if self._restart_all_abort.is_set():
+                    self.reply(chat_id, f"Restart sequence aborted at {i-1}/{total}.")
+                    return
+
+                ok, err = restart_claude(name, mode=mode)
+                if ok:
+                    self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} restarted.")
+                else:
+                    failed.append((name, err))
+                    self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} failed: {err}")
+
+                if i < total:
+                    # Interruptible sleep
+                    for _ in range(5):
+                        if self._restart_all_abort.is_set():
+                            break
+                        time.sleep(delay_s / 5)
+
+            if failed:
+                summary = ", ".join(n for n, _ in failed)
+                self.reply(chat_id, f"Restart all done. {len(failed)} failed: {summary}")
+            else:
+                self.reply(chat_id, f"Restart all done. All {total} workers restarted.")
+        finally:
+            with self._restart_all_lock:
+                self._restart_all_running = False
+                self._restart_all_abort.clear()
+                self._restart_all_thread = None
+
+    def _cmd_restart_cancel(self, chat_id):
+        with self._restart_all_lock:
+            if not self._restart_all_running:
+                self.reply(chat_id, "No restart-all sequence is running.")
+                return True
+            self._restart_all_abort.set()
+        self.reply(chat_id, "Stopping restart-all sequence...")
         return True
 
     def cmd_settings(self, chat_id):
