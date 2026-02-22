@@ -192,7 +192,7 @@ Interactive vs non-interactive detection is backend-driven (`backend.is_interact
 - **Protocol flexibility:** Each worker advertises how to reach it (tmux, pipe, etc.)
 
 **Current state:**
-- **tmux backends:** Workers can use `tmux send-keys -t claude-<node>-<worker> "message" Enter` directly
+- **tmux backends:** Workers use `echo 'message' | tmux load-buffer - && tmux paste-buffer -r -t claude-<node>-<worker> && tmux send-keys -t claude-<node>-<worker> Enter`
 - **All backends:** Each worker gets a named pipe at `/tmp/claudecode-telegram/<node>/<worker>/in.pipe`
   - Node name derived from `TMUX_PREFIX` (`claude-test-` → `test`, `claude-` → `default`)
 
@@ -210,7 +210,7 @@ Response:
       "name": "alice",
       "protocol": "tmux",
       "address": "claude-prod-alice",
-      "send_example": "tmux send-keys -t claude-prod-alice 'your message here' Enter"
+      "send_example": "echo 'your message here' | tmux load-buffer - && tmux paste-buffer -r -t claude-prod-alice && tmux send-keys -t claude-prod-alice Enter"
     },
     {
       "name": "bob",
@@ -226,7 +226,7 @@ Response:
 
 | Protocol | Address Format | How to Send | Backends |
 |----------|---------------|-------------|------|
-| `tmux` | Session name | `tmux send-keys -t <address> "message" Enter` | tmux only |
+| `tmux` | Session name | `echo "msg" \| tmux load-buffer - && tmux paste-buffer -r -t <address> && tmux send-keys -t <address> Enter` | tmux only |
 | `pipe` | Named pipe path | `echo "message" > <address>` | All backends |
 
 **Recommended: Named pipes as unified protocol**

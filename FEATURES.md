@@ -845,7 +845,7 @@ claude [--resume <id>] [--append-system-prompt <text>] --dangerously-skip-permis
 - `send()` (paste-buffer — reliable for long messages):
   - Write text to temp file
   - `tmux load-buffer -b <id> <tmpfile>` (load into named buffer)
-  - `tmux paste-buffer -t <session> -b <id> -d` (paste atomically)
+  - `tmux paste-buffer -r -t <session> -b <id> -d` (paste atomically, -r suppresses bracketed paste)
   - `tmux send-keys -t <session> Enter` (submit)
 - `is_online()`:
   - tmux session exists AND

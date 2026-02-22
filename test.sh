@@ -4646,7 +4646,7 @@ for worker in data['workers']:
 assert found, f'discoverworker1 should be in workers list, got: {[w[\"name\"] for w in data[\"workers\"]]}'
 assert found['protocol'] == 'tmux', f'tmux worker should have tmux protocol, got {found[\"protocol\"]}'
 assert '${TEST_TMUX_PREFIX}discoverworker1' in found['address'], f'address should be tmux session name'
-assert 'tmux send-keys' in found['send_example'], f'send_example should show tmux command'
+assert 'paste-buffer -r' in found['send_example'], f'send_example should use paste-buffer -r (no bracketed paste), got: {found[\"send_example\"]}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
