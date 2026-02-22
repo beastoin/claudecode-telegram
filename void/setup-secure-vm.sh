@@ -2325,11 +2325,9 @@ HTML_PAGE = """<!doctype html>
       ws.onopen = () => {
         reconnectDelay = 250;
         setStatus("connected");
-        startScreenshotPoll();
       };
       ws.onclose = () => {
-        setStatus("disconnected, reconnecting...");
-        stopScreenshotPoll();
+        setStatus("reconnecting...");
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(4000, Math.floor(reconnectDelay * 1.7));
@@ -2373,12 +2371,14 @@ HTML_PAGE = """<!doctype html>
           const delay = Math.max(50, 300 - elapsed);
           pollTimer = setTimeout(pollScreenshot, delay);
         })
-        .catch(() => {
-          pollTimer = setTimeout(pollScreenshot, 500);
+        .catch((err) => {
+          setStatus("screenshot: " + err.message);
+          pollTimer = setTimeout(pollScreenshot, 1000);
         });
     }
 
     connect();
+    startScreenshotPoll();
 
     doneBtn.addEventListener("click", () => send({ type: "done" }));
     navBtn.addEventListener("click", () => {
@@ -3545,6 +3545,7 @@ async def run(args, external_stop):
                 img_str = img_str.split(",", 1)[1]
             import base64 as _b64
             img_bytes = _b64.b64decode(img_str)
+            last_client_ts["value"] = time.time()
             return HTTPStatus.OK, [
                 ("Content-Type", "image/jpeg"),
                 ("Content-Length", str(len(img_bytes))),
@@ -3588,7 +3589,7 @@ async def run(args, external_stop):
                 if now - started > args.max_seconds:
                     stop_reason["value"] = "timeout"
                     break
-                if not clients and now - last_client_ts["value"] > 180:
+                if not clients and now - last_client_ts["value"] > 600:
                     stop_reason["value"] = "idle"
                     break
 
