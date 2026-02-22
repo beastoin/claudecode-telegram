@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import re
@@ -349,15 +350,45 @@ def tmux_exists(tmux_name: str) -> bool:
 
 
 def tmux_send_message(tmux_name: str, text: str) -> bool:
-    """Send text + Enter to tmux session with locking."""
+    """Send text + Enter to tmux session via paste-buffer (reliable for long messages).
+
+    Uses tmux load-buffer/paste-buffer instead of send-keys -l to avoid
+    character-by-character terminal injection which causes input batching
+    on long messages or rapid sends.
+    """
     lock = _get_tmux_send_lock(tmux_name)
     with lock:
-        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "-l", text])
-        if result.returncode != 0:
-            return False
-        time.sleep(0.2)  # Delay to let terminal process text before Enter
-        result = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-        return result.returncode == 0
+        # Write message to temp file for tmux load-buffer
+        fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
+        try:
+            os.write(fd, text.encode())
+            os.close(fd)
+            buf_name = f"msg-{uuid.uuid4().hex[:8]}"
+            # Load entire message into a named tmux buffer
+            r = subprocess.run(
+                ["tmux", "load-buffer", "-b", buf_name, tmpfile],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                return False
+            # Paste buffer atomically into the target pane
+            r = subprocess.run(
+                ["tmux", "paste-buffer", "-t", tmux_name, "-b", buf_name, "-d"],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                return False
+            # No delay needed — paste-buffer is processed by tmux server
+            # before the next command, unlike send-keys -l which injects
+            # character-by-character through the terminal.
+            # Send Enter to submit the pasted text
+            r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+            return r.returncode == 0
+        finally:
+            try:
+                os.unlink(tmpfile)
+            except OSError:
+                pass
 
 
 def get_pane_command(tmux_name: str) -> str:
@@ -2980,7 +3011,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"tmux send-keys -t {tmux_name} 'YOUR_NAME: your message here' Enter && sleep 1"
+                    "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -t {tmux_name} && tmux send-keys -t {tmux_name} Enter",
+                    "note": "Uses paste-buffer for reliable delivery of long messages. Always prefix your name."
                 })
         return workers
 

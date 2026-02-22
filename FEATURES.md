@@ -842,10 +842,11 @@ opencode run "<message>" --format json
 ```
 claude [--resume <id>] [--append-system-prompt <text>] --dangerously-skip-permissions
 ```
-- `send()`:
-  - `tmux send-keys -t <session> -l "<text>"`
-  - sleep 0.2s
-  - `tmux send-keys -t <session> Enter`
+- `send()` (paste-buffer — reliable for long messages):
+  - Write text to temp file
+  - `tmux load-buffer -b <id> <tmpfile>` (load into named buffer)
+  - `tmux paste-buffer -t <session> -b <id> -d` (paste atomically)
+  - `tmux send-keys -t <session> Enter` (submit)
 - `is_online()`:
   - tmux session exists AND
   - current pane command contains `claude` OR a child process named `claude` is running under the pane PID

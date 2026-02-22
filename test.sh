@@ -4333,6 +4333,68 @@ print('OK')
     fi
 }
 
+test_tmux_paste_buffer_send() {
+    info "Testing tmux paste-buffer message delivery..."
+
+    local test_session="test-paste-buf-$$"
+    tmux new-session -d -s "$test_session" -x 200 -y 50 2>/dev/null
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create test tmux session"
+        return
+    fi
+
+    # Test 1: Short message via paste-buffer
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import tmux_send_message
+result = tmux_send_message('$test_session', 'paste-test-short-ok')
+assert result == True, f'Expected True, got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "paste-buffer: short message sent"
+    else
+        fail "paste-buffer: short message failed"
+        tmux kill-session -t "$test_session" 2>/dev/null
+        return
+    fi
+
+    sleep 0.5
+    local pane_content
+    pane_content=$(tmux capture-pane -t "$test_session" -p 2>/dev/null)
+    if echo "$pane_content" | grep -q "paste-test-short-ok"; then
+        success "paste-buffer: short message arrived in pane"
+    else
+        fail "paste-buffer: short message not found in pane"
+        tmux kill-session -t "$test_session" 2>/dev/null
+        return
+    fi
+
+    # Test 2: Long message (1000+ chars)
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import tmux_send_message
+long_msg = 'LONGMSG_' + 'A' * 1000 + '_END'
+result = tmux_send_message('$test_session', long_msg)
+assert result == True, f'Expected True, got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "paste-buffer: long message (1000+ chars) sent"
+    else
+        fail "paste-buffer: long message send failed"
+    fi
+
+    sleep 0.5
+    pane_content=$(tmux capture-pane -t "$test_session" -p -S -50 2>/dev/null)
+    if echo "$pane_content" | grep -q "LONGMSG_"; then
+        success "paste-buffer: long message arrived in pane"
+    else
+        fail "paste-buffer: long message not found in pane"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup and shutdown tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6743,6 +6805,7 @@ run_unit_tests() {
     log ""
     log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
     test_tmux_send_locks
+    test_tmux_paste_buffer_send
 
     # Unit tests - Misc behavior
     log ""
