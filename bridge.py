@@ -118,7 +118,7 @@ WATCHDOG_INTERVAL = 4
 START_GRACE = 30
 THINK_GRACE = 30
 TOOL_GAP_GRACE = 12
-STALE_PENDING = 300
+STALE_PENDING = 900  # 15 minutes
 CPU_ACTIVE = 15.0
 CPU_IDLE = 7.0
 IDLE_STREAK_STUCK = 3
@@ -693,6 +693,8 @@ _idle_streak = {}
 _prev_worker_states = {}
 _consecutive_probe_failures = {}
 _idle_child_baseline = {}  # name -> int (MCP server child count at idle)
+_prev_children = {}  # name -> int (previous active children count, for activity detection)
+_last_activity_ts = {}  # name -> float (last time children count changed)
 _watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
@@ -2671,7 +2673,23 @@ def watchdog_loop():
                     with _watchdog_lock:
                         _last_child_ts[name] = now
 
-                pending_age = now - pending_ts if pending_ts else 0.0
+                # Activity detection: if children count changed or CPU is active,
+                # worker is doing something. Reset the stale-pending timer so
+                # long autonomous work doesn't trigger false STUCK alerts.
+                with _watchdog_lock:
+                    prev_children = _prev_children.get(name)
+                    activity_changed = (prev_children is not None and prev_children != children)
+                    if activity_changed or cpu >= CPU_ACTIVE:
+                        _last_activity_ts[name] = now
+                    _prev_children[name] = children
+                    last_activity = _last_activity_ts.get(name, 0.0)
+
+                # pending_age counts from the LATER of: message arrival or last activity
+                if pending_ts:
+                    effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
+                    pending_age = now - effective_start
+                else:
+                    pending_age = 0.0
                 with _watchdog_lock:
                     last_child_ts = _last_child_ts.get(name, 0.0)
                     last_hook_ts = _last_hook_ts.get(name)
@@ -2743,6 +2761,12 @@ def watchdog_loop():
                 for name in list(_idle_child_baseline.keys()):
                     if name not in registered_names:
                         _idle_child_baseline.pop(name, None)
+                for name in list(_prev_children.keys()):
+                    if name not in registered_names:
+                        _prev_children.pop(name, None)
+                for name in list(_last_activity_ts.keys()):
+                    if name not in registered_names:
+                        _last_activity_ts.pop(name, None)
             for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
                     _consecutive_probe_failures.pop(name, None)

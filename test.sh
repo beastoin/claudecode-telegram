@@ -3194,10 +3194,10 @@ state, reason = bridge.compute_state(
 )
 assert state == 'WAITING', f'WAITING case: expected WAITING, got {state} ({reason})'
 
-# STUCK: pending set, pending_age > STALE_PENDING (300), cpu < CPU_IDLE
+# STUCK: pending set, pending_age > STALE_PENDING (900), cpu < CPU_IDLE
 state, reason = bridge.compute_state(
-    tmux_exists=True, claude_pid='12345', pending=True, pending_ts=now - 600,
-    pending_age=600, children=0, last_child_ts=0.0, cpu=2.0,
+    tmux_exists=True, claude_pid='12345', pending=True, pending_ts=now - 1200,
+    pending_age=1200, children=0, last_child_ts=0.0, cpu=2.0,
     last_hook_ts=None, last_seen_claude=now, now=now, is_interactive=True,
 )
 assert state == 'STUCK', f'STUCK case: expected STUCK, got {state} ({reason})'
