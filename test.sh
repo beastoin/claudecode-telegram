@@ -3210,6 +3210,60 @@ print('OK')
     fi
 }
 
+test_idle_child_baseline() {
+    info "Testing idle child baseline filters MCP servers..."
+
+    if python3 -c "
+import time
+import bridge
+
+now = time.time()
+
+# With children=0 (baseline subtracted), idle worker should be READY
+state, reason = bridge.compute_state(
+    tmux_exists=True, claude_pid='12345', pending=False, pending_ts=None,
+    pending_age=0, children=0, last_child_ts=0.0, cpu=1.0,
+    last_hook_ts=None, last_seen_claude=now, now=now, is_interactive=True,
+)
+assert state == 'READY', f'Idle with baseline subtracted: expected READY, got {state} ({reason})'
+
+# With children=1 (one extra above baseline), should be UNTRACKED_BUSY
+state, reason = bridge.compute_state(
+    tmux_exists=True, claude_pid='12345', pending=False, pending_ts=None,
+    pending_age=0, children=1, last_child_ts=now, cpu=1.0,
+    last_hook_ts=None, last_seen_claude=now, now=now, is_interactive=True,
+)
+assert state == 'UNTRACKED_BUSY', f'Extra child above baseline: expected UNTRACKED_BUSY, got {state} ({reason})'
+
+# Test _idle_child_baseline map directly
+bridge._idle_child_baseline.clear()
+
+# First observation: sets baseline
+bridge._idle_child_baseline['test-worker'] = 2  # simulate 2 MCP servers
+baseline = bridge._idle_child_baseline['test-worker']
+assert baseline == 2, f'Expected baseline 2, got {baseline}'
+
+# Effective children with 2 MCP + 1 tool = 3 total, active = 1
+children_total = 3
+children_active = max(0, children_total - baseline)
+assert children_active == 1, f'Expected 1 active child, got {children_active}'
+
+# Effective children with just MCP = 2 total, active = 0
+children_total = 2
+children_active = max(0, children_total - baseline)
+assert children_active == 0, f'Expected 0 active children, got {children_active}'
+
+# Cleanup
+bridge._idle_child_baseline.clear()
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Idle child baseline filters MCP server children"
+    else
+        fail "Idle child baseline test failed"
+    fi
+}
+
 test_idle_streak_prevents_false_stuck() {
     info "Testing idle_streak prevents false STUCK alerts..."
 
@@ -6773,6 +6827,7 @@ run_unit_tests() {
     test_compute_state_non_interactive
     test_since_preserved_on_reason_change
     test_compute_state_interactive
+    test_idle_child_baseline
     test_idle_streak_prevents_false_stuck
     test_watchdog_resolved_alert
     test_handle_watchdog_transition

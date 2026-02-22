@@ -692,6 +692,7 @@ _last_alert_ts = {}
 _idle_streak = {}
 _prev_worker_states = {}
 _consecutive_probe_failures = {}
+_idle_child_baseline = {}  # name -> int (MCP server child count at idle)
 _watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
@@ -2645,13 +2646,31 @@ def watchdog_loop():
                 if claude_pid and claude_pid in stats:
                     cpu = stats[claude_pid].get("cpu", 0.0)
 
-                children = _child_count(claude_pid) if claude_pid else 0
+                children_total = _child_count(claude_pid) if claude_pid else 0
+
+                # Dynamic baseline: MCP servers are persistent children.
+                # Track idle child count so only EXTRA children count as work.
+                pending_ts = _pending_timestamp(name)
+                pending = pending_ts is not None
+                if is_interactive and claude_pid:
+                    with _watchdog_lock:
+                        baseline = _idle_child_baseline.get(name)
+                        if baseline is None:
+                            # First observation — assume current count is baseline
+                            _idle_child_baseline[name] = children_total
+                            baseline = children_total
+                        elif not pending:
+                            # When idle, learn the true floor (MCP servers may start late)
+                            baseline = min(baseline, children_total)
+                            _idle_child_baseline[name] = baseline
+                    children = max(0, children_total - baseline)
+                else:
+                    children = children_total
+
                 if children > 0:
                     with _watchdog_lock:
                         _last_child_ts[name] = now
 
-                pending_ts = _pending_timestamp(name)
-                pending = pending_ts is not None
                 pending_age = now - pending_ts if pending_ts else 0.0
                 with _watchdog_lock:
                     last_child_ts = _last_child_ts.get(name, 0.0)
@@ -2721,6 +2740,9 @@ def watchdog_loop():
                 for name in list(_idle_streak.keys()):
                     if name not in registered_names:
                         _idle_streak.pop(name, None)
+                for name in list(_idle_child_baseline.keys()):
+                    if name not in registered_names:
+                        _idle_child_baseline.pop(name, None)
             for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
                     _consecutive_probe_failures.pop(name, None)
