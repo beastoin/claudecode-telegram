@@ -332,6 +332,9 @@ class Backend(Protocol):
 _tmux_send_locks = {}
 _tmux_send_locks_guard = threading.Lock()
 
+# Per-session flock file descriptors (kept open for the process lifetime)
+_tmux_send_flock_fds = {}
+
 
 def _get_tmux_send_lock(tmux_name: str):
     """Get or create a lock for a specific tmux session."""
@@ -339,6 +342,28 @@ def _get_tmux_send_lock(tmux_name: str):
         if tmux_name not in _tmux_send_locks:
             _tmux_send_locks[tmux_name] = threading.Lock()
         return _tmux_send_locks[tmux_name]
+
+
+def tmux_send_lock_path(tmux_name: str) -> Path:
+    """Return the flock file path for a tmux session. Node-namespaced."""
+    return Path(f"/tmp/claudecode-telegram/{_node_name}/locks/{tmux_name}.lock")
+
+
+def _acquire_flock(tmux_name: str) -> int:
+    """Acquire a cross-process flock for a tmux session. Returns fd."""
+    lock_file = tmux_send_lock_path(tmux_name)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_flock(fd: int):
+    """Release a cross-process flock."""
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
 
 
 def tmux_exists(tmux_name: str) -> bool:
@@ -355,44 +380,50 @@ def tmux_send_message(tmux_name: str, text: str) -> bool:
     Uses tmux load-buffer/paste-buffer instead of send-keys -l to avoid
     character-by-character terminal injection which causes input batching
     on long messages or rapid sends.
+
+    Two-layer locking:
+    1. Python threading.Lock — serializes sends within this process
+    2. flock on a per-session file — serializes sends across processes
+       (workers sending via tmux directly use the same lock file)
     """
     lock = _get_tmux_send_lock(tmux_name)
     with lock:
-        # Write message to temp file for tmux load-buffer
-        fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
+        flock_fd = _acquire_flock(tmux_name)
         try:
-            os.write(fd, text.encode())
-            os.close(fd)
-            buf_name = f"msg-{uuid.uuid4().hex[:8]}"
-            # Load entire message into a named tmux buffer
-            r = subprocess.run(
-                ["tmux", "load-buffer", "-b", buf_name, tmpfile],
-                capture_output=True,
-            )
-            if r.returncode != 0:
-                return False
-            # Paste buffer atomically into the target pane
-            # -r: suppress bracketed paste escape sequences (tmux 3.4+)
-            #      without -r, TUI apps like Claude Code show "[Pasted text]"
-            #      instead of processing the input
-            # -d: delete buffer after pasting
-            r = subprocess.run(
-                ["tmux", "paste-buffer", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
-                capture_output=True,
-            )
-            if r.returncode != 0:
-                return False
-            # No delay needed — paste-buffer is processed by tmux server
-            # before the next command, unlike send-keys -l which injects
-            # character-by-character through the terminal.
-            # Send Enter to submit the pasted text
-            r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-            return r.returncode == 0
-        finally:
+            # Write message to temp file for tmux load-buffer
+            fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
             try:
-                os.unlink(tmpfile)
-            except OSError:
-                pass
+                os.write(fd, text.encode())
+                os.close(fd)
+                buf_name = f"msg-{uuid.uuid4().hex[:8]}"
+                # Load entire message into a named tmux buffer
+                r = subprocess.run(
+                    ["tmux", "load-buffer", "-b", buf_name, tmpfile],
+                    capture_output=True,
+                )
+                if r.returncode != 0:
+                    return False
+                # Paste buffer atomically into the target pane
+                # -r: suppress bracketed paste escape sequences (tmux 3.4+)
+                #      without -r, TUI apps like Claude Code show "[Pasted text]"
+                #      instead of processing the input
+                # -d: delete buffer after pasting
+                r = subprocess.run(
+                    ["tmux", "paste-buffer", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
+                    capture_output=True,
+                )
+                if r.returncode != 0:
+                    return False
+                # Send Enter to submit the pasted text
+                r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+                return r.returncode == 0
+            finally:
+                try:
+                    os.unlink(tmpfile)
+                except OSError:
+                    pass
+        finally:
+            _release_flock(flock_fd)
 
 
 def get_pane_command(tmux_name: str) -> str:
@@ -3264,8 +3295,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -r -t {tmux_name} && tmux send-keys -t {tmux_name} Enter",
-                    "note": "Uses paste-buffer for reliable delivery of long messages. Always prefix your name."
+                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -r -t {tmux_name} && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
+                    "note": "Uses paste-buffer + flock for reliable delivery. The flock prevents interleaving when multiple senders target the same session. Always prefix your name."
                 })
         return workers
 

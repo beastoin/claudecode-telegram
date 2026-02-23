@@ -2798,6 +2798,184 @@ print('OK')
     fi
 }
 
+test_concurrent_sends_no_interleave() {
+    info "Testing concurrent tmux sends don't interleave (flock behavior)..."
+
+    local test_session="test-conc-$$"
+    local recv_log="/tmp/test-conc-recv-$$.log"
+    tmux new-session -d -s "$test_session" -x 200 -y 50 2>/dev/null
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create test tmux session"
+        return
+    fi
+
+    # Start a simple receiver that logs each line
+    rm -f "$recv_log"
+    tmux send-keys -t "$test_session" "while IFS= read -r line; do printf '%s\n' \"\$line\" >> $recv_log; done" Enter
+    sleep 0.5
+
+    # 5 parallel threads, 5 messages each, all via tmux_send_message (has flock)
+    if python3 -c "
+import sys, threading, time; sys.path.insert(0, '.')
+import bridge
+
+bridge._node_name = 'test-conc'
+
+results = {'errors': []}
+
+def sender(label, count):
+    for i in range(1, count+1):
+        ok = bridge.tmux_send_message('$test_session', f'CC-{label}{i}')
+        if not ok:
+            results['errors'].append(f'{label}{i} send failed')
+
+threads = []
+for s in 'ABCDE':
+    t = threading.Thread(target=sender, args=(s, 5))
+    threads.append(t)
+    t.start()
+for t in threads:
+    t.join()
+
+assert not results['errors'], f'Send errors: {results[\"errors\"]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        sleep 3
+
+        # Count clean messages (each should be exactly CC-X# on its own line)
+        local total_expected=25
+        local clean
+        clean=$(grep -cE '^CC-[A-E][1-5]$' "$recv_log" 2>/dev/null || echo 0)
+        local total
+        total=$(grep -c 'CC-' "$recv_log" 2>/dev/null || echo 0)
+        local corrupted=$(( total - clean ))
+
+        if [[ "$clean" -eq "$total_expected" && "$corrupted" -eq 0 ]]; then
+            success "Concurrent sends: $clean/$total_expected clean, 0 corrupted"
+        else
+            fail "Concurrent sends: $clean/$total_expected clean, $corrupted corrupted"
+            grep -v '^CC-[A-E][1-5]$' "$recv_log" 2>/dev/null | grep 'CC-' | head -5 | while IFS= read -r line; do
+                info "  corrupted: '$line'"
+            done
+        fi
+    else
+        fail "Concurrent send test script failed"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null
+    rm -f "$recv_log"
+}
+
+test_flock_per_session_isolation() {
+    info "Testing flock is per-session (different sessions don't block)..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+import bridge
+
+bridge._node_name = 'test-iso'
+
+# Different sessions get different lock files
+path_a = bridge.tmux_send_lock_path('session-alice')
+path_b = bridge.tmux_send_lock_path('session-bob')
+assert path_a != path_b, f'same lock path for different sessions: {path_a}'
+assert 'session-alice' in str(path_a), f'lock path missing session name: {path_a}'
+assert 'session-bob' in str(path_b), f'lock path missing session name: {path_b}'
+
+# Acquiring flock on session A should not block session B
+import fcntl, os
+path_a.parent.mkdir(parents=True, exist_ok=True)
+fd_a = os.open(str(path_a), os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd_a, fcntl.LOCK_EX)
+
+# Session B lock should be immediately acquirable (non-blocking test)
+path_b.parent.mkdir(parents=True, exist_ok=True)
+fd_b = os.open(str(path_b), os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd_b, fcntl.LOCK_EX | fcntl.LOCK_NB)  # LOCK_NB = non-blocking, raises if blocked
+
+fcntl.flock(fd_b, fcntl.LOCK_UN)
+os.close(fd_b)
+fcntl.flock(fd_a, fcntl.LOCK_UN)
+os.close(fd_a)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Flock is per-session (different sessions independent)"
+    else
+        fail "Flock isolation between sessions failed"
+    fi
+}
+
+test_flock_node_namespaced() {
+    info "Testing flock path includes node name (multi-node isolation)..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+import bridge
+
+# Prod node
+bridge._node_name = 'prod'
+path_prod = bridge.tmux_send_lock_path('claude-prod-chen')
+assert '/prod/locks/' in str(path_prod), f'prod lock not namespaced: {path_prod}'
+
+# Dev node
+bridge._node_name = 'dev'
+path_dev = bridge.tmux_send_lock_path('claude-dev-chen')
+assert '/dev/locks/' in str(path_dev), f'dev lock not namespaced: {path_dev}'
+
+# They must be different (same worker name, different nodes)
+assert path_prod != path_dev, f'prod and dev lock paths collide: {path_prod}'
+
+# Follows existing pipe isolation pattern: /tmp/claudecode-telegram/<node>/...
+assert str(path_prod).startswith('/tmp/claudecode-telegram/'), f'wrong base: {path_prod}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Flock path is node-namespaced (multi-node isolation)"
+    else
+        fail "Flock node namespace test failed"
+    fi
+}
+
+test_send_example_uses_flock() {
+    info "Testing /workers send_example includes flock for tmux workers..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+import bridge
+
+bridge._node_name = 'test-sendex'
+bridge.TMUX_PREFIX = 'test-sendex-'
+
+# Mock get_registered_sessions to return a tmux worker
+orig = bridge.worker_manager.get_registered_sessions
+bridge.worker_manager.get_registered_sessions = lambda: {
+    'bob': {'backend': 'claude', 'tmux': 'test-sendex-bob'}
+}
+
+try:
+    workers = bridge.get_workers()
+    bob = next((w for w in workers if w['name'] == 'bob'), None)
+    assert bob is not None, f'bob not found in workers: {[w[\"name\"] for w in workers]}'
+    assert bob['protocol'] == 'tmux', f'expected tmux protocol, got {bob[\"protocol\"]}'
+
+    # The send_example must include flock to prevent interleaving
+    ex = bob['send_example']
+    assert 'flock' in ex, f'send_example missing flock: {ex}'
+    # Must reference a lock path
+    assert '/locks/' in ex, f'send_example missing lock path: {ex}'
+
+    print('OK')
+finally:
+    bridge.worker_manager.get_registered_sessions = orig
+" 2>/dev/null | grep -q "OK"; then
+        success "send_example includes flock for tmux workers"
+    else
+        fail "send_example missing flock"
+    fi
+}
+
 test_pipe_forwarding_to_codex() {
     info "Testing pipe forwarding routes to codex..."
 
@@ -4495,6 +4673,47 @@ print('OK')
         success "paste-buffer: long message arrived in pane"
     else
         fail "paste-buffer: long message not found in pane"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null
+}
+
+test_tmux_send_uses_flock() {
+    info "Testing tmux_send_message acquires cross-process flock..."
+
+    # tmux_send_message should acquire a file lock (flock) so that
+    # external processes (workers) using the same lock file are serialized.
+    # Verify the lock file exists after a send.
+    local test_session="test-flock-$$"
+    tmux new-session -d -s "$test_session" -x 200 -y 50 2>/dev/null
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create test tmux session"
+        return
+    fi
+
+    if python3 -c "
+import sys, os; sys.path.insert(0, '.')
+import bridge
+
+# Override _node_name so lock path is predictable
+bridge._node_name = 'test-flock'
+bridge.TMUX_PREFIX = 'test-flock-'
+
+# Send a message
+result = bridge.tmux_send_message('$test_session', 'flock-test-msg')
+assert result == True, f'send failed: {result}'
+
+# Check that a lock file was created for this session
+lock_path = bridge.tmux_send_lock_path('$test_session')
+assert os.path.exists(lock_path), f'lock file not created: {lock_path}'
+assert '/test-flock/' in str(lock_path), f'lock not node-namespaced: {lock_path}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "tmux_send_message uses flock (lock file created)"
+    else
+        fail "tmux_send_message does not use flock"
     fi
 
     tmux kill-session -t "$test_session" 2>/dev/null
@@ -7369,6 +7588,11 @@ run_unit_tests() {
     log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
     run_test test_tmux_send_locks
     run_test test_tmux_paste_buffer_send
+    run_test test_tmux_send_uses_flock
+    run_test test_send_example_uses_flock
+    run_test test_concurrent_sends_no_interleave
+    run_test test_flock_per_session_isolation
+    run_test test_flock_node_namespaced
     # Unit tests - Misc behavior
     log ""
     log "── Misc Behavior Tests (Unit) ──────────────────────────────────────────"
