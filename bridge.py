@@ -2475,14 +2475,18 @@ def clear_pending(name):
 
 
 def is_pending(name):
-    """Check if session has a pending request. Auto-clears after 10 min timeout."""
+    """Check if session has a pending request within the timeout window.
+
+    Non-mutating: does NOT delete the pending file. The file is preserved
+    so the watchdog can detect STALE_PENDING at 15 minutes. Cleanup happens
+    only via clear_pending() when a response arrives.
+    """
     pending = get_pending_file(name)
     if not pending.exists():
         return False
     try:
         ts = int(pending.read_text().strip())
-        if (time.time() - ts) > PENDING_TIMEOUT:  # 10 min timeout - auto-clear stale pending
-            pending.unlink()
+        if (time.time() - ts) > PENDING_TIMEOUT:
             return False
         return True
     except:
@@ -3102,14 +3106,20 @@ def format_progress_lines(
 
 
 def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
-    """Get backend for a worker."""
-    # Check session dict first
-    if session and session.get("backend"):
-        return normalize_backend(session.get("backend"))
-    # Check backend file in session dir (for non-interactive mode workers)
+    """Get backend for a worker.
+
+    Priority: backend file (canonical) > session dict (cache) > default.
+    The backend file in SESSIONS_DIR/<name>/backend is the single source of
+    truth, written at hire time. Session dict may drift if registry or RAM
+    state gets stale.
+    """
+    # Backend file is canonical — check it first
     backend_file = SESSIONS_DIR / name / "backend"
     if backend_file.exists():
         return normalize_backend(backend_file.read_text().strip())
+    # Fall back to session dict (cache from registry/tmux)
+    if session and session.get("backend"):
+        return normalize_backend(session.get("backend"))
     return DEFAULT_BACKEND
 
 

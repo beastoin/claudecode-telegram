@@ -2907,6 +2907,48 @@ print('OK')
     fi
 }
 
+test_backend_file_is_canonical() {
+    info "Testing backend file is canonical source (not registry or tmux env)..."
+
+    if python3 -c "
+import sys, tempfile; sys.path.insert(0, '.')
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+# Simulate drift: backend file says 'codex', but session dict says 'claude'
+session_dir = tmp / 'drifted'
+session_dir.mkdir()
+(session_dir / 'backend').write_text('codex')
+
+# get_worker_backend with a session dict that says 'claude'
+# Backend FILE must take priority over session dict when both exist
+result_with_session = bridge.get_worker_backend('drifted', {'backend': 'claude'})
+
+# get_worker_backend without session dict — must use file
+result_file_only = bridge.get_worker_backend('drifted')
+
+# Both should return 'codex' (file is canonical)
+# Currently session dict wins — this test documents the priority
+assert result_file_only == 'codex', f'file-only: expected codex, got {result_file_only}'
+
+# Session dict currently overrides file — this is the drift bug.
+# After fix, file should win. For now, document the current behavior:
+if result_with_session == 'claude':
+    # CURRENT BEHAVIOR: session dict wins over file — drift possible
+    print('DRIFT_BUG: session dict overrides backend file')
+    raise AssertionError('Backend file must be canonical over session dict')
+else:
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Backend file is canonical source of truth"
+    else
+        fail "Backend file not canonical (session dict overrides)"
+    fi
+}
+
 test_flock_node_namespaced() {
     info "Testing flock path includes node name (multi-node isolation)..."
 
@@ -4241,34 +4283,38 @@ test_notify_endpoint_missing_text() {
 # Pending and timeout tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-test_pending_auto_timeout() {
-    info "Testing pending auto-timeout (10 min)..."
+test_pending_no_side_effect() {
+    info "Testing is_pending() is non-mutating (no auto-delete)..."
 
     if python3 -c "
-from bridge import is_pending, set_pending, get_pending_file
+from bridge import is_pending, set_pending, get_pending_file, _pending_timestamp
 import time
 from pathlib import Path
 
 # Create test session dir
-test_name = 'timeout_test'
+test_name = 'sideeffect_test'
 pending_file = get_pending_file(test_name)
 pending_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-# Write a pending file with old timestamp (11 minutes ago)
+# Write a pending file with timestamp 11 minutes ago (past PENDING_TIMEOUT=600s)
 old_ts = int(time.time()) - (11 * 60)
 pending_file.write_text(str(old_ts))
 
-# is_pending should return False and auto-clear the file
+# is_pending should return False for stale pending...
 result = is_pending(test_name)
 assert result == False, f'expected False for stale pending, got {result}'
 
-# File should be removed
-assert not pending_file.exists(), 'stale pending file should be removed'
+# ...BUT the file must still exist (non-mutating read)
+# This is critical: watchdog needs the file at 15min for STALE_PENDING detection
+assert pending_file.exists(), 'is_pending must NOT delete the pending file'
 
-# Now test with fresh timestamp
+# _pending_timestamp should still return the original timestamp
+ts = _pending_timestamp(test_name)
+assert ts == old_ts, f'expected {old_ts}, got {ts}'
+
+# Fresh timestamp should return True
 fresh_ts = int(time.time())
 pending_file.write_text(str(fresh_ts))
-
 result = is_pending(test_name)
 assert result == True, f'expected True for fresh pending, got {result}'
 
@@ -4278,9 +4324,63 @@ pending_file.parent.rmdir()
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Pending auto-timeout (10 min) works"
+        success "is_pending() is non-mutating"
     else
-        fail "Pending auto-timeout test failed"
+        fail "is_pending() side-effect test failed"
+    fi
+}
+
+test_stale_pending_survives_for_watchdog() {
+    info "Testing pending file survives past 10min for STALE_PENDING (15min) detection..."
+
+    if python3 -c "
+from bridge import is_pending, get_pending_file, _pending_timestamp, compute_state
+import time
+from pathlib import Path
+
+test_name = 'stale_test'
+pending_file = get_pending_file(test_name)
+pending_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+# Simulate 16 minutes old pending (past both PENDING_TIMEOUT and STALE_PENDING)
+stale_ts = int(time.time()) - (16 * 60)
+pending_file.write_text(str(stale_ts))
+
+# is_pending returns False (timed out)
+assert is_pending(test_name) == False
+
+# But _pending_timestamp still returns the timestamp
+ts = _pending_timestamp(test_name)
+assert ts == stale_ts, f'timestamp lost: {ts}'
+
+# And compute_state should see STALE_PENDING
+now = time.time()
+pending_age = now - stale_ts
+state, reason = compute_state(
+    tmux_exists=True,
+    claude_pid='12345',
+    pending=True,  # watchdog uses _pending_timestamp, not is_pending()
+    pending_ts=stale_ts,
+    pending_age=pending_age,
+    children=0,
+    last_child_ts=0,
+    cpu=0.0,
+    last_hook_ts=None,
+    last_seen_claude=now,  # claude was seen recently
+    now=now,
+)
+# STALE_PENDING threshold triggers STUCK state (not a separate state name)
+assert state == 'STUCK', f'expected STUCK at stale pending, got {state}: {reason}'
+
+# Cleanup
+pending_file.unlink(missing_ok=True)
+pending_file.parent.rmdir()
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Pending file survives for STALE_PENDING detection"
+    else
+        fail "Stale pending survival test failed"
     fi
 }
 
@@ -7568,7 +7668,9 @@ run_unit_tests() {
     log ""
     log "── Persistence Functions Tests (Unit) ──────────────────────────────────"
     run_test test_persistence_file_functions
-    run_test test_pending_auto_timeout
+    run_test test_pending_no_side_effect
+    run_test test_stale_pending_survives_for_watchdog
+    run_test test_backend_file_is_canonical
     run_test test_pending_files
     # Unit tests - Worker Registry (persistent)
     log ""
