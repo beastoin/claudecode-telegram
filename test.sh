@@ -4746,6 +4746,160 @@ print('OK')
     fi
 }
 
+test_checkin_cwd_stores_in_registry() {
+    info "Testing /checkin?cwd stores cwd in registry..."
+
+    if python3 -c "
+import io, json, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}regcheckin-'
+
+bridge._registry_add('alice', 'claude', 123)
+project_dir = Path(tmpdir) / 'project'
+project_dir.mkdir()
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(project_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+assert handler.status == 200, f'expected 200, got {handler.status}'
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert data['workers']['alice']['cwd'] == str(project_dir), data
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd stores cwd in registry"
+    else
+        fail "/checkin?cwd registry update failed"
+    fi
+}
+
+test_checkin_cwd_invalid_path() {
+    info "Testing /checkin?cwd rejects invalid path..."
+
+    if python3 -c "
+import io, json, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}regcheckin-'
+
+bridge._registry_add('alice', 'claude', 123)
+missing = Path(tmpdir) / 'does-not-exist'
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, *_args, **_kwargs):
+        pass
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(missing)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+assert handler.status == 400, f'expected 400, got {handler.status}'
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert 'cwd' not in data['workers']['alice'], data['workers']['alice']
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd rejects invalid path with 400"
+    else
+        fail "/checkin?cwd invalid path test failed"
+    fi
+}
+
+test_hire_uses_registry_cwd() {
+    info "Testing hire() starts worker in registry cwd..."
+
+    if python3 -c "
+import json, shlex, shutil, subprocess, tempfile
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+prefix = '${TEST_TMUX_PREFIX}regcwd-'
+bridge.TMUX_PREFIX = prefix
+
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, prefix)
+project_dir = Path(tmpdir) / 'project'
+project_dir.mkdir()
+bridge._registry_add('cwdhire', 'codex', 123, cwd=str(project_dir))
+tmux_name = f'{prefix}cwdhire'
+
+calls = []
+def fake_run(cmd, *args, **kwargs):
+    calls.append(cmd)
+    if cmd[:2] == ['tmux', 'new-session']:
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+    if cmd[:2] == ['tmux', 'display-message']:
+        return subprocess.CompletedProcess(cmd, 0, str(project_dir) + '\\n', '')
+    return subprocess.CompletedProcess(cmd, 0, '', '')
+
+with patch('bridge.shutil.which', return_value='/tmp/fake-codex'), \
+     patch('bridge.tmux_exists', return_value=False), \
+     patch('bridge.export_hook_env'), \
+     patch('bridge.ensure_worker_pipe', return_value=Path(tmpdir) / 'in.pipe'), \
+     patch('bridge.save_last_active'), \
+     patch('bridge.read_checkin_note', return_value=''), \
+     patch('bridge.time.sleep', lambda *_args, **_kwargs: None), \
+     patch('bridge.subprocess.run', side_effect=fake_run):
+    ok, err = wm.hire('cwdhire', backend='codex', chat_id=123)
+
+assert ok, f'hire failed: {err}'
+expected_cd = f'cd {shlex.quote(str(project_dir))}'
+assert any(
+    len(cmd) >= 5 and cmd[:4] == ['tmux', 'send-keys', '-t', tmux_name] and cmd[4] == expected_cd
+    for cmd in calls
+), f'expected tmux cd command with {expected_cd}, got {calls}'
+
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert data['workers']['cwdhire']['cwd'] == str(project_dir), data['workers']['cwdhire']
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "hire() uses registry cwd"
+    else
+        fail "hire() registry cwd test failed"
+    fi
+}
+
 test_restart_dead_worker() {
     info "Testing restart of dead worker (tmux gone, in registry)..."
 
@@ -7217,6 +7371,9 @@ run_unit_tests() {
     test_registry_bootstrap
     test_registry_corrupt_recovery
     test_get_registered_includes_registry
+    test_checkin_cwd_stores_in_registry
+    test_checkin_cwd_invalid_path
+    test_hire_uses_registry_cwd
     test_restart_dead_worker
     test_end_removes_from_registry
     test_team_shows_exited

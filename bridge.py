@@ -827,17 +827,23 @@ def _save_registry(data: dict):
         print(f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: int = None):
+def _registry_add(name: str, backend: str, chat_id: int = None, cwd: str = None):
     """Add a worker to the persistent registry."""
     with _watchdog_lock:
         data = _load_registry()
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
-        data["workers"][name] = {
+        existing = data["workers"].get(name, {})
+        entry = {
             "backend": backend,
             "chat_id": chat_id,
             "hire_time": int(time.time()),
         }
+        if cwd is None:
+            cwd = existing.get("cwd")
+        if cwd:
+            entry["cwd"] = cwd
+        data["workers"][name] = entry
         _save_registry(data)
 
 
@@ -848,6 +854,44 @@ def _registry_remove(name: str):
         if "workers" not in data:
             return
         data["workers"].pop(name, None)
+        _save_registry(data)
+
+
+def _registry_get(name: str) -> dict:
+    """Return one worker record from the registry, or {}."""
+    data = _load_registry()
+    workers = data.get("workers", {})
+    worker = workers.get(name, {})
+    return worker if isinstance(worker, dict) else {}
+
+
+def _registry_get_cwd(name: str) -> str:
+    """Return persisted cwd for worker, if present."""
+    worker = _registry_get(name)
+    cwd = worker.get("cwd")
+    if isinstance(cwd, str):
+        return cwd
+    return ""
+
+
+def _registry_update_cwd(name: str, cwd: str):
+    """Set/update cwd in registry for a worker."""
+    with _watchdog_lock:
+        data = _load_registry()
+        if "workers" not in data:
+            data = {"version": 1, "workers": {}}
+        workers = data["workers"]
+        existing = workers.get(name, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        backend = normalize_backend(existing.get("backend"))
+        entry = {
+            "backend": backend,
+            "chat_id": existing.get("chat_id"),
+            "hire_time": existing.get("hire_time") or int(time.time()),
+            "cwd": cwd,
+        }
+        workers[name] = entry
         _save_registry(data)
 
 
@@ -2884,6 +2928,28 @@ def normalize_backend(backend: Optional[str]) -> str:
     return backend or DEFAULT_BACKEND
 
 
+def normalize_cwd(cwd: Optional[str]) -> str:
+    """Expand ~ and return absolute path; empty string for unset/blank."""
+    if cwd is None:
+        return ""
+    raw = cwd.strip()
+    if not raw:
+        return ""
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def validate_cwd(cwd: Optional[str]) -> tuple[str, str]:
+    """Validate cwd path. Returns (normalized_path, error_message)."""
+    normalized = normalize_cwd(cwd)
+    if not normalized:
+        return "", "cwd is empty"
+    if not os.path.exists(normalized):
+        return "", f"cwd does not exist: {normalized}"
+    if not os.path.isdir(normalized):
+        return "", f"cwd is not a directory: {normalized}"
+    return normalized, ""
+
+
 def parse_hire_args(raw: str) -> tuple[str, str]:
     """Parse /hire arguments and return (name, backend).
 
@@ -2901,6 +2967,9 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
         part = parts[i]
         if part == "--backend" and i + 1 < len(parts):
             backend = parts[i + 1]
+            i += 2
+            continue
+        elif part == "--cwd" and i + 1 < len(parts):
             i += 2
             continue
         elif part == "--codex":
@@ -2932,6 +3001,25 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
         return name, backend
 
     return name, backend
+
+
+def parse_hire_cwd(raw: str) -> tuple[str, str]:
+    """Parse optional --cwd from /hire args.
+
+    Returns (cwd, error_message). error_message is non-empty for parse errors.
+    """
+    parts = [p for p in (raw or "").split() if p]
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--cwd":
+            if i + 1 >= len(parts):
+                return "", "Usage: /hire <name> [--backend <backend>] [--cwd <path>]"
+            return parts[i + 1], ""
+        if part.startswith("--cwd="):
+            return part.split("=", 1)[1], ""
+        i += 1
+    return "", ""
 
 
 def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Optional[dict] = None) -> str:
@@ -3055,6 +3143,38 @@ class WorkerManager:
             self.sessions_dir = SESSIONS_DIR
         if self.tmux_prefix != TMUX_PREFIX:
             self.tmux_prefix = TMUX_PREFIX
+
+    def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
+        """Resolve startup cwd with priority: explicit > registry > fallback."""
+        candidate = normalize_cwd(requested_cwd)
+        if not candidate:
+            candidate = normalize_cwd(_registry_get_cwd(name))
+        if candidate:
+            if os.path.isdir(candidate):
+                return candidate
+            print(f"Ignoring invalid startup cwd for {name}: {candidate}")
+
+        fallback = normalize_cwd(fallback_cwd)
+        if fallback and os.path.isdir(fallback):
+            return fallback
+        return ""
+
+    def _get_tmux_pane_cwd(self, tmux_name: str) -> str:
+        """Read current pane cwd for a tmux session."""
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+
+    def _cd_tmux_to_cwd(self, tmux_name: str, cwd: str):
+        """Change tmux shell cwd before starting backend process."""
+        if not cwd:
+            return
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"])
+        time.sleep(0.2)
 
     def scan_tmux_sessions(self):
         """Scan tmux for claude-* sessions (registered)."""
@@ -3205,6 +3325,7 @@ class WorkerManager:
             "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
+            f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
             "WARNING: Do NOT output worker messages normally — they go to Telegram. Use the send commands from /workers instead."
         )
         if not backend_obj.is_interactive:
@@ -3225,7 +3346,7 @@ class WorkerManager:
 
         return welcome
 
-    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None):
+    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None, cwd: str = None):
         """Create a new worker instance."""
         self._sync_paths()
         if not is_valid_backend(backend):
@@ -3252,15 +3373,13 @@ class WorkerManager:
             return False, "Could not start the worker workspace"
 
         time.sleep(0.5)
+        startup_cwd = self._get_startup_cwd(name, requested_cwd=cwd)
+        if startup_cwd:
+            self._cd_tmux_to_cwd(tmux_name, startup_cwd)
 
         # After tmux new-session succeeds, capture the pane's cwd
-        pane_cwd = ""
-        result = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            pane_cwd = result.stdout.strip()
+        pane_cwd = self._get_tmux_pane_cwd(tmux_name) or startup_cwd
+        if pane_cwd:
             save_claude_session_cwd(name, pane_cwd)
 
         export_hook_env(tmux_name, backend)
@@ -3284,11 +3403,15 @@ class WorkerManager:
             append_prompt = build_mcp_inventory_prompt(pane_cwd)
 
         if SANDBOX_ENABLED and backend_obj.is_interactive:
+            if startup_cwd:
+                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, append_system_prompt=append_prompt)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
             print(f"Started worker '{name}' in sandbox mode")
         else:
             start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd(append_system_prompt=append_prompt)}'
+            if startup_cwd:
+                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend_obj.is_interactive:
                 time.sleep(1.5)
@@ -3311,7 +3434,7 @@ class WorkerManager:
 
         state["active"] = name
         save_last_active(name)
-        _registry_add(name, backend, chat_id)
+        _registry_add(name, backend, chat_id, cwd=startup_cwd or None)
 
         if not backend_obj.is_interactive:
             print(f"Created {backend} worker '{name}' (non-interactive mode)")
@@ -3393,6 +3516,9 @@ class WorkerManager:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
+        startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
+        if startup_cwd:
+            save_claude_session_cwd(name, startup_cwd)
 
         # Clean non-interactive state on restart
         if not backend.is_interactive:
@@ -3424,20 +3550,21 @@ class WorkerManager:
 
         append_prompt = ""
         if backend.name == "claude":
-            inventory_cwd = resume_cwd or get_claude_session_cwd(name)
+            inventory_cwd = startup_cwd or get_claude_session_cwd(name)
             append_prompt = build_mcp_inventory_prompt(inventory_cwd)
 
         if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
             time.sleep(0.5)
+            if startup_cwd:
+                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
             start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
-            if resume_cwd:
-                start_cmd = f'cd "{resume_cwd}" && unset CLAUDECODE && {start_cmd}'
-            else:
-                start_cmd = f'unset CLAUDECODE && {start_cmd}'
+            start_cmd = f'unset CLAUDECODE && {start_cmd}'
+            if startup_cwd:
+                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
 
         # Re-send welcome/instructions so worker gets fresh context after restart
@@ -3490,21 +3617,25 @@ class WorkerManager:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
+        startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
+        if startup_cwd:
+            save_claude_session_cwd(name, startup_cwd)
 
         append_prompt = ""
         if backend.name == "claude":
-            inventory_cwd = resume_cwd or get_claude_session_cwd(name)
+            inventory_cwd = startup_cwd or get_claude_session_cwd(name)
             append_prompt = build_mcp_inventory_prompt(inventory_cwd)
 
         if SANDBOX_ENABLED and backend.is_interactive:
+            if startup_cwd:
+                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
             start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
-            if resume_cwd:
-                start_cmd = f'cd "{resume_cwd}" && unset CLAUDECODE && {start_cmd}'
-            else:
-                start_cmd = f'unset CLAUDECODE && {start_cmd}'
+            start_cmd = f'unset CLAUDECODE && {start_cmd}'
+            if startup_cwd:
+                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend.is_interactive:
                 time.sleep(1.5)
@@ -3821,10 +3952,10 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
  
 
 
-def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None):
+def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None, cwd: str = None):
     """Create a new worker instance."""
     _sync_worker_manager()
-    return worker_manager.hire(name, backend, chat_id=chat_id)
+    return worker_manager.hire(name, backend, chat_id=chat_id, cwd=cwd)
 
 
 def kill_session(name):
@@ -4178,6 +4309,11 @@ class CommandRouter:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
 
+        cwd_arg, cwd_parse_error = parse_hire_cwd(name)
+        if cwd_parse_error:
+            self.reply(chat_id, cwd_parse_error, outcome="Needs decision")
+            return True
+
         parsed_name, backend = parse_hire_args(name)
         if not parsed_name:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
@@ -4194,7 +4330,14 @@ class CommandRouter:
             self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
             return True
 
-        ok, err = create_session(name, backend, chat_id=chat_id)
+        cwd = None
+        if cwd_arg:
+            cwd, cwd_err = validate_cwd(cwd_arg)
+            if cwd_err:
+                self.reply(chat_id, f"Invalid --cwd: {cwd_err}", outcome="Needs decision")
+                return True
+
+        ok, err = create_session(name, backend, chat_id=chat_id, cwd=cwd)
         if ok:
             self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
             update_bot_commands()
@@ -4814,16 +4957,28 @@ class Handler(BaseHTTPRequestHandler):
     def handle_checkin_endpoint(self, parsed):
         """Return worker instructions as plain text.
 
-        GET /checkin           — generic instructions (uses default backend)
-        GET /checkin?name=lee  — personalized instructions for worker 'lee'
+        GET /checkin                    — generic instructions (uses default backend)
+        GET /checkin?name=lee           — personalized instructions for worker 'lee'
+        GET /checkin?name=lee&cwd=/dir  — persist cwd; restart worker if cwd changed
         """
         try:
             params = parse_qs(parsed.query)
             name = params.get("name", ["worker"])[0]
+            raw_cwd = params.get("cwd", [None])[0]
+            requested_cwd = ""
+            if raw_cwd is not None:
+                requested_cwd, cwd_err = validate_cwd(raw_cwd)
+                if cwd_err:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(f"Invalid cwd: {cwd_err}".encode())
+                    return
 
             # If worker exists, use their actual backend; otherwise default
             _sync_worker_manager()
             registered = worker_manager.get_registered_sessions()
+            tmux_name = ""
             if name in registered:
                 backend_name = get_worker_backend(name, registered[name])
                 # Re-export hook env on checkin (fixes stale HOOK_SECRET after restart)
@@ -4833,6 +4988,27 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
+
+            if requested_cwd:
+                _registry_update_cwd(name, requested_cwd)
+                save_claude_session_cwd(name, requested_cwd)
+                if tmux_name and tmux_exists(tmux_name):
+                    pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name))
+                    same_cwd = pane_cwd and os.path.realpath(pane_cwd) == os.path.realpath(requested_cwd)
+                    if not same_cwd:
+                        ok, err = worker_manager.restart(name, mode="relaunch")
+                        if not ok:
+                            self.send_response(500)
+                            self.send_header("Content-Type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
+                            return
+
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain")
+                        self.end_headers()
+                        self.wfile.write(f"Restarting in {requested_cwd}...".encode())
+                        return
 
             welcome = worker_manager._build_welcome(name, backend_obj)
 
