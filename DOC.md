@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.27.3
+> Version: 0.27.4
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,18 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.27.4 - Fix long text batch input (bracketed paste)
+
+**Bug fixed:** Long text messages sent via bridge get pasted into Claude Code's input as `[Pasted text #N +M lines]` but the Enter key is swallowed — text sits in input without submitting. Caused by `paste-buffer -r` sending raw text without bracketed paste control codes. Claude Code's time-based paste detection treats the immediately-following Enter as part of the paste.
+
+**Fix:**
+- Add `-p` flag to `paste-buffer`: sends proper bracketed paste codes (`\e[200~`...`\e[201~`) so TUI apps know exactly where the paste ends.
+- Add 50ms delay between paste and Enter for processing safety margin.
+- Fix incorrect code comment that said `-r` controls bracketed paste (`-r` is LF→CR conversion; `-p` is bracketed paste).
+- Update `/workers` `send_example` with matching `-p` + delay.
+
+**Chaos test:** 0/5 without `-p`, 5/5 with `-p -r` against TUI simulator with bracketed paste mode. **2 new tests:** `test_paste_buffer_uses_bracketed_paste`, `test_long_text_enter_with_bracketed_paste`.
 
 ### v0.27.3 - Fix state reliability (is_pending + backend canonical)
 
