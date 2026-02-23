@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.27.2
+> Version: 0.27.3
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,14 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.27.3 - Fix state reliability (is_pending + backend canonical)
+
+**Bugs fixed:**
+- **is_pending() side-effect**: `is_pending()` auto-deleted the pending file at 10min (`PENDING_TIMEOUT=600`), but watchdog STUCK triggers at 15min (`STALE_PENDING=900`). The 5-min gap silently suppressed STUCK detection. Fix: `is_pending()` is now non-mutating — only `clear_pending()` deletes the file.
+- **Backend source drift**: `get_worker_backend()` checked session dict before backend file, allowing drift when registry/RAM state gets stale. Fix: backend file (`SESSIONS_DIR/<name>/backend`) is now the canonical source, session dict is fallback only.
+
+**3 new tests:** `test_pending_no_side_effect`, `test_stale_pending_survives_for_watchdog`, `test_backend_file_is_canonical`.
 
 ### v0.27.2 - Fix tmux send interleaving (cross-process flock)
 
