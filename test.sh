@@ -20,6 +20,7 @@ CHAT_ID="${TEST_CHAT_ID:-123456789}"
 BRIDGE_PID=""
 TUNNEL_PID=""
 TUNNEL_URL=""
+TEST_FILTER="${TEST_FILTER:-}"
 
 # Test node configuration
 TEST_NODE="test"
@@ -53,6 +54,7 @@ NC='\033[0m' # No Color
 
 passed=0
 failed=0
+tests_run=0
 
 # ============================================================
 # TEST CONFIG + HELPERS
@@ -66,6 +68,55 @@ log()     { echo -e "$@"; }
 success() { log "${GREEN}✓${NC} $1"; ((passed++)) || true; }
 fail()    { log "${RED}✗${NC} $1"; ((failed++)) || true; }
 info()    { log "${YELLOW}→${NC} $1"; }
+
+should_run_test() {
+    [[ -z "$TEST_FILTER" ]] && return 0
+    [[ "$1" == *"$TEST_FILTER"* ]] && return 0
+    return 1
+}
+
+run_test() {
+    local test_name="$1"
+    should_run_test "$test_name" || return 0
+    ((tests_run++)) || true
+    "$test_name"
+}
+
+collect_run_tests() {
+    local runner_fn="$1"
+    declare -f "$runner_fn" | awk '/^[[:space:]]*run_test[[:space:]]+test_[a-zA-Z0-9_]+/ { print $2 }'
+}
+
+count_matching_tests() {
+    local mode="$1"
+    local -a candidate_tests=()
+    local fn
+    local test_name
+
+    for fn in run_unit_tests run_cli_tests; do
+        while read -r test_name; do
+            [[ -n "$test_name" ]] && candidate_tests+=("$test_name")
+        done < <(collect_run_tests "$fn")
+    done
+
+    if [[ "$mode" != "fast" ]]; then
+        while read -r test_name; do
+            [[ -n "$test_name" ]] && candidate_tests+=("$test_name")
+        done < <(collect_run_tests "run_integration_tests")
+    fi
+
+    if [[ "$mode" == "full" ]]; then
+        while read -r test_name; do
+            [[ -n "$test_name" ]] && candidate_tests+=("$test_name")
+        done < <(collect_run_tests "run_full_tests")
+    fi
+
+    local matched=0
+    for test_name in "${candidate_tests[@]}"; do
+        should_run_test "$test_name" && ((matched++)) || true
+    done
+    echo "$matched"
+}
 
 cleanup() {
     info "Cleaning up..."
@@ -7228,269 +7279,246 @@ print('OK')
 run_unit_tests() {
     # Unit tests (no bridge needed)
     log "── Unit Tests ──────────────────────────────────────────────────────────"
-    test_formatting
-    test_message_splitting
-    test_sandbox_docker_cmd
-
+    run_test test_formatting
+    run_test test_message_splitting
+    run_test test_sandbox_docker_cmd
     # Unit tests - Markdown conversion
     log ""
     log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
-    test_markdown_to_telegram_html
-    test_forward_to_bridge_escape_flag
-    test_forward_self_heal_on_403
-    test_forward_no_self_heal_on_other_errors
-
+    run_test test_markdown_to_telegram_html
+    run_test test_forward_to_bridge_escape_flag
+    run_test test_forward_self_heal_on_403
+    run_test test_forward_no_self_heal_on_other_errors
     # Unit tests - Backend registry / non-interactive mode
     log ""
     log "── Backend Registry Tests (Unit) ───────────────────────────────────────"
-    test_backend_registry_exists
-    test_get_registered_sessions_includes_noninteractive_workers
-
+    run_test test_backend_registry_exists
+    run_test test_get_registered_sessions_includes_noninteractive_workers
     # Unit tests - Worker naming
     log ""
     log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"
-    test_hire_backend_parsing
-    test_hire_binary_check
-    test_relaunch_binary_check
-    test_mcp_inventory_prompt
-    test_team_output_includes_backend
-    test_progress_output_includes_backend
-    test_worker_send_uses_backend
-    test_backend_env_metadata
-    test_codex_end_cleans_session
-    test_codex_relaunch_clears_session_id
-    test_restart_with_name
-    test_restart_clean_with_name
-    test_restart_all_sequential
-    test_restart_all_clean
-    test_restart_all_handles_failure
-    test_restart_cancel
-    test_restart_all_no_workers
-    test_restart_all_rejects_duplicate
-    test_codex_pause_clears_pending
-    test_adapter_pid_tracking
-    test_pause_kills_adapter
-    test_end_kills_adapter
-    test_end_clears_pending
-    test_adapter_stderr_logging
-    test_poisoned_detection
-    test_compute_state_non_interactive
-    test_since_preserved_on_reason_change
-    test_compute_state_interactive
-    test_idle_child_baseline
-    test_idle_streak_prevents_false_stuck
-    test_watchdog_resolved_alert
-    test_handle_watchdog_transition
-    test_parse_at_mentions
-    test_format_watchdog_status
-    test_switch_session
-    test_send_response_html_formatting
-    test_format_response_strips_name_prefix
-    test_get_any_session_id
-    test_progress_continuity_for_noninteractive
-    test_noninteractive_backpressure
-    test_get_workers_includes_codex
-    test_pipe_forwarding_to_codex
-    test_update_bot_commands_includes_codex
-    test_broadcast_includes_codex
-
+    run_test test_hire_backend_parsing
+    run_test test_hire_binary_check
+    run_test test_relaunch_binary_check
+    run_test test_mcp_inventory_prompt
+    run_test test_team_output_includes_backend
+    run_test test_progress_output_includes_backend
+    run_test test_worker_send_uses_backend
+    run_test test_backend_env_metadata
+    run_test test_codex_end_cleans_session
+    run_test test_codex_relaunch_clears_session_id
+    run_test test_restart_with_name
+    run_test test_restart_clean_with_name
+    run_test test_restart_all_sequential
+    run_test test_restart_all_clean
+    run_test test_restart_all_handles_failure
+    run_test test_restart_cancel
+    run_test test_restart_all_no_workers
+    run_test test_restart_all_rejects_duplicate
+    run_test test_codex_pause_clears_pending
+    run_test test_adapter_pid_tracking
+    run_test test_pause_kills_adapter
+    run_test test_end_kills_adapter
+    run_test test_end_clears_pending
+    run_test test_adapter_stderr_logging
+    run_test test_poisoned_detection
+    run_test test_compute_state_non_interactive
+    run_test test_since_preserved_on_reason_change
+    run_test test_compute_state_interactive
+    run_test test_idle_child_baseline
+    run_test test_idle_streak_prevents_false_stuck
+    run_test test_watchdog_resolved_alert
+    run_test test_handle_watchdog_transition
+    run_test test_parse_at_mentions
+    run_test test_format_watchdog_status
+    run_test test_switch_session
+    run_test test_send_response_html_formatting
+    run_test test_format_response_strips_name_prefix
+    run_test test_get_any_session_id
+    run_test test_progress_continuity_for_noninteractive
+    run_test test_noninteractive_backpressure
+    run_test test_get_workers_includes_codex
+    run_test test_pipe_forwarding_to_codex
+    run_test test_update_bot_commands_includes_codex
+    run_test test_broadcast_includes_codex
     # Unit tests - Media tags
     log ""
     log "── Media Tag Tests (Unit) ──────────────────────────────────────────────"
-    test_media_tag_parsing
-
+    run_test test_media_tag_parsing
     # Unit tests - Persistence functions
     log ""
     log "── Persistence Functions Tests (Unit) ──────────────────────────────────"
-    test_persistence_file_functions
-    test_pending_auto_timeout
-    test_pending_files
-
+    run_test test_persistence_file_functions
+    run_test test_pending_auto_timeout
+    run_test test_pending_files
     # Unit tests - Worker Registry (persistent)
     log ""
     log "── Worker Registry Tests (Unit) ────────────────────────────────────────"
-    test_registry_add_remove
-    test_registry_bootstrap
-    test_registry_corrupt_recovery
-    test_get_registered_includes_registry
-    test_checkin_cwd_stores_in_memory
-    test_checkin_cwd_invalid_path
-    test_restart_dead_worker
-    test_end_removes_from_registry
-    test_team_shows_exited
-    test_watchdog_exited_state
-
+    run_test test_registry_add_remove
+    run_test test_registry_bootstrap
+    run_test test_registry_corrupt_recovery
+    run_test test_get_registered_includes_registry
+    run_test test_checkin_cwd_stores_in_memory
+    run_test test_checkin_cwd_invalid_path
+    run_test test_restart_dead_worker
+    run_test test_end_removes_from_registry
+    run_test test_team_shows_exited
+    run_test test_watchdog_exited_state
     # Unit tests - Concurrency
     log ""
     log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
-    test_tmux_send_locks
-    test_tmux_paste_buffer_send
-
+    run_test test_tmux_send_locks
+    run_test test_tmux_paste_buffer_send
     # Unit tests - Misc behavior
     log ""
     log "── Misc Behavior Tests (Unit) ──────────────────────────────────────────"
-    test_watchdog_alert_on_stuck
-    test_extra_mounts_docker_cmd
-
+    run_test test_watchdog_alert_on_stuck
+    run_test test_extra_mounts_docker_cmd
     # Unit tests - File validation
     log ""
     log "── File Validation Tests (Unit) ────────────────────────────────────────"
-    test_file_validation
-
+    run_test test_file_validation
     # Unit tests - Worker discovery
     log ""
     log "── Worker Discovery Tests (Unit) ───────────────────────────────────────"
-    test_worker_pipe_creation_on_startup
-    test_worker_pipe_cleanup_on_end
-    test_pipe_reader_liveness_check
-
+    run_test test_worker_pipe_creation_on_startup
+    run_test test_worker_pipe_cleanup_on_end
+    run_test test_pipe_reader_liveness_check
     # Unit tests - send_to_worker abstraction
     log ""
     log "── send_to_worker Abstraction Tests (Unit) ─────────────────────────────"
-    test_send_to_worker_uses_backend_registry
-    test_send_to_worker_missing
+    run_test test_send_to_worker_uses_backend_registry
+    run_test test_send_to_worker_missing
 }
 
 run_cli_tests() {
     # CLI tests (no bridge needed)
     log ""
     log "── CLI Tests ───────────────────────────────────────────────────────────"
-    test_cli_help
-    test_cli_version
-    test_cli_flags_and_commands
-    test_cli_unknown_command
-    test_cli_missing_token_error
-    test_cli_hook_install_uninstall
-
+    run_test test_cli_help
+    run_test test_cli_version
+    run_test test_cli_flags_and_commands
+    run_test test_cli_unknown_command
+    run_test test_cli_missing_token_error
+    run_test test_cli_hook_install_uninstall
     # CLI command coverage tests
     log ""
     log "── CLI Command Coverage Tests ──────────────────────────────────────────"
-    test_cli_status_command
-    test_cli_webhook_info
-    test_cli_webhook_commands
-    test_cli_hook_test_no_chat
+    run_test test_cli_status_command
+    run_test test_cli_webhook_info
+    run_test test_cli_webhook_commands
+    run_test test_cli_hook_test_no_chat
 }
 
 run_integration_tests() {
     # Integration tests (bridge needed)
     log ""
     log "── Integration Tests ───────────────────────────────────────────────────"
-    test_bridge_starts || exit 1
+    run_test test_bridge_starts || exit 1
     sleep 0.3
 
     # HTTP endpoint tests
     log ""
     log "── HTTP Endpoint Tests ─────────────────────────────────────────────────"
-    test_health_endpoint
-    test_response_endpoint_missing_fields
-    test_response_endpoint_no_chat_id
-    test_notify_endpoint_missing_text
-    test_checkin_endpoint
-    test_checkin_note
-    test_health_workers_endpoint
-
+    run_test test_health_endpoint
+    run_test test_response_endpoint_missing_fields
+    run_test test_response_endpoint_no_chat_id
+    run_test test_notify_endpoint_missing_text
+    run_test test_checkin_endpoint
+    run_test test_checkin_note
+    run_test test_health_workers_endpoint
     # Admin tests
     log ""
     log "── Admin Tests ─────────────────────────────────────────────────────────"
-    test_admin_registration
-
+    run_test test_admin_registration
     # Bot command tests
     log ""
     log "── Bot Command Tests ───────────────────────────────────────────────────"
-    test_hire_command
-    test_end_command
-    test_dynamic_bot_command_list_update
-
+    run_test test_hire_command
+    run_test test_end_command
+    run_test test_dynamic_bot_command_list_update
     # Worker naming tests (integration)
     log ""
     log "── Worker Naming Tests (Integration) ───────────────────────────────────"
-    test_reserved_names_rejection
-    test_shortcuts_and_unknown_commands
-
+    run_test test_reserved_names_rejection
+    run_test test_shortcuts_and_unknown_commands
     # Routing tests
     log ""
     log "── Routing Tests ───────────────────────────────────────────────────────"
-    test_mention_routing
-    test_reply_routing_and_context
-
+    run_test test_mention_routing
+    run_test test_reply_routing_and_context
     # Tmux mode behavior tests (parity with direct mode)
     log ""
     log "── Tmux Mode Behavior Tests ────────────────────────────────────────────"
-    test_tmux_mode_session_stays_alive
-    test_tmux_mode_message_delivery
-
+    run_test test_tmux_mode_session_stays_alive
+    run_test test_tmux_mode_message_delivery
     # Security tests (integration)
     log ""
     log "── Security Tests (Integration) ────────────────────────────────────────"
-    test_webhook_secret
-    test_graceful_shutdown_notification
-    test_typing_indicator_loop
-    test_token_isolation
-    test_secure_directory_permissions
-    test_session_files
-
+    run_test test_webhook_secret
+    run_test test_graceful_shutdown_notification
+    run_test test_typing_indicator_loop
+    run_test test_token_isolation
+    run_test test_secure_directory_permissions
+    run_test test_session_files
     # Image/document handling tests
     log ""
     log "── Image/Document Handling Tests ───────────────────────────────────────"
-    test_inbox_directory
-    test_document_message_routing
-    test_incoming_document_e2e
-    test_incoming_image_e2e
-    test_response_with_image_tags
-
+    run_test test_inbox_directory
+    run_test test_document_message_routing
+    run_test test_incoming_document_e2e
+    run_test test_incoming_image_e2e
+    run_test test_response_with_image_tags
     # Response/notify endpoint tests
     log ""
     log "── Response/Notify Endpoint Tests ──────────────────────────────────────"
-    test_notify_endpoint
-    test_response_endpoint
-    test_response_without_pending
-
+    run_test test_notify_endpoint
+    run_test test_response_endpoint
+    run_test test_response_without_pending
     # Persistence tests (integration)
     log ""
     log "── Persistence Tests (Integration) ─────────────────────────────────────"
-    test_last_chat_id_persistence
-    test_last_active_persistence
-
+    run_test test_last_chat_id_persistence
+    run_test test_last_active_persistence
     # Hook behavior tests (integration)
     log ""
     log "── Hook Behavior Tests (Integration) ───────────────────────────────────"
-    test_hook_env_validation
-    test_checkin_hook_env_validation
-    test_checkin_hook_calls_endpoint
-
+    run_test test_hook_env_validation
+    run_test test_checkin_hook_env_validation
+    run_test test_checkin_hook_calls_endpoint
     # Worker discovery tests (integration)
     log ""
     log "── Worker Discovery Tests (Integration) ────────────────────────────────"
-    test_workers_endpoint_exists
-    test_workers_endpoint_json_structure
-    test_workers_endpoint_shows_tmux_workers
-    test_workers_endpoint_empty_when_no_workers
-
+    run_test test_workers_endpoint_exists
+    run_test test_workers_endpoint_json_structure
+    run_test test_workers_endpoint_shows_tmux_workers
+    run_test test_workers_endpoint_empty_when_no_workers
     # send_to_worker integration tests
     log ""
     log "── send_to_worker Integration Tests ────────────────────────────────────"
-    test_send_to_worker_integration
-
+    run_test test_send_to_worker_integration
     # Worker-to-worker pipe communication tests (e2e behavior)
     log ""
     log "── Worker-to-Worker Pipe Tests (Integration) ───────────────────────────"
-    test_worker_to_worker_pipe
-
+    run_test test_worker_to_worker_pipe
     # Tmux and process inspection tests (integration)
     log ""
     log "── Tmux/Process Inspection Tests (Integration) ─────────────────────────"
-    test_tmux_prompt_empty
-    test_process_inspection_functions
-
+    run_test test_tmux_prompt_empty
+    run_test test_process_inspection_functions
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }
 
-run_tunnel_tests() {
-    # Tunnel tests
+run_full_tests() {
+    # Full mode tests
     log ""
     log "── Tunnel Tests ────────────────────────────────────────────────────────"
-    test_with_tunnel
+    run_test test_with_tunnel
+}
+
+run_tunnel_tests() {
+    run_full_tests
 }
 
 main() {
@@ -7512,6 +7540,11 @@ main() {
         mode_desc="DEFAULT mode: Unit + Integration tests (~2-3 min)"
     fi
     log "  Mode: $mode_desc"
+    if [[ -n "$TEST_FILTER" ]]; then
+        local matching_tests
+        matching_tests=$(count_matching_tests "$mode")
+        log "  Filter: $TEST_FILTER (matching $matching_tests tests)"
+    fi
     log "═══════════════════════════════════════════════════════════════════════"
     log ""
 
@@ -7532,13 +7565,13 @@ main() {
     # Run E2E and tunnel tests only in FULL mode
     if [[ "$mode" == "full" ]]; then
         # Tunnel tests
-        run_tunnel_tests
+        run_full_tests
     fi
 
     # Summary
     log ""
     log "═══════════════════════════════════════════════════════════════════════"
-    log "  Results: ${GREEN}$passed passed${NC}, ${RED}$failed failed${NC}"
+    log "  Results: ${GREEN}$passed passed${NC}, ${RED}$failed failed${NC}, $tests_run tests run"
     log "═══════════════════════════════════════════════════════════════════════"
     log ""
 

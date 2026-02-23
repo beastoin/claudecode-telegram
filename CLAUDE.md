@@ -50,18 +50,48 @@ Workflow rules:
 - When adding tests, follow `TEST.md`.
 - See `TEST.md` for mode definitions, env vars, isolation details, inventories, and manual/CI instructions.
 
-### TDD Workflow
+### TDD Workflow: Red-Green-Refactor
 
+Development follows increment-based TDD. Each feature is broken into small testable increments, and each increment follows Red-Green-Refactor:
+
+**Decompose first:**
+Before coding, break the feature into an increment ladder:
+1. Degenerate/empty case (zero, nil, no-op)
+2. Simplest happy path (one item, minimal valid input)  
+3. Variations (multiple items, different valid inputs)
+4. Edge cases (boundaries, limits, special characters)
+5. Error cases (invalid input, missing data, failure modes)
+6. Integration (combine with other components)
+
+**Per increment:**
+1. **RED** — Write one failing test in test.sh. Run it with TEST_FILTER to confirm it fails:
+   ```bash
+   TEST_FILTER=test_name FAST=1 TEST_BOT_TOKEN='...' ./test.sh
+   ```
+2. **GREEN** — Write minimal code to make the test pass. Run filtered test again.
+3. **REFACTOR** — Clean up if needed. Run filtered test to confirm still green.
+4. Move to next increment.
+
+**Mode gates (unchanged):**
 ```bash
-# While developing - run frequently
+# While developing — run single test frequently  
+TEST_FILTER=test_name FAST=1 TEST_BOT_TOKEN='...' ./test.sh
+
+# Per increment green — run FAST suite
 FAST=1 TEST_BOT_TOKEN='...' ./test.sh
 
-# Before commit - full local validation
+# Before commit — full local validation
 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
-# Before push - including tunnel tests
+# Before push — including tunnel tests
 FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 ```
+
+**Rules:**
+- Write the test BEFORE the implementation code
+- One behavior per test — tests stay focused and readable
+- Run full FAST suite after each increment to catch regressions
+- Show first failing test evidence before implementation in plan reviews
 
 **Why e2e tests matter:**
 - They catch integration bugs that unit tests miss
