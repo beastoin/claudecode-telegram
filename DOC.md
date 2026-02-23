@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.27.1
+> Version: 0.27.2
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,17 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.27.2 - Fix tmux send interleaving (cross-process flock)
+
+**Bug fixed:** When multiple processes send to the same tmux session concurrently (worker-to-worker or bridge+worker), the `load-buffer → paste-buffer → send-keys Enter` sequence interleaves. Text from different senders concatenates on one line, while orphan Enters submit empty input. 93% corruption rate in chaos testing.
+
+**Fix:**
+- **Two-layer locking in `tmux_send_message`**: existing Python `threading.Lock` (intra-process) + new `flock` on `/tmp/claudecode-telegram/<node>/locks/<session>.lock` (cross-process).
+- **`/workers` `send_example`** now wraps tmux commands in `flock`, so inter-worker sends use the same lock file.
+- Lock files are node-namespaced (multi-node isolation, matches pipe isolation pattern).
+
+**5 new tests:** flock creation, send_example flock, concurrent send behavior (25/25 clean with 5 parallel senders), per-session isolation, node namespace.
 
 ### v0.27.1 - TDD workflow and TEST_FILTER
 
