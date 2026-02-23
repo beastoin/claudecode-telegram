@@ -4576,6 +4576,360 @@ print('OK')
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Worker Registry Tests (persistent registry)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_registry_add_remove() {
+    info "Testing registry add/remove CRUD..."
+
+    if python3 -c "
+import os, json, tempfile, time
+from pathlib import Path
+import bridge
+
+# Use temp dir to avoid touching real registry
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+
+# Add a worker
+bridge._registry_add('alice', 'claude', 12345)
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert 'alice' in data['workers'], 'alice not in registry'
+assert data['workers']['alice']['backend'] == 'claude'
+assert data['workers']['alice']['chat_id'] == 12345
+assert data['version'] == 1
+
+# Add another
+bridge._registry_add('bob', 'codex', 67890)
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert 'alice' in data['workers'] and 'bob' in data['workers'], 'both should exist'
+
+# Remove alice
+bridge._registry_remove('alice')
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert 'alice' not in data['workers'], 'alice should be removed'
+assert 'bob' in data['workers'], 'bob should remain'
+
+# Remove nonexistent (no crash)
+bridge._registry_remove('charlie')
+
+# Verify file permissions
+perms = oct(bridge.WORKER_REGISTRY_FILE.stat().st_mode)[-3:]
+assert perms == '600', f'registry file should be 600, got {perms}'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Registry add/remove CRUD works"
+    else
+        fail "Registry add/remove CRUD failed"
+    fi
+}
+
+test_registry_bootstrap() {
+    info "Testing registry bootstrap from tmux sessions..."
+
+    if python3 -c "
+import os, json, tempfile
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+
+# Simulate existing tmux sessions
+registered = {
+    'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
+    'bob': {'tmux': 'claude-test-bob', 'backend': 'codex'},
+}
+
+# Bootstrap should create registry
+bridge._registry_bootstrap(registered)
+assert bridge.WORKER_REGISTRY_FILE.exists(), 'registry file should be created'
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert 'alice' in data['workers'] and 'bob' in data['workers'], 'both workers should be bootstrapped'
+assert data['workers']['alice']['backend'] == 'claude'
+assert data['workers']['bob']['backend'] == 'codex'
+
+# Second call should be a no-op (file already exists)
+old_mtime = bridge.WORKER_REGISTRY_FILE.stat().st_mtime
+import time; time.sleep(0.01)
+bridge._registry_bootstrap({'charlie': {'tmux': 'claude-test-charlie', 'backend': 'claude'}})
+new_mtime = bridge.WORKER_REGISTRY_FILE.stat().st_mtime
+assert old_mtime == new_mtime, 'bootstrap should not overwrite existing registry'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Registry bootstrap from tmux sessions works"
+    else
+        fail "Registry bootstrap test failed"
+    fi
+}
+
+test_registry_corrupt_recovery() {
+    info "Testing registry corrupt file recovery..."
+
+    if python3 -c "
+import os, json, tempfile
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+
+# Write garbage to registry file
+bridge.WORKER_REGISTRY_FILE.write_text('not valid json{{{')
+
+# Load should return empty dict, not crash
+data = bridge._load_registry()
+assert data == {}, f'corrupt file should return empty dict, got {data}'
+
+# Corrupt file should be renamed
+corrupt_files = list(Path(tmpdir).glob('workers.corrupt.*'))
+assert len(corrupt_files) == 1, f'expected 1 corrupt backup, got {len(corrupt_files)}'
+
+# Now add a worker — should work fine after corrupt recovery
+bridge._registry_add('alice', 'claude', 12345)
+data = bridge._load_registry()
+assert 'alice' in data.get('workers', {}), 'should work after corrupt recovery'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Registry corrupt file recovery works"
+    else
+        fail "Registry corrupt recovery test failed"
+    fi
+}
+
+test_get_registered_includes_registry() {
+    info "Testing get_registered_sessions includes registry workers..."
+
+    if python3 -c "
+import os, json, tempfile
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+# Pre-create registry with a dead worker
+data = {'version': 1, 'workers': {
+    'deadworker': {'backend': 'claude', 'chat_id': 123, 'hire_time': 1000}
+}}
+bridge.WORKER_REGISTRY_FILE.write_text(json.dumps(data))
+
+# Create worker manager that returns no tmux sessions
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+
+# Mock scan_tmux_sessions to return empty (no live workers)
+wm.scan_tmux_sessions = lambda: {}
+
+registered = wm.get_registered_sessions()
+assert 'deadworker' in registered, f'dead worker should be in registered, got {list(registered.keys())}'
+assert registered['deadworker'].get('backend') == 'claude'
+assert 'tmux' not in registered['deadworker'], 'dead worker should not have tmux key'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_registered_sessions includes registry workers"
+    else
+        fail "get_registered_sessions registry merge failed"
+    fi
+}
+
+test_restart_dead_worker() {
+    info "Testing restart of dead worker (tmux gone, in registry)..."
+
+    if python3 -c "
+import os, json, tempfile, subprocess, time
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+# Pre-create registry with a dead worker
+data = {'version': 1, 'workers': {
+    'deadworker': {'backend': 'claude', 'chat_id': 123, 'hire_time': 1000}
+}}
+bridge.WORKER_REGISTRY_FILE.write_text(json.dumps(data))
+
+prefix = 'claude-regtest-'
+bridge.TMUX_PREFIX = prefix
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, prefix)
+wm.scan_tmux_sessions = lambda: {}
+
+registered = wm.get_registered_sessions()
+assert 'deadworker' in registered, 'dead worker should be in registered'
+
+# Test that restart detects dead worker and enters recovery path
+# Mock _restart_dead_worker to track that it was called (avoids tmux/claude deps)
+called = {}
+original = wm._restart_dead_worker
+def mock_restart(name, backend_name, backend, tmux_name, mode):
+    called['name'] = name
+    called['backend'] = backend_name
+    called['tmux'] = tmux_name
+    called['mode'] = mode
+    return True, None
+
+wm._restart_dead_worker = mock_restart
+
+ok, err = wm.restart('deadworker', mode='relaunch')
+assert ok, f'restart should succeed, got err: {err}'
+assert called.get('name') == 'deadworker', f'expected deadworker, got {called}'
+assert called.get('backend') == 'claude', f'expected claude backend, got {called}'
+assert called.get('tmux') == f'{prefix}deadworker', f'expected regtest prefix, got {called}'
+assert called.get('mode') == 'relaunch', f'expected relaunch mode, got {called}'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Restart of dead worker recovers from registry"
+    else
+        fail "Restart dead worker test failed"
+    fi
+}
+
+test_end_removes_from_registry() {
+    info "Testing /end removes worker from registry..."
+
+    if python3 -c "
+import os, json, tempfile, subprocess
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+prefix = 'claude-regtest-'
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, prefix)
+
+# Create a tmux session to simulate a live worker
+tmux_name = f'{prefix}endtest'
+subprocess.run(['tmux', 'new-session', '-d', '-s', tmux_name], capture_output=True)
+
+# Add to registry
+bridge._registry_add('endtest', 'claude', 123)
+data = bridge._load_registry()
+assert 'endtest' in data['workers'], 'worker should be in registry before end'
+
+# End the worker
+ok, err = wm.end('endtest')
+assert ok, f'end should succeed, got err: {err}'
+
+# Verify removed from registry
+data = bridge._load_registry()
+assert 'endtest' not in data.get('workers', {}), 'worker should be removed from registry after end'
+
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/end removes worker from registry"
+    else
+        fail "/end registry removal test failed"
+    fi
+}
+
+test_team_shows_exited() {
+    info "Testing /team shows exited workers..."
+
+    if python3 -c "
+import bridge
+
+# Mock a registered dict with one exited worker (no tmux key)
+registered = {
+    'alive': {'tmux': 'claude-test-alive', 'backend': 'claude'},
+    'dead': {'backend': 'claude'},  # no tmux key = exited
+}
+
+# Record EXITED state in watchdog
+bridge._record_worker_state('dead', 'EXITED', 'session gone', 1000)
+bridge._record_worker_state('alive', 'READY', 'idle', 1000)
+
+lines = bridge.format_team_lines(registered, 'alive')
+output = '\n'.join(lines)
+assert 'dead' in output, f'dead worker should appear in team output'
+assert 'exited' in output, f'exited status should appear in team output'
+assert 'alive' in output, f'alive worker should appear in team output'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team shows exited workers"
+    else
+        fail "/team exited display test failed"
+    fi
+}
+
+test_watchdog_exited_state() {
+    info "Testing watchdog EXITED state for registry-only workers..."
+
+    if python3 -c "
+import bridge
+import time
+
+# Clear watchdog state
+bridge._worker_states.clear()
+bridge._prev_worker_states.clear()
+bridge._last_alert_ts.clear()
+
+now = time.time()
+
+# Record EXITED state
+since = bridge._record_worker_state('deadworker', 'EXITED', 'session gone', now)
+
+# Verify it's tracked
+entry = bridge._worker_states.get('deadworker')
+assert entry is not None, 'EXITED state should be recorded'
+assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
+
+# Verify _format_watchdog_status returns 'exited'
+status = bridge._format_watchdog_status('deadworker')
+assert status == 'exited', f'expected \"exited\", got \"{status}\"'
+
+# Verify EXITED is in the alert actions
+bridge.admin_chat_id = 12345
+calls = []
+def fake_api(method, data):
+    calls.append((method, data))
+    return {'ok': True}
+
+orig_api = bridge.telegram_api
+bridge.telegram_api = fake_api
+
+# Simulate transition: first transition should alert (after grace period)
+bridge._prev_worker_states.clear()
+bridge._handle_watchdog_transition('deadworker', 'EXITED', 'session gone', since=now - 60, now=now)
+assert len(calls) == 1, f'expected 1 alert call, got {len(calls)}'
+assert 'EXITED' in calls[0][1]['text'], f'alert should mention EXITED'
+assert '/restart deadworker' in calls[0][1]['text'], f'alert should suggest /restart'
+
+bridge.telegram_api = orig_api
+bridge.admin_chat_id = None
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog EXITED state detection works"
+    else
+        fail "Watchdog EXITED state test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Telegram API limit test
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -6855,6 +7209,18 @@ run_unit_tests() {
     test_persistence_file_functions
     test_pending_auto_timeout
     test_pending_files
+
+    # Unit tests - Worker Registry (persistent)
+    log ""
+    log "── Worker Registry Tests (Unit) ────────────────────────────────────────"
+    test_registry_add_remove
+    test_registry_bootstrap
+    test_registry_corrupt_recovery
+    test_get_registered_includes_registry
+    test_restart_dead_worker
+    test_end_removes_from_registry
+    test_team_shows_exited
+    test_watchdog_exited_state
 
     # Unit tests - Concurrency
     log ""

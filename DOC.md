@@ -340,6 +340,28 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.26.0 - Persistent worker registry
+
+**Breaking changes:** None.
+
+**New features:**
+- **Persistent worker registry (`workers.json`)**: Bridge remembers all hired workers in `NODE_DIR/workers.json`. When a worker's tmux session dies (context limit, crash, idle timeout), the bridge still knows about it and can recover it.
+- **Dead worker recovery**: `/restart <name>` now works for workers whose tmux session has died. Re-creates the tmux session, exports hook env, starts the backend, and sends a welcome message. Supports both `resume` and `relaunch` modes.
+- **EXITED watchdog state**: New watchdog state for workers that are in the registry but have no tmux session. Triggers an alert with a suggested `/restart <name>` action.
+- **`/team` shows exited workers**: Workers whose tmux sessions have died appear as "exited" in `/team` output instead of silently disappearing.
+- **`/progress` shows exited state**: Reports "Session exited. Use /restart to bring back." for dead workers.
+- **`/workers` includes exited workers**: Returns exited workers with `status: "exited"` and `protocol: "none"` (interactive) or `protocol: "pipe"` (non-interactive).
+- **First-run bootstrap**: If `workers.json` doesn't exist, it's auto-created from current tmux sessions so existing deployments don't lose track of workers.
+
+**Architecture changes:**
+- Registry file: `NODE_DIR/workers.json` — atomic write via tmpfile + `os.replace()`, chmod 0o600.
+- Registry CRUD: `_load_registry()`, `_save_registry()`, `_registry_add()`, `_registry_remove()`, `_registry_bootstrap()`.
+- Corrupt file recovery: renames to `.corrupt.<timestamp>`, logs warning, returns empty dict.
+- Thread safety: all registry operations guarded by existing `_watchdog_lock`.
+- `hire()` writes to registry, `end()` removes, `get_registered_sessions()` merges.
+- `_restart_dead_worker()`: full dead worker recovery path (tmux create, env export, backend start, welcome).
+- 8 new tests: registry CRUD, bootstrap, corrupt recovery, registered sessions merge, dead worker restart, end cleanup, team display, watchdog EXITED state.
+
 ### v0.25.0 - SessionStart hook for auto-checkin + checkin notes
 
 **Breaking changes:** None.

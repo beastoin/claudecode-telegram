@@ -778,6 +778,97 @@ def load_last_active():
         print(f"Failed to load last_active: {e}")
     return None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent Worker Registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
+
+
+def _load_registry() -> dict:
+    """Load worker registry from disk. Returns {} on missing/corrupt."""
+    try:
+        if not WORKER_REGISTRY_FILE.exists():
+            return {}
+        raw = WORKER_REGISTRY_FILE.read_text()
+        data = json.loads(raw)
+        if not isinstance(data, dict) or "workers" not in data:
+            raise ValueError("invalid registry format")
+        return data
+    except Exception as e:
+        if WORKER_REGISTRY_FILE.exists():
+            corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(time.time())}")
+            print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
+            try:
+                WORKER_REGISTRY_FILE.rename(corrupt_path)
+            except Exception:
+                pass
+        return {}
+
+
+def _save_registry(data: dict):
+    """Atomic write of registry to disk."""
+    try:
+        NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(NODE_DIR), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, str(WORKER_REGISTRY_FILE))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            raise
+    except Exception as e:
+        print(f"Failed to save worker registry: {e}")
+
+
+def _registry_add(name: str, backend: str, chat_id: int = None):
+    """Add a worker to the persistent registry."""
+    with _watchdog_lock:
+        data = _load_registry()
+        if "workers" not in data:
+            data = {"version": 1, "workers": {}}
+        data["workers"][name] = {
+            "backend": backend,
+            "chat_id": chat_id,
+            "hire_time": int(time.time()),
+        }
+        _save_registry(data)
+
+
+def _registry_remove(name: str):
+    """Remove a worker from the persistent registry."""
+    with _watchdog_lock:
+        data = _load_registry()
+        if "workers" not in data:
+            return
+        data["workers"].pop(name, None)
+        _save_registry(data)
+
+
+def _registry_bootstrap(registered: dict):
+    """First-run: create registry from currently running tmux sessions."""
+    if WORKER_REGISTRY_FILE.exists():
+        return
+    if not registered:
+        return
+    data = {"version": 1, "workers": {}}
+    for name, session in registered.items():
+        backend = normalize_backend(session.get("backend"))
+        data["workers"][name] = {
+            "backend": backend,
+            "chat_id": None,
+            "hire_time": int(time.time()),
+        }
+    _save_registry(data)
+    print(f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
+
+
 def read_checkin_note():
     """Read checkin note from file. Returns empty string if file missing."""
     try:
@@ -2503,6 +2594,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         "DEAD": f"/restart --clean {name}",
         "STUCK": f"/restart --clean {name}",
         "POISONED": f"/restart --clean {name} (context may be poisoned)",
+        "EXITED": f"/restart {name}",
     }
     action = actions.get(state, "check /team")
     text = f"[watchdog] {name}: {state} ({reason}). Suggested: {action}"
@@ -2519,7 +2611,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         return
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states:
@@ -2542,14 +2634,14 @@ def _handle_watchdog_transition(
     if now is None:
         now = time.time()
 
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
 
     def eligible_for_alert() -> bool:
-        if state in {"OFFLINE", "DEAD"}:
+        if state in {"OFFLINE", "DEAD", "EXITED"}:
             return since is not None and (now - since) >= START_GRACE
         return True
 
@@ -2557,7 +2649,7 @@ def _handle_watchdog_transition(
         if state_changed:
             if eligible_for_alert():
                 _send_watchdog_alert(name, state, reason)
-        elif state in {"OFFLINE", "DEAD"} and eligible_for_alert():
+        elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert():
             _send_watchdog_alert(name, state, reason)
 
     if state_changed and prev_state in bad_states and state in good_states:
@@ -2627,6 +2719,13 @@ def watchdog_loop():
             for name, session in registered.items():
                 tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
                 tmux_exists = tmux_present.get(name, False)
+
+                # Registry-only worker (tmux gone): mark EXITED directly
+                if not tmux_exists and "tmux" not in session:
+                    since = _record_worker_state(name, "EXITED", "session gone", now)
+                    _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
+                    continue
+
                 if probe_failed and not tmux_exists and _consecutive_probe_failures.get(name, 0) < 3:
                     continue
 
@@ -2868,6 +2967,8 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
         return "DEAD"
     if state == "OFFLINE":
         return "offline"
+    if state == "EXITED":
+        return "exited"
     if state == "UNTRACKED_BUSY":
         return "working (untracked)"
     return state.lower()
@@ -2999,6 +3100,15 @@ class WorkerManager:
                             backend = backend_file.read_text().strip()
                             registered[name] = {"backend": backend}
 
+        # Merge persistent registry: workers in registry but not in tmux
+        # appear with no "tmux" key (same pattern as non-interactive fallback above).
+        # On first run, bootstrap registry from current tmux sessions.
+        _registry_bootstrap(registered)
+        registry = _load_registry()
+        for name, info in registry.get("workers", {}).items():
+            if name not in registered:
+                registered[name] = {"backend": info.get("backend", DEFAULT_BACKEND)}
+
         if state["active"] and state["active"] not in registered:
             state["active"] = None
         if registered and not state["active"]:
@@ -3044,6 +3154,28 @@ class WorkerManager:
         for name, info in registered.items():
             backend_name = get_worker_backend(name, info)
             backend = get_backend(backend_name)
+
+            # Registry-only workers (tmux gone): non-interactive can still serve via pipe
+            if "tmux" not in info:
+                if not backend.is_interactive:
+                    pipe_path = ensure_worker_pipe(name)
+                    workers.append({
+                        "name": name,
+                        "protocol": "pipe",
+                        "address": str(pipe_path),
+                        "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
+                        "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
+                    })
+                else:
+                    workers.append({
+                        "name": name,
+                        "protocol": "none",
+                        "address": "",
+                        "status": "exited",
+                        "note": f"Worker exited. Use /restart {name} to bring back.",
+                    })
+                continue
+
             if not backend.is_interactive:
                 pipe_path = ensure_worker_pipe(name)
                 workers.append({
@@ -3055,8 +3187,6 @@ class WorkerManager:
                 })
             else:
                 tmux_name = info.get("tmux")
-                if not tmux_name:
-                    continue
                 workers.append({
                     "name": name,
                     "protocol": "tmux",
@@ -3181,6 +3311,7 @@ class WorkerManager:
 
         state["active"] = name
         save_last_active(name)
+        _registry_add(name, backend, chat_id)
 
         if not backend_obj.is_interactive:
             print(f"Created {backend} worker '{name}' (non-interactive mode)")
@@ -3216,10 +3347,11 @@ class WorkerManager:
             stop_docker_container(name)
 
         clear_pending(name)
-        # All backends have tmux sessions now
+        # Kill tmux session if it exists (may already be gone for registry-only workers)
         subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
         cleanup_inbox(name)
         cleanup_worker_pipe(name)
+        _registry_remove(name)
 
         if state["active"] == name:
             state["active"] = None
@@ -3228,7 +3360,11 @@ class WorkerManager:
         return True, None
 
     def restart(self, name: str, mode: str = "relaunch"):
-        """Restart a worker in its existing tmux session."""
+        """Restart a worker in its existing tmux session.
+
+        If tmux session is gone but worker is in the persistent registry,
+        re-creates the tmux session and restarts the backend (dead worker recovery).
+        """
         self._sync_paths()
         registered = self.get_registered_sessions()
         if name not in registered:
@@ -3240,7 +3376,8 @@ class WorkerManager:
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
         if not tmux_exists(tmux_name):
-            return False, "Worker workspace is not running"
+            # Dead worker recovery: re-create tmux session if worker is in registry
+            return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
 
         # Check binary still exists before restarting
         if not shutil.which(backend.binary):
@@ -3311,6 +3448,78 @@ class WorkerManager:
         else:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 
+        return True, None
+
+    def _restart_dead_worker(self, name: str, backend_name: str, backend, tmux_name: str, mode: str):
+        """Re-create a dead worker (tmux gone) from registry.
+
+        Creates a new tmux session, exports env, starts backend, sends welcome.
+        Preserves session files (session_id, cwd) for resume capability.
+        """
+        if not shutil.which(backend.binary):
+            return False, f"'{backend.binary}' not found in PATH. Install it first."
+
+        # Create new tmux session
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+            capture_output=True, env=clean_env
+        )
+        if result.returncode != 0:
+            return False, "Could not create worker workspace"
+
+        time.sleep(0.5)
+        export_hook_env(tmux_name, backend_name)
+        time.sleep(0.3)
+
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
+        time.sleep(0.3)
+
+        ensure_session_dir(name)
+        if not backend.is_interactive:
+            ensure_worker_pipe(name)
+
+        resume_id = ""
+        resume_cwd = ""
+        if mode == "resume":
+            resume_id = get_claude_session_id(name)
+            resume_cwd = get_claude_session_cwd(name)
+        else:
+            session_dir = self.sessions_dir / name
+            session_dir.mkdir(parents=True, exist_ok=True)
+            for session_id_file in session_dir.glob("*_session_id"):
+                session_id_file.unlink()
+
+        append_prompt = ""
+        if backend.name == "claude":
+            inventory_cwd = resume_cwd or get_claude_session_cwd(name)
+            append_prompt = build_mcp_inventory_prompt(inventory_cwd)
+
+        if SANDBOX_ENABLED and backend.is_interactive:
+            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+        else:
+            start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
+            if resume_cwd:
+                start_cmd = f'cd "{resume_cwd}" && unset CLAUDECODE && {start_cmd}'
+            else:
+                start_cmd = f'unset CLAUDECODE && {start_cmd}'
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+            if backend.is_interactive:
+                time.sleep(1.5)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
+                time.sleep(0.3)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+
+        welcome = self._build_welcome(name, backend)
+        if backend.is_interactive:
+            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+            self.send(name, welcome)
+        else:
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
+
+        print(f"Dead worker '{name}' recovered from registry (mode={mode})")
         return True, None
 
 
@@ -4053,21 +4262,24 @@ class CommandRouter:
         mode = "tmux"
 
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
-        if not backend.is_interactive:
+        is_tmux_alive = "tmux" in session and tmux_exists(tmux_name)
+        if not is_tmux_alive:
+            # Worker exited (tmux gone, in registry only)
+            online = False
+            ready = False
+            mode = f"{backend_name} (exited)"
+            needs_attention = "Session exited. Use /restart to bring back."
+        elif not backend.is_interactive:
             # Non-interactive: online = tmux exists, ready = always (stateless)
-            online = tmux_exists(tmux_name)
-            ready = online  # Ready if tmux exists
+            online = True
+            ready = True
             mode = f"{backend_name} (non-interactive)"
-            if not online:
-                needs_attention = "tmux session missing. Use /end then /hire to recreate."
         else:
-            exists = tmux_exists(tmux_name)
-            online = exists
-            if exists:
-                claude_running = is_claude_running(tmux_name)
-                ready = claude_running
-                if not claude_running:
-                    needs_attention = "worker app is not running. Use /restart."
+            online = True
+            claude_running = is_claude_running(tmux_name)
+            ready = claude_running
+            if not claude_running:
+                needs_attention = "worker app is not running. Use /restart."
 
         resume_line = None
         continuity_line = None
@@ -4189,7 +4401,10 @@ class CommandRouter:
         backend = get_backend(backend_name)
 
         # Non-interactive backends: resume is automatic via saved thread ID
-        if not backend.is_interactive:
+        # (but only if tmux is still alive — dead workers need full restart)
+        tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
+        worker_alive = session and "tmux" in session and tmux_exists(tmux_name)
+        if not backend.is_interactive and worker_alive:
             session_id, source = get_any_session_id(name)
             if session_id:
                 self.reply(chat_id, f"Resume is automatic for {backend_name}. Thread {session_id[:8]}... is active — next message continues it.")

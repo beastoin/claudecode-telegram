@@ -1,4 +1,4 @@
-# claudecode-telegram Product Specification (v0.25.0)
+# claudecode-telegram Product Specification (v0.26.0)
 
 ## Overview
 - MUST provide a Telegram bot plus an HTTP bridge that routes manager messages to multiple workers and returns worker responses to Telegram.
@@ -125,6 +125,18 @@
 - MUST accept backend-prefix syntax (e.g., `codex-alice`, `gemini-bob`) and map to the corresponding backend.
 - MUST reject unknown backends and list available backends.
 - MUST send a welcome message on hire that includes the bridge URL, inter-worker discovery instructions, and the checkin note (if `TEAM_DIR/checkin-note.txt` exists).
+
+### Persistent worker registry
+- MUST persist hired workers in `NODE_DIR/workers.json` with name, backend, chat_id, and hire_time.
+- MUST use atomic writes (tmpfile + `os.replace()`) and secure permissions (`0o600`).
+- MUST recover gracefully from corrupt registry files (rename to `.corrupt.<timestamp>`, return empty).
+- MUST add workers to registry on `/hire` and remove on `/end`.
+- MUST bootstrap registry from current tmux sessions on first run (no `workers.json` exists).
+- MUST merge registry workers into `get_registered_sessions()` so dead workers are visible.
+- MUST detect dead workers (in registry, no tmux session) and report EXITED watchdog state.
+- MUST allow `/restart` to recover dead workers by re-creating tmux sessions from registry data.
+- MUST show exited workers in `/team`, `/progress`, and `/workers` output.
+- MUST guard all registry operations with `_watchdog_lock` for thread safety.
 
 ### Per-session backend state
 - MUST store backend selection at `SESSIONS_DIR/<worker>/backend`.
