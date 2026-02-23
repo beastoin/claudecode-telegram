@@ -695,6 +695,7 @@ _consecutive_probe_failures = {}
 _idle_child_baseline = {}  # name -> int (MCP server child count at idle)
 _prev_children = {}  # name -> int (previous active children count, for activity detection)
 _last_activity_ts = {}  # name -> float (last time children count changed)
+_worker_cwds = {}  # name -> cwd (RAM-only startup cwd hints)
 _watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
@@ -827,22 +828,17 @@ def _save_registry(data: dict):
         print(f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: int = None, cwd: str = None):
+def _registry_add(name: str, backend: str, chat_id: int = None):
     """Add a worker to the persistent registry."""
     with _watchdog_lock:
         data = _load_registry()
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
-        existing = data["workers"].get(name, {})
         entry = {
             "backend": backend,
             "chat_id": chat_id,
             "hire_time": int(time.time()),
         }
-        if cwd is None:
-            cwd = existing.get("cwd")
-        if cwd:
-            entry["cwd"] = cwd
         data["workers"][name] = entry
         _save_registry(data)
 
@@ -857,42 +853,21 @@ def _registry_remove(name: str):
         _save_registry(data)
 
 
-def _registry_get(name: str) -> dict:
-    """Return one worker record from the registry, or {}."""
-    data = _load_registry()
-    workers = data.get("workers", {})
-    worker = workers.get(name, {})
-    return worker if isinstance(worker, dict) else {}
-
-
-def _registry_get_cwd(name: str) -> str:
-    """Return persisted cwd for worker, if present."""
-    worker = _registry_get(name)
-    cwd = worker.get("cwd")
-    if isinstance(cwd, str):
-        return cwd
-    return ""
-
-
-def _registry_update_cwd(name: str, cwd: str):
-    """Set/update cwd in registry for a worker."""
+def _set_worker_cwd(name: str, cwd: str):
+    """Set startup cwd hint for a worker in RAM."""
+    normalized = normalize_cwd(cwd)
     with _watchdog_lock:
-        data = _load_registry()
-        if "workers" not in data:
-            data = {"version": 1, "workers": {}}
-        workers = data["workers"]
-        existing = workers.get(name, {})
-        if not isinstance(existing, dict):
-            existing = {}
-        backend = normalize_backend(existing.get("backend"))
-        entry = {
-            "backend": backend,
-            "chat_id": existing.get("chat_id"),
-            "hire_time": existing.get("hire_time") or int(time.time()),
-            "cwd": cwd,
-        }
-        workers[name] = entry
-        _save_registry(data)
+        if normalized:
+            _worker_cwds[name] = normalized
+        else:
+            _worker_cwds.pop(name, None)
+
+
+def _get_worker_cwd(name: str) -> str:
+    """Get startup cwd hint for a worker from RAM."""
+    with _watchdog_lock:
+        cwd = _worker_cwds.get(name)
+    return cwd if isinstance(cwd, str) else ""
 
 
 def _registry_bootstrap(registered: dict):
@@ -2969,9 +2944,6 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
             backend = parts[i + 1]
             i += 2
             continue
-        elif part == "--cwd" and i + 1 < len(parts):
-            i += 2
-            continue
         elif part == "--codex":
             # Legacy support
             backend = "codex"
@@ -3001,25 +2973,6 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
         return name, backend
 
     return name, backend
-
-
-def parse_hire_cwd(raw: str) -> tuple[str, str]:
-    """Parse optional --cwd from /hire args.
-
-    Returns (cwd, error_message). error_message is non-empty for parse errors.
-    """
-    parts = [p for p in (raw or "").split() if p]
-    i = 0
-    while i < len(parts):
-        part = parts[i]
-        if part == "--cwd":
-            if i + 1 >= len(parts):
-                return "", "Usage: /hire <name> [--backend <backend>] [--cwd <path>]"
-            return parts[i + 1], ""
-        if part.startswith("--cwd="):
-            return part.split("=", 1)[1], ""
-        i += 1
-    return "", ""
 
 
 def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Optional[dict] = None) -> str:
@@ -3145,10 +3098,10 @@ class WorkerManager:
             self.tmux_prefix = TMUX_PREFIX
 
     def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
-        """Resolve startup cwd with priority: explicit > registry > fallback."""
+        """Resolve startup cwd with priority: explicit > RAM hint > fallback."""
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
-            candidate = normalize_cwd(_registry_get_cwd(name))
+            candidate = normalize_cwd(_get_worker_cwd(name))
         if candidate:
             if os.path.isdir(candidate):
                 return candidate
@@ -3346,7 +3299,7 @@ class WorkerManager:
 
         return welcome
 
-    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None, cwd: str = None):
+    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int = None):
         """Create a new worker instance."""
         self._sync_paths()
         if not is_valid_backend(backend):
@@ -3373,7 +3326,7 @@ class WorkerManager:
             return False, "Could not start the worker workspace"
 
         time.sleep(0.5)
-        startup_cwd = self._get_startup_cwd(name, requested_cwd=cwd)
+        startup_cwd = self._get_startup_cwd(name)
         if startup_cwd:
             self._cd_tmux_to_cwd(tmux_name, startup_cwd)
 
@@ -3434,7 +3387,7 @@ class WorkerManager:
 
         state["active"] = name
         save_last_active(name)
-        _registry_add(name, backend, chat_id, cwd=startup_cwd or None)
+        _registry_add(name, backend, chat_id)
 
         if not backend_obj.is_interactive:
             print(f"Created {backend} worker '{name}' (non-interactive mode)")
@@ -3470,6 +3423,7 @@ class WorkerManager:
             stop_docker_container(name)
 
         clear_pending(name)
+        _set_worker_cwd(name, "")
         # Kill tmux session if it exists (may already be gone for registry-only workers)
         subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
         cleanup_inbox(name)
@@ -3952,10 +3906,10 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
  
 
 
-def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None, cwd: str = None):
+def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None):
     """Create a new worker instance."""
     _sync_worker_manager()
-    return worker_manager.hire(name, backend, chat_id=chat_id, cwd=cwd)
+    return worker_manager.hire(name, backend, chat_id=chat_id)
 
 
 def kill_session(name):
@@ -4309,11 +4263,6 @@ class CommandRouter:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
 
-        cwd_arg, cwd_parse_error = parse_hire_cwd(name)
-        if cwd_parse_error:
-            self.reply(chat_id, cwd_parse_error, outcome="Needs decision")
-            return True
-
         parsed_name, backend = parse_hire_args(name)
         if not parsed_name:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
@@ -4330,14 +4279,7 @@ class CommandRouter:
             self.reply(chat_id, f"Cannot use \"{name}\" - reserved command. Choose another name.", outcome="Needs decision")
             return True
 
-        cwd = None
-        if cwd_arg:
-            cwd, cwd_err = validate_cwd(cwd_arg)
-            if cwd_err:
-                self.reply(chat_id, f"Invalid --cwd: {cwd_err}", outcome="Needs decision")
-                return True
-
-        ok, err = create_session(name, backend, chat_id=chat_id, cwd=cwd)
+        ok, err = create_session(name, backend, chat_id=chat_id)
         if ok:
             self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
             update_bot_commands()
@@ -4959,7 +4901,7 @@ class Handler(BaseHTTPRequestHandler):
 
         GET /checkin                    — generic instructions (uses default backend)
         GET /checkin?name=lee           — personalized instructions for worker 'lee'
-        GET /checkin?name=lee&cwd=/dir  — persist cwd; restart worker if cwd changed
+        GET /checkin?name=lee&cwd=/dir  — set startup cwd (RAM); restart worker if cwd changed
         """
         try:
             params = parse_qs(parsed.query)
@@ -4990,7 +4932,7 @@ class Handler(BaseHTTPRequestHandler):
             backend_obj = get_backend(backend_name)
 
             if requested_cwd:
-                _registry_update_cwd(name, requested_cwd)
+                _set_worker_cwd(name, requested_cwd)
                 save_claude_session_cwd(name, requested_cwd)
                 if tmux_name and tmux_exists(tmux_name):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name))
