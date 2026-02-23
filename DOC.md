@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.25.0
+> Version: 0.27.1
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,30 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.27.1 - TDD workflow and TEST_FILTER
+
+**New features:**
+- **TEST_FILTER env var**: Run specific tests by substring match. `TEST_FILTER=test_registry FAST=1 ./test.sh` runs only matching tests. Enables fast Red-Green-Refactor inner loops.
+- **CLAUDE.md TDD section**: Expanded with increment-based decomposition ladder (degenerate → happy path → variations → edges → errors → integration), per-increment RED/GREEN/REFACTOR steps, and mode gate guidelines.
+
+**Architecture changes:**
+- `should_run_test()` / `run_test()` helpers in test.sh — all test invocations wrapped through `run_test()`.
+- `count_matching_tests()` pre-scans runner functions to show how many tests will execute when filter is active.
+- `tests_run` counter tracks actual tests executed (vs total available).
+
+### v0.27.0 - Worker CWD shift via checkin API
+
+**New features:**
+- **Checkin CWD**: Workers can shift their working directory via `curl checkin?name=X&cwd=/path`. Bridge validates the path, stores it in RAM, and restarts the worker in the new directory if it differs from the current tmux pane CWD.
+- **RAM-only CWD storage**: `_worker_cwds` dict (not persisted to workers.json). Cleared on `/end`.
+
+**Architecture changes:**
+- `validate_cwd()` / `normalize_cwd()` — path validation and normalization.
+- `_get_startup_cwd()` — resolves CWD priority (explicit > RAM > fallback).
+- `_get_tmux_pane_cwd()` — reads current tmux pane working directory.
+- `_cd_tmux_to_cwd()` — sends cd command to tmux session.
+- `hire()`, `restart()`, `_restart_dead_worker()` all respect stored CWD.
 
 ### v0.26.0 - Persistent worker registry
 
