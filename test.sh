@@ -3007,6 +3007,8 @@ try:
     assert 'flock' in ex, f'send_example missing flock: {ex}'
     # Must reference a lock path
     assert '/locks/' in ex, f'send_example missing lock path: {ex}'
+    # Must use -p for bracketed paste (prevents Enter being swallowed by TUI)
+    assert 'paste-buffer -p' in ex, f'send_example missing -p flag: {ex}'
 
     print('OK')
 finally:
@@ -4776,6 +4778,181 @@ print('OK')
     fi
 
     tmux kill-session -t "$test_session" 2>/dev/null
+}
+
+test_paste_buffer_uses_bracketed_paste() {
+    info "Testing paste-buffer uses -p flag for bracketed paste..."
+
+    if python3 -c "
+import sys, subprocess, unittest.mock; sys.path.insert(0, '.')
+import bridge
+
+bridge._node_name = 'test-bp'
+
+calls = []
+orig_run = subprocess.run
+
+def mock_run(cmd, *args, **kwargs):
+    calls.append(cmd)
+    # Simulate success
+    return type('R', (), {'returncode': 0, 'stdout': b'', 'stderr': b''})()
+
+subprocess.run = mock_run
+try:
+    # Need a temp tmux lock dir
+    import tempfile, os
+    lock_dir = f'/tmp/claudecode-telegram/test-bp/locks'
+    os.makedirs(lock_dir, exist_ok=True)
+
+    bridge.tmux_send_message('test-session', 'hello world')
+
+    # Find the paste-buffer call
+    paste_calls = [c for c in calls if isinstance(c, list) and 'paste-buffer' in c]
+    assert len(paste_calls) == 1, f'Expected 1 paste-buffer call, got {len(paste_calls)}: {paste_calls}'
+
+    paste_cmd = paste_calls[0]
+    assert '-p' in paste_cmd, f'Missing -p flag in paste-buffer: {paste_cmd}'
+    assert '-r' in paste_cmd, f'Missing -r flag in paste-buffer: {paste_cmd}'
+
+    print('OK')
+finally:
+    subprocess.run = orig_run
+" 2>/dev/null | grep -q "OK"; then
+        success "paste-buffer uses -p (bracketed paste) and -r flags"
+    else
+        fail "paste-buffer missing -p flag for bracketed paste"
+    fi
+}
+
+test_long_text_enter_with_bracketed_paste() {
+    info "Testing long text (60 lines) + Enter delivered via bracketed paste..."
+
+    # Create TUI simulator that enables bracketed paste mode
+    cat > /tmp/tui-sim-test-$$.py << 'TUITEST'
+import sys, os, select, time, tty, termios
+
+RESULT_FILE = sys.argv[1]
+
+# Enable bracketed paste mode (like Claude Code)
+sys.stdout.buffer.write(b'\033[?2004h')
+sys.stdout.buffer.flush()
+
+old = termios.tcgetattr(sys.stdin)
+tty.setraw(sys.stdin)
+
+results = []
+buf = b''
+in_paste = False
+paste_data = b''
+paste_received = False
+
+try:
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if readable:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buf += chunk
+
+            while True:
+                if not in_paste:
+                    idx = buf.find(b'\x1b[200~')
+                    if idx >= 0:
+                        in_paste = True
+                        paste_data = b''
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        if b'\r' in buf:
+                            if paste_received:
+                                results.append("ENTER_AFTER_PASTE")
+                            buf = buf[buf.rfind(b'\r')+1:]
+                        break
+                else:
+                    idx = buf.find(b'\x1b[201~')
+                    if idx >= 0:
+                        paste_data += buf[:idx]
+                        in_paste = False
+                        paste_received = True
+                        lines = paste_data.count(b'\n') + 1
+                        results.append(f"PASTE:{lines}lines")
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        paste_data += buf
+                        buf = b''
+                        break
+
+        if "ENTER_AFTER_PASTE" in results:
+            break
+finally:
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+    sys.stdout.buffer.write(b'\033[?2004l')
+    sys.stdout.buffer.flush()
+
+if not results:
+    results.append("NOTHING_RECEIVED")
+
+with open(RESULT_FILE, 'w') as f:
+    f.write('\n'.join(results) + '\n')
+TUITEST
+
+    local test_session="test-bp-long-$$"
+    local result_file="/tmp/tui-bp-result-$$.txt"
+    rm -f "$result_file"
+
+    tmux new-session -d -s "$test_session" -x 200 -y 50 \
+        "python3 /tmp/tui-sim-test-$$.py $result_file"
+    sleep 1
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create TUI simulator session"
+        rm -f "/tmp/tui-sim-test-$$.py"
+        return
+    fi
+
+    # Send 60-line message via bridge function
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import tmux_send_message
+
+# Generate 60-line message
+lines = [f'Line {i}: Test content for bracketed paste delivery verification.' for i in range(1, 61)]
+msg = '\n'.join(lines)
+result = tmux_send_message('$test_session', msg)
+assert result == True, f'tmux_send_message returned {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        : # send succeeded
+    else
+        fail "tmux_send_message failed for 60-line message"
+        tmux kill-session -t "$test_session" 2>/dev/null
+        rm -f "/tmp/tui-sim-test-$$.py" "$result_file"
+        return
+    fi
+
+    # Wait for TUI to process
+    sleep 3
+
+    if [ -f "$result_file" ]; then
+        local has_paste has_enter
+        has_paste=$(grep -c "PASTE:" "$result_file" 2>/dev/null || echo 0)
+        has_enter=$(grep -c "ENTER_AFTER_PASTE" "$result_file" 2>/dev/null || echo 0)
+        if [ "$has_paste" -gt 0 ] && [ "$has_enter" -gt 0 ]; then
+            success "60-line text + Enter delivered via bracketed paste"
+        elif [ "$has_paste" -gt 0 ]; then
+            fail "Paste received but Enter lost ($(cat "$result_file" | tr '\n' ' '))"
+        else
+            fail "Bracketed paste not detected ($(cat "$result_file" | tr '\n' ' '))"
+        fi
+    else
+        fail "TUI simulator produced no result file"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+    rm -f "/tmp/tui-sim-test-$$.py" "$result_file"
 }
 
 test_tmux_send_uses_flock() {
@@ -7690,6 +7867,8 @@ run_unit_tests() {
     log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
     run_test test_tmux_send_locks
     run_test test_tmux_paste_buffer_send
+    run_test test_paste_buffer_uses_bracketed_paste
+    run_test test_long_text_enter_with_bracketed_paste
     run_test test_tmux_send_uses_flock
     run_test test_send_example_uses_flock
     run_test test_concurrent_sends_no_interleave

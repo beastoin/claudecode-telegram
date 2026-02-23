@@ -403,17 +403,23 @@ def tmux_send_message(tmux_name: str, text: str) -> bool:
                 )
                 if r.returncode != 0:
                     return False
-                # Paste buffer atomically into the target pane
-                # -r: suppress bracketed paste escape sequences (tmux 3.4+)
-                #      without -r, TUI apps like Claude Code show "[Pasted text]"
-                #      instead of processing the input
+                # Paste buffer into the target pane with proper bracketed paste
+                # -p: send bracketed paste control codes (\e[200~ ... \e[201~)
+                #     so TUI apps (Claude Code) know exactly where paste ends.
+                #     Without -p, Enter sent after paste can be swallowed into
+                #     the TUI's time-based paste detection window.
+                # -r: preserve LF as LF (don't convert to CR). Keeps multi-line
+                #     text as multi-line input, not line-by-line Enter presses.
                 # -d: delete buffer after pasting
                 r = subprocess.run(
-                    ["tmux", "paste-buffer", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
+                    ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
                     capture_output=True,
                 )
                 if r.returncode != 0:
                     return False
+                # Small delay: let the TUI finish processing the paste event
+                # before sending Enter as a separate keypress
+                time.sleep(0.05)
                 # Send Enter to submit the pasted text
                 r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
                 return r.returncode == 0
@@ -3305,8 +3311,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -r -t {tmux_name} && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
-                    "note": "Uses paste-buffer + flock for reliable delivery. The flock prevents interleaving when multiple senders target the same session. Always prefix your name."
+                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 0.05 && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
+                    "note": "Uses paste-buffer -p (bracketed paste) + flock for reliable delivery. The -p flag ensures TUI apps receive proper paste delimiters so Enter is not swallowed. Always prefix your name."
                 })
         return workers
 
