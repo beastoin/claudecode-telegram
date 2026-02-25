@@ -3102,7 +3102,7 @@ try:
     # Must use -p for bracketed paste (prevents Enter being swallowed by TUI)
     assert 'paste-buffer -p' in ex, f'send_example missing -p flag: {ex}'
     # Must use 0.15s delay (not 0.05) — TUI render takes ~80-120ms
-    assert 'sleep 0.15' in ex, f'send_example should use sleep 0.15, got: {ex}'
+    assert 'sleep 0.3' in ex, f'send_example should use sleep 0.3, got: {ex}'
 
     print('OK')
 finally:

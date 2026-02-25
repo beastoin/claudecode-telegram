@@ -3314,7 +3314,7 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 0.15 && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
+                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 0.3 && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
                     "note": "Uses paste-buffer -p (bracketed paste) + flock for reliable delivery. The -p flag ensures TUI apps receive proper paste delimiters so Enter is not swallowed. Always prefix your name."
                 })
         return workers
