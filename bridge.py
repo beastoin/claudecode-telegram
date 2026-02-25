@@ -417,9 +417,12 @@ def tmux_send_message(tmux_name: str, text: str) -> bool:
                 )
                 if r.returncode != 0:
                     return False
-                # Small delay: let the TUI finish processing the paste event
-                # before sending Enter as a separate keypress
-                time.sleep(0.05)
+                # Delay after paste: TUI needs time to process paste-end marker
+                # and re-render (e.g. image path detection, prompt re-draw).
+                # 50ms was insufficient — Enter got swallowed when TUI was
+                # still rendering image references. 150ms covers observed
+                # rendering times with safety margin.
+                time.sleep(0.15)
                 # Send Enter to submit the pasted text
                 r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
                 return r.returncode == 0
@@ -1039,8 +1042,8 @@ def verify_hook_hmac(headers, body: bytes) -> bool:
 # Image Handling
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Max file size: 20MB (Telegram limit)
-MAX_FILE_SIZE = 20 * 1024 * 1024
+# Max file size: 50MB (Telegram Bot API limit for uploads)
+MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # Allowed image extensions for outgoing (sendPhoto + sendAnimation + sendVideo)
 ALLOWED_IMAGE_EXTENSIONS = {
@@ -4081,6 +4084,11 @@ class CommandRouter:
         photo = msg.get("photo")
         document = msg.get("document")
         animation = msg.get("animation")
+        audio = msg.get("audio")
+        voice = msg.get("voice")
+        video = msg.get("video")
+        video_note = msg.get("video_note")
+        sticker = msg.get("sticker")
 
         doc_is_image = False
         if document:
@@ -4161,6 +4169,49 @@ class CommandRouter:
                     self.route_to_active(file_text, chat_id, msg_id)
                 else:
                     self.reply(chat_id, "Needs decision - Could not download file. Try again.")
+                return
+
+        # Handle audio, voice, video, video_note, sticker — all have file_id
+        media_item = audio or voice or video or video_note or sticker
+        if media_item and chat_id:
+            file_id = media_item.get("file_id")
+            if file_id:
+                if admin_chat_id is None:
+                    admin_chat_id = chat_id
+                elif chat_id != admin_chat_id:
+                    return
+
+                if not state["active"]:
+                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    return
+
+                local_path = download_telegram_file(file_id, state["active"])
+                if local_path:
+                    if audio:
+                        title = audio.get("title", audio.get("file_name", "audio"))
+                        duration = audio.get("duration", 0)
+                        media_text = f"Manager sent audio: {title} ({duration}s)\nPath: {local_path}"
+                    elif voice:
+                        duration = voice.get("duration", 0)
+                        media_text = f"Manager sent voice message: ({duration}s)\nPath: {local_path}"
+                    elif video:
+                        duration = video.get("duration", 0)
+                        file_name = video.get("file_name", "video")
+                        media_text = f"Manager sent video: {file_name} ({duration}s)\nPath: {local_path}"
+                    elif video_note:
+                        duration = video_note.get("duration", 0)
+                        media_text = f"Manager sent video note: ({duration}s)\nPath: {local_path}"
+                    elif sticker:
+                        emoji = sticker.get("emoji", "")
+                        media_text = f"Manager sent sticker: {emoji}\nPath: {local_path}"
+                    else:
+                        media_text = f"Manager sent media: {local_path}"
+                    if text:
+                        media_text = f"{text}\n\n{media_text}"
+                    self.route_to_active(media_text, chat_id, msg_id)
+                else:
+                    media_type = "audio" if audio else "voice" if voice else "video" if video else "media"
+                    self.reply(chat_id, f"Needs decision - Could not download {media_type}. Try again.")
                 return
 
         if not text or not chat_id:

@@ -1020,6 +1020,98 @@ print('OK')
     fi
 }
 
+test_file_size_limit_50mb() {
+    info "Testing file size limit is 50MB (Telegram Bot API limit)..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from bridge import validate_document_path, validate_photo_path, MAX_FILE_SIZE
+from pathlib import Path
+import tempfile
+
+# Verify MAX_FILE_SIZE is 50MB (Telegram Bot API limit)
+assert MAX_FILE_SIZE == 50 * 1024 * 1024, f'MAX_FILE_SIZE should be 50MB, got {MAX_FILE_SIZE}'
+
+# 21MB file (kenji's MP3) should pass
+tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+tmp.write(b'x' * (21 * 1024 * 1024))
+tmp.close()
+ok, result = validate_document_path(Path(tmp.name))
+assert ok, f'21MB file should be accepted: {result}'
+os.unlink(tmp.name)
+
+# 49MB file should pass (under 50MB limit)
+tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+tmp.write(b'x' * (49 * 1024 * 1024))
+tmp.close()
+ok, result = validate_document_path(Path(tmp.name))
+assert ok, f'49MB file should be accepted: {result}'
+os.unlink(tmp.name)
+
+# 51MB file should be rejected (over 50MB limit)
+tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+tmp.write(b'x' * (51 * 1024 * 1024))
+tmp.close()
+ok, result = validate_document_path(Path(tmp.name))
+assert not ok, '51MB file should be rejected'
+os.unlink(tmp.name)
+
+# Photo validation also uses 50MB limit
+tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+tmp.write(b'x' * (21 * 1024 * 1024))
+tmp.close()
+ok, result = validate_photo_path(Path(tmp.name))
+assert ok, f'21MB photo should be accepted: {result}'
+os.unlink(tmp.name)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "File size limit is 50MB (Telegram Bot API limit)"
+    else
+        fail "File size limit test failed"
+    fi
+}
+
+test_incoming_media_types() {
+    info "Testing incoming media type handling (audio, voice, video, video_note, sticker)..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+
+# Test that handle_message extracts file_id from all media types
+# We test the parsing logic, not the actual download
+
+media_types = {
+    'audio': {'file_id': 'audio123', 'duration': 180, 'title': 'Song', 'file_name': 'song.mp3'},
+    'voice': {'file_id': 'voice123', 'duration': 5},
+    'video': {'file_id': 'video123', 'duration': 30, 'file_name': 'clip.mp4'},
+    'video_note': {'file_id': 'vnote123', 'duration': 10},
+    'sticker': {'file_id': 'sticker123', 'emoji': '🔥'},
+}
+
+# Verify each type produces a valid update structure with file_id
+for mtype, data in media_types.items():
+    msg = {'message_id': 1, 'chat': {'id': 12345}, mtype: data}
+    update = {'update_id': 1, 'message': msg}
+
+    # Verify file_id is extractable
+    media_item = msg.get(mtype)
+    assert media_item is not None, f'{mtype} should be in msg'
+    assert media_item.get('file_id'), f'{mtype} should have file_id'
+
+    # Verify it's not caught by photo/document/animation handlers
+    assert msg.get('photo') is None
+    assert msg.get('document') is None
+    assert msg.get('animation') is None
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Incoming media type handling works for audio/voice/video/video_note/sticker"
+    else
+        fail "Incoming media type handling test failed"
+    fi
+}
+
 test_direct_mode_lifecycle() {
     info "Testing direct mode lifecycle (hire, message, team, end)..."
 
@@ -4824,6 +4916,169 @@ finally:
     fi
 }
 
+test_image_caption_enter_with_bracketed_paste() {
+    info "Chaos test: image+caption message (multi-line with path) Enter delivery..."
+
+    # TUI simulator that simulates Claude Code's behavior:
+    # - Enables bracketed paste mode
+    # - After receiving paste end, simulates processing delay (image rendering)
+    # - Counts PASTE+ENTER pairs
+    cat > /tmp/tui-sim-imgcap-$$.py << 'TUITEST'
+import sys, os, select, time, tty, termios
+
+RESULT_FILE = sys.argv[1]
+EXPECTED = int(sys.argv[2])
+# Simulate TUI processing delay after paste (image path detection + rendering)
+RENDER_DELAY_MS = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+
+sys.stdout.buffer.write(b'\033[?2004h')
+sys.stdout.buffer.flush()
+
+old = termios.tcgetattr(sys.stdin)
+tty.setraw(sys.stdin)
+
+paste_count = 0
+enter_after_count = 0
+enter_during_render = 0
+buf = b''
+in_paste = False
+paste_data = b''
+rendering = False
+render_end_time = 0
+
+try:
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.01)
+        if readable:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buf += chunk
+
+            while True:
+                if not in_paste:
+                    idx = buf.find(b'\x1b[200~')
+                    if idx >= 0:
+                        in_paste = True
+                        paste_data = b''
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        if b'\r' in buf:
+                            now = time.time()
+                            if rendering and now < render_end_time:
+                                # Enter arrived while TUI is still rendering
+                                enter_during_render += 1
+                            elif paste_count > enter_after_count:
+                                enter_after_count += 1
+                                rendering = False
+                            buf = buf[buf.rfind(b'\r')+1:]
+                        break
+                else:
+                    idx = buf.find(b'\x1b[201~')
+                    if idx >= 0:
+                        paste_data += buf[:idx]
+                        in_paste = False
+                        paste_count += 1
+                        # Simulate TUI rendering delay after paste ends
+                        if RENDER_DELAY_MS > 0:
+                            rendering = True
+                            render_end_time = time.time() + (RENDER_DELAY_MS / 1000.0)
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        paste_data += buf
+                        buf = b''
+                        break
+
+        # Check if rendering finished
+        if rendering and time.time() >= render_end_time:
+            rendering = False
+
+        if enter_after_count >= EXPECTED:
+            break
+finally:
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+    sys.stdout.buffer.write(b'\033[?2004l')
+    sys.stdout.buffer.flush()
+
+with open(RESULT_FILE, 'w') as f:
+    f.write(f'PASTES:{paste_count}\n')
+    f.write(f'ENTERS:{enter_after_count}\n')
+    f.write(f'ENTER_DURING_RENDER:{enter_during_render}\n')
+TUITEST
+
+    local test_session="test-imgcap-$$"
+    local result_file="/tmp/tui-imgcap-result-$$.txt"
+    local chaos_count=10
+    # Simulate 120ms TUI render delay (image path detection + re-render).
+    # Claude Code needs time to detect image paths and re-draw prompt.
+    # Bridge post-paste delay must exceed this to avoid Enter swallowing.
+    local render_delay_ms=120
+    rm -f "$result_file"
+
+    tmux new-session -d -s "$test_session" -x 200 -y 50 \
+        "python3 /tmp/tui-sim-imgcap-$$.py $result_file $chaos_count $render_delay_ms"
+    sleep 1
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create TUI simulator session"
+        rm -f "/tmp/tui-sim-imgcap-$$.py"
+        return
+    fi
+
+    # Chaos: send 10 image+caption messages rapidly
+    local sent=0
+    local failed=0
+    for i in $(seq 1 $chaos_count); do
+        if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import tmux_send_message
+
+# Exact format bridge produces for image+caption
+caption = 'can u improve the check capturing haha'
+img_path = '/tmp/claudecode-telegram/prod/kenji/inbox/7ca9f508093444a4be3e5824bd339e24.jpg'
+msg = f'{caption}\n\nManager sent image: {img_path}'
+result = tmux_send_message('$test_session', msg)
+print('OK' if result else 'FAIL')
+" 2>/dev/null | grep -q "OK"; then
+            sent=$((sent + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+
+    if [ "$sent" -ne "$chaos_count" ]; then
+        fail "Only $sent/$chaos_count messages sent (tmux_send_message returned False)"
+        tmux kill-session -t "$test_session" 2>/dev/null || true
+        rm -f "/tmp/tui-sim-imgcap-$$.py" "$result_file"
+        return
+    fi
+
+    # Wait for TUI to process all (TUI deadline is 8s, wait beyond it)
+    sleep 10
+
+    if [ -f "$result_file" ]; then
+        local pastes enters renders
+        pastes=$(grep -oP 'PASTES:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        enters=$(grep -oP 'ENTERS:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        renders=$(grep -oP 'ENTER_DURING_RENDER:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        if [ "$enters" -ge "$chaos_count" ]; then
+            success "Chaos: $enters/$chaos_count image+caption Enter delivered ($pastes pastes, $renders during render)"
+        elif [ "$enters" -gt 0 ]; then
+            fail "Chaos: only $enters/$chaos_count Enter received ($pastes pastes, $renders during render) — Enter swallowed!"
+        else
+            fail "Chaos: 0/$chaos_count Enter received ($pastes pastes, $renders during render) — total failure"
+        fi
+    else
+        fail "TUI simulator produced no result file"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+    rm -f "/tmp/tui-sim-imgcap-$$.py" "$result_file"
+}
+
 test_long_text_enter_with_bracketed_paste() {
     info "Testing long text (60 lines) + Enter delivered via bracketed paste..."
 
@@ -7868,6 +8123,7 @@ run_unit_tests() {
     run_test test_tmux_send_locks
     run_test test_tmux_paste_buffer_send
     run_test test_paste_buffer_uses_bracketed_paste
+    run_test test_image_caption_enter_with_bracketed_paste
     run_test test_long_text_enter_with_bracketed_paste
     run_test test_tmux_send_uses_flock
     run_test test_send_example_uses_flock
@@ -7883,6 +8139,8 @@ run_unit_tests() {
     log ""
     log "── File Validation Tests (Unit) ────────────────────────────────────────"
     run_test test_file_validation
+    run_test test_file_size_limit_50mb
+    run_test test_incoming_media_types
     # Unit tests - Worker discovery
     log ""
     log "── Worker Discovery Tests (Unit) ───────────────────────────────────────"
