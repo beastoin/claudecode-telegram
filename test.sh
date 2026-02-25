@@ -3705,8 +3705,8 @@ bridge._send_resolved_alert('testworker', 'READY')
 assert len(calls) == 1, f'Expected 1 API call, got {len(calls)}'
 method, data = calls[0]
 assert method == 'sendMessage', f'Expected sendMessage, got {method}'
-assert 'resolved' in data['text'], f'Expected resolved in text, got {data[\"text\"]}'
 assert 'testworker' in data['text'], f'Expected worker name in text, got {data[\"text\"]}'
+assert 'back online' in data['text'], f'Expected back online in text, got {data[\"text\"]}'
 
 # Verify no alert when transition is not from bad to good state
 calls.clear()
@@ -5296,7 +5296,9 @@ with patch('bridge.telegram_api', fake_api):
 
 assert sent.get('method') == 'sendMessage', 'telegram_api not called'
 assert sent['data']['chat_id'] == 123, 'admin chat id should be used'
-assert 'STUCK' in sent['data']['text'], 'alert should include state'
+txt = sent['data']['text']
+assert 'alice' in txt, f'alert should include worker name: {txt}'
+assert 'frozen' in txt or '/restart' in txt, f'alert should be human-friendly: {txt}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -5816,8 +5818,9 @@ bridge.telegram_api = fake_api
 bridge._prev_worker_states.clear()
 bridge._handle_watchdog_transition('deadworker', 'EXITED', 'session gone', since=now - 60, now=now)
 assert len(calls) == 1, f'expected 1 alert call, got {len(calls)}'
-assert 'EXITED' in calls[0][1]['text'], f'alert should mention EXITED'
-assert '/restart deadworker' in calls[0][1]['text'], f'alert should suggest /restart'
+txt = calls[0][1]['text']
+assert 'deadworker' in txt, f'alert should mention worker name: {txt}'
+assert '/restart' in txt, f'alert should suggest /restart: {txt}'
 
 bridge.telegram_api = orig_api
 bridge.admin_chat_id = None

@@ -2652,15 +2652,23 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     if last and (now - last) < ALERT_COOLDOWN:
         return
 
-    actions = {
-        "OFFLINE": f"/hire {name}",
-        "DEAD": f"/restart --clean {name}",
-        "STUCK": f"/restart --clean {name}",
-        "POISONED": f"/restart --clean {name} (context may be poisoned)",
-        "EXITED": f"/restart {name}",
-    }
-    action = actions.get(state, "check /team")
-    text = f"[watchdog] {name}: {state} ({reason}). Suggested: {action}"
+    # Human-friendly alert messages for manager
+    if state == "STUCK":
+        # Parse age from reason like "age=909s cpu=6.3 streak=3/3"
+        age_match = re.search(r"age=(\d+)s", reason)
+        age_min = int(age_match.group(1)) // 60 if age_match else 0
+        age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
+        text = f"{name} appears frozen — no activity for {age_str}.\nTry: /restart --clean {name}"
+    elif state == "POISONED":
+        text = f"{name} hit an error and may be stuck in a bad state.\nTry: /restart --clean {name}"
+    elif state == "DEAD":
+        text = f"{name}'s session crashed — process is gone.\nTry: /restart --clean {name}"
+    elif state == "EXITED":
+        text = f"{name}'s session ended unexpectedly.\nTry: /restart {name}"
+    elif state == "OFFLINE":
+        text = f"{name} is offline — session not found.\nTry: /hire {name}"
+    else:
+        text = f"{name}: {state} ({reason}). Check /team"
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
         with _watchdog_lock:
@@ -2680,7 +2688,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if prev_state not in bad_states or new_state not in good_states:
         return
 
-    text = f"[watchdog] {name}: resolved -> {new_state}"
+    text = f"{name} is back online and working."
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
     except Exception as e:
