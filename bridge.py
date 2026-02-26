@@ -736,6 +736,7 @@ _idle_child_baseline = {}  # name -> int (MCP server child count at idle)
 _prev_children = {}  # name -> int (previous active children count, for activity detection)
 _last_activity_ts = {}  # name -> float (last time children count changed)
 _worker_cwds = {}  # name -> cwd (RAM-only startup cwd hints)
+_recent_restarts = {}  # name -> timestamp (suppress watchdog resolved alert after restart)
 _watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
@@ -2688,6 +2689,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if prev_state not in bad_states or new_state not in good_states:
         return
 
+    # Suppress if worker was recently restarted (cmd_restart sends its own confirmation)
+    restart_ts = _recent_restarts.get(name)
+    if restart_ts and time.time() - restart_ts < 30:
+        return
+
     text = f"{name} is back online and working."
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
@@ -3067,28 +3073,317 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
     return state.lower()
 
 
-def format_team_lines(registered: dict, active: Optional[str], pending_lookup=None) -> list[str]:
-    """Format /team response lines (backend-aware)."""
+def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, str, int]:
+    """Return (icon, blocker_label, sort_rank) for /team rows."""
+    status = (watchdog_status or "").lower()
+    act = (activity or "").lower()
+
+    if "rate limit" in act:
+        return "🔴", "rate limit", 0
+    if "error" in act or "traceback" in act or "not running" in act or "failed" in act:
+        return "🔴", "error", 0
+    if "stuck" in status:
+        return "🔴", "stuck", 0
+    if "poisoned" in status:
+        return "🔴", "poisoned", 0
+    if "dead" in status:
+        return "🔴", "dead", 0
+    if "offline" in status:
+        return "🔴", "offline", 0
+    if "exited" in status:
+        return "🔴", "exited", 0
+
+    waiting_signals = (
+        "waiting for",
+        "awaiting",
+        "approval",
+        "accept edits",
+        "confirm",
+        "in plan mode",
+    )
+    if "working (waiting)" in status or any(sig in act for sig in waiting_signals):
+        return "🟡", "needs input", 1
+
+    return "🟢", "no blocker", 2
+
+
+def format_team_lines(
+    registered: dict,
+    active: Optional[str],
+    pending_lookup=None,
+    worker_live: Optional[dict] = None
+) -> list[str]:
+    """Format /team response lines with attention, activity, and context."""
     if pending_lookup is None:
         pending_lookup = is_pending
+    if worker_live is None:
+        worker_live = {}
 
-    lines = []
-    lines.append("Your team:")
-    lines.append(f"Focused: {active or '(none)'}")
-    lines.append("Workers:")
     with _watchdog_lock:
         state_snapshot = dict(_worker_states)
+
+    backend_values = set()
+    for name, session in registered.items():
+        live = worker_live.get(name, {})
+        backend = normalize_backend(live.get("backend") or session.get("backend"))
+        backend_values.add(backend)
+    show_backend = len(backend_values) > 1
+
+    rows = []
+    counts = {"🔴": 0, "🟡": 0, "🟢": 0}
     for name in sorted(registered.keys()):
         session = registered[name]
-        backend = normalize_backend(session.get("backend"))
-        status = []
-        if name == active:
-            status.append("focused")
         watchdog_status = _format_watchdog_status(name, pending_lookup, state_snapshot=state_snapshot)
-        status.append(watchdog_status)
-        status.append(f"backend={backend}")
-        lines.append(f"- {name} ({', '.join(status)})")
+        live = worker_live.get(name, {})
+        backend = normalize_backend(live.get("backend") or session.get("backend"))
+
+        raw_activity = (live.get("activity") or "").strip()
+        if not raw_activity or raw_activity == "Unknown":
+            raw_activity = watchdog_status
+        activity = raw_activity
+        if len(activity) > 42:
+            activity = activity[:39].rstrip() + "..."
+
+        context_pct = (live.get("context_pct") or "--").strip()
+        icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
+        counts[icon] += 1
+
+        name_cell = f"{name} 🎯" if name == active else name
+        row = f"{name_cell} | {icon} | {activity} | {blocker} | {context_pct}"
+        if show_backend:
+            row += f" | backend={backend}"
+
+        focus_rank = 0 if name == active else 1
+        rows.append((severity_rank, focus_rank, name, blocker, row))
+
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
+    attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]
+
+    lines = []
+    focused = active or "(none)"
+    lines.append(
+        f"Team ({len(registered)}) · focused: {focused} · "
+        f"🔴{counts['🔴']} 🟡{counts['🟡']} 🟢{counts['🟢']}"
+    )
+    if attention_rows:
+        lines.append("Needs attention: " + ", ".join(attention_rows))
+    lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
     return lines
+
+
+def _extract_activity(lines: list[str]) -> str:
+    """Extract a 1-line activity summary from tmux pane output.
+
+    Based on Claude Code v2.1.59 (repo d6ab0ea, 2026-02-26).
+    Scans for Claude Code UI signals. Priority:
+    1.  Active thinking spinner (· Verb… / * Verb…) — NOT ✻ (past tense)
+    2.  Tool actively running (● ToolName( + ⎿ Running…)
+    3.  Rate limiting / connection errors (blockers — before prompt check)
+    4.  Mode bars (⏵⏵ permission/accept-edits, ⏸ plan mode) vs idle (❯)
+    5.  Editor mode ("Save and close editor to continue...")
+    6.  Hook execution ("Running SessionStart/PreCompact hooks…")
+    7.  Confirmation prompts (plan approval, accept edits, team lead, etc.)
+    8.  Task progress (✔/◻)
+    9.  Last ● output block (non-tool)
+    10. Standalone error line
+    """
+    if not lines:
+        return "Active"
+
+    stripped = [l.strip() for l in lines if l.strip()]
+    if not stripped:
+        return "Idle"
+
+    # 1. Active thinking spinner — "· Verb…" or "* Verb…" or "✢ Verb…" etc.
+    #    Claude Code uses various Unicode chars as spinner frames (·, *, ✢, etc.)
+    #    NOT "✻" which is past tense (completed thinking).
+    #    Extract the actual verb (e.g. "Compacting conversation" vs "Thinking")
+    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•"}
+    for raw in reversed(stripped):
+        if raw.startswith("✻"):
+            continue
+        first = raw[0] if raw else ""
+        if first not in _ACTIVE_SPINNER_CHARS:
+            continue
+        # "· Compacting conversation… (5m 26s · thought for 5s)" → verb + duration
+        m = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
+        if m:
+            verb = m.group(1).strip()
+            dur = m.group(2).split('·')[0].strip()
+            return f"{verb} ({dur})"
+        # Fallback: "· Verb…" or "· Verb" without duration ($ anchor fixes greedy)
+        vm = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
+        if vm:
+            verb = vm.group(1).strip()
+            dm = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
+            return f"{verb} ({dm.group(1).strip()})" if dm else verb
+
+    # 2. Tool actively running: "● ToolName(...)" followed by "⎿ Running…"
+    #    Also handles MCP tools: "● mcp__server__tool("
+    last_running_tool = None
+    for i, raw in enumerate(stripped):
+        m_tool = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
+        if not m_tool:
+            continue
+        tool = m_tool.group(1)
+        # Look ahead up to 5 lines for "⎿ Running…" (tolerant of intermediate lines)
+        for j in range(i + 1, min(i + 6, len(stripped))):
+            s = stripped[j]
+            if not s:
+                continue
+            if s.startswith("⎿"):
+                if "Running" in s and "background" not in s:
+                    last_running_tool = tool
+                break
+    if last_running_tool:
+        # Shorten MCP tool names: mcp__figma__get_file → figma.get_file
+        if last_running_tool.startswith("mcp__"):
+            parts = last_running_tool.split("__")
+            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
+        return f"Running {last_running_tool}"
+
+    # 3. Rate limiting / connection errors (BEFORE prompt — blockers override idle)
+    for raw in reversed(stripped):
+        ll = raw.lower()
+        if "rate limit" in ll:
+            return "Rate limited — waiting to retry"
+        if "connection error" in ll and "retrying" in ll:
+            return "Connection error — retrying"
+        if ll.startswith("retrying") or "retrying in" in ll:
+            return "Retrying API request"
+
+    # 4. Prompt + mode bars — all bottom-bar elements are informational, not blocking
+    #    ⏵⏵ bypass permissions on · 1 bash    → mode bar (bypass ON, 1 bash auto-approved)
+    #    ⏵⏵ bypass permissions on (shift+tab)  → mode bar (bypass ON, no recent actions)
+    #    ⏵⏵ accept edits on (shift+tab)       → mode bar (accept edits mode)
+    #    ⏸ plan mode on (shift+tab to cycle)  → plan mode indicator
+    #    ❯                                     → idle prompt
+    #    ❯ some text                           → idle (auto-suggestion hint, not a message)
+    #
+    #  "bypass permissions on" means permissions ARE being bypassed — worker is NOT blocked.
+    #  The · N action count shows what was auto-approved (informational).
+    last_prompt_idx = None
+    last_plan_bar_idx = None  # "⏸ plan mode on"
+    for i, raw in enumerate(stripped):
+        if raw.startswith("❯"):
+            last_prompt_idx = i
+        if raw.startswith("⏸"):
+            last_plan_bar_idx = i
+
+    # ⏸ plan mode bar (persistent at bottom, only if no prompt after it)
+    if last_plan_bar_idx is not None:
+        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
+            return "In plan mode"
+
+    # Prompt present = idle at prompt (text after ❯ is auto-suggestion hint)
+    if last_prompt_idx is not None:
+        return "Idle at prompt"
+
+    # 5. Editor mode — worker waiting for external editor
+    for raw in reversed(stripped):
+        if "Save and close editor to continue" in raw:
+            return "Waiting for external editor"
+
+    # 6. Hook execution — system hooks running
+    for raw in reversed(stripped):
+        if "Running SessionStart" in raw:
+            return "Running SessionStart hooks"
+        if "Running PreCompact" in raw:
+            return "Running PreCompact hooks"
+
+    # 7. Confirmation prompts (plan approval, team lead, etc.)
+    for raw in reversed(stripped):
+        if "Do you want to proceed?" in raw:
+            return "Waiting for plan approval"
+        if "Exit plan mode?" in raw or "Entering plan mode" in raw:
+            return "In plan mode"
+        if "Waiting for team lead" in raw:
+            return "Waiting for team lead approval"
+
+    # 8. Task progress
+    done = 0
+    total = 0
+    for raw in stripped:
+        s = raw.lstrip()
+        if s.startswith("✔") or s.startswith("✅"):
+            done += 1
+            total += 1
+        elif s.startswith("◻"):
+            total += 1
+    if total >= 2:
+        return f"Tasks ({done}/{total} done)"
+
+    # 9. Last non-tool ● output block
+    def _is_block_end(text):
+        t = text.lstrip()
+        if t.startswith("Context left until auto-compact:"):
+            return True
+        return t.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
+
+    for i in range(len(stripped) - 1, -1, -1):
+        raw = stripped[i]
+        if not raw.startswith("●"):
+            continue
+        # Skip tool calls (● CapitalWord( or ● mcp__server__tool()
+        if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw):
+            continue
+        parts = []
+        head = re.sub(r'^●\s*', '', raw).strip()
+        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
+            parts.append(head)
+        j = i + 1
+        while j < len(stripped):
+            nxt = stripped[j]
+            if _is_block_end(nxt):
+                break
+            t = nxt.strip()
+            if t and not t.startswith("⎿") and not t.startswith("(ctrl+"):
+                parts.append(t)
+            j += 1
+        if parts:
+            msg = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+            if len(msg) > 120:
+                msg = msg[:117].rstrip() + "..."
+            return msg
+
+    # 10. Standalone error (case-insensitive for broader coverage)
+    for raw in reversed(stripped):
+        if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
+            ll = raw.lower()
+            if ll.startswith("error"):
+                tail = raw[len("Error"):].lstrip(": ").strip()
+                return f"Error: {tail}" if tail else "Error"
+            return f"Error: {raw[:60]}"
+
+    return "Active"
+
+
+def _extract_context_pct(lines: list[str]) -> Optional[str]:
+    """Extract context % from tmux output if present."""
+    for line in reversed(lines):
+        m = re.search(r'Context left.*?(\d+)%', line)
+        if m:
+            return f"{m.group(1)}%"
+    return None
+
+
+def _read_tmux_activity(tmux_name: str) -> tuple:
+    """Read tmux pane and extract activity summary + context%.
+
+    Returns (activity_str, context_pct_str_or_None).
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode != 0:
+            return "Unknown", None
+        lines = result.stdout.split("\n")
+        tail = lines[-30:]
+        return _extract_activity(tail), _extract_context_pct(tail)
+    except Exception:
+        return "Unknown", None
 
 
 def format_progress_lines(
@@ -3100,25 +3395,36 @@ def format_progress_lines(
     mode: str,
     resume_line: Optional[str] = None,
     continuity_line: Optional[str] = None,
-    needs_attention: Optional[str] = None
+    needs_attention: Optional[str] = None,
+    activity: Optional[str] = None,
+    context_pct: Optional[str] = None
 ) -> list[str]:
-    """Format /progress response lines (backend-aware)."""
+    """Format /progress response lines (manager-friendly)."""
     status = []
-    status.append(f"Progress for focused worker: {name}")
-    status.append("Focused: yes")
-    status.append(f"Working: {'yes' if pending else 'no'}")
+
+    # Header with name + context%
     watchdog_status = _format_watchdog_status(name)
-    status.append(f"State: {watchdog_status}")
-    status.append(f"Backend: {backend}")
-    status.append(f"Online: {'yes' if online else 'no'}")
-    status.append(f"Ready: {'yes' if ready else 'no'}")
+    ctx = f" · context {context_pct}" if context_pct else ""
+    status.append(f"{name.capitalize()} ({backend}) — {watchdog_status}{ctx}")
+
+    # Activity line (what they're doing right now)
+    if activity:
+        status.append(f"Doing: {activity}")
+    elif not online:
+        status.append("Doing: Offline")
+    elif pending:
+        status.append("Doing: Working on a request")
+
+    # Blockers / attention
+    if needs_attention:
+        status.append(f"Blocker: {needs_attention}")
+
+    # Session info (non-interactive backends only)
     if continuity_line:
         status.append(continuity_line)
     elif resume_line:
         status.append(resume_line)
-    if needs_attention:
-        status.append(f"Needs attention: {needs_attention}")
-    status.append(f"Mode: {mode}")
+
     return status
 
 
@@ -4414,7 +4720,31 @@ class CommandRouter:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
-        lines = format_team_lines(registered, state["active"])
+        worker_live = {}
+        for name, session in registered.items():
+            backend_name = get_worker_backend(name, session)
+            activity = None
+            context_pct = None
+
+            tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
+            tmux_alive = "tmux" in session and tmux_exists(tmux_name)
+            if tmux_alive:
+                backend = get_backend(backend_name)
+                if backend.is_interactive:
+                    if is_claude_running(tmux_name):
+                        activity, context_pct = _read_tmux_activity(tmux_name)
+                    else:
+                        activity = "worker app not running"
+                else:
+                    activity = "handling async requests"
+
+            worker_live[name] = {
+                "backend": backend_name,
+                "activity": activity,
+                "context_pct": context_pct,
+            }
+
+        lines = format_team_lines(registered, state["active"], worker_live=worker_live)
         self.reply(chat_id, "\n".join(lines))
         return True
 
@@ -4490,6 +4820,12 @@ class CommandRouter:
             else:
                 resume_line = "Resume: not available"
 
+        # Read live activity from tmux pane
+        activity = None
+        context_pct = None
+        if is_tmux_alive and ready:
+            activity, context_pct = _read_tmux_activity(tmux_name)
+
         status = format_progress_lines(
             name=name,
             pending=pending,
@@ -4499,7 +4835,9 @@ class CommandRouter:
             mode=mode,
             resume_line=resume_line,
             continuity_line=continuity_line,
-            needs_attention=needs_attention
+            needs_attention=needs_attention,
+            activity=activity,
+            context_pct=context_pct
         )
 
         self.reply(chat_id, "\n".join(status))
@@ -4582,7 +4920,9 @@ class CommandRouter:
         if clean:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
+                _recent_restarts[name] = time.time()
                 self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
+                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
                 self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
@@ -4612,14 +4952,18 @@ class CommandRouter:
         if not has_session_id:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
+                _recent_restarts[name] = time.time()
                 self.reply(chat_id, f"No resume info found. Restarting {name.capitalize()} fresh...")
+                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
                 self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
 
         ok, err = restart_claude(name, mode="resume")
         if ok:
+            _recent_restarts[name] = time.time()
             self.reply(chat_id, f"Resuming {name.capitalize()}...")
+            self.reply(chat_id, f"{name.capitalize()} is back and ready.")
         else:
             self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True

@@ -2240,7 +2240,7 @@ lines = format_progress_lines(
 )
 
 text = '\\n'.join(lines)
-assert 'Backend: codex' in text, f'expected Backend line in progress output: {text}'
+assert 'codex' in text, f'expected backend name in progress output: {text}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -2424,6 +2424,99 @@ print('OK')
         success "/restart with name defaults to resume"
     else
         fail "/restart with name test failed"
+    fi
+}
+
+test_restart_sends_ready_confirmation() {
+    info "Testing /restart sends resuming + ready confirmation..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+session_dir = tmp / 'bob'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('sess_123')
+
+bridge.state['active'] = 'alice'
+
+def fake_restart(name, mode='relaunch'):
+    return True, None
+
+bridge.restart_claude = fake_restart
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'}}
+
+messages = []
+
+class FakeTelegram:
+    def send_message(self, chat_id, text, **kwargs):
+        messages.append(text)
+        return {'ok': True}
+
+router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
+router.cmd_restart(123, 'bob')
+
+# Should have 2 messages: 'Resuming Bob...' + ready confirmation
+assert len(messages) == 2, f'expected 2 messages, got {len(messages)}: {messages}'
+assert 'Resuming' in messages[0], f'first message should be Resuming, got: {messages[0]}'
+ready_msg = messages[1].lower()
+assert 'bob' in ready_msg and 'ready' in ready_msg, \
+    f'second message should confirm bob is ready, got: {messages[1]}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart sends ready confirmation"
+    else
+        fail "/restart sends ready confirmation"
+    fi
+}
+
+test_watchdog_suppressed_after_restart() {
+    info "Testing watchdog resolved alert suppressed after recent restart..."
+
+    if python3 -c "
+import time
+import bridge
+
+calls = []
+def fake_api(method, data):
+    calls.append((method, data))
+    return {'ok': True}
+
+orig_api = bridge.telegram_api
+bridge.telegram_api = fake_api
+bridge.admin_chat_id = 12345
+
+# Clear state
+with bridge._watchdog_lock:
+    bridge._prev_worker_states.clear()
+    bridge._prev_worker_states['bob'] = 'STUCK'
+
+# Mark bob as recently restarted
+bridge._recent_restarts['bob'] = time.time()
+
+# Resolved alert should be suppressed
+bridge._send_resolved_alert('bob', 'READY')
+assert len(calls) == 0, f'Expected 0 calls (suppressed), got {len(calls)}'
+
+# After 30s, should fire again
+bridge._recent_restarts['bob'] = time.time() - 31
+calls.clear()
+bridge._send_resolved_alert('bob', 'READY')
+assert len(calls) == 1, f'Expected 1 call after cooldown, got {len(calls)}'
+
+bridge.telegram_api = orig_api
+bridge.admin_chat_id = None
+bridge._recent_restarts.clear()
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog resolved alert suppressed after restart"
+    else
+        fail "Watchdog resolved alert suppressed after restart"
     fi
 }
 
@@ -2798,6 +2891,220 @@ print('OK')
         success "/progress shows Continuity for non-interactive"
     else
         fail "/progress Continuity test failed"
+    fi
+}
+
+test_extract_worker_activity() {
+    info "Testing _extract_activity parses tmux output signals..."
+
+    if python3 -c "
+from bridge import _extract_activity
+
+# Spinner shows actual verb + duration (not just 'Thinking')
+lines = ['some output', '· Razzle-dazzling… (6m 21s · thought for 7s)', '───']
+result = _extract_activity(lines)
+assert 'razzle-dazzling' in result.lower(), f'Expected verb in: {result}'
+assert '6m 21s' in result, f'Expected duration in: {result}'
+
+# Compacting shows as compacting, not thinking
+lines = ['some output', '* Compacting conversation… (5m 26s · thought for 5s)', '───']
+result = _extract_activity(lines)
+assert 'compacting' in result.lower(), f'Expected compacting in: {result}'
+assert '5m 26s' in result, f'Expected duration in: {result}'
+
+# Thinking with * prefix
+lines = ['some output', '* Stewing… (44s)', 'more stuff']
+result = _extract_activity(lines)
+assert 'stewing' in result.lower(), f'Expected verb in: {result}'
+assert '44s' in result, f'Expected duration in: {result}'
+
+# Tool actively running (● prefix + ⎿ Running...)
+lines = ['● Bash(python3 -u test.py)', '  ⎿  Running...']
+result = _extract_activity(lines)
+assert 'bash' in result.lower() or 'running' in result.lower(), f'Expected running bash in: {result}'
+
+# Finished tool call should NOT report as running
+lines = ['● Bash(python3 -u test.py)', '  ⎿  file1.txt', '     file2.txt']
+result = _extract_activity(lines)
+assert 'running' not in result.lower(), f'Finished tool should NOT show as running: {result}'
+
+# Backgrounded tool should NOT report as running
+lines = ['● Bash(python3 -u test.py 2>&1)', '  ⎿  Running in the background (↓ to manage)', '✻ Compacting conversation… (5m 26s)', '❯']
+result = _extract_activity(lines)
+assert 'running bash' not in result.lower(), f'Backgrounded tool should NOT show as running: {result}'
+
+# Task list with progress
+lines = ['  ✔ Task A', '  ✔ Task B', '  ◻ Task C', '  ◻ Task D']
+result = _extract_activity(lines)
+assert '2' in result and '4' in result, f'Expected 2/4 progress in: {result}'
+
+# Error in discussion should NOT trigger error (false positive)
+lines = ['● 300ms gap gives best result: 0.77% with 53.4%', 'savings (only 16 errors). Close to target.']
+result = _extract_activity(lines)
+assert 'error:' not in result.lower(), f'Should not false-positive on discussion error: {result}'
+
+# Standalone error line SHOULD trigger
+lines = ['FAIL: test_something', 'exit code 1']
+result = _extract_activity(lines)
+assert 'error' in result.lower() or 'fail' in result.lower(), f'Expected error/fail in: {result}'
+
+# Plan approval prompt
+lines = ['Plan:', '1. Do X', '2. Do Y', 'Do you want to proceed?']
+result = _extract_activity(lines)
+assert 'waiting' in result.lower() or 'input' in result.lower() or 'approval' in result.lower(), f'Expected waiting/input in: {result}'
+
+# ✻ Churned = PAST tense, NOT active thinking — with mode bar at bottom
+lines = ['● Skill looks solid.', '✻ Churned for 2m 45s', '───', '❯ save reports', '───', '  ⏵⏵ bypass permissions on · 1 bash']
+result = _extract_activity(lines)
+assert 'thinking' not in result.lower(), f'✻ Churned should NOT be thinking: {result}'
+assert 'idle' in result.lower(), f'Prompt with bypass mode bar should be idle: {result}'
+
+# Prompt with hint text = idle (auto-suggestion, not queued message)
+lines = ['● Done with task.', '───', '❯ do the next thing', '───']
+result = _extract_activity(lines)
+assert 'idle' in result.lower(), f'Prompt hint text should be idle: {result}'
+
+# Idle at bare prompt
+lines = ['● Done with task.', '───', '❯', '───']
+result = _extract_activity(lines)
+assert 'idle' in result.lower(), f'Expected idle at prompt: {result}'
+
+# bypass permissions mode bar is NEVER a blocking prompt — bypass = auto-approved
+lines = ['● Some output', '  ⏵⏵ bypass permissions on · 1 bash']
+result = _extract_activity(lines)
+assert 'permission' not in result.lower(), f'Bypass mode bar should NOT be permission: {result}'
+
+# bypass mode bar with prompt = idle
+lines = ['● Some output', '───', '  ⏵⏵ bypass permissions on · 1 bash', '───', '❯', '───']
+result = _extract_activity(lines)
+assert 'idle' in result.lower(), f'Prompt with bypass mode bar should be idle: {result}'
+assert 'permission' not in result.lower(), f'Should NOT show permission: {result}'
+
+# mode bar WITHOUT pending actions = NOT a permission prompt
+# bypass-permissions-on with shift+tab hint is just persistent mode bar
+lines = ['● Done!', '✻ Cooked for 21m', '───', '❯ merge the PR', '───', '⏵⏵ bypass permissions on (shift+tab to cycle)']
+result = _extract_activity(lines)
+assert 'permission' not in result.lower(), f'Mode bar without actions should NOT be permission: {result}'
+assert 'idle' in result.lower(), f'Prompt with hint text should be idle: {result}'
+
+# ⏵⏵ accept edits on = mode bar, NOT permission prompt (Codex fix #3)
+lines = ['● Finished edits', '⏵⏵ accept edits on (shift+tab to cycle)']
+result = _extract_activity(lines)
+assert 'permission' not in result.lower(), f'accept edits should NOT be permission: {result}'
+
+# ⏸ plan mode bar detection (Codex fix #4)
+lines = ['● Some output', '⏸ plan mode on (shift+tab to cycle)']
+result = _extract_activity(lines)
+assert 'plan mode' in result.lower(), f'Expected plan mode: {result}'
+
+# ⏸ plan mode with prompt AFTER = idle (worker moved past plan mode bar)
+lines = ['⏸ plan mode on (shift+tab to cycle)', '❯']
+result = _extract_activity(lines)
+assert 'idle' in result.lower(), f'Prompt after plan bar should be idle: {result}'
+
+# Rate limit ABOVE prompt should still detect rate limit (Codex fix #2)
+lines = ['Rate limit exceeded. Retrying in 30s...', '❯']
+result = _extract_activity(lines)
+assert 'rate limit' in result.lower(), f'Rate limit should beat idle prompt: {result}'
+
+# Case-insensitive error matching (Codex fix #6)
+lines = ['error: something went wrong']
+result = _extract_activity(lines)
+assert 'error' in result.lower(), f'Lowercase error should be caught: {result}'
+
+lines = ['ERROR: fatal crash']
+result = _extract_activity(lines)
+assert 'error' in result.lower(), f'Uppercase ERROR should be caught: {result}'
+
+# Active spinner beats mode bar (spinner is real status)
+lines = ['· Ruminating… (20m 2s · thinking)', '───', '❯', '───', '  ⏵⏵ bypass permissions on · 1 bash']
+result = _extract_activity(lines)
+assert 'ruminating' in result.lower(), f'Active spinner should beat mode bar: {result}'
+assert '20m 2s' in result, f'Expected duration in: {result}'
+
+# Last ● block concat (multi-line) — no idle prompt after
+lines = ['● Found 3 bugs in the', '  auth module. All critical.', '  Context left until auto-compact: 42%']
+result = _extract_activity(lines)
+assert 'found 3 bugs' in result.lower() and 'auth module' in result.lower(), f'Expected concat ● block: {result}'
+
+# Rate limiting detection
+lines = ['● Some output', 'Rate limit exceeded. Retrying in 30s...']
+result = _extract_activity(lines)
+assert 'rate limit' in result.lower(), f'Expected rate limit detection: {result}'
+
+# Connection error detection
+lines = ['● Output', 'Connection error, retrying in 5s']
+result = _extract_activity(lines)
+assert 'connection' in result.lower(), f'Expected connection error: {result}'
+
+# Editor mode detection
+lines = ['some code', 'Save and close editor to continue...']
+result = _extract_activity(lines)
+assert 'editor' in result.lower(), f'Expected editor mode: {result}'
+
+# Hook execution — SessionStart
+lines = ['Loading hooks', 'Running SessionStart hooks…']
+result = _extract_activity(lines)
+assert 'sessionstart' in result.lower() or 'hooks' in result.lower(), f'Expected hook execution: {result}'
+
+# Hook execution — PreCompact
+lines = ['Auto-compacting', 'Running PreCompact hooks…']
+result = _extract_activity(lines)
+assert 'precompact' in result.lower() or 'hooks' in result.lower(), f'Expected hook execution: {result}'
+
+# Plan mode entry
+lines = ['● Plan:', '1. Do X', '2. Do Y', 'Entering plan mode']
+result = _extract_activity(lines)
+assert 'plan' in result.lower(), f'Expected plan mode: {result}'
+
+# Team lead approval
+lines = ['Changes ready', 'Waiting for team lead to review and approve...']
+result = _extract_activity(lines)
+assert 'team lead' in result.lower(), f'Expected team lead: {result}'
+
+# ✢ spinner character (Unicode cross spinner frame)
+lines = ['some output', '✢ Befuddling… (14m 23s · thought for 3s)']
+result = _extract_activity(lines)
+assert 'befuddling' in result.lower(), f'Expected ✢ spinner verb: {result}'
+assert '14m 23s' in result, f'Expected duration for ✢ spinner: {result}'
+
+# Idle / empty
+lines = ['', '  >', '']
+result = _extract_activity(lines)
+assert result, f'Should return something even for idle, got empty'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_extract_activity parses tmux signals"
+    else
+        fail "_extract_activity parsing test failed"
+    fi
+}
+
+test_progress_shows_activity() {
+    info "Testing /progress output includes activity line..."
+
+    if python3 -c "
+from bridge import format_progress_lines
+
+lines = format_progress_lines(
+    name='alice',
+    pending=True,
+    backend='claude',
+    online=True,
+    ready=True,
+    mode='tmux',
+    activity='Running unit tests (3/14 passed)'
+)
+
+text = '\\n'.join(lines)
+assert 'Running unit tests' in text, f'Expected activity in progress output: {text}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/progress output includes activity"
+    else
+        fail "/progress activity output test failed"
     fi
 }
 
@@ -5778,6 +6085,75 @@ print('OK')
     fi
 }
 
+test_team_live_activity_format() {
+    info "Testing /team shows live activity, attention, and sorting..."
+
+    if python3 -c "
+import bridge
+
+registered = {
+    'kenji': {'tmux': 'claude-test-kenji', 'backend': 'claude'},
+    'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'},
+    'mon': {'tmux': 'claude-test-mon', 'backend': 'claude'},
+    'kelvin': {'tmux': 'claude-test-kelvin', 'backend': 'claude'},
+}
+
+# Set watchdog states
+bridge._record_worker_state('kenji', 'BUSY_TOOL', 'tools', 1000)
+bridge._record_worker_state('lee', 'READY', 'idle', 1000)
+bridge._record_worker_state('mon', 'READY', 'idle', 1000)
+bridge._record_worker_state('kelvin', 'BUSY_THINKING', 'thinking', 1000)
+
+# Provide live activity data
+worker_live = {
+    'kenji': {'backend': 'claude', 'activity': 'Running Bash', 'context_pct': '54%'},
+    'lee': {'backend': 'claude', 'activity': 'Idle at prompt', 'context_pct': '27%'},
+    'mon': {'backend': 'claude', 'activity': 'Rate limited — waiting to retry', 'context_pct': '42%'},
+    'kelvin': {'backend': 'claude', 'activity': 'Waiting for plan approval', 'context_pct': '27%'},
+}
+
+lines = bridge.format_team_lines(registered, 'kenji', worker_live=worker_live)
+output = '\n'.join(lines)
+
+# Header should have team count and traffic-light summary
+assert 'Team (4)' in output, f'Missing team count: {output}'
+assert 'focused: kenji' in output.lower() or 'focused: Kenji' in output, f'Missing focused: {output}'
+
+# Red/yellow/green counts
+assert chr(0x1F534) in output, f'Missing red circle: {output}'  # 🔴
+assert chr(0x1F7E1) in output, f'Missing yellow circle: {output}'  # 🟡
+assert chr(0x1F7E2) in output, f'Missing green circle: {output}'  # 🟢
+
+# mon has rate limit -> needs attention
+assert 'mon' in output and 'rate limit' in output.lower(), f'Missing mon rate limit: {output}'
+
+# kelvin waiting for approval -> needs input
+assert 'kelvin' in output and 'needs input' in output.lower(), f'Missing kelvin needs input: {output}'
+
+# Activity should appear for each worker
+assert 'Running Bash' in output, f'Missing kenji activity: {output}'
+assert 'Idle at prompt' in output, f'Missing lee activity: {output}'
+
+# Red workers should come before green in the list
+lines_lower = output.lower()
+mon_pos = lines_lower.index('mon')
+lee_pos = lines_lower.index('lee')
+assert mon_pos < lee_pos, f'Red (mon) should sort before green (lee): {output}'
+
+# Focused worker should have target icon
+assert chr(0x1F3AF) in output, f'Missing target icon for focused worker: {output}'  # 🎯
+
+# Backend should NOT show when all same
+assert 'backend=' not in output, f'backend should be hidden when all same: {output}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team shows live activity and attention"
+    else
+        fail "/team live activity format test failed"
+    fi
+}
+
 test_watchdog_exited_state() {
     info "Testing watchdog EXITED state for registry-only workers..."
 
@@ -8064,6 +8440,8 @@ run_unit_tests() {
     run_test test_codex_end_cleans_session
     run_test test_codex_relaunch_clears_session_id
     run_test test_restart_with_name
+    run_test test_restart_sends_ready_confirmation
+    run_test test_watchdog_suppressed_after_restart
     run_test test_restart_clean_with_name
     run_test test_restart_all_sequential
     run_test test_restart_all_clean
@@ -8092,6 +8470,8 @@ run_unit_tests() {
     run_test test_format_response_strips_name_prefix
     run_test test_get_any_session_id
     run_test test_progress_continuity_for_noninteractive
+    run_test test_extract_worker_activity
+    run_test test_progress_shows_activity
     run_test test_noninteractive_backpressure
     run_test test_get_workers_includes_codex
     run_test test_pipe_forwarding_to_codex
@@ -8121,6 +8501,7 @@ run_unit_tests() {
     run_test test_restart_dead_worker
     run_test test_end_removes_from_registry
     run_test test_team_shows_exited
+    run_test test_team_live_activity_format
     run_test test_watchdog_exited_state
     # Unit tests - Concurrency
     log ""
