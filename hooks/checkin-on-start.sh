@@ -1,7 +1,7 @@
 #!/bin/bash
 # Claude Code SessionStart hook - re-injects bridge instructions after compaction/resume
 #
-# Fires on "compact" and "resume" events (configured via matcher in settings.json).
+# Fires on "compact", "resume", "init", and "start" events (configured via matcher in settings.json).
 # Calls GET /checkin?name=<worker> and prints the result to stdout, which Claude
 # Code injects into the post-compaction context.
 #

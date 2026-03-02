@@ -418,11 +418,12 @@ def tmux_send_message(tmux_name: str, text: str) -> bool:
                 if r.returncode != 0:
                     return False
                 # Delay after paste: TUI needs time to process paste-end marker
-                # and re-render (e.g. image path detection, prompt re-draw).
-                # 50ms was insufficient — Enter got swallowed when TUI was
-                # still rendering image references. 150ms covers observed
-                # rendering times with safety margin.
-                time.sleep(0.15)
+                # and re-render. At low context (1%), Claude Code TUI can take
+                # 300-1000ms to render pasted text. Enter sent before render
+                # completes hits an empty prompt and the message is silently lost.
+                # 50ms → 150ms → 1s: increased after observing silent message
+                # loss on prod sessions with heavy context load.
+                time.sleep(1.0)
                 # Send Enter to submit the pasted text
                 r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
                 return r.returncode == 0
@@ -737,6 +738,7 @@ _prev_children = {}  # name -> int (previous active children count, for activity
 _last_activity_ts = {}  # name -> float (last time children count changed)
 _worker_cwds = {}  # name -> cwd (RAM-only startup cwd hints)
 _recent_restarts = {}  # name -> timestamp (suppress watchdog resolved alert after restart)
+_waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
 _watchdog_lock = threading.Lock()
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
@@ -2654,7 +2656,22 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         return
 
     # Human-friendly alert messages for manager
-    if state == "STUCK":
+    if state == "WAITING_INPUT":
+        with _watchdog_lock:
+            details = _waiting_input_details.get(name)
+        header = details.get("header", "") if details else ""
+        title = f"{name} is waiting for your input"
+        if header:
+            title += f": {header}"
+        parts = [title]
+        if details and details.get("options"):
+            for o in details["options"]:
+                marker = "\u2794 " if o.get("selected") else "  "
+                parts.append(f"{marker}{o['num']}. {o['label']}")
+            max_num = max(o["num"] for o in details["options"])
+            parts.append(f"\nReply 1-{max_num} to pick, \"skip\" to cancel")
+        text = "\n".join(parts)
+    elif state == "STUCK":
         # Parse age from reason like "age=909s cpu=6.3 streak=3/3"
         age_match = re.search(r"age=(\d+)s", reason)
         age_min = int(age_match.group(1)) // 60 if age_match else 0
@@ -2683,7 +2700,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         return
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states:
@@ -2711,7 +2728,7 @@ def _handle_watchdog_transition(
     if now is None:
         now = time.time()
 
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
@@ -2909,6 +2926,21 @@ def watchdog_loop():
                 else:
                     _idle_streak[name] = 0
 
+                # Detect interactive prompt (WAITING_INPUT): worker is READY
+                # but TUI is at a selection/question prompt needing manager action
+                if state == "READY" and is_interactive:
+                    pane_text = _capture_pane_text(tmux_name, lines=30)
+                    if pane_text:
+                        pane_lines = pane_text.splitlines()
+                        details = _extract_question_details(pane_lines)
+                        if details:
+                            # Store details for the alert message
+                            with _watchdog_lock:
+                                _waiting_input_details[name] = details
+                            state = "WAITING_INPUT"
+                            header = details.get("header", "")
+                            reason = f"question={header}" if header else "interactive prompt"
+
                 since = _record_worker_state(name, state, reason, now)
                 _handle_watchdog_transition(name, state, reason, since, now=now)
 
@@ -3056,6 +3088,9 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
         return "working (thinking)"
     if state == "WAITING":
         return "working (waiting)"
+    if state == "WAITING_INPUT":
+        minutes = max(0, int((now - since) / 60)) if since else 0
+        return f"NEEDS INPUT {minutes}m"
     if state == "STUCK":
         minutes = max(0, int((now - since) / 60)) if since else 0
         return f"STUCK {minutes}m"
@@ -3082,6 +3117,8 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
         return "🔴", "rate limit", 0
     if "error" in act or "traceback" in act or "not running" in act or "failed" in act:
         return "🔴", "error", 0
+    if "needs input" in status:
+        return "🟡", "needs input", 1
     if "stuck" in status:
         return "🔴", "stuck", 0
     if "poisoned" in status:
@@ -3252,6 +3289,22 @@ def _extract_activity(lines: list[str]) -> str:
         if ll.startswith("retrying") or "retrying in" in ll:
             return "Retrying API request"
 
+    # 3b. Interactive prompts — Claude Code TUI has taken over input.
+    #      These footer lines appear at the bottom when a selection/question UI
+    #      is active. The ❯ symbol in these states is a SELECTION CURSOR, not
+    #      the text input prompt. Must check BEFORE the ❯ prompt check below.
+    #      Uses module-level _INTERACTIVE_FOOTERS list (shared with _extract_question_details).
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                # Try to extract question header (☐ line)
+                for q_raw in stripped:
+                    if "☐" in q_raw:
+                        q = q_raw.replace("☐", "").strip()
+                        if q:
+                            return f"Waiting for input: {q}"
+                return "Waiting for user input"
+
     # 4. Prompt + mode bars — all bottom-bar elements are informational, not blocking
     #    ⏵⏵ bypass permissions on · 1 bash    → mode bar (bypass ON, 1 bash auto-approved)
     #    ⏵⏵ bypass permissions on (shift+tab)  → mode bar (bypass ON, no recent actions)
@@ -3368,9 +3421,9 @@ def _extract_context_pct(lines: list[str]) -> Optional[str]:
 
 
 def _read_tmux_activity(tmux_name: str) -> tuple:
-    """Read tmux pane and extract activity summary + context%.
+    """Read tmux pane and extract activity summary + context% + raw lines.
 
-    Returns (activity_str, context_pct_str_or_None).
+    Returns (activity_str, context_pct_str_or_None, raw_lines_or_None).
     """
     try:
         result = subprocess.run(
@@ -3378,12 +3431,130 @@ def _read_tmux_activity(tmux_name: str) -> tuple:
             capture_output=True, text=True, timeout=3
         )
         if result.returncode != 0:
-            return "Unknown", None
+            return "Unknown", None, None
         lines = result.stdout.split("\n")
-        tail = lines[-30:]
-        return _extract_activity(tail), _extract_context_pct(tail)
+        tail = lines[-40:]
+        return _extract_activity(tail), _extract_context_pct(tail), tail
     except Exception:
-        return "Unknown", None
+        return "Unknown", None, None
+
+
+# Interactive footer patterns (kept in sync with _extract_activity step 3b)
+_INTERACTIVE_FOOTERS = [
+    "Enter to select",      # AskUserQuestion single-select
+    "Space to toggle",      # AskUserQuestion multi-select
+    "Tab to toggle",        # Toggle confirm
+    "Type to search",       # Searchable list
+    "Enter to submit",      # Text submission prompt
+    "Enter to add",         # Autocomplete
+    "Enter to retry",       # Retry prompt
+    "Enter to continue",    # Continue/proceed prompt
+    "Enter to try again",   # Retry variant
+    "Enter to confirm",     # Selection confirm variant
+]
+
+
+def _extract_question_details(lines: list[str]) -> Optional[dict]:
+    """Extract interactive question details from tmux pane output.
+
+    Returns dict with:
+      header: str — question title from ☐ line (or "")
+      options: list of {num: int, label: str, selected: bool}
+      selected_num: int — currently selected option number (or 0)
+    Returns None if no interactive prompt detected.
+    """
+    if not lines:
+        return None
+
+    stripped = [l.strip() for l in lines if l.strip()]
+    if not stripped:
+        return None
+
+    # Check for interactive footer
+    has_footer = False
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                has_footer = True
+                break
+        if has_footer:
+            break
+    if not has_footer:
+        return None
+
+    # Extract header (☐ line)
+    header = ""
+    for raw in stripped:
+        if "☐" in raw:
+            header = raw.replace("☐", "").strip()
+            break
+
+    # Extract options: lines matching "❯? N. Label" or "  N. Label"
+    # Option lines start with optional ❯, then number + dot
+    options = []
+    selected_num = 0
+    opt_re = re.compile(r'^(❯)?\s*(\d+)\.\s+(.+)')
+    for raw in stripped:
+        m = opt_re.match(raw)
+        if m:
+            is_selected = m.group(1) == "❯"
+            num = int(m.group(2))
+            label = m.group(3).strip()
+            options.append({"num": num, "label": label, "selected": is_selected})
+            if is_selected:
+                selected_num = num
+
+    if not options:
+        return None
+
+    return {
+        "header": header,
+        "options": options,
+        "selected_num": selected_num,
+    }
+
+
+def _send_interactive_reply(tmux_name: str, reply: str, details: dict) -> bool:
+    """Handle manager's reply to an interactive prompt via keystroke navigation.
+
+    reply: "1"-"9" for option selection, "skip"/"cancel" for Escape.
+    details: from _extract_question_details().
+    Returns True if handled, False if not applicable.
+    """
+    reply = reply.strip().lower()
+
+    if reply in ("skip", "cancel", "esc"):
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+        return True
+
+    if reply.isdigit():
+        target_num = int(reply)
+        # Find target option index and current selected index
+        option_nums = [o["num"] for o in details["options"]]
+        if target_num not in option_nums:
+            return False
+
+        target_idx = option_nums.index(target_num)
+        current_idx = 0
+        for i, o in enumerate(details["options"]):
+            if o["selected"]:
+                current_idx = i
+                break
+
+        diff = target_idx - current_idx
+        keys = []
+        if diff > 0:
+            keys = ["Down"] * diff
+        elif diff < 0:
+            keys = ["Up"] * abs(diff)
+        keys.append("Enter")
+
+        for key in keys:
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, key])
+            time.sleep(0.05)
+        return True
+
+    return False
 
 
 def format_progress_lines(
@@ -3397,7 +3568,8 @@ def format_progress_lines(
     continuity_line: Optional[str] = None,
     needs_attention: Optional[str] = None,
     activity: Optional[str] = None,
-    context_pct: Optional[str] = None
+    context_pct: Optional[str] = None,
+    question_details: Optional[dict] = None
 ) -> list[str]:
     """Format /progress response lines (manager-friendly)."""
     status = []
@@ -3414,6 +3586,17 @@ def format_progress_lines(
         status.append("Doing: Offline")
     elif pending:
         status.append("Doing: Working on a request")
+
+    # Rich question details (when at interactive prompt)
+    if question_details and question_details.get("options"):
+        opts = question_details["options"]
+        if question_details.get("header"):
+            status.append(f"\n{question_details['header']}")
+        for o in opts:
+            marker = "\u2794 " if o.get("selected") else "  "
+            status.append(f"{marker}{o['num']}. {o['label']}")
+        max_num = max(o["num"] for o in opts)
+        status.append(f"\nReply 1-{max_num} to pick, \"skip\" to cancel")
 
     # Blockers / attention
     if needs_attention:
@@ -4732,7 +4915,7 @@ class CommandRouter:
                 backend = get_backend(backend_name)
                 if backend.is_interactive:
                     if is_claude_running(tmux_name):
-                        activity, context_pct = _read_tmux_activity(tmux_name)
+                        activity, context_pct, _ = _read_tmux_activity(tmux_name)
                     else:
                         activity = "worker app not running"
                 else:
@@ -4823,8 +5006,14 @@ class CommandRouter:
         # Read live activity from tmux pane
         activity = None
         context_pct = None
+        raw_lines = None
         if is_tmux_alive and ready:
-            activity, context_pct = _read_tmux_activity(tmux_name)
+            activity, context_pct, raw_lines = _read_tmux_activity(tmux_name)
+
+        # Extract question details if at interactive prompt
+        question_details = None
+        if raw_lines and activity and "Waiting for" in activity:
+            question_details = _extract_question_details(raw_lines)
 
         status = format_progress_lines(
             name=name,
@@ -4837,7 +5026,8 @@ class CommandRouter:
             continuity_line=continuity_line,
             needs_attention=needs_attention,
             activity=activity,
-            context_pct=context_pct
+            context_pct=context_pct,
+            question_details=question_details
         )
 
         self.reply(chat_id, "\n".join(status))
@@ -5139,6 +5329,22 @@ class CommandRouter:
         if not backend.is_interactive and is_pending(session_name):
             self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
             return
+
+        # Interactive prompt shortcut: if worker is at a selection prompt and
+        # manager sends a single digit or "skip", translate to keystrokes
+        shortcut = text.strip().lower()
+        if backend.is_interactive and shortcut in (
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "cancel"
+        ):
+            tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{session_name}")
+            _, _, raw_lines = _read_tmux_activity(tmux_name)
+            if raw_lines:
+                details = _extract_question_details(raw_lines)
+                if details:
+                    if _send_interactive_reply(tmux_name, shortcut, details):
+                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
+                        self.reply(chat_id, f"{action}.")
+                        return
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
 

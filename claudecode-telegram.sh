@@ -1265,7 +1265,7 @@ cmd_hook_install() {
             log "$(dim "SessionStart hook already in settings.json")"
         elif check_cmd jq; then
             jq --arg cmd "$checkin_cmd" \
-                '.hooks.SessionStart = [{"matcher":"compact|resume","hooks":[{"type":"command","command":$cmd}]}]' \
+                '.hooks.SessionStart = [{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":$cmd}]}]' \
                 "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
                 && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
             success "Updated settings.json (SessionStart hook)"
@@ -1276,12 +1276,12 @@ cmd_hook_install() {
             jq -n --arg stop "$hook_cmd" --arg checkin "$checkin_cmd" '{
                 hooks: {
                     Stop: [{hooks: [{type: "command", command: $stop}]}],
-                    SessionStart: [{matcher: "compact|resume", hooks: [{type: "command", command: $checkin}]}]
+                    SessionStart: [{matcher: "compact|resume|init|start", hooks: [{type: "command", command: $checkin}]}]
                 }
             }' > "$SETTINGS_FILE"
         else
             cat > "$SETTINGS_FILE" << EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume","hooks":[{"type":"command","command":"$checkin_cmd"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":"$checkin_cmd"}]}]}}
 EOF
         fi
         success "Created settings.json"

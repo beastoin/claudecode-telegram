@@ -84,6 +84,22 @@ void browse --session qa open https://docs.github.com  # named session
 
 Uses [Vercel agent-browser](https://github.com/vercel-labs/agent-browser) (headless Chromium with snapshot-based AI workflow).
 
+### WebRTC Operations
+
+`void/webrtc/deploy.sh` now runs with explicit gateway hardening and PID-file process control:
+
+```bash
+cd void/webrtc
+GATEWAY_API_KEY='<strong-random-key>' \
+ALLOWED_ORIGIN='https://console.example.com' \
+./deploy.sh start
+```
+
+- Gateway bind defaults to `127.0.0.1` (`GATEWAY_BIND` overrides it).
+- Gateway API requires `X-API-Key` on `/session/create` and `/turn/credentials`.
+- CORS is deny-by-default unless `ALLOWED_ORIGIN` matches the request origin.
+- `stop` uses PID files (`/var/run/void-webrtc/*.pid`) for `gateway`, `streamd`, `xvfb`, and `ffmpeg` (no `pkill`).
+
 ## CLI Reference
 
 Copy/paste-ready commands for every allowlisted action.
@@ -398,7 +414,7 @@ All output is scrubbed before crossing the VM boundary:
 | `restart` | Stop + start (re-pulls secrets) |
 | `grant <user>` | Grant non-root user access to `void` CLI |
 | `status` | Show VM/runtime status |
-| `test` | Run embedded security tests (48 tests) |
+| `test` | Run embedded security tests (77 tests) |
 | `clean` | Nuclear teardown: unmount LUKS, delete VM, shred secrets |
 | `all` | Run deps + build + create + configure |
 
@@ -418,20 +434,19 @@ All output is scrubbed before crossing the VM boundary:
 
 ## Testing
 
-54 embedded security tests run without a VM:
+77 embedded security tests run without a VM:
 
 ```bash
 ./setup-secure-vm.sh --yes test
 ```
 
-Test categories:
-- **Browser whitelist** (13): ACL enforcement for allowed/denied commands
-- **Browser security** (7): env isolation, firewall rules, output scrubbing, session limits, timeouts
-- **gh/gcloud ACL** (17): allowed tools, denied tools, deny patterns, subcommand allowlist enforcement
-- **Output scrubbing** (9): JWT, GitHub PAT/OAuth, fine-grained PAT, Google tokens, Bearer, AWS, PEM, OpenAI key format
-- **Environment isolation** (3): credential passthrough, random var exclusion
-- **IPC authentication** (1): unsigned request rejection
-- **Host proxy** (4): tool allowlist, rejection, argv JSON, browse routing
+Test categories include:
+- Browser ACL + session-origin + portal hardening checks
+- Firewall hardening (fail-closed + IPv6)
+- gh/gcloud ACL + deny-pattern + flag-level restrictions
+- Output scrubbing (GitHub, GitLab, DigitalOcean, 1Password refs, AWS session tokens, JWT, etc.)
+- IPC authentication and internal status probe HMAC behavior
+- Host proxy behavior and runtime file-permission checks
 
 ## Bitwarden Secrets Setup
 
@@ -448,7 +463,7 @@ For multi-line secrets (e.g., gcloud SA key JSON), store as separate `.json` sec
 ## Architecture
 
 ```
-setup-secure-vm.sh (3385 lines, single file)
+setup-secure-vm.sh (6434 lines, single file)
   |
   |-- cmd_deps()        Install Rust, Python, gcloud, gh, bws CLI
   |-- cmd_build()       Build libkrunfw + libkrun + krunvm from source
@@ -457,7 +472,7 @@ setup-secure-vm.sh (3385 lines, single file)
   |-- cmd_start()       Unlock LUKS, fetch Bitwarden secrets, boot VM
   |-- cmd_stop()        Stop VM, cleanup mounts
   |-- cmd_clean()       Nuclear 8-step teardown
-  |-- cmd_test()        54 embedded Python security tests
+  |-- cmd_test()        77 embedded Python security tests
   |
   |-- write_proxy_daemon()        Guest-side Python daemon (PID 1)
   |-- write_proxy_config()        ACL config (YAML)

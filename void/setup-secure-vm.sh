@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 cd /tmp 2>/dev/null || cd /
 
 VERSION="1.1.0"
@@ -517,6 +518,13 @@ DEFAULT_CONFIG = {
         r"(?i)--verbosity=debug",
         r"(?i)\bsecret\s+get\b.*\b(?:--output|-o|--format)\s*(?:yaml|json)\b",
     ],
+    "flag_deny_patterns": [
+        r"(?i)(?:^|\s)--body-file(?:=|\s+)\S+",
+        r"(?i)(?:^|\s)--jq(?:=|\s+)(?:file://|/|~/|\./|\.\./)\S*",
+        r"(?i)(?:^|\s)--template(?:=|\s+)(?:file://|/|~/|\./|\.\./)\S*",
+        r"(?i)(?:^|\s)--json(?:=|\s+\S+)?(?:\s+|$).*(?:^|\s)--jq(?:=|\s+\S+)?(?:\s+|$)|"
+        r"(?:^|\s)--jq(?:=|\s+\S+)?(?:\s+|$).*(?:^|\s)--json(?:=|\s+\S+)?(?:\s+|$)",
+    ],
     "sensitive_output_regex": [
         r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]{8,}\.[A-Za-z0-9._-]{8,}",
         r"AKIA[0-9A-Z]{16}",
@@ -527,6 +535,12 @@ DEFAULT_CONFIG = {
         r"(?i)kubeconfig",
         r"gho_[A-Za-z0-9_]{36}",
         r"ghp_[A-Za-z0-9_]{36}",
+        r"ghs_[A-Za-z0-9]{36}",
+        r"ghu_[A-Za-z0-9]{36}",
+        r"glsa-[A-Za-z0-9-]{20,}",
+        r"dop_v1_[a-f0-9]{64}",
+        r"op://[^\s]+",
+        r"(?i)aws[_-]?session[_-]?token\s*[:=]\s*\S+",
         r"ya29\.[A-Za-z0-9_-]+",
         r"Bearer [A-Za-z0-9._-]+",
         r"Basic [A-Za-z0-9+/=]{20,}",
@@ -1685,6 +1699,13 @@ def check_command(argv, cfg, logger):
         logger.info("DENIED tool=%s reason=subcommand_not_allowed detail=%s", tool, sub_err)
         return False, "Command denied by subcommand allowlist"
 
+    # Check flag-level deny patterns on arg tail.
+    arg_tail = " ".join(argv[1:])
+    for pattern in cfg.get("flag_deny_patterns", []):
+        if re.search(pattern, arg_tail):
+            logger.info("DENIED tool=%s reason=flag_deny_pattern pattern=%s", tool, pattern)
+            return False, "Command denied by flag policy"
+
     # Check command deny patterns
     cmd_str = " ".join(argv)
     for pattern in cfg.get("command_deny_patterns", []):
@@ -1987,64 +2008,74 @@ def process_request(req_path, cfg, logger, ipc_key):
                 timeout = min(req.get("timeout", 60), 300)  # cap at 5 minutes
                 logger.info("REQUEST id=%s argv=%s", req_id, argv[:3])  # log first 3 args only
 
-                ok, error_msg = check_command(argv, cfg, logger)
-                if not ok:
+                if argv and argv[0] == "__status__":
                     response = {
                         "id": req_id,
-                        "exit_code": 1,
-                        "stdout": "",
-                        "stderr": error_msg,
-                        "error": "denied",
+                        "exit_code": 0,
+                        "stdout": "ok\n",
+                        "stderr": "",
+                        "error": None,
                     }
+                    logger.info("COMPLETED id=%s tool=__status__ exit_code=0", req_id)
                 else:
-                    tool = os.path.basename(argv[0])
-                    env = build_command_env()
-                    try:
-                        proc = subprocess.run(
-                            argv,
-                            shell=False,
-                            check=False,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout,
-                            env=env,
-                        )
-                        scrub_patterns = cfg.get("sensitive_output_regex", [])
-                        response = {
-                            "id": req_id,
-                            "exit_code": proc.returncode,
-                            "stdout": scrub_text(proc.stdout, scrub_patterns),
-                            "stderr": scrub_text(proc.stderr, scrub_patterns),
-                            "error": None,
-                        }
-                        logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
-                    except subprocess.TimeoutExpired:
-                        response = {
-                            "id": req_id,
-                            "exit_code": 124,
-                            "stdout": "",
-                            "stderr": f"Command timed out after {timeout}s",
-                            "error": "timeout",
-                        }
-                        logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
-                    except FileNotFoundError:
-                        response = {
-                            "id": req_id,
-                            "exit_code": 127,
-                            "stdout": "",
-                            "stderr": f"Command not found: {argv[0]}",
-                            "error": "not_found",
-                        }
-                        logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
-                    except Exception as e:
+                    ok, error_msg = check_command(argv, cfg, logger)
+                    if not ok:
                         response = {
                             "id": req_id,
                             "exit_code": 1,
                             "stdout": "",
-                            "stderr": "Command execution failed",
-                            "error": "internal",
+                            "stderr": error_msg,
+                            "error": "denied",
                         }
-                        logger.error("EXCEPTION id=%s error=%s", req_id, e)
+                    else:
+                        tool = os.path.basename(argv[0])
+                        env = build_command_env()
+                        try:
+                            proc = subprocess.run(
+                                argv,
+                                shell=False,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                                timeout=timeout,
+                                env=env,
+                            )
+                            scrub_patterns = cfg.get("sensitive_output_regex", [])
+                            response = {
+                                "id": req_id,
+                                "exit_code": proc.returncode,
+                                "stdout": scrub_text(proc.stdout, scrub_patterns),
+                                "stderr": scrub_text(proc.stderr, scrub_patterns),
+                                "error": None,
+                            }
+                            logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
+                        except subprocess.TimeoutExpired:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 124,
+                                "stdout": "",
+                                "stderr": f"Command timed out after {timeout}s",
+                                "error": "timeout",
+                            }
+                            logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
+                        except FileNotFoundError:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 127,
+                                "stdout": "",
+                                "stderr": f"Command not found: {argv[0]}",
+                                "error": "not_found",
+                            }
+                            logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
+                        except Exception as e:
+                            response = {
+                                "id": req_id,
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": "Command execution failed",
+                                "error": "internal",
+                            }
+                            logger.error("EXCEPTION id=%s error=%s", req_id, e)
 
     response.setdefault("id", req_id)
     response["timestamp"] = int(time.time())
@@ -2144,6 +2175,11 @@ global_deny_regex:
   - '(?i)--log-http'
   - '(?i)--verbosity=debug'
   - '(?i)\bsecret\s+get\b.*\b(?:--output|-o|--format)\s*(?:yaml|json)\b'
+flag_deny_patterns:
+  - '(?i)(?:^|\s)--body-file(?:=|\s+)\S+'
+  - '(?i)(?:^|\s)--jq(?:=|\s+)(?:file://|/|~/|\./|\.\./)\S*'
+  - '(?i)(?:^|\s)--template(?:=|\s+)(?:file://|/|~/|\./|\.\./)\S*'
+  - '(?i)(?:^|\s)--json(?:=|\s+\S+)?(?:\s+|$).*(?:^|\s)--jq(?:=|\s+\S+)?(?:\s+|$)|(?:^|\s)--jq(?:=|\s+\S+)?(?:\s+|$).*(?:^|\s)--json(?:=|\s+\S+)?(?:\s+|$)'
 sensitive_output_regex:
   - 'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]{8,}\.[A-Za-z0-9._-]{8,}'
   - 'AKIA[0-9A-Z]{16}'
@@ -2154,6 +2190,12 @@ sensitive_output_regex:
   - '(?i)kubeconfig'
   - 'gho_[A-Za-z0-9_]{36}'
   - 'ghp_[A-Za-z0-9_]{36}'
+  - 'ghs_[A-Za-z0-9]{36}'
+  - 'ghu_[A-Za-z0-9]{36}'
+  - 'glsa-[A-Za-z0-9-]{20,}'
+  - 'dop_v1_[a-f0-9]{64}'
+  - 'op://[^\s]+'
+  - '(?i)aws[_-]?session[_-]?token\s*[:=]\s*\S+'
   - 'ya29\.[A-Za-z0-9_-]+'
   - 'Bearer [A-Za-z0-9._-]+'
   - 'Basic [A-Za-z0-9+/=]{20,}'
@@ -2833,9 +2875,13 @@ class ChromiumCDP:
             err_text = "\n".join(self._stderr_lines[-40:]).lower()
             sandbox_markers = ("no usable sandbox", "setuid sandbox", "namespace sandbox")
             if any(marker in err_text for marker in sandbox_markers):
-                _plog("chromium sandbox unavailable; retrying with --no-sandbox")
-                await self.stop()
-                await self._start_once(no_sandbox=True)
+                if os.getuid() == 0:
+                    _plog("chromium sandbox unavailable while running as root; retrying with --no-sandbox")
+                    await self.stop()
+                    await self._start_once(no_sandbox=True)
+                else:
+                    await self.stop()
+                    raise RuntimeError("chromium sandbox unavailable; refusing --no-sandbox for non-root user") from first_error
             else:
                 await self.stop()
                 raise first_error
@@ -2888,10 +2934,12 @@ class ChromiumCDP:
             "--disable-gpu",
             "--disable-dev-shm-usage",
             "--disable-webrtc",
-            "--no-sandbox",
             f"--window-size={DEFAULT_VIEWPORT_W},{DEFAULT_VIEWPORT_H}",
             "about:blank",
         ]
+        if no_sandbox and os.getuid() == 0:
+            _plog("WARNING: Chromium sandbox disabled (--no-sandbox) because process is running as root")
+            cmd.append("--no-sandbox")
         _plog(f"launching chromium (pipe mode): {self.chromium_path}")
         # Chrome reads from fd 3, writes to fd 4 (from Chrome's POV).
         # We create two pipes: parent_write→chrome_read(3), chrome_write(4)→parent_read.
@@ -3433,6 +3481,10 @@ async def run(args, external_stop):
             if not next_url:
                 await send_notice(websocket, "invalid url")
                 return
+            if allow_hosts and not url_host_allowed(next_url, allow_hosts):
+                denied_host = (urlparse(next_url).hostname or "unknown").lower()
+                await send_notice(websocket, f"HTTP 403 forbidden: host not in allowlist ({denied_host})")
+                return
             await browser.goto(next_url)
             return
         if msg_type == "click":
@@ -3726,7 +3778,6 @@ set -euo pipefail
 
 # Debian bookworm defaults to nftables backend. If the kernel lacks
 # nf_tables support (e.g., libkrun microVM), fall back to iptables-legacy.
-# If neither works (no netfilter in kernel), warn and skip.
 IPT=""
 for candidate in iptables iptables-legacy; do
   if command -v "$candidate" >/dev/null 2>&1 && $candidate -L -n >/dev/null 2>&1; then
@@ -3735,10 +3786,22 @@ for candidate in iptables iptables-legacy; do
   fi
 done
 
+IP6T=""
+for candidate in ip6tables ip6tables-legacy; do
+  if command -v "$candidate" >/dev/null 2>&1 && $candidate -L -n >/dev/null 2>&1; then
+    IP6T="$candidate"
+    break
+  fi
+done
+
 if [[ -z "$IPT" ]]; then
-  echo "WARNING: Kernel has no netfilter support. Firewall rules NOT applied." >&2
-  echo "WARNING: Network isolation relies on the host firewall instead." >&2
-  exit 0
+  echo "ERROR: No usable iptables binary found. Refusing to start without IPv4 firewall." >&2
+  exit 1
+fi
+
+if [[ -z "$IP6T" ]]; then
+  echo "ERROR: No usable ip6tables binary found. Refusing to start without IPv6 firewall." >&2
+  exit 1
 fi
 
 $IPT -F
@@ -3795,6 +3858,52 @@ $IPT -A OUTPUT -p udp --dport 53 -j ACCEPT
 $IPT -A OUTPUT -p tcp --dport 53 -j ACCEPT
 $IPT -A OUTPUT -p tcp --dport 443 -j ACCEPT
 $IPT -A OUTPUT -p tcp --dport 80 -j ACCEPT
+
+$IP6T -F
+$IP6T -X
+$IP6T -P INPUT DROP
+$IP6T -P FORWARD DROP
+$IP6T -P OUTPUT DROP
+
+$IP6T -A INPUT -i lo -j ACCEPT
+$IP6T -A OUTPUT -o lo -j ACCEPT
+$IP6T -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+$IP6T -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Block local and private IPv6 ranges before allowing egress.
+$IP6T -A OUTPUT -d ::1/128 -j DROP
+$IP6T -A OUTPUT -d ::/128 -j DROP
+$IP6T -A OUTPUT -d fc00::/7 -j DROP
+$IP6T -A OUTPUT -d fe80::/10 -j DROP
+$IP6T -A OUTPUT -d ff00::/8 -j DROP
+
+if [[ -n "$BROWSER_UID" ]]; then
+  $IP6T -N VOID_BROWSER_EGRESS6 2>/dev/null || true
+  $IP6T -F VOID_BROWSER_EGRESS6
+  $IP6T -A OUTPUT -m owner --uid-owner "$BROWSER_UID" -j VOID_BROWSER_EGRESS6
+  $IP6T -A VOID_BROWSER_EGRESS6 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+  # Allow DNS to configured IPv6 resolvers first.
+  while read -r ns; do
+    [[ -z "$ns" ]] && continue
+    [[ "$ns" != *:* ]] && continue
+    $IP6T -A VOID_BROWSER_EGRESS6 -p udp -d "$ns" --dport 53 -j ACCEPT
+    $IP6T -A VOID_BROWSER_EGRESS6 -p tcp -d "$ns" --dport 53 -j ACCEPT
+  done < <(awk '/^nameserver/{print $2}' /etc/resolv.conf)
+
+  # Block private/link-local/multicast before allowing HTTPS.
+  for cidr6 in ::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8; do
+    $IP6T -A VOID_BROWSER_EGRESS6 -d "$cidr6" -j REJECT
+  done
+
+  $IP6T -A VOID_BROWSER_EGRESS6 -p tcp --dport 443 -j ACCEPT
+  $IP6T -A VOID_BROWSER_EGRESS6 -j REJECT
+fi
+
+$IP6T -A OUTPUT -p udp --dport 53 -j ACCEPT
+$IP6T -A OUTPUT -p tcp --dport 53 -j ACCEPT
+$IP6T -A OUTPUT -p tcp --dport 443 -j ACCEPT
+$IP6T -A OUTPUT -p tcp --dport 80 -j ACCEPT
 FW_SCRIPT
   chmod 0755 "$target"
 }
@@ -4379,7 +4488,7 @@ VM_LOG=${log_file}
 IPC_DIR=${ipc_dir}
 IPC_KEY=${ipc_key}
 EOF_RUNTIME
-  chmod 0644 "$RUNTIME_ENV_FILE"
+  chmod 0640 "$RUNTIME_ENV_FILE"
 }
 
 wait_for_port() {
@@ -4769,8 +4878,8 @@ SECRETS_GUIDE
   local ipc_dir
   ipc_dir="$(mktemp -d "${mktemp_base}/vm-ipc.${VM_NAME}.XXXXXX")"
   run mkdir -p "${ipc_dir}/requests" "${ipc_dir}/responses"
-  run chmod 0777 "$ipc_dir"
-  run chmod 0777 "${ipc_dir}/requests" "${ipc_dir}/responses"
+  run chmod 0770 "$ipc_dir"
+  run chmod 0770 "${ipc_dir}/requests" "${ipc_dir}/responses"
 
   # Write guest boot script to a file (krunvm mangles multi-line -c args).
   local boot_dir
@@ -5070,21 +5179,39 @@ cmd_grant() {
 
     log_info "Granting void access to user '${username}'..."
 
-    # runtime.env must be readable
+    local user_group
+    user_group="$(id -gn "$username")"
+
+    # runtime.env must be readable by granted user only
     if [[ -f "$RUNTIME_ENV_FILE" ]]; then
-      run chmod 0644 "$RUNTIME_ENV_FILE"
+      run chmod 0640 "$RUNTIME_ENV_FILE"
+      if command_exists setfacl; then
+        run setfacl -m "u:${username}:r" "$RUNTIME_ENV_FILE"
+      else
+        run chgrp "$user_group" "$RUNTIME_ENV_FILE"
+      fi
     fi
 
-    # IPC directory must be read/writable
+    # IPC directory must be read/writable by granted user only
     if [[ -n "$ipc_dir" && -d "$ipc_dir" ]]; then
-      run chmod 0777 "$ipc_dir"
-      run chmod 0777 "${ipc_dir}/requests" "${ipc_dir}/responses"
+      run chmod 0770 "$ipc_dir"
+      run chmod 0770 "${ipc_dir}/requests" "${ipc_dir}/responses"
+      if command_exists setfacl; then
+        run setfacl -m "u:${username}:rwx" "$ipc_dir" "${ipc_dir}/requests" "${ipc_dir}/responses"
+      else
+        run chgrp "$user_group" "$ipc_dir" "${ipc_dir}/requests" "${ipc_dir}/responses"
+      fi
     else
       # Scan for any IPC dirs
       local d
       for d in "${RUN_ROOT}"/vm-ipc.${VM_NAME}.*; do
         [[ -d "$d" ]] || continue
-        run chmod 0777 "$d" "$d/requests" "$d/responses"
+        run chmod 0770 "$d" "$d/requests" "$d/responses"
+        if command_exists setfacl; then
+          run setfacl -m "u:${username}:rwx" "$d" "$d/requests" "$d/responses"
+        else
+          run chgrp "$user_group" "$d" "$d/requests" "$d/responses"
+        fi
       done
     fi
 
@@ -5191,7 +5318,7 @@ cmd_status() {
   # ── DNS check (inside VM via test command) ──
   echo "=== Network (quick probe) ==="
   if [[ "$daemon_alive" == "yes" && -n "$ipc_dir" ]]; then
-    # Send a harmless gcloud command to test connectivity
+    # Send an internal status probe command to test daemon request path
     local probe_id="status-probe-$$"
     local probe_req="${ipc_dir}/requests/${probe_id}.json"
     local probe_resp="${ipc_dir}/responses/${probe_id}.json"
@@ -5202,17 +5329,18 @@ cmd_status() {
     # Build signed probe request
     local probe_ts
     probe_ts="$(date +%s)"
-    local probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"gcloud\",\"auth\",\"list\"],\"timeout\":10,\"timestamp\":${probe_ts}}"
+    local probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"__status__\"],\"timeout\":10,\"timestamp\":${probe_ts}}"
     if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
       local probe_hmac
       probe_hmac="$(python3 -c "
 import hmac, hashlib, json
 key = bytes.fromhex('${ipc_key_hex}')
-payload = '${probe_json}'.encode()
-print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+payload = json.loads('${probe_json}')
+canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+print(hmac.new(key, canonical.encode('utf-8'), hashlib.sha256).hexdigest())
 " 2>/dev/null || true)"
       if [[ -n "$probe_hmac" ]]; then
-        probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"gcloud\",\"auth\",\"list\"],\"timeout\":10,\"timestamp\":${probe_ts},\"hmac\":\"${probe_hmac}\"}"
+        probe_json="{\"id\":\"${probe_id}\",\"argv\":[\"__status__\"],\"timeout\":10,\"timestamp\":${probe_ts},\"hmac\":\"${probe_hmac}\"}"
       fi
     fi
     echo "$probe_json" > "$probe_req" 2>/dev/null
@@ -5223,7 +5351,7 @@ print(hmac.new(key, payload, hashlib.sha256).hexdigest())
       waited=$((waited + 1))
     done
     if [[ -f "$probe_resp" ]]; then
-      echo "gcloud_auth_probe=ok (${waited}s)"
+      echo "status_probe=ok (${waited}s)"
       local probe_exit
       probe_exit="$(python3 -c "import json;print(json.load(open('${probe_resp}'))['exit_code'])" 2>/dev/null || echo "?")"
       local probe_stdout
@@ -5235,7 +5363,7 @@ print(hmac.new(key, payload, hashlib.sha256).hexdigest())
       [[ -n "$probe_stderr" ]] && echo "stderr=${probe_stderr}"
       rm -f "$probe_resp"
     else
-      echo "gcloud_auth_probe=TIMEOUT (15s)"
+      echo "status_probe=TIMEOUT (15s)"
     fi
     rm -f "$probe_req"
     echo ""
@@ -5251,10 +5379,11 @@ print(hmac.new(key, payload, hashlib.sha256).hexdigest())
     if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
       local bprobe_hmac
       bprobe_hmac="$(python3 -c "
-import hmac, hashlib
+import hmac, hashlib, json
 key = bytes.fromhex('${ipc_key_hex}')
-payload = '${bprobe_json}'.encode()
-print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+payload = json.loads('${bprobe_json}')
+canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+print(hmac.new(key, canonical.encode('utf-8'), hashlib.sha256).hexdigest())
 " 2>/dev/null || true)"
       if [[ -n "$bprobe_hmac" ]]; then
         bprobe_json="{\"id\":\"${bprobe_id}\",\"tool\":\"browser\",\"action\":\"session list\",\"timeout\":10,\"timestamp\":${bprobe_ts},\"hmac\":\"${bprobe_hmac}\"}"
@@ -5292,10 +5421,11 @@ print(hmac.new(key, payload, hashlib.sha256).hexdigest())
     if [[ -n "$ipc_key_hex" ]] && command -v python3 >/dev/null 2>&1; then
       local dprobe_hmac
       dprobe_hmac="$(python3 -c "
-import hmac, hashlib
+import hmac, hashlib, json
 key = bytes.fromhex('${ipc_key_hex}')
-payload = '${dprobe_json}'.encode()
-print(hmac.new(key, payload, hashlib.sha256).hexdigest())
+payload = json.loads('${dprobe_json}')
+canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+print(hmac.new(key, canonical.encode('utf-8'), hashlib.sha256).hexdigest())
 " 2>/dev/null || true)"
       if [[ -n "$dprobe_hmac" ]]; then
         dprobe_json="{\"id\":\"${dprobe_id}\",\"tool\":\"browser\",\"action\":\"open\",\"params\":{\"url\":\"https://example.com\"},\"timeout\":15,\"timestamp\":${dprobe_ts},\"hmac\":\"${dprobe_hmac}\"}"
@@ -5356,23 +5486,39 @@ cmd_test() {
   track_tmp_path "$test_root"
 
   local daemon_py="${test_root}/command-proxy-daemon.py"
+  local login_portal_py="${test_root}/void-login-portal.py"
   local firewall_sh="${test_root}/firewall.sh"
   local host_proxy="${test_root}/void"
   local runtime_env="${test_root}/runtime.env"
+  local void_dir
+  void_dir="$(dirname "$SCRIPT_PATH")"
+  local deploy_sh="${void_dir}/webrtc/deploy.sh"
+  local readme_md="${void_dir}/README.md"
 
   write_proxy_daemon "$daemon_py"
+  write_login_portal_script "$login_portal_py"
   write_firewall_script "$firewall_sh"
   write_host_proxy_script "$host_proxy" "$runtime_env"
 
-  python3 - "$daemon_py" "$firewall_sh" "$host_proxy" <<'PY_TEST'
+  python3 - "$daemon_py" "$login_portal_py" "$firewall_sh" "$host_proxy" "$SCRIPT_PATH" "$deploy_sh" "$readme_md" <<'PY_TEST'
 import importlib.util
+import json
 import logging
+import os
 import pathlib
+import re
+import subprocess
 import sys
+import tempfile
 
 daemon_path = pathlib.Path(sys.argv[1])
-firewall_path = pathlib.Path(sys.argv[2])
-host_proxy_path = pathlib.Path(sys.argv[3])
+login_portal_path = pathlib.Path(sys.argv[2])
+firewall_path = pathlib.Path(sys.argv[3])
+host_proxy_path = pathlib.Path(sys.argv[4])
+setup_script_path = pathlib.Path(sys.argv[5])
+deploy_script_path = pathlib.Path(sys.argv[6])
+readme_path = pathlib.Path(sys.argv[7])
+login_portal_source = login_portal_path.read_text(encoding="utf-8")
 
 spec = importlib.util.spec_from_file_location("proxy_daemon", daemon_path)
 module = importlib.util.module_from_spec(spec)
@@ -5506,7 +5652,30 @@ check(
     "missing one or more private range deny rules",
 )
 
-# 18. scrub query tokens
+# 18. firewall must fail closed if iptables is unavailable
+with tempfile.TemporaryDirectory(prefix="void-fw-path.") as fake_path:
+    probe = subprocess.run(
+        ["/bin/bash", str(firewall_path)],
+        env={**os.environ, "PATH": fake_path},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+check(
+    "test_firewall_fails_closed_without_iptables",
+    probe.returncode != 0,
+    f"expected non-zero exit when iptables missing, got {probe.returncode}",
+)
+
+# 19. firewall includes IPv6 policy rules
+check(
+    "test_firewall_has_ipv6_rules",
+    "ip6tables" in fw and "::1/128" in fw,
+    "missing ip6tables IPv6 rules",
+)
+
+# 20. scrub query tokens
 scrubbed = module.scrub_browser_text("https://example.com/?token=secret123&x=1")
 check(
     "test_browser_scrubs_query_tokens",
@@ -5514,7 +5683,7 @@ check(
     scrubbed,
 )
 
-# 19. session limit enforced
+# 21. session limit enforced
 module.active_browser_sessions.clear()
 module.active_browser_sessions.add("s1")
 module.active_browser_sessions.add("s2")
@@ -5523,7 +5692,7 @@ limit_cfg["max_browser_sessions"] = 2
 allowed, msg = module.browser_session_allowed(("open",), "s3", limit_cfg)
 check("test_browser_session_limit_enforced", not allowed, msg or "")
 
-# 20. timeout enforced
+# 22. timeout enforced
 slow_timeout = module.browser_timeout_for_action("open", 999)
 fast_timeout = module.browser_timeout_for_action("click", 999)
 check(
@@ -5532,17 +5701,46 @@ check(
     f"slow={slow_timeout} fast={fast_timeout}",
 )
 
-# 21. session login action is allowed
+# 23. session login action is allowed
 ok, argv, err = module.validate_browser_command(
     "session login", {"session": "github", "args": []}, cfg
 )
 check("test_browser_allows_session_login", ok and argv and "session" in argv, err or "")
 
-# 22. per-session origin policy blocks off-domain open
+# 24. per-session origin policy blocks off-domain open
 ok, _, err = module.validate_browser_command(
     "open", {"session": "github", "url": "https://example.com"}, cfg
 )
 check("test_browser_denies_offdomain_session_open", not ok and "allowlist" in (err or "").lower(), err or "")
+
+# 25. login portal goto enforces allow-hosts before navigation
+check(
+    "test_portal_goto_enforces_allow_hosts",
+    bool(re.search(r'if msg_type == "goto":[\s\S]{0,500}url_host_allowed\(next_url,\s*allow_hosts\)', login_portal_source)),
+    "goto handler missing allow-host enforcement",
+)
+
+# 26. login portal goto returns explicit 403-style rejection for denied hosts
+check(
+    "test_portal_goto_returns_403_for_denied_host",
+    bool(re.search(r'if msg_type == "goto":[\s\S]{0,700}403', login_portal_source)),
+    "goto handler missing explicit 403 rejection message",
+)
+
+# 27. chromium no-sandbox must be conditional on root
+check(
+    "test_portal_no_sandbox_only_for_root",
+    '"--no-sandbox",' not in login_portal_source
+    and bool(re.search(r'if\s+no_sandbox\s+and\s+os\.getuid\(\)\s*==\s*0', login_portal_source)),
+    "no-sandbox flag must be gated on os.getuid() == 0",
+)
+
+# 28. disabling chromium sandbox must log a clear warning
+check(
+    "test_portal_logs_warning_when_sandbox_disabled",
+    "running as root" in login_portal_source.lower() and "--no-sandbox" in login_portal_source,
+    "missing explicit warning when chromium sandbox is disabled",
+)
 
 # Host proxy regression check for browse wiring
 host_proxy = host_proxy_path.read_text(encoding="utf-8")
@@ -5554,15 +5752,15 @@ check(
 
 # ── gh/gcloud ACL tests ──────────────────────────────────────────────
 
-# 22. gh allowed
+# 29. gh allowed
 ok, err = module.check_command(["gh", "pr", "list"], cfg, logger)
 check("test_gh_pr_list_allowed", ok, err or "")
 
-# 23. gcloud allowed
+# 30. gcloud allowed
 ok, err = module.check_command(["gcloud", "projects", "list"], cfg, logger)
 check("test_gcloud_projects_list_allowed", ok, err or "")
 
-# 24. deny tool not in allowed list
+# 31. deny tool not in allowed list
 ok, err = module.check_command(["curl", "https://example.com"], cfg, logger)
 check("test_deny_tool_not_allowed_curl", not ok and "not allowed" in (err or "").lower(), err or "")
 
@@ -5622,6 +5820,38 @@ check("test_deny_gh_extension_install", not ok and "denied" in (err or "").lower
 ok, err = module.check_command(["gcloud", "secrets", "versions", "access", "latest"], cfg, logger)
 check("test_deny_gcloud_secrets_versions_access", not ok and "denied" in (err or "").lower(), err or "")
 
+# 39. deny gh --body-file flag (reads arbitrary files)
+ok, err = module.check_command(
+    ["gh", "issue", "create", "--title", "x", "--body-file", "/etc/passwd"],
+    cfg,
+    logger,
+)
+check("test_deny_gh_body_file_flag", not ok and "denied" in (err or "").lower(), err or "")
+
+# 40. allow safe inline body for gh issue create
+ok, err = module.check_command(
+    ["gh", "issue", "create", "--title", "x", "--body", "safe text"],
+    cfg,
+    logger,
+)
+check("test_allow_gh_inline_body_flag", ok, err or "")
+
+# 41. deny gh --template with local path
+ok, err = module.check_command(
+    ["gh", "issue", "create", "--title", "x", "--template", "/tmp/t.md"],
+    cfg,
+    logger,
+)
+check("test_deny_gh_template_file_flag", not ok and "denied" in (err or "").lower(), err or "")
+
+# 42. deny --json combined with --jq
+ok, err = module.check_command(
+    ["gh", "issue", "view", "123", "--json", "body", "--jq", ".body"],
+    cfg,
+    logger,
+)
+check("test_deny_gh_json_jq_combo", not ok and "denied" in (err or "").lower(), err or "")
+
 # ── gh/gcloud output scrubbing tests ─────────────────────────────────
 
 scrub_patterns = cfg.get("sensitive_output_regex", [])
@@ -5671,9 +5901,39 @@ openai_key_text = "api_key=sk-1234567890ABCDEFGHIJKLMNOPQRST"
 scrubbed = module.scrub_text(openai_key_text, scrub_patterns)
 check("test_scrub_openai_api_key", "sk-1234567890" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
 
+# 48. scrub GitHub server-to-server token
+ghs_text = "token=ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+scrubbed = module.scrub_text(ghs_text, scrub_patterns)
+check("test_scrub_github_server_token", "ghs_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 49. scrub GitHub user-to-server token
+ghu_text = "token=ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+scrubbed = module.scrub_text(ghu_text, scrub_patterns)
+check("test_scrub_github_user_token", "ghu_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 50. scrub GitLab service account token
+glsa_text = "glsa-a1b2c3d4e5f6g7h8i9j0k1l2"
+scrubbed = module.scrub_text(glsa_text, scrub_patterns)
+check("test_scrub_gitlab_service_account_token", "glsa-" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 51. scrub DigitalOcean token
+dop_text = "token=dop_v1_" + "0" * 64
+scrubbed = module.scrub_text(dop_text, scrub_patterns)
+check("test_scrub_digitalocean_token", "dop_v1_" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 52. scrub 1Password reference
+op_ref_text = "credential=op://vault/item/field"
+scrubbed = module.scrub_text(op_ref_text, scrub_patterns)
+check("test_scrub_1password_reference", "op://" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
+# 53. scrub AWS session token key/value
+aws_session_text = "AWS_SESSION_TOKEN=IQoJb3JpZ2luX2VjEKf//////////wEaCXVzLXdlc3QtMiJIMEYCIQCl"
+scrubbed = module.scrub_text(aws_session_text, scrub_patterns)
+check("test_scrub_aws_session_token", "AWS_SESSION_TOKEN=" not in scrubbed and "[REDACTED]" in scrubbed, scrubbed)
+
 # ── gh/gcloud environment tests ──────────────────────────────────────
 
-# 48. command env passes through GH_ vars
+# 54. command env passes through GH_ vars
 import os as _os
 _orig_gh = _os.environ.get("GH_TOKEN")
 _os.environ["GH_TOKEN"] = "test-value-123"
@@ -5688,7 +5948,7 @@ if _orig_gh is None:
 else:
     _os.environ["GH_TOKEN"] = _orig_gh
 
-# 49. command env passes through GOOGLE_ vars
+# 55. command env passes through GOOGLE_ vars
 _orig_gac = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/run/secrets/sa.json"
 cmd_env = module.build_command_env()
@@ -5702,7 +5962,7 @@ if _orig_gac is None:
 else:
     _os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _orig_gac
 
-# 50. command env does NOT pass random vars
+# 56. command env does NOT pass random vars
 _os.environ["MY_SECRET"] = "leaked"
 cmd_env = module.build_command_env()
 check(
@@ -5712,7 +5972,7 @@ check(
 )
 _os.environ.pop("MY_SECRET", None)
 
-# 51. unsigned requests fail HMAC verification
+# 57. unsigned requests fail HMAC verification
 import time as _time
 unsigned = {
     "id": "unsigned-1",
@@ -5726,27 +5986,114 @@ check(
     str(unsigned),
 )
 
+# 58. internal status probe succeeds with valid canonical HMAC
+import tempfile as _tempfile
+from pathlib import Path as _Path
+
+with _tempfile.TemporaryDirectory(prefix="void-status-test.") as _tmp:
+    _resp_dir = _Path(_tmp) / "responses"
+    _resp_dir.mkdir(parents=True, exist_ok=True)
+    _req_path = _Path(_tmp) / "status-ok.json"
+    _key = bytes.fromhex("22" * 32)
+    _req = {
+        "id": "status-ok",
+        "argv": ["__status__"],
+        "timeout": 5,
+        "timestamp": int(_time.time()),
+    }
+    _req["hmac"] = module.compute_payload_hmac(_req, _key)
+    _req_path.write_text(json.dumps(_req), encoding="utf-8")
+    _orig_resp_dir = module.RESPONSES_DIR
+    module.RESPONSES_DIR = _resp_dir
+    try:
+        module.process_request(_req_path, cfg, logger, _key)
+    finally:
+        module.RESPONSES_DIR = _orig_resp_dir
+    _resp_path = _resp_dir / "status-ok.json"
+    if _resp_path.exists():
+        _resp = json.loads(_resp_path.read_text(encoding="utf-8"))
+        _ok = _resp.get("exit_code") == 0 and _resp.get("error") in {None, "none"}
+        _detail = str(_resp)
+    else:
+        _ok = False
+        _detail = "status response not written"
+check("test_status_probe_valid_hmac_succeeds", _ok, _detail)
+
+# 59. status probe fails with invalid HMAC
+with _tempfile.TemporaryDirectory(prefix="void-status-test.") as _tmp:
+    _resp_dir = _Path(_tmp) / "responses"
+    _resp_dir.mkdir(parents=True, exist_ok=True)
+    _req_path = _Path(_tmp) / "status-bad.json"
+    _key = bytes.fromhex("33" * 32)
+    _req = {
+        "id": "status-bad",
+        "argv": ["__status__"],
+        "timeout": 5,
+        "timestamp": int(_time.time()),
+        "hmac": "0" * 64,
+    }
+    _req_path.write_text(json.dumps(_req), encoding="utf-8")
+    _orig_resp_dir = module.RESPONSES_DIR
+    module.RESPONSES_DIR = _resp_dir
+    try:
+        module.process_request(_req_path, cfg, logger, _key)
+    finally:
+        module.RESPONSES_DIR = _orig_resp_dir
+    _resp_path = _resp_dir / "status-bad.json"
+    if _resp_path.exists():
+        _resp = json.loads(_resp_path.read_text(encoding="utf-8"))
+        _ok = _resp.get("error") == "auth" and _resp.get("exit_code") == 1
+        _detail = str(_resp)
+    else:
+        _ok = False
+        _detail = "status response not written"
+check("test_status_probe_invalid_hmac_fails", _ok, _detail)
+
 # ── Host proxy tests ─────────────────────────────────────────────────
 
-# 52. host proxy allows gh
+# 60. host proxy allows gh
 check(
     "test_host_proxy_allows_gh",
     "gh|gcloud|browse|session" in host_proxy,
     "gh not in allowed tools pattern",
 )
 
-# 53. host proxy rejects unknown tools
+# 61. host proxy rejects unknown tools
 check(
     "test_host_proxy_rejects_unknown_tools",
     "only 'gh', 'gcloud', 'browse', and 'session' are allowed" in host_proxy,
     "missing tool rejection message",
 )
 
-# 54. host proxy builds argv JSON for gh/gcloud
+# 62. host proxy builds argv JSON for gh/gcloud
 check(
     "test_host_proxy_builds_argv_json",
     "argv_json" in host_proxy and "json.dumps" in host_proxy,
     "missing argv JSON construction",
+)
+
+# 63. runtime.env is not world-readable
+setup_script = setup_script_path.read_text(encoding="utf-8")
+check(
+    "test_runtime_env_permissions_restrictive",
+    bool(__import__("re").search(r'^\s*(?:run\s+)?chmod 0640 "\$RUNTIME_ENV_FILE"\s*$', setup_script, __import__("re").MULTILINE)),
+    "runtime.env chmod must be 0640",
+)
+
+# 64. IPC directory perms are not world-writable
+check(
+    "test_ipc_directory_permissions_restrictive",
+    bool(__import__("re").search(r'^\s*(?:run\s+)?chmod 0770 "\$ipc_dir"\s*$', setup_script, __import__("re").MULTILINE))
+    and bool(__import__("re").search(r'^\s*(?:run\s+)?chmod 0770 "\$\{ipc_dir\}/requests" "\$\{ipc_dir\}/responses"\s*$', setup_script, __import__("re").MULTILINE)),
+    "ipc dir chmod must be 0770",
+)
+
+# 65. deploy stop uses PID files instead of pkill
+deploy_script = deploy_script_path.read_text(encoding="utf-8")
+check(
+    "test_deploy_stop_uses_pid_files_not_pkill",
+    "pkill -f" not in deploy_script and "$PID_DIR/$svc.pid" in deploy_script,
+    "deploy stop must manage processes via PID files only",
 )
 
 if failures:

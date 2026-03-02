@@ -3081,6 +3081,156 @@ print('OK')
     fi
 }
 
+test_activity_detects_interactive_prompt() {
+    info "Testing _extract_activity detects interactive TUI prompts..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import _extract_activity, _extract_question_details
+
+# AskUserQuestion single-select (exact kelvin repro)
+lines = [
+    '☐ Translate how?',
+    '',
+    'Which translation method?',
+    '',
+    '❯ 1. OpenAI API (Recommended)',
+    '     Use GPT to auto-translate missing/untranslated',
+    '  2. Detect only + open issue',
+    '  3. Google Cloud Translate',
+    '  4. Type something.',
+    '───────────────────────────────────────────────────',
+    '  5. Chat about this',
+    '  6. Skip interview and plan immediately',
+    '',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Single-select: expected Waiting, got: {result}'
+assert result != 'Idle at prompt', f'Single-select: must NOT be Idle at prompt'
+
+# Question details extraction
+details = _extract_question_details(lines)
+assert details is not None, 'details should not be None'
+assert details['header'] == 'Translate how?', f'header: {details[\"header\"]}'
+assert len(details['options']) >= 4, f'options: {len(details[\"options\"])}'
+assert details['selected_num'] == 1, f'selected: {details[\"selected_num\"]}'
+assert details['options'][0]['label'] == 'OpenAI API (Recommended)', f'opt1: {details[\"options\"][0]}'
+
+# AskUserQuestion multi-select
+lines = [
+    '☐ Which features?',
+    '  [x] Feature A',
+    '  [ ] Feature B',
+    '  [ ] Feature C',
+    'Space to toggle, Enter to confirm, a to select all, n to select none',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Multi-select: expected Waiting, got: {result}'
+
+# Searchable list
+lines = [
+    'Select a file:',
+    '❯ src/main.ts',
+    '  src/app.ts',
+    '  src/index.ts',
+    'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Searchable: expected Waiting, got: {result}'
+
+# Continue prompt
+lines = [
+    'Some output text here',
+    'Press Enter to continue',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Continue: expected Waiting, got: {result}'
+
+# Enter to confirm variant
+lines = [
+    '❯ 1. Yes, proceed',
+    '  2. No, cancel',
+    '↑/↓ to select · Enter to confirm · Esc to cancel',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Confirm variant: expected Waiting, got: {result}'
+
+# Normal idle prompt must still work
+lines = ['❯']
+result = _extract_activity(lines)
+assert result == 'Idle at prompt', f'Idle: expected Idle at prompt, got: {result}'
+
+# Prompt with text (auto-suggestion) still idle
+lines = ['❯ some auto text']
+result = _extract_activity(lines)
+assert result == 'Idle at prompt', f'Idle+text: expected Idle at prompt, got: {result}'
+
+# No interactive prompt = None details
+lines = ['❯']
+details = _extract_question_details(lines)
+assert details is None, f'Idle should have no details, got: {details}'
+
+# Rich progress includes options
+from bridge import format_progress_lines
+q_details = {
+    'header': 'Pick a color',
+    'options': [
+        {'num': 1, 'label': 'Red', 'selected': True},
+        {'num': 2, 'label': 'Blue', 'selected': False},
+        {'num': 3, 'label': 'Green', 'selected': False},
+    ],
+    'selected_num': 1,
+}
+lines = format_progress_lines(
+    name='kelvin', pending=False, backend='claude',
+    online=True, ready=True, mode='tmux',
+    activity='Waiting for input: Pick a color',
+    question_details=q_details,
+)
+joined = '\n'.join(lines)
+assert 'Red' in joined, f'Missing Red in: {joined}'
+assert 'Blue' in joined, f'Missing Blue in: {joined}'
+assert '1-3' in joined, f'Missing reply hint in: {joined}'
+assert 'skip' in joined.lower(), f'Missing skip hint in: {joined}'
+" 2>&1; then
+        success "_extract_activity detects interactive prompts + rich details"
+    else
+        fail "_extract_activity interactive prompt detection failed"
+    fi
+}
+
+test_watchdog_waiting_input_state() {
+    info "Testing watchdog detects WAITING_INPUT state and formats alert..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+import bridge, time
+
+# Test _format_watchdog_status with WAITING_INPUT
+bridge._worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
+result = bridge._format_watchdog_status('testbot')
+assert 'NEEDS INPUT' in result, f'Expected NEEDS INPUT, got: {result}'
+assert '2m' in result, f'Expected 2m duration, got: {result}'
+
+# Test that WAITING_INPUT is in bad_states for alert transitions
+bad = {'OFFLINE', 'DEAD', 'STUCK', 'POISONED', 'EXITED', 'WAITING_INPUT'}
+assert 'WAITING_INPUT' in bad
+
+# Test _team_attention_summary picks it up
+icon, label, rank = bridge._team_attention_summary('NEEDS INPUT 2m', 'Waiting for input: Pick color')
+assert icon == '\U0001f7e1', f'Expected yellow icon, got: {icon}'
+assert 'input' in label, f'Expected input label, got: {label}'
+
+# Clean up
+bridge._worker_states.pop('testbot', None)
+" 2>&1; then
+        success "Watchdog WAITING_INPUT state detection"
+    else
+        fail "Watchdog WAITING_INPUT state detection failed"
+    fi
+}
+
 test_progress_shows_activity() {
     info "Testing /progress output includes activity line..."
 
@@ -4877,7 +5027,7 @@ test_cli_hook_install_uninstall() {
         else
             fail "SessionStart hook not in settings.json"
         fi
-        if grep -q '"compact|resume"' "$temp_home/.claude/settings.json"; then
+        if grep -q '"compact|resume|init|start"' "$temp_home/.claude/settings.json"; then
             success "SessionStart hook has correct matcher"
         else
             fail "SessionStart hook matcher missing"
@@ -5517,6 +5667,131 @@ print('OK')
 
     tmux kill-session -t "$test_session" 2>/dev/null || true
     rm -f "/tmp/tui-sim-test-$$.py" "$result_file"
+}
+
+test_slow_paste_render_enter_delivered() {
+    info "Chaos test: slow paste render (400ms) — 1s delay must cover it..."
+
+    # Same TUI simulator as test_image_caption_enter but with 400ms render delay
+    # (exceeds old 150ms sleep, within new 1s sleep).
+    cat > /tmp/tui-sim-slowpaste-$$.py << 'TUITEST'
+import sys, os, select, time, tty, termios
+RESULT_FILE = sys.argv[1]
+EXPECTED = int(sys.argv[2])
+RENDER_DELAY_MS = int(sys.argv[3]) if len(sys.argv) > 3 else 400
+sys.stdout.buffer.write(b'\033[?2004h')
+sys.stdout.buffer.flush()
+old = termios.tcgetattr(sys.stdin)
+tty.setraw(sys.stdin)
+paste_count = 0
+enter_after_count = 0
+enter_during_render = 0
+buf = b''
+in_paste = False
+paste_data = b''
+rendering = False
+render_end_time = 0
+try:
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.01)
+        if readable:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                if not in_paste:
+                    idx = buf.find(b'\x1b[200~')
+                    if idx >= 0:
+                        in_paste = True
+                        paste_data = b''
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        if b'\r' in buf:
+                            now = time.time()
+                            if rendering and now < render_end_time:
+                                enter_during_render += 1
+                            elif paste_count > enter_after_count:
+                                enter_after_count += 1
+                                rendering = False
+                            buf = buf[buf.rfind(b'\r')+1:]
+                        break
+                else:
+                    idx = buf.find(b'\x1b[201~')
+                    if idx >= 0:
+                        paste_data += buf[:idx]
+                        in_paste = False
+                        paste_count += 1
+                        if RENDER_DELAY_MS > 0:
+                            rendering = True
+                            render_end_time = time.time() + (RENDER_DELAY_MS / 1000.0)
+                        buf = buf[idx + 6:]
+                        continue
+                    else:
+                        paste_data += buf
+                        buf = b''
+                        break
+        if rendering and time.time() >= render_end_time:
+            rendering = False
+        if enter_after_count >= EXPECTED:
+            break
+finally:
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+    sys.stdout.buffer.write(b'\033[?2004l')
+    sys.stdout.buffer.flush()
+with open(RESULT_FILE, 'w') as f:
+    f.write(f'PASTES:{paste_count}\n')
+    f.write(f'ENTERS:{enter_after_count}\n')
+    f.write(f'ENTER_DURING_RENDER:{enter_during_render}\n')
+TUITEST
+
+    local test_session="test-slowpaste-$$"
+    local result_file="/tmp/tui-slowpaste-result-$$.txt"
+    local msg_count=5
+    local render_delay_ms=400
+    rm -f "$result_file"
+
+    tmux new-session -d -s "$test_session" -x 200 -y 50 \
+        "python3 /tmp/tui-sim-slowpaste-$$.py $result_file $msg_count $render_delay_ms"
+    sleep 1
+
+    if ! tmux has-session -t "$test_session" 2>/dev/null; then
+        fail "Could not create TUI simulator session"
+        return
+    fi
+
+    local sent=0
+    for i in $(seq 1 $msg_count); do
+        if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import tmux_send_message
+result = tmux_send_message('$test_session', 'Slow paste test message $i')
+print('OK' if result else 'FAIL')
+" 2>/dev/null | grep -q "OK"; then
+            sent=$((sent + 1))
+        fi
+    done
+
+    sleep 8
+
+    if [ -f "$result_file" ]; then
+        local pastes enters renders
+        pastes=$(grep -oP 'PASTES:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        enters=$(grep -oP 'ENTERS:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        renders=$(grep -oP 'ENTER_DURING_RENDER:\K\d+' "$result_file" 2>/dev/null || echo 0)
+        if [ "$enters" -ge "$msg_count" ]; then
+            success "Slow paste: $enters/$msg_count Enter delivered ($renders during render)"
+        else
+            fail "Slow paste: $enters/$msg_count Enter OK, $renders during render — message lost!"
+        fi
+    else
+        fail "TUI simulator produced no result file"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+    rm -f "$result_file"
 }
 
 test_tmux_send_uses_flock() {
@@ -8471,6 +8746,8 @@ run_unit_tests() {
     run_test test_get_any_session_id
     run_test test_progress_continuity_for_noninteractive
     run_test test_extract_worker_activity
+    run_test test_activity_detects_interactive_prompt
+    run_test test_watchdog_waiting_input_state
     run_test test_progress_shows_activity
     run_test test_noninteractive_backpressure
     run_test test_get_workers_includes_codex
@@ -8511,6 +8788,7 @@ run_unit_tests() {
     run_test test_paste_buffer_uses_bracketed_paste
     run_test test_image_caption_enter_with_bracketed_paste
     run_test test_long_text_enter_with_bracketed_paste
+    run_test test_slow_paste_render_enter_delivered
     run_test test_tmux_send_uses_flock
     run_test test_send_example_uses_flock
     run_test test_concurrent_sends_no_interleave
