@@ -1020,6 +1020,11 @@ def telegram_api(method, data):
     return telegram.api(method, data)
 
 
+def send_telegram_message(chat_id: int, text: str):
+    """Send a plain Telegram message."""
+    return telegram.send_message(chat_id, text)
+
+
 def verify_hook_hmac(headers, body: bytes) -> bool:
     """Verify HMAC-SHA256 signature on internal endpoint requests.
 
@@ -2424,6 +2429,28 @@ def get_chat_id_file(name):
     return get_session_dir(name) / "chat_id"
 
 
+def get_manager_chat_id(name: str) -> Optional[int]:
+    """Resolve manager chat ID for worker notifications.
+
+    Priority:
+      1) ADMIN_CHAT_ID (if configured)
+      2) Session chat_id file
+    """
+    if admin_chat_id is not None:
+        return admin_chat_id
+
+    chat_id_file = get_chat_id_file(name)
+    if not chat_id_file.exists():
+        return None
+
+    try:
+        value = chat_id_file.read_text().strip()
+        return int(value) if value else None
+    except Exception as e:
+        print(f"Failed to read chat_id for {name}: {e}")
+        return None
+
+
 def get_claude_session_id(name):
     f = get_session_dir(name) / "claude_session_id"
     if f.exists():
@@ -3437,6 +3464,23 @@ def _read_tmux_activity(tmux_name: str) -> tuple:
         return _extract_activity(tail), _extract_context_pct(tail), tail
     except Exception:
         return "Unknown", None, None
+
+
+def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0) -> bool:
+    """Wait until restarted worker is actually back at the prompt."""
+    backend = get_backend(backend_name)
+    if not backend.is_interactive:
+        return True
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not tmux_exists(tmux_name):
+            return False
+        activity, _, _ = _read_tmux_activity(tmux_name)
+        if activity == "Idle at prompt":
+            return True
+        time.sleep(0.5)
+    return False
 
 
 # Interactive footer patterns (kept in sync with _extract_activity step 3b)
@@ -5594,13 +5638,40 @@ class Handler(BaseHTTPRequestHandler):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name))
                     same_cwd = pane_cwd and os.path.realpath(pane_cwd) == os.path.realpath(requested_cwd)
                     if not same_cwd:
+                        notify_chat_id = get_manager_chat_id(name)
+                        if notify_chat_id is not None:
+                            send_telegram_message(
+                                notify_chat_id,
+                                f"{name} is switching to {requested_cwd} and restarting now. "
+                                "Messages sent during this restart can be lost.",
+                            )
+
                         ok, err = worker_manager.restart(name, mode="relaunch")
                         if not ok:
+                            if notify_chat_id is not None:
+                                send_telegram_message(
+                                    notify_chat_id,
+                                    f"{name} could not restart in {requested_cwd}. "
+                                    f"Please run /restart {name} before sending new messages.",
+                                )
                             self.send_response(500)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
                             self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
                             return
+
+                        if notify_chat_id is not None:
+                            if _wait_for_restart_ready(tmux_name, backend_name):
+                                send_telegram_message(
+                                    notify_chat_id,
+                                    f"{name} is ready in {requested_cwd}. Safe to send messages now.",
+                                )
+                            else:
+                                send_telegram_message(
+                                    notify_chat_id,
+                                    f"{name} restarted in {requested_cwd} but is not ready yet. "
+                                    f"Hold messages for now. If this continues, run /restart {name}.",
+                                )
 
                         self.send_response(200)
                         self.send_header("Content-Type", "text/plain")

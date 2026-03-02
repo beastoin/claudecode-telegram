@@ -6230,6 +6230,238 @@ print('OK')
     fi
 }
 
+test_checkin_cwd_restart_notifies_manager() {
+    info "Testing /checkin?cwd restart sends manager start+ready notifications..."
+
+    if python3 -c "
+import io, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp_path = Path(tmpdir)
+bridge.NODE_DIR = tmp_path
+bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+bridge.SESSIONS_DIR = tmp_path / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
+bridge.admin_chat_id = None
+bridge._worker_cwds.clear()
+
+bridge._registry_add('alice', 'claude', 123)
+session_dir = bridge.ensure_session_dir('alice')
+chat_file = session_dir / 'chat_id'
+chat_file.write_text('777')
+chat_file.chmod(0o600)
+
+old_dir = tmp_path / 'old-project'
+new_dir = tmp_path / 'new-project'
+old_dir.mkdir()
+new_dir.mkdir()
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
+}
+bridge.tmux_exists = lambda _name: True
+bridge.export_hook_env = lambda *_args, **_kwargs: None
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
+bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
+
+sent = []
+def fake_send(chat_id, text):
+    sent.append((chat_id, text))
+    return {'ok': True}
+bridge.send_telegram_message = fake_send
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+body = handler.wfile.getvalue().decode()
+assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
+assert 'Restarting in' in body, body
+assert len(sent) == 2, f'expected 2 notifications, got {len(sent)}: {sent}'
+assert sent[0][0] == 777 and sent[1][0] == 777, sent
+first = sent[0][1].lower()
+second = sent[1][1].lower()
+assert 'alice' in first and 'restart' in first, first
+assert 'lost' in first or 'hold' in first, first
+assert 'alice' in second and 'ready' in second, second
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart sends manager notifications"
+    else
+        fail "/checkin?cwd restart notification test failed"
+    fi
+}
+
+test_checkin_cwd_restart_prefers_admin_chat_id() {
+    info "Testing /checkin?cwd restart prefers admin chat id over session chat id..."
+
+    if python3 -c "
+import io, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp_path = Path(tmpdir)
+bridge.NODE_DIR = tmp_path
+bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+bridge.SESSIONS_DIR = tmp_path / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
+bridge.admin_chat_id = 999
+bridge._worker_cwds.clear()
+
+bridge._registry_add('alice', 'claude', 123)
+session_dir = bridge.ensure_session_dir('alice')
+chat_file = session_dir / 'chat_id'
+chat_file.write_text('777')
+chat_file.chmod(0o600)
+
+old_dir = tmp_path / 'old-project'
+new_dir = tmp_path / 'new-project'
+old_dir.mkdir()
+new_dir.mkdir()
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
+}
+bridge.tmux_exists = lambda _name: True
+bridge.export_hook_env = lambda *_args, **_kwargs: None
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
+bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
+
+sent = []
+def fake_send(chat_id, text):
+    sent.append((chat_id, text))
+    return {'ok': True}
+bridge.send_telegram_message = fake_send
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+body = handler.wfile.getvalue().decode()
+assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
+assert len(sent) == 2, f'expected 2 notifications, got {len(sent)}: {sent}'
+assert sent[0][0] == 999 and sent[1][0] == 999, sent
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart uses admin chat id when set"
+    else
+        fail "/checkin?cwd admin chat id preference test failed"
+    fi
+}
+
+test_checkin_cwd_restart_failure_notifies_manager() {
+    info "Testing /checkin?cwd restart failure sends manager follow-up..."
+
+    if python3 -c "
+import io, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp_path = Path(tmpdir)
+bridge.NODE_DIR = tmp_path
+bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+bridge.SESSIONS_DIR = tmp_path / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
+bridge.admin_chat_id = None
+bridge._worker_cwds.clear()
+
+bridge._registry_add('alice', 'claude', 123)
+session_dir = bridge.ensure_session_dir('alice')
+chat_file = session_dir / 'chat_id'
+chat_file.write_text('777')
+chat_file.chmod(0o600)
+
+old_dir = tmp_path / 'old-project'
+new_dir = tmp_path / 'new-project'
+old_dir.mkdir()
+new_dir.mkdir()
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
+}
+bridge.tmux_exists = lambda _name: True
+bridge.export_hook_env = lambda *_args, **_kwargs: None
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager.restart = lambda name, mode='relaunch': (False, 'boom')
+
+sent = []
+def fake_send(chat_id, text):
+    sent.append((chat_id, text))
+    return {'ok': True}
+bridge.send_telegram_message = fake_send
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+body = handler.wfile.getvalue().decode()
+assert handler.status == 500, f'expected 500, got {handler.status}: {body}'
+assert 'Failed to restart' in body, body
+assert len(sent) == 2, f'expected 2 notifications, got {len(sent)}: {sent}'
+assert sent[0][0] == 777 and sent[1][0] == 777, sent
+assert 'restart' in sent[1][1].lower() and ('fail' in sent[1][1].lower() or 'could not' in sent[1][1].lower()), sent[1][1]
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart failure sends manager follow-up"
+    else
+        fail "/checkin?cwd restart failure notification test failed"
+    fi
+}
+
 test_restart_dead_worker() {
     info "Testing restart of dead worker (tmux gone, in registry)..."
 
@@ -8775,6 +9007,9 @@ run_unit_tests() {
     run_test test_get_registered_includes_registry
     run_test test_checkin_cwd_stores_in_memory
     run_test test_checkin_cwd_invalid_path
+    run_test test_checkin_cwd_restart_notifies_manager
+    run_test test_checkin_cwd_restart_prefers_admin_chat_id
+    run_test test_checkin_cwd_restart_failure_notifies_manager
     run_test test_restart_dead_worker
     run_test test_end_removes_from_registry
     run_test test_team_shows_exited
