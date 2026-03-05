@@ -37,13 +37,31 @@ class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-PORT = int(os.environ.get("PORT", "8080"))
+
+# Node-derived config: NODE_NAME drives defaults for PORT, TMUX_PREFIX, SESSIONS_DIR.
+# Explicit env vars always override. No NODE_NAME = original defaults.
+NODE_NAME = os.environ.get("NODE_NAME", "")
+_DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
+
+if NODE_NAME and not os.environ.get("PORT"):
+    PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
+else:
+    PORT = int(os.environ.get("PORT", "8270"))
+
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 # Internal endpoint auth: generated per-run, exported to workers via tmux set-environment
 HOOK_SECRET = os.environ.get("HOOK_SECRET", "") or secrets.token_hex(16)
-SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
-TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
+
+if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
+    SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
+else:
+    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
+
+if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
+    TMUX_PREFIX = f"claude-{NODE_NAME}-"
+else:
+    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 
@@ -69,6 +87,11 @@ MCP_INVENTORY_INCLUDE_ENV_KEYS = os.environ.get("MCP_INVENTORY_INCLUDE_ENV_KEYS"
 # User can set BRIDGE_URL=https://remote-bridge.example.com for distributed setups
 _bridge_url_env = os.environ.get("BRIDGE_URL", "")
 BRIDGE_URL = _bridge_url_env.rstrip("/") if _bridge_url_env else f"http://localhost:{PORT}"
+# BRIDGE_PUBLIC_URL: reachable URL for teleported workers (e.g., http://100.125.36.102:8271)
+# When set and BRIDGE_BIND is not explicitly set, auto-bind to 0.0.0.0
+BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
+if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
+    BRIDGE_BIND = "0.0.0.0"
 PERSISTENCE_NOTE = "They'll stay on your team."
 
 # Sandbox mode: run Claude Code in Docker container for isolation
@@ -325,6 +348,101 @@ class Backend(Protocol):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SSH Teleport helpers (remote worker support)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _remote_run(cmd: list, host: str = None, **kwargs) -> subprocess.CompletedProcess:
+    """Run a command, optionally on a remote host via SSH.
+
+    When host is None, runs locally. When set, builds a single shell command
+    string with proper quoting so the remote shell doesn't eat special chars
+    like # (which starts a comment in bash).
+    SSH ControlMaster keeps overhead to ~10ms per call.
+    """
+    if host:
+        # SSH concatenates args and runs them through the remote shell,
+        # so we must shell-quote each arg to preserve special characters.
+        remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
+        cmd = ["ssh", host, remote_cmd]
+    return subprocess.run(cmd, **kwargs)
+
+
+def _remote_copy(src: str, dst: str, host: str = None, direction: str = "push"):
+    """Copy a file, optionally to/from a remote host via scp.
+
+    direction='push': local src -> remote dst
+    direction='pull': remote src -> local dst
+    host=None: local copy via shutil.copy2
+    """
+    if not host:
+        shutil.copy2(src, dst)
+    elif direction == "push":
+        subprocess.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True)
+    else:  # pull
+        subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True)
+
+
+def parse_worker_target(target: str) -> tuple:
+    """Parse 'name@host' or 'name' into (name, host).
+
+    Returns (name, None) for local workers, (name, host) for remote.
+    """
+    if "@" in target:
+        name, host = target.rsplit("@", 1)
+        return name, host
+    return target, None
+
+
+def get_worker_host(name: str) -> Optional[str]:
+    """Get the SSH host for a worker from the persistent registry, or None if local."""
+    registry = _load_registry()
+    worker = registry.get("workers", {}).get(name, {})
+    return worker.get("host")
+
+
+def _project_slug(cwd: str) -> str:
+    """Convert absolute path to Claude Code's project directory slug.
+
+    Claude Code stores sessions at ~/.claude/projects/<slug>/<session-id>.jsonl
+    where slug is the CWD with / replaced by -.
+    """
+    return cwd.replace("/", "-")
+
+
+# Default rsync excludes for teleport directory sync
+TELEPORT_RSYNC_EXCLUDES = [
+    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    ".next", "build", "dist", "target", ".gradle", ".cache",
+    ".tox", ".mypy_cache", ".pytest_cache", "*.pyc",
+]
+
+
+def _registry_update_teleport(name: str, host: str, home_host: str, home_cwd: str):
+    """Update registry with teleport location info."""
+    with _watchdog_lock:
+        data = _load_registry()
+        worker = data.get("workers", {}).get(name, {})
+        worker["host"] = host
+        worker["home_host"] = home_host
+        worker["home_cwd"] = home_cwd
+        data.setdefault("workers", {})[name] = worker
+        _save_registry(data)
+
+
+def _registry_clear_teleport(name: str):
+    """Clear teleport location info from registry (after teleback)."""
+    with _watchdog_lock:
+        data = _load_registry()
+        worker = data.get("workers", {}).get(name, {})
+        worker.pop("host", None)
+        worker.pop("home_host", None)
+        worker.pop("home_cwd", None)
+        data.setdefault("workers", {})[name] = worker
+        _save_registry(data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared tmux helpers (used by multiple backends)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -366,20 +484,22 @@ def _release_flock(fd: int):
     os.close(fd)
 
 
-def tmux_exists(tmux_name: str) -> bool:
-    """Check if tmux session exists."""
-    return subprocess.run(
+def tmux_exists(tmux_name: str, host: str = None) -> bool:
+    """Check if tmux session exists (locally or on remote host via SSH)."""
+    return _remote_run(
         ["tmux", "has-session", "-t", tmux_name],
-        capture_output=True
+        host=host, capture_output=True
     ).returncode == 0
 
 
-def tmux_send_message(tmux_name: str, text: str) -> bool:
+def tmux_send_message(tmux_name: str, text: str, host: str = None) -> bool:
     """Send text + Enter to tmux session via paste-buffer (reliable for long messages).
 
     Uses tmux load-buffer/paste-buffer instead of send-keys -l to avoid
     character-by-character terminal injection which causes input batching
     on long messages or rapid sends.
+
+    When host is set, uses SSH and pipes text via stdin (no shared filesystem needed).
 
     Two-layer locking:
     1. Python threading.Lock — serializes sends within this process
@@ -390,48 +510,56 @@ def tmux_send_message(tmux_name: str, text: str) -> bool:
     with lock:
         flock_fd = _acquire_flock(tmux_name)
         try:
-            # Write message to temp file for tmux load-buffer
-            fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
-            try:
-                os.write(fd, text.encode())
-                os.close(fd)
-                buf_name = f"msg-{uuid.uuid4().hex[:8]}"
-                # Load entire message into a named tmux buffer
-                r = subprocess.run(
-                    ["tmux", "load-buffer", "-b", buf_name, tmpfile],
-                    capture_output=True,
+            buf_name = f"msg-{uuid.uuid4().hex[:8]}"
+
+            if host:
+                # Remote: pipe text via stdin to avoid shared filesystem
+                r = _remote_run(
+                    ["tmux", "load-buffer", "-b", buf_name, "-"],
+                    host=host, input=text.encode(), capture_output=True,
                 )
-                if r.returncode != 0:
-                    return False
-                # Paste buffer into the target pane with proper bracketed paste
-                # -p: send bracketed paste control codes (\e[200~ ... \e[201~)
-                #     so TUI apps (Claude Code) know exactly where paste ends.
-                #     Without -p, Enter sent after paste can be swallowed into
-                #     the TUI's time-based paste detection window.
-                # -r: preserve LF as LF (don't convert to CR). Keeps multi-line
-                #     text as multi-line input, not line-by-line Enter presses.
-                # -d: delete buffer after pasting
-                r = subprocess.run(
-                    ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
-                    capture_output=True,
-                )
-                if r.returncode != 0:
-                    return False
-                # Delay after paste: TUI needs time to process paste-end marker
-                # and re-render. At low context (1%), Claude Code TUI can take
-                # 300-1000ms to render pasted text. Enter sent before render
-                # completes hits an empty prompt and the message is silently lost.
-                # 50ms → 150ms → 1s: increased after observing silent message
-                # loss on prod sessions with heavy context load.
-                time.sleep(1.0)
-                # Send Enter to submit the pasted text
-                r = subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-                return r.returncode == 0
-            finally:
+            else:
+                # Local: write to temp file for tmux load-buffer
+                fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
                 try:
-                    os.unlink(tmpfile)
-                except OSError:
-                    pass
+                    os.write(fd, text.encode())
+                    os.close(fd)
+                    r = subprocess.run(
+                        ["tmux", "load-buffer", "-b", buf_name, tmpfile],
+                        capture_output=True,
+                    )
+                finally:
+                    try:
+                        os.unlink(tmpfile)
+                    except OSError:
+                        pass
+
+            if r.returncode != 0:
+                return False
+            # Paste buffer into the target pane with proper bracketed paste
+            # -p: send bracketed paste control codes (\e[200~ ... \e[201~)
+            #     so TUI apps (Claude Code) know exactly where paste ends.
+            #     Without -p, Enter sent after paste can be swallowed into
+            #     the TUI's time-based paste detection window.
+            # -r: preserve LF as LF (don't convert to CR). Keeps multi-line
+            #     text as multi-line input, not line-by-line Enter presses.
+            # -d: delete buffer after pasting
+            r = _remote_run(
+                ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
+                host=host, capture_output=True,
+            )
+            if r.returncode != 0:
+                return False
+            # Delay after paste: TUI needs time to process paste-end marker
+            # and re-render. At low context (1%), Claude Code TUI can take
+            # 300-1000ms to render pasted text. Enter sent before render
+            # completes hits an empty prompt and the message is silently lost.
+            # 50ms → 150ms → 1s: increased after observing silent message
+            # loss on prod sessions with heavy context load.
+            time.sleep(1.0)
+            # Send Enter to submit the pasted text
+            r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host)
+            return r.returncode == 0
         finally:
             _release_flock(flock_fd)
 
@@ -497,12 +625,12 @@ def _tmux_pane_pids() -> dict:
     return pane_map
 
 
-def _get_claude_pid(pane_pid: str) -> Optional[str]:
+def _get_claude_pid(pane_pid: str, host: str = None) -> Optional[str]:
     """Return Claude PID for a pane, or None if not found."""
     try:
-        result = subprocess.run(
+        result = _remote_run(
             ["pgrep", "-P", str(pane_pid), "-f", "claude"],
-            capture_output=True, text=True, timeout=5
+            host=host, capture_output=True, text=True, timeout=5
         )
     except Exception:
         return None
@@ -516,14 +644,14 @@ def _get_claude_pid(pane_pid: str) -> Optional[str]:
     return output[0].strip()
 
 
-def _child_count(pid: str) -> int:
+def _child_count(pid: str, host: str = None) -> int:
     """Return child process count for pid."""
     if not pid:
         return 0
     try:
-        result = subprocess.run(
+        result = _remote_run(
             ["pgrep", "-P", str(pid)],
-            capture_output=True, text=True, timeout=5
+            host=host, capture_output=True, text=True, timeout=5
         )
     except Exception:
         return 0
@@ -583,11 +711,14 @@ class ClaudeBackend:
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
-        if not tmux_exists(tmux_name):
+        host = get_worker_host(worker_name)
+        if not tmux_exists(tmux_name, host=host):
             return False
-        return tmux_send_message(tmux_name, text)
+        return tmux_send_message(tmux_name, text, host=host)
 
     def is_online(self, tmux_name: str) -> bool:
+        # Note: is_online doesn't have worker_name, so can't look up host.
+        # For remote workers, the watchdog uses different detection.
         if not tmux_exists(tmux_name):
             return False
         return is_process_running(tmux_name, "claude")
@@ -723,6 +854,9 @@ state = {
     "active": None,  # Currently active session name
     "startup_notified": False,  # Whether we've sent the startup message
 }
+
+# Consecutive @mention tracking (auto-focus after 2 in a row to same worker)
+_last_mention = {"target": None, "count": 0}
 
 # Watchdog state
 _worker_states = {}  # name -> (state, reason, since)
@@ -871,7 +1005,7 @@ def _save_registry(data: dict):
         print(f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: int = None):
+def _registry_add(name: str, backend: str, chat_id: int = None, host: str = None):
     """Add a worker to the persistent registry."""
     with _watchdog_lock:
         data = _load_registry()
@@ -882,6 +1016,8 @@ def _registry_add(name: str, backend: str, chat_id: int = None):
             "chat_id": chat_id,
             "hire_time": int(time.time()),
         }
+        if host:
+            entry["host"] = host
         data["workers"][name] = entry
         _save_registry(data)
 
@@ -2680,6 +2816,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     with _watchdog_lock:
         last = _last_alert_ts.get(name)
     if last and (now - last) < ALERT_COOLDOWN:
+        print(f"[watchdog] Alert suppressed for {name} ({state}): cooldown {now - last:.0f}s < {ALERT_COOLDOWN}s")
         return
 
     # Human-friendly alert messages for manager
@@ -2687,7 +2824,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         with _watchdog_lock:
             details = _waiting_input_details.get(name)
         header = details.get("header", "") if details else ""
-        title = f"{name} is waiting for your input"
+        title = f"🟡 {name} needs your reply"
         if header:
             title += f": {header}"
         parts = [title]
@@ -2696,28 +2833,32 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
                 marker = "\u2794 " if o.get("selected") else "  "
                 parts.append(f"{marker}{o['num']}. {o['label']}")
             max_num = max(o["num"] for o in details["options"])
-            parts.append(f"\nReply 1-{max_num} to pick, \"skip\" to cancel")
+            parts.append(f"\nReply 1-{max_num} to choose, or \"skip\" to cancel.")
         text = "\n".join(parts)
     elif state == "STUCK":
         # Parse age from reason like "age=909s cpu=6.3 streak=3/3"
         age_match = re.search(r"age=(\d+)s", reason)
         age_min = int(age_match.group(1)) // 60 if age_match else 0
         age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
-        text = f"{name} appears frozen — no activity for {age_str}.\nTry: /restart --clean {name}"
+        text = f"🔴 {name} has made no progress for {age_str}.\n/restart --clean {name} (starts fresh)"
     elif state == "POISONED":
-        text = f"{name} hit an error and may be stuck in a bad state.\nTry: /restart --clean {name}"
+        text = f"🔴 {name} is stuck in an error loop.\n/restart --clean {name} (starts fresh)"
     elif state == "DEAD":
-        text = f"{name}'s session crashed — process is gone.\nTry: /restart --clean {name}"
+        text = f"🔴 {name} stopped unexpectedly.\n/restart --clean {name} (starts fresh)"
     elif state == "EXITED":
-        text = f"{name}'s session ended unexpectedly.\nTry: /restart {name}"
+        text = f"🟡 {name}'s session ended.\n/restart {name}"
     elif state == "OFFLINE":
-        text = f"{name} is offline — session not found.\nTry: /hire {name}"
+        text = f"🔴 {name} is not running.\n/hire {name}"
     else:
         text = f"{name}: {state} ({reason}). Check /team"
     try:
-        telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
-        with _watchdog_lock:
-            _last_alert_ts[name] = now
+        result = telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
+        if result and result.get("ok"):
+            print(f"[watchdog] Alert sent for {name} ({state}): {text[:80]}")
+            with _watchdog_lock:
+                _last_alert_ts[name] = now
+        else:
+            print(f"[watchdog] Alert FAILED for {name} ({state}): {result}")
     except Exception as e:
         print(f"Watchdog alert error: {e}")
 
@@ -2738,7 +2879,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if restart_ts and time.time() - restart_ts < 30:
         return
 
-    text = f"{name} is back online and working."
+    text = f"✅ {name} is back to normal."
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
     except Exception as e:
@@ -2769,6 +2910,7 @@ def _handle_watchdog_transition(
     if state in bad_states:
         if state_changed:
             if eligible_for_alert():
+                print(f"[watchdog] State change {name}: {prev_state} -> {state} ({reason}), sending alert")
                 _send_watchdog_alert(name, state, reason)
         elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert():
             _send_watchdog_alert(name, state, reason)
@@ -3102,36 +3244,36 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
     else:
         entry = state_snapshot.get(name)
     if not entry:
-        return "working" if pending_lookup(name) else "available"
+        return "Working" if pending_lookup(name) else "Ready"
 
     state, _reason, since = entry
     now = time.time()
 
     if state == "READY":
-        return "ready"
+        return "Ready"
     if state == "BUSY_TOOL":
-        return "working (tools)"
+        return "Working"
     if state == "BUSY_THINKING":
-        return "working (thinking)"
+        return "Thinking"
     if state == "WAITING":
-        return "working (waiting)"
+        return "Working"
     if state == "WAITING_INPUT":
         minutes = max(0, int((now - since) / 60)) if since else 0
-        return f"NEEDS INPUT {minutes}m"
+        return f"Needs reply ({minutes}m)"
     if state == "STUCK":
         minutes = max(0, int((now - since) / 60)) if since else 0
-        return f"STUCK {minutes}m"
+        return f"No progress ({minutes}m)"
     if state == "POISONED":
         minutes = max(0, int((now - since) / 60)) if since else 0
-        return f"POISONED {minutes}m"
+        return f"Error loop ({minutes}m)"
     if state == "DEAD":
-        return "DEAD"
+        return "Not responding"
     if state == "OFFLINE":
-        return "offline"
+        return "Offline"
     if state == "EXITED":
-        return "exited"
+        return "Session ended"
     if state == "UNTRACKED_BUSY":
-        return "working (untracked)"
+        return "Working"
     return state.lower()
 
 
@@ -3144,18 +3286,18 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
         return "🔴", "rate limit", 0
     if "error" in act or "traceback" in act or "not running" in act or "failed" in act:
         return "🔴", "error", 0
-    if "needs input" in status:
-        return "🟡", "needs input", 1
-    if "stuck" in status:
+    if "needs input" in status or "needs reply" in status:
+        return "🟡", "needs reply", 1
+    if "stuck" in status or "no progress" in status:
         return "🔴", "stuck", 0
-    if "poisoned" in status:
-        return "🔴", "poisoned", 0
-    if "dead" in status:
-        return "🔴", "dead", 0
+    if "poisoned" in status or "error loop" in status:
+        return "🔴", "error loop", 0
+    if "dead" in status or "not responding" in status:
+        return "🔴", "stopped", 0
     if "offline" in status:
         return "🔴", "offline", 0
-    if "exited" in status:
-        return "🔴", "exited", 0
+    if "exited" in status or "session ended" in status:
+        return "🔴", "session ended", 0
 
     waiting_signals = (
         "waiting for",
@@ -3166,9 +3308,9 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
         "in plan mode",
     )
     if "working (waiting)" in status or any(sig in act for sig in waiting_signals):
-        return "🟡", "needs input", 1
+        return "🟡", "needs reply", 1
 
-    return "🟢", "no blocker", 2
+    return "🟢", "ok", 2
 
 
 def format_team_lines(
@@ -3204,16 +3346,17 @@ def format_team_lines(
         raw_activity = (live.get("activity") or "").strip()
         if not raw_activity or raw_activity == "Unknown":
             raw_activity = watchdog_status
-        activity = raw_activity
+        activity = _normalize_activity(raw_activity)
         if len(activity) > 42:
             activity = activity[:39].rstrip() + "..."
 
-        context_pct = (live.get("context_pct") or "--").strip()
+        context_pct = (live.get("context_pct") or "").strip()
         icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
         counts[icon] += 1
 
         name_cell = f"{name} 🎯" if name == active else name
-        row = f"{name_cell} | {icon} | {activity} | {blocker} | {context_pct}"
+        ctx_part = f" | ctx {context_pct}" if context_pct and context_pct != "--" else ""
+        row = f"{icon} {name_cell} — {activity}{ctx_part}"
         if show_backend:
             row += f" | backend={backend}"
 
@@ -3226,13 +3369,41 @@ def format_team_lines(
     lines = []
     focused = active or "(none)"
     lines.append(
-        f"Team ({len(registered)}) · focused: {focused} · "
-        f"🔴{counts['🔴']} 🟡{counts['🟡']} 🟢{counts['🟢']}"
+        f"Team: {len(registered)} agents · focused: {focused} | "
+        f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked"
     )
     if attention_rows:
-        lines.append("Needs attention: " + ", ".join(attention_rows))
+        lines.append("Needs your reply: " + ", ".join(attention_rows))
     lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
     return lines
+
+
+def _normalize_activity(raw: str) -> str:
+    """Normalize Claude Code spinner verbs to human-friendly text.
+
+    Claude Code TUI shows random verbs like "Ionizing", "Hullaballooing",
+    "Schlepping" as thinking spinner text. These are meaningless to managers.
+    Normalize single-word spinner verbs to "Thinking (duration)".
+
+    Multi-word activities like "Running Bash", "Compacting conversation",
+    "In plan mode", etc. pass through unchanged.
+    """
+    if not raw:
+        return raw
+    # Pattern: single capitalized gerund word optionally followed by (duration)
+    m = re.match(r'^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$', raw)
+    if m:
+        verb = m.group(1)
+        dur = m.group(2)
+        # Known multi-word prefixes that happen to start with a gerund are handled
+        # by the regex requiring the FULL string to be one word + optional duration.
+        # "Running Bash" won't match because "Bash" follows after a space.
+        # "Compacting conversation (5m)" won't match because "conversation" follows.
+        # Only single-word verbs like "Ionizing", "Whirring" match.
+        if dur:
+            return f"Thinking ({dur})"
+        return "Thinking"
+    return raw
 
 
 def _extract_activity(lines: list[str]) -> str:
@@ -3332,6 +3503,24 @@ def _extract_activity(lines: list[str]) -> str:
                             return f"Waiting for input: {q}"
                 return "Waiting for user input"
 
+    # 3c. Content-based interactive detection — prompts without standard footers.
+    #      ExitPlanMode, EnterPlanMode, and tool permission prompts may not render
+    #      any _INTERACTIVE_FOOTERS pattern (e.g. plan approval only shows "ctrl-g to edit"
+    #      when an editor is configured, and nothing at all otherwise).
+    #      Must check BEFORE the ❯ prompt check to avoid misclassifying ❯ selection cursor.
+    #      Uses module-level _INTERACTIVE_CONTENT list.
+    for raw in stripped:
+        for pattern in _INTERACTIVE_CONTENT:
+            if pattern in raw:
+                # Check if this is a plan approval specifically
+                if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
+                    return "Waiting for plan approval"
+                if "plan mode" in raw.lower():
+                    return "Waiting for plan mode decision"
+                if raw.startswith("Allow "):
+                    return "Waiting for tool permission"
+                return "Waiting for user input"
+
     # 4. Prompt + mode bars — all bottom-bar elements are informational, not blocking
     #    ⏵⏵ bypass permissions on · 1 bash    → mode bar (bypass ON, 1 bash auto-approved)
     #    ⏵⏵ bypass permissions on (shift+tab)  → mode bar (bypass ON, no recent actions)
@@ -3355,9 +3544,9 @@ def _extract_activity(lines: list[str]) -> str:
         if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
             return "In plan mode"
 
-    # Prompt present = idle at prompt (text after ❯ is auto-suggestion hint)
+    # Prompt present = ready (text after ❯ is auto-suggestion hint)
     if last_prompt_idx is not None:
-        return "Idle at prompt"
+        return "Ready"
 
     # 5. Editor mode — worker waiting for external editor
     for raw in reversed(stripped):
@@ -3373,7 +3562,7 @@ def _extract_activity(lines: list[str]) -> str:
 
     # 7. Confirmation prompts (plan approval, team lead, etc.)
     for raw in reversed(stripped):
-        if "Do you want to proceed?" in raw:
+        if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
             return "Waiting for plan approval"
         if "Exit plan mode?" in raw or "Entering plan mode" in raw:
             return "In plan mode"
@@ -3495,6 +3684,30 @@ _INTERACTIVE_FOOTERS = [
     "Enter to continue",    # Continue/proceed prompt
     "Enter to try again",   # Retry variant
     "Enter to confirm",     # Selection confirm variant
+    "ctrl-g to edit",       # ExitPlanMode plan approval (editor configured)
+    "Auto-approving in",    # ExitPlanMode auto-approve countdown
+    "Press any key to intervene",  # ExitPlanMode auto-approve variant
+]
+
+# Content patterns that indicate an interactive prompt even without a matching footer.
+# These are checked BEFORE the ❯ idle-prompt detection (step 3c) to avoid misclassifying
+# the ❯ selection cursor as the text input prompt.
+_INTERACTIVE_CONTENT = [
+    # ExitPlanMode "Ready to code?" prompt
+    "Would you like to proceed?",
+    "written up a plan and is ready to execute",
+    # EnterPlanMode prompt
+    "wants to enter plan mode",
+    "No code changes will be made until you approve",
+    # Tool permission prompts
+    "Allow Bash",
+    "Allow Read",
+    "Allow Write",
+    "Allow Edit",
+    "Allow Glob",
+    "Allow Grep",
+    "Allow Agent",
+    "Allow Notebook",
 ]
 
 
@@ -3514,16 +3727,24 @@ def _extract_question_details(lines: list[str]) -> Optional[dict]:
     if not stripped:
         return None
 
-    # Check for interactive footer
-    has_footer = False
+    # Check for interactive footer or content patterns
+    has_interactive = False
     for raw in reversed(stripped):
         for footer in _INTERACTIVE_FOOTERS:
             if footer in raw:
-                has_footer = True
+                has_interactive = True
                 break
-        if has_footer:
+        if has_interactive:
             break
-    if not has_footer:
+    if not has_interactive:
+        for raw in stripped:
+            for pattern in _INTERACTIVE_CONTENT:
+                if pattern in raw:
+                    has_interactive = True
+                    break
+            if has_interactive:
+                break
+    if not has_interactive:
         return None
 
     # Extract header (☐ line)
@@ -3855,8 +4076,8 @@ class WorkerManager:
                     "name": name,
                     "protocol": "tmux",
                     "address": tmux_name,
-                    "send_example": f"(flock 200; echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 0.3 && tmux send-keys -t {tmux_name} Enter) 200>{tmux_send_lock_path(tmux_name)}",
-                    "note": "Uses paste-buffer -p (bracketed paste) + flock for reliable delivery. The -p flag ensures TUI apps receive proper paste delimiters so Enter is not swallowed. Always prefix your name."
+                    "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 1 && tmux send-keys -t {tmux_name} Enter",
+                    "note": "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
                 })
         return workers
 
@@ -4646,7 +4867,7 @@ class CommandRouter:
                     return
 
                 if not state["active"]:
-                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
                 local_path = download_telegram_file(file_id, state["active"])
@@ -4656,7 +4877,7 @@ class CommandRouter:
                         gif_text = f"{text}\n\n{gif_text}"
                     self.route_to_active(gif_text, chat_id, msg_id)
                 else:
-                    self.reply(chat_id, "Needs decision - Could not download GIF. Try again.")
+                    self.reply(chat_id, "Could not download GIF. Try again.")
                 return
 
         if (photo or doc_is_image) and chat_id:
@@ -4673,7 +4894,7 @@ class CommandRouter:
                     return
 
                 if not state["active"]:
-                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
                 local_path = download_telegram_file(file_id, state["active"])
@@ -4683,7 +4904,7 @@ class CommandRouter:
                         image_text = f"{text}\n\n{image_text}"
                     self.route_to_active(image_text, chat_id, msg_id)
                 else:
-                    self.reply(chat_id, "Needs decision - Could not download image. Try again or send as file.")
+                    self.reply(chat_id, "Could not download image. Try again or send as file.")
                 return
 
         if document and not doc_is_image and chat_id:
@@ -4695,7 +4916,7 @@ class CommandRouter:
                     return
 
                 if not state["active"]:
-                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
                 local_path = download_telegram_file(file_id, state["active"])
@@ -4709,7 +4930,7 @@ class CommandRouter:
                         file_text = f"{text}\n\n{file_text}"
                     self.route_to_active(file_text, chat_id, msg_id)
                 else:
-                    self.reply(chat_id, "Needs decision - Could not download file. Try again.")
+                    self.reply(chat_id, "Could not download file. Try again.")
                 return
 
         # Handle audio, voice, video, video_note, sticker — all have file_id
@@ -4723,7 +4944,7 @@ class CommandRouter:
                     return
 
                 if not state["active"]:
-                    self.reply(chat_id, "Needs decision - No focused worker. Use /focus <name> first.")
+                    self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
                 local_path = download_telegram_file(file_id, state["active"])
@@ -4752,7 +4973,7 @@ class CommandRouter:
                     self.route_to_active(media_text, chat_id, msg_id)
                 else:
                     media_type = "audio" if audio else "voice" if voice else "video" if video else "media"
-                    self.reply(chat_id, f"Needs decision - Could not download {media_type}. Try again.")
+                    self.reply(chat_id, f"Could not download {media_type}. Try again.")
                 return
 
         if not text or not chat_id:
@@ -4775,11 +4996,15 @@ class CommandRouter:
 
         if text.startswith("/"):
             if self.handle_command(text, chat_id, msg_id):
+                _last_mention["target"] = None
+                _last_mention["count"] = 0
                 return
 
         if text.lower().startswith("@all "):
             message = text[5:]
             self.route_to_all(message, chat_id, msg_id)
+            _last_mention["target"] = None
+            _last_mention["count"] = 0
             return
 
         # Extract reply context (quote-reply = context only, never routing)
@@ -4797,9 +5022,28 @@ class CommandRouter:
                 message = self.format_reply_context(message, reply_context)
             for name in targets:
                 self.route_message(name, message, chat_id, msg_id, one_off=True)
+
+            # Auto-focus: if same single worker mentioned 2+ consecutive times, switch focus
+            if len(targets) == 1:
+                target = targets[0]
+                if _last_mention["target"] == target:
+                    _last_mention["count"] += 1
+                else:
+                    _last_mention["target"] = target
+                    _last_mention["count"] = 1
+                if _last_mention["count"] >= 2 and state["active"] != target:
+                    state["active"] = target
+                    save_last_active(target)
+                    self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
+            else:
+                # Multi-mention resets streak
+                _last_mention["target"] = None
+                _last_mention["count"] = 0
             return
 
-        # No @mentions → route to focused worker
+        # No @mentions → route to focused worker (resets mention streak)
+        _last_mention["target"] = None
+        _last_mention["count"] = 0
         routed_text = text
         if reply_context:
             routed_text = self.format_reply_context(text, reply_context)
@@ -4877,6 +5121,10 @@ class CommandRouter:
             return self.cmd_restart(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
+        elif cmd == "/teleport":
+            return self.cmd_teleport(arg, chat_id)
+        elif cmd == "/teleback":
+            return self.cmd_teleback(arg, chat_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
@@ -4977,7 +5225,7 @@ class CommandRouter:
 
     def cmd_end(self, name, chat_id):
         if not name:
-            self.reply(chat_id, "Offboarding is permanent. Usage: /end <name>", outcome="Needs decision")
+            self.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
             return True
 
         name = name.lower().strip()
@@ -4986,7 +5234,7 @@ class CommandRouter:
             self.reply(chat_id, f"{name.capitalize()} removed from your team.")
             update_bot_commands()
         else:
-            self.reply(chat_id, f"Could not offboard \"{name}\". {err}", outcome="Needs decision")
+            self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_progress(self, chat_id):
@@ -5027,7 +5275,7 @@ class CommandRouter:
             claude_running = is_claude_running(tmux_name)
             ready = claude_running
             if not claude_running:
-                needs_attention = "worker app is not running. Use /restart."
+                needs_attention = "Not running. Use /restart."
 
         resume_line = None
         continuity_line = None
@@ -5036,14 +5284,14 @@ class CommandRouter:
             # Non-interactive: show Continuity (thread) + In-flight
             session_id, source = get_any_session_id(name)
             if session_id:
-                continuity_line = f"Continuity: on ({source} thread {session_id[:8]}...)"
+                continuity_line = "Continuity: on"
             else:
                 continuity_line = "Continuity: off (next message starts new thread)"
         else:
             # Interactive: show Resume
             resume_id = get_claude_session_id(name)
             if resume_id:
-                resume_line = f"Resume: available (session {resume_id[:8]}...)"
+                resume_line = "Resume: available"
             else:
                 resume_line = "Resume: not available"
 
@@ -5172,9 +5420,9 @@ class CommandRouter:
         if not backend.is_interactive and worker_alive:
             session_id, source = get_any_session_id(name)
             if session_id:
-                self.reply(chat_id, f"Resume is automatic for {backend_name}. Thread {session_id[:8]}... is active — next message continues it.")
+                self.reply(chat_id, f"{name.capitalize()} is still active. Next message continues where you left off.")
             else:
-                self.reply(chat_id, f"No thread found for {name.capitalize()}. Next message starts a new {backend_name} thread.")
+                self.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
             return True
 
         # Interactive backends: restart with --resume
@@ -5187,7 +5435,7 @@ class CommandRouter:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
                 _recent_restarts[name] = time.time()
-                self.reply(chat_id, f"No resume info found. Restarting {name.capitalize()} fresh...")
+                self.reply(chat_id, f"Restarting {name.capitalize()} fresh...")
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
                 self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
@@ -5278,6 +5526,525 @@ class CommandRouter:
             self._restart_all_abort.set()
         self.reply(chat_id, "Stopping restart-all sequence...")
         return True
+
+    # ── Teleport commands ──────────────────────────────────────────────────
+
+    def cmd_teleport(self, arg, chat_id):
+        """Teleport a worker to a remote machine."""
+        if not arg:
+            self.reply(chat_id, "Usage: /teleport <worker> <host>[:/path] [--full]")
+            return True
+
+        parts = arg.split()
+        worker_name = parts[0].lower()
+        target_spec = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        if not target_spec:
+            self.reply(chat_id, "Usage: /teleport <worker> <host>[:/path] [--full]")
+            return True
+
+        full_sync = "--full" in target_spec
+        target_spec = target_spec.replace("--full", "").strip()
+
+        # Parse target_host:target_cwd
+        if ":" in target_spec and not target_spec.startswith("/"):
+            target_host, target_cwd = target_spec.split(":", 1)
+        else:
+            target_host = target_spec
+            target_cwd = ""
+
+        # 1. Worker exists?
+        registry = _load_registry()
+        if worker_name not in registry.get("workers", {}):
+            self.reply(chat_id, f"Worker '{worker_name}' not found in registry.")
+            return True
+
+        # 2. Worker not actively busy? (EXITED/OFFLINE/UNKNOWN are all fine)
+        with _watchdog_lock:
+            ws = _worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        current_state = ws[0]
+        if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
+            self.reply(chat_id,
+                f"{worker_name} is busy. Must be idle to teleport.\n"
+                f"Wait for it to finish or /pause {worker_name} first.")
+            return True
+
+        # 3. No teleport in progress?
+        teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+        if teleport_file.exists():
+            self.reply(chat_id, f"{worker_name} has a teleport in progress.")
+            return True
+
+        # 4. Target reachable?
+        r = _remote_run(["echo", "ok"], host=target_host,
+                        capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            self.reply(chat_id, f"Cannot reach {target_host} via SSH.")
+            return True
+
+        # 5. Claude Code on target?
+        r = _remote_run(["which", "claude"], host=target_host,
+                        capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            self.reply(chat_id, f"claude not found on {target_host}. Install it first.")
+            return True
+
+        # 6. tmux on target?
+        r = _remote_run(["which", "tmux"], host=target_host,
+                        capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            self.reply(chat_id, f"tmux not found on {target_host}. Install it first.")
+            return True
+
+        # 7. Need a reachable URL for remote workers
+        target_bridge_url = BRIDGE_PUBLIC_URL or BRIDGE_URL
+        if "localhost" in target_bridge_url or "127.0.0.1" in target_bridge_url:
+            self.reply(chat_id,
+                "Cannot teleport: no reachable bridge URL. "
+                "Set BRIDGE_PUBLIC_URL to this machine's network IP "
+                "(e.g., BRIDGE_PUBLIC_URL=http://100.125.36.102:8271).")
+            return True
+
+        # 8. Bridge must be reachable from target
+        r = _remote_run(["curl", "-sf", "--connect-timeout", "5",
+                         f"{target_bridge_url}/health"],
+                        host=target_host, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            self.reply(chat_id,
+                f"Target {target_host} cannot reach {target_bridge_url}. "
+                f"Ensure BRIDGE_BIND=0.0.0.0 and network connectivity.")
+            return True
+
+        # Note: Claude auth on target is not checked here. If the worker
+        # shows "Not logged in", run: ssh <host> claude login
+
+        # All checks pass — dispatch async teleport
+        self.reply(chat_id, f"Teleporting {worker_name} to {target_host}...")
+        threading.Thread(
+            target=self._do_teleport,
+            args=(worker_name, target_host, target_cwd, full_sync, chat_id),
+            daemon=True
+        ).start()
+        return True
+
+    def cmd_teleback(self, arg, chat_id):
+        """Bring a teleported worker back to its previous machine."""
+        parts = arg.split()
+        worker_name = parts[0].lower() if parts else ""
+        full_sync = "--full" in parts
+
+        if not worker_name:
+            self.reply(chat_id, "Usage: /teleback <worker> [--full]")
+            return True
+
+        registry = _load_registry()
+        worker = registry.get("workers", {}).get(worker_name)
+        if not worker:
+            self.reply(chat_id, f"Worker '{worker_name}' not in registry.")
+            return True
+
+        current_host = worker.get("host")
+        home_host = worker.get("home_host")
+        home_cwd = worker.get("home_cwd")
+
+        if current_host is None and home_cwd is None:
+            self.reply(chat_id, f"{worker_name} hasn't been teleported.")
+            return True
+
+        # Worker must not be actively busy
+        with _watchdog_lock:
+            ws = _worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        if ws[0] in ("BUSY_TOOL", "BUSY_THINKING"):
+            self.reply(chat_id,
+                f"{worker_name} is busy. Must be idle to teleback.")
+            return True
+
+        target_host = home_host  # Where we're going back to (None = local)
+        target_cwd = home_cwd or get_claude_session_cwd(worker_name)
+
+        # If going back to local, verify current remote host is reachable
+        if current_host:
+            r = _remote_run(["echo", "ok"], host=current_host,
+                            capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                self.reply(chat_id,
+                    f"Cannot reach {current_host} where {worker_name} currently is.")
+                return True
+
+        dest_label = home_host or "local"
+        self.reply(chat_id, f"Bringing {worker_name} back to {dest_label}...")
+        threading.Thread(
+            target=self._do_teleport,
+            args=(worker_name, target_host, target_cwd, full_sync, chat_id, True),
+            daemon=True
+        ).start()
+        return True
+
+    def _do_teleport(self, name, target_host, target_cwd, full_sync,
+                     chat_id, is_teleback=False):
+        """Run the full teleport flow in a background thread."""
+        try:
+            registered = self.workers.get_registered_sessions()
+            session = registered.get(name, {})
+            tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+            backend_name = get_worker_backend(name, session)
+            source_host = get_worker_host(name)
+
+            source_cwd = get_claude_session_cwd(name)
+            if not target_cwd:
+                target_cwd = source_cwd
+
+            # Write teleport state for crash recovery
+            ensure_session_dir(name)
+            state_file = SESSIONS_DIR / name / "teleport_state"
+            state_file.write_text(json.dumps({
+                "phase": 1, "source_host": source_host,
+                "target_host": target_host, "target_cwd": target_cwd,
+                "started_at": int(time.time()),
+            }))
+
+            # ── PHASE 1: Stop and sync (reversible) ──
+
+            self._teleport_notify(chat_id, f"Stopping {name}...")
+            session_id = self._stop_worker_for_teleport(name, tmux_name, source_host)
+
+            if source_cwd and target_cwd:
+                self._teleport_notify(chat_id, f"Syncing working directory...")
+                ok = self._sync_working_directory(
+                    source_cwd, target_cwd, source_host, target_host, full_sync)
+                if not ok:
+                    self._teleport_rollback(name, tmux_name, source_host, source_cwd,
+                                            session_id, backend_name, chat_id,
+                                            "working directory sync failed")
+                    return
+
+            if session_id:
+                self._teleport_notify(chat_id, "Syncing session transcript...")
+                self._sync_session_transcript(
+                    session_id, source_cwd, target_cwd, source_host, target_host)
+
+            self._teleport_notify(chat_id, "Installing hooks on target...")
+            self._install_hooks_on_target(target_host)
+
+            # ── PHASE 2: Commit ──
+
+            state_file.write_text(json.dumps({
+                "phase": 2, "source_host": source_host,
+                "target_host": target_host, "target_cwd": target_cwd,
+                "started_at": int(time.time()),
+            }))
+
+            self._teleport_notify(chat_id,
+                f"Starting {name} on {target_host or 'local'}...")
+            ok = self._start_worker_on_target(
+                name, target_host, target_cwd, session_id, backend_name)
+            if not ok:
+                # Clean up target, restart source
+                _remote_run(["tmux", "kill-session", "-t", tmux_name],
+                            host=target_host, capture_output=True)
+                self._teleport_rollback(name, tmux_name, source_host, source_cwd,
+                                        session_id, backend_name, chat_id,
+                                        "failed to start on target")
+                return
+
+            # Point of no return: kill source
+            _remote_run(["tmux", "kill-session", "-t", tmux_name],
+                        host=source_host, capture_output=True)
+
+            # Update registry
+            if is_teleback:
+                _registry_clear_teleport(name)
+            else:
+                _registry_update_teleport(
+                    name, host=target_host,
+                    home_host=source_host, home_cwd=source_cwd)
+
+            save_claude_session_cwd(name, target_cwd)
+            state_file.unlink(missing_ok=True)
+
+            dest_label = target_host or "local"
+            action = "teleported back" if is_teleback else "teleported"
+            msg = f"{name} {action} to {dest_label}:{target_cwd}"
+            if session_id:
+                msg += f"\nSession resumed ({session_id[:8]}...)."
+            if not is_teleback:
+                msg += f"\nUse /teleback {name} to bring it back."
+            self._teleport_notify(chat_id, msg)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._teleport_notify(chat_id, f"Teleport failed: {e}")
+            try:
+                state_file = SESSIONS_DIR / name / "teleport_state"
+                state_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _stop_worker_for_teleport(self, name, tmux_name, host=None):
+        """Gracefully stop Claude Code and return session_id."""
+        session_id = get_claude_session_id(name)
+
+        # Send /exit for graceful shutdown
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"],
+                     host=host, capture_output=True)
+
+        # Wait for process to exit (up to 10s)
+        for _ in range(20):
+            time.sleep(0.5)
+            r = _remote_run(
+                ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
+                host=host, capture_output=True, text=True)
+            if r.returncode != 0:
+                break
+            pane_pid = r.stdout.strip()
+            if pane_pid:
+                claude_pid = _get_claude_pid(pane_pid, host=host)
+                if not claude_pid:
+                    break
+        else:
+            # Force stop
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""],
+                         host=host, capture_output=True)
+            time.sleep(1)
+
+        # Re-read session ID (hook may have updated it during /exit)
+        return get_claude_session_id(name) or session_id
+
+    def _sync_working_directory(self, source_cwd, target_cwd,
+                                 source_host=None, target_host=None,
+                                 full=False):
+        """rsync working directory from source to target."""
+        _remote_run(["mkdir", "-p", target_cwd],
+                     host=target_host, capture_output=True)
+
+        cmd = ["rsync", "-az", "--delete"]
+        if not full:
+            for excl in TELEPORT_RSYNC_EXCLUDES:
+                cmd.extend(["--exclude", excl])
+
+        src = source_cwd.rstrip("/") + "/"
+        dst = target_cwd.rstrip("/") + "/"
+
+        if source_host:
+            cmd.extend([f"{source_host}:{src}", dst])
+        elif target_host:
+            cmd.extend([src, f"{target_host}:{dst}"])
+        else:
+            cmd.extend([src, dst])
+
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            print(f"[teleport] rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
+        return r.returncode == 0
+
+    def _sync_session_transcript(self, session_id, source_cwd, target_cwd,
+                                  source_host=None, target_host=None):
+        """Sync Claude Code session transcript between machines."""
+        if not session_id:
+            return
+
+        source_slug = _project_slug(source_cwd)
+        target_slug = _project_slug(target_cwd)
+
+        # _remote_run shell-quotes args, so ~ won't expand. Use $HOME instead
+        # for remote commands, and os.path.expanduser for local paths.
+        source_dir = f".claude/projects/{source_slug}"
+        target_dir = f".claude/projects/{target_slug}"
+
+        # Ensure target directory exists (use bash -c for $HOME expansion)
+        if target_host:
+            _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"],
+                         host=target_host, capture_output=True)
+        else:
+            os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
+
+        # Sync session JSONL and subdirectory
+        jsonl = f"{session_id}.jsonl"
+        for item in [jsonl, f"{session_id}/"]:
+            if source_host:
+                # rsync handles ~ in remote paths (not shell-quoted by _remote_run)
+                src_path = f"~/{source_dir}/{item}"
+                local_dst = os.path.expanduser(f"~/{target_dir}/")
+                cmd = ["rsync", "-az", f"{source_host}:{src_path}", local_dst]
+            elif target_host:
+                local_src = os.path.expanduser(f"~/{source_dir}/{item}")
+                dst_path = f"~/{target_dir}/"
+                cmd = ["rsync", "-az", local_src, f"{target_host}:{dst_path}"]
+            else:
+                local_src = os.path.expanduser(f"~/{source_dir}/{item}")
+                local_dst = os.path.expanduser(f"~/{target_dir}/")
+                cmd = ["rsync", "-az", local_src, local_dst]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+
+    def _install_hooks_on_target(self, target_host):
+        """Install Claude Code hooks and settings on target machine."""
+        if not target_host:
+            return  # Local — hooks already installed
+
+        hooks_src = str(Path(__file__).parent / "hooks") + "/"
+        _remote_run(["mkdir", "-p", ".claude/hooks"],
+                     host=target_host, capture_output=True)
+        subprocess.run(["rsync", "-az", hooks_src, f"{target_host}:.claude/hooks/"],
+                       capture_output=True, timeout=30)
+        _remote_run(["chmod", "-R", "700", ".claude/hooks"],
+                     host=target_host, capture_output=True)
+
+        # Sync settings.json with adapted hook paths for target $HOME
+        settings_src = os.path.expanduser("~/.claude/settings.json")
+        if os.path.exists(settings_src):
+            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
+                                  capture_output=True, text=True, timeout=5)
+            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            local_home = os.path.expanduser("~")
+            with open(settings_src) as f:
+                settings_text = f.read()
+            if remote_home and remote_home != local_home:
+                settings_text = settings_text.replace(local_home, remote_home)
+            fd, tmp = tempfile.mkstemp(suffix=".json")
+            os.write(fd, settings_text.encode())
+            os.close(fd)
+            subprocess.run(
+                ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
+                capture_output=True, timeout=10)
+            os.unlink(tmp)
+
+        # Sync .claude.json (onboarding, trust dialogs, project config)
+        claude_json = os.path.expanduser("~/.claude.json")
+        if os.path.exists(claude_json):
+            subprocess.run(
+                ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
+                capture_output=True, timeout=10)
+        else:
+            # Create minimal .claude.json to skip first-time prompts
+            _remote_run(
+                ["python3", "-c",
+                 'import json,os,pathlib;'
+                 'p=pathlib.Path(os.path.expanduser("~/.claude.json"));'
+                 'd=json.loads(p.read_text()) if p.exists() else {};'
+                 'd["hasCompletedOnboarding"]=True;'
+                 'd.setdefault("numStartups",1);'
+                 'p.write_text(json.dumps(d))'],
+                host=target_host, capture_output=True, timeout=10)
+
+    def _start_worker_on_target(self, name, target_host, target_cwd,
+                                 session_id, backend_name):
+        """Create tmux session on target and start Claude Code with --resume."""
+        tmux_name = f"{TMUX_PREFIX}{name}"
+
+        # Clean up any leftover session
+        _remote_run(["tmux", "kill-session", "-t", tmux_name],
+                     host=target_host, capture_output=True)
+        time.sleep(0.3)
+
+        # Create new session
+        r = _remote_run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+            host=target_host, capture_output=True)
+        if r.returncode != 0:
+            return False
+
+        time.sleep(0.5)
+
+        # Export hook env vars (BRIDGE_URL points back to bridge)
+        for key, value in {
+            "PORT": str(PORT),
+            "TMUX_PREFIX": TMUX_PREFIX,
+            "SESSIONS_DIR": str(SESSIONS_DIR),
+            "WORKER_BACKEND": normalize_backend(backend_name),
+            "BRIDGE_URL": BRIDGE_PUBLIC_URL or BRIDGE_URL,
+            "HOOK_SECRET": HOOK_SECRET,
+        }.items():
+            _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value],
+                         host=target_host, capture_output=True)
+
+        time.sleep(0.3)
+
+        # Source env and unset CLAUDECODE
+        _remote_run(
+            ["tmux", "send-keys", "-t", tmux_name,
+             'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
+            host=target_host, capture_output=True)
+        time.sleep(0.3)
+
+        # Build and send start command
+        backend = get_backend(backend_name)
+        cli_cmd = backend.start_cmd(session_id)
+
+        # Claude Code refuses --dangerously-skip-permissions as root
+        if target_host:
+            r_id = _remote_run(["id", "-u"], host=target_host,
+                               capture_output=True, text=True)
+            if r_id.returncode == 0 and r_id.stdout.strip() == "0":
+                cli_cmd = cli_cmd.replace(" --dangerously-skip-permissions", "")
+
+        start_cmd = f'unset CLAUDECODE && {cli_cmd}'
+        if target_cwd:
+            start_cmd = f'cd {shlex.quote(target_cwd)} && {start_cmd}'
+
+        _remote_run(
+            ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
+            host=target_host, capture_output=True)
+
+        if backend.is_interactive:
+            # Claude may show first-time prompts (theme picker, permission
+            # mode). Navigate them: Enter accepts defaults, "2" selects
+            # auto-accept permission mode. Multiple Enter presses are safe.
+            for delay, key in [(3.0, "Enter"), (2.0, "Enter"),
+                               (1.0, "Enter"), (1.0, "Enter")]:
+                time.sleep(delay)
+                _remote_run(["tmux", "send-keys", "-t", tmux_name, key],
+                             host=target_host, capture_output=True)
+
+        # Verify Claude is running (retry up to 30s for startup)
+        for _ in range(30):
+            time.sleep(1)
+            r = _remote_run(
+                ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
+                host=target_host, capture_output=True, text=True)
+            if r.returncode != 0:
+                continue
+            pane_pid = r.stdout.strip()
+            if pane_pid and _get_claude_pid(pane_pid, host=target_host):
+                return True
+        return False
+
+    def _teleport_rollback(self, name, tmux_name, source_host, source_cwd,
+                            session_id, backend_name, chat_id, reason):
+        """Roll back a failed teleport by restarting on source."""
+        self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
+        try:
+            # Ensure tmux session exists on source
+            if not tmux_exists(tmux_name, host=source_host):
+                _remote_run(
+                    ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+                    host=source_host, capture_output=True)
+
+            # Restart Claude Code on source
+            backend = get_backend(backend_name)
+            start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id)}'
+            if source_cwd:
+                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'
+            _remote_run(
+                ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
+                host=source_host, capture_output=True)
+
+            self._teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
+        except Exception as e:
+            self._teleport_notify(chat_id, f"Rollback also failed: {e}")
+
+        try:
+            state_file = SESSIONS_DIR / name / "teleport_state"
+            state_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _teleport_notify(self, chat_id, text):
+        """Send progress notification during teleport."""
+        try:
+            telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+        except Exception:
+            pass
 
     def cmd_settings(self, chat_id):
         def redact(s):
@@ -5642,8 +6409,8 @@ class Handler(BaseHTTPRequestHandler):
                         if notify_chat_id is not None:
                             send_telegram_message(
                                 notify_chat_id,
-                                f"{name} is switching to {requested_cwd} and restarting now. "
-                                "Messages sent during this restart can be lost.",
+                                f"{name} is restarting in a new directory. "
+                                "Messages during restart may be lost.",
                             )
 
                         ok, err = worker_manager.restart(name, mode="relaunch")
@@ -5651,8 +6418,8 @@ class Handler(BaseHTTPRequestHandler):
                             if notify_chat_id is not None:
                                 send_telegram_message(
                                     notify_chat_id,
-                                    f"{name} could not restart in {requested_cwd}. "
-                                    f"Please run /restart {name} before sending new messages.",
+                                    f"{name} could not restart. "
+                                    f"Run /restart {name} before sending new messages.",
                                 )
                             self.send_response(500)
                             self.send_header("Content-Type", "text/plain")
@@ -5664,12 +6431,12 @@ class Handler(BaseHTTPRequestHandler):
                             if _wait_for_restart_ready(tmux_name, backend_name):
                                 send_telegram_message(
                                     notify_chat_id,
-                                    f"{name} is ready in {requested_cwd}. Safe to send messages now.",
+                                    f"{name} is ready. Safe to send messages now.",
                                 )
                             else:
                                 send_telegram_message(
                                     notify_chat_id,
-                                    f"{name} restarted in {requested_cwd} but is not ready yet. "
+                                    f"{name} restarted but is not ready yet. "
                                     f"Hold messages for now. If this continues, run /restart {name}.",
                                 )
 
@@ -5771,12 +6538,17 @@ def main():
     if registered:
         print(f"Discovered sessions: {list(registered.keys())}")
         for name, info in registered.items():
+            # SAFETY: only touch sessions that match OUR prefix to avoid
+            # overwriting env vars of workers belonging to other nodes
+            tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
+            if not tmux_name.startswith(TMUX_PREFIX):
+                print(f"  SKIP {name}: tmux '{tmux_name}' doesn't match prefix '{TMUX_PREFIX}'")
+                continue
             backend_name = get_worker_backend(name, info)
             backend_obj = get_backend(backend_name)
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
             # Re-export hook env so workers get the new HOOK_SECRET
-            tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
             if tmux_exists(tmux_name):
                 export_hook_env(tmux_name, backend_name)
 

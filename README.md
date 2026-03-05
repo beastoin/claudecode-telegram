@@ -563,7 +563,7 @@ Why this matters: this starts bridge + tunnel + webhook so Telegram can reach yo
 ```
 
 You should see output similar to:
-- `Bridge started on port 8080`
+- `Bridge started on port 8270`
 - `Tunnel URL: https://...`
 - `Webhook configured`
 

@@ -10,7 +10,7 @@
 #   TEST_BOT_TOKEN  - Required: Your test bot token from @BotFather
 #   TEST_CHAT_ID    - Optional: Your chat ID for e2e verification
 #
-# Tests run isolated using --node test with separate port (8095),
+# Tests run isolated using --node test with separate port (8295),
 # prefix (claude-test-), and PID file. Safe to run while production is active.
 #
 set -euo pipefail
@@ -25,7 +25,7 @@ TEST_FILTER="${TEST_FILTER:-}"
 # Test node configuration
 TEST_NODE="test"
 TEST_NODE_DIR="${TEST_NODE_DIR:-$HOME/.claude/telegram/nodes/$TEST_NODE}"
-PORT="${TEST_PORT:-8095}"
+PORT="${TEST_PORT:-8295}"
 TEST_SESSION_DIR="$TEST_NODE_DIR/sessions"
 TEST_PID_FILE="$TEST_NODE_DIR/pid"
 TEST_TMUX_PREFIX="claude-${TEST_NODE}-"
@@ -1222,7 +1222,7 @@ test_sandbox_docker_cmd() {
 import os
 from pathlib import Path
 os.environ['SANDBOX_ENABLED'] = '1'
-os.environ['PORT'] = '8095'
+os.environ['PORT'] = '8295'
 os.environ['BRIDGE_URL'] = ''
 
 from bridge import get_docker_run_cmd
@@ -1242,7 +1242,7 @@ assert f'-v={home}:/workspace' in cmd, 'should mount home to /workspace'
 assert '-w /workspace' in cmd, 'should set workdir to /workspace'
 
 # Verify BRIDGE_URL for container->host communication
-assert 'BRIDGE_URL=http://host.docker.internal:8095' in cmd, 'should set BRIDGE_URL'
+assert 'BRIDGE_URL=http://host.docker.internal:8295' in cmd, 'should set BRIDGE_URL'
 
 # Verify claude command with --dangerously-skip-permissions
 assert 'claude --dangerously-skip-permissions' in cmd, 'should run claude with skip permissions'
@@ -2957,17 +2957,17 @@ assert 'waiting' in result.lower() or 'input' in result.lower() or 'approval' in
 lines = ['● Skill looks solid.', '✻ Churned for 2m 45s', '───', '❯ save reports', '───', '  ⏵⏵ bypass permissions on · 1 bash']
 result = _extract_activity(lines)
 assert 'thinking' not in result.lower(), f'✻ Churned should NOT be thinking: {result}'
-assert 'idle' in result.lower(), f'Prompt with bypass mode bar should be idle: {result}'
+assert result == 'Ready', f'Prompt with bypass mode bar should be idle: {result}'
 
 # Prompt with hint text = idle (auto-suggestion, not queued message)
 lines = ['● Done with task.', '───', '❯ do the next thing', '───']
 result = _extract_activity(lines)
-assert 'idle' in result.lower(), f'Prompt hint text should be idle: {result}'
+assert result == 'Ready', f'Prompt hint text should be idle: {result}'
 
 # Idle at bare prompt
 lines = ['● Done with task.', '───', '❯', '───']
 result = _extract_activity(lines)
-assert 'idle' in result.lower(), f'Expected idle at prompt: {result}'
+assert result == 'Ready', f'Expected idle at prompt: {result}'
 
 # bypass permissions mode bar is NEVER a blocking prompt — bypass = auto-approved
 lines = ['● Some output', '  ⏵⏵ bypass permissions on · 1 bash']
@@ -2977,7 +2977,7 @@ assert 'permission' not in result.lower(), f'Bypass mode bar should NOT be permi
 # bypass mode bar with prompt = idle
 lines = ['● Some output', '───', '  ⏵⏵ bypass permissions on · 1 bash', '───', '❯', '───']
 result = _extract_activity(lines)
-assert 'idle' in result.lower(), f'Prompt with bypass mode bar should be idle: {result}'
+assert result == 'Ready', f'Prompt with bypass mode bar should be idle: {result}'
 assert 'permission' not in result.lower(), f'Should NOT show permission: {result}'
 
 # mode bar WITHOUT pending actions = NOT a permission prompt
@@ -2985,7 +2985,7 @@ assert 'permission' not in result.lower(), f'Should NOT show permission: {result
 lines = ['● Done!', '✻ Cooked for 21m', '───', '❯ merge the PR', '───', '⏵⏵ bypass permissions on (shift+tab to cycle)']
 result = _extract_activity(lines)
 assert 'permission' not in result.lower(), f'Mode bar without actions should NOT be permission: {result}'
-assert 'idle' in result.lower(), f'Prompt with hint text should be idle: {result}'
+assert result == 'Ready', f'Prompt with hint text should be idle: {result}'
 
 # ⏵⏵ accept edits on = mode bar, NOT permission prompt (Codex fix #3)
 lines = ['● Finished edits', '⏵⏵ accept edits on (shift+tab to cycle)']
@@ -3000,7 +3000,7 @@ assert 'plan mode' in result.lower(), f'Expected plan mode: {result}'
 # ⏸ plan mode with prompt AFTER = idle (worker moved past plan mode bar)
 lines = ['⏸ plan mode on (shift+tab to cycle)', '❯']
 result = _extract_activity(lines)
-assert 'idle' in result.lower(), f'Prompt after plan bar should be idle: {result}'
+assert result == 'Ready', f'Prompt after plan bar should be idle: {result}'
 
 # Rate limit ABOVE prompt should still detect rate limit (Codex fix #2)
 lines = ['Rate limit exceeded. Retrying in 30s...', '❯']
@@ -3107,7 +3107,7 @@ lines = [
 ]
 result = _extract_activity(lines)
 assert 'Waiting' in result, f'Single-select: expected Waiting, got: {result}'
-assert result != 'Idle at prompt', f'Single-select: must NOT be Idle at prompt'
+assert result != 'Ready', f'Single-select: must NOT be Ready'
 
 # Question details extraction
 details = _extract_question_details(lines)
@@ -3159,12 +3159,12 @@ assert 'Waiting' in result, f'Confirm variant: expected Waiting, got: {result}'
 # Normal idle prompt must still work
 lines = ['❯']
 result = _extract_activity(lines)
-assert result == 'Idle at prompt', f'Idle: expected Idle at prompt, got: {result}'
+assert result == 'Ready', f'Idle: expected Ready, got: {result}'
 
 # Prompt with text (auto-suggestion) still idle
 lines = ['❯ some auto text']
 result = _extract_activity(lines)
-assert result == 'Idle at prompt', f'Idle+text: expected Idle at prompt, got: {result}'
+assert result == 'Ready', f'Idle+text: expected Ready, got: {result}'
 
 # No interactive prompt = None details
 lines = ['❯']
@@ -3200,6 +3200,100 @@ assert 'skip' in joined.lower(), f'Missing skip hint in: {joined}'
     fi
 }
 
+test_activity_detects_plan_approval() {
+    info "Testing _extract_activity detects ExitPlanMode plan approval prompt..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+from bridge import _extract_activity, _extract_question_details
+
+# ExitPlanMode 'Ready to code?' prompt (with editor configured)
+lines = [
+    'Here is Claude\'s plan:',
+    '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -',
+    '# Plan: Implement feature X',
+    '',
+    '## Files to modify',
+    '| File | Change |',
+    '|------|--------|',
+    '| src/main.ts | Add handler |',
+    '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -',
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '❯ 1. Yes, clear context (31% used) and bypass permissions',
+    '  2. Yes, and bypass permissions',
+    '  3. Yes, manually approve edits',
+    '  4. Type here to tell Claude what to change',
+    'ctrl-g to edit in Vim',
+]
+result = _extract_activity(lines)
+assert 'Waiting' in result, f'Plan approval: expected Waiting, got: {result}'
+assert result != 'Ready', f'Plan approval: must NOT be Ready'
+
+# ExitPlanMode without editor (no ctrl-g footer — only content-based detection)
+lines_no_editor = [
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '❯ 1. Yes, clear context (42% used) and auto-accept edits (shift+tab)',
+    '  2. Yes, auto-accept edits',
+    '  3. Yes, manually approve edits',
+    '  4. Type here to tell Claude what to change',
+]
+result = _extract_activity(lines_no_editor)
+assert 'Waiting' in result or 'plan' in result.lower(), f'No-editor plan: expected plan/waiting, got: {result}'
+assert result != 'Ready', f'No-editor plan: must NOT be Ready'
+
+# ExitPlanMode with auto-approve countdown
+lines_auto = [
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '❯ 1. Yes, clear context (50% used) and bypass permissions',
+    '  2. Yes, and bypass permissions',
+    '  3. Yes, manually approve edits',
+    '  4. Type here to tell Claude what to change',
+    'ctrl-g to edit in Vim',
+    'Auto-approving in 5s… Press any key to intervene.',
+]
+result = _extract_activity(lines_auto)
+assert 'Waiting' in result or 'plan' in result.lower() or 'auto' in result.lower(), \
+    f'Auto-approve plan: expected plan/waiting/auto, got: {result}'
+assert result != 'Ready', f'Auto-approve plan: must NOT be Ready'
+
+# EnterPlanMode prompt (different from ExitPlanMode)
+lines_enter = [
+    'Claude wants to enter plan mode to explore and design an implementation approach.',
+    'In plan mode, Claude will:',
+    ' · Explore the codebase thoroughly',
+    ' · Identify existing patterns',
+    ' · Design an implementation strategy',
+    ' · Present a plan for your approval',
+    'No code changes will be made until you approve the plan.',
+    '❯ 1. Yes, enter plan mode',
+    '  2. No, start implementing now',
+]
+result = _extract_activity(lines_enter)
+assert result != 'Ready', f'EnterPlanMode: must NOT be Ready, got: {result}'
+
+# Tool permission prompt (e.g., Allow Bash?)
+lines_tool = [
+    'Allow Bash?',
+    'ls -la /tmp',
+    '❯ 1. Yes',
+    '  2. Yes, and don\\'t ask again for this tool',
+    '  3. No',
+]
+result = _extract_activity(lines_tool)
+assert result != 'Ready', f'Tool permission: must NOT be Ready, got: {result}'
+
+# Question details should still be extractable for plan approval
+details = _extract_question_details(lines)
+assert details is not None, f'Plan approval details should not be None'
+assert details['selected_num'] == 1, f'Plan approval selected: {details[\"selected_num\"]}'
+assert len(details['options']) >= 3, f'Plan approval options: {len(details[\"options\"])}'
+" 2>&1; then
+        success "_extract_activity detects plan approval prompts"
+    else
+        fail "_extract_activity plan approval detection failed"
+    fi
+}
+
 test_watchdog_waiting_input_state() {
     info "Testing watchdog detects WAITING_INPUT state and formats alert..."
 
@@ -3210,7 +3304,7 @@ import bridge, time
 # Test _format_watchdog_status with WAITING_INPUT
 bridge._worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
 result = bridge._format_watchdog_status('testbot')
-assert 'NEEDS INPUT' in result, f'Expected NEEDS INPUT, got: {result}'
+assert 'Needs reply' in result, f'Expected Needs reply, got: {result}'
 assert '2m' in result, f'Expected 2m duration, got: {result}'
 
 # Test that WAITING_INPUT is in bad_states for alert transitions
@@ -3218,9 +3312,9 @@ bad = {'OFFLINE', 'DEAD', 'STUCK', 'POISONED', 'EXITED', 'WAITING_INPUT'}
 assert 'WAITING_INPUT' in bad
 
 # Test _team_attention_summary picks it up
-icon, label, rank = bridge._team_attention_summary('NEEDS INPUT 2m', 'Waiting for input: Pick color')
+icon, label, rank = bridge._team_attention_summary('Needs reply (2m)', 'Waiting for input: Pick color')
 assert icon == '\U0001f7e1', f'Expected yellow icon, got: {icon}'
-assert 'input' in label, f'Expected input label, got: {label}'
+assert 'reply' in label, f'Expected reply label, got: {label}'
 
 # Clean up
 bridge._worker_states.pop('testbot', None)
@@ -3529,8 +3623,8 @@ print('OK')
     fi
 }
 
-test_send_example_uses_flock() {
-    info "Testing /workers send_example includes flock for tmux workers..."
+test_send_example_uses_paste_buffer() {
+    info "Testing /workers send_example uses paste-buffer for tmux workers..."
 
     if python3 -c "
 import sys; sys.path.insert(0, '.')
@@ -3551,23 +3645,21 @@ try:
     assert bob is not None, f'bob not found in workers: {[w[\"name\"] for w in workers]}'
     assert bob['protocol'] == 'tmux', f'expected tmux protocol, got {bob[\"protocol\"]}'
 
-    # The send_example must include flock to prevent interleaving
     ex = bob['send_example']
-    assert 'flock' in ex, f'send_example missing flock: {ex}'
-    # Must reference a lock path
-    assert '/locks/' in ex, f'send_example missing lock path: {ex}'
-    # Must use -p for bracketed paste (prevents Enter being swallowed by TUI)
-    assert 'paste-buffer -p' in ex, f'send_example missing -p flag: {ex}'
-    # Must use 0.15s delay (not 0.05) — TUI render takes ~80-120ms
-    assert 'sleep 0.3' in ex, f'send_example should use sleep 0.3, got: {ex}'
+    # Must use paste-buffer -p -r for reliable delivery
+    assert 'paste-buffer -p' in ex, f'send_example missing paste-buffer -p: {ex}'
+    # Must use 1s delay — TUI needs time to render
+    assert 'sleep 1' in ex, f'send_example should use sleep 1, got: {ex}'
+    # Must include Enter after delay
+    assert 'send-keys' in ex, f'send_example missing send-keys Enter: {ex}'
 
     print('OK')
 finally:
     bridge.worker_manager.get_registered_sessions = orig
 " 2>/dev/null | grep -q "OK"; then
-        success "send_example includes flock for tmux workers"
+        success "send_example uses paste-buffer for tmux workers"
     else
-        fail "send_example missing flock"
+        fail "send_example paste-buffer test failed"
     fi
 }
 
@@ -4163,7 +4255,7 @@ assert len(calls) == 1, f'Expected 1 API call, got {len(calls)}'
 method, data = calls[0]
 assert method == 'sendMessage', f'Expected sendMessage, got {method}'
 assert 'testworker' in data['text'], f'Expected worker name in text, got {data[\"text\"]}'
-assert 'back online' in data['text'], f'Expected back online in text, got {data[\"text\"]}'
+assert 'back to normal' in data['text'], f'Expected back to normal in text, got {data[\"text\"]}'
 
 # Verify no alert when transition is not from bad to good state
 calls.clear()
@@ -4230,6 +4322,133 @@ print('OK')
     fi
 }
 
+test_auto_focus_on_consecutive_mentions() {
+    info "Testing auto-focus after 2 consecutive @mentions to same worker..."
+
+    if python3 -c "
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+import bridge
+
+# Set up temp dirs for isolation
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir(parents=True)
+sessions_dir = node_dir / 'sessions'
+sessions_dir.mkdir()
+
+# Save originals
+orig_sessions_dir = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_last_active = bridge.LAST_ACTIVE_FILE
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_mention = dict(bridge._last_mention)
+
+# Override paths
+bridge.SESSIONS_DIR = sessions_dir
+bridge.NODE_DIR = node_dir
+bridge.LAST_ACTIVE_FILE = node_dir / 'last_active'
+bridge.admin_chat_id = 123
+
+# Create mock workers
+class MockWorkers:
+    def get_registered_sessions(self, registered=None):
+        return {'alice': {'tmux': 'claude-test-alice'}, 'bob': {'tmux': 'claude-test-bob'}}
+    def is_online(self, name, session):
+        return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+router.route_message = MagicMock()
+router.route_to_active = MagicMock()
+
+def make_msg(text):
+    return {'update_id': 1, 'message': {'message_id': 1, 'chat': {'id': 123}, 'text': text}}
+
+# Reset state
+bridge.state['active'] = 'bob'
+bridge.state['startup_notified'] = True
+bridge._last_mention['target'] = None
+bridge._last_mention['count'] = 0
+mock_api.sent.clear()
+
+# Test 1: First @alice mention — no focus switch
+router.handle_message(make_msg('@alice do task 1'))
+assert bridge.state['active'] == 'bob', f'T1: should stay bob, got {bridge.state[\"active\"]}'
+assert bridge._last_mention['target'] == 'alice', f'T1: tracker target should be alice'
+assert bridge._last_mention['count'] == 1, f'T1: count should be 1, got {bridge._last_mention[\"count\"]}'
+
+# Test 2: Second @alice mention — auto-focus switches to alice
+router.handle_message(make_msg('@alice do task 2'))
+assert bridge.state['active'] == 'alice', f'T2: should switch to alice, got {bridge.state[\"active\"]}'
+assert any('Auto-focused to alice' in s for s in mock_api.sent), f'T2: should notify auto-focus, sent: {mock_api.sent}'
+
+# Test 3: Third @alice mention — already focused, no duplicate notification
+mock_api.sent.clear()
+router.handle_message(make_msg('@alice do task 3'))
+assert bridge.state['active'] == 'alice', f'T3: should stay alice'
+assert not any('Auto-focused' in s for s in mock_api.sent), f'T3: should not re-notify when already focused'
+
+# Test 4: @bob then @alice — different workers, no focus switch
+bridge.state['active'] = 'bob'
+bridge._last_mention['target'] = None
+bridge._last_mention['count'] = 0
+mock_api.sent.clear()
+router.handle_message(make_msg('@bob do X'))
+router.handle_message(make_msg('@alice do Y'))
+assert bridge.state['active'] == 'bob', f'T4: should stay bob after different mentions'
+assert bridge._last_mention['target'] == 'alice', f'T4: tracker should be alice'
+assert bridge._last_mention['count'] == 1, f'T4: count should be 1'
+
+# Test 5: @alice then plain message then @alice — streak reset, no focus
+bridge.state['active'] = 'bob'
+bridge._last_mention['target'] = None
+bridge._last_mention['count'] = 0
+mock_api.sent.clear()
+router.handle_message(make_msg('@alice do X'))
+router.handle_message(make_msg('just a plain message'))
+router.handle_message(make_msg('@alice do Y'))
+assert bridge.state['active'] == 'bob', f'T5: should stay bob, streak was reset'
+assert bridge._last_mention['count'] == 1, f'T5: count should be 1 after reset+mention'
+
+# Test 6: Multi-mention resets streak, no focus switch
+bridge.state['active'] = 'bob'
+bridge._last_mention['target'] = 'alice'
+bridge._last_mention['count'] = 1
+mock_api.sent.clear()
+router.handle_message(make_msg('@alice @bob do both'))
+assert bridge.state['active'] == 'bob', f'T6: multi-mention should not switch focus'
+assert bridge._last_mention['target'] is None, f'T6: multi-mention should reset target'
+assert bridge._last_mention['count'] == 0, f'T6: multi-mention should reset count'
+
+# Restore originals
+bridge.SESSIONS_DIR = orig_sessions_dir
+bridge.NODE_DIR = orig_node_dir
+bridge.LAST_ACTIVE_FILE = orig_last_active
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge._last_mention.update(orig_mention)
+
+import shutil
+shutil.rmtree(tmpdir)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "auto-focus on consecutive @mentions works correctly"
+    else
+        fail "auto-focus on consecutive mentions test failed"
+    fi
+}
+
 test_format_watchdog_status() {
     info "Testing _format_watchdog_status for each state..."
 
@@ -4259,44 +4478,44 @@ with bridge._watchdog_lock:
 
 snapshot = dict(states)
 
-# READY -> 'ready'
+# READY -> 'Ready'
 result = bridge._format_watchdog_status('ready_worker', lambda n: False, state_snapshot=snapshot)
-assert result == 'ready', f'READY: expected ready, got {result}'
+assert result == 'Ready', f'READY: expected Ready, got {result}'
 
-# BUSY_TOOL -> 'working (tools)'
+# BUSY_TOOL -> 'Working'
 result = bridge._format_watchdog_status('busy_tool_worker', lambda n: True, state_snapshot=snapshot)
-assert result == 'working (tools)', f'BUSY_TOOL: expected working (tools), got {result}'
+assert result == 'Working', f'BUSY_TOOL: expected Working, got {result}'
 
-# BUSY_THINKING -> 'working (thinking)'
+# BUSY_THINKING -> 'Thinking'
 result = bridge._format_watchdog_status('busy_thinking_worker', lambda n: True, state_snapshot=snapshot)
-assert result == 'working (thinking)', f'BUSY_THINKING: expected working (thinking), got {result}'
+assert result == 'Thinking', f'BUSY_THINKING: expected Thinking, got {result}'
 
-# WAITING -> 'working (waiting)'
+# WAITING -> 'Working'
 result = bridge._format_watchdog_status('waiting_worker', lambda n: True, state_snapshot=snapshot)
-assert result == 'working (waiting)', f'WAITING: expected working (waiting), got {result}'
+assert result == 'Working', f'WAITING: expected Working, got {result}'
 
-# STUCK -> 'STUCK Xm'
+# STUCK -> 'No progress (Xm)'
 result = bridge._format_watchdog_status('stuck_worker', lambda n: True, state_snapshot=snapshot)
-assert result.startswith('STUCK'), f'STUCK: expected STUCK Xm, got {result}'
-assert 'm' in result, f'STUCK: expected minutes suffix, got {result}'
+assert result.startswith('No progress'), f'STUCK: expected No progress (Xm), got {result}'
+assert 'm)' in result, f'STUCK: expected minutes in parens, got {result}'
 
-# DEAD -> 'DEAD'
+# DEAD -> 'Not responding'
 result = bridge._format_watchdog_status('dead_worker', lambda n: False, state_snapshot=snapshot)
-assert result == 'DEAD', f'DEAD: expected DEAD, got {result}'
+assert result == 'Not responding', f'DEAD: expected Not responding, got {result}'
 
-# OFFLINE -> 'offline'
+# OFFLINE -> 'Offline'
 result = bridge._format_watchdog_status('offline_worker', lambda n: False, state_snapshot=snapshot)
-assert result == 'offline', f'OFFLINE: expected offline, got {result}'
+assert result == 'Offline', f'OFFLINE: expected Offline, got {result}'
 
-# POISONED -> 'POISONED Xm'
+# POISONED -> 'Error loop (Xm)'
 result = bridge._format_watchdog_status('poisoned_worker', lambda n: True, state_snapshot=snapshot)
-assert result.startswith('POISONED'), f'POISONED: expected POISONED Xm, got {result}'
+assert result.startswith('Error loop'), f'POISONED: expected Error loop (Xm), got {result}'
 
 # Unknown worker -> fallback based on pending
 result = bridge._format_watchdog_status('nonexistent_worker', lambda n: True, state_snapshot=snapshot)
-assert result == 'working', f'Unknown+pending: expected working, got {result}'
+assert result == 'Working', f'Unknown+pending: expected Working, got {result}'
 result = bridge._format_watchdog_status('nonexistent_worker', lambda n: False, state_snapshot=snapshot)
-assert result == 'available', f'Unknown+idle: expected available, got {result}'
+assert result == 'Ready', f'Unknown+idle: expected Ready, got {result}'
 
 # Clean up
 with bridge._watchdog_lock:
@@ -5896,7 +6115,7 @@ test_extra_mounts_docker_cmd() {
     if python3 -c "
 import os
 os.environ['SANDBOX_ENABLED'] = '1'
-os.environ['PORT'] = '8095'
+os.environ['PORT'] = '8295'
 os.environ['SANDBOX_MOUNTS'] = '/host:/container,ro:/readonly:/readonly'
 
 # Re-import to pick up env changes
@@ -5918,6 +6137,1040 @@ print('OK')
         success "Extra mounts parsing works"
     else
         fail "Extra mounts parsing test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Teleport SSH Foundation Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_remote_run_local() {
+    info "Testing _remote_run with host=None runs locally..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+# _remote_run with host=None should call subprocess.run without ssh prefix
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')
+    bridge._remote_run(['tmux', 'has-session', '-t', 'test'], host=None, capture_output=True)
+    args = mock_run.call_args[0][0]
+    assert args == ['tmux', 'has-session', '-t', 'test'], f'Local: expected raw cmd, got {args}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_remote_run local passes commands through"
+    else
+        fail "_remote_run local test failed"
+    fi
+}
+
+test_remote_run_ssh() {
+    info "Testing _remote_run with host prefixes ssh..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+# _remote_run with host='mac' should prefix with ssh and shell-quote args
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')
+    bridge._remote_run(['tmux', 'has-session', '-t', 'test'], host='mac', capture_output=True)
+    args = mock_run.call_args[0][0]
+    # New format: ['ssh', host, 'shell-quoted-command']
+    assert args[0] == 'ssh', f'Expected ssh, got {args[0]}'
+    assert args[1] == 'mac', f'Expected mac, got {args[1]}'
+    assert len(args) == 3, f'Expected 3 args (ssh host cmd), got {len(args)}: {args}'
+    assert 'has-session' in args[2], f'Expected has-session in cmd string, got {args[2]}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_remote_run remote prefixes ssh"
+    else
+        fail "_remote_run remote test failed"
+    fi
+}
+
+test_remote_run_stdin() {
+    info "Testing _remote_run passes input/kwargs through..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Verify kwargs (input, capture_output, etc.) are forwarded
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0)
+    bridge._remote_run(['tmux', 'load-buffer', '-b', 'buf1', '-'], host='mac', input=b'hello', capture_output=True)
+    kwargs = mock_run.call_args[1]
+    assert kwargs.get('input') == b'hello', f'input not forwarded: {kwargs}'
+    assert kwargs.get('capture_output') == True, f'capture_output not forwarded: {kwargs}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_remote_run forwards kwargs"
+    else
+        fail "_remote_run kwargs test failed"
+    fi
+}
+
+test_remote_copy() {
+    info "Testing _remote_copy builds scp commands..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import shutil
+import bridge
+
+# Local copy (no host) — should use shutil.copy2
+with patch('shutil.copy2') as mock_copy:
+    bridge._remote_copy('/tmp/a.txt', '/tmp/b.txt', host=None)
+    mock_copy.assert_called_once_with('/tmp/a.txt', '/tmp/b.txt')
+
+# Push to remote — scp local remote:path
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0)
+    bridge._remote_copy('/tmp/a.txt', '/remote/b.txt', host='mac', direction='push')
+    args = mock_run.call_args[0][0]
+    assert args == ['scp', '-q', '/tmp/a.txt', 'mac:/remote/b.txt'], f'Push: got {args}'
+
+# Pull from remote — scp remote:path local
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0)
+    bridge._remote_copy('/remote/a.txt', '/tmp/b.txt', host='mac', direction='pull')
+    args = mock_run.call_args[0][0]
+    assert args == ['scp', '-q', 'mac:/remote/a.txt', '/tmp/b.txt'], f'Pull: got {args}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_remote_copy handles local/push/pull"
+    else
+        fail "_remote_copy test failed"
+    fi
+}
+
+test_worker_host_field() {
+    info "Testing worker registry stores host field..."
+
+    if python3 -c "
+import json, tempfile
+from pathlib import Path
+import bridge
+
+# Use temp dir
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+
+# Add worker with host
+bridge._registry_add('kenji', 'claude', 123, host='mac')
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert data['workers']['kenji']['host'] == 'mac', f'host not stored: {data[\"workers\"][\"kenji\"]}'
+
+# Add worker without host (local)
+bridge._registry_add('lee', 'claude', 123)
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+assert data['workers']['lee'].get('host') is None, f'local worker should have no host'
+
+# get_worker_host reads back correctly
+assert bridge.get_worker_host('kenji') == 'mac', 'get_worker_host should return mac'
+assert bridge.get_worker_host('lee') is None, 'get_worker_host should return None for local'
+assert bridge.get_worker_host('nobody') is None, 'get_worker_host should return None for missing'
+
+# Restore
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Worker registry stores and retrieves host field"
+    else
+        fail "Worker host field test failed"
+    fi
+}
+
+test_hire_parses_host() {
+    info "Testing hire parses name@host syntax..."
+
+    if python3 -c "
+import bridge
+
+# Parse name@host
+name, host = bridge.parse_worker_target('kenji@mac')
+assert name == 'kenji', f'Expected kenji, got {name}'
+assert host == 'mac', f'Expected mac, got {host}'
+
+# Parse plain name (no host)
+name, host = bridge.parse_worker_target('lee')
+assert name == 'lee', f'Expected lee, got {name}'
+assert host is None, f'Expected None, got {host}'
+
+# Parse name@host with dashes
+name, host = bridge.parse_worker_target('my-worker@mac-mini')
+assert name == 'my-worker', f'Expected my-worker, got {name}'
+assert host == 'mac-mini', f'Expected mac-mini, got {host}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "hire parses name@host syntax"
+    else
+        fail "hire name@host parsing test failed"
+    fi
+}
+
+test_tmux_send_message_remote() {
+    info "Testing tmux_send_message uses SSH for remote workers..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+calls = []
+def mock_run(cmd, **kwargs):
+    calls.append((list(cmd), kwargs))
+    return MagicMock(returncode=0)
+
+with patch('subprocess.run', side_effect=mock_run):
+    with patch('bridge._acquire_flock', return_value=99):
+        with patch('bridge._release_flock'):
+            bridge.tmux_send_message('test-session', 'hello', host='mac')
+
+# Verify all tmux commands went through ssh (format: ['ssh', 'mac', 'cmd string'])
+tmux_calls = [c for c in calls if 'tmux' in ' '.join(c[0])]
+for cmd, kwargs in tmux_calls:
+    assert cmd[0] == 'ssh' and cmd[1] == 'mac', f'Expected ssh mac prefix, got {cmd[:2]}'
+
+# Verify load-buffer uses stdin (- flag) not tmpfile
+load_calls = [c for c in calls if 'load-buffer' in ' '.join(c[0])]
+assert len(load_calls) == 1, f'Expected 1 load-buffer, got {len(load_calls)}'
+load_cmd_str = ' '.join(load_calls[0][0])
+assert 'load-buffer' in load_cmd_str, f'Expected load-buffer in cmd, got {load_cmd_str}'
+assert load_calls[0][1].get('input') == b'hello', f'Should pipe text via input kwarg'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "tmux_send_message uses SSH for remote workers"
+    else
+        fail "tmux_send_message remote test failed"
+    fi
+}
+
+test_tmux_exists_remote() {
+    info "Testing tmux_exists uses SSH for remote host..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0)
+    result = bridge.tmux_exists('test-session', host='mac')
+    assert result == True
+    args = mock_run.call_args[0][0]
+    assert args[:2] == ['ssh', 'mac'], f'Expected ssh prefix, got {args}'
+    cmd_str = ' '.join(args)
+    assert 'has-session' in cmd_str, f'Expected has-session in cmd: {cmd_str}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "tmux_exists uses SSH for remote host"
+    else
+        fail "tmux_exists remote test failed"
+    fi
+}
+
+test_process_inspection_remote() {
+    info "Testing pgrep/kill use SSH for remote workers..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+# _get_claude_pid with host should prefix ssh
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stdout='12345\n')
+    result = bridge._get_claude_pid('999', host='mac')
+    args = mock_run.call_args[0][0]
+    assert args[:2] == ['ssh', 'mac'], f'Expected ssh prefix for pgrep, got {args}'
+    cmd_str = ' '.join(args)
+    assert 'pgrep' in cmd_str, f'Expected pgrep in cmd: {cmd_str}'
+    assert result == '12345'
+
+# _child_count with host should prefix ssh
+with patch('subprocess.run') as mock_run:
+    mock_run.return_value = MagicMock(returncode=0, stdout='111\n222\n')
+    result = bridge._child_count('999', host='mac')
+    args = mock_run.call_args[0][0]
+    assert args[:2] == ['ssh', 'mac'], f'Expected ssh prefix for child_count, got {args}'
+    assert result == 2
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Process inspection uses SSH for remote workers"
+    else
+        fail "Process inspection remote test failed"
+    fi
+}
+
+test_project_slug() {
+    info "Testing _project_slug converts paths to Claude session slugs..."
+
+    if python3 -c "
+import bridge
+
+assert bridge._project_slug('/home/claude/proj') == '-home-claude-proj'
+assert bridge._project_slug('/Users/joan/my-project') == '-Users-joan-my-project'
+assert bridge._project_slug('/') == '-'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_project_slug converts paths correctly"
+    else
+        fail "_project_slug test failed"
+    fi
+}
+
+test_registry_teleport_fields() {
+    info "Testing registry stores and clears teleport fields..."
+
+    if python3 -c "
+import json, tempfile
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+
+# Add a worker
+bridge._registry_add('lee', 'claude', 123)
+
+# Update with teleport info
+bridge._registry_update_teleport('lee', host='mac', home_host=None, home_cwd='/home/claude/proj')
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+w = data['workers']['lee']
+assert w['host'] == 'mac', f'host should be mac, got {w.get(\"host\")}'
+assert w['home_host'] is None, f'home_host should be None'
+assert w['home_cwd'] == '/home/claude/proj', f'home_cwd wrong'
+
+# Clear teleport info (teleback)
+bridge._registry_clear_teleport('lee')
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+w = data['workers']['lee']
+assert w.get('host') is None, f'host should be cleared'
+assert w.get('home_host') is None, f'home_host should be cleared'
+assert w.get('home_cwd') is None, f'home_cwd should be cleared'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Registry teleport fields store and clear correctly"
+    else
+        fail "Registry teleport fields test failed"
+    fi
+}
+
+test_bridge_public_url_default_empty() {
+    info "Testing BRIDGE_PUBLIC_URL defaults to empty when unset..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL',)}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_PUBLIC_URL == \"\", f\"Expected empty BRIDGE_PUBLIC_URL, got {bridge.BRIDGE_PUBLIC_URL!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "BRIDGE_PUBLIC_URL defaults to empty"
+    else
+        fail "BRIDGE_PUBLIC_URL default test failed"
+    fi
+}
+
+test_bridge_public_url_auto_bind() {
+    info "Testing BRIDGE_PUBLIC_URL auto-sets BRIDGE_BIND when implicit..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['BRIDGE_PUBLIC_URL'] = 'http://100.125.36.102:8080'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_PUBLIC_URL == \"http://100.125.36.102:8080\", bridge.BRIDGE_PUBLIC_URL
+assert bridge.BRIDGE_BIND == \"0.0.0.0\", f\"Expected BRIDGE_BIND=0.0.0.0, got {bridge.BRIDGE_BIND!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "BRIDGE_PUBLIC_URL auto-sets BRIDGE_BIND=0.0.0.0 when implicit"
+    else
+        fail "BRIDGE_PUBLIC_URL auto-bind test failed"
+    fi
+}
+
+test_bridge_public_url_no_auto_bind_when_explicit() {
+    info "Testing explicit BRIDGE_BIND overrides BRIDGE_PUBLIC_URL auto-bind..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['BRIDGE_PUBLIC_URL'] = 'http://100.125.36.102:8080'
+env['BRIDGE_BIND'] = '127.0.0.9'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_PUBLIC_URL == \"http://100.125.36.102:8080\", bridge.BRIDGE_PUBLIC_URL
+assert bridge.BRIDGE_BIND == \"127.0.0.9\", f\"Expected explicit BRIDGE_BIND to persist, got {bridge.BRIDGE_BIND!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "Explicit BRIDGE_BIND is preserved with BRIDGE_PUBLIC_URL"
+    else
+        fail "Explicit BRIDGE_BIND override test failed"
+    fi
+}
+
+test_teleport_preflight_uses_public_url() {
+    info "Testing teleport preflight uses BRIDGE_PUBLIC_URL when BRIDGE_URL is localhost..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_bridge_url = bridge.BRIDGE_URL
+had_bridge_public_url = hasattr(bridge, 'BRIDGE_PUBLIC_URL')
+orig_bridge_public_url = getattr(bridge, 'BRIDGE_PUBLIC_URL', '')
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+bridge.BRIDGE_URL = 'http://localhost:8080'
+bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8080'
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session): return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+class MockThread:
+    def __init__(self, *args, **kwargs): pass
+    def start(self): pass
+
+bridge._registry_add('lee', 'claude', 123)
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+remote_calls = []
+
+def mock_remote_run(cmd, **kwargs):
+    remote_calls.append(list(cmd))
+    return MagicMock(returncode=0, stdout='ok\\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('bridge.threading.Thread', MockThread):
+    router.cmd_teleport('lee mac', 123)
+
+joined = [' '.join(c) for c in remote_calls]
+assert any('curl -sf --connect-timeout 5 http://100.125.36.102:8080/health' in c for c in joined), \
+    f'Expected health check against BRIDGE_PUBLIC_URL, got: {joined}'
+assert any('Teleporting lee to mac' in s for s in mock_api.sent), \
+    f'Expected teleport to proceed, got messages: {mock_api.sent}'
+assert not any('Cannot teleport' in s for s in mock_api.sent), \
+    f'Should not reject when BRIDGE_PUBLIC_URL is reachable, got: {mock_api.sent}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge.BRIDGE_URL = orig_bridge_url
+if had_bridge_public_url:
+    bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
+else:
+    delattr(bridge, 'BRIDGE_PUBLIC_URL')
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Teleport preflight uses BRIDGE_PUBLIC_URL instead of localhost BRIDGE_URL"
+    else
+        fail "Teleport preflight BRIDGE_PUBLIC_URL test failed"
+    fi
+}
+
+test_teleport_remote_worker_gets_public_url() {
+    info "Testing remote worker receives BRIDGE_PUBLIC_URL in tmux environment..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+orig_bridge_url = bridge.BRIDGE_URL
+had_bridge_public_url = hasattr(bridge, 'BRIDGE_PUBLIC_URL')
+orig_bridge_public_url = getattr(bridge, 'BRIDGE_PUBLIC_URL', '')
+
+bridge.BRIDGE_URL = 'http://localhost:8080'
+bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8080'
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None): return {}
+    def is_online(self, name, session): return True
+
+class MockTelegramAPI:
+    def send_message(self, chat_id, text, **kwargs): pass
+
+class MockBackend:
+    is_interactive = False
+    def start_cmd(self, session_id):
+        return f'claude --resume {session_id} --dangerously-skip-permissions'
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+remote_calls = []
+
+def mock_remote_run(cmd, **kwargs):
+    remote_calls.append(list(cmd))
+    if cmd[:2] == ['id', '-u']:
+        return MagicMock(returncode=0, stdout='1000\\n', stderr='')
+    return MagicMock(returncode=0, stdout='ok\\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('bridge.get_backend', return_value=MockBackend()), \
+     patch('bridge.time.sleep', return_value=None):
+    ok = router._start_worker_on_target('lee', 'mac', '', 'abc-123-session', 'claude')
+
+assert ok is True, 'Expected target worker start to succeed'
+bridge_exports = [c for c in remote_calls if len(c) >= 6 and c[0] == 'tmux' and c[1] == 'set-environment' and c[4] == 'BRIDGE_URL']
+assert bridge_exports, f'Expected tmux BRIDGE_URL export call, got {remote_calls}'
+assert any(c[5] == 'http://100.125.36.102:8080' for c in bridge_exports), \
+    f'Expected BRIDGE_URL export to use BRIDGE_PUBLIC_URL, got {bridge_exports}'
+
+bridge.BRIDGE_URL = orig_bridge_url
+if had_bridge_public_url:
+    bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
+else:
+    delattr(bridge, 'BRIDGE_PUBLIC_URL')
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Remote worker BRIDGE_URL export uses BRIDGE_PUBLIC_URL"
+    else
+        fail "Remote worker BRIDGE_PUBLIC_URL export test failed"
+    fi
+}
+
+test_teleport_preflight_rejects_without_public_url() {
+    info "Testing teleport preflight rejects localhost BRIDGE_URL without BRIDGE_PUBLIC_URL..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_bridge_url = bridge.BRIDGE_URL
+had_bridge_public_url = hasattr(bridge, 'BRIDGE_PUBLIC_URL')
+orig_bridge_public_url = getattr(bridge, 'BRIDGE_PUBLIC_URL', '')
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+bridge.BRIDGE_URL = 'http://localhost:8080'
+bridge.BRIDGE_PUBLIC_URL = ''
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session): return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+bridge._registry_add('lee', 'claude', 123)
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+
+def mock_remote_run(cmd, **kwargs):
+    return MagicMock(returncode=0, stdout='ok\\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run):
+    router.cmd_teleport('lee mac', 123)
+
+assert any('Cannot teleport' in s for s in mock_api.sent), \
+    f'Expected localhost rejection, got: {mock_api.sent}'
+assert any('BRIDGE_PUBLIC_URL' in s for s in mock_api.sent), \
+    f'Expected guidance to set BRIDGE_PUBLIC_URL, got: {mock_api.sent}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge.BRIDGE_URL = orig_bridge_url
+if had_bridge_public_url:
+    bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
+else:
+    delattr(bridge, 'BRIDGE_PUBLIC_URL')
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Teleport preflight rejects localhost BRIDGE_URL without BRIDGE_PUBLIC_URL"
+    else
+        fail "Teleport preflight missing BRIDGE_PUBLIC_URL test failed"
+    fi
+}
+
+test_teleport_preflight_checks() {
+    info "Testing teleport pre-flight rejects bad states..."
+
+    if python3 -c "
+import json, tempfile, threading
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+
+# Set up mock workers with lee registered
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session):
+        return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+
+# Register lee in registry
+bridge._registry_add('lee', 'claude', 123)
+
+# Test 1: Worker not found
+mock_api.sent.clear()
+router.cmd_teleport('nobody mac', 123)
+assert any('not found' in s.lower() or 'not in registry' in s.lower() for s in mock_api.sent), \
+    f'T1: should reject missing worker, got: {mock_api.sent}'
+
+# Test 2: Worker is busy (inject state)
+mock_api.sent.clear()
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('BUSY_TOOL', 'children=3', 0)
+router.cmd_teleport('lee mac', 123)
+assert any('busy' in s.lower() or 'idle' in s.lower() for s in mock_api.sent), \
+    f'T2: should reject busy worker, got: {mock_api.sent}'
+
+# Test 3: Target unreachable
+mock_api.sent.clear()
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with patch('bridge._remote_run') as mock_rr:
+    mock_rr.return_value = MagicMock(returncode=1, stdout='', stderr='err')
+    router.cmd_teleport('lee unreachable-host', 123)
+assert any('cannot reach' in s.lower() or 'reach' in s.lower() for s in mock_api.sent), \
+    f'T3: should reject unreachable host, got: {mock_api.sent}'
+
+# Restore
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Teleport pre-flight checks reject bad states"
+    else
+        fail "Teleport pre-flight checks test failed"
+    fi
+}
+
+test_teleport_end_to_end() {
+    info "Testing teleport end-to-end flow (mocked SSH)..."
+
+    if python3 -c "
+import json, tempfile, time, threading
+from pathlib import Path
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_bridge_url = bridge.BRIDGE_URL
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
+
+# Create session dir with state files
+session_dir = bridge.SESSIONS_DIR / 'lee'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('abc-123-session')
+(session_dir / 'claude_session_cwd').write_text('/home/claude/myproject')
+(session_dir / 'chat_id').write_text('123')
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session): return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+
+bridge._registry_add('lee', 'claude', 123)
+
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+# Mock _get_claude_pid: returns None first (worker stopped), then PID (target started)
+pid_call_count = [0]
+def mock_get_claude_pid(pane_pid, host=None):
+    pid_call_count[0] += 1
+    if pid_call_count[0] <= 1:
+        return None  # Stop phase: worker already exited
+    return '99999'   # Start phase: Claude is running on target
+
+ssh_calls = []
+def mock_remote_run(cmd, **kwargs):
+    ssh_calls.append((list(cmd), kwargs))
+    return MagicMock(returncode=0, stdout='12345\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
+     patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
+     patch('bridge.telegram_api'):
+
+    # Call _do_teleport directly (deterministic, no thread timing issues)
+    router._do_teleport('lee', 'mac', '', False, 123)
+
+# Check registry was updated
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+w = data['workers']['lee']
+assert w.get('host') == 'mac', f'host should be mac after teleport, got {w}'
+assert w.get('home_host') is None, f'home_host should be None (was local)'
+assert w.get('home_cwd') == '/home/claude/myproject', f'home_cwd should preserve original'
+
+# Check teleport state file was cleaned up
+assert not (session_dir / 'teleport_state').exists(), 'teleport_state should be cleaned up'
+
+# Check some key SSH calls were made
+call_strs = [' '.join(c[0]) for c in ssh_calls]
+has_exit = any('/exit' in s for s in call_strs)
+has_tmux_new = any('tmux new-session' in s for s in call_strs)
+has_set_env = any('set-environment' in s and 'BRIDGE_URL' in s for s in call_strs)
+assert has_exit, f'Should send /exit to stop worker'
+assert has_tmux_new, f'Should create tmux on target'
+assert has_set_env, f'Should set BRIDGE_URL on target'
+
+# Now test teleback
+ssh_calls.clear()
+# After teleport, lee is on mac. Teleback should bring it local.
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+pid_call_count[0] = 0  # Reset for teleback
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
+     patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
+     patch('bridge.telegram_api'):
+
+    router._do_teleport('lee', None, '/home/claude/myproject', False, 123, is_teleback=True)
+
+# Registry should be cleared
+data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+w = data['workers']['lee']
+assert w.get('host') is None, f'host should be None after teleback, got {w}'
+assert w.get('home_host') is None, f'home_host should be cleared'
+assert w.get('home_cwd') is None, f'home_cwd should be cleared'
+
+# Restore
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge.BRIDGE_URL = orig_bridge_url
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Teleport end-to-end flow works correctly"
+    else
+        fail "Teleport end-to-end test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node-derived config tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_node_derives_tmux_prefix() {
+    info "Testing NODE_NAME derives TMUX_PREFIX..."
+
+    # NODE_NAME=mynode → TMUX_PREFIX should be "claude-mynode-"
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items()
+       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+env['NODE_NAME'] = 'mynode'
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.TMUX_PREFIX)
+'''], capture_output=True, text=True, env=env)
+prefix = result.stdout.strip()
+assert prefix == 'claude-mynode-', f'Expected claude-mynode-, got {prefix!r}'
+"; then
+        success "NODE_NAME=mynode → TMUX_PREFIX=claude-mynode-"
+    else
+        fail "NODE_NAME did not derive TMUX_PREFIX"
+    fi
+}
+
+test_node_derives_sessions_dir() {
+    info "Testing NODE_NAME derives SESSIONS_DIR..."
+
+    # NODE_NAME=mynode → SESSIONS_DIR should be ~/.claude/telegram/nodes/mynode/sessions
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items()
+       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+env['NODE_NAME'] = 'mynode'
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.SESSIONS_DIR)
+'''], capture_output=True, text=True, env=env)
+got = result.stdout.strip()
+expected = os.path.expanduser('~/.claude/telegram/nodes/mynode/sessions')
+assert got == expected, f'Expected {expected}, got {got!r}'
+"; then
+        success "NODE_NAME=mynode → SESSIONS_DIR=~/.claude/telegram/nodes/mynode/sessions"
+    else
+        fail "NODE_NAME did not derive SESSIONS_DIR"
+    fi
+}
+
+test_node_derives_port() {
+    info "Testing NODE_NAME derives PORT from default map..."
+
+    # NODE_NAME=prod → PORT=8271, dev→8272, test→8295, other→8270
+    if python3 -c "
+import subprocess, sys, os
+
+cases = [('prod', 8271), ('dev', 8272), ('test', 8295), ('custom', 8270)]
+for node, expected_port in cases:
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+    env['NODE_NAME'] = node
+    env['TELEGRAM_BOT_TOKEN'] = 'test'
+    result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.PORT)
+'''], capture_output=True, text=True, env=env)
+    got = int(result.stdout.strip())
+    assert got == expected_port, f'NODE_NAME={node}: expected PORT={expected_port}, got {got}'
+"; then
+        success "NODE_NAME derives correct PORT for prod/dev/test/other"
+    else
+        fail "NODE_NAME did not derive PORT correctly"
+    fi
+}
+
+test_node_derives_bridge_url() {
+    info "Testing NODE_NAME derives BRIDGE_URL from PORT..."
+
+    # NODE_NAME=dev → PORT=8272 → BRIDGE_URL=http://localhost:8272
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items()
+       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+env['NODE_NAME'] = 'dev'
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.BRIDGE_URL)
+'''], capture_output=True, text=True, env=env)
+got = result.stdout.strip()
+assert got == 'http://localhost:8272', f'Expected http://localhost:8272, got {got!r}'
+"; then
+        success "NODE_NAME=dev → BRIDGE_URL=http://localhost:8272"
+    else
+        fail "NODE_NAME did not derive BRIDGE_URL"
+    fi
+}
+
+test_node_explicit_env_overrides() {
+    info "Testing explicit env vars override NODE_NAME derivation..."
+
+    # NODE_NAME=prod but PORT=9999, TMUX_PREFIX=custom-, SESSIONS_DIR=/tmp/custom
+    if python3 -c "
+import subprocess, sys, os, tempfile
+tmpdir = tempfile.mkdtemp()
+env = {k: v for k, v in os.environ.items()
+       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+env['NODE_NAME'] = 'prod'
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['PORT'] = '9999'
+env['TMUX_PREFIX'] = 'custom-'
+env['SESSIONS_DIR'] = tmpdir
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.PORT)
+print(bridge.TMUX_PREFIX)
+print(bridge.SESSIONS_DIR)
+'''], capture_output=True, text=True, env=env)
+lines = result.stdout.strip().split('\n')
+assert lines[0] == '9999', f'PORT: expected 9999, got {lines[0]!r}'
+assert lines[1] == 'custom-', f'TMUX_PREFIX: expected custom-, got {lines[1]!r}'
+assert lines[2] == tmpdir, f'SESSIONS_DIR: expected {tmpdir}, got {lines[2]!r}'
+import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+"; then
+        success "Explicit env vars override NODE_NAME derivation"
+    else
+        fail "Explicit env vars did not override NODE_NAME"
+    fi
+}
+
+test_node_empty_uses_defaults() {
+    info "Testing no NODE_NAME uses existing defaults..."
+
+    # No NODE_NAME, no PORT, no TMUX_PREFIX, no SESSIONS_DIR → original defaults
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items()
+       if k not in ('NODE_NAME', 'TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+print(bridge.PORT)
+print(bridge.TMUX_PREFIX)
+print(bridge.SESSIONS_DIR)
+print(bridge.BRIDGE_URL)
+'''], capture_output=True, text=True, env=env)
+lines = result.stdout.strip().split('\n')
+expected_dir = os.path.expanduser('~/.claude/telegram/sessions')
+assert lines[0] == '8270', f'PORT: expected 8270, got {lines[0]!r}'
+assert lines[1] == 'claude-', f'TMUX_PREFIX: expected claude-, got {lines[1]!r}'
+assert lines[2] == expected_dir, f'SESSIONS_DIR: expected {expected_dir}, got {lines[2]!r}'
+assert lines[3] == 'http://localhost:8270', f'BRIDGE_URL: expected http://localhost:8270, got {lines[3]!r}'
+"; then
+        success "No NODE_NAME preserves original defaults"
+    else
+        fail "Missing NODE_NAME changed defaults"
     fi
 }
 
@@ -6582,7 +7835,7 @@ bridge._record_worker_state('alive', 'READY', 'idle', 1000)
 lines = bridge.format_team_lines(registered, 'alive')
 output = '\n'.join(lines)
 assert 'dead' in output, f'dead worker should appear in team output'
-assert 'exited' in output, f'exited status should appear in team output'
+assert 'Session ended' in output, f'exited status should appear as Session ended: {output}'
 assert 'alive' in output, f'alive worker should appear in team output'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -6614,7 +7867,7 @@ bridge._record_worker_state('kelvin', 'BUSY_THINKING', 'thinking', 1000)
 # Provide live activity data
 worker_live = {
     'kenji': {'backend': 'claude', 'activity': 'Running Bash', 'context_pct': '54%'},
-    'lee': {'backend': 'claude', 'activity': 'Idle at prompt', 'context_pct': '27%'},
+    'lee': {'backend': 'claude', 'activity': 'Ready', 'context_pct': '27%'},
     'mon': {'backend': 'claude', 'activity': 'Rate limited — waiting to retry', 'context_pct': '42%'},
     'kelvin': {'backend': 'claude', 'activity': 'Waiting for plan approval', 'context_pct': '27%'},
 }
@@ -6623,7 +7876,7 @@ lines = bridge.format_team_lines(registered, 'kenji', worker_live=worker_live)
 output = '\n'.join(lines)
 
 # Header should have team count and traffic-light summary
-assert 'Team (4)' in output, f'Missing team count: {output}'
+assert '4 agents' in output, f'Missing team count: {output}'
 assert 'focused: kenji' in output.lower() or 'focused: Kenji' in output, f'Missing focused: {output}'
 
 # Red/yellow/green counts
@@ -6634,12 +7887,12 @@ assert chr(0x1F7E2) in output, f'Missing green circle: {output}'  # 🟢
 # mon has rate limit -> needs attention
 assert 'mon' in output and 'rate limit' in output.lower(), f'Missing mon rate limit: {output}'
 
-# kelvin waiting for approval -> needs input
-assert 'kelvin' in output and 'needs input' in output.lower(), f'Missing kelvin needs input: {output}'
+# kelvin waiting for approval -> needs reply
+assert 'kelvin' in output and 'needs reply' in output.lower(), f'Missing kelvin needs reply: {output}'
 
 # Activity should appear for each worker
 assert 'Running Bash' in output, f'Missing kenji activity: {output}'
-assert 'Idle at prompt' in output, f'Missing lee activity: {output}'
+assert 'Ready' in output, f'Missing lee Ready activity: {output}'
 
 # Red workers should come before green in the list
 lines_lower = output.lower()
@@ -6658,6 +7911,321 @@ print('OK')
         success "/team shows live activity and attention"
     else
         fail "/team live activity format test failed"
+    fi
+}
+
+test_normalize_activity_spinner_verbs() {
+    info "Testing spinner verbs are normalized to Thinking..."
+
+    if python3 -c "
+import bridge
+
+cases = [
+    ('Ionizing (52m 40s)', 'Thinking (52m 40s)'),
+    ('Schlepping (45s)', 'Thinking (45s)'),
+    ('Whirring (2m 19s)', 'Thinking (2m 19s)'),
+    ('Hullaballooing (17m 40s)', 'Thinking (17m 40s)'),
+    ('Running Bash', 'Running Bash'),
+    ('Ready', 'Ready'),
+    ('In plan mode', 'In plan mode'),
+    ('Error: something broke', 'Error: something broke'),
+    ('Tasks (3/5 done)', 'Tasks (3/5 done)'),
+    ('Compacting conversation (5m)', 'Compacting conversation (5m)'),
+]
+for raw, expected in cases:
+    got = bridge._normalize_activity(raw)
+    assert got == expected, f'_normalize_activity({raw!r}) = {got!r}, expected {expected!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Spinner verbs normalized to Thinking"
+    else
+        fail "Spinner verb normalization failed"
+    fi
+}
+
+test_team_ready_replaces_idle() {
+    info "Testing _extract_activity returns Ready for idle prompt..."
+
+    if python3 -c "
+import bridge
+
+# Simulate pane with idle prompt
+pane_lines = [
+    '--- some output ---',
+    '❯ ',
+    '-------------------------------------------',
+    '  ⏵⏵ bypass permissions on · 5 bashes',
+]
+result = bridge._extract_activity(pane_lines)
+assert result == 'Ready', f'Expected Ready, got {result!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_extract_activity returns Ready for idle prompt"
+    else
+        fail "_extract_activity Ready test failed"
+    fi
+}
+
+test_team_header_human_friendly() {
+    info "Testing /team header is human-friendly..."
+
+    if python3 -c "
+import bridge
+
+registered = {
+    'kai': {'tmux': 'claude-test-kai', 'backend': 'claude'},
+    'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'},
+}
+bridge._record_worker_state('kai', 'WAITING_INPUT', 'question=Auth', 1000)
+bridge._record_worker_state('lee', 'READY', 'idle', 1000)
+
+lines = bridge.format_team_lines(registered, 'lee')
+header = lines[0]
+
+assert 'agents' in header, f'Header should contain agents: {header}'
+assert 'ok' in header.lower() or 'active' in header.lower(), f'Header should contain ok: {header}'
+assert 'need reply' in header.lower() or 'waiting' in header.lower(), f'Header should say need reply: {header}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team header is human-friendly"
+    else
+        fail "/team header human-friendly test failed"
+    fi
+}
+
+test_team_row_format_simplified() {
+    info "Testing /team row format is simplified..."
+
+    if python3 -c "
+import bridge
+
+registered = {
+    'kai': {'tmux': 'claude-test-kai', 'backend': 'claude'},
+    'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'},
+}
+bridge._record_worker_state('kai', 'READY', 'idle', 1000)
+bridge._record_worker_state('lee', 'READY', 'idle', 1000)
+
+worker_live = {
+    'kai': {'backend': 'claude', 'activity': 'Ready', 'context_pct': '54%'},
+    'lee': {'backend': 'claude', 'activity': 'Ready', 'context_pct': '--'},
+}
+
+lines = bridge.format_team_lines(registered, 'lee', worker_live=worker_live)
+output = '\n'.join(lines)
+
+# Should not have 'no blocker' or 'needs input' as separate column
+assert 'no blocker' not in output, f'Should not have no blocker column: {output}'
+
+# Worker with context should show it
+kai_line = [l for l in lines if 'kai' in l][0]
+assert '54%' in kai_line, f'kai should show context: {kai_line}'
+
+# Worker without context should not show --
+lee_line = [l for l in lines if 'lee' in l][0]
+assert '-- ' not in lee_line and '| --' not in lee_line, f'lee should not show --: {lee_line}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team row format simplified"
+    else
+        fail "/team row format test failed"
+    fi
+}
+
+test_watchdog_alert_stuck_copy() {
+    info "Testing watchdog STUCK alert copy..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'alice': 'READY'}
+
+sent = {}
+def fake_api(method, data):
+    sent['method'] = method
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('alice', 'STUCK', 'age=900s cpu=0.0', since=100, now=1000)
+
+txt = sent['data']['text']
+assert 'no progress' in txt.lower(), f'Should say no progress: {txt}'
+assert '/restart --clean alice' in txt, f'Should have restart command: {txt}'
+assert 'starts fresh' in txt.lower(), f'Should explain --clean: {txt}'
+assert 'STUCK' not in txt, f'Should not expose internal state name: {txt}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog STUCK alert has human-friendly copy"
+    else
+        fail "Watchdog STUCK alert copy test failed"
+    fi
+}
+
+test_watchdog_alert_poisoned_copy() {
+    info "Testing watchdog POISONED alert copy..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'bob': 'READY'}
+
+sent = {}
+def fake_api(method, data):
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('bob', 'POISONED', 'error loop', since=100, now=1000)
+
+txt = sent['data']['text']
+assert 'error' in txt.lower(), f'Should mention error: {txt}'
+assert 'POISONED' not in txt, f'Should not expose internal state POISONED: {txt}'
+assert '/restart --clean bob' in txt, f'Should have restart command: {txt}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog POISONED alert uses human-friendly copy"
+    else
+        fail "Watchdog POISONED alert copy test failed"
+    fi
+}
+
+test_watchdog_alert_dead_copy() {
+    info "Testing watchdog DEAD alert copy..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'carol': 'READY'}
+
+sent = {}
+def fake_api(method, data):
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('carol', 'DEAD', 'process gone', since=100, now=1000)
+
+txt = sent['data']['text']
+assert 'stopped' in txt.lower(), f'Should say stopped: {txt}'
+assert 'process' not in txt.lower(), f'Should not say process: {txt}'
+assert '/restart --clean carol' in txt, f'Should have restart command: {txt}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog DEAD alert uses human-friendly copy"
+    else
+        fail "Watchdog DEAD alert copy test failed"
+    fi
+}
+
+test_watchdog_alert_waiting_input_copy() {
+    info "Testing watchdog WAITING_INPUT alert copy..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'dave': 'READY'}
+bridge._waiting_input_details = {
+    'dave': {
+        'header': 'Auth method',
+        'options': [
+            {'num': 1, 'label': 'OAuth', 'selected': True},
+            {'num': 2, 'label': 'JWT', 'selected': False},
+        ],
+        'selected_num': 1,
+    }
+}
+
+sent = {}
+def fake_api(method, data):
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('dave', 'WAITING_INPUT', 'question=Auth', since=100, now=1000)
+
+txt = sent['data']['text']
+assert 'needs your reply' in txt.lower() or 'reply' in txt.lower(), f'Should say needs reply: {txt}'
+assert 'Auth method' in txt, f'Should include question header: {txt}'
+assert 'waiting for your input' not in txt.lower(), f'Should not use old copy: {txt}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog WAITING_INPUT alert uses human-friendly copy"
+    else
+        fail "Watchdog WAITING_INPUT alert copy test failed"
+    fi
+}
+
+test_watchdog_resolved_copy() {
+    info "Testing watchdog resolved alert copy..."
+
+    if python3 -c "
+import bridge
+from unittest.mock import patch
+
+bridge.admin_chat_id = 123
+bridge._prev_worker_states = {'eve': 'STUCK'}
+bridge._recent_restarts = {}
+
+sent = {}
+def fake_api(method, data):
+    sent['data'] = data
+    return {'ok': True}
+
+with patch('bridge.telegram_api', fake_api):
+    bridge._send_resolved_alert('eve', 'READY')
+
+txt = sent['data']['text']
+assert 'back to normal' in txt.lower() or chr(0x2705) in txt, f'Should say back to normal: {txt}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog resolved alert has good copy"
+    else
+        fail "Watchdog resolved alert copy test failed"
+    fi
+}
+
+test_team_attention_needs_reply() {
+    info "Testing _team_attention_summary uses needs reply..."
+
+    if python3 -c "
+import bridge
+
+# WAITING_INPUT status should return 'needs reply' not 'needs input'
+icon, label, rank = bridge._team_attention_summary('Needs reply (5m)', 'some activity')
+assert label == 'needs reply', f'Expected needs reply, got {label!r}'
+assert icon == chr(0x1F7E1), f'Expected yellow, got {icon!r}'
+
+# Green worker should return 'ok' not 'no blocker'
+icon2, label2, rank2 = bridge._team_attention_summary('Ready', 'Ready')
+assert label2 == 'ok', f'Expected ok, got {label2!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_team_attention_summary uses needs reply / ok"
+    else
+        fail "_team_attention_summary copy test failed"
     fi
 }
 
@@ -6685,7 +8253,7 @@ assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
 
 # Verify _format_watchdog_status returns 'exited'
 status = bridge._format_watchdog_status('deadworker')
-assert status == 'exited', f'expected \"exited\", got \"{status}\"'
+assert status == 'Session ended', f'expected \"Session ended\", got \"{status}\"'
 
 # Verify EXITED is in the alert actions
 bridge.admin_chat_id = 12345
@@ -8971,6 +10539,7 @@ run_unit_tests() {
     run_test test_watchdog_resolved_alert
     run_test test_handle_watchdog_transition
     run_test test_parse_at_mentions
+    run_test test_auto_focus_on_consecutive_mentions
     run_test test_format_watchdog_status
     run_test test_switch_session
     run_test test_send_response_html_formatting
@@ -8979,6 +10548,7 @@ run_unit_tests() {
     run_test test_progress_continuity_for_noninteractive
     run_test test_extract_worker_activity
     run_test test_activity_detects_interactive_prompt
+    run_test test_activity_detects_plan_approval
     run_test test_watchdog_waiting_input_state
     run_test test_progress_shows_activity
     run_test test_noninteractive_backpressure
@@ -8986,6 +10556,37 @@ run_unit_tests() {
     run_test test_pipe_forwarding_to_codex
     run_test test_update_bot_commands_includes_codex
     run_test test_broadcast_includes_codex
+    # Unit tests - Teleport SSH Foundation
+    log ""
+    log "── Teleport SSH Foundation Tests (Unit) ────────────────────────────────"
+    run_test test_remote_run_local
+    run_test test_remote_run_ssh
+    run_test test_remote_run_stdin
+    run_test test_remote_copy
+    run_test test_worker_host_field
+    run_test test_hire_parses_host
+    run_test test_tmux_send_message_remote
+    run_test test_tmux_exists_remote
+    run_test test_process_inspection_remote
+    run_test test_project_slug
+    run_test test_registry_teleport_fields
+    run_test test_bridge_public_url_default_empty
+    run_test test_bridge_public_url_auto_bind
+    run_test test_bridge_public_url_no_auto_bind_when_explicit
+    run_test test_teleport_preflight_uses_public_url
+    run_test test_teleport_remote_worker_gets_public_url
+    run_test test_teleport_preflight_rejects_without_public_url
+    run_test test_teleport_preflight_checks
+    run_test test_teleport_end_to_end
+    # Unit tests - Node-derived config
+    log ""
+    log "── Node-Derived Config Tests (Unit) ────────────────────────────────────"
+    run_test test_node_derives_tmux_prefix
+    run_test test_node_derives_sessions_dir
+    run_test test_node_derives_port
+    run_test test_node_derives_bridge_url
+    run_test test_node_explicit_env_overrides
+    run_test test_node_empty_uses_defaults
     # Unit tests - Media tags
     log ""
     log "── Media Tag Tests (Unit) ──────────────────────────────────────────────"
@@ -9015,6 +10616,19 @@ run_unit_tests() {
     run_test test_team_shows_exited
     run_test test_team_live_activity_format
     run_test test_watchdog_exited_state
+    # Unit tests - Copy improvements (human-friendly /team + watchdog)
+    log ""
+    log "── Copy Improvement Tests (Unit) ───────────────────────────────────────"
+    run_test test_normalize_activity_spinner_verbs
+    run_test test_team_ready_replaces_idle
+    run_test test_team_header_human_friendly
+    run_test test_team_row_format_simplified
+    run_test test_watchdog_alert_stuck_copy
+    run_test test_watchdog_alert_poisoned_copy
+    run_test test_watchdog_alert_dead_copy
+    run_test test_watchdog_alert_waiting_input_copy
+    run_test test_watchdog_resolved_copy
+    run_test test_team_attention_needs_reply
     # Unit tests - Concurrency
     log ""
     log "── Concurrency Tests (Unit) ────────────────────────────────────────────"
@@ -9025,7 +10639,7 @@ run_unit_tests() {
     run_test test_long_text_enter_with_bracketed_paste
     run_test test_slow_paste_render_enter_delivered
     run_test test_tmux_send_uses_flock
-    run_test test_send_example_uses_flock
+    run_test test_send_example_uses_paste_buffer
     run_test test_concurrent_sends_no_interleave
     run_test test_flock_per_session_isolation
     run_test test_flock_node_namespaced

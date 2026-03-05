@@ -6,7 +6,7 @@
 # Token isolation: Claude never sees the token.
 #
 # ENV VARS (set by bridge via tmux set-environment):
-#   BRIDGE_URL    - Full bridge URL (e.g., "http://localhost:8081" or "https://remote.example.com")
+#   BRIDGE_URL    - Full bridge URL (e.g., "http://localhost:8271" or "https://remote.example.com")
 #   TMUX_PREFIX   - Session prefix (e.g., "claude-prod-")
 #   SESSIONS_DIR  - Path to session files
 #   PORT          - Bridge port (fallback if BRIDGE_URL not set)

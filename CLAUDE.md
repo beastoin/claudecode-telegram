@@ -203,7 +203,7 @@ pkill -f cloudflared
 pkill -f bridge.py
 
 # WRONG - kills without knowing which node owns the port
-lsof -ti :8081 | xargs kill
+lsof -ti :8271 | xargs kill
 
 # RIGHT - use specific PID from file
 kill $(cat ~/.claude/telegram/nodes/prod/pid)
@@ -216,15 +216,15 @@ kill $(cat ~/.claude/telegram/nodes/prod/pid)
 
 ### Verify port ownership before killing
 
-**Problem:** Ran `lsof -ti :8081 | xargs kill` thinking it was dev node, but port 8081 = prod. Killed production bridge while team was working.
+**Problem:** Ran `lsof -ti :8271 | xargs kill` thinking it was dev node, but port 8271 = prod. Killed production bridge while team was working.
 
 **Default port assignments (overridable via `--port` or `PORT` env var):**
 | Default Port | Node | Sandbox |
 |--------------|------|---------|
-| 8080 | sandbox (or custom) | `--sandbox` |
-| 8081 | **prod** | `--no-sandbox` |
-| 8082 | dev | `--no-sandbox` |
-| 8095 | test (test.sh) | `--no-sandbox` |
+| 8270 | sandbox (or custom) | `--sandbox` |
+| 8271 | **prod** | `--no-sandbox` |
+| 8272 | dev | `--no-sandbox` |
+| 8295 | test (test.sh) | `--no-sandbox` |
 
 Ports are dynamic — always check the actual running port, not the defaults.
 
@@ -249,7 +249,7 @@ cat ~/.claude/telegram/nodes/prod/port
 ```bash
 # Load token and restart prod
 source ~/.config/claudecode-telegram/prod.env
-TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./claudecode-telegram.sh --node prod --no-sandbox --port 8080 run
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./claudecode-telegram.sh --node prod --no-sandbox run
 ```
 
 | File | Purpose |
@@ -279,7 +279,7 @@ kill $(cat ~/.claude/telegram/claudecode-telegram.pid)
 **Problem:** Deployed v0.9.2 fix directly to prod without testing on dev node first. Ran local stress test but skipped real integration testing on dev.
 
 **Fix:** Always test on dev node before prod deployment:
-1. Start dev bridge with dev bot token on port 8082
+1. Start dev bridge with dev bot token on port 8272
 2. Run full integration tests against dev
 3. Test manually via Telegram on dev bot
 4. Only then deploy to prod

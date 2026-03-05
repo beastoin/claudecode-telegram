@@ -385,7 +385,7 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TEST_BOT_TOKEN` | Yes | Bot token from @BotFather |
-| `TEST_PORT` | No | Bridge port (default: 8095) |
+| `TEST_PORT` | No | Bridge port (default: 8295) |
 | `TEST_CHAT_ID` | No | Your chat ID for e2e tests (default: mock 123456789) |
 | `FAST` | No | Set to `1` for unit + CLI tests only |
 | `FULL` | No | Set to `1` to include tunnel tests |
@@ -396,10 +396,10 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 
 ```bash
 # Start bridge
-TELEGRAM_BOT_TOKEN='...' PORT=8095 python3 bridge.py &
+TELEGRAM_BOT_TOKEN='...' PORT=8295 python3 bridge.py &
 
 # Send simulated message
-curl -X POST http://localhost:8095 \
+curl -X POST http://localhost:8295 \
   -H "Content-Type: application/json" \
   -d '{
     "update_id": 1,
@@ -430,7 +430,7 @@ Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/`:
 | Resource | Test | Production |
 |----------|------|------------|
 | Node dir | `~/.claude/telegram/nodes/test/` | `~/.claude/telegram/nodes/prod/` |
-| Port | 8095 | 8081 |
+| Port | 8295 | 8271 |
 | tmux prefix | `claude-test-` | `claude-prod-` |
 | Session files | `.../nodes/test/sessions/` | `.../nodes/prod/sessions/` |
 | PID file | `.../nodes/test/pid` | `.../nodes/prod/pid` |

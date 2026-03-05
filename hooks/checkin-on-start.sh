@@ -6,7 +6,7 @@
 # Code injects into the post-compaction context.
 #
 # ENV VARS (set by bridge via tmux set-environment):
-#   BRIDGE_URL    - Full bridge URL (e.g., "http://localhost:8081")
+#   BRIDGE_URL    - Full bridge URL (e.g., "http://localhost:8271")
 #   TMUX_PREFIX   - Session prefix (e.g., "claude-prod-")
 #   PORT          - Bridge port (fallback if BRIDGE_URL not set)
 

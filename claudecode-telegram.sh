@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   PORT, SESSIONS_DIR, TMUX_PREFIX
 # ─────────────────────────────────────────────────────────────────────────────
 
-: "${PORT:=8080}"
+: "${PORT:=8270}"
 : "${TUNNEL_URL:=}"
 
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
@@ -115,10 +115,10 @@ get_node_tmux_prefix() {
 get_default_port() {
     local node="$1"
     case "$node" in
-        prod) echo 8081 ;;
-        dev)  echo 8082 ;;
-        test) echo 8095 ;;
-        *)    echo 8080 ;;
+        prod) echo 8271 ;;
+        dev)  echo 8272 ;;
+        test) echo 8295 ;;
+        *)    echo 8270 ;;
     esac
 }
 
@@ -1034,14 +1034,19 @@ EOF
 
             # Check tmux env vars match node config
             if $running; then
-                local tmux_port tmux_dir tmux_prefix_env
+                local tmux_port tmux_dir tmux_prefix_env tmux_bridge_url
                 tmux_port=$(tmux show-environment -t "$s" PORT 2>/dev/null | cut -d= -f2- || true)
                 tmux_dir=$(tmux show-environment -t "$s" SESSIONS_DIR 2>/dev/null | cut -d= -f2- || true)
                 tmux_prefix_env=$(tmux show-environment -t "$s" TMUX_PREFIX 2>/dev/null | cut -d= -f2- || true)
+                tmux_bridge_url=$(tmux show-environment -t "$s" BRIDGE_URL 2>/dev/null | cut -d= -f2- || true)
 
                 [[ -n "$tmux_port" && "$tmux_port" != "$port" ]] && issues+="port "
                 [[ -n "$tmux_dir" && "$tmux_dir" != "$sessions_dir" ]] && issues+="dir "
                 [[ -n "$tmux_prefix_env" && "$tmux_prefix_env" != "$tmux_prefix" ]] && issues+="prefix "
+                # BRIDGE_URL must contain the node's port (catches cross-node env overwrites)
+                if [[ -n "$tmux_bridge_url" && -n "$port" && ! "$tmux_bridge_url" =~ ":${port}" ]]; then
+                    issues+="bridge_url "
+                fi
 
                 if [[ -n "$issues" ]]; then
                     env_mismatch=true
@@ -1418,7 +1423,7 @@ FLAGS
   -V, --version         Show version
   -n, --node <name>     Target specific node
   --all                 Target all nodes (stop, status)
-  -p, --port <port>     Bridge port (default: 8080)
+  -p, --port <port>     Bridge port (default: 8270)
   --no-tunnel           Skip tunnel/webhook (manual setup)
   --tunnel-url <url>    Use existing tunnel URL
   --headless            Non-interactive mode
@@ -1437,7 +1442,7 @@ FLAGS
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
   TELEGRAM_BOT_TOKEN      Bot token from @BotFather (required)
-  PORT                    Server port (default: 8080)
+  PORT                    Server port (default: 8270)
   TUNNEL_URL              Pre-configured tunnel URL
   TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
   SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 0)

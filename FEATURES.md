@@ -67,7 +67,7 @@
 - MUST resolve target node by priority: `--node` flag, then `NODE_NAME`, then auto-detect running nodes.
 - MUST prompt interactively when multiple nodes are running unless `--headless` or non-tty, in which case it MUST error unless `--node` or `--all` is provided.
 - MUST default `run` to node `prod` when no nodes are running.
-- MUST map default ports by node name: `prod=8081`, `dev=8082`, `test=8095`, otherwise `8080`.
+- MUST map default ports by node name: `prod=8271`, `dev=8272`, `test=8295`, otherwise `8270`.
 - MUST sanitize node names to lowercase alphanumeric plus hyphen.
 - MUST derive tmux prefix as `claude-<node>-` for node isolation.
 
@@ -146,7 +146,7 @@
 ## Environment Variables
 ### Bridge (bridge.py)
 - MUST require `TELEGRAM_BOT_TOKEN`.
-- MUST accept `PORT` (default `8080`).
+- MUST accept `PORT` (default `8270`).
 - MUST accept `TELEGRAM_WEBHOOK_SECRET` (optional).
 - MUST accept `SESSIONS_DIR` (default `~/.claude/telegram/sessions`).
 - MUST accept `TMUX_PREFIX` (default `claude-`).
@@ -185,7 +185,7 @@
 ### Test harness (test.sh)
 - MUST accept `TEST_BOT_TOKEN` (required for tests).
 - MUST accept `TEST_CHAT_ID` (optional, enables full e2e validation).
-- MUST accept `TEST_PORT` (optional, default `8095`).
+- MUST accept `TEST_PORT` (optional, default `8295`).
 - MUST allow `FAST=1` and `FULL=1` for test mode selection.
 
 ## Persistence & File Layout

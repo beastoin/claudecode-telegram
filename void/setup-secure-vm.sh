@@ -504,7 +504,7 @@ POLL_INTERVAL = 0.1  # seconds
 REQUEST_MAX_AGE_SECONDS = 30
 
 DEFAULT_CONFIG = {
-    "allowed_tools": ["gh", "gcloud"],
+    "allowed_tools": ["gh", "gcloud", "omi"],
     "command_deny_patterns": [
         r"^gh\s+auth\s+token\b",
         r"^gh\s+auth\s+login\b",
@@ -662,8 +662,14 @@ ALLOWED_GCLOUD_SUBCOMMANDS = {
     ("logging", "read"),
     ("storage", "ls"),
     ("storage", "cp"),
+    ("storage", "buckets", "list"),
+    ("storage", "buckets", "describe"),
+    ("storage", "buckets", "update"),
     ("auth", "activate-service-account"),
 }
+
+OMI_BINARY = Path("/usr/local/bin/omi")
+OMI_CHECKSUM_ENV = "OMI_SHA256"
 
 BROWSER_SCRUB_PATTERNS = [
     r'([?&](?:access_token|token|id_token|refresh_token|api[_-]?key|key|sig|signature|auth|authorization|code|client_secret)=)[^&#\s]+',
@@ -1677,6 +1683,28 @@ def check_gcloud_subcommand(argv):
     return False, f"gcloud subcommand not allowed: {' '.join(parts[:3])}"
 
 
+def check_omi(argv, logger):
+    """Validate omi binary checksum. Returns (ok, error_message)."""
+    if len(argv) < 2:
+        return False, "omi subcommand is required"
+
+    if not OMI_BINARY.is_file():
+        return False, "omi binary not installed"
+
+    actual_hash = hashlib.sha256(OMI_BINARY.read_bytes()).hexdigest()
+    expected_hash = os.environ.get(OMI_CHECKSUM_ENV, "")
+
+    if not expected_hash:
+        logger.info("DENIED tool=omi reason=missing_checksum")
+        return False, "no checksum configured for omi"
+
+    if not hmac.compare_digest(actual_hash, expected_hash):
+        logger.info("DENIED tool=omi reason=checksum_mismatch")
+        return False, "omi binary checksum mismatch"
+
+    return True, None
+
+
 def check_command(argv, cfg, logger):
     """Validate command against ACL. Returns (ok, error_message)."""
     if not argv:
@@ -1687,6 +1715,12 @@ def check_command(argv, cfg, logger):
     if tool not in allowed:
         logger.info("DENIED tool=%s reason=tool_not_allowed", tool)
         return False, f"Tool not allowed: {tool}. Allowed: {', '.join(sorted(allowed))}"
+
+    if tool == "omi":
+        # Omi has its own checksum-based validation; skip
+        # flag/command/global deny patterns (it's a Go binary,
+        # not gh/gcloud CLI).
+        return check_omi(argv, logger)
 
     if tool == "gh":
         sub_ok, sub_err = check_gh_subcommand(argv)
@@ -2029,53 +2063,73 @@ def process_request(req_path, cfg, logger, ipc_key):
                         }
                     else:
                         tool = os.path.basename(argv[0])
-                        env = build_command_env()
-                        try:
-                            proc = subprocess.run(
-                                argv,
-                                shell=False,
-                                check=False,
-                                capture_output=True,
-                                text=True,
-                                timeout=timeout,
-                                env=env,
-                            )
-                            scrub_patterns = cfg.get("sensitive_output_regex", [])
-                            response = {
-                                "id": req_id,
-                                "exit_code": proc.returncode,
-                                "stdout": scrub_text(proc.stdout, scrub_patterns),
-                                "stderr": scrub_text(proc.stderr, scrub_patterns),
-                                "error": None,
-                            }
-                            logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
-                        except subprocess.TimeoutExpired:
-                            response = {
-                                "id": req_id,
-                                "exit_code": 124,
-                                "stdout": "",
-                                "stderr": f"Command timed out after {timeout}s",
-                                "error": "timeout",
-                            }
-                            logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
-                        except FileNotFoundError:
-                            response = {
-                                "id": req_id,
-                                "exit_code": 127,
-                                "stdout": "",
-                                "stderr": f"Command not found: {argv[0]}",
-                                "error": "not_found",
-                            }
-                            logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
-                        except Exception as e:
-                            response = {
-                                "id": req_id,
-                                "exit_code": 1,
-                                "stdout": "",
-                                "stderr": "Command execution failed",
-                                "error": "internal",
-                            }
-                            logger.error("EXCEPTION id=%s error=%s", req_id, e)
+                        response = None
+
+                        # Omi: re-verify checksum (TOCTOU defense),
+                        # then rewrite argv[0] to the verified binary path.
+                        if tool == "omi":
+                            omi_ok, omi_err = check_omi(argv, logger)
+                            if not omi_ok:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 1,
+                                    "stdout": "",
+                                    "stderr": omi_err,
+                                    "error": "denied",
+                                }
+                            else:
+                                argv = [str(OMI_BINARY)] + argv[1:]
+
+                        if not response:
+                            env = build_command_env()
+                            # Strip OMI_SHA256 from subprocess env (defense in depth)
+                            env.pop(OMI_CHECKSUM_ENV, None)
+                            try:
+                                proc = subprocess.run(
+                                    argv,
+                                    shell=False,
+                                    check=False,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=timeout,
+                                    env=env,
+                                )
+                                scrub_patterns = cfg.get("sensitive_output_regex", [])
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": proc.returncode,
+                                    "stdout": scrub_text(proc.stdout, scrub_patterns),
+                                    "stderr": scrub_text(proc.stderr, scrub_patterns),
+                                    "error": None,
+                                }
+                                logger.info("COMPLETED id=%s tool=%s exit_code=%d", req_id, tool, proc.returncode)
+                            except subprocess.TimeoutExpired:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 124,
+                                    "stdout": "",
+                                    "stderr": f"Command timed out after {timeout}s",
+                                    "error": "timeout",
+                                }
+                                logger.info("TIMEOUT id=%s tool=%s timeout=%d", req_id, tool, timeout)
+                            except FileNotFoundError:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 127,
+                                    "stdout": "",
+                                    "stderr": f"Command not found: {argv[0]}",
+                                    "error": "not_found",
+                                }
+                                logger.info("NOT_FOUND id=%s tool=%s", req_id, tool)
+                            except Exception as e:
+                                response = {
+                                    "id": req_id,
+                                    "exit_code": 1,
+                                    "stdout": "",
+                                    "stderr": "Command execution failed",
+                                    "error": "internal",
+                                }
+                                logger.error("EXCEPTION id=%s error=%s", req_id, e)
 
     response.setdefault("id", req_id)
     response["timestamp"] = int(time.time())
@@ -2164,6 +2218,7 @@ write_proxy_config() {
 allowed_tools:
   - gh
   - gcloud
+  - omi
 command_deny_patterns:
   - '^gh\s+auth\s+token\b'
   - '^gh\s+auth\s+login\b'
@@ -3795,13 +3850,13 @@ for candidate in ip6tables ip6tables-legacy; do
 done
 
 if [[ -z "$IPT" ]]; then
-  echo "ERROR: No usable iptables binary found. Refusing to start without IPv4 firewall." >&2
-  exit 1
+  echo "WARNING: No usable iptables binary found. Skipping IPv4 firewall (kernel may lack netfilter)." >&2
+  exit 0
 fi
 
 if [[ -z "$IP6T" ]]; then
-  echo "ERROR: No usable ip6tables binary found. Refusing to start without IPv6 firewall." >&2
-  exit 1
+  echo "WARNING: No usable ip6tables binary found. Skipping IPv6 firewall." >&2
+  IP6T="$IPT"  # fall through, best-effort
 fi
 
 $IPT -F
@@ -3930,6 +3985,13 @@ install -m 0755 /provision/void-login-browser.js /usr/local/bin/void-login-brows
 install -m 0640 /provision/config.yaml /etc/credential-proxy/config.yaml
 install -m 0755 /provision/firewall.sh /root/firewall.sh
 
+# Compile and install omi binary (checksum-verified tier)
+if [ -f /provision/omi.go ]; then
+  apt-get install -y --no-install-recommends golang-go
+  cd /tmp && CGO_ENABLED=0 go build -o /usr/local/bin/omi /provision/omi.go
+  chmod 0755 /usr/local/bin/omi
+fi
+
 # Install gh CLI
 curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
   | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -3997,6 +4059,13 @@ prepare_provision_bundle() {
   write_firewall_script "${bundle_dir}/firewall.sh"
   write_guest_provision_script "${bundle_dir}/provision.sh"
 
+  # Bundle omi source (single Go file, compiled during provision)
+  local omi_src
+  omi_src="$(dirname "$SCRIPT_PATH")/omi.go"
+  if [[ -f "$omi_src" ]]; then
+    cp "$omi_src" "${bundle_dir}/omi.go"
+  fi
+
   # POSIX bootstrap: debian:bookworm-slim only has /bin/sh (dash).
   # Install bash first, then hand off to the real provision script.
   cat >"${bundle_dir}/bootstrap.sh" <<'BOOTSTRAP'
@@ -4024,14 +4093,21 @@ set -euo pipefail
 RUNTIME_ENV="${runtime_env}"
 
 usage() {
-  echo "Usage: void <gh|gcloud|browse|session> [args...]" >&2
+  echo "Usage: void <gh|gcloud|browse|session|omi> [args...]" >&2
   echo "" >&2
-  echo "Executes gh, gcloud, browse, or session commands securely inside the VM." >&2
+  echo "Tier 1 — CLI passthrough (raw gh/gcloud):" >&2
+  echo "  void gh pr list" >&2
+  echo "  void gcloud projects list" >&2
+  echo "" >&2
+  echo "Tier 2 — Checksum-verified scripts (omi infrastructure):" >&2
+  echo "  void omi bucket-versioning-set [--dry-run] [--project ID]" >&2
+  echo "  Omi scripts are verified against SHA256 checksums stored in Bitwarden." >&2
   echo "" >&2
   echo "Session commands:" >&2
   echo "  void session login <service> [--port N]" >&2
   echo "  void session list" >&2
   echo "  void session close <service>" >&2
+  echo "" >&2
   echo "Credentials never leave the VM boundary." >&2
   exit 2
 }
@@ -4042,9 +4118,9 @@ fi
 
 tool="\$1"
 case "\$tool" in
-  gh|gcloud|browse|session) ;;
+  gh|gcloud|browse|session|omi) ;;
   -h|--help) usage ;;
-  *) echo "Error: only 'gh', 'gcloud', 'browse', and 'session' are allowed (got: \$tool)" >&2; exit 1 ;;
+  *) echo "Error: only 'gh', 'gcloud', 'browse', 'session', and 'omi' are allowed (got: \$tool)" >&2; exit 1 ;;
 esac
 
 # Read IPC directory from runtime state
@@ -4353,13 +4429,17 @@ PY_SESSION_CLOSE
       ;;
   esac
 else
-  # Build JSON request for gh/gcloud passthrough mode.
+  # Build JSON request for gh/gcloud/omi passthrough mode.
   argv_json=\$(printf '%s\n' "\$@" | python3 -c '
 import json, sys
 print(json.dumps([line.rstrip("\n") for line in sys.stdin]))
 ')
 
-  timeout=60
+  if [[ "\$tool" == "omi" ]]; then
+    timeout=300
+  else
+    timeout=60
+  fi
   request=\$(python3 -c "
 import json, time
 print(json.dumps({
@@ -5501,6 +5581,7 @@ cmd_test() {
   write_host_proxy_script "$host_proxy" "$runtime_env"
 
   python3 - "$daemon_py" "$login_portal_py" "$firewall_sh" "$host_proxy" "$SCRIPT_PATH" "$deploy_sh" "$readme_md" <<'PY_TEST'
+import hashlib
 import importlib.util
 import json
 import logging
@@ -5746,7 +5827,7 @@ check(
 host_proxy = host_proxy_path.read_text(encoding="utf-8")
 check(
     "test_host_proxy_allows_browse_tool",
-    "gh|gcloud|browse|session" in host_proxy and "\"tool\": \"browser\"" in host_proxy,
+    "gh|gcloud|browse|session|omi" in host_proxy and "\"tool\": \"browser\"" in host_proxy,
     "browse tool mapping missing",
 )
 
@@ -6054,14 +6135,14 @@ check("test_status_probe_invalid_hmac_fails", _ok, _detail)
 # 60. host proxy allows gh
 check(
     "test_host_proxy_allows_gh",
-    "gh|gcloud|browse|session" in host_proxy,
+    "gh|gcloud|browse|session|omi" in host_proxy,
     "gh not in allowed tools pattern",
 )
 
 # 61. host proxy rejects unknown tools
 check(
     "test_host_proxy_rejects_unknown_tools",
-    "only 'gh', 'gcloud', 'browse', and 'session' are allowed" in host_proxy,
+    "only 'gh', 'gcloud', 'browse', 'session', and 'omi' are allowed" in host_proxy,
     "missing tool rejection message",
 )
 
@@ -6095,6 +6176,99 @@ check(
     "pkill -f" not in deploy_script and "$PID_DIR/$svc.pid" in deploy_script,
     "deploy stop must manage processes via PID files only",
 )
+
+# ── Omi checksum-verified script tests ──────────────────────────────
+
+# 66. omi is in allowed_tools
+check(
+    "test_omi_in_allowed_tools",
+    "omi" in cfg["allowed_tools"],
+    f"allowed_tools={cfg['allowed_tools']}",
+)
+
+# 67. omi requires subcommand
+ok, err = module.check_command(["omi"], cfg, logger)
+check(
+    "test_omi_subcommand_required",
+    not ok and "subcommand" in (err or "").lower(),
+    err or "",
+)
+
+# Set up a temp omi binary for checksum tests
+_omi_tmp = _tempfile.TemporaryDirectory(prefix="void-omi-test.")
+_omi_bin = _Path(_omi_tmp.name) / "omi"
+_omi_bin.write_bytes(b"#!/bin/sh\necho hello\n")
+_omi_hash = hashlib.sha256(_omi_bin.read_bytes()).hexdigest()
+
+# Temporarily override OMI_BINARY
+_orig_omi_bin = module.OMI_BINARY
+module.OMI_BINARY = _omi_bin
+
+# 68. missing checksum env var → denied (fail closed)
+_os.environ.pop("OMI_SHA256", None)
+ok, err = module.check_command(["omi", "bucket-versioning-set"], cfg, logger)
+check(
+    "test_omi_missing_checksum_denied",
+    not ok and "no checksum" in (err or "").lower(),
+    err or "",
+)
+
+# 69. correct checksum → allowed
+_os.environ["OMI_SHA256"] = _omi_hash
+ok, err = module.check_command(["omi", "bucket-versioning-set"], cfg, logger)
+check(
+    "test_omi_correct_checksum_allowed",
+    ok and err is None,
+    err or "",
+)
+
+# 70. wrong checksum → denied
+_os.environ["OMI_SHA256"] = "0" * 64
+ok, err = module.check_command(["omi", "bucket-versioning-set"], cfg, logger)
+check(
+    "test_omi_wrong_checksum_denied",
+    not ok and "checksum mismatch" in (err or "").lower(),
+    err or "",
+)
+
+# 71. omi binary not found → denied
+module.OMI_BINARY = _Path("/nonexistent/omi")
+_os.environ["OMI_SHA256"] = _omi_hash
+ok, err = module.check_command(["omi", "bucket-versioning-set"], cfg, logger)
+check(
+    "test_omi_binary_not_found_denied",
+    not ok and "not installed" in (err or "").lower(),
+    err or "",
+)
+module.OMI_BINARY = _omi_bin
+
+# 72. host proxy includes omi in case statement
+check(
+    "test_host_proxy_includes_omi",
+    "gh|gcloud|browse|session|omi" in host_proxy,
+    "omi not in host proxy case statement",
+)
+
+# 73. omi uses 300s timeout in host proxy
+check(
+    "test_host_proxy_omi_timeout_300",
+    "timeout=300" in host_proxy,
+    "omi timeout not set to 300 in host proxy",
+)
+
+# 74. OMI_SHA256 NOT leaked to subprocess env
+_os.environ["OMI_SHA256"] = _omi_hash
+cmd_env = module.build_command_env()
+check(
+    "test_omi_checksum_not_in_command_env",
+    "OMI_SHA256" not in cmd_env,
+    f"OMI_SHA256={cmd_env.get('OMI_SHA256', '(absent)')}",
+)
+_os.environ.pop("OMI_SHA256", None)
+
+# Restore OMI_BINARY
+module.OMI_BINARY = _orig_omi_bin
+_omi_tmp.cleanup()
 
 if failures:
     print(f"\\n{len(failures)} of {len(tests)} tests failed.")

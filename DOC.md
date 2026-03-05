@@ -281,7 +281,7 @@ The bridge-centric architecture ensures this can't happen:
 │                    ▼                                    │
 │              Hook (NO token needed)                     │
 │                    │                                    │
-│                    │ POST localhost:8080/response       │
+│                    │ POST localhost:8270/response       │
 │                    ▼                                    │
 │              Bridge ──► Telegram API         ← SAFE    │
 └─────────────────────────────────────────────────────────┘
@@ -692,7 +692,7 @@ Fixes the "wrong chat_id persists forever" issue by removing admin_chat_id and s
 
 **Removed config.env:**
 - No more `~/.claude/telegram/nodes/<node>/config.env` files
-- PORT now derived from node name: prod=8081, dev=8082, test=8095
+- PORT now derived from node name: prod=8271, dev=8272, test=8295
 - Override via `--port` flag or `PORT` env var
 
 **Why:** config.env caused stale config issues similar to chat_id persistence. All config should be explicit (env vars, flags) or derived (node name), not persisted files.
@@ -719,8 +719,8 @@ Fixes the "wrong chat_id persists forever" issue by removing admin_chat_id and s
 
 | Config | Use Case |
 |--------|----------|
-| `PORT=8081` (default) | Local setup, hook builds `http://localhost:8081/response` |
-| `BRIDGE_URL=http://host.docker.internal:8081` | Docker containers |
+| `PORT=8271` (default) | Local setup, hook builds `http://localhost:8271/response` |
+| `BRIDGE_URL=http://host.docker.internal:8271` | Docker containers |
 | `BRIDGE_URL=https://bridge.company.com` | Remote workers on different machines |
 
 **How it works:**
@@ -910,7 +910,7 @@ Path: /tmp/claudecode-telegram/<node>/worker/inbox/abc123.pdf
 
 **Bug fix:** Argument parser now accepts both `--flag=value` and `--flag value` syntax.
 
-Previously, `--port=1789` was silently ignored (falling back to node config), causing confusing errors like "Port 8081 is already in use" when you specified a different port.
+Previously, `--port=1789` was silently ignored (falling back to node config), causing confusing errors like "Port 8271 is already in use" when you specified a different port.
 
 Now both work:
 ```bash
@@ -938,7 +938,7 @@ Now both work:
 
 **Bug fix:**
 - Removed `HOST` variable from `cmd_start()` that was supposed to be removed in v0.9.5
-- Fixed malformed log output "on :8080" → "on port 8080"
+- Fixed malformed log output "on :8080" → "on port 8270"
 - Removed `--host` flag from `cmd_start` (was non-functional)
 
 ### v0.9.7 - SIGTERM diagnostics and improved logging
@@ -1210,13 +1210,13 @@ Here's the diagram:
 - **`clean` command**: Reset stale chat_id files
 - **Per-node state isolation**: Each node has its own sessions, PIDs, ports
 - **Smart auto-detection**: If only one node running, uses it; if multiple, prompts or errors
-- **Default ports**: prod=8081, dev=8082, test=8095 (override with `--port` or `PORT` env var)
+- **Default ports**: prod=8271, dev=8272, test=8295 (override with `--port` or `PORT` env var)
 
 **Usage:**
 ```bash
 # Start nodes (PORT defaults derived from node name, overridable)
-NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # default port 8081
-NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # default port 8082
+NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # default port 8271
+NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # default port 8272
 
 # Stop specific node
 ./claudecode-telegram.sh --node dev stop
@@ -1231,10 +1231,10 @@ NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # default port 8082
 **Recommended node configurations:**
 | Node | Token | Sandbox | Default Port | Purpose |
 |------|-------|---------|--------------|---------|
-| test | TEST_BOT_TOKEN | `--no-sandbox` | 8095 | Automated tests (fast, no Docker) |
-| prod | PROD_BOT_TOKEN | `--no-sandbox` | 8081 | Production (performance) |
-| dev | DEV_BOT_TOKEN | `--no-sandbox` | 8082 | Development |
-| sandbox | TEST_BOT_TOKEN | `--sandbox` | 8080 | Untrusted/experimental code |
+| test | TEST_BOT_TOKEN | `--no-sandbox` | 8295 | Automated tests (fast, no Docker) |
+| prod | PROD_BOT_TOKEN | `--no-sandbox` | 8271 | Production (performance) |
+| dev | DEV_BOT_TOKEN | `--no-sandbox` | 8272 | Development |
+| sandbox | TEST_BOT_TOKEN | `--sandbox` | 8270 | Untrusted/experimental code |
 
 Ports are defaults, not fixed — override with `--port <n>` or `PORT` env var.
 
@@ -1373,7 +1373,7 @@ Ports are defaults, not fixed — override with `--port <n>` or `PORT` env var.
 Before:                              After:
 Claude (has token)                   Claude (NO token)
     │                                    │
-    └─► Hook calls Telegram API          └─► Hook POSTs to localhost:8080/response
+    └─► Hook calls Telegram API          └─► Hook POSTs to localhost:8270/response
                                               │
                                               ▼
                                          Bridge (has token) ─► Telegram API
