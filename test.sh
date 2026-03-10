@@ -2959,6 +2959,12 @@ result = _extract_activity(lines)
 assert 'thinking' not in result.lower(), f'✻ Churned should NOT be thinking: {result}'
 assert result == 'Ready', f'Prompt with bypass mode bar should be idle: {result}'
 
+# ✻ with ellipsis = ACTIVE spinner frame, not past tense (kelvin bug 2026-03-08)
+lines = ['● Bash(ssh host \"adb screencap\")', '  ⎿  Running… (7s · timeout 15s)', '✻ Discombobulating… (49m 13s · thinking)', '───', '❯', '───', '⏵⏵ bypass permissions on (shift+tab to cycle) · es…']
+result = _extract_activity(lines)
+assert 'discombobulating' in result.lower(), f'✻ with … should be active spinner: {result}'
+assert '49m 13s' in result, f'Expected duration in: {result}'
+
 # Prompt with hint text = idle (auto-suggestion, not queued message)
 lines = ['● Done with task.', '───', '❯ do the next thing', '───']
 result = _extract_activity(lines)
@@ -6545,6 +6551,75 @@ print(result.stdout.strip())
         success "Explicit BRIDGE_BIND is preserved with BRIDGE_PUBLIC_URL"
     else
         fail "Explicit BRIDGE_BIND override test failed"
+    fi
+}
+
+test_bridge_url_ignores_stale_localhost() {
+    info "Testing BRIDGE_URL ignores stale localhost env and derives from PORT..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['PORT'] = '9999'
+env['BRIDGE_URL'] = 'http://localhost:8080'  # stale from old bridge
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_URL == \"http://localhost:9999\", f\"Expected http://localhost:9999, got {bridge.BRIDGE_URL!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "BRIDGE_URL ignores stale localhost env, derives from PORT"
+    else
+        fail "BRIDGE_URL stale localhost test failed"
+    fi
+}
+
+test_bridge_url_ignores_stale_127() {
+    info "Testing BRIDGE_URL ignores stale 127.0.0.1 env..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['PORT'] = '9999'
+env['BRIDGE_URL'] = 'http://127.0.0.1:8080'  # stale
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_URL == \"http://localhost:9999\", f\"Expected http://localhost:9999, got {bridge.BRIDGE_URL!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "BRIDGE_URL ignores stale 127.0.0.1 env"
+    else
+        fail "BRIDGE_URL stale 127.0.0.1 test failed"
+    fi
+}
+
+test_bridge_url_honors_remote() {
+    info "Testing BRIDGE_URL honors remote (non-localhost) env..."
+
+    if python3 -c "
+import subprocess, sys, os
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env['TELEGRAM_BOT_TOKEN'] = 'test'
+env['PORT'] = '9999'
+env['BRIDGE_URL'] = 'https://remote-bridge.example.com'
+result = subprocess.run([sys.executable, '-c', '''
+import bridge
+assert bridge.BRIDGE_URL == \"https://remote-bridge.example.com\", f\"Expected remote URL, got {bridge.BRIDGE_URL!r}\"
+print(\"OK\")
+'''], capture_output=True, text=True, env=env)
+assert result.returncode == 0, result.stderr or result.stdout
+print(result.stdout.strip())
+" 2>/dev/null | grep -q "OK"; then
+        success "BRIDGE_URL honors remote env"
+    else
+        fail "BRIDGE_URL remote test failed"
     fi
 }
 
@@ -10573,6 +10648,9 @@ run_unit_tests() {
     run_test test_bridge_public_url_default_empty
     run_test test_bridge_public_url_auto_bind
     run_test test_bridge_public_url_no_auto_bind_when_explicit
+    run_test test_bridge_url_ignores_stale_localhost
+    run_test test_bridge_url_ignores_stale_127
+    run_test test_bridge_url_honors_remote
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url

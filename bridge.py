@@ -83,10 +83,14 @@ MCP_INVENTORY_MAX_CHARS = int(os.environ.get("MCP_INVENTORY_MAX_CHARS", "2000"))
 MCP_INVENTORY_INCLUDE_COMMAND = os.environ.get("MCP_INVENTORY_INCLUDE_COMMAND", "0") == "1"
 MCP_INVENTORY_INCLUDE_ENV_KEYS = os.environ.get("MCP_INVENTORY_INCLUDE_ENV_KEYS", "1") != "0"
 
-# BRIDGE_URL: primary hook target for remote workers, falls back to localhost:PORT
-# User can set BRIDGE_URL=https://remote-bridge.example.com for distributed setups
-_bridge_url_env = os.environ.get("BRIDGE_URL", "")
-BRIDGE_URL = _bridge_url_env.rstrip("/") if _bridge_url_env else f"http://localhost:{PORT}"
+# BRIDGE_URL: hook callback target. Localhost URLs are always derived from PORT to
+# prevent stale-port inheritance when restarting. Only non-localhost URLs (for
+# distributed setups, e.g. https://remote-bridge.example.com) are honored from env.
+_bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
+if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
+    BRIDGE_URL = _bridge_url_env
+else:
+    BRIDGE_URL = f"http://localhost:{PORT}"
 # BRIDGE_PUBLIC_URL: reachable URL for teleported workers (e.g., http://100.125.36.102:8271)
 # When set and BRIDGE_BIND is not explicitly set, auto-bind to 0.0.0.0
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
@@ -3430,14 +3434,14 @@ def _extract_activity(lines: list[str]) -> str:
         return "Idle"
 
     # 1. Active thinking spinner — "· Verb…" or "* Verb…" or "✢ Verb…" etc.
-    #    Claude Code uses various Unicode chars as spinner frames (·, *, ✢, etc.)
-    #    NOT "✻" which is past tense (completed thinking).
-    #    Extract the actual verb (e.g. "Compacting conversation" vs "Thinking")
-    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•"}
+    #    Claude Code cycles through various Unicode chars as spinner frames.
+    #    ✻ is ALSO a spinner frame (not just past tense) — distinguish by "…" presence.
+    #    "✻ Verbing… (49m)" = active; "✻ Thought for 5s" = completed (no "…").
+    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
-        if raw.startswith("✻"):
-            continue
         first = raw[0] if raw else ""
+        if first == "✻" and "…" not in raw and "..." not in raw:
+            continue  # Past tense completed thinking (no ellipsis = done)
         if first not in _ACTIVE_SPINNER_CHARS:
             continue
         # "· Compacting conversation… (5m 26s · thought for 5s)" → verb + duration
