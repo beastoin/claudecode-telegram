@@ -5081,8 +5081,21 @@ class CommandRouter:
             message = clean_text or text
             if reply_context:
                 message = self.format_reply_context(message, reply_context)
-            for name in targets:
-                self.route_message(name, message, chat_id, msg_id, one_off=True)
+            # If reply-to message contains media, download and forward it to targets
+            if reply_to:
+                reply_media = self._extract_reply_media(reply_to, targets[0])
+                if reply_media:
+                    media_text = reply_media
+                    if message:
+                        media_text = f"{message}\n\n{reply_media}"
+                    for name in targets:
+                        self.route_message(name, media_text, chat_id, msg_id, one_off=True)
+                else:
+                    for name in targets:
+                        self.route_message(name, message, chat_id, msg_id, one_off=True)
+            else:
+                for name in targets:
+                    self.route_message(name, message, chat_id, msg_id, one_off=True)
 
             # Auto-focus: if same single worker mentioned 2+ consecutive times, switch focus
             if len(targets) == 1:
@@ -6151,6 +6164,52 @@ class CommandRouter:
 
         self.reply(chat_id, "\n".join(lines))
         return True
+
+    def _extract_reply_media(self, reply_to, target_worker):
+        """Download media from a reply-to message. Returns media text or None."""
+        # Check for media types in priority order
+        animation = reply_to.get("animation")
+        photo = reply_to.get("photo")
+        document = reply_to.get("document")
+        audio = reply_to.get("audio")
+        voice = reply_to.get("voice")
+        video = reply_to.get("video")
+        sticker = reply_to.get("sticker")
+
+        file_id = None
+        media_label = "media"
+
+        if animation:
+            file_id = animation.get("file_id")
+            media_label = "GIF"
+        elif photo:
+            largest = max(photo, key=lambda p: p.get("file_size", 0))
+            file_id = largest.get("file_id")
+            media_label = "image"
+        elif video:
+            file_id = video.get("file_id")
+            media_label = "video"
+        elif document:
+            file_id = document.get("file_id")
+            media_label = f"file: {document.get('file_name', 'unknown')}"
+        elif audio:
+            file_id = audio.get("file_id")
+            media_label = "audio"
+        elif voice:
+            file_id = voice.get("file_id")
+            media_label = "voice message"
+        elif sticker:
+            file_id = sticker.get("file_id")
+            media_label = f"sticker: {sticker.get('emoji', '')}"
+
+        if not file_id:
+            return None
+
+        local_path = download_telegram_file(file_id, target_worker)
+        if not local_path:
+            return None
+
+        return f"Manager forwarded {media_label}: {local_path}"
 
     def _worker_from_reply(self, msg):
         """Extract worker name from a reply-to message's text prefix (e.g. 'bob:\\n...')."""
