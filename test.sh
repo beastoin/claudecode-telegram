@@ -5063,6 +5063,94 @@ PYEOF
     rm -f "$tmpscript" "$tmpout"
 }
 
+test_media_reply_to_routes_to_replied_worker() {
+    info "Testing media reply-to routes to the worker whose message was replied to..."
+
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_media_reply_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile, json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+# Create two workers: alice (active) and bob (reply target)
+for name in ['alice', 'bob']:
+    d = sessions_dir / name
+    d.mkdir()
+    (d / 'chat_id').write_text('12345')
+    (d / 'backend').write_text('claude')
+
+bridge.state['active'] = 'alice'
+orig_admin = bridge.admin_chat_id
+bridge.admin_chat_id = 12345
+
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice'},
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob'},
+}
+mock_workers.is_online.return_value = True
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+mock_workers.send.return_value = True
+router.workers = mock_workers
+router.telegram = MagicMock()
+
+# Simulate: manager replies to bob's message with a GIF (no caption)
+# Bob's message in Telegram looks like "bob:\nHere is my analysis..."
+with patch('bridge.download_telegram_file', return_value='/tmp/fake.gif'):
+    update = {
+        'message': {
+            'chat': {'id': 12345},
+            'message_id': 2,
+            'caption': '',
+            'animation': {'file_id': 'fake_file_id'},
+            'reply_to_message': {
+                'message_id': 1,
+                'text': 'bob:\nHere is my analysis of the code...',
+            },
+        }
+    }
+    router.handle_message(update)
+
+# Bob should have received the GIF (not alice, the active worker)
+send_calls = mock_workers.send.call_args_list
+assert len(send_calls) >= 1, f'expected at least 1 send call, got {len(send_calls)}'
+
+recipients = [c[0][0] for c in send_calls]
+assert 'bob' in recipients, f'expected bob in recipients, got: {recipients}'
+assert 'alice' not in recipients, f'alice should NOT have received it, recipients: {recipients}'
+
+# Check the message contains the GIF path
+sent_text = send_calls[0][0][1]
+assert '/tmp/fake.gif' in sent_text, f'expected GIF path in message, got: {sent_text!r}'
+
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+bridge.admin_chat_id = orig_admin
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "Media reply-to routes to replied worker"
+    else
+        fail "Media reply-to routing test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
 test_handle_watchdog_transition() {
     info "Testing _handle_watchdog_transition state machine..."
 
@@ -11015,6 +11103,7 @@ run_unit_tests() {
     run_test test_format_response_strips_name_prefix
     run_test test_manager_prefix_on_route_message
     run_test test_media_at_mention_routes_to_mentioned_worker
+    run_test test_media_reply_to_routes_to_replied_worker
     run_test test_get_any_session_id
     run_test test_progress_continuity_for_noninteractive
     run_test test_extract_worker_activity

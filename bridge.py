@@ -4936,7 +4936,7 @@ class CommandRouter:
                     gif_text = f"Manager sent GIF: {local_path}"
                     if text:
                         gif_text = f"{text}\n\n{gif_text}"
-                    self._route_media_message(gif_text, text, chat_id, msg_id)
+                    self._route_media_message(gif_text, text, chat_id, msg_id, msg=msg)
                 else:
                     self.reply(chat_id, "Could not download GIF. Try again.")
                 return
@@ -4963,7 +4963,7 @@ class CommandRouter:
                     image_text = f"Manager sent image: {local_path}"
                     if text:
                         image_text = f"{text}\n\n{image_text}"
-                    self._route_media_message(image_text, text, chat_id, msg_id)
+                    self._route_media_message(image_text, text, chat_id, msg_id, msg=msg)
                 else:
                     self.reply(chat_id, "Could not download image. Try again or send as file.")
                 return
@@ -4989,7 +4989,7 @@ class CommandRouter:
                     file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
                     if text:
                         file_text = f"{text}\n\n{file_text}"
-                    self._route_media_message(file_text, text, chat_id, msg_id)
+                    self._route_media_message(file_text, text, chat_id, msg_id, msg=msg)
                 else:
                     self.reply(chat_id, "Could not download file. Try again.")
                 return
@@ -5031,7 +5031,7 @@ class CommandRouter:
                         media_text = f"Manager sent media: {local_path}"
                     if text:
                         media_text = f"{text}\n\n{media_text}"
-                    self._route_media_message(media_text, text, chat_id, msg_id)
+                    self._route_media_message(media_text, text, chat_id, msg_id, msg=msg)
                 else:
                     media_type = "audio" if audio else "voice" if voice else "video" if video else "media"
                     self.reply(chat_id, f"Could not download {media_type}. Try again.")
@@ -6152,14 +6152,36 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def _route_media_message(self, media_text, caption, chat_id, msg_id):
-        """Route a media message, honoring @mentions in caption."""
+    def _worker_from_reply(self, msg):
+        """Extract worker name from a reply-to message's text prefix (e.g. 'bob:\\n...')."""
+        reply_to = msg.get("reply_to_message") if msg else None
+        if not reply_to:
+            return None
+        reply_text = reply_to.get("text") or reply_to.get("caption") or ""
+        if not reply_text:
+            return None
+        # Worker messages are formatted as "name:\n..." — extract the name
+        first_line = reply_text.split("\n", 1)[0]
+        if first_line.endswith(":"):
+            candidate = first_line[:-1].strip().lower()
+            registered = self.workers.get_registered_sessions()
+            if candidate in registered:
+                return candidate
+        return None
+
+    def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
+        """Route a media message, honoring @mentions in caption or reply-to context."""
         if caption:
             targets, _ = self.parse_at_mentions(caption)
             if targets:
                 for name in targets:
                     self.route_message(name, media_text, chat_id, msg_id, one_off=True)
                 return
+        # Check reply-to: if replying to a worker's message, route to that worker
+        reply_worker = self._worker_from_reply(msg)
+        if reply_worker:
+            self.route_message(reply_worker, media_text, chat_id, msg_id, one_off=True)
+            return
         self.route_to_active(media_text, chat_id, msg_id)
 
     def route_to_active(self, text, chat_id, msg_id):
