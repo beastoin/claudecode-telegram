@@ -2795,7 +2795,60 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         return ""
 
 
+HOOK_FAILURE_THRESHOLD = 3   # failures in window → POISONED
+HOOK_FAILURE_WINDOW = 120    # seconds
+
+
+def _check_hook_failure_signal(name: str) -> Optional[str]:
+    """Check hook-written failure signal file for recent tool failures.
+
+    PostToolUseFailure hook appends lines: "<epoch> <tool_name>"
+    Returns reason string if >= HOOK_FAILURE_THRESHOLD recent failures, else None.
+    """
+    signal_file = Path(f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures")
+    if not signal_file.exists():
+        return None
+    try:
+        lines = signal_file.read_text().strip().splitlines()
+    except Exception:
+        return None
+    if not lines:
+        return None
+
+    cutoff = int(time.time()) - HOOK_FAILURE_WINDOW
+    recent = 0
+    for line in lines:
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            ts = int(parts[0])
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent += 1
+
+    if recent >= HOOK_FAILURE_THRESHOLD:
+        return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
+    return None
+
+
+def _clear_hook_failures(name: str) -> None:
+    """Remove hook failure signal file for a worker (on restart/clean)."""
+    signal_file = Path(f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures")
+    try:
+        signal_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
+    # Primary: check hook-written failure signal file
+    hook_reason = _check_hook_failure_signal(name)
+    if hook_reason:
+        return hook_reason
+
+    # Fallback: regex-based pane/log scanning
     backend_name = get_worker_backend(name)
     backend = get_backend(backend_name)
     text_parts = []
@@ -4290,6 +4343,10 @@ class WorkerManager:
         if startup_cwd:
             save_claude_session_cwd(name, startup_cwd)
 
+        # Clear hook failure signal on clean restart
+        if mode != "resume":
+            _clear_hook_failures(name)
+
         # Clean non-interactive state on restart
         if not backend.is_interactive:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -4879,7 +4936,7 @@ class CommandRouter:
                     gif_text = f"Manager sent GIF: {local_path}"
                     if text:
                         gif_text = f"{text}\n\n{gif_text}"
-                    self.route_to_active(gif_text, chat_id, msg_id)
+                    self._route_media_message(gif_text, text, chat_id, msg_id)
                 else:
                     self.reply(chat_id, "Could not download GIF. Try again.")
                 return
@@ -4906,7 +4963,7 @@ class CommandRouter:
                     image_text = f"Manager sent image: {local_path}"
                     if text:
                         image_text = f"{text}\n\n{image_text}"
-                    self.route_to_active(image_text, chat_id, msg_id)
+                    self._route_media_message(image_text, text, chat_id, msg_id)
                 else:
                     self.reply(chat_id, "Could not download image. Try again or send as file.")
                 return
@@ -4932,7 +4989,7 @@ class CommandRouter:
                     file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
                     if text:
                         file_text = f"{text}\n\n{file_text}"
-                    self.route_to_active(file_text, chat_id, msg_id)
+                    self._route_media_message(file_text, text, chat_id, msg_id)
                 else:
                     self.reply(chat_id, "Could not download file. Try again.")
                 return
@@ -4974,7 +5031,7 @@ class CommandRouter:
                         media_text = f"Manager sent media: {local_path}"
                     if text:
                         media_text = f"{text}\n\n{media_text}"
-                    self.route_to_active(media_text, chat_id, msg_id)
+                    self._route_media_message(media_text, text, chat_id, msg_id)
                 else:
                     media_type = "audio" if audio else "voice" if voice else "video" if video else "media"
                     self.reply(chat_id, f"Could not download {media_type}. Try again.")
@@ -6095,6 +6152,16 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
+    def _route_media_message(self, media_text, caption, chat_id, msg_id):
+        """Route a media message, honoring @mentions in caption."""
+        if caption:
+            targets, _ = self.parse_at_mentions(caption)
+            if targets:
+                for name in targets:
+                    self.route_message(name, media_text, chat_id, msg_id, one_off=True)
+                return
+        self.route_to_active(media_text, chat_id, msg_id)
+
     def route_to_active(self, text, chat_id, msg_id):
         registered = self.workers.get_registered_sessions()
 
@@ -6160,6 +6227,11 @@ class CommandRouter:
                         action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
                         self.reply(chat_id, f"{action}.")
                         return
+
+        # Prefix manager messages so workers can distinguish from inter-worker messages.
+        # Skip if text already has a "Manager sent ..." prefix (media messages).
+        if not text.startswith("Manager sent "):
+            text = f"manager: {text}"
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
 

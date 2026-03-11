@@ -3984,6 +3984,224 @@ print('OK')
     fi
 }
 
+test_poisoned_hook_signal_file() {
+    info "Testing poisoned detection via hook signal file..."
+
+    if python3 -c "
+import tempfile, time, os
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+name = 'hooktest'
+tmux_name = 'claude-test-hooktest'
+session_dir = tmp / name
+session_dir.mkdir()
+(session_dir / 'backend').write_text('claude')
+
+# Create hook signal file with 4 recent failures (>= 3 threshold)
+node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
+hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir.mkdir(parents=True, exist_ok=True)
+failures_file = hook_dir / 'failures'
+
+now = int(time.time())
+lines = []
+for i in range(4):
+    lines.append(f'{now - i} Bash')
+failures_file.write_text('\\n'.join(lines) + '\\n')
+
+# _detect_poisoned should find hook signal and return reason
+reason = bridge._detect_poisoned(name, tmux_name)
+assert reason is not None, f'expected poisoned from hook signal, got None'
+assert 'hook' in reason.lower() or 'failure' in reason.lower(), f'expected hook-based reason, got {reason!r}'
+
+# Cleanup
+import shutil
+shutil.rmtree(hook_dir.parent, ignore_errors=True)
+failures_file.unlink(missing_ok=True)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Poisoned detection via hook signal file works"
+    else
+        fail "Poisoned detection via hook signal file failed"
+    fi
+}
+
+test_poisoned_hook_signal_stale_ignored() {
+    info "Testing poisoned detection ignores stale hook signals..."
+
+    if python3 -c "
+import tempfile, time, os
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+name = 'hookstale'
+tmux_name = 'claude-test-hookstale'
+session_dir = tmp / name
+session_dir.mkdir()
+(session_dir / 'backend').write_text('claude')
+
+# Create hook signal file with 4 OLD failures (> 120s ago)
+node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
+hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir.mkdir(parents=True, exist_ok=True)
+failures_file = hook_dir / 'failures'
+
+old = int(time.time()) - 300
+lines = []
+for i in range(4):
+    lines.append(f'{old - i} Bash')
+failures_file.write_text('\\n'.join(lines) + '\\n')
+
+# Should NOT detect poisoned (stale failures)
+reason = bridge._detect_poisoned(name, tmux_name)
+# With stale hook signals, should fall through to regex (which has no pane text for non-tmux)
+# So reason should be None
+assert reason is None, f'expected None for stale signals, got {reason!r}'
+
+# Cleanup
+import shutil
+shutil.rmtree(hook_dir.parent, ignore_errors=True)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Poisoned detection ignores stale hook signals"
+    else
+        fail "Poisoned detection stale hook signal test failed"
+    fi
+}
+
+test_poisoned_hook_signal_below_threshold() {
+    info "Testing poisoned detection below threshold..."
+
+    if python3 -c "
+import tempfile, time, os
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+
+name = 'hooklow'
+tmux_name = 'claude-test-hooklow'
+session_dir = tmp / name
+session_dir.mkdir()
+(session_dir / 'backend').write_text('claude')
+
+# Create hook signal file with only 2 recent failures (< 3 threshold)
+node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
+hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir.mkdir(parents=True, exist_ok=True)
+failures_file = hook_dir / 'failures'
+
+now = int(time.time())
+lines = [f'{now} Bash', f'{now - 1} Edit']
+failures_file.write_text('\\n'.join(lines) + '\\n')
+
+# Should NOT detect poisoned (below threshold)
+reason = bridge._detect_poisoned(name, tmux_name)
+assert reason is None, f'expected None for below-threshold, got {reason!r}'
+
+# Cleanup
+import shutil
+shutil.rmtree(hook_dir.parent, ignore_errors=True)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Poisoned detection below threshold works"
+    else
+        fail "Poisoned detection below threshold test failed"
+    fi
+}
+
+test_on_tool_failure_hook_script() {
+    info "Testing on-tool-failure.sh hook script writes signal file..."
+
+    # Create a tmux session to simulate a worker
+    local test_session="${TMUX_PREFIX}hookscript"
+    tmux new-session -d -s "$test_session" "bash" 2>/dev/null || true
+    sleep 0.3
+
+    # Set tmux env vars that the hook reads
+    tmux set-environment -t "$test_session" TMUX_PREFIX "$TMUX_PREFIX"
+
+    # Derive node name the same way as bridge.py
+    local node_name
+    node_name=$(echo "$TMUX_PREFIX" | sed 's/-$//' | sed 's/^claude-//')
+    [ -z "$node_name" ] && node_name="default"
+
+    # Clean up any pre-existing signal file
+    local hook_dir="/tmp/claudecode-telegram/${node_name}/hookscript/hooks"
+    rm -rf "$hook_dir" 2>/dev/null
+
+    # Simulate PostToolUseFailure payload via the hook script
+    # The hook reads stdin and extracts tool_name
+    local hook_script
+    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks/on-tool-failure.sh"
+
+    # Run hook in the tmux session context (so tmux display-message works)
+    echo '{"tool_name": "Bash", "error": "Command failed"}' | \
+        tmux send-keys -t "$test_session" \
+        "echo '{\"tool_name\": \"Bash\", \"error\": \"Command failed\"}' | $hook_script" Enter
+    sleep 0.5
+
+    local failures_file="${hook_dir}/failures"
+    if [ -f "$failures_file" ]; then
+        local content
+        content=$(cat "$failures_file")
+        if echo "$content" | grep -q "Bash"; then
+            success "on-tool-failure.sh writes signal file correctly"
+        else
+            fail "Signal file exists but no Bash entry: $content"
+        fi
+    else
+        fail "Signal file not created at $failures_file"
+    fi
+
+    # Cleanup
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+    rm -rf "$hook_dir" 2>/dev/null
+}
+
+test_clear_hook_failures_on_restart() {
+    info "Testing hook failure signal cleared on non-resume restart..."
+
+    if python3 -c "
+import tempfile, time, os
+from pathlib import Path
+import bridge
+
+# Set up signal file
+node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').removeprefix('claude-') or 'default'
+name = 'cleartest'
+hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir.mkdir(parents=True, exist_ok=True)
+failures_file = hook_dir / 'failures'
+now = int(time.time())
+failures_file.write_text(f'{now} Bash\n{now} Edit\n{now} Read\n')
+
+assert failures_file.exists(), 'setup failed: signal file not created'
+
+# Clear
+bridge._clear_hook_failures(name)
+
+assert not failures_file.exists(), 'signal file should be deleted after clear'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Hook failure signal cleared on restart"
+    else
+        fail "Hook failure signal clear test failed"
+    fi
+}
+
 test_compute_state_non_interactive() {
     info "Testing compute_state for non-interactive backends..."
 
@@ -4685,6 +4903,166 @@ print('OK')
     fi
 }
 
+test_manager_prefix_on_route_message() {
+    info "Testing manager prefix: plain text gets prefixed, media does not..."
+
+    # Note: route_message mock test can segfault during Python cleanup.
+    # Write test to a temp script and run it, capturing stdout separately.
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_prefix_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+worker_name = 'testbot'
+worker_dir = sessions_dir / worker_name
+worker_dir.mkdir()
+(worker_dir / 'chat_id').write_text('12345')
+(worker_dir / 'backend').write_text('claude')
+
+bridge.state['active'] = worker_name
+tmux_name = f'{bridge.TMUX_PREFIX}{worker_name}'
+
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    worker_name: {'tmux': tmux_name}
+}
+mock_workers.is_online.return_value = True
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+mock_workers.send.return_value = True
+router.workers = mock_workers
+router.telegram = MagicMock()
+
+# 1) Plain text must get 'manager: ' prefix
+router.route_message(worker_name, 'hello world', 12345, None)
+sent_text = mock_workers.send.call_args[0][1]
+assert sent_text == 'manager: hello world', f'plain text: expected manager prefix, got: {sent_text!r}'
+
+# 2) Media text (already has Manager sent) must NOT get double-prefixed
+mock_workers.send.reset_mock()
+router.route_message(worker_name, 'Manager sent image: /tmp/photo.jpg', 12345, None)
+sent_media = mock_workers.send.call_args[0][1]
+assert sent_media == 'Manager sent image: /tmp/photo.jpg', f'media: should pass through unchanged, got: {sent_media!r}'
+
+# 3) @all route also gets prefix (goes through route_message)
+mock_workers.send.reset_mock()
+router.route_to_all('team update', 12345, None)
+sent_all = mock_workers.send.call_args[0][1]
+assert sent_all == 'manager: team update', f'@all: expected manager prefix, got: {sent_all!r}'
+
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "Manager prefix: plain text prefixed, media unchanged, @all prefixed"
+    else
+        fail "Manager prefix test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
+test_media_at_mention_routes_to_mentioned_worker() {
+    info "Testing media with @mention routes to mentioned worker, not active..."
+
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_media_mention_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile, json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+# Create two workers: alice (active) and bob (mentioned)
+for name in ['alice', 'bob']:
+    d = sessions_dir / name
+    d.mkdir()
+    (d / 'chat_id').write_text('12345')
+    (d / 'backend').write_text('claude')
+
+bridge.state['active'] = 'alice'
+orig_admin = bridge.admin_chat_id
+bridge.admin_chat_id = 12345
+
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice'},
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob'},
+}
+mock_workers.is_online.return_value = True
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+mock_workers.send.return_value = True
+router.workers = mock_workers
+router.telegram = MagicMock()
+
+# Simulate sending an animation with @bob in caption
+# Mock download_telegram_file to return a fake path
+with patch('bridge.download_telegram_file', return_value='/tmp/fake.gif'):
+    update = {
+        'message': {
+            'chat': {'id': 12345},
+            'message_id': 1,
+            'text': '@bob turn this gif to mp4 pls',
+            'caption': '@bob turn this gif to mp4 pls',
+            'animation': {'file_id': 'fake_file_id'},
+        }
+    }
+    router.handle_message(update)
+
+# Bob should have received the message (not alice)
+send_calls = mock_workers.send.call_args_list
+assert len(send_calls) >= 1, f'expected at least 1 send call, got {len(send_calls)}'
+
+# Check that bob was the recipient
+recipients = [c[0][0] for c in send_calls]
+assert 'bob' in recipients, f'expected bob in recipients, got: {recipients}'
+assert 'alice' not in recipients, f'alice should NOT have received it, recipients: {recipients}'
+
+# Check the message contains the GIF path
+sent_text = send_calls[0][0][1]
+assert '/tmp/fake.gif' in sent_text, f'expected GIF path in message, got: {sent_text!r}'
+
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+bridge.admin_chat_id = orig_admin
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "Media with @mention routes to mentioned worker"
+    else
+        fail "Media @mention routing test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
 test_handle_watchdog_transition() {
     info "Testing _handle_watchdog_transition state machine..."
 
@@ -5256,6 +5634,17 @@ test_cli_hook_install_uninstall() {
             success "SessionStart hook has correct matcher"
         else
             fail "SessionStart hook matcher missing"
+        fi
+
+        if grep -q "PostToolUseFailure" "$temp_home/.claude/settings.json"; then
+            success "PostToolUseFailure hook registered in settings.json"
+        else
+            fail "PostToolUseFailure hook not in settings.json"
+        fi
+        if grep -q "on-tool-failure.sh" "$temp_home/.claude/settings.json"; then
+            success "PostToolUseFailure hook points to on-tool-failure.sh"
+        else
+            fail "PostToolUseFailure hook script path missing"
         fi
     fi
 
@@ -10606,6 +10995,11 @@ run_unit_tests() {
     run_test test_end_clears_pending
     run_test test_adapter_stderr_logging
     run_test test_poisoned_detection
+    run_test test_poisoned_hook_signal_file
+    run_test test_poisoned_hook_signal_stale_ignored
+    run_test test_poisoned_hook_signal_below_threshold
+    run_test test_on_tool_failure_hook_script
+    run_test test_clear_hook_failures_on_restart
     run_test test_compute_state_non_interactive
     run_test test_since_preserved_on_reason_change
     run_test test_compute_state_interactive
@@ -10619,6 +11013,8 @@ run_unit_tests() {
     run_test test_switch_session
     run_test test_send_response_html_formatting
     run_test test_format_response_strips_name_prefix
+    run_test test_manager_prefix_on_route_message
+    run_test test_media_at_mention_routes_to_mentioned_worker
     run_test test_get_any_session_id
     run_test test_progress_continuity_for_noninteractive
     run_test test_extract_worker_activity

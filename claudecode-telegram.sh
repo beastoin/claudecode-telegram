@@ -1239,9 +1239,18 @@ cmd_hook_install() {
         success "Checkin hook installed: $checkin_dst"
     fi
 
+    # Copy tool failure hook (PostToolUseFailure - POISONED detection via signal file)
+    local failure_hook_src="$SCRIPT_DIR/hooks/on-tool-failure.sh"
+    local failure_hook_dst="$HOOKS_DIR/on-tool-failure.sh"
+    if [[ -f "$failure_hook_src" ]]; then
+        cp "$failure_hook_src" "$failure_hook_dst" && chmod 755 "$failure_hook_dst"
+        success "Tool failure hook installed: $failure_hook_dst"
+    fi
+
     mkdir -p "$CLAUDE_DIR"
     local hook_cmd="$HOME/.claude/hooks/$HOOK_SCRIPT"
     local checkin_cmd="$HOME/.claude/hooks/$CHECKIN_HOOK_SCRIPT"
+    local failure_cmd="$HOME/.claude/hooks/on-tool-failure.sh"
 
     # Add to settings.json
     # Claude Code hooks structure: hooks.<Event>[].hooks[] (matcher group with hooks array)
@@ -1265,6 +1274,17 @@ cmd_hook_install() {
             warn "Install jq to auto-update settings.json"
         fi
 
+        # Add PostToolUseFailure hook for POISONED detection
+        if grep -q "on-tool-failure.sh" "$SETTINGS_FILE" 2>/dev/null; then
+            log "$(dim "PostToolUseFailure hook already in settings.json")"
+        elif check_cmd jq; then
+            jq --arg cmd "$failure_cmd" \
+                '.hooks.PostToolUseFailure = [{"hooks":[{"type":"command","command":$cmd}]}]' \
+                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+            success "Updated settings.json (PostToolUseFailure hook)"
+        fi
+
         # Add SessionStart hook for checkin (compact/resume)
         if grep -q "$CHECKIN_HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
             log "$(dim "SessionStart hook already in settings.json")"
@@ -1277,16 +1297,17 @@ cmd_hook_install() {
         fi
     else
         if check_cmd jq; then
-            # Create with both hooks using jq for proper escaping
-            jq -n --arg stop "$hook_cmd" --arg checkin "$checkin_cmd" '{
+            # Create with all hooks using jq for proper escaping
+            jq -n --arg stop "$hook_cmd" --arg checkin "$checkin_cmd" --arg failure "$failure_cmd" '{
                 hooks: {
                     Stop: [{hooks: [{type: "command", command: $stop}]}],
-                    SessionStart: [{matcher: "compact|resume|init|start", hooks: [{type: "command", command: $checkin}]}]
+                    SessionStart: [{matcher: "compact|resume|init|start", hooks: [{type: "command", command: $checkin}]}],
+                    PostToolUseFailure: [{hooks: [{type: "command", command: $failure}]}]
                 }
             }' > "$SETTINGS_FILE"
         else
             cat > "$SETTINGS_FILE" << EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":"$checkin_cmd"}]}]}}
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":"$checkin_cmd"}]}],"PostToolUseFailure":[{"hooks":[{"type":"command","command":"$failure_cmd"}]}]}}
 EOF
         fi
         success "Created settings.json"
