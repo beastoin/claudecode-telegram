@@ -175,22 +175,12 @@ wait_for_port() {
     nc -z localhost "$port" 2>/dev/null
 }
 
-# Compute HMAC-SHA256 signature for hook endpoint requests
-hook_sign() {
-    local body="$1"
-    local secret="${TEST_HOOK_SECRET:-test_hook_secret_for_hmac}"
-    echo -n "$body" | openssl dgst -sha256 -hmac "$secret" | sed 's/^.* //'
-}
-
-# curl wrapper that adds HMAC signature for /response and /notify endpoints
+# curl wrapper for /response and /notify endpoints
 hook_curl() {
     local url="$1"; shift
     local body="$1"; shift
-    local sig
-    sig=$(hook_sign "$body")
     curl -s -X POST "$url" \
         -H "Content-Type: application/json" \
-        -H "X-Hook-Signature: sha256=$sig" \
         -d "$body" "$@"
 }
 
@@ -198,11 +188,8 @@ hook_curl() {
 hook_curl_code() {
     local url="$1"; shift
     local body="$1"; shift
-    local sig
-    sig=$(hook_sign "$body")
     curl -s -o /dev/null -w "%{http_code}" -X POST "$url" \
         -H "Content-Type: application/json" \
-        -H "X-Hook-Signature: sha256=$sig" \
         -d "$body" "$@"
 }
 
@@ -1269,8 +1256,6 @@ test_bridge_starts() {
     chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR" "$TEST_TEAM_DIR"
 
     # Start bridge with test node isolation
-    # Use fixed HOOK_SECRET so tests can sign requests
-    TEST_HOOK_SECRET="test_hook_secret_for_hmac"
     TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
     PORT="$PORT" \
     NODE_NAME="$TEST_NODE" \
@@ -1278,7 +1263,6 @@ test_bridge_starts() {
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     TEAM_DIR="$TEST_TEAM_DIR" \
-    HOOK_SECRET="$TEST_HOOK_SECRET" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -9725,109 +9709,6 @@ print('OK')
     fi
 }
 
-test_forward_self_heal_on_403() {
-    info "Testing forward-to-bridge self-heals on 403 (stale HOOK_SECRET)..."
-
-    if python3 -c "
-import sys, json, os
-from importlib.util import spec_from_loader, module_from_spec
-from importlib.machinery import SourceFileLoader
-from unittest.mock import patch, MagicMock
-import urllib.error
-
-# Load forward-to-bridge.py as a module
-spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
-ftb = module_from_spec(spec)
-spec.loader.exec_module(ftb)
-
-# Track calls
-calls = {'response': 0, 'checkin': 0}
-
-def mock_urlopen(req, **kwargs):
-    url = req.full_url if hasattr(req, 'full_url') else str(req)
-    if '/checkin' in url:
-        calls['checkin'] += 1
-        resp = MagicMock()
-        resp.status = 200
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = lambda s, *a: None
-        return resp
-    # /response endpoint
-    calls['response'] += 1
-    if calls['response'] == 1:
-        # First call: reject with 403 (stale secret)
-        raise urllib.error.HTTPError(url, 403, 'Invalid hook signature', {}, None)
-    # Second call: accept (fresh secret)
-    resp = MagicMock()
-    resp.status = 200
-    resp.__enter__ = lambda s: s
-    resp.__exit__ = lambda s, *a: None
-    return resp
-
-def mock_read_secret(session):
-    return 'fresh_secret_abc'
-
-os.environ['HOOK_SECRET'] = 'stale_secret_xyz'
-
-with patch('urllib.request.urlopen', mock_urlopen), \
-     patch.object(ftb, 'read_hook_secret_from_tmux', mock_read_secret):
-    result = ftb.forward_to_bridge('test msg', 'lee', 'http://localhost:8080/response')
-
-assert result == True, f'expected True, got {result}'
-assert calls['response'] == 2, f'expected 2 /response calls, got {calls[\"response\"]}'
-assert calls['checkin'] == 1, f'expected 1 /checkin call, got {calls[\"checkin\"]}'
-
-# Clean up
-del os.environ['HOOK_SECRET']
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "forward-to-bridge self-heals on 403"
-    else
-        fail "forward-to-bridge self-heal test failed"
-    fi
-}
-
-test_forward_no_self_heal_on_other_errors() {
-    info "Testing forward-to-bridge does NOT self-heal on non-403 errors..."
-
-    if python3 -c "
-import sys, os
-from importlib.util import spec_from_loader, module_from_spec
-from importlib.machinery import SourceFileLoader
-from unittest.mock import patch
-import urllib.error
-
-spec = spec_from_loader('forward_to_bridge', SourceFileLoader('forward_to_bridge', 'hooks/forward-to-bridge.py'))
-ftb = module_from_spec(spec)
-spec.loader.exec_module(ftb)
-
-calls = {'response': 0}
-
-def mock_urlopen(req, **kwargs):
-    calls['response'] += 1
-    raise urllib.error.HTTPError(str(req), 500, 'Server Error', {}, None)
-
-os.environ['HOOK_SECRET'] = 'some_secret'
-
-try:
-    with patch('urllib.request.urlopen', mock_urlopen):
-        ftb.forward_to_bridge('test', 'lee', 'http://localhost:8080/response')
-    assert False, 'should have raised'
-except urllib.error.HTTPError as e:
-    assert e.code == 500, f'expected 500, got {e.code}'
-
-# Should NOT retry on 500
-assert calls['response'] == 1, f'expected 1 call (no retry), got {calls[\"response\"]}'
-
-del os.environ['HOOK_SECRET']
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "forward-to-bridge does not self-heal on non-403"
-    else
-        fail "forward-to-bridge non-403 test failed"
-    fi
-}
-
 test_backend_registry_exists() {
     info "Testing backend registry exists and contains expected backends..."
 
@@ -11141,8 +11022,8 @@ run_unit_tests() {
     log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
     run_test test_markdown_to_telegram_html
     run_test test_forward_to_bridge_escape_flag
-    run_test test_forward_self_heal_on_403
-    run_test test_forward_no_self_heal_on_other_errors
+    # test_forward_self_heal_on_403 removed (HOOK_SECRET removed)
+    # test_forward_no_self_heal_on_other_errors removed (HOOK_SECRET removed)
     # Unit tests - Backend registry / non-interactive mode
     log ""
     log "── Backend Registry Tests (Unit) ───────────────────────────────────────"

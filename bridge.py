@@ -4,7 +4,6 @@
 VERSION = "0.24.0"
 
 import hashlib
-import hmac
 import os
 import json
 import mimetypes
@@ -50,8 +49,6 @@ else:
 
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
-# Internal endpoint auth: generated per-run, exported to workers via tmux set-environment
-HOOK_SECRET = os.environ.get("HOOK_SECRET", "") or secrets.token_hex(16)
 
 if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
     SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
@@ -1164,22 +1161,6 @@ def send_telegram_message(chat_id: int, text: str):
     """Send a plain Telegram message."""
     return telegram.send_message(chat_id, text)
 
-
-def verify_hook_hmac(headers, body: bytes) -> bool:
-    """Verify HMAC-SHA256 signature on internal endpoint requests.
-
-    Hook sends: X-Hook-Signature: sha256=<hex>
-    Computed over raw request body using HOOK_SECRET.
-    Returns True if valid or if HOOK_SECRET is empty (disabled).
-    """
-    if not HOOK_SECRET:
-        return True
-    sig_header = headers.get("X-Hook-Signature", "")
-    if not sig_header.startswith("sha256="):
-        return False
-    provided = sig_header[7:]
-    expected = hmac.new(HOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(provided.lower(), expected.lower())
 
 
 # ============================================================
@@ -4586,8 +4567,6 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)])
     # Always export BRIDGE_URL so workers know where their bridge is
     subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
-    # HMAC secret for hook endpoint authentication
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "HOOK_SECRET", HOOK_SECRET])
 
 
 def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
@@ -6027,7 +6006,6 @@ class CommandRouter:
             "SESSIONS_DIR": str(SESSIONS_DIR),
             "WORKER_BACKEND": normalize_backend(backend_name),
             "BRIDGE_URL": BRIDGE_PUBLIC_URL or BRIDGE_URL,
-            "HOOK_SECRET": HOOK_SECRET,
         }.items():
             _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value],
                          host=target_host, capture_output=True)
@@ -6349,21 +6327,11 @@ class Handler(BaseHTTPRequestHandler):
         # Route based on path
         if self.path == "/response":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            if not verify_hook_hmac(self.headers, body):
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Invalid hook signature")
-                return
             self.handle_hook_response(body)
             return
 
         if self.path == "/notify":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            if not verify_hook_hmac(self.headers, body):
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Invalid hook signature")
-                return
             self.handle_notify(body)
             return
 
@@ -6547,7 +6515,7 @@ class Handler(BaseHTTPRequestHandler):
             tmux_name = ""
             if name in registered:
                 backend_name = get_worker_backend(name, registered[name])
-                # Re-export hook env on checkin (fixes stale HOOK_SECRET after restart)
+                # Re-export hook env on checkin (refreshes BRIDGE_URL after restart)
                 tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
                 if tmux_exists(tmux_name):
                     export_hook_env(tmux_name, backend_name)
@@ -6705,7 +6673,7 @@ def main():
             backend_obj = get_backend(backend_name)
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
-            # Re-export hook env so workers get the new HOOK_SECRET
+            # Re-export hook env so workers get the current BRIDGE_URL
             if tmux_exists(tmux_name):
                 export_hook_env(tmux_name, backend_name)
 
@@ -6744,7 +6712,7 @@ def main():
         print("Webhook verification: enabled")
     else:
         print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
-    print(f"Hook endpoint auth: {'enabled' if HOOK_SECRET else 'disabled'}")
+    print(f"Hook endpoint auth: disabled (localhost-only)")
     if admin_chat_id:
         print(f"Admin: {admin_chat_id} (pre-configured)")
     else:
