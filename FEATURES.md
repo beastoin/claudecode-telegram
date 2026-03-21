@@ -217,7 +217,12 @@
 
 ## HTTP Endpoints
 ### `GET /`
-- MUST return `200 OK` with body `Claude-Telegram Multi-Session Bridge`.
+- MUST return `200 OK` with JSON body containing `name`, `endpoints`, and `note` fields.
+- MUST include all available endpoint paths in `endpoints`.
+
+### Unknown routes
+- MUST return `404` with JSON body containing `error`, `available_endpoints`, and `hint` for any unrecognized GET or POST path.
+- POST webhook MUST only be accepted on root path `/`.
 
 ### `POST /` (Telegram webhook)
 - MUST accept Telegram Update JSON.

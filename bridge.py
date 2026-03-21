@@ -95,6 +95,17 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
 PERSISTENCE_NOTE = "They'll stay on your team."
 
+# API endpoint registry — used by index, 404 handler, and worker instructions.
+# Update this when adding new endpoints.
+API_ENDPOINTS = {
+    "GET /": "API index — lists all endpoints",
+    "GET /workers": "List active workers with send commands",
+    "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
+    "GET /health/workers": "Watchdog state for all workers",
+    "POST /response": "Hook: send Claude response to Telegram",
+    "POST /notify": "Send notification to all admin chats",
+}
+
 # Sandbox mode: run Claude Code in Docker container for isolation
 # CLI flags: --sandbox, --sandbox-image, --mount, --mount-ro
 # Default: mounts ~ to /workspace (rw)
@@ -846,6 +857,24 @@ def list_backends() -> list[str]:
     return list(BACKENDS.keys())
 
 
+def _which_binary(binary: str) -> str | None:
+    """Find binary in PATH, including common user install locations.
+
+    The bridge may run with a minimal PATH (e.g. via env -i), missing
+    ~/.local/bin or ~/bin where claude/codex are typically installed.
+    """
+    found = shutil.which(binary)
+    if found:
+        return found
+    home = os.environ.get("HOME", "")
+    if home:
+        for extra_dir in [os.path.join(home, ".local", "bin"), os.path.join(home, "bin")]:
+            candidate = os.path.join(extra_dir, binary)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 def is_claude_running(tmux_name: str) -> bool:
     return is_process_running(tmux_name, "claude")
 
@@ -894,6 +923,7 @@ BOT_COMMANDS = [
     {"command": "restart", "description": "Restart worker (--clean for fresh)"},
     # Occasional
     {"command": "settings", "description": "Show settings"},
+    {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
@@ -2992,12 +3022,38 @@ def watchdog_loop():
             tmux_present = {}
             backend_info = {}
 
+            # Collect remote hosts and probe their tmux sessions in bulk
+            remote_workers = {}  # host -> [(name, tmux_name)]
+            for name, session in registered.items():
+                host = get_worker_host(name)
+                if host:
+                    tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+                    remote_workers.setdefault(host, []).append((name, tmux_name))
+
+            remote_pane_pids = {}  # tmux_name -> pane_pid (across all hosts)
+            for host, workers in remote_workers.items():
+                try:
+                    r = _remote_run(
+                        ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                        host=host, capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        for line in r.stdout.splitlines():
+                            parts = line.strip().split()
+                            if len(parts) >= 2 and parts[1].isdigit():
+                                remote_pane_pids[parts[0]] = parts[1]
+                except Exception:
+                    pass
+
             for name, session in registered.items():
                 backend_name = get_worker_backend(name, session)
                 backend = get_backend(backend_name)
                 backend_info[name] = backend
                 tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
-                pane_pid = pane_pids.get(tmux_name)
+                host = get_worker_host(name)
+                if host:
+                    pane_pid = remote_pane_pids.get(tmux_name)
+                else:
+                    pane_pid = pane_pids.get(tmux_name)
                 tmux_exists = bool(pane_pid)
                 tmux_present[name] = tmux_exists
 
@@ -3005,7 +3061,7 @@ def watchdog_loop():
                     continue
 
                 if backend.is_interactive:
-                    claude_pid = _get_claude_pid(pane_pid)
+                    claude_pid = _get_claude_pid(pane_pid, host=host)
                     if claude_pid:
                         claude_pids[name] = claude_pid
                         with _watchdog_lock:
@@ -3674,16 +3730,23 @@ def _extract_context_pct(lines: list[str]) -> Optional[str]:
     return None
 
 
-def _read_tmux_activity(tmux_name: str) -> tuple:
+def _read_tmux_activity(tmux_name: str, host: str = None) -> tuple:
     """Read tmux pane and extract activity summary + context% + raw lines.
 
     Returns (activity_str, context_pct_str_or_None, raw_lines_or_None).
+    When host is set, reads from a remote tmux session via SSH.
     """
     try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-t", tmux_name, "-p"],
-            capture_output=True, text=True, timeout=3
-        )
+        if host:
+            result = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=host, capture_output=True, text=True, timeout=5
+            )
+        else:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                capture_output=True, text=True, timeout=3
+            )
         if result.returncode != 0:
             return "Unknown", None, None
         lines = result.stdout.split("\n")
@@ -4129,6 +4192,7 @@ class WorkerManager:
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
+            "BRIDGE API: Available endpoints: GET /workers, GET /checkin. Messages from manager arrive as prompts — there is NO polling endpoint. "
             "WARNING: Do NOT output worker messages normally — they go to Telegram. Use the send commands from /workers instead."
         )
         if not backend_obj.is_interactive:
@@ -4158,7 +4222,7 @@ class WorkerManager:
         backend_obj = get_backend(backend)
 
         # Check binary exists before creating tmux session
-        if not shutil.which(backend_obj.binary):
+        if not _which_binary(backend_obj.binary):
             return False, f"'{backend_obj.binary}' not found in PATH. Install it first."
 
         tmux_name = f"{self.tmux_prefix}{name}"
@@ -4307,7 +4371,7 @@ class WorkerManager:
             return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
 
         # Check binary still exists before restarting
-        if not shutil.which(backend.binary):
+        if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
 
         resume_id = ""
@@ -4391,7 +4455,7 @@ class WorkerManager:
         Creates a new tmux session, exports env, starts backend, sends welcome.
         Preserves session files (session_id, cwd) for resume capability.
         """
-        if not shutil.which(backend.binary):
+        if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
 
         # Create new tmux session
@@ -5174,6 +5238,8 @@ class CommandRouter:
             return self.cmd_restart(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
+        elif cmd == "/pilot":
+            return self.cmd_pilot(arg, chat_id)
         elif cmd == "/teleport":
             return self.cmd_teleport(arg, chat_id)
         elif cmd == "/teleback":
@@ -5227,6 +5293,32 @@ class CommandRouter:
             self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
         return True
 
+    def cmd_pilot(self, name, chat_id):
+        if not name:
+            self.reply(chat_id, "Usage: /pilot <name>", outcome="Needs decision")
+            return True
+        name = name.lower().strip()
+        # Resolve to tmux session name
+        prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
+        session_name = f"{prefix}{name}" if not name.startswith("claude-") else name
+        pilot_port = os.environ.get("PILOT_PORT", "10170")
+        try:
+            import urllib.request
+            import json as _json
+            url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
+            req = urllib.request.Request(url, method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read())
+            # Derive host from BRIDGE_PUBLIC_URL (e.g. http://100.125.36.102:8271 → 100.125.36.102)
+            from urllib.parse import urlparse
+            bridge_pub = os.environ.get("BRIDGE_PUBLIC_URL", "")
+            host = urlparse(bridge_pub).hostname if bridge_pub else "localhost"
+            pilot_url = f"http://{host}:{pilot_port}/session/{session_name}"
+            self.reply(chat_id, f"✈️ Pilot on for {name} (5min)\n{pilot_url}")
+        except Exception as e:
+            self.reply(chat_id, f"Pilot error: {e}", outcome="Needs decision")
+        return True
+
     def cmd_focus(self, name, chat_id):
         if not name:
             self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
@@ -5255,12 +5347,13 @@ class CommandRouter:
             context_pct = None
 
             tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
-            tmux_alive = "tmux" in session and tmux_exists(tmux_name)
+            host = get_worker_host(name)
+            tmux_alive = "tmux" in session and tmux_exists(tmux_name, host=host)
             if tmux_alive:
                 backend = get_backend(backend_name)
                 if backend.is_interactive:
                     if is_claude_running(tmux_name):
-                        activity, context_pct, _ = _read_tmux_activity(tmux_name)
+                        activity, context_pct, _ = _read_tmux_activity(tmux_name, host=host)
                     else:
                         activity = "worker app not running"
                 else:
@@ -5776,7 +5869,8 @@ class CommandRouter:
                 self._sync_session_transcript(
                     session_id, source_cwd, target_cwd, source_host, target_host)
 
-            self._teleport_notify(chat_id, "Installing hooks on target...")
+            self._teleport_notify(chat_id, "Syncing team config and hooks...")
+            self._sync_shared_repos(target_host, chat_id)
             self._install_hooks_on_target(target_host)
 
             # ── PHASE 2: Commit ──
@@ -5803,6 +5897,10 @@ class CommandRouter:
             # Point of no return: kill source
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                         host=source_host, capture_output=True)
+
+            # Sync shared repos back on teleback
+            if is_teleback:
+                self._sync_shared_repos_back(source_host)
 
             # Update registry
             if is_teleback:
@@ -5930,37 +6028,101 @@ class CommandRouter:
                 cmd = ["rsync", "-az", local_src, local_dst]
             subprocess.run(cmd, capture_output=True, timeout=120)
 
+    def _sync_shared_repos(self, target_host, chat_id=None):
+        """Sync team and agent-config git repos between VPS and target.
+
+        VPS hosts bare repos at ~/git/{team,agent-config}.git.
+        Both VPS working copies and target clones use these as origin.
+        Push from source, pull on target.
+        """
+        if not target_host:
+            return  # Local — already in sync
+
+        home = os.path.expanduser("~")
+        git_repos = {
+            "team": os.path.join(home, "team"),
+            "agent-config": os.path.join(home, "agent-config"),
+        }
+
+        # Push local changes to bare repo (VPS side)
+        for repo_name, repo_path in git_repos.items():
+            if os.path.isdir(os.path.join(repo_path, ".git")):
+                subprocess.run(
+                    ["git", "-C", repo_path, "add", "-A"],
+                    capture_output=True, timeout=10)
+                subprocess.run(
+                    ["git", "-C", repo_path, "commit", "-m",
+                     f"teleport sync: {repo_name}"],
+                    capture_output=True, timeout=10)
+                subprocess.run(
+                    ["git", "-C", repo_path, "push", "origin", "master"],
+                    capture_output=True, timeout=15)
+
+        # Pull on target
+        for repo_name in git_repos:
+            _remote_run(
+                ["bash", "-c",
+                 f"cd ~/{repo_name} 2>/dev/null && git pull origin master 2>/dev/null || true"],
+                host=target_host, capture_output=True, timeout=30)
+
+        # Adapt settings.json paths for target $HOME
+        r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
+                              capture_output=True, text=True, timeout=5)
+        remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+        local_home = home
+        if remote_home and remote_home != local_home:
+            settings_src = os.path.expanduser("~/.claude/settings.json")
+            if os.path.exists(settings_src):
+                with open(settings_src) as f:
+                    settings_text = f.read()
+                settings_text = settings_text.replace(local_home, remote_home)
+                fd, tmp = tempfile.mkstemp(suffix=".json")
+                os.write(fd, settings_text.encode())
+                os.close(fd)
+                subprocess.run(
+                    ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
+                    capture_output=True, timeout=10)
+                os.unlink(tmp)
+
+    def _sync_shared_repos_back(self, source_host):
+        """Pull changes back from remote after teleback.
+
+        Commits and pushes on remote, then pulls locally.
+        """
+        if not source_host:
+            return
+
+        home = os.path.expanduser("~")
+        for repo_name in ["team", "agent-config"]:
+            # Commit + push on remote
+            _remote_run(
+                ["bash", "-c",
+                 f"cd ~/{repo_name} 2>/dev/null && "
+                 f"git add -A && "
+                 f"git commit -m 'teleback sync: {repo_name}' 2>/dev/null; "
+                 f"git push origin master 2>/dev/null || true"],
+                host=source_host, capture_output=True, timeout=30)
+
+            # Pull locally
+            repo_path = os.path.join(home, repo_name)
+            if os.path.isdir(os.path.join(repo_path, ".git")):
+                subprocess.run(
+                    ["git", "-C", repo_path, "pull", "origin", "master"],
+                    capture_output=True, timeout=15)
+
     def _install_hooks_on_target(self, target_host):
-        """Install Claude Code hooks and settings on target machine."""
+        """Install Claude Code hooks and settings on target machine.
+
+        With git-synced agent-config, this is a lightweight fallback
+        for any files not covered by the repo (e.g., .claude.json).
+        Hooks/skills/settings are synced via _sync_shared_repos.
+        """
         if not target_host:
             return  # Local — hooks already installed
 
-        hooks_src = str(Path(__file__).parent / "hooks") + "/"
-        _remote_run(["mkdir", "-p", ".claude/hooks"],
-                     host=target_host, capture_output=True)
-        subprocess.run(["rsync", "-az", hooks_src, f"{target_host}:.claude/hooks/"],
-                       capture_output=True, timeout=30)
+        # Ensure hooks dir has correct permissions
         _remote_run(["chmod", "-R", "700", ".claude/hooks"],
                      host=target_host, capture_output=True)
-
-        # Sync settings.json with adapted hook paths for target $HOME
-        settings_src = os.path.expanduser("~/.claude/settings.json")
-        if os.path.exists(settings_src):
-            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
-                                  capture_output=True, text=True, timeout=5)
-            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
-            local_home = os.path.expanduser("~")
-            with open(settings_src) as f:
-                settings_text = f.read()
-            if remote_home and remote_home != local_home:
-                settings_text = settings_text.replace(local_home, remote_home)
-            fd, tmp = tempfile.mkstemp(suffix=".json")
-            os.write(fd, settings_text.encode())
-            os.close(fd)
-            subprocess.run(
-                ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
-                capture_output=True, timeout=10)
-            os.unlink(tmp)
 
         # Sync .claude.json (onboarding, trust dialogs, project config)
         claude_json = os.path.expanduser("~/.claude.json")
@@ -6323,6 +6485,22 @@ command_router = CommandRouter(telegram, worker_manager)
 # ============================================================
 
 class Handler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code: int, data: dict):
+        """Send a JSON response with proper Content-Type."""
+        body = json.dumps(data).encode()
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_unknown_endpoint(self, method: str, path: str):
+        """Return 404 JSON for unrecognized endpoints with available alternatives."""
+        self._send_json(404, {
+            "error": f"Unknown endpoint: {method} {path}",
+            "available_endpoints": API_ENDPOINTS,
+            "hint": "Messages from manager arrive as prompts. There is no polling endpoint.",
+        })
+
     def do_POST(self):
         # Route based on path
         if self.path == "/response":
@@ -6333,6 +6511,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/notify":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             self.handle_notify(body)
+            return
+
+        # Only accept Telegram webhook on root path — 404 for unknown POST paths
+        parsed = urlparse(self.path)
+        if parsed.path != "/":
+            self._send_unknown_endpoint("POST", parsed.path)
             return
 
         # Telegram webhook - optional secret verification
@@ -6463,10 +6647,17 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_health_workers_endpoint()
             return
 
-        # Default health check endpoint
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Claude-Telegram Multi-Session Bridge")
+        # API index (also serves as health check — returns 200)
+        if parsed.path == "/":
+            self._send_json(200, {
+                "name": "claudecode-telegram bridge",
+                "endpoints": API_ENDPOINTS,
+                "note": "Messages from manager arrive as prompts. There is no polling endpoint.",
+            })
+            return
+
+        # Unknown GET endpoint
+        self._send_unknown_endpoint("GET", parsed.path)
 
     def handle_workers_endpoint(self):
         """Return list of active workers with communication details.

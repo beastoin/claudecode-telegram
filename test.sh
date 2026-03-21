@@ -1276,10 +1276,10 @@ test_bridge_starts() {
     fi
 
     # Verify endpoint
-    if curl -s "http://localhost:$PORT" | grep -q "Claude-Telegram"; then
-        success "Bridge endpoint responds"
+    if curl -s "http://localhost:$PORT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
+        success "Bridge endpoint responds with JSON API index"
     else
-        fail "Bridge endpoint not responding"
+        fail "Bridge endpoint not responding with JSON"
     fi
 }
 
@@ -2087,6 +2087,7 @@ import time
 import bridge
 
 orig_which = shutil.which
+orig_which_binary = bridge._which_binary
 
 tmux_name = f'{bridge.TMUX_PREFIX}binchk'
 
@@ -2099,13 +2100,14 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'binchk': {'tmux': tmux_name, 'backend': 'codex'}
 }
 
-# Now make codex binary disappear
+# Now make codex binary disappear — mock both shutil.which and _which_binary
 def mock_which(name, path=None):
     if name == 'codex':
         return None
     return orig_which(name, path=path)
 
 shutil.which = mock_which
+bridge._which_binary = mock_which
 
 ok, err = bridge.worker_manager.restart('binchk', mode='relaunch')
 assert ok is False, f'expected restart to fail, got ok={ok}'
@@ -2115,6 +2117,7 @@ assert 'not found' in err, f'expected not-found message: {err}'
 # Cleanup
 subprocess.run(['tmux', 'kill-session', '-t', tmux_name], capture_output=True)
 shutil.which = orig_which
+bridge._which_binary = orig_which_binary
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -4598,13 +4601,13 @@ assert bridge._last_mention['count'] == 1, f'T1: count should be 1, got {bridge.
 # Test 2: Second @alice mention — auto-focus switches to alice
 router.handle_message(make_msg('@alice do task 2'))
 assert bridge.state['active'] == 'alice', f'T2: should switch to alice, got {bridge.state[\"active\"]}'
-assert any('Auto-focused to alice' in s for s in mock_api.sent), f'T2: should notify auto-focus, sent: {mock_api.sent}'
+assert any('Switched to alice' in s for s in mock_api.sent), f'T2: should notify auto-focus, sent: {mock_api.sent}'
 
 # Test 3: Third @alice mention — already focused, no duplicate notification
 mock_api.sent.clear()
 router.handle_message(make_msg('@alice do task 3'))
 assert bridge.state['active'] == 'alice', f'T3: should stay alice'
-assert not any('Auto-focused' in s for s in mock_api.sent), f'T3: should not re-notify when already focused'
+assert not any('Switched to' in s for s in mock_api.sent), f'T3: should not re-notify when already focused'
 
 # Test 4: @bob then @alice — different workers, no focus switch
 bridge.state['active'] = 'bob'
@@ -5532,15 +5535,21 @@ test_secure_directory_permissions() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_health_endpoint() {
-    info "Testing GET / health endpoint..."
+    info "Testing GET / API index endpoint..."
 
     local response
     response=$(curl -s "http://localhost:$PORT")
 
-    if echo "$response" | grep -q "Claude-Telegram Multi-Session Bridge"; then
-        success "Health endpoint returns expected string"
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert 'endpoints' in d
+assert 'name' in d
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "API index returns JSON with endpoints"
     else
-        fail "Health endpoint response incorrect: $response"
+        fail "API index response incorrect: $response"
     fi
 }
 
@@ -9889,10 +9898,10 @@ test_direct_mode_bridge_starts() {
     fi
 
     # Verify health endpoint
-    if curl -s "http://localhost:$DIRECT_MODE_PORT" | grep -q "Claude-Telegram"; then
-        success "Direct mode bridge health endpoint responds"
+    if curl -s "http://localhost:$DIRECT_MODE_PORT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
+        success "Direct mode bridge health endpoint responds with JSON"
     else
-        fail "Direct mode bridge health endpoint not responding"
+        fail "Direct mode bridge health endpoint not responding with JSON"
     fi
 }
 
@@ -10901,6 +10910,155 @@ test_health_workers_endpoint() {
     fi
 }
 
+test_api_index_returns_json() {
+    info "Testing GET / returns JSON API index..."
+
+    local response
+    response=$(curl -s "http://localhost:$PORT")
+
+    # Must be valid JSON with endpoints and name
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert 'endpoints' in d, 'missing endpoints'
+assert 'name' in d, 'missing name'
+assert 'claudecode-telegram' in d['name'], 'wrong name'
+assert 'note' in d, 'missing note'
+assert 'polling' in d['note'].lower(), 'note should mention polling'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "GET / returns JSON API index with endpoints, name, and no-polling note"
+    else
+        fail "GET / JSON missing required fields: $response"
+    fi
+}
+
+test_unknown_get_returns_404() {
+    info "Testing unknown GET returns 404 JSON..."
+
+    # GET /poll — the exact endpoint sora hallucinated
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/poll")
+    if [[ "$http_code" == "404" ]]; then
+        success "GET /poll returns 404"
+    else
+        fail "GET /poll should return 404, got $http_code"
+    fi
+
+    # Verify response is JSON with error and available_endpoints
+    local response
+    response=$(curl -s "http://localhost:$PORT/poll")
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert 'error' in d, 'missing error'
+assert '/poll' in d['error'], 'error should mention /poll'
+assert 'available_endpoints' in d, 'missing available_endpoints'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "GET /poll returns JSON with error and available endpoints"
+    else
+        fail "GET /poll should return JSON error: $response"
+    fi
+
+    # Also test a random path
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/nonexistent")
+    if [[ "$http_code" == "404" ]]; then
+        success "GET /nonexistent returns 404"
+    else
+        fail "GET /nonexistent should return 404, got $http_code"
+    fi
+}
+
+test_unknown_post_returns_404() {
+    info "Testing unknown POST returns 404 JSON..."
+
+    # POST /hire — the exact endpoint kenji tried
+    local http_code
+    http_code=$(hook_curl_code "http://localhost:$PORT/hire" '{"name":"test"}')
+    if [[ "$http_code" == "404" ]]; then
+        success "POST /hire returns 404"
+    else
+        fail "POST /hire should return 404, got $http_code"
+    fi
+
+    # Verify response is JSON with error
+    local response
+    response=$(hook_curl "http://localhost:$PORT/hire" '{"name":"test"}')
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert 'error' in d, 'missing error'
+assert '/hire' in d['error'], 'error should mention /hire'
+assert 'available_endpoints' in d, 'missing available_endpoints'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "POST /hire returns JSON with error and available endpoints"
+    else
+        fail "POST /hire should return JSON error: $response"
+    fi
+
+    # POST /poll should also 404
+    http_code=$(hook_curl_code "http://localhost:$PORT/poll" '{}')
+    if [[ "$http_code" == "404" ]]; then
+        success "POST /poll returns 404"
+    else
+        fail "POST /poll should return 404, got $http_code"
+    fi
+}
+
+test_known_endpoints_unchanged() {
+    info "Testing known endpoints still return 200..."
+
+    local http_code
+
+    # GET /workers
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/workers")
+    if [[ "$http_code" == "200" ]]; then
+        success "GET /workers still returns 200"
+    else
+        fail "GET /workers should return 200, got $http_code"
+    fi
+
+    # GET /checkin
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/checkin")
+    if [[ "$http_code" == "200" ]]; then
+        success "GET /checkin still returns 200"
+    else
+        fail "GET /checkin should return 200, got $http_code"
+    fi
+
+    # GET /health/workers
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/health/workers")
+    if [[ "$http_code" == "200" ]]; then
+        success "GET /health/workers still returns 200"
+    else
+        fail "GET /health/workers should return 200, got $http_code"
+    fi
+
+    # GET / (API index)
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/")
+    if [[ "$http_code" == "200" ]]; then
+        success "GET / still returns 200"
+    else
+        fail "GET / should return 200, got $http_code"
+    fi
+}
+
+test_webhook_root_still_works() {
+    info "Testing POST / (Telegram webhook) still works..."
+
+    local response
+    response=$(curl -s -X POST "http://localhost:$PORT/" \
+        -H "Content-Type: application/json" \
+        -d '{"update_id": 99999}')
+    if [[ "$response" == "OK" ]]; then
+        success "POST / (webhook) still returns OK"
+    else
+        fail "POST / (webhook) should return OK, got: $response"
+    fi
+}
+
 test_tmux_prompt_empty() {
     info "Testing tmux_prompt_empty with real tmux session..."
 
@@ -11243,6 +11401,11 @@ run_integration_tests() {
     run_test test_checkin_endpoint
     run_test test_checkin_note
     run_test test_health_workers_endpoint
+    run_test test_api_index_returns_json
+    run_test test_unknown_get_returns_404
+    run_test test_unknown_post_returns_404
+    run_test test_known_endpoints_unchanged
+    run_test test_webhook_root_still_works
     # Admin tests
     log ""
     log "── Admin Tests ─────────────────────────────────────────────────────────"
