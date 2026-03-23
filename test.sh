@@ -7248,7 +7248,8 @@ def mock_remote_run(cmd, **kwargs):
     return MagicMock(returncode=0, stdout='ok\\n', stderr='')
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
-     patch('bridge.threading.Thread', MockThread):
+     patch('bridge.threading.Thread', MockThread), \
+     patch.object(router, '_run_teleport_preflight', return_value=[]):
     router.cmd_teleport('lee mac', 123)
 
 joined = [' '.join(c) for c in remote_calls]

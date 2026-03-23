@@ -5242,6 +5242,8 @@ class CommandRouter:
             return self.cmd_pilot(arg, chat_id)
         elif cmd == "/teleport":
             return self.cmd_teleport(arg, chat_id)
+        elif cmd == "/teleport-check":
+            return self.cmd_teleport(arg, chat_id, check_only=True)
         elif cmd == "/teleback":
             return self.cmd_teleback(arg, chat_id)
         elif cmd in BLOCKED_COMMANDS:
@@ -5675,10 +5677,11 @@ class CommandRouter:
 
     # ── Teleport commands ──────────────────────────────────────────────────
 
-    def cmd_teleport(self, arg, chat_id):
+    def cmd_teleport(self, arg, chat_id, check_only=False):
         """Teleport a worker to a remote machine."""
         if not arg:
-            self.reply(chat_id, "Usage: /teleport <worker> <host>[:/path] [--full]")
+            cmd_name = "/teleport-check" if check_only else "/teleport"
+            self.reply(chat_id, f"Usage: {cmd_name} <worker> <host>[:/path]")
             return True
 
         parts = arg.split()
@@ -5701,9 +5704,11 @@ class CommandRouter:
 
         # 1. Worker exists?
         registry = _load_registry()
-        if worker_name not in registry.get("workers", {}):
+        worker_entry = registry.get("workers", {}).get(worker_name)
+        if not worker_entry:
             self.reply(chat_id, f"Worker '{worker_name}' not found in registry.")
             return True
+        backend_name = worker_entry.get("backend", "claude")
 
         # 2. Worker not actively busy? (EXITED/OFFLINE/UNKNOWN are all fine)
         with _watchdog_lock:
@@ -5761,10 +5766,48 @@ class CommandRouter:
                 f"Ensure BRIDGE_BIND=0.0.0.0 and network connectivity.")
             return True
 
-        # Note: Claude auth on target is not checked here. If the worker
-        # shows "Not logged in", run: ssh <host> claude login
+        # 9. Claude credentials on target?
+        r = _remote_run(["test", "-f", ".claude/.credentials.json"],
+                        host=target_host, capture_output=True, timeout=5)
+        if r.returncode != 0:
+            # Try to sync credentials from source
+            local_creds = os.path.expanduser("~/.claude/.credentials.json")
+            if os.path.exists(local_creds):
+                _remote_run(["mkdir", "-p", ".claude"],
+                             host=target_host, capture_output=True)
+                subprocess.run(
+                    ["rsync", "-az", local_creds,
+                     f"{target_host}:.claude/.credentials.json"],
+                    capture_output=True, timeout=10)
+                _remote_run(["chmod", "600", ".claude/.credentials.json"],
+                             host=target_host, capture_output=True)
+                self._teleport_notify(chat_id, "Synced credentials to target.")
+            else:
+                self.reply(chat_id,
+                    f"No Claude credentials on {target_host} or locally. "
+                    f"Run: ssh {target_host} claude login")
+                return True
 
-        # All checks pass — dispatch async teleport
+        # 10. Hooks installed on target?
+        r = _remote_run(["test", "-f", ".claude/hooks/send-to-telegram.sh"],
+                        host=target_host, capture_output=True, timeout=5)
+        if r.returncode != 0:
+            self._teleport_notify(chat_id, "Hooks missing on target — will install during teleport.")
+
+        # 11. Team-defined preflight checks
+        preflight_fails = self._run_teleport_preflight(
+            target_host, worker_name, backend_name)
+        if preflight_fails:
+            self.reply(chat_id,
+                f"Preflight failed:\n" + "\n".join(f"  - {f}" for f in preflight_fails))
+            return True
+
+        # All checks pass
+        if check_only:
+            self.reply(chat_id,
+                f"Preflight OK — {worker_name} is clear to teleport to {target_host}.")
+            return True
+
         self.reply(chat_id, f"Teleporting {worker_name} to {target_host}...")
         threading.Thread(
             target=self._do_teleport,
@@ -5817,6 +5860,18 @@ class CommandRouter:
                     f"Cannot reach {current_host} where {worker_name} currently is.")
                 return True
 
+        # Conflict check: detect if both sides changed the working directory
+        if not full_sync:
+            conflicts = self._check_teleback_conflicts(
+                worker_name, current_host, target_cwd)
+            if conflicts:
+                self.reply(chat_id,
+                    f"Teleback conflict detected for {worker_name}:\n"
+                    + "\n".join(f"  {c}" for c in conflicts)
+                    + "\n\nUse /teleback " + worker_name + " --full to force sync "
+                    "(remote overwrites local).")
+                return True
+
         dest_label = home_host or "local"
         self.reply(chat_id, f"Bringing {worker_name} back to {dest_label}...")
         threading.Thread(
@@ -5825,6 +5880,83 @@ class CommandRouter:
             daemon=True
         ).start()
         return True
+
+    def _check_teleback_conflicts(self, name, remote_host, local_cwd):
+        """Check for working directory conflicts before teleback.
+
+        Compares git status on both remote (where worker is) and local
+        (VPS, where worker is coming back to). If both sides have
+        uncommitted changes or new commits, report conflicts.
+
+        Returns list of conflict descriptions, or empty list if clean.
+        """
+        conflicts = []
+        if not local_cwd or not remote_host:
+            return conflicts
+
+        # Check if it's a git repo locally
+        local_is_git = os.path.isdir(os.path.join(local_cwd, ".git"))
+        if not local_is_git:
+            return conflicts  # Not a git repo — rsync is the only option
+
+        # Get local (VPS) git status — uncommitted changes + recent commits
+        local_status = subprocess.run(
+            ["git", "-C", local_cwd, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10)
+        local_changed = bool(local_status.stdout.strip()) if local_status.returncode == 0 else False
+
+        local_head = subprocess.run(
+            ["git", "-C", local_cwd, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
+
+        # Get remote git status
+        # Detect remote CWD (may have different $HOME prefix)
+        r_home = _remote_run(
+            ["bash", "-c", "echo $HOME"], host=remote_host,
+            capture_output=True, text=True, timeout=5)
+        remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+        local_home = os.path.expanduser("~")
+
+        remote_cwd = local_cwd
+        if remote_home and remote_home != local_home and local_cwd.startswith(local_home):
+            remote_cwd = remote_home + local_cwd[len(local_home):]
+
+        r_status = _remote_run(
+            ["git", "-C", remote_cwd, "status", "--porcelain"],
+            host=remote_host, capture_output=True, text=True, timeout=10)
+        remote_changed = bool(r_status.stdout.strip()) if r_status.returncode == 0 else False
+
+        r_head = _remote_run(
+            ["git", "-C", remote_cwd, "rev-parse", "HEAD"],
+            host=remote_host, capture_output=True, text=True, timeout=5)
+        remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
+
+        # Conflict: both sides have uncommitted changes
+        if local_changed and remote_changed:
+            local_files = [l.strip().split(None, 1)[-1]
+                          for l in local_status.stdout.strip().splitlines()[:5]]
+            remote_files = [l.strip().split(None, 1)[-1]
+                           for l in r_status.stdout.strip().splitlines()[:5]]
+            conflicts.append(
+                f"VPS has uncommitted changes: {', '.join(local_files)}")
+            conflicts.append(
+                f"Remote has uncommitted changes: {', '.join(remote_files)}")
+
+        # Conflict: commits diverged
+        elif local_commit and remote_commit and local_commit != remote_commit:
+            if local_changed:
+                conflicts.append(
+                    f"VPS has uncommitted changes AND different commit than remote")
+            elif remote_changed:
+                # Remote changed, local has new commits — this is the normal case
+                # (VPS got new commits while worker was away, worker made changes)
+                conflicts.append(
+                    f"VPS has new commits since teleport (HEAD: {local_commit[:8]})")
+                conflicts.append(
+                    f"Remote has uncommitted changes (HEAD: {remote_commit[:8]})")
+
+        return conflicts
 
     def _do_teleport(self, name, target_host, target_cwd, full_sync,
                      chat_id, is_teleback=False):
@@ -5839,6 +5971,16 @@ class CommandRouter:
             source_cwd = get_claude_session_cwd(name)
             if not target_cwd:
                 target_cwd = source_cwd
+                # Remap home directory when source and target have different $HOME
+                # e.g., /home/claude/project → /Users/beastoinagents/project
+                if target_cwd and target_host:
+                    local_home = os.path.expanduser("~")
+                    r_home = _remote_run(
+                        ["bash", "-c", "echo $HOME"], host=target_host,
+                        capture_output=True, text=True, timeout=5)
+                    remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                    if remote_home and remote_home != local_home and target_cwd.startswith(local_home):
+                        target_cwd = remote_home + target_cwd[len(local_home):]
 
             # Write teleport state for crash recovery
             ensure_session_dir(name)
@@ -5869,9 +6011,12 @@ class CommandRouter:
                 self._sync_session_transcript(
                     session_id, source_cwd, target_cwd, source_host, target_host)
 
-            self._teleport_notify(chat_id, "Syncing team config and hooks...")
-            self._sync_shared_repos(target_host, chat_id)
-            self._install_hooks_on_target(target_host)
+            # On teleport out: push team configs + install hooks on target
+            # On teleback: skip — VPS is source of truth for team-scope config
+            if not is_teleback:
+                self._teleport_notify(chat_id, "Syncing team config and hooks...")
+                self._sync_shared_repos(target_host, chat_id)
+                self._install_hooks_on_target(target_host)
 
             # ── PHASE 2: Commit ──
 
@@ -5898,9 +6043,10 @@ class CommandRouter:
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                         host=source_host, capture_output=True)
 
-            # Sync shared repos back on teleback
+            # On teleback: sync only worker-scoped data back
+            # VPS is source of truth — workers don't override team-scope config
             if is_teleback:
-                self._sync_shared_repos_back(source_host)
+                self._sync_worker_data_back(name, source_host)
 
             # Update registry
             if is_teleback:
@@ -6084,31 +6230,101 @@ class CommandRouter:
                     capture_output=True, timeout=10)
                 os.unlink(tmp)
 
-    def _sync_shared_repos_back(self, source_host):
-        """Pull changes back from remote after teleback.
+    def _sync_worker_data_back(self, name, source_host):
+        """Sync worker-scoped data back from remote after teleback.
 
-        Commits and pushes on remote, then pulls locally.
+        Only syncs:
+        - ~/team/<worker>/ — worker's own team dir (kanban, playbook, etc.)
+        - ~/.claude/projects/*/memory/ — worker's auto-memory
+        Working directory and session transcript are already synced
+        by _sync_working_directory and _sync_session_transcript.
+
+        VPS is source of truth for team-scope config — workers don't
+        override ~/team/playbook.md, ~/agent-config/, etc.
         """
         if not source_host:
             return
 
         home = os.path.expanduser("~")
-        for repo_name in ["team", "agent-config"]:
-            # Commit + push on remote
-            _remote_run(
-                ["bash", "-c",
-                 f"cd ~/{repo_name} 2>/dev/null && "
-                 f"git add -A && "
-                 f"git commit -m 'teleback sync: {repo_name}' 2>/dev/null; "
-                 f"git push origin master 2>/dev/null || true"],
-                host=source_host, capture_output=True, timeout=30)
 
-            # Pull locally
-            repo_path = os.path.join(home, repo_name)
-            if os.path.isdir(os.path.join(repo_path, ".git")):
-                subprocess.run(
-                    ["git", "-C", repo_path, "pull", "origin", "master"],
-                    capture_output=True, timeout=15)
+        # 1. Sync worker's team dir (~/team/<name>/)
+        worker_team_dir = os.path.join(home, "team", name)
+        if os.path.isdir(worker_team_dir):
+            subprocess.run(
+                ["rsync", "-az",
+                 f"{source_host}:team/{name}/",
+                 f"{worker_team_dir}/"],
+                capture_output=True, timeout=30)
+
+        # 2. Sync auto-memory files back
+        # Memory lives in ~/.claude/projects/<slug>/memory/
+        r = _remote_run(
+            ["bash", "-c",
+             "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
+            host=source_host, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            for remote_file in r.stdout.strip().splitlines():
+                # Convert remote path to local: replace remote $HOME with local
+                r_home = _remote_run(
+                    ["bash", "-c", "echo $HOME"], host=source_host,
+                    capture_output=True, text=True, timeout=5)
+                remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                if remote_home and remote_file.startswith(remote_home):
+                    local_file = home + remote_file[len(remote_home):]
+                    local_dir = os.path.dirname(local_file)
+                    os.makedirs(local_dir, exist_ok=True)
+                    subprocess.run(
+                        ["rsync", "-az",
+                         f"{source_host}:{remote_file}", local_file],
+                        capture_output=True, timeout=10)
+
+    def _run_teleport_preflight(self, target_host, worker_name, backend_name):
+        """Run team-defined preflight check scripts against target.
+
+        Scripts live in agent-config/teleport-preflight.d/*.sh (team-managed)
+        and ~/.config/claudecode-telegram/teleport-preflight.d/*.sh (local).
+
+        Each script receives env vars: TARGET_HOST, WORKER_NAME, BACKEND,
+        BRIDGE_URL. Exit 0 = pass, exit 1 = fail (stdout = reason).
+        """
+        fails = []
+        preflight_dirs = [
+            os.path.expanduser("~/agent-config/teleport-preflight.d"),
+            os.path.expanduser("~/.config/claudecode-telegram/teleport-preflight.d"),
+        ]
+
+        env = os.environ.copy()
+        env["TARGET_HOST"] = target_host or ""
+        env["WORKER_NAME"] = worker_name
+        env["BACKEND"] = backend_name
+        env["BRIDGE_URL"] = BRIDGE_PUBLIC_URL or BRIDGE_URL
+
+        seen_scripts = set()  # Deduplicate symlinked scripts
+        for pdir in preflight_dirs:
+            if not os.path.isdir(pdir):
+                continue
+            scripts = sorted(
+                f for f in os.listdir(pdir)
+                if f.endswith(".sh") and os.access(os.path.join(pdir, f), os.X_OK))
+            for script in scripts:
+                script_path = os.path.join(pdir, script)
+                real_path = os.path.realpath(script_path)
+                if real_path in seen_scripts:
+                    continue
+                seen_scripts.add(real_path)
+                try:
+                    r = subprocess.run(
+                        [script_path], env=env,
+                        capture_output=True, text=True, timeout=10)
+                    if r.returncode != 0:
+                        reason = r.stdout.strip().split("\n")[0] if r.stdout.strip() else f"{script} failed"
+                        fails.append(reason)
+                except subprocess.TimeoutExpired:
+                    fails.append(f"{script} timed out")
+                except Exception as e:
+                    fails.append(f"{script} error: {e}")
+
+        return fails
 
     def _install_hooks_on_target(self, target_host):
         """Install Claude Code hooks and settings on target machine.
@@ -6142,6 +6358,51 @@ class CommandRouter:
                  'p.write_text(json.dumps(d))'],
                 host=target_host, capture_output=True, timeout=10)
 
+    def _sync_session_files_to_target(self, name, target_sessions_dir, target_host):
+        """Copy session files (chat_id, session_id, cwd) to target machine.
+
+        The Stop hook reads chat_id from SESSIONS_DIR/<worker>/chat_id to
+        route responses to Telegram. Without these files, the hook exits
+        silently and responses never reach Telegram.
+        """
+        local_session_dir = SESSIONS_DIR / name
+        if not local_session_dir.is_dir():
+            return
+        remote_session_dir = f"{target_sessions_dir}/{name}"
+        _remote_run(["mkdir", "-p", remote_session_dir],
+                     host=target_host, capture_output=True)
+        for fname in ["chat_id", "claude_session_id", "claude_session_cwd"]:
+            local_file = local_session_dir / fname
+            if local_file.exists():
+                subprocess.run(
+                    ["rsync", "-az", str(local_file),
+                     f"{target_host}:{remote_session_dir}/{fname}"],
+                    capture_output=True, timeout=10)
+
+    def _sync_credentials_to_target(self, target_host):
+        """Copy Claude credentials to target if it doesn't have them.
+
+        ~/.claude/.credentials.json has the actual access/refresh tokens.
+        Without it, Claude starts unauthenticated on the target machine.
+        """
+        local_creds = os.path.expanduser("~/.claude/.credentials.json")
+        if not os.path.exists(local_creds):
+            return
+        # Don't overwrite existing credentials on target
+        r = _remote_run(
+            ["test", "-f", ".claude/.credentials.json"],
+            host=target_host, capture_output=True)
+        if r.returncode == 0:
+            return
+        _remote_run(["mkdir", "-p", ".claude"],
+                     host=target_host, capture_output=True)
+        subprocess.run(
+            ["rsync", "-az", local_creds,
+             f"{target_host}:.claude/.credentials.json"],
+            capture_output=True, timeout=10)
+        _remote_run(["chmod", "600", ".claude/.credentials.json"],
+                     host=target_host, capture_output=True)
+
     def _start_worker_on_target(self, name, target_host, target_cwd,
                                  session_id, backend_name):
         """Create tmux session on target and start Claude Code with --resume."""
@@ -6161,11 +6422,30 @@ class CommandRouter:
 
         time.sleep(0.5)
 
+        # Remap SESSIONS_DIR for target $HOME (e.g. /home/claude → /Users/user)
+        target_sessions_dir = str(SESSIONS_DIR)
+        local_home = os.path.expanduser("~")
+        if target_host:
+            r_home = _remote_run(
+                ["bash", "-c", "echo $HOME"], host=target_host,
+                capture_output=True, text=True, timeout=5)
+            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            if remote_home and remote_home != local_home and target_sessions_dir.startswith(local_home):
+                target_sessions_dir = remote_home + target_sessions_dir[len(local_home):]
+
+        # Sync session files (chat_id, session_id, cwd) to target
+        if target_host:
+            self._sync_session_files_to_target(name, target_sessions_dir, target_host)
+
+        # Sync credentials if target lacks them
+        if target_host:
+            self._sync_credentials_to_target(target_host)
+
         # Export hook env vars (BRIDGE_URL points back to bridge)
         for key, value in {
             "PORT": str(PORT),
             "TMUX_PREFIX": TMUX_PREFIX,
-            "SESSIONS_DIR": str(SESSIONS_DIR),
+            "SESSIONS_DIR": target_sessions_dir,  # Remapped for target $HOME
             "WORKER_BACKEND": normalize_backend(backend_name),
             "BRIDGE_URL": BRIDGE_PUBLIC_URL or BRIDGE_URL,
         }.items():
