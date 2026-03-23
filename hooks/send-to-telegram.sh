@@ -199,8 +199,17 @@ TMPFILE=$(mktemp)
 echo "$TEXT" > "$TMPFILE"
 
 # Run forward in background with 5s timeout, then cleanup
+# Use gtimeout on macOS (GNU coreutils), fall back to no timeout if unavailable
+TIMEOUT_CMD="timeout"
+if ! command -v timeout &>/dev/null; then
+    if command -v gtimeout &>/dev/null; then
+        TIMEOUT_CMD="gtimeout"
+    else
+        TIMEOUT_CMD=""
+    fi
+fi
 (
-    timeout 5 python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT"
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD 5} python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT"
     rm -f "$TMPFILE"
 ) &
 

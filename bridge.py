@@ -4093,7 +4093,11 @@ class WorkerManager:
         registry = _load_registry()
         for name, info in registry.get("workers", {}).items():
             if name not in registered:
-                registered[name] = {"backend": info.get("backend", DEFAULT_BACKEND)}
+                entry = {"backend": info.get("backend", DEFAULT_BACKEND)}
+                # Teleported workers: inject tmux name so they don't appear as "exited"
+                if info.get("host"):
+                    entry["tmux"] = f"{self.tmux_prefix}{name}"
+                registered[name] = entry
 
         if state["active"] and state["active"] not in registered:
             state["active"] = None
@@ -4114,6 +4118,11 @@ class WorkerManager:
         backend_name = normalize_backend(session.get("backend"))
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+
+        # For teleported workers, check remote tmux session
+        host = get_worker_host(name)
+        if host:
+            return tmux_exists(tmux_name, host=host)
 
         return backend.is_online(tmux_name)
 
@@ -4717,6 +4726,44 @@ def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bo
     return worker_manager.send(name, message, chat_id)
 
 
+def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
+    """Fetch a file from a remote host via rsync to a local temp path.
+
+    Returns local temp path on success, None on failure.
+    """
+    suffix = Path(remote_path).suffix
+    fd, local_path = tempfile.mkstemp(suffix=suffix, prefix="remote-file-")
+    os.close(fd)
+    try:
+        r = subprocess.run(
+            ["rsync", "-az", f"{host}:{remote_path}", local_path],
+            capture_output=True, timeout=15)
+        if r.returncode == 0 and os.path.getsize(local_path) > 0:
+            return local_path
+    except Exception as e:
+        print(f"Remote file fetch failed: {host}:{remote_path} -> {e}")
+    os.unlink(local_path)
+    return None
+
+
+def _localize_media(name: str, media_list: list) -> list:
+    """For teleported workers, fetch remote files to local temp paths."""
+    host = get_worker_host(name)
+    if not host:
+        return media_list
+    result = []
+    for file_path, caption in media_list:
+        if not os.path.exists(file_path):
+            local = _fetch_remote_file(host, file_path)
+            if local:
+                result.append((local, caption))
+            else:
+                print(f"Cannot fetch remote file {host}:{file_path} for {name}")
+        else:
+            result.append((file_path, caption))
+    return result
+
+
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response"):
     """Send a response to Telegram. Shared by hook responses.
 
@@ -4727,8 +4774,20 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         log_prefix: Prefix for log messages (e.g., "Response", "Hook response")
     """
     # Parse image and file tags from text (before converting to preserve tag syntax)
-    clean_text, images = parse_image_tags(text)
-    clean_text, files = parse_file_tags(clean_text)
+    # For teleported workers, skip local file existence check during parsing
+    # (files are on the remote host, not local) — validate after fetching
+    host = get_worker_host(name)
+    if host:
+        _accept_all = lambda p: (True, Path(p))
+        clean_text, images = _parse_media_tags(text, "image", _accept_all)
+        clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
+    else:
+        clean_text, images = parse_image_tags(text)
+        clean_text, files = parse_file_tags(clean_text)
+
+    # For teleported workers, fetch remote files to local temp paths
+    images = _localize_media(name, images)
+    files = _localize_media(name, files)
     clean_text = markdown_to_telegram_html(clean_text)
 
     # Send text message if there's text content
@@ -5307,7 +5366,11 @@ class CommandRouter:
         try:
             import urllib.request
             import json as _json
+            # Pass remote host to pilot if worker is teleported
+            worker_host = get_worker_host(name)
             url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
+            if worker_host:
+                url += f"&host={urllib.parse.quote(worker_host)}"
             req = urllib.request.Request(url, method="POST")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = _json.loads(resp.read())
