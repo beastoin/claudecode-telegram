@@ -6256,7 +6256,9 @@ class CommandRouter:
                 local_src = os.path.expanduser(f"~/{source_dir}/{item}")
                 local_dst = os.path.expanduser(f"~/{target_dir}/")
                 cmd = ["rsync", "-az", local_src, local_dst]
-            subprocess.run(cmd, capture_output=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                print(f"[teleport] transcript sync failed for {item}: {r.stderr[:200]}")
 
     def _sync_shared_repos(self, target_host, chat_id=None):
         """Sync team and agent-config git repos between VPS and target.
