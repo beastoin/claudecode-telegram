@@ -7654,6 +7654,351 @@ print('OK')
     fi
 }
 
+test_sync_credentials_always_overwrites() {
+    info "Testing _sync_credentials_to_target always overwrites (not skip-if-exists)..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+# Track all remote commands
+remote_calls = []
+def mock_remote_run(cmd, **kwargs):
+    remote_calls.append((list(cmd), kwargs))
+    # Simulate target ALREADY has credentials (test -f returns 0)
+    if cmd and 'test' in cmd and '-f' in cmd:
+        return MagicMock(returncode=0)
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+rsync_calls = []
+orig_subproc_run = __import__('subprocess').run
+def mock_subprocess_run(cmd, **kwargs):
+    if isinstance(cmd, list) and 'rsync' in cmd:
+        rsync_calls.append(list(cmd))
+        return MagicMock(returncode=0)
+    return orig_subproc_run(cmd, **kwargs)
+
+# Create a fake local credentials file
+tmpdir = tempfile.mkdtemp()
+fake_creds = os.path.join(tmpdir, '.credentials.json')
+with open(fake_creds, 'w') as f:
+    json.dump({'accessToken': 'fresh-token'}, f)
+
+with patch('os.path.expanduser', return_value=fake_creds), \
+     patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=mock_subprocess_run):
+
+    # Create a CommandRouter with mock workers
+    class MockWorkers:
+        tmux_prefix = 'claude-test-'
+        sessions_dir = Path(tmpdir)
+        def _sync_paths(self): pass
+    class MockTelegramAPI:
+        def send_message(self, *a, **k): pass
+
+    router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+    router._sync_credentials_to_target('mac-mini')
+
+# BUG 1 TEST: rsync MUST be called even when target already has credentials
+assert len(rsync_calls) > 0, f'rsync should be called even when target has creds, got {len(rsync_calls)} calls'
+# Verify rsync targets the credentials file
+rsync_target = ' '.join(rsync_calls[0])
+assert '.credentials.json' in rsync_target, f'rsync should target credentials file'
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Credentials always synced (not skip-if-exists)"
+    else
+        fail "Credentials should always sync to target"
+    fi
+}
+
+test_sync_credentials_atomic_write() {
+    info "Testing _sync_credentials_to_target uses atomic tmp+mv pattern..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+remote_calls = []
+def mock_remote_run(cmd, **kwargs):
+    remote_calls.append(list(cmd))
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+rsync_calls = []
+def mock_subprocess_run(cmd, **kwargs):
+    if isinstance(cmd, list) and 'rsync' in cmd:
+        rsync_calls.append(list(cmd))
+        return MagicMock(returncode=0)
+    return MagicMock(returncode=0)
+
+tmpdir = tempfile.mkdtemp()
+fake_creds = os.path.join(tmpdir, '.credentials.json')
+with open(fake_creds, 'w') as f:
+    json.dump({'accessToken': 'test'}, f)
+
+with patch('os.path.expanduser', return_value=fake_creds), \
+     patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=mock_subprocess_run):
+
+    class MockWorkers:
+        tmux_prefix = 'claude-test-'
+        sessions_dir = Path(tmpdir)
+        def _sync_paths(self): pass
+    class MockTelegramAPI:
+        def send_message(self, *a, **k): pass
+
+    router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+    router._sync_credentials_to_target('mac-mini')
+
+# BUG 1b TEST: rsync should write to .tmp first, then mv to final path
+assert len(rsync_calls) > 0, 'rsync should be called'
+rsync_dest = rsync_calls[0][-1]  # last arg is destination
+assert '.tmp' in rsync_dest, f'rsync should write to .tmp file, got: {rsync_dest}'
+
+# mv should be called to atomically rename
+mv_calls = [c for c in remote_calls if 'mv' in c]
+assert len(mv_calls) > 0, f'mv should be called for atomic rename, remote_calls: {remote_calls}'
+mv_cmd = ' '.join(mv_calls[0])
+assert '.credentials.json.tmp' in mv_cmd, f'mv should rename from .tmp: {mv_cmd}'
+assert '.credentials.json' in mv_cmd, f'mv should rename to final: {mv_cmd}'
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Credentials use atomic tmp+mv write pattern"
+    else
+        fail "Credentials should use atomic write"
+    fi
+}
+
+test_teleport_sends_welcome_after_start() {
+    info "Testing teleport sends welcome message to worker after boot..."
+
+    if python3 -c "
+import json, tempfile, time, threading
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_bridge_url = bridge.BRIDGE_URL
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
+
+session_dir = bridge.SESSIONS_DIR / 'lee'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('abc-123-session')
+(session_dir / 'claude_session_cwd').write_text('/home/claude/myproject')
+(session_dir / 'chat_id').write_text('123')
+
+# Track what messages were sent to the worker
+sent_messages = []
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session): return True
+    def _build_welcome(self, name, backend_obj):
+        return f'Welcome {name} to Telegram bridge'
+    def send(self, name, message, **kwargs):
+        sent_messages.append((name, message))
+        return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+bridge._registry_add('lee', 'claude', 123)
+
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+pid_call_count = [0]
+def mock_get_claude_pid(pane_pid, host=None):
+    pid_call_count[0] += 1
+    if pid_call_count[0] <= 1:
+        return None
+    return '99999'
+
+def mock_remote_run(cmd, **kwargs):
+    return MagicMock(returncode=0, stdout='12345\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
+     patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
+     patch('bridge.telegram_api'), \
+     patch('time.sleep'):  # Speed up test
+
+    router._do_teleport('lee', 'mac', '', False, 123)
+
+# BUG 2 TEST: welcome message MUST be sent to worker after teleport
+assert len(sent_messages) > 0, f'Welcome message should be sent to worker after teleport, got: {sent_messages}'
+assert sent_messages[0][0] == 'lee', f'Message should be sent to lee, got: {sent_messages[0][0]}'
+assert 'Welcome' in sent_messages[0][1] or 'Telegram' in sent_messages[0][1], \
+    f'Should contain welcome text, got: {sent_messages[0][1][:100]}'
+
+# Restore
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge.BRIDGE_URL = orig_bridge_url
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Teleport sends welcome message after boot"
+    else
+        fail "Teleport should send welcome message"
+    fi
+}
+
+test_teleport_registry_updated_before_source_kill() {
+    info "Testing registry is updated BEFORE source session is killed..."
+
+    if python3 -c "
+import json, tempfile, time, threading
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_admin = bridge.admin_chat_id
+orig_state = dict(bridge.state)
+orig_bridge_url = bridge.BRIDGE_URL
+
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.admin_chat_id = 123
+bridge.state['startup_notified'] = True
+bridge.state['active'] = 'lee'
+bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
+
+session_dir = bridge.SESSIONS_DIR / 'lee'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('abc-123-session')
+(session_dir / 'claude_session_cwd').write_text('/home/claude/myproject')
+(session_dir / 'chat_id').write_text('123')
+
+class MockWorkers:
+    tmux_prefix = 'claude-test-'
+    sessions_dir = bridge.SESSIONS_DIR
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, registered=None):
+        return {'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}}
+    def is_online(self, name, session): return True
+    def _build_welcome(self, name, backend_obj):
+        return 'Welcome to bridge'
+    def send(self, name, msg, **kwargs): return True
+
+class MockTelegramAPI:
+    def __init__(self):
+        self.sent = []
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+mock_api = MockTelegramAPI()
+router = bridge.CommandRouter(mock_api, MockWorkers())
+bridge._registry_add('lee', 'claude', 123)
+
+with bridge._watchdog_lock:
+    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+
+# Track the ORDER of operations
+operation_log = []
+
+pid_call_count = [0]
+def mock_get_claude_pid(pane_pid, host=None):
+    pid_call_count[0] += 1
+    if pid_call_count[0] <= 1:
+        return None
+    return '99999'
+
+orig_registry_update = bridge._registry_update_teleport
+def tracking_registry_update(*args, **kwargs):
+    operation_log.append('registry_update')
+    return orig_registry_update(*args, **kwargs)
+
+def mock_remote_run(cmd, **kwargs):
+    cmd_str = ' '.join(str(c) for c in cmd)
+    host = kwargs.get('host')
+    # Track kill-session on source (host=None for local source)
+    if 'kill-session' in cmd_str and host is None:
+        operation_log.append('kill_source')
+    return MagicMock(returncode=0, stdout='12345\n', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
+     patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
+     patch('bridge._registry_update_teleport', side_effect=tracking_registry_update), \
+     patch('bridge.telegram_api'), \
+     patch('time.sleep'):
+
+    router._do_teleport('lee', 'mac', '', False, 123)
+
+# BUG 3 TEST: registry_update MUST come before kill_source (source kill, not target cleanup)
+assert 'registry_update' in operation_log, f'registry_update should be called, log: {operation_log}'
+assert 'kill_source' in operation_log, f'kill_source should be called, log: {operation_log}'
+reg_idx = operation_log.index('registry_update')
+kill_idx = operation_log.index('kill_source')
+assert reg_idx < kill_idx, f'registry_update (idx {reg_idx}) must come BEFORE kill_source (idx {kill_idx}), log: {operation_log}'
+
+# Restore
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.admin_chat_id = orig_admin
+bridge.state.update(orig_state)
+bridge.BRIDGE_URL = orig_bridge_url
+with bridge._watchdog_lock:
+    bridge._worker_states.pop('lee', None)
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Registry updated before source session killed"
+    else
+        fail "Registry should be updated before source kill"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Node-derived config tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8844,6 +9189,151 @@ print('OK')
         success "Watchdog resolved alert has good copy"
     else
         fail "Watchdog resolved alert copy test failed"
+    fi
+}
+
+test_teleport_suppresses_offline_message() {
+    info "Testing route_message says 'being teleported' instead of 'offline' when teleport_state exists..."
+
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_teleport_offline_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile, json
+from pathlib import Path
+from unittest.mock import MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+worker_name = 'alice'
+worker_dir = sessions_dir / worker_name
+worker_dir.mkdir()
+(worker_dir / 'chat_id').write_text('12345')
+(worker_dir / 'backend').write_text('claude')
+
+# Write teleport_state file to simulate teleport in progress
+(worker_dir / 'teleport_state').write_text(json.dumps({
+    "phase": 1, "source_host": "host1",
+    "target_host": "host2", "target_cwd": "/tmp",
+    "started_at": 1000,
+}))
+
+tmux_name = f'{bridge.TMUX_PREFIX}{worker_name}'
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    worker_name: {'tmux': tmux_name}
+}
+mock_workers.is_online.return_value = False  # Worker appears offline during teleport
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+router.workers = mock_workers
+
+replies = []
+router.reply = lambda chat_id, text, **kw: replies.append(text)
+
+router.route_message(worker_name, 'hello', 12345, None)
+
+assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}: {replies}'
+assert 'being teleported' in replies[0], f'Should say being teleported, got: {replies[0]}'
+assert 'offline' not in replies[0].lower(), f'Should NOT say offline, got: {replies[0]}'
+
+# Now remove teleport_state and verify it says offline
+(worker_dir / 'teleport_state').unlink()
+replies.clear()
+
+router.route_message(worker_name, 'hello', 12345, None)
+
+assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}: {replies}'
+assert 'offline' in replies[0].lower(), f'Should say offline when no teleport, got: {replies[0]}'
+
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "route_message returns teleport message instead of offline"
+    else
+        fail "teleport offline suppression test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
+test_watchdog_skips_dead_alert_during_teleport() {
+    info "Testing watchdog suppresses DEAD/OFFLINE alerts when teleport_state exists..."
+
+    if python3 -c "
+import bridge, tempfile, json, time
+from pathlib import Path
+from unittest.mock import patch
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+worker_name = 'bob'
+worker_dir = sessions_dir / worker_name
+worker_dir.mkdir()
+
+# Write teleport_state file
+(worker_dir / 'teleport_state').write_text(json.dumps({
+    'phase': 1, 'source_host': 'host1',
+    'target_host': 'host2', 'target_cwd': '/tmp',
+    'started_at': 1000,
+}))
+
+bridge.admin_chat_id = 123
+bridge._last_alert_ts = {}
+bridge._prev_worker_states = {'bob': 'READY'}
+
+sent = []
+def fake_api(method, data):
+    sent.append(data)
+    return {'ok': True}
+
+now = time.time()
+with patch('bridge.telegram_api', fake_api):
+    # DEAD during teleport: should NOT send alert
+    bridge._handle_watchdog_transition('bob', 'DEAD', 'process gone', since=100, now=now)
+assert len(sent) == 0, f'Should suppress DEAD alert during teleport, but sent {len(sent)} messages'
+
+# Verify state was still recorded
+with bridge._watchdog_lock:
+    assert bridge._prev_worker_states.get('bob') == 'DEAD', 'State should still be tracked'
+
+# OFFLINE during teleport: should also NOT send alert
+sent.clear()
+bridge._prev_worker_states = {'bob': 'READY'}
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('bob', 'OFFLINE', 'not running', since=100, now=now)
+assert len(sent) == 0, f'Should suppress OFFLINE alert during teleport, but sent {len(sent)} messages'
+
+# Remove teleport_state — now DEAD alert should fire
+(worker_dir / 'teleport_state').unlink()
+sent.clear()
+bridge._prev_worker_states = {'bob': 'READY'}
+with patch('bridge.telegram_api', fake_api):
+    bridge._handle_watchdog_transition('bob', 'DEAD', 'process gone', since=100, now=now)
+assert len(sent) == 1, f'Should send DEAD alert without teleport_state, but sent {len(sent)} messages'
+
+bridge.SESSIONS_DIR = orig_sessions_dir
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog suppresses DEAD/OFFLINE alerts during teleport"
+    else
+        fail "Watchdog teleport suppression test failed"
     fi
 }
 
@@ -11277,6 +11767,10 @@ run_unit_tests() {
     run_test test_teleport_preflight_rejects_without_public_url
     run_test test_teleport_preflight_checks
     run_test test_teleport_end_to_end
+    run_test test_sync_credentials_always_overwrites
+    run_test test_sync_credentials_atomic_write
+    run_test test_teleport_sends_welcome_after_start
+    run_test test_teleport_registry_updated_before_source_kill
     # Unit tests - Node-derived config
     log ""
     log "── Node-Derived Config Tests (Unit) ────────────────────────────────────"
@@ -11327,6 +11821,8 @@ run_unit_tests() {
     run_test test_watchdog_alert_dead_copy
     run_test test_watchdog_alert_waiting_input_copy
     run_test test_watchdog_resolved_copy
+    run_test test_teleport_suppresses_offline_message
+    run_test test_watchdog_skips_dead_alert_during_teleport
     run_test test_team_attention_needs_reply
     # Unit tests - Concurrency
     log ""

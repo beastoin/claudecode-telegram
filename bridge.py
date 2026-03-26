@@ -2970,6 +2970,14 @@ def _handle_watchdog_transition(
         prev_state = _prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
 
+    # Suppress alerts for workers being teleported (teleport takes 30-60s,
+    # during which the worker appears DEAD/OFFLINE but is expected)
+    teleport_state_file = SESSIONS_DIR / name / "teleport_state"
+    if state in {"OFFLINE", "DEAD", "EXITED"} and teleport_state_file.exists():
+        with _watchdog_lock:
+            _prev_worker_states[name] = state
+        return
+
     def eligible_for_alert() -> bool:
         if state in {"OFFLINE", "DEAD", "EXITED"}:
             return since is not None and (now - since) >= START_GRACE
@@ -6102,6 +6110,15 @@ class CommandRouter:
                                         "failed to start on target")
                 return
 
+            # Update registry BEFORE killing source (crash-safe: if we crash
+            # between here and kill, bridge still knows where the worker is)
+            if is_teleback:
+                _registry_clear_teleport(name)
+            else:
+                _registry_update_teleport(
+                    name, host=target_host,
+                    home_host=source_host, home_cwd=source_cwd)
+
             # Point of no return: kill source
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                         host=source_host, capture_output=True)
@@ -6111,15 +6128,19 @@ class CommandRouter:
             if is_teleback:
                 self._sync_worker_data_back(name, source_host)
 
-            # Update registry
-            if is_teleback:
-                _registry_clear_teleport(name)
-            else:
-                _registry_update_teleport(
-                    name, host=target_host,
-                    home_host=source_host, home_cwd=source_cwd)
-
             save_claude_session_cwd(name, target_cwd)
+
+            # Auto-inject worker context so teleported worker knows about
+            # the Telegram bridge (without waiting for next SessionStart event)
+            if not is_teleback:
+                try:
+                    backend_obj = get_backend(backend_name)
+                    welcome = self.workers._build_welcome(name, backend_obj)
+                    time.sleep(3)  # Let Claude finish loading
+                    self.workers.send(name, welcome)
+                except Exception as e:
+                    print(f"[teleport] Warning: failed to send welcome to {name}: {e}")
+
             state_file.unlink(missing_ok=True)
 
             dest_label = target_host or "local"
@@ -6443,26 +6464,25 @@ class CommandRouter:
                     capture_output=True, timeout=10)
 
     def _sync_credentials_to_target(self, target_host):
-        """Copy Claude credentials to target if it doesn't have them.
+        """Copy Claude credentials to target (always overwrite — tokens expire).
 
         ~/.claude/.credentials.json has the actual access/refresh tokens.
         Without it, Claude starts unauthenticated on the target machine.
+        Always overwrite: target may have expired tokens from a previous teleport.
         """
         local_creds = os.path.expanduser("~/.claude/.credentials.json")
         if not os.path.exists(local_creds):
             return
-        # Don't overwrite existing credentials on target
-        r = _remote_run(
-            ["test", "-f", ".claude/.credentials.json"],
-            host=target_host, capture_output=True)
-        if r.returncode == 0:
-            return
         _remote_run(["mkdir", "-p", ".claude"],
                      host=target_host, capture_output=True)
+        # Atomic: rsync to tmp, then mv (avoids truncated file on crash)
         subprocess.run(
             ["rsync", "-az", local_creds,
-             f"{target_host}:.claude/.credentials.json"],
+             f"{target_host}:.claude/.credentials.json.tmp"],
             capture_output=True, timeout=10)
+        _remote_run(["mv", ".claude/.credentials.json.tmp",
+                      ".claude/.credentials.json"],
+                     host=target_host, capture_output=True)
         _remote_run(["chmod", "600", ".claude/.credentials.json"],
                      host=target_host, capture_output=True)
 
@@ -6765,6 +6785,11 @@ class CommandRouter:
             return
 
         if not self.workers.is_online(session_name, session):
+            # Check if worker is being teleported before reporting offline
+            teleport_state_file = SESSIONS_DIR / session_name / "teleport_state"
+            if teleport_state_file.exists():
+                self.reply(chat_id, f"{session_name.capitalize()} is being teleported. Please wait.")
+                return
             self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /restart.")
             return
 
