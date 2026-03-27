@@ -427,6 +427,7 @@ TELEPORT_RSYNC_EXCLUDES = [
     "node_modules", ".git", "__pycache__", ".venv", "venv",
     ".next", "build", "dist", "target", ".gradle", ".cache",
     ".tox", ".mypy_cache", ".pytest_cache", "*.pyc",
+    ".build", ".claude/worktrees",
 ]
 
 
@@ -576,24 +577,24 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None) -> bool:
             _release_flock(flock_fd)
 
 
-def get_pane_command(tmux_name: str) -> str:
+def get_pane_command(tmux_name: str, host: str = None) -> str:
     """Get the current command running in tmux pane."""
-    result = subprocess.run(
+    result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
-        capture_output=True, text=True
+        host=host, capture_output=True, text=True
     )
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def is_process_running(tmux_name: str, process_name: str) -> bool:
+def is_process_running(tmux_name: str, process_name: str, host: str = None) -> bool:
     """Check if a process is running in tmux session."""
-    cmd = get_pane_command(tmux_name)
+    cmd = get_pane_command(tmux_name, host=host)
     if process_name.lower() in cmd.lower():
         return True
 
-    result = subprocess.run(
+    result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
-        capture_output=True, text=True
+        host=host, capture_output=True, text=True
     )
     if result.returncode != 0:
         return False
@@ -602,23 +603,23 @@ def is_process_running(tmux_name: str, process_name: str) -> bool:
     if not pane_pid:
         return False
 
-    result = subprocess.run(
+    result = _remote_run(
         ["pgrep", "-P", pane_pid, process_name],
-        capture_output=True
+        host=host, capture_output=True
     )
     return result.returncode == 0
 
 
-def tmux_send_escape(tmux_name: str):
-    subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+def tmux_send_escape(tmux_name: str, host: str = None):
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host)
 
 
-def _tmux_pane_pids() -> dict:
+def _tmux_pane_pids(host: str = None) -> dict:
     """Return a map of tmux session_name -> pane_pid for all panes."""
     try:
-        result = subprocess.run(
+        result = _remote_run(
             ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-            capture_output=True, text=True, timeout=5
+            host=host, capture_output=True, text=True, timeout=5
         )
     except Exception:
         return {}
@@ -674,16 +675,16 @@ def _child_count(pid: str, host: str = None) -> int:
     return len([line for line in result.stdout.splitlines() if line.strip()])
 
 
-def _ps_stats(pids) -> dict:
+def _ps_stats(pids, host: str = None) -> dict:
     """Return {pid: {'cpu': float, 'state': str}} for given pids."""
     pid_list = [str(pid) for pid in pids if pid]
     if not pid_list:
         return {}
 
     try:
-        result = subprocess.run(
+        result = _remote_run(
             ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
-            capture_output=True, text=True, timeout=5
+            host=host, capture_output=True, text=True, timeout=5
         )
     except Exception:
         return {}
@@ -875,8 +876,8 @@ def _which_binary(binary: str) -> str | None:
     return None
 
 
-def is_claude_running(tmux_name: str) -> bool:
-    return is_process_running(tmux_name, "claude")
+def is_claude_running(tmux_name: str, host: str = None) -> bool:
+    return is_process_running(tmux_name, "claude", host=host)
 
 
 # In-memory state (RAM only, no persistence - tmux IS the persistence)
@@ -2775,14 +2776,14 @@ POISON_PATTERNS = [
 ]
 
 
-def _capture_pane_text(tmux_name: str, lines: int = 50) -> str:
+def _capture_pane_text(tmux_name: str, lines: int = 50, host: str = None) -> str:
     """Return the last N lines of a tmux pane, or empty string on error."""
     if lines <= 0:
         return ""
     try:
-        result = subprocess.run(
+        result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
-            capture_output=True, text=True, timeout=5
+            host=host, capture_output=True, text=True, timeout=5
         )
     except Exception:
         return ""
@@ -2862,9 +2863,10 @@ def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
     # Fallback: regex-based pane/log scanning
     backend_name = get_worker_backend(name)
     backend = get_backend(backend_name)
+    host = get_worker_host(name)
     text_parts = []
     if backend.is_interactive:
-        text_parts.append(_capture_pane_text(tmux_name))
+        text_parts.append(_capture_pane_text(tmux_name, host=host))
     else:
         text_parts.append(_check_adapter_log(name))
     combined = "\n".join([part for part in text_parts if part])
@@ -3079,7 +3081,16 @@ def watchdog_loop():
                             if name not in _last_seen_claude:
                                 _last_seen_claude[name] = now
 
-            stats = _ps_stats(claude_pids.values())
+            # Group PIDs by host for remote ps stats
+            pids_by_host = {}  # host (None=local) -> [pid, ...]
+            pid_to_host = {}   # pid -> host
+            for name, pid in claude_pids.items():
+                host = get_worker_host(name)
+                pids_by_host.setdefault(host, []).append(pid)
+                pid_to_host[pid] = host
+            stats = {}
+            for host, pids in pids_by_host.items():
+                stats.update(_ps_stats(pids, host=host))
 
             for name, session in registered.items():
                 tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
@@ -3107,12 +3118,13 @@ def watchdog_loop():
                         proc, _stderr = entry
                         adapter_alive = proc.poll() is None
 
+                host = get_worker_host(name)
                 claude_pid = claude_pids.get(name) if is_interactive else None
                 cpu = 0.0
                 if claude_pid and claude_pid in stats:
                     cpu = stats[claude_pid].get("cpu", 0.0)
 
-                children_total = _child_count(claude_pid) if claude_pid else 0
+                children_total = _child_count(claude_pid, host=host) if claude_pid else 0
 
                 # Dynamic baseline: MCP servers are persistent children.
                 # Track idle child count so only EXTRA children count as work.
@@ -3200,7 +3212,7 @@ def watchdog_loop():
                 # Detect interactive prompt (WAITING_INPUT): worker is READY
                 # but TUI is at a selection/question prompt needing manager action
                 if state == "READY" and is_interactive:
-                    pane_text = _capture_pane_text(tmux_name, lines=30)
+                    pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
                     if pane_text:
                         pane_lines = pane_text.splitlines()
                         details = _extract_question_details(pane_lines)
@@ -3764,7 +3776,7 @@ def _read_tmux_activity(tmux_name: str, host: str = None) -> tuple:
         return "Unknown", None, None
 
 
-def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0) -> bool:
+def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str = None) -> bool:
     """Wait until restarted worker is actually back at the prompt."""
     backend = get_backend(backend_name)
     if not backend.is_interactive:
@@ -3772,9 +3784,9 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if not tmux_exists(tmux_name):
+        if not tmux_exists(tmux_name, host=host):
             return False
-        activity, _, _ = _read_tmux_activity(tmux_name)
+        activity, _, _ = _read_tmux_activity(tmux_name, host=host)
         if activity == "Idle at prompt":
             return True
         time.sleep(0.5)
@@ -3888,7 +3900,7 @@ def _extract_question_details(lines: list[str]) -> Optional[dict]:
     }
 
 
-def _send_interactive_reply(tmux_name: str, reply: str, details: dict) -> bool:
+def _send_interactive_reply(tmux_name: str, reply: str, details: dict, host: str = None) -> bool:
     """Handle manager's reply to an interactive prompt via keystroke navigation.
 
     reply: "1"-"9" for option selection, "skip"/"cancel" for Escape.
@@ -3898,7 +3910,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: dict) -> bool:
     reply = reply.strip().lower()
 
     if reply in ("skip", "cancel", "esc"):
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Escape"])
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host)
         return True
 
     if reply.isdigit():
@@ -3924,7 +3936,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: dict) -> bool:
         keys.append("Enter")
 
         for key in keys:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, key])
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host)
             time.sleep(0.05)
         return True
 
@@ -4033,11 +4045,11 @@ class WorkerManager:
             return fallback
         return ""
 
-    def _get_tmux_pane_cwd(self, tmux_name: str) -> str:
+    def _get_tmux_pane_cwd(self, tmux_name: str, host: str = None) -> str:
         """Read current pane cwd for a tmux session."""
-        result = subprocess.run(
+        result = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
-            capture_output=True, text=True
+            host=host, capture_output=True, text=True
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -4613,7 +4625,7 @@ def get_registered_sessions(registered=None):
     return worker_manager.get_registered_sessions(registered)
 
 
-def tmux_prompt_empty(tmux_name, timeout=0.5):
+def tmux_prompt_empty(tmux_name, timeout=0.5, host: str = None):
     """Check if Claude Code's input prompt is empty (message was accepted).
 
     After sending a message, polls the tmux pane to verify the prompt
@@ -4624,9 +4636,9 @@ def tmux_prompt_empty(tmux_name, timeout=0.5):
     import re
     start = time.time()
     while time.time() - start < timeout:
-        result = subprocess.run(
+        result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p"],
-            capture_output=True, text=True
+            host=host, capture_output=True, text=True
         )
         if result.returncode == 0:
             # Check for empty prompt: line starting with ❯ followed by only whitespace
@@ -4636,18 +4648,18 @@ def tmux_prompt_empty(tmux_name, timeout=0.5):
     return False
 
 
-def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND):
+def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str = None):
     """Export env vars for hook inside tmux session.
 
     Uses tmux set-environment which persists in session and survives restarts.
     Hook reads these via `tmux show-environment -t $SESSION_NAME`.
     """
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)])
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX])
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)])
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)])
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host)
     # Always export BRIDGE_URL so workers know where their bridge is
-    subprocess.run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL])
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL], host=host)
 
 
 def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
@@ -5425,7 +5437,7 @@ class CommandRouter:
             if tmux_alive:
                 backend = get_backend(backend_name)
                 if backend.is_interactive:
-                    if is_claude_running(tmux_name):
+                    if is_claude_running(tmux_name, host=host):
                         activity, context_pct, _ = _read_tmux_activity(tmux_name, host=host)
                     else:
                         activity = "worker app not running"
@@ -5477,7 +5489,8 @@ class CommandRouter:
         mode = "tmux"
 
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
-        is_tmux_alive = "tmux" in session and tmux_exists(tmux_name)
+        host = get_worker_host(name)
+        is_tmux_alive = "tmux" in session and tmux_exists(tmux_name, host=host)
         if not is_tmux_alive:
             # Worker exited (tmux gone, in registry only)
             online = False
@@ -5491,7 +5504,7 @@ class CommandRouter:
             mode = f"{backend_name} (non-interactive)"
         else:
             online = True
-            claude_running = is_claude_running(tmux_name)
+            claude_running = is_claude_running(tmux_name, host=host)
             ready = claude_running
             if not claude_running:
                 needs_attention = "Not running. Use /restart."
@@ -5519,7 +5532,7 @@ class CommandRouter:
         context_pct = None
         raw_lines = None
         if is_tmux_alive and ready:
-            activity, context_pct, raw_lines = _read_tmux_activity(tmux_name)
+            activity, context_pct, raw_lines = _read_tmux_activity(tmux_name, host=host)
 
         # Extract question details if at interactive prompt
         question_details = None
@@ -5560,7 +5573,8 @@ class CommandRouter:
                 clear_pending(name)
                 self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
                 return True
-            tmux_send_escape(session["tmux"])
+            host = get_worker_host(name)
+            tmux_send_escape(session["tmux"], host=host)
             clear_pending(name)
 
         self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
@@ -5777,7 +5791,18 @@ class CommandRouter:
                     self.reply(chat_id, f"Restart sequence aborted at {i-1}/{total}.")
                     return
 
-                ok, err = restart_claude(name, mode=mode)
+                host = get_worker_host(name)
+                if host:
+                    _sync_worker_manager()
+                    reg = worker_manager.get_registered_sessions()
+                    session = reg.get(name, {})
+                    backend_name = get_worker_backend(name, session)
+                    backend_obj = get_backend(backend_name)
+                    tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
+                    ok, err = self._restart_remote_worker(
+                        name, backend_name, backend_obj, tmux_name, host, mode)
+                else:
+                    ok, err = restart_claude(name, mode=mode)
                 if ok:
                     self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} restarted.")
                 else:
@@ -6266,6 +6291,8 @@ class CommandRouter:
 
         cmd = ["rsync", "-az", "--delete"]
         if not full:
+            # Respect .gitignore files — excludes build artifacts, deps, etc.
+            cmd.extend(["--filter", ":- .gitignore"])
             for excl in TELEPORT_RSYNC_EXCLUDES:
                 cmd.extend(["--exclude", excl])
 
@@ -6884,11 +6911,12 @@ class CommandRouter:
             "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "cancel"
         ):
             tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{session_name}")
-            _, _, raw_lines = _read_tmux_activity(tmux_name)
+            host = get_worker_host(session_name)
+            _, _, raw_lines = _read_tmux_activity(tmux_name, host=host)
             if raw_lines:
                 details = _extract_question_details(raw_lines)
                 if details:
-                    if _send_interactive_reply(tmux_name, shortcut, details):
+                    if _send_interactive_reply(tmux_name, shortcut, details, host=host):
                         action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
                         self.reply(chat_id, f"{action}.")
                         return
@@ -6918,7 +6946,8 @@ class CommandRouter:
             return
 
         if msg_id and send_ok:
-            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", "")):
+            host = get_worker_host(session_name)
+            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host):
                 self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
@@ -7152,8 +7181,9 @@ class Handler(BaseHTTPRequestHandler):
                 backend_name = get_worker_backend(name, registered[name])
                 # Re-export hook env on checkin (refreshes BRIDGE_URL after restart)
                 tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
-                if tmux_exists(tmux_name):
-                    export_hook_env(tmux_name, backend_name)
+                host = get_worker_host(name)
+                if tmux_exists(tmux_name, host=host):
+                    export_hook_env(tmux_name, backend_name, host=host)
             else:
                 backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
@@ -7161,8 +7191,8 @@ class Handler(BaseHTTPRequestHandler):
             if requested_cwd:
                 _set_worker_cwd(name, requested_cwd)
                 save_claude_session_cwd(name, requested_cwd)
-                if tmux_name and tmux_exists(tmux_name):
-                    pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name))
+                if tmux_name and tmux_exists(tmux_name, host=host):
+                    pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
                     same_cwd = pane_cwd and os.path.realpath(pane_cwd) == os.path.realpath(requested_cwd)
                     if not same_cwd:
                         notify_chat_id = get_manager_chat_id(name)
@@ -7188,7 +7218,7 @@ class Handler(BaseHTTPRequestHandler):
                             return
 
                         if notify_chat_id is not None:
-                            if _wait_for_restart_ready(tmux_name, backend_name):
+                            if _wait_for_restart_ready(tmux_name, backend_name, host=host):
                                 send_telegram_message(
                                     notify_chat_id,
                                     f"{name} is ready. Safe to send messages now.",
@@ -7309,8 +7339,9 @@ def main():
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
             # Re-export hook env so workers get the current BRIDGE_URL
-            if tmux_exists(tmux_name):
-                export_hook_env(tmux_name, backend_name)
+            host = get_worker_host(name)
+            if tmux_exists(tmux_name, host=host):
+                export_hook_env(tmux_name, backend_name, host=host)
 
     # Load last active worker from file (if still exists)
     last_active = load_last_active()

@@ -8251,6 +8251,807 @@ print('OK')
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 1: host=None parameter tests (teleport remote dispatch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_remote_dispatch_get_pane_command() {
+    info "Testing get_pane_command routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import subprocess
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'claude'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge.get_pane_command('claude-prod-ren', host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 _remote_run call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {calls[0][\"host\"]}'
+assert 'tmux' in calls[0]['cmd'][0], f'Expected tmux command, got {calls[0][\"cmd\"]}'
+assert result == 'claude', f'Expected claude, got {result}'
+
+# host=None should also work (backward compat)
+calls.clear()
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.get_pane_command('claude-prod-ren')
+assert calls[0]['host'] is None, f'Default host should be None'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_pane_command dispatches to _remote_run with host"
+    else
+        fail "get_pane_command should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_is_process_running() {
+    info "Testing is_process_running passes host through call chain..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'claude'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge.is_process_running('claude-prod-ren', 'claude', host='mac-mini')
+
+# Should have called _remote_run for tmux display-message (via get_pane_command)
+assert any(c['host'] == 'mac-mini' for c in calls), f'All calls should have host=mac-mini: {calls}'
+assert result == True, f'Process name in pane command should match'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "is_process_running passes host to _remote_run"
+    else
+        fail "is_process_running should pass host to _remote_run"
+    fi
+}
+
+test_remote_dispatch_is_claude_running() {
+    info "Testing is_claude_running passes host through..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'claude'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge.is_claude_running('claude-prod-ren', host='mac-mini')
+
+assert any(c['host'] == 'mac-mini' for c in calls), f'Should route through _remote_run with host'
+assert result == True
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "is_claude_running passes host to is_process_running"
+    else
+        fail "is_claude_running should pass host to is_process_running"
+    fi
+}
+
+test_remote_dispatch_tmux_send_escape() {
+    info "Testing tmux_send_escape routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    return MagicMock(returncode=0)
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.tmux_send_escape('claude-prod-ren', host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert 'Escape' in calls[0]['cmd'], f'Should send Escape key: {calls[0][\"cmd\"]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "tmux_send_escape dispatches to _remote_run with host"
+    else
+        fail "tmux_send_escape should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_tmux_pane_pids() {
+    info "Testing _tmux_pane_pids routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'claude-prod-ren 12345\nclaude-prod-lee 67890'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge._tmux_pane_pids(host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert result == {'claude-prod-ren': '12345', 'claude-prod-lee': '67890'}, f'Got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_tmux_pane_pids dispatches to _remote_run with host"
+    else
+        fail "_tmux_pane_pids should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_ps_stats() {
+    info "Testing _ps_stats routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = '12345  2.5 S'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge._ps_stats(['12345'], host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert '12345' in result, f'Got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ps_stats dispatches to _remote_run with host"
+    else
+        fail "_ps_stats should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_capture_pane_text() {
+    info "Testing _capture_pane_text routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'some pane text'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge._capture_pane_text('claude-prod-ren', host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert result == 'some pane text', f'Got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_capture_pane_text dispatches to _remote_run with host"
+    else
+        fail "_capture_pane_text should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_export_hook_env() {
+    info "Testing export_hook_env routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    return MagicMock(returncode=0)
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.export_hook_env('claude-prod-ren', host='mac-mini')
+
+# Should have 5 set-environment calls (PORT, TMUX_PREFIX, SESSIONS_DIR, WORKER_BACKEND, BRIDGE_URL)
+assert len(calls) == 5, f'Expected 5 set-environment calls, got {len(calls)}'
+assert all(c['host'] == 'mac-mini' for c in calls), f'All calls should target mac-mini'
+assert all('set-environment' in ' '.join(c['cmd']) for c in calls), f'All should be set-environment'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "export_hook_env dispatches to _remote_run with host"
+    else
+        fail "export_hook_env should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_tmux_prompt_empty() {
+    info "Testing tmux_prompt_empty routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = 'some output\n❯ \n'
+    return r
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge.tmux_prompt_empty('claude-prod-ren', host='mac-mini')
+
+assert len(calls) >= 1, f'Expected at least 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert result == True, f'Should detect empty prompt'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "tmux_prompt_empty dispatches to _remote_run with host"
+    else
+        fail "tmux_prompt_empty should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_send_interactive_reply() {
+    info "Testing _send_interactive_reply routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    return MagicMock(returncode=0)
+
+details = {'options': [{'num': 1, 'selected': True}, {'num': 2, 'selected': False}]}
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = bridge._send_interactive_reply('claude-prod-ren', 'cancel', details, host='mac-mini')
+
+assert result == True, f'cancel should be handled'
+assert len(calls) >= 1, f'Expected at least 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_send_interactive_reply dispatches to _remote_run with host"
+    else
+        fail "_send_interactive_reply should dispatch to _remote_run with host"
+    fi
+}
+
+test_remote_dispatch_wait_for_restart_ready() {
+    info "Testing _wait_for_restart_ready passes host to sub-calls..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmux_exists_calls = []
+activity_calls = []
+
+def mock_tmux_exists(name, host=None):
+    tmux_exists_calls.append({'name': name, 'host': host})
+    return True
+
+def mock_activity(name, host=None):
+    activity_calls.append({'name': name, 'host': host})
+    return ('Idle at prompt', None, None)
+
+with patch('bridge.tmux_exists', side_effect=mock_tmux_exists), \
+     patch('bridge._read_tmux_activity', side_effect=mock_activity):
+    result = bridge._wait_for_restart_ready('claude-prod-ren', 'claude', host='mac-mini')
+
+assert result == True, f'Should detect idle prompt'
+assert any(c['host'] == 'mac-mini' for c in tmux_exists_calls), f'tmux_exists should get host: {tmux_exists_calls}'
+assert any(c['host'] == 'mac-mini' for c in activity_calls), f'_read_tmux_activity should get host: {activity_calls}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_wait_for_restart_ready passes host to tmux_exists and _read_tmux_activity"
+    else
+        fail "_wait_for_restart_ready should pass host to sub-calls"
+    fi
+}
+
+test_remote_dispatch_get_tmux_pane_cwd() {
+    info "Testing _get_tmux_pane_cwd routes through _remote_run when host is set..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import bridge
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append({'cmd': cmd, 'host': host})
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = '/Users/beastoinagents/omi'
+    return r
+
+wm = bridge.WorkerManager.__new__(bridge.WorkerManager)
+with patch('bridge._remote_run', side_effect=mock_remote):
+    result = wm._get_tmux_pane_cwd('claude-prod-ren', host='mac-mini')
+
+assert len(calls) == 1, f'Expected 1 call, got {len(calls)}'
+assert calls[0]['host'] == 'mac-mini'
+assert result == '/Users/beastoinagents/omi', f'Got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_get_tmux_pane_cwd dispatches to _remote_run with host"
+    else
+        fail "_get_tmux_pane_cwd should dispatch to _remote_run with host"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2: Call site host= propagation tests (teleport)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_phase2_cmd_team_passes_host() {
+    info "Testing cmd_team passes host to is_claude_running for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+
+# Registry: ren is teleported to mac-mini
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+
+icr_calls = []
+orig_icr = bridge.is_claude_running
+def mock_icr(tmux_name, host=None):
+    icr_calls.append({'tmux': tmux_name, 'host': host})
+    return True
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def scan_tmux_sessions(self):
+        return {'claude-prod-ren': True}
+    def get_registered_sessions(self, *a):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+replies = []
+def mock_reply(self, chat_id, text, **kwargs):
+    replies.append(text)
+
+with patch('bridge.is_claude_running', side_effect=mock_icr), \
+     patch('bridge.tmux_exists', return_value=True), \
+     patch('bridge._read_tmux_activity', return_value=('Idle at prompt', '50%', None)), \
+     patch('bridge.get_worker_backend', return_value='claude'), \
+     patch.object(bridge.CommandRouter, 'reply', mock_reply):
+    router.cmd_team(123)
+
+# is_claude_running should have been called with host='mac-mini'
+assert len(icr_calls) >= 1, f'Expected is_claude_running call, got {icr_calls}'
+assert icr_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {icr_calls[0][\"host\"]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cmd_team passes host to is_claude_running"
+    else
+        fail "cmd_team should pass host to is_claude_running"
+    fi
+}
+
+test_phase2_cmd_pause_passes_host() {
+    info "Testing cmd_pause passes host to tmux_send_escape for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+
+escape_calls = []
+orig_escape = bridge.tmux_send_escape
+def mock_escape(tmux_name, host=None):
+    escape_calls.append({'tmux': tmux_name, 'host': host})
+
+orig_state = dict(bridge.state)
+bridge.state['active'] = 'ren'
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, *a):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+def mock_reply(self, chat_id, text, **kwargs): pass
+
+with patch('bridge.tmux_send_escape', side_effect=mock_escape), \
+     patch.object(bridge.CommandRouter, 'reply', mock_reply):
+    router.cmd_pause(123)
+
+assert len(escape_calls) == 1, f'Expected 1 tmux_send_escape call, got {escape_calls}'
+assert escape_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {escape_calls[0][\"host\"]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+bridge.state.update(orig_state)
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cmd_pause passes host to tmux_send_escape"
+    else
+        fail "cmd_pause should pass host to tmux_send_escape"
+    fi
+}
+
+test_phase2_cmd_progress_passes_host() {
+    info "Testing cmd_progress passes host to is_claude_running for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+orig_state = dict(bridge.state)
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+bridge.state['active'] = 'ren'
+
+icr_calls = []
+def mock_icr(tmux_name, host=None):
+    icr_calls.append({'tmux': tmux_name, 'host': host})
+    return True
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, *a):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+def mock_reply(self, chat_id, text, **kwargs): pass
+
+with patch('bridge.is_claude_running', side_effect=mock_icr), \
+     patch('bridge.tmux_exists', return_value=True), \
+     patch('bridge._read_tmux_activity', return_value=('Working', '50%', None)), \
+     patch('bridge.get_worker_backend', return_value='claude'), \
+     patch('bridge.is_pending', return_value=False), \
+     patch('bridge.get_any_session_id', return_value=(None, None)), \
+     patch('bridge.get_claude_session_id', return_value=None), \
+     patch.object(bridge.CommandRouter, 'reply', mock_reply):
+    router.cmd_progress(123)
+
+assert len(icr_calls) >= 1, f'Expected is_claude_running call, got {icr_calls}'
+assert icr_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {icr_calls[0][\"host\"]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+bridge.state.update(orig_state)
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cmd_progress passes host to is_claude_running"
+    else
+        fail "cmd_progress should pass host to is_claude_running"
+    fi
+}
+
+test_phase2_interactive_reply_passes_host() {
+    info "Testing interactive reply routing passes host to _send_interactive_reply..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+orig_state = dict(bridge.state)
+orig_admin = bridge.admin_chat_id
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+bridge.state['active'] = 'ren'
+bridge.admin_chat_id = 123
+
+sir_calls = []
+def mock_sir(tmux_name, reply, details, host=None):
+    sir_calls.append({'tmux': tmux_name, 'host': host})
+    return True
+
+details = {'options': [{'num': 1, 'selected': True}]}
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, *a):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+    def send(self, name, text, chat_id=None, session=None):
+        return True
+    def is_online(self, name, session=None):
+        return True
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+    def set_reaction(self, *a, **k): pass
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+def mock_reply(self, chat_id, text, **kwargs): pass
+
+# Build a proper Telegram update dict
+update = {
+    'message': {
+        'text': 'skip',
+        'chat': {'id': 123},
+        'message_id': 999
+    }
+}
+
+with patch('bridge._send_interactive_reply', side_effect=mock_sir), \
+     patch('bridge._read_tmux_activity', return_value=('Waiting', None, ['line1', 'line2'])), \
+     patch('bridge._extract_question_details', return_value=details), \
+     patch('bridge.get_worker_backend', return_value='claude'), \
+     patch.object(bridge.CommandRouter, 'reply', mock_reply):
+    router.handle_message(update)
+
+assert len(sir_calls) >= 1, f'Expected _send_interactive_reply call, got {sir_calls}'
+assert sir_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {sir_calls[0][\"host\"]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+bridge.state.update(orig_state)
+bridge.admin_chat_id = orig_admin
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Interactive reply passes host to _send_interactive_reply"
+    else
+        fail "Interactive reply should pass host to _send_interactive_reply"
+    fi
+}
+
+test_phase2_checkin_passes_host() {
+    info "Testing check-in handler passes host to export_hook_env and _wait_for_restart_ready..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+
+ehe_calls = []
+def mock_ehe(tmux_name, backend=None, host=None):
+    ehe_calls.append({'tmux': tmux_name, 'host': host})
+
+te_calls = []
+def mock_te(tmux_name, host=None):
+    te_calls.append({'tmux': tmux_name, 'host': host})
+    return True
+
+class MockWorkerManager:
+    tmux_prefix = bridge.TMUX_PREFIX
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self, *a):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+    def _get_tmux_pane_cwd(self, tmux_name, host=None):
+        return '/Users/beastoinagents/omi'
+
+orig_wm = bridge.worker_manager
+bridge.worker_manager = MockWorkerManager()
+
+with patch('bridge.export_hook_env', side_effect=mock_ehe), \
+     patch('bridge.tmux_exists', side_effect=mock_te):
+
+    # Simulate check-in: just verify export_hook_env is called with host
+    name = 'ren'
+    registered = bridge.worker_manager.get_registered_sessions()
+    tmux_name = registered[name].get('tmux', f'{bridge.TMUX_PREFIX}{name}')
+    host = bridge.get_worker_host(name)
+    if bridge.tmux_exists(tmux_name, host=host):
+        bridge.export_hook_env(tmux_name, 'claude', host=host)
+
+assert len(ehe_calls) == 1, f'Expected 1 export_hook_env call, got {ehe_calls}'
+assert ehe_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {ehe_calls[0][\"host\"]}'
+assert te_calls[0]['host'] == 'mac-mini', f'tmux_exists should get host=mac-mini, got {te_calls[0][\"host\"]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+bridge.worker_manager = orig_wm
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Check-in handler passes host to export_hook_env"
+    else
+        fail "Check-in handler should pass host to export_hook_env"
+    fi
+}
+
+test_phase2_watchdog_capture_pane_passes_host() {
+    info "Testing watchdog passes host to _capture_pane_text for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+
+reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+(node_dir / 'workers.json').write_text(json.dumps(reg))
+
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+
+cpt_calls = []
+orig_cpt = bridge._capture_pane_text
+def mock_cpt(tmux_name, lines=50, host=None):
+    cpt_calls.append({'tmux': tmux_name, 'host': host})
+    return ''
+
+# Test that _detect_poisoned passes host
+with patch('bridge._capture_pane_text', side_effect=mock_cpt), \
+     patch('bridge._check_adapter_log', return_value=''):
+    bridge._detect_poisoned('ren', 'claude-prod-ren')
+
+assert len(cpt_calls) == 1, f'Expected 1 _capture_pane_text call, got {cpt_calls}'
+assert cpt_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {cpt_calls[0][\"host\"]}'
+
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Watchdog/_detect_poisoned passes host to _capture_pane_text"
+    else
+        fail "Watchdog should pass host to _capture_pane_text"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Node-derived config tests
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -8753,9 +9554,9 @@ new_dir.mkdir()
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
-bridge.tmux_exists = lambda _name: True
+bridge.tmux_exists = lambda _name, host=None: True
 bridge.export_hook_env = lambda *_args, **_kwargs: None
-bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
 
@@ -8834,9 +9635,9 @@ new_dir.mkdir()
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
-bridge.tmux_exists = lambda _name: True
+bridge.tmux_exists = lambda _name, host=None: True
 bridge.export_hook_env = lambda *_args, **_kwargs: None
-bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
 
@@ -8909,9 +9710,9 @@ new_dir.mkdir()
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
-bridge.tmux_exists = lambda _name: True
+bridge.tmux_exists = lambda _name, host=None: True
 bridge.export_hook_env = lambda *_args, **_kwargs: None
-bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux: str(old_dir)
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (False, 'boom')
 
 sent = []
@@ -12025,6 +12826,30 @@ run_unit_tests() {
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_delegates_to_remote_for_teleported
+    # Phase 1: Remote dispatch (host=None parameter)
+    log ""
+    log "── Remote Dispatch Tests (Phase 1) ─────────────────────────────────────"
+    run_test test_remote_dispatch_get_pane_command
+    run_test test_remote_dispatch_is_process_running
+    run_test test_remote_dispatch_is_claude_running
+    run_test test_remote_dispatch_tmux_send_escape
+    run_test test_remote_dispatch_tmux_pane_pids
+    run_test test_remote_dispatch_ps_stats
+    run_test test_remote_dispatch_capture_pane_text
+    run_test test_remote_dispatch_export_hook_env
+    run_test test_remote_dispatch_tmux_prompt_empty
+    run_test test_remote_dispatch_send_interactive_reply
+    run_test test_remote_dispatch_wait_for_restart_ready
+    run_test test_remote_dispatch_get_tmux_pane_cwd
+    # Phase 2: Call site host= propagation
+    log ""
+    log "── Call Site Host Propagation Tests (Phase 2) ──────────────────────────"
+    run_test test_phase2_cmd_team_passes_host
+    run_test test_phase2_cmd_pause_passes_host
+    run_test test_phase2_cmd_progress_passes_host
+    run_test test_phase2_interactive_reply_passes_host
+    run_test test_phase2_checkin_passes_host
+    run_test test_phase2_watchdog_capture_pane_passes_host
     # Unit tests - Node-derived config
     log ""
     log "── Node-Derived Config Tests (Unit) ────────────────────────────────────"
