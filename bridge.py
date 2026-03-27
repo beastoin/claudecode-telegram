@@ -3848,6 +3848,12 @@ def _extract_question_details(lines: list[str]) -> Optional[dict]:
     if not stripped:
         return None
 
+    # If the idle ❯ prompt appears in the last few lines, the dialog was
+    # already dismissed — it's just still visible in scrollback above.
+    tail = stripped[-5:]
+    if any(line == "❯" for line in tail):
+        return None
+
     # Check for interactive footer or content patterns
     has_interactive = False
     for raw in reversed(stripped):
