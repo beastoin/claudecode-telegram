@@ -6299,9 +6299,30 @@ class CommandRouter:
                      host=target_host, capture_output=True)
 
         cmd = ["rsync", "-az", "--delete"]
+        gitignore_tmpfile = None
         if not full:
-            # Respect .gitignore files — excludes build artifacts, deps, etc.
-            cmd.extend(["--filter", ":- .gitignore"])
+            # Build exclude list from git ls-files on the source side.
+            # --filter ':- .gitignore' breaks on macOS openrsync, so we
+            # generate an exclude file from git instead (portable).
+            try:
+                gi_result = _remote_run(
+                    ["git", "-C", source_cwd, "ls-files",
+                     "--others", "--ignored", "--exclude-standard",
+                     "--directory"],
+                    host=source_host, capture_output=True, text=True, timeout=15)
+                if gi_result.returncode == 0 and gi_result.stdout.strip():
+                    fd, gitignore_tmpfile = tempfile.mkstemp(
+                        prefix="rsync-gitignore-", suffix=".txt")
+                    os.write(fd, gi_result.stdout.encode())
+                    os.close(fd)
+                    if source_host:
+                        # Excludes are relative paths — works locally with --exclude-from
+                        cmd.extend(["--exclude-from", gitignore_tmpfile])
+                    else:
+                        cmd.extend(["--exclude-from", gitignore_tmpfile])
+            except Exception as e:
+                print(f"[teleport] git ls-files failed, skipping gitignore excludes: {e}")
+
             for excl in TELEPORT_RSYNC_EXCLUDES:
                 cmd.extend(["--exclude", excl])
 
@@ -6315,10 +6336,14 @@ class CommandRouter:
         else:
             cmd.extend([src, dst])
 
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            print(f"[teleport] rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
-        return r.returncode == 0
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                print(f"[teleport] rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
+            return r.returncode == 0
+        finally:
+            if gitignore_tmpfile and os.path.exists(gitignore_tmpfile):
+                os.unlink(gitignore_tmpfile)
 
     def _sync_session_transcript(self, session_id, source_cwd, target_cwd,
                                   source_host=None, target_host=None):
