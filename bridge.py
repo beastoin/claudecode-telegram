@@ -5617,6 +5617,24 @@ class CommandRouter:
             state["active"] = name
             save_last_active(name)
 
+        # Teleported worker: delegate to remote restart
+        host = get_worker_host(name)
+        if host:
+            mode = "relaunch" if clean else "resume"
+            backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
+            backend_obj = get_backend(backend_name)
+            tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
+            self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
+            ok, err = self._restart_remote_worker(
+                name, backend_name, backend_obj, tmux_name, host, mode)
+            if ok:
+                _recent_restarts[name] = time.time()
+                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
+            else:
+                self.reply(chat_id, f"Could not restart \"{name}\" on {host}. {err}",
+                           outcome="Needs decision")
+            return True
+
         # --clean: fresh start (clear session IDs)
         if clean:
             ok, err = restart_claude(name, mode="relaunch")
@@ -5668,6 +5686,53 @@ class CommandRouter:
         else:
             self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True
+
+    # ── Remote Restart ──────────────────────────────────────────────
+
+    def _restart_remote_worker(self, name, backend_name, backend, tmux_name, host, mode):
+        """Restart a teleported worker on its remote host.
+
+        Reuses _stop_worker_for_teleport + _start_worker_on_target which
+        already handle remote tmux, $HOME remapping, credential sync, etc.
+        """
+        resume_id = ""
+        target_cwd = get_claude_session_cwd(name)
+        if mode == "resume":
+            resume_id = get_claude_session_id(name)
+        else:
+            # Clear session IDs for relaunch
+            session_dir = SESSIONS_DIR / name
+            session_dir.mkdir(parents=True, exist_ok=True)
+            for f in session_dir.glob("*_session_id"):
+                f.unlink()
+            _clear_hook_failures(name)
+
+        # Stop the remote Claude process if tmux is still alive
+        if tmux_exists(tmux_name, host=host):
+            self._stop_worker_for_teleport(name, tmux_name, host=host)
+            # Kill tmux — _start_worker_on_target creates a fresh one
+            _remote_run(["tmux", "kill-session", "-t", tmux_name],
+                         host=host, capture_output=True)
+            time.sleep(0.5)
+
+        # Re-read session_id (hook may have updated during /exit)
+        if mode == "resume":
+            resume_id = get_claude_session_id(name) or resume_id
+
+        # Delegate to existing remote start flow
+        ok = self._start_worker_on_target(
+            name, host, target_cwd, resume_id, backend_name)
+        if not ok:
+            return False, f"Failed to restart {name} on {host}"
+
+        # Send welcome
+        welcome = self.workers._build_welcome(name, backend)
+        if backend.is_interactive:
+            time.sleep(3.0)
+            self.workers.send(name, welcome)
+
+        print(f"Remote worker '{name}' restarted on {host} (mode={mode})")
+        return True, None
 
     # ── Restart All (sequential) ──────────────────────────────────
 

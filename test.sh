@@ -7999,6 +7999,205 @@ print('OK')
     fi
 }
 
+test_restart_teleported_worker() {
+    info "Testing /restart works for teleported (remote) workers..."
+
+    if python3 -c "
+import json, tempfile, os, time
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+(sessions / 'ren' / 'claude_session_id').write_text('sess-uuid-123')
+(sessions / 'ren' / 'cwd').write_text('/home/claude/omi')
+
+# Write registry with host (teleported)
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+(node_dir / 'workers.json').write_text(json.dumps({
+    'ren': {'host': 'mac-mini', 'tmux': 'claude-prod-ren'}
+}))
+
+# Track calls
+remote_calls = []
+start_worker_calls = []
+stop_calls = []
+send_calls = []
+
+def mock_remote_run(cmd, **kwargs):
+    remote_calls.append((' '.join(str(c) for c in cmd), kwargs.get('host')))
+    r = MagicMock(returncode=0, stdout='', stderr='')
+    if 'has-session' in str(cmd):
+        r.returncode = 0  # tmux exists on remote
+    if 'display-message' in str(cmd):
+        r.stdout = '12345'
+    if 'pgrep' in str(cmd):
+        r.returncode = 1  # claude not running (already exited)
+    if 'echo' in str(cmd) and 'HOME' in str(cmd):
+        r.stdout = '/Users/beastoinagents'
+        r = MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    return r
+
+orig_start = bridge.CommandRouter._start_worker_on_target
+def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_name):
+    start_worker_calls.append({
+        'name': name, 'host': target_host, 'cwd': target_cwd,
+        'session_id': session_id, 'backend': backend_name
+    })
+    return True
+
+orig_stop = bridge.CommandRouter._stop_worker_for_teleport
+def mock_stop(self, name, tmux_name, host=None):
+    stop_calls.append({'name': name, 'tmux': tmux_name, 'host': host})
+    return 'sess-uuid-123'
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+    def _build_welcome(self, name, backend):
+        return 'Welcome ren!'
+    def send(self, name, text):
+        send_calls.append({'name': name, 'text': text[:20]})
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start_worker), \
+     patch.object(bridge.CommandRouter, '_stop_worker_for_teleport', mock_stop), \
+     patch('time.sleep'):
+
+    # Call _restart_remote_worker directly on CommandRouter
+    ok, err = router._restart_remote_worker(
+        'ren', 'claude', bridge.get_backend('claude'),
+        'claude-prod-ren', 'mac-mini', 'resume')
+
+assert ok, f'restart should succeed, got err={err}'
+
+# Should have stopped the worker on mac-mini
+assert len(stop_calls) == 1, f'Expected 1 stop call, got {stop_calls}'
+assert stop_calls[0]['host'] == 'mac-mini', f'Stop should target mac-mini'
+
+# Should have called _start_worker_on_target with session_id for resume
+assert len(start_worker_calls) == 1, f'Expected 1 start call, got {start_worker_calls}'
+assert start_worker_calls[0]['host'] == 'mac-mini'
+assert start_worker_calls[0]['session_id'] == 'sess-uuid-123', \
+    f'Should pass session_id for resume, got {start_worker_calls[0][\"session_id\"]}'
+
+# Should have sent welcome
+assert len(send_calls) == 1, f'Expected welcome, got {send_calls}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Restart works for teleported workers"
+    else
+        fail "Restart should work for teleported workers"
+    fi
+}
+
+test_restart_delegates_to_remote_for_teleported() {
+    info "Testing cmd_restart detects teleported worker and delegates to remote..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'chat_id').write_text('123')
+(sessions / 'ren' / 'claude_session_id').write_text('sess-abc')
+(sessions / 'ren' / 'cwd').write_text('/home/claude/omi')
+
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+(node_dir / 'workers.json').write_text(json.dumps({
+    'workers': {'ren': {'host': 'mac-mini', 'tmux': 'claude-prod-ren'}}
+}))
+
+remote_restart_calls = []
+replies = []
+
+def mock_restart_remote(self, name, backend_name, backend, tmux_name, host, mode):
+    remote_restart_calls.append({
+        'name': name, 'host': host, 'mode': mode
+    })
+    return True, None
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _sync_paths(self): pass
+    def get_registered_sessions(self):
+        return {'ren': {'tmux': 'claude-prod-ren'}}
+
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_registry = bridge.WORKER_REGISTRY_FILE
+orig_state = dict(bridge.state)
+orig_admin = bridge.admin_chat_id
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+bridge.admin_chat_id = 123
+bridge.state['active'] = 'ren'
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+router.workers = MockWorkers()
+
+def mock_reply(self, chat_id, text, **kwargs):
+    replies.append(text)
+
+with patch.object(bridge.CommandRouter, '_restart_remote_worker', mock_restart_remote), \
+     patch.object(bridge.CommandRouter, 'reply', mock_reply):
+    router.cmd_restart(123, 'ren')
+
+assert len(remote_restart_calls) == 1, f'Should delegate to _restart_remote_worker, got {remote_restart_calls}'
+assert remote_restart_calls[0]['host'] == 'mac-mini'
+assert remote_restart_calls[0]['mode'] == 'resume', f'Default mode should be resume, got {remote_restart_calls[0][\"mode\"]}'
+assert any('back and ready' in r for r in replies), f'Should confirm restart, got {replies}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_registry
+bridge.state.update(orig_state)
+bridge.admin_chat_id = orig_admin
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cmd_restart delegates to remote for teleported workers"
+    else
+        fail "cmd_restart should delegate to remote for teleported workers"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Node-derived config tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11771,6 +11970,8 @@ run_unit_tests() {
     run_test test_sync_credentials_atomic_write
     run_test test_teleport_sends_welcome_after_start
     run_test test_teleport_registry_updated_before_source_kill
+    run_test test_restart_teleported_worker
+    run_test test_restart_delegates_to_remote_for_teleported
     # Unit tests - Node-derived config
     log ""
     log "── Node-Derived Config Tests (Unit) ────────────────────────────────────"
