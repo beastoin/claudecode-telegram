@@ -7999,6 +7999,58 @@ print('OK')
     fi
 }
 
+test_sync_shared_repos_deploys_agent_config() {
+    info "Testing _sync_shared_repos deploys skills/hooks/scripts from agent-config to .claude/..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Track remote commands
+remote_calls = []
+def mock_remote_run(cmd, **kwargs):
+    cmd_str = ' '.join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    remote_calls.append((cmd_str, kwargs.get('host')))
+    r = MagicMock(returncode=0, stdout='', stderr='')
+    if 'echo \$HOME' in cmd_str:
+        r.stdout = '/Users/beastoinagents\n'
+    return r
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = Path(tempfile.mkdtemp())
+    def _sync_paths(self): pass
+class MockTelegramAPI:
+    def send_message(self, *a, **k): pass
+
+router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch('subprocess.run', return_value=MagicMock(returncode=0)), \
+     patch('os.path.isdir', return_value=True), \
+     patch('os.path.exists', return_value=False):
+    router._sync_shared_repos('mac-mini')
+
+# Check that rsync --checksum deploy commands were issued for skills, hooks, scripts
+deploy_cmds = [c for c, h in remote_calls if 'rsync' in c and '--checksum' in c and h == 'mac-mini']
+assert len(deploy_cmds) == 3, f'Expected 3 deploy commands (skills/hooks/scripts), got {len(deploy_cmds)}: {deploy_cmds}'
+
+for subdir in ['skills', 'hooks', 'scripts']:
+    found = any(subdir in c for c in deploy_cmds)
+    assert found, f'Missing deploy for {subdir}, got: {deploy_cmds}'
+
+import shutil
+shutil.rmtree(str(MockWorkers.sessions_dir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Shared repos deploy agent-config to .claude/"
+    else
+        fail "Shared repos should deploy agent-config to .claude/"
+    fi
+}
+
 test_restart_teleported_worker() {
     info "Testing /restart works for teleported (remote) workers..."
 
@@ -11970,6 +12022,7 @@ run_unit_tests() {
     run_test test_sync_credentials_atomic_write
     run_test test_teleport_sends_welcome_after_start
     run_test test_teleport_registry_updated_before_source_kill
+    run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_delegates_to_remote_for_teleported
     # Unit tests - Node-derived config

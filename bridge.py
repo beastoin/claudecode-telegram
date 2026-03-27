@@ -6362,6 +6362,15 @@ class CommandRouter:
                  f"cd ~/{repo_name} 2>/dev/null && git pull origin master 2>/dev/null || true"],
                 host=target_host, capture_output=True, timeout=30)
 
+        # Deploy agent-config to ~/.claude/ on target (skills, hooks, scripts)
+        # This replaces the old symlink approach which broke macOS find.
+        for subdir in ["skills", "hooks", "scripts"]:
+            _remote_run(
+                ["bash", "-c",
+                 f"[ -d ~/agent-config/.claude/{subdir} ] && "
+                 f"rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/"],
+                host=target_host, capture_output=True, timeout=30)
+
         # Adapt settings.json paths for target $HOME
         r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
                               capture_output=True, text=True, timeout=5)
