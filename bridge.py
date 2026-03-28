@@ -3264,6 +3264,8 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         print(f"Watchdog alert error: {e}")
 
 
+_last_resolved_ts: dict[str, float] = {}  # Per-worker resolved alert cooldown
+
 def _send_resolved_alert(name: str, new_state: str) -> None:
     if admin_chat_id is None:
         return
@@ -3280,6 +3282,13 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if restart_ts and time.time() - restart_ts < 30:
         return
 
+    # Cooldown: don't spam "back to normal" for flapping workers
+    now = time.time()
+    last_resolved = _last_resolved_ts.get(name, 0)
+    if now - last_resolved < 180:
+        return
+
+    _last_resolved_ts[name] = now
     text = f"✅ {name} is back to normal."
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
@@ -4490,13 +4499,17 @@ class WorkerManager:
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
         # For teleported workers, check remote tmux AND claude process
+        # Treat SSH failures as "online" to avoid false OFFLINE from transient network issues
         host = get_worker_host(name)
         if host:
-            if not tmux_exists(tmux_name, host=host):
-                return False
-            if backend.is_interactive:
-                return is_claude_running(tmux_name, host=host)
-            return True
+            try:
+                if not tmux_exists(tmux_name, host=host):
+                    return False
+                if backend.is_interactive:
+                    return is_claude_running(tmux_name, host=host)
+                return True
+            except Exception:
+                return True  # SSH failure — assume still online
 
         return backend.is_online(tmux_name)
 

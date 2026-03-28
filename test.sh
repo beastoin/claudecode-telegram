@@ -9528,6 +9528,78 @@ print('OK')
     fi
 }
 
+test_resolved_alert_cooldown() {
+    info "Testing resolved alert has cooldown to prevent spam..."
+
+    if python3 -c "
+from unittest.mock import patch, MagicMock
+import time
+import bridge
+
+# Reset state
+bridge._last_resolved_ts.clear()
+bridge._prev_worker_states.clear()
+
+alerts = []
+def mock_api(method, params):
+    alerts.append(params.get('text', ''))
+    return {'ok': True, 'result': {'message_id': 1}}
+
+with patch.object(bridge, 'admin_chat_id', 123), \
+     patch.object(bridge, 'telegram_api', mock_api):
+    # Set prev state as DEAD
+    with bridge._watchdog_lock:
+        bridge._prev_worker_states['test'] = 'DEAD'
+
+    # First resolved alert should send
+    bridge._send_resolved_alert('test', 'READY')
+    assert len(alerts) == 1, f'First alert should send, got {len(alerts)}'
+
+    # Reset prev state back to DEAD to simulate another bad->good transition
+    with bridge._watchdog_lock:
+        bridge._prev_worker_states['test'] = 'DEAD'
+
+    # Second one within cooldown should be suppressed
+    bridge._send_resolved_alert('test', 'READY')
+    assert len(alerts) == 1, f'Second alert within cooldown should be suppressed, got {len(alerts)}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "resolved alert has 180s cooldown"
+    else
+        fail "resolved alert should have cooldown to prevent spam"
+    fi
+}
+
+test_is_online_teleported_ssh_failure_assumes_online() {
+    info "Testing is_online treats SSH failures as online for remote workers..."
+
+    if python3 -c "
+from unittest.mock import patch
+import bridge
+
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+session = {'tmux': 'claude-test-ren', 'backend': 'claude'}
+
+# SSH failure (exception) should return True (assume online)
+def mock_tmux_exists(name, host=None):
+    if host:
+        raise Exception('SSH connection refused')
+    return True
+
+with patch('bridge.get_worker_host', return_value='mac-mini'), \
+     patch('bridge.tmux_exists', side_effect=mock_tmux_exists):
+    result = wm.is_online('ren', session)
+    assert result is True, f'SSH failure should assume online, got {result}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "is_online treats SSH failure as online for teleported workers"
+    else
+        fail "is_online should treat SSH failure as online for teleported workers"
+    fi
+}
+
 test_is_online_teleported_checks_claude_process() {
     info "Testing teleported interactive workers require tmux and Claude to be alive..."
 
@@ -14713,6 +14785,8 @@ run_unit_tests() {
     run_test test_restart_teleported_requires_remote_dispatch
     run_test test_export_hook_env_remaps_remote_sessions_dir
     run_test test_export_hook_env_uses_public_url_for_remote
+    run_test test_resolved_alert_cooldown
+    run_test test_is_online_teleported_ssh_failure_assumes_online
     run_test test_is_online_teleported_checks_claude_process
     run_test test_session_helpers_read_remote_files
     run_test test_hook_failures_teleported_use_remote_files

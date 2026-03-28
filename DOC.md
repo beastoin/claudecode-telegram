@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.28.2
+> Version: 0.28.3
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,14 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.28.3 - Fix watchdog flapping for teleported workers
+
+**Two fixes for teleported worker watchdog spam:**
+- `_send_resolved_alert()`: added 180s cooldown — prevents "back to normal" spam when SSH detection flaps
+- `is_online()`: SSH failures for remote workers now return True (assume online) instead of False — transient network issues no longer trigger false OFFLINE alerts
+
+FAST 238/1.
 
 ### v0.28.2 - Fix BRIDGE_URL for teleported workers
 
