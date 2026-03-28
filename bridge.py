@@ -7532,7 +7532,8 @@ class Handler(BaseHTTPRequestHandler):
                 save_claude_session_cwd(name, requested_cwd)
                 if tmux_name and tmux_exists(tmux_name, host=host):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
-                    same_cwd = pane_cwd and os.path.realpath(pane_cwd) == os.path.realpath(requested_cwd)
+                    # Compare normalized paths (don't use os.path.realpath — it resolves on VPS, not remote)
+                    same_cwd = pane_cwd and pane_cwd.rstrip("/") == requested_cwd.rstrip("/")
                     if not same_cwd:
                         notify_chat_id = get_manager_chat_id(name)
                         if notify_chat_id is not None:
@@ -7542,7 +7543,13 @@ class Handler(BaseHTTPRequestHandler):
                                 "Messages during restart may be lost.",
                             )
 
-                        ok, err = worker_manager.restart(name, mode="relaunch")
+                        if host:
+                            # Teleported worker: use remote restart
+                            backend_obj_r = get_backend(backend_name)
+                            ok, err = command_router._restart_remote_worker(
+                                name, backend_name, backend_obj_r, tmux_name, host, "relaunch")
+                        else:
+                            ok, err = worker_manager.restart(name, mode="relaunch")
                         if not ok:
                             if notify_chat_id is not None:
                                 send_telegram_message(

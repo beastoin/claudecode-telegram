@@ -10636,6 +10636,88 @@ print('OK')
     fi
 }
 
+test_checkin_cwd_restart_uses_remote_for_teleported() {
+    info "Testing /checkin?cwd restart uses remote restart for teleported worker..."
+
+    if python3 -c "
+import io, json, shutil, tempfile, subprocess
+from pathlib import Path
+from urllib.parse import urlparse, quote
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkin-'
+(bridge.SESSIONS_DIR / 'ren').mkdir()
+(bridge.SESSIONS_DIR / 'ren' / 'chat_id').write_text('123')
+(bridge.SESSIONS_DIR / 'ren' / 'cwd').write_text('/Users/beastoinagents/old-dir')
+bridge.admin_chat_id = 123
+
+bridge._registry_add('ren', 'claude', 123)
+bridge._registry_update_teleport('ren', host='mac-mini', home_host=None, home_cwd='/home/claude/omi')
+
+remote_restart_calls = []
+tg_messages = []
+
+def mock_remote_run(cmd, host=None, **kwargs):
+    # validate_cwd SSH check
+    if cmd[:2] == ['test', '-d']:
+        return subprocess.CompletedProcess(cmd, 0)
+    # tmux_exists
+    if 'has-session' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    # _get_tmux_pane_cwd
+    if 'display-message' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='/Users/beastoinagents/old-dir', stderr='')
+    return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+
+def mock_restart_remote(self, name, backend_name, backend, tmux_name, host, mode):
+    remote_restart_calls.append({'name': name, 'host': host, 'mode': mode})
+    return True, None
+
+def mock_send_tg(chat_id, text, **kwargs):
+    tg_messages.append(text)
+
+new_cwd = '/Users/beastoinagents/omi/omi-ren'
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers_sent = []
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, *a):
+        self.headers_sent.append(a)
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=ren&cwd=' + quote(new_cwd))
+
+with patch.object(bridge, '_remote_run', side_effect=mock_remote_run), \
+     patch.object(bridge, 'send_telegram_message', side_effect=mock_send_tg), \
+     patch.object(bridge.CommandRouter, '_restart_remote_worker', mock_restart_remote), \
+     patch.object(bridge, '_wait_for_restart_ready', return_value=True):
+    bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+# Key assertion: should use _restart_remote_worker, not worker_manager.restart
+assert len(remote_restart_calls) == 1, f'Should call _restart_remote_worker, got {remote_restart_calls}'
+assert remote_restart_calls[0]['host'] == 'mac-mini', f'Should target mac-mini: {remote_restart_calls[0]}'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart uses remote restart for teleported worker"
+    else
+        fail "/checkin?cwd remote restart test failed"
+    fi
+}
+
 test_checkin_cwd_restart_notifies_manager() {
     info "Testing /checkin?cwd restart sends manager start+ready notifications..."
 
@@ -14028,6 +14110,7 @@ run_unit_tests() {
     run_test test_checkin_cwd_stores_in_memory
     run_test test_checkin_cwd_invalid_path
     run_test test_checkin_cwd_accepts_remote_path_for_teleported_worker
+    run_test test_checkin_cwd_restart_uses_remote_for_teleported
     run_test test_checkin_cwd_restart_notifies_manager
     run_test test_checkin_cwd_restart_prefers_admin_chat_id
     run_test test_checkin_cwd_restart_failure_notifies_manager
