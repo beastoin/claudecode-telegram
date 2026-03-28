@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.28.1
+> Version: 0.28.2
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,10 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.28.2 - Fix BRIDGE_URL for teleported workers
+
+**Bug fix:** `export_hook_env()` was exporting `BRIDGE_URL=http://localhost:8271` to remote workers — localhost doesn't resolve to VPS from Mac Mini. Now uses `BRIDGE_PUBLIC_URL` (Tailscale IP) for remote hosts, keeps localhost for local workers. Also fixed pre-existing test failure in `test_remote_dispatch_export_hook_env` (mock needed echo $HOME handling). FAST 236/1.
 
 ### v0.28.1 - Fix 11 teleport gaps (Codex-audited)
 

@@ -9477,6 +9477,57 @@ print('OK')
     fi
 }
 
+test_export_hook_env_uses_public_url_for_remote() {
+    info "Testing export_hook_env uses BRIDGE_PUBLIC_URL for remote workers..."
+
+    if python3 -c "
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Save originals
+orig_bridge_url = bridge.BRIDGE_URL
+orig_public_url = bridge.BRIDGE_PUBLIC_URL
+
+# Simulate: BRIDGE_URL is localhost, BRIDGE_PUBLIC_URL is the Tailscale IP
+bridge.BRIDGE_URL = 'http://localhost:8271'
+bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8271'
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+# Remote worker: must use BRIDGE_PUBLIC_URL, not localhost
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.export_hook_env('claude-test-ren', backend='claude', host='mac-mini')
+
+bridge_exports = [cmd for cmd, host in calls if host == 'mac-mini' and len(cmd) >= 6 and cmd[4] == 'BRIDGE_URL']
+assert len(bridge_exports) == 1, f'expected one BRIDGE_URL export, got {bridge_exports}'
+assert bridge_exports[0][5] == 'http://100.125.36.102:8271', f'remote should use BRIDGE_PUBLIC_URL, got: {bridge_exports[0][5]}'
+
+# Local worker: can use BRIDGE_URL as-is
+calls.clear()
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.export_hook_env('claude-test-lee', backend='claude')
+
+local_exports = [cmd for cmd, host in calls if host is None and len(cmd) >= 6 and cmd[4] == 'BRIDGE_URL']
+assert len(local_exports) == 1, f'expected one BRIDGE_URL export, got {local_exports}'
+assert local_exports[0][5] == 'http://localhost:8271', f'local should use BRIDGE_URL, got: {local_exports[0][5]}'
+
+# Restore
+bridge.BRIDGE_URL = orig_bridge_url
+bridge.BRIDGE_PUBLIC_URL = orig_public_url
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "export_hook_env uses BRIDGE_PUBLIC_URL for remote workers"
+    else
+        fail "export_hook_env should use BRIDGE_PUBLIC_URL for remote workers"
+    fi
+}
+
 test_is_online_teleported_checks_claude_process() {
     info "Testing teleported interactive workers require tmux and Claude to be alive..."
 
@@ -10121,15 +10172,19 @@ import bridge
 calls = []
 def mock_remote(cmd, host=None, **kwargs):
     calls.append({'cmd': cmd, 'host': host})
-    return MagicMock(returncode=0)
+    # Handle echo HOME call for SESSIONS_DIR remapping
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    return MagicMock(returncode=0, stdout='', stderr='')
 
 with patch('bridge._remote_run', side_effect=mock_remote):
     bridge.export_hook_env('claude-prod-ren', host='mac-mini')
 
-# Should have 5 set-environment calls (PORT, TMUX_PREFIX, SESSIONS_DIR, WORKER_BACKEND, BRIDGE_URL)
-assert len(calls) == 5, f'Expected 5 set-environment calls, got {len(calls)}'
+# Should have 6 calls: 5 set-environment + 1 echo HOME (for SESSIONS_DIR remapping)
+assert len(calls) == 6, f'Expected 6 calls (5 set-env + 1 echo HOME), got {len(calls)}'
 assert all(c['host'] == 'mac-mini' for c in calls), f'All calls should target mac-mini'
-assert all('set-environment' in ' '.join(c['cmd']) for c in calls), f'All should be set-environment'
+set_env_calls = [c for c in calls if 'set-environment' in ' '.join(c['cmd'])]
+assert len(set_env_calls) == 5, f'Expected 5 set-environment calls, got {len(set_env_calls)}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "export_hook_env dispatches to _remote_run with host"
@@ -14657,6 +14712,7 @@ run_unit_tests() {
     run_test test_end_worker_teleported_uses_remote_tmux
     run_test test_restart_teleported_requires_remote_dispatch
     run_test test_export_hook_env_remaps_remote_sessions_dir
+    run_test test_export_hook_env_uses_public_url_for_remote
     run_test test_is_online_teleported_checks_claude_process
     run_test test_session_helpers_read_remote_files
     run_test test_hook_failures_teleported_use_remote_files

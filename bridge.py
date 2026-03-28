@@ -5065,7 +5065,9 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host)
     # Always export BRIDGE_URL so workers know where their bridge is
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL], host=host)
+    # Remote workers need BRIDGE_PUBLIC_URL (reachable IP), not localhost
+    bridge_url_val = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host)
 
 
 def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
