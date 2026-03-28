@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.27.4
+> Version: 0.28.0
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,33 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.28.0 - Git-based teleport sync + checkin CWD fix
+
+**New feature: Git-based teleport sync** replaces rsync for git repositories. VPS hosts bare repos at `~/git-server/<project>.git`, workers push WIP state (via `git stash create`) to per-worker branches, target fetches deltas. ~0-50s vs 600s+ for rsync over Tailscale on large repos.
+
+**Architecture:**
+- `_is_git_repo()` — detects git repos (local or remote via SSH)
+- `_get_project_name()` — extracts project name from `remote.origin.url`
+- `_ensure_bare_repo()` — creates `~/git-server/<project>.git` on VPS
+- `_git_push_state()` — non-mutating snapshot: `git add -A` → `git stash create` → `git reset` → push to `refs/heads/teleport/<worker>`
+- `_git_pull_state()` — clone/fetch from bare repo, apply stash, restore branch + staged files
+- `_bare_repo_url()` — SSH URL for remote targets, direct path for local
+- `_sync_working_directory()` — tries git first, falls back to rsync on failure or `full=True`
+
+**Key design:** `git stash create` doesn't support `-u` for untracked files. Workaround: temporarily `git add -A`, create stash, then `git reset HEAD` + re-stage original files. Source tree is never mutated.
+
+**Bug fix: Checkin CWD validation for teleported workers.** `/checkin?cwd=` rejected remote paths (e.g., `/Users/beastoinagents/omi/omi-ren`) because `validate_cwd()` checked the VPS filesystem. Now uses `get_worker_host()` to detect teleported workers and validates via SSH on the remote host.
+
+**29 new tests** (222 total, 1 pre-existing failure):
+- 6 helper tests (_is_git_repo, _get_project_name)
+- 2 bare repo management tests
+- 5 source push tests (clean, dirty, untracked, staged, no-mutation)
+- 5 target pull tests (fresh clone, existing, branch, staged, unstaged)
+- 4 edge case tests (detached HEAD, push/pull failures, non-git)
+- 3 remote dispatch tests (SSH routing, bare repo URL)
+- 3 integration tests (git path, full flag, fallback)
+- 1 checkin CWD remote validation test
 
 ### v0.27.4 - Fix long text batch input (bracketed paste)
 

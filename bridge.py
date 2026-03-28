@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.24.0"
+VERSION = "0.28.0"
 
 import hashlib
 import os
@@ -439,6 +439,248 @@ TELEPORT_RSYNC_EXCLUDES = [
     ".tox", ".mypy_cache", ".pytest_cache", "*.pyc",
     ".build", ".claude/worktrees",
 ]
+
+# ============================================================
+# GIT-BASED TELEPORT SYNC
+# ============================================================
+# VPS hosts bare repos at ~/git-server/<project>.git.
+# Workers push WIP state (via git stash create) to per-worker branches,
+# target fetches deltas. ~0-50s vs 600s+ for rsync over Tailscale.
+
+GIT_SERVER_DIR = os.path.expanduser("~/git-server")
+
+
+def _bare_repo_url(bare_repo_path: str, target_host: str = None) -> str:
+    """Return the URL to access the bare repo from target_host.
+
+    Local targets get the direct path. Remote targets get an SSH URL to VPS.
+    """
+    if target_host:
+        return f"claude@100.125.36.102:{bare_repo_path}"
+    return bare_repo_path
+
+
+def _ensure_bare_repo(project_name: str) -> str:
+    """Create bare repo at GIT_SERVER_DIR/<project>.git if missing. Returns path."""
+    bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
+    if not os.path.isdir(bare_path):
+        os.makedirs(GIT_SERVER_DIR, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "--bare", bare_path],
+            capture_output=True, text=True, check=True)
+    return bare_path
+
+
+def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
+                    host: str = None) -> Optional[dict]:
+    """Push working state to bare repo without mutating source.
+
+    Approach: temporarily `git add -A` to capture untracked files in the index,
+    run `git stash create` (non-mutating — creates commit without moving HEAD),
+    then `git reset` to restore original index. Working tree is never modified.
+
+    Returns metadata dict {orig_sha, orig_branch, staged_files, stash_sha}
+    or None on failure.
+    """
+    try:
+        # Get current HEAD
+        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "HEAD"],
+                        host=host, capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            print(f"[git-sync] rev-parse HEAD failed: {r.stderr[:200]}")
+            return None
+        orig_sha = r.stdout.strip()
+
+        # Get current branch name (or "HEAD" if detached)
+        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                        host=host, capture_output=True, text=True, timeout=10)
+        orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
+
+        # Get originally staged files (before we touch the index)
+        r = _remote_run(["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
+                        host=host, capture_output=True, text=True, timeout=15)
+        staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
+
+        # Stage everything (including untracked) temporarily to capture in stash
+        _remote_run(["git", "-C", source_cwd, "add", "-A"],
+                    host=host, capture_output=True, text=True, timeout=30)
+
+        # Create stash commit (non-mutating — working tree untouched)
+        r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
+                        host=host, capture_output=True, text=True, timeout=30)
+        stash_sha = r.stdout.strip() if r.returncode == 0 else ""
+
+        # Restore original index: reset, then re-stage originally staged files
+        _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
+                    host=host, capture_output=True, text=True, timeout=15)
+        if staged_files:
+            _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
+                        host=host, capture_output=True, text=True, timeout=15)
+
+        # Determine what to push: stash commit if dirty, HEAD if clean
+        push_sha = stash_sha if stash_sha else orig_sha
+        ref = f"refs/heads/teleport/{worker_name}"
+
+        # Push to bare repo
+        if host:
+            # Remote source → push to VPS bare repo via SSH
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force",
+                 f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
+                host=host, capture_output=True, text=True, timeout=60)
+        else:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force",
+                 bare_repo, f"{push_sha}:{ref}"],
+                host=host, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            print(f"[git-sync] push failed: {r.stderr[:200]}")
+            return None
+
+        return {
+            "orig_sha": orig_sha,
+            "orig_branch": orig_branch,
+            "staged_files": staged_files,
+            "stash_sha": stash_sha or None,
+        }
+    except Exception as e:
+        print(f"[git-sync] push state error: {e}")
+        return None
+
+
+def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
+                    metadata: dict, host: str = None) -> bool:
+    """Pull and apply working state on target. Returns success.
+
+    For fresh targets: clones from bare repo.
+    For existing targets: fetches and applies.
+    Restores branch, working tree changes, and staged files.
+    """
+    try:
+        orig_sha = metadata["orig_sha"]
+        orig_branch = metadata["orig_branch"]
+        staged_files = metadata.get("staged_files", [])
+        stash_sha = metadata.get("stash_sha")
+        ref = f"teleport/{worker_name}"
+
+        is_existing = False
+        try:
+            r = _remote_run(["git", "-C", target_cwd, "rev-parse", "--git-dir"],
+                            host=host, capture_output=True, text=True, timeout=10)
+            is_existing = r.returncode == 0
+        except Exception:
+            pass
+
+        if not is_existing:
+            # Fresh clone from bare repo
+            r = _remote_run(
+                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
+                host=host, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                print(f"[git-sync] clone failed: {r.stderr[:200]}")
+                return False
+            # Configure user for the clone
+            _remote_run(["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"],
+                        host=host, capture_output=True)
+            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"],
+                        host=host, capture_output=True)
+        else:
+            # Add/update remote pointing to bare repo
+            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"],
+                        host=host, capture_output=True)
+            _remote_run(
+                ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
+                host=host, capture_output=True, text=True, timeout=10)
+            # Fetch the teleport branch
+            r = _remote_run(
+                ["git", "-C", target_cwd, "fetch", "vps", ref],
+                host=host, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                print(f"[git-sync] fetch failed: {r.stderr[:200]}")
+                return False
+
+        # Checkout the original branch at the original commit
+        if orig_branch and orig_branch != "HEAD":
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
+                host=host, capture_output=True, text=True, timeout=30)
+        else:
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", orig_sha],
+                host=host, capture_output=True, text=True, timeout=30)
+
+        # Apply the stash if there were uncommitted changes
+        if stash_sha:
+            # Fetch the stash commit (it's on the teleport branch)
+            # For fresh clones, it's already available. For existing, we fetched it.
+            # Use FETCH_HEAD or the ref directly
+            fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
+
+            # Apply stash: the teleport branch tip IS the stash commit
+            r = _remote_run(
+                ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
+                host=host, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                # Fallback: try direct SHA if ref doesn't resolve
+                # The stash SHA was pushed as the branch tip
+                _remote_run(
+                    ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
+                    host=host, capture_output=True, text=True, timeout=15)
+                r = _remote_run(
+                    ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
+                    host=host, capture_output=True, text=True, timeout=30)
+
+            # Re-stage originally staged files
+            if staged_files:
+                # First reset index to HEAD (stash apply may have staged everything)
+                _remote_run(["git", "-C", target_cwd, "reset", "HEAD"],
+                            host=host, capture_output=True, text=True, timeout=15)
+                _remote_run(["git", "-C", target_cwd, "add", "--"] + staged_files,
+                            host=host, capture_output=True, text=True, timeout=15)
+
+        return True
+    except Exception as e:
+        print(f"[git-sync] pull state error: {e}")
+        return False
+
+
+def _is_git_repo(cwd: str, host: str = None) -> bool:
+    """Check if cwd is inside a git repository."""
+    try:
+        r = _remote_run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            host=host, capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_project_name(cwd: str, host: str = None) -> Optional[str]:
+    """Derive project name from git remote.origin.url.
+
+    Returns short name (e.g., 'omi' from 'https://github.com/BasedHardware/omi.git')
+    or None if no origin remote.
+    """
+    try:
+        r = _remote_run(
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            host=host, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        url = r.stdout.strip()
+        # Strip trailing .git
+        if url.endswith(".git"):
+            url = url[:-4]
+        # Handle SSH (git@host:org/repo) and HTTPS (https://host/org/repo)
+        if ":" in url and not url.startswith("http"):
+            # SSH format: git@github.com:Org/repo
+            name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
+        else:
+            # HTTPS format
+            name = url.rsplit("/", 1)[-1]
+        return name if name else None
+    except Exception:
+        return None
 
 
 def _registry_update_teleport(name: str, host: str, home_host: str, home_cwd: str):
@@ -3296,15 +3538,28 @@ def normalize_cwd(cwd: Optional[str]) -> str:
     return os.path.abspath(os.path.expanduser(raw))
 
 
-def validate_cwd(cwd: Optional[str]) -> tuple[str, str]:
-    """Validate cwd path. Returns (normalized_path, error_message)."""
+def validate_cwd(cwd: Optional[str], host: str = None) -> tuple[str, str]:
+    """Validate cwd path. Returns (normalized_path, error_message).
+
+    When host is set, validates via SSH on the remote machine instead of locally.
+    """
     normalized = normalize_cwd(cwd)
     if not normalized:
         return "", "cwd is empty"
-    if not os.path.exists(normalized):
-        return "", f"cwd does not exist: {normalized}"
-    if not os.path.isdir(normalized):
-        return "", f"cwd is not a directory: {normalized}"
+    if host:
+        # Remote validation: check directory exists on the remote host
+        try:
+            r = _remote_run(["test", "-d", normalized], host=host,
+                            capture_output=True, timeout=10)
+            if r.returncode != 0:
+                return "", f"cwd does not exist on {host}: {normalized}"
+        except Exception as e:
+            return "", f"cwd check failed on {host}: {e}"
+    else:
+        if not os.path.exists(normalized):
+            return "", f"cwd does not exist: {normalized}"
+        if not os.path.isdir(normalized):
+            return "", f"cwd is not a directory: {normalized}"
     return normalized, ""
 
 
@@ -6300,16 +6555,44 @@ class CommandRouter:
     def _sync_working_directory(self, source_cwd, target_cwd,
                                  source_host=None, target_host=None,
                                  full=False):
-        """rsync working directory from source to target."""
+        """Sync working directory from source to target.
+
+        Prefers git-based sync (fast, delta-only) for git repos.
+        Falls back to rsync for non-git dirs or on git failure.
+        Use full=True to force rsync (skip git entirely).
+        """
+        if not full and _is_git_repo(source_cwd, host=source_host):
+            project = _get_project_name(source_cwd, host=source_host)
+            if project:
+                try:
+                    bare_repo = _ensure_bare_repo(project)
+                    meta = _git_push_state(source_cwd, project, bare_repo,
+                                           host=source_host)
+                    if meta:
+                        bare_url = _bare_repo_url(bare_repo, target_host=target_host)
+                        if _git_pull_state(target_cwd, project, bare_url, meta,
+                                           host=target_host):
+                            print(f"[teleport] git sync succeeded for {project}")
+                            return True
+                        print(f"[teleport] git pull failed, falling back to rsync")
+                    else:
+                        print(f"[teleport] git push failed, falling back to rsync")
+                except Exception as e:
+                    print(f"[teleport] git sync error, falling back to rsync: {e}")
+
+        return self._rsync_working_directory(
+            source_cwd, target_cwd, source_host, target_host, full)
+
+    def _rsync_working_directory(self, source_cwd, target_cwd,
+                                  source_host=None, target_host=None,
+                                  full=False):
+        """rsync working directory from source to target (fallback path)."""
         _remote_run(["mkdir", "-p", target_cwd],
                      host=target_host, capture_output=True)
 
         cmd = ["rsync", "-az", "--delete"]
         gitignore_tmpfile = None
         if not full:
-            # Build exclude list from git ls-files on the source side.
-            # --filter ':- .gitignore' breaks on macOS openrsync, so we
-            # generate an exclude file from git instead (portable).
             try:
                 gi_result = _remote_run(
                     ["git", "-C", source_cwd, "ls-files",
@@ -6321,11 +6604,7 @@ class CommandRouter:
                         prefix="rsync-gitignore-", suffix=".txt")
                     os.write(fd, gi_result.stdout.encode())
                     os.close(fd)
-                    if source_host:
-                        # Excludes are relative paths — works locally with --exclude-from
-                        cmd.extend(["--exclude-from", gitignore_tmpfile])
-                    else:
-                        cmd.extend(["--exclude-from", gitignore_tmpfile])
+                    cmd.extend(["--exclude-from", gitignore_tmpfile])
             except Exception as e:
                 print(f"[teleport] git ls-files failed, skipping gitignore excludes: {e}")
 
@@ -7205,7 +7484,9 @@ class Handler(BaseHTTPRequestHandler):
             raw_cwd = params.get("cwd", [None])[0]
             requested_cwd = ""
             if raw_cwd is not None:
-                requested_cwd, cwd_err = validate_cwd(raw_cwd)
+                # Teleported workers have remote cwds — validate on their host
+                worker_host = get_worker_host(name)
+                requested_cwd, cwd_err = validate_cwd(raw_cwd, host=worker_host)
                 if cwd_err:
                     self.send_response(400)
                     self.send_header("Content-Type", "text/plain")

@@ -7193,6 +7193,1009 @@ print(result.stdout.strip())
     fi
 }
 
+# ── Git-Based Teleport Sync Tests ──────────────────────────────────────
+
+test_is_git_repo_false_for_non_git() {
+    info "Testing _is_git_repo returns False for non-git directory..."
+
+    if python3 -c "
+import tempfile, shutil
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+assert bridge._is_git_repo(tmpdir) == False, 'non-git dir should be False'
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_is_git_repo returns False for non-git dir"
+    else
+        fail "_is_git_repo non-git test failed"
+    fi
+}
+
+test_is_git_repo_true_for_git() {
+    info "Testing _is_git_repo returns True for git repository..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', tmpdir], capture_output=True)
+assert bridge._is_git_repo(tmpdir) == True, 'git repo should be True'
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_is_git_repo returns True for git repo"
+    else
+        fail "_is_git_repo git repo test failed"
+    fi
+}
+
+test_is_git_repo_with_remote_host() {
+    info "Testing _is_git_repo dispatches via _remote_run for remote host..."
+
+    if python3 -c "
+import subprocess
+from unittest.mock import patch
+import bridge
+
+# Mock _remote_run to simulate remote git rev-parse succeeding
+def mock_remote_run(cmd, host=None, **kwargs):
+    if host == 'remote-mac' and 'rev-parse' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='true\n', stderr='')
+    return subprocess.CompletedProcess(cmd, 1)
+
+with patch.object(bridge, '_remote_run', side_effect=mock_remote_run):
+    assert bridge._is_git_repo('/remote/path', host='remote-mac') == True
+
+# Also test failure case
+def mock_fail(cmd, host=None, **kwargs):
+    return subprocess.CompletedProcess(cmd, 128, stderr='not a git repo')
+
+with patch.object(bridge, '_remote_run', side_effect=mock_fail):
+    assert bridge._is_git_repo('/remote/path', host='remote-mac') == False
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_is_git_repo dispatches via SSH for remote host"
+    else
+        fail "_is_git_repo remote host test failed"
+    fi
+}
+
+test_get_project_name_from_github_url() {
+    info "Testing _get_project_name extracts name from GitHub HTTPS URL..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', tmpdir], capture_output=True)
+subprocess.run(['git', '-C', tmpdir, 'remote', 'add', 'origin',
+                'https://github.com/BasedHardware/omi.git'], capture_output=True)
+
+name = bridge._get_project_name(tmpdir)
+assert name == 'omi', f'expected omi, got {name!r}'
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_get_project_name from GitHub HTTPS URL"
+    else
+        fail "_get_project_name HTTPS test failed"
+    fi
+}
+
+test_get_project_name_from_ssh_url() {
+    info "Testing _get_project_name extracts name from SSH URL..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', tmpdir], capture_output=True)
+subprocess.run(['git', '-C', tmpdir, 'remote', 'add', 'origin',
+                'git@github.com:BasedHardware/omi.git'], capture_output=True)
+
+name = bridge._get_project_name(tmpdir)
+assert name == 'omi', f'expected omi, got {name!r}'
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_get_project_name from SSH URL"
+    else
+        fail "_get_project_name SSH test failed"
+    fi
+}
+
+test_get_project_name_no_remote() {
+    info "Testing _get_project_name returns None when no remote..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', tmpdir], capture_output=True)
+
+name = bridge._get_project_name(tmpdir)
+assert name is None, f'expected None, got {name!r}'
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_get_project_name returns None for no remote"
+    else
+        fail "_get_project_name no remote test failed"
+    fi
+}
+
+test_ensure_bare_repo_creates_new() {
+    info "Testing _ensure_bare_repo creates a new bare repo..."
+
+    if python3 -c "
+import tempfile, shutil, os
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = tmpdir
+
+path = bridge._ensure_bare_repo('test-project')
+assert path == os.path.join(tmpdir, 'test-project.git'), f'unexpected path: {path}'
+assert os.path.isdir(path), 'bare repo dir should exist'
+assert os.path.isfile(os.path.join(path, 'HEAD')), 'bare repo should have HEAD'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ensure_bare_repo creates new bare repo"
+    else
+        fail "_ensure_bare_repo create test failed"
+    fi
+}
+
+test_ensure_bare_repo_idempotent() {
+    info "Testing _ensure_bare_repo is idempotent..."
+
+    if python3 -c "
+import tempfile, shutil, os
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = tmpdir
+
+path1 = bridge._ensure_bare_repo('myrepo')
+path2 = bridge._ensure_bare_repo('myrepo')
+assert path1 == path2, f'paths differ: {path1} vs {path2}'
+assert os.path.isdir(path1), 'bare repo should still exist'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ensure_bare_repo is idempotent"
+    else
+        fail "_ensure_bare_repo idempotent test failed"
+    fi
+}
+
+test_git_push_state_clean_tree() {
+    info "Testing _git_push_state with clean tree pushes HEAD..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+# Create source repo with one commit
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Create bare repo
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'worker1', bare)
+assert meta is not None, 'push should succeed'
+assert 'orig_sha' in meta, 'meta should have orig_sha'
+assert 'orig_branch' in meta, 'meta should have orig_branch'
+assert meta['stash_sha'] is None or meta['stash_sha'] == '', 'clean tree should have no stash'
+
+# Verify the branch exists in bare repo
+r = subprocess.run(['git', '-C', bare, 'rev-parse', 'teleport/worker1'],
+                   capture_output=True, text=True)
+assert r.returncode == 0, f'branch not found: {r.stderr}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state clean tree pushes HEAD"
+    else
+        fail "_git_push_state clean tree test failed"
+    fi
+}
+
+test_git_push_state_with_changes() {
+    info "Testing _git_push_state with uncommitted changes uses stash..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Make uncommitted changes
+open(os.path.join(srcdir, 'file.txt'), 'w').write('modified')
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'worker1', bare)
+assert meta is not None, 'push should succeed'
+assert meta['stash_sha'], 'dirty tree should have stash_sha'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state with changes uses stash"
+    else
+        fail "_git_push_state with changes test failed"
+    fi
+}
+
+test_git_push_state_with_untracked() {
+    info "Testing _git_push_state includes untracked files..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Add untracked file
+open(os.path.join(srcdir, 'untracked.txt'), 'w').write('new file')
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'worker1', bare)
+assert meta is not None, 'push should succeed'
+assert meta['stash_sha'], 'tree with untracked should have stash_sha'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state includes untracked files"
+    else
+        fail "_git_push_state untracked test failed"
+    fi
+}
+
+test_git_push_state_with_staged() {
+    info "Testing _git_push_state records staged files..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Stage a change
+open(os.path.join(srcdir, 'file.txt'), 'w').write('staged change')
+subprocess.run(['git', '-C', srcdir, 'add', 'file.txt'], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'worker1', bare)
+assert meta is not None, 'push should succeed'
+assert 'file.txt' in meta.get('staged_files', []), f'staged_files should contain file.txt: {meta}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state records staged files"
+    else
+        fail "_git_push_state staged test failed"
+    fi
+}
+
+test_git_push_state_no_source_mutation() {
+    info "Testing _git_push_state does not mutate source tree..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Dirty the tree
+open(os.path.join(srcdir, 'file.txt'), 'w').write('modified')
+open(os.path.join(srcdir, 'new.txt'), 'w').write('untracked')
+
+# Capture state before push
+head_before = subprocess.run(['git', '-C', srcdir, 'rev-parse', 'HEAD'],
+                             capture_output=True, text=True).stdout.strip()
+status_before = subprocess.run(['git', '-C', srcdir, 'status', '--porcelain'],
+                               capture_output=True, text=True).stdout
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'worker1', bare)
+
+# Verify no mutation
+head_after = subprocess.run(['git', '-C', srcdir, 'rev-parse', 'HEAD'],
+                            capture_output=True, text=True).stdout.strip()
+status_after = subprocess.run(['git', '-C', srcdir, 'status', '--porcelain'],
+                              capture_output=True, text=True).stdout
+
+assert head_before == head_after, f'HEAD changed: {head_before} -> {head_after}'
+assert status_before == status_after, f'status changed:\n{status_before}\nvs\n{status_after}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state does not mutate source"
+    else
+        fail "_git_push_state no mutation test failed"
+    fi
+}
+
+test_git_pull_state_fresh_clone() {
+    info "Testing _git_pull_state clones to fresh target directory..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+# Create source with a commit
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+# Dirty it
+open(os.path.join(srcdir, 'file.txt'), 'w').write('modified')
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'w1', bare)
+assert meta, 'push should succeed'
+
+# Pull to a fresh target (doesn't exist yet)
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+ok = bridge._git_pull_state(tgtdir, 'w1', bare, meta)
+assert ok, 'pull should succeed'
+assert os.path.isdir(os.path.join(tgtdir, '.git')), 'target should be a git repo'
+content = open(os.path.join(tgtdir, 'file.txt')).read()
+assert content == 'modified', f'expected modified, got {content!r}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state clones to fresh target"
+    else
+        fail "_git_pull_state fresh clone test failed"
+    fi
+}
+
+test_git_pull_state_existing_repo() {
+    info "Testing _git_pull_state fetches into existing repo..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+# First push (clean)
+meta1 = bridge._git_push_state(srcdir, 'w1', bare)
+
+# Clone target
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+bridge._git_pull_state(tgtdir, 'w1', bare, meta1)
+
+# Now modify source and push again
+open(os.path.join(srcdir, 'file.txt'), 'w').write('updated')
+meta2 = bridge._git_push_state(srcdir, 'w1', bare)
+
+# Pull into existing target
+ok = bridge._git_pull_state(tgtdir, 'w1', bare, meta2)
+assert ok, 'pull into existing should succeed'
+content = open(os.path.join(tgtdir, 'file.txt')).read()
+assert content == 'updated', f'expected updated, got {content!r}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state fetches into existing repo"
+    else
+        fail "_git_pull_state existing repo test failed"
+    fi
+}
+
+test_git_pull_state_restores_branch() {
+    info "Testing _git_pull_state restores correct branch..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+# Create and switch to a feature branch
+subprocess.run(['git', '-C', srcdir, 'checkout', '-b', 'feature-x'], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'w1', bare)
+assert meta['orig_branch'] == 'feature-x', f'branch should be feature-x: {meta}'
+
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+ok = bridge._git_pull_state(tgtdir, 'w1', bare, meta)
+assert ok, 'pull should succeed'
+
+r = subprocess.run(['git', '-C', tgtdir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+                   capture_output=True, text=True)
+assert r.stdout.strip() == 'feature-x', f'target branch should be feature-x, got {r.stdout.strip()!r}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state restores correct branch"
+    else
+        fail "_git_pull_state branch restore test failed"
+    fi
+}
+
+test_git_pull_state_restores_staged() {
+    info "Testing _git_pull_state re-stages originally staged files..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'a.txt'), 'w').write('hello')
+open(os.path.join(srcdir, 'b.txt'), 'w').write('world')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Stage a.txt, leave b.txt unstaged
+open(os.path.join(srcdir, 'a.txt'), 'w').write('staged-a')
+open(os.path.join(srcdir, 'b.txt'), 'w').write('unstaged-b')
+subprocess.run(['git', '-C', srcdir, 'add', 'a.txt'], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'w1', bare)
+assert 'a.txt' in meta['staged_files']
+
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+ok = bridge._git_pull_state(tgtdir, 'w1', bare, meta)
+assert ok
+
+# Check a.txt is staged on target
+r = subprocess.run(['git', '-C', tgtdir, 'diff', '--cached', '--name-only'],
+                   capture_output=True, text=True)
+staged = [f for f in r.stdout.strip().split('\n') if f]
+assert 'a.txt' in staged, f'a.txt should be staged: {staged}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state re-stages originally staged files"
+    else
+        fail "_git_pull_state staged restore test failed"
+    fi
+}
+
+test_git_pull_state_restores_unstaged() {
+    info "Testing _git_pull_state restores unstaged changes..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Unstaged modification + untracked file
+open(os.path.join(srcdir, 'file.txt'), 'w').write('modified')
+open(os.path.join(srcdir, 'new.txt'), 'w').write('untracked')
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'w1', bare)
+
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+ok = bridge._git_pull_state(tgtdir, 'w1', bare, meta)
+assert ok
+
+# Check both files on target
+content1 = open(os.path.join(tgtdir, 'file.txt')).read()
+assert content1 == 'modified', f'file.txt should be modified: {content1!r}'
+content2 = open(os.path.join(tgtdir, 'new.txt')).read()
+assert content2 == 'untracked', f'new.txt should be untracked: {content2!r}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state restores unstaged and untracked"
+    else
+        fail "_git_pull_state unstaged restore test failed"
+    fi
+}
+
+test_git_push_state_detached_head() {
+    info "Testing _git_push_state works with detached HEAD..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+head = subprocess.run(['git', '-C', srcdir, 'rev-parse', 'HEAD'],
+                      capture_output=True, text=True).stdout.strip()
+# Detach HEAD
+subprocess.run(['git', '-C', srcdir, 'checkout', head], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+bare = bridge._ensure_bare_repo('test')
+
+meta = bridge._git_push_state(srcdir, 'w1', bare)
+assert meta is not None, 'push should succeed with detached HEAD'
+assert meta['orig_branch'] == 'HEAD', f'branch should be HEAD: {meta[\"orig_branch\"]}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state works with detached HEAD"
+    else
+        fail "_git_push_state detached HEAD test failed"
+    fi
+}
+
+test_git_sync_fallback_on_push_fail() {
+    info "Testing _git_push_state returns None on push failure..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+# Push to nonexistent bare repo
+meta = bridge._git_push_state(srcdir, 'w1', '/nonexistent/bare.git')
+assert meta is None, f'push to nonexistent should fail: {meta}'
+
+shutil.rmtree(srcdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state returns None on failure"
+    else
+        fail "_git_push_state failure fallback test failed"
+    fi
+}
+
+test_git_sync_fallback_on_pull_fail() {
+    info "Testing _git_pull_state returns False on pull failure..."
+
+    if python3 -c "
+import bridge
+
+meta = {'orig_sha': 'abc123', 'orig_branch': 'main', 'staged_files': [], 'stash_sha': None}
+ok = bridge._git_pull_state('/tmp/nonexistent-target', 'w1', '/nonexistent/bare.git', meta)
+assert ok == False, f'pull from nonexistent should fail: {ok}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state returns False on failure"
+    else
+        fail "_git_pull_state failure fallback test failed"
+    fi
+}
+
+test_git_sync_non_git_dir() {
+    info "Testing _is_git_repo returns False for non-git dir (rsync path)..."
+
+    if python3 -c "
+import tempfile, shutil
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+assert bridge._is_git_repo(tmpdir) == False
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_is_git_repo False for non-git triggers rsync path"
+    else
+        fail "_is_git_repo non-git for rsync test failed"
+    fi
+}
+
+test_git_push_state_remote_host() {
+    info "Testing _git_push_state dispatches git commands via SSH for remote host..."
+
+    if python3 -c "
+import subprocess
+from unittest.mock import patch, call
+import bridge
+
+calls = []
+def mock_remote_run(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    if 'rev-parse' in cmd and 'HEAD' in cmd and '--abbrev-ref' not in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='abc123\n', stderr='')
+    if '--abbrev-ref' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='main\n', stderr='')
+    if 'diff' in cmd and '--cached' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+    if 'add' in cmd and '-A' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    if 'stash' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+    if 'reset' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    if 'push' in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+    return subprocess.CompletedProcess(cmd, 0)
+
+with patch.object(bridge, '_remote_run', side_effect=mock_remote_run):
+    meta = bridge._git_push_state('/remote/src', 'w1', '/home/claude/git-server/test.git',
+                                   host='remote-mac')
+
+assert meta is not None, f'push should succeed: {meta}'
+# Verify all git commands were dispatched to remote host
+git_calls = [(c, h) for c, h in calls if c[0] == 'git']
+for cmd, host in git_calls:
+    assert host == 'remote-mac', f'expected remote-mac, got {host} for {cmd}'
+
+# Verify push targets VPS bare repo via SSH
+push_calls = [c for c, h in calls if 'push' in c]
+assert len(push_calls) > 0, 'should have a push call'
+push_cmd = push_calls[0]
+assert 'claude@100.125.36.102:' in str(push_cmd), f'push should target VPS: {push_cmd}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_push_state dispatches via SSH for remote host"
+    else
+        fail "_git_push_state remote host test failed"
+    fi
+}
+
+test_git_pull_state_remote_host() {
+    info "Testing _git_pull_state dispatches git commands via SSH for remote host..."
+
+    if python3 -c "
+import subprocess
+from unittest.mock import patch
+import bridge
+
+calls = []
+def mock_remote_run(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    if 'rev-parse' in cmd and '--git-dir' in cmd:
+        return subprocess.CompletedProcess(cmd, 128, stderr='not a git repo')
+    if 'clone' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    if 'config' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    if 'checkout' in cmd:
+        return subprocess.CompletedProcess(cmd, 0)
+    return subprocess.CompletedProcess(cmd, 0)
+
+meta = {'orig_sha': 'abc123', 'orig_branch': 'main', 'staged_files': [], 'stash_sha': None}
+
+with patch.object(bridge, '_remote_run', side_effect=mock_remote_run):
+    ok = bridge._git_pull_state('/remote/target', 'w1',
+                                 'claude@100.125.36.102:/home/claude/git-server/test.git',
+                                 meta, host='remote-mac')
+
+assert ok, 'pull should succeed'
+# Verify all commands dispatched to remote host
+git_calls = [(c, h) for c, h in calls if c[0] == 'git']
+for cmd, host in git_calls:
+    assert host == 'remote-mac', f'expected remote-mac, got {host} for {cmd}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_git_pull_state dispatches via SSH for remote host"
+    else
+        fail "_git_pull_state remote host test failed"
+    fi
+}
+
+test_bare_repo_url_for_remote() {
+    info "Testing bare repo URL generation for remote targets..."
+
+    if python3 -c "
+import bridge
+
+# Local target should use direct path
+url = bridge._bare_repo_url('/home/claude/git-server/test.git', target_host=None)
+assert url == '/home/claude/git-server/test.git', f'local: {url}'
+
+# Remote target should use SSH URL
+url = bridge._bare_repo_url('/home/claude/git-server/test.git',
+                             target_host='beastoin-agents-f1-mac-mini')
+assert 'claude@100.125.36.102:' in url, f'remote should SSH to VPS: {url}'
+assert '/home/claude/git-server/test.git' in url, f'should include path: {url}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Bare repo URL correct for remote targets"
+    else
+        fail "Bare repo URL test failed"
+    fi
+}
+
+test_sync_working_directory_uses_git() {
+    info "Testing _sync_working_directory prefers git sync for git repos..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+from unittest.mock import patch, MagicMock
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'remote', 'add', 'origin', 'https://github.com/test/proj.git'],
+               capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = baredir
+
+tgtdir = os.path.join(tempfile.mkdtemp(), 'target')
+
+rsync_called = []
+orig_subprocess_run = subprocess.run
+def track_rsync(*args, **kwargs):
+    if args and isinstance(args[0], list) and args[0][0] == 'rsync':
+        rsync_called.append(args[0])
+    return orig_subprocess_run(*args, **kwargs)
+
+router = bridge.CommandRouter(None, bridge.worker_manager)
+with patch('subprocess.run', side_effect=track_rsync):
+    result = router._sync_working_directory(srcdir, tgtdir)
+
+assert result == True, 'sync should succeed'
+assert os.path.isfile(os.path.join(tgtdir, 'file.txt')), 'file should exist on target'
+assert len(rsync_called) == 0, f'rsync should NOT be called when git succeeds: {rsync_called}'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(baredir)
+shutil.rmtree(os.path.dirname(tgtdir))
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_sync_working_directory uses git for git repos"
+    else
+        fail "_sync_working_directory git path test failed"
+    fi
+}
+
+test_sync_working_directory_full_flag_uses_rsync() {
+    info "Testing _sync_working_directory --full flag bypasses git..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+from unittest.mock import patch, MagicMock
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'remote', 'add', 'origin', 'https://github.com/test/proj.git'],
+               capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+tgtdir = tempfile.mkdtemp()
+
+rsync_called = []
+orig_subprocess_run = subprocess.run
+def track_rsync(*args, **kwargs):
+    if args and isinstance(args[0], list) and args[0][0] == 'rsync':
+        rsync_called.append(True)
+    return orig_subprocess_run(*args, **kwargs)
+
+router = bridge.CommandRouter(None, bridge.worker_manager)
+with patch('subprocess.run', side_effect=track_rsync):
+    router._sync_working_directory(srcdir, tgtdir, full=True)
+
+assert len(rsync_called) > 0, 'rsync should be called when full=True'
+
+shutil.rmtree(srcdir)
+shutil.rmtree(tgtdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_sync_working_directory --full uses rsync"
+    else
+        fail "_sync_working_directory --full rsync test failed"
+    fi
+}
+
+test_sync_working_directory_git_fail_falls_back() {
+    info "Testing _sync_working_directory falls back to rsync on git failure..."
+
+    if python3 -c "
+import tempfile, shutil, subprocess, os
+from unittest.mock import patch
+import bridge
+
+srcdir = tempfile.mkdtemp()
+subprocess.run(['git', 'init', srcdir], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.email', 'test@test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'config', 'user.name', 'test'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'remote', 'add', 'origin', 'https://github.com/test/proj.git'],
+               capture_output=True)
+open(os.path.join(srcdir, 'file.txt'), 'w').write('hello')
+subprocess.run(['git', '-C', srcdir, 'add', '.'], capture_output=True)
+subprocess.run(['git', '-C', srcdir, 'commit', '-m', 'init'], capture_output=True)
+
+tgtdir = tempfile.mkdtemp()
+
+# Make git push fail by using a broken bare repo path
+baredir = tempfile.mkdtemp()
+orig = bridge.GIT_SERVER_DIR
+bridge.GIT_SERVER_DIR = '/nonexistent/git-server'
+
+rsync_called = []
+orig_subprocess_run = subprocess.run
+def track_rsync(*args, **kwargs):
+    if args and isinstance(args[0], list) and args[0][0] == 'rsync':
+        rsync_called.append(True)
+    return orig_subprocess_run(*args, **kwargs)
+
+router = bridge.CommandRouter(None, bridge.worker_manager)
+with patch('subprocess.run', side_effect=track_rsync):
+    router._sync_working_directory(srcdir, tgtdir)
+
+assert len(rsync_called) > 0, 'rsync should be called as fallback when git fails'
+
+bridge.GIT_SERVER_DIR = orig
+shutil.rmtree(srcdir)
+shutil.rmtree(tgtdir)
+shutil.rmtree(baredir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_sync_working_directory falls back to rsync on git failure"
+    else
+        fail "_sync_working_directory git fallback test failed"
+    fi
+}
+
 test_teleport_preflight_uses_public_url() {
     info "Testing teleport preflight uses BRIDGE_PUBLIC_URL when BRIDGE_URL is localhost..."
 
@@ -9523,6 +10526,70 @@ print('OK')
         success "/checkin?cwd rejects invalid path with 400"
     else
         fail "/checkin?cwd invalid path test failed"
+    fi
+}
+
+test_checkin_cwd_accepts_remote_path_for_teleported_worker() {
+    info "Testing /checkin?cwd accepts remote path for teleported worker..."
+
+    if python3 -c "
+import io, json, shutil, tempfile, subprocess
+from pathlib import Path
+from urllib.parse import urlparse, quote
+from unittest.mock import patch
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = Path(tmpdir)
+bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
+bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}regcheckin-'
+
+bridge._registry_add('ren', 'claude', 123)
+# Mark ren as teleported to a remote host
+bridge._registry_update_teleport('ren', 'remote-host', None, '/home/claude/omi')
+
+# Remote path that does NOT exist on VPS
+remote_cwd = '/Users/beastoinagents/omi/omi-ren'
+
+# Mock _remote_run to succeed for 'test -d' on the remote path
+orig_remote_run = bridge._remote_run
+def mock_remote_run(cmd, host=None, **kwargs):
+    # Intercept the remote directory check
+    if host == 'remote-host' and cmd[:2] == ['test', '-d']:
+        return subprocess.CompletedProcess(cmd, 0)
+    return orig_remote_run(cmd, host=host, **kwargs)
+
+# Mock tmux_exists so we don't need a real session
+# Mock worker_manager methods
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, *_args, **_kwargs):
+        pass
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=ren&cwd=' + quote(remote_cwd))
+
+with patch.object(bridge, '_remote_run', side_effect=mock_remote_run), \
+     patch.object(bridge, 'tmux_exists', return_value=False):
+    bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+# Should NOT be 400 — remote path is valid on the remote host
+assert handler.status != 400, f'expected non-400, got {handler.status}: {handler.wfile.getvalue()}'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd accepts remote path for teleported worker"
+    else
+        fail "/checkin?cwd remote path for teleported worker test failed"
     fi
 }
 
@@ -12819,6 +13886,37 @@ run_unit_tests() {
     run_test test_bridge_url_ignores_stale_localhost
     run_test test_bridge_url_ignores_stale_127
     run_test test_bridge_url_honors_remote
+    # Unit tests - Git-Based Teleport Sync
+    log ""
+    log "── Git Sync Tests (Unit) ───────────────────────────────────────────────"
+    run_test test_is_git_repo_false_for_non_git
+    run_test test_is_git_repo_true_for_git
+    run_test test_is_git_repo_with_remote_host
+    run_test test_get_project_name_from_github_url
+    run_test test_get_project_name_from_ssh_url
+    run_test test_get_project_name_no_remote
+    run_test test_ensure_bare_repo_creates_new
+    run_test test_ensure_bare_repo_idempotent
+    run_test test_git_push_state_clean_tree
+    run_test test_git_push_state_with_changes
+    run_test test_git_push_state_with_untracked
+    run_test test_git_push_state_with_staged
+    run_test test_git_push_state_no_source_mutation
+    run_test test_git_pull_state_fresh_clone
+    run_test test_git_pull_state_existing_repo
+    run_test test_git_pull_state_restores_branch
+    run_test test_git_pull_state_restores_staged
+    run_test test_git_pull_state_restores_unstaged
+    run_test test_git_push_state_detached_head
+    run_test test_git_sync_fallback_on_push_fail
+    run_test test_git_sync_fallback_on_pull_fail
+    run_test test_git_sync_non_git_dir
+    run_test test_git_push_state_remote_host
+    run_test test_git_pull_state_remote_host
+    run_test test_bare_repo_url_for_remote
+    run_test test_sync_working_directory_uses_git
+    run_test test_sync_working_directory_full_flag_uses_rsync
+    run_test test_sync_working_directory_git_fail_falls_back
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url
@@ -12885,6 +13983,7 @@ run_unit_tests() {
     run_test test_get_registered_includes_registry
     run_test test_checkin_cwd_stores_in_memory
     run_test test_checkin_cwd_invalid_path
+    run_test test_checkin_cwd_accepts_remote_path_for_teleported_worker
     run_test test_checkin_cwd_restart_notifies_manager
     run_test test_checkin_cwd_restart_prefers_admin_chat_id
     run_test test_checkin_cwd_restart_failure_notifies_manager
