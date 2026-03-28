@@ -90,7 +90,17 @@ else:
     BRIDGE_URL = f"http://localhost:{PORT}"
 # BRIDGE_PUBLIC_URL: reachable URL for teleported workers (e.g., http://100.125.36.102:8271)
 # When set and BRIDGE_BIND is not explicitly set, auto-bind to 0.0.0.0
+# Auto-detect from Tailscale IP if not explicitly set.
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
+if not BRIDGE_PUBLIC_URL:
+    try:
+        _ts_ip = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True,
+            text=True, timeout=3).stdout.strip()
+        if _ts_ip:
+            BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
+    except Exception:
+        pass
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
 PERSISTENCE_NOTE = "They'll stay on your team."
@@ -5400,19 +5410,9 @@ class CommandRouter:
             req = urllib.request.Request(url, method="POST")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = _json.loads(resp.read())
-            # Derive host from BRIDGE_PUBLIC_URL (e.g. http://100.125.36.102:8271 → 100.125.36.102)
-            # Fallback: tailscale IP so URL is reachable from manager's network
+            # Derive host from BRIDGE_PUBLIC_URL (auto-detected at startup)
             from urllib.parse import urlparse
-            bridge_pub = os.environ.get("BRIDGE_PUBLIC_URL", "")
-            if bridge_pub:
-                host = urlparse(bridge_pub).hostname
-            else:
-                try:
-                    host = subprocess.run(
-                        ["tailscale", "ip", "-4"], capture_output=True,
-                        text=True, timeout=3).stdout.strip() or "localhost"
-                except Exception:
-                    host = "localhost"
+            host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
             pilot_url = f"http://{host}:{pilot_port}/session/{session_name}"
             self.reply(chat_id, f"✈️ Pilot on for {name} (5min)\n{pilot_url}")
         except Exception as e:

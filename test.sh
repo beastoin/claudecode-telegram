@@ -7051,8 +7051,8 @@ print('OK')
     fi
 }
 
-test_bridge_public_url_default_empty() {
-    info "Testing BRIDGE_PUBLIC_URL defaults to empty when unset..."
+test_bridge_public_url_auto_detect() {
+    info "Testing BRIDGE_PUBLIC_URL auto-detects from Tailscale when unset..."
 
     if python3 -c "
 import subprocess, sys, os
@@ -7060,13 +7060,18 @@ env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL',)}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 result = subprocess.run([sys.executable, '-c', '''
 import bridge
-assert bridge.BRIDGE_PUBLIC_URL == \"\", f\"Expected empty BRIDGE_PUBLIC_URL, got {bridge.BRIDGE_PUBLIC_URL!r}\"
+# Should be auto-detected from tailscale or empty (no tailscale)
+url = bridge.BRIDGE_PUBLIC_URL
+assert isinstance(url, str), f\"Expected string, got {type(url)}\"
+if url:
+    assert url.startswith(\"http://\"), f\"Expected http:// URL, got {url!r}\"
+    assert \"localhost\" not in url and \"127.0.0.1\" not in url, f\"Should not be localhost: {url!r}\"
 print(\"OK\")
 '''], capture_output=True, text=True, env=env)
 assert result.returncode == 0, result.stderr or result.stdout
 print(result.stdout.strip())
 " 2>/dev/null | grep -q "OK"; then
-        success "BRIDGE_PUBLIC_URL defaults to empty"
+        success "BRIDGE_PUBLIC_URL auto-detects or stays empty"
     else
         fail "BRIDGE_PUBLIC_URL default test failed"
     fi
@@ -12808,7 +12813,7 @@ run_unit_tests() {
     run_test test_process_inspection_remote
     run_test test_project_slug
     run_test test_registry_teleport_fields
-    run_test test_bridge_public_url_default_empty
+    run_test test_bridge_public_url_auto_detect
     run_test test_bridge_public_url_auto_bind
     run_test test_bridge_public_url_no_auto_bind_when_explicit
     run_test test_bridge_url_ignores_stale_localhost
