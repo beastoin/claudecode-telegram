@@ -8196,6 +8196,49 @@ print('OK')
     fi
 }
 
+test_workers_send_example_ssh_for_teleported() {
+    info "Testing /workers send_example uses SSH for teleported workers..."
+
+    if python3 -c "
+import tempfile, json
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'ren': {'tmux': '${TEST_TMUX_PREFIX}wkr-ren', 'chat_id': 123}
+}
+
+# Register ren as teleported to mac mini
+bridge._registry_add('ren', 'claude', 123)
+bridge._registry_update_teleport('ren', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/omi')
+
+workers = bridge.worker_manager.get_workers()
+ren = next((w for w in workers if w['name'] == 'ren'), None)
+assert ren is not None, f'ren not in workers: {[w[\"name\"] for w in workers]}'
+assert ren['protocol'] == 'tmux', f'expected tmux protocol: {ren}'
+assert 'ssh' in ren['send_example'], f'teleported worker should have ssh in send_example: {ren[\"send_example\"]}'
+assert 'beastoin-agents-f1-mac-mini' in ren['send_example'], f'should reference mac mini host: {ren[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers send_example uses SSH for teleported workers"
+    else
+        fail "/workers send_example SSH test failed"
+    fi
+}
+
 test_teleport_preflight_uses_public_url() {
     info "Testing teleport preflight uses BRIDGE_PUBLIC_URL when BRIDGE_URL is localhost..."
 
@@ -13917,6 +13960,7 @@ run_unit_tests() {
     run_test test_sync_working_directory_uses_git
     run_test test_sync_working_directory_full_flag_uses_rsync
     run_test test_sync_working_directory_git_fail_falls_back
+    run_test test_workers_send_example_ssh_for_teleported
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url

@@ -4473,13 +4473,31 @@ class WorkerManager:
                 })
             else:
                 tmux_name = info.get("tmux")
-                workers.append({
-                    "name": name,
-                    "protocol": "tmux",
-                    "address": tmux_name,
-                    "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 1 && tmux send-keys -t {tmux_name} Enter",
-                    "note": "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
-                })
+                host = get_worker_host(name)
+                if host:
+                    # Teleported worker: wrap tmux commands in SSH
+                    tmux_cmd = (
+                        f"echo 'YOUR_NAME: your message here' | "
+                        f"tmux load-buffer - && "
+                        f"tmux paste-buffer -p -r -t {tmux_name} && "
+                        f"sleep 1 && tmux send-keys -t {tmux_name} Enter"
+                    )
+                    send_example = f"ssh {host} \"{tmux_cmd}\""
+                    workers.append({
+                        "name": name,
+                        "protocol": "tmux",
+                        "address": f"{host}:{tmux_name}",
+                        "send_example": send_example,
+                        "note": f"Teleported to {host}. Uses SSH + paste-buffer -p (bracketed paste). Always prefix your name."
+                    })
+                else:
+                    workers.append({
+                        "name": name,
+                        "protocol": "tmux",
+                        "address": tmux_name,
+                        "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 1 && tmux send-keys -t {tmux_name} Enter",
+                        "note": "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
+                    })
         return workers
 
     def _build_welcome(self, name: str, backend_obj) -> str:
