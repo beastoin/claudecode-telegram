@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.28.0"
+VERSION = "0.28.1"
 
 import hashlib
 import os
@@ -1058,6 +1058,11 @@ _adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
 def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
                    bridge_url: str, sessions_dir: Path) -> bool:
     """Spawn an adapter process with stderr logged to per-worker file."""
+    # Teleported workers can't run adapters locally
+    host = get_worker_host(worker_name)
+    if host:
+        print(f"Cannot spawn adapter for teleported worker '{worker_name}' on {host} (not supported yet)")
+        return False
     if not adapter_path.exists():
         print(f"Adapter not found: {adapter_path}")
         return False
@@ -1793,6 +1798,15 @@ def download_telegram_file(file_id, session_name):
             local_path.write_bytes(content)
             local_path.chmod(0o600)
         print(f"Downloaded file: {local_path}")
+        # For teleported workers, sync file to remote inbox
+        host = get_worker_host(session_name)
+        if host:
+            remote_inbox = str(inbox)
+            _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True)
+            _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True)
+            subprocess.run(
+                ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
+                capture_output=True, timeout=15)
         return str(local_path)
     except Exception as e:
         print(f"Download error: {e}")
@@ -2855,18 +2869,39 @@ def get_manager_chat_id(name: str) -> Optional[int]:
         return None
 
 
-def get_claude_session_id(name):
-    f = get_session_dir(name) / "claude_session_id"
+def _read_session_file(name, filename):
+    """Read a session file, routing to remote host for teleported workers."""
+    host = get_worker_host(name)
+    if host:
+        try:
+            # Remap local SESSIONS_DIR to remote $HOME
+            r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+                            capture_output=True, text=True, timeout=5)
+            remote_home = r.stdout.strip() if r.returncode == 0 else ""
+            local_home = str(Path.home())
+            session_path = str(get_session_dir(name) / filename)
+            if remote_home and remote_home != local_home and session_path.startswith(local_home):
+                session_path = remote_home + session_path[len(local_home):]
+            r = _remote_run(["cat", session_path], host=host,
+                            capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return ""
+    # Local worker: read from filesystem
+    f = get_session_dir(name) / filename
     if f.exists():
         return f.read_text().strip()
     return ""
+
+
+def get_claude_session_id(name):
+    return _read_session_file(name, "claude_session_id")
 
 
 def get_claude_session_cwd(name):
-    f = get_session_dir(name) / "claude_session_cwd"
-    if f.exists():
-        return f.read_text().strip()
-    return ""
+    return _read_session_file(name, "claude_session_cwd")
 
 
 def save_claude_session_cwd(name, cwd):
@@ -3045,9 +3080,27 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str = None) -> str
 
 
 def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
-    """Read the last N lines of adapter.log for a worker, or empty string."""
+    """Read the last N lines of adapter.log for a worker, or empty string.
+    For teleported workers, reads via SSH from the remote host.
+    """
     if tail_lines <= 0:
         return ""
+    host = get_worker_host(name)
+    if host:
+        try:
+            # Remap path for remote $HOME
+            r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+                            capture_output=True, text=True, timeout=5)
+            remote_home = r.stdout.strip() if r.returncode == 0 else ""
+            local_home = str(Path.home())
+            remote_log = str(get_session_dir(name) / "adapter.log")
+            if remote_home and remote_home != local_home and remote_log.startswith(local_home):
+                remote_log = remote_home + remote_log[len(local_home):]
+            r = _remote_run(["tail", "-n", str(tail_lines), remote_log], host=host,
+                            capture_output=True, text=True, timeout=5)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
     log_path = get_session_dir(name) / "adapter.log"
     if not log_path.exists():
         return ""
@@ -3068,16 +3121,32 @@ def _check_hook_failure_signal(name: str) -> Optional[str]:
 
     PostToolUseFailure hook appends lines: "<epoch> <tool_name>"
     Returns reason string if >= HOOK_FAILURE_THRESHOLD recent failures, else None.
+    For teleported workers, reads the file from the remote host.
     """
-    signal_file = Path(f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures")
-    if not signal_file.exists():
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+
+    if host:
+        try:
+            r = _remote_run(["cat", signal_path], host=host,
+                            capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                return None
+            raw = r.stdout.strip()
+        except Exception:
+            return None
+    else:
+        signal_file = Path(signal_path)
+        if not signal_file.exists():
+            return None
+        try:
+            raw = signal_file.read_text().strip()
+        except Exception:
+            return None
+
+    if not raw:
         return None
-    try:
-        lines = signal_file.read_text().strip().splitlines()
-    except Exception:
-        return None
-    if not lines:
-        return None
+    lines = raw.splitlines()
 
     cutoff = int(time.time()) - HOOK_FAILURE_WINDOW
     recent = 0
@@ -3098,12 +3167,22 @@ def _check_hook_failure_signal(name: str) -> Optional[str]:
 
 
 def _clear_hook_failures(name: str) -> None:
-    """Remove hook failure signal file for a worker (on restart/clean)."""
-    signal_file = Path(f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures")
-    try:
-        signal_file.unlink(missing_ok=True)
-    except Exception:
-        pass
+    """Remove hook failure signal file for a worker (on restart/clean).
+    For teleported workers, removes the file on the remote host.
+    """
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+    if host:
+        try:
+            _remote_run(["rm", "-f", signal_path], host=host,
+                        capture_output=True, timeout=5)
+        except Exception:
+            pass
+    else:
+        try:
+            Path(signal_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
@@ -4410,10 +4489,14 @@ class WorkerManager:
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
-        # For teleported workers, check remote tmux session
+        # For teleported workers, check remote tmux AND claude process
         host = get_worker_host(name)
         if host:
-            return tmux_exists(tmux_name, host=host)
+            if not tmux_exists(tmux_name, host=host):
+                return False
+            if backend.is_interactive:
+                return is_claude_running(tmux_name, host=host)
+            return True
 
         return backend.is_online(tmux_name)
 
@@ -4463,14 +4546,24 @@ class WorkerManager:
                 continue
 
             if not backend.is_interactive:
-                pipe_path = ensure_worker_pipe(name)
-                workers.append({
-                    "name": name,
-                    "protocol": "pipe",
-                    "address": str(pipe_path),
-                    "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
-                    "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
-                })
+                host = get_worker_host(name)
+                if host:
+                    # Non-interactive remote workers can't use local pipes
+                    workers.append({
+                        "name": name,
+                        "protocol": "none",
+                        "address": f"{host}:{info.get('tmux', '')}",
+                        "note": f"Non-interactive ({backend_name}) on {host}. Remote pipe not supported yet.",
+                    })
+                else:
+                    pipe_path = ensure_worker_pipe(name)
+                    workers.append({
+                        "name": name,
+                        "protocol": "pipe",
+                        "address": str(pipe_path),
+                        "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
+                        "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
+                    })
             else:
                 tmux_name = info.get("tmux")
                 host = get_worker_host(name)
@@ -4657,7 +4750,8 @@ class WorkerManager:
         clear_pending(name)
         _set_worker_cwd(name, "")
         # Kill tmux session if it exists (may already be gone for registry-only workers)
-        subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+        host = get_worker_host(name)
+        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
         cleanup_inbox(name)
         cleanup_worker_pipe(name)
         _registry_remove(name)
@@ -4673,11 +4767,19 @@ class WorkerManager:
 
         If tmux session is gone but worker is in the persistent registry,
         re-creates the tmux session and restarts the backend (dead worker recovery).
+
+        For teleported workers, returns sentinel (False, "use_remote_restart") —
+        callers should route to CommandRouter._restart_remote_worker() instead.
         """
         self._sync_paths()
         registered = self.get_registered_sessions()
         if name not in registered:
             return False, f"Worker '{name}' not found"
+
+        # Teleported workers must be restarted via CommandRouter._restart_remote_worker
+        host = get_worker_host(name)
+        if host:
+            return False, "use_remote_restart"
 
         session = registered[name]
         backend_name = get_worker_backend(name, session)
@@ -4942,10 +5044,25 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
 
     Uses tmux set-environment which persists in session and survives restarts.
     Hook reads these via `tmux show-environment -t $SESSION_NAME`.
+
+    For remote hosts, remaps SESSIONS_DIR to use the remote $HOME prefix
+    (e.g., /home/claude/... → /Users/beastoinagents/...).
     """
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host)
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", str(SESSIONS_DIR)], host=host)
+    # Remap SESSIONS_DIR for remote hosts (different $HOME path)
+    sessions_dir_val = str(SESSIONS_DIR)
+    if host:
+        try:
+            r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+                            capture_output=True, text=True, timeout=5)
+            remote_home = r.stdout.strip() if r.returncode == 0 else ""
+            local_home = str(Path.home())
+            if remote_home and remote_home != local_home and sessions_dir_val.startswith(local_home):
+                sessions_dir_val = remote_home + sessions_dir_val[len(local_home):]
+        except Exception:
+            pass
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host)
     # Always export BRIDGE_URL so workers know where their bridge is
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", BRIDGE_URL], host=host)
@@ -5056,20 +5173,22 @@ def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
 
 
 def _localize_media(name: str, media_list: list) -> list:
-    """For teleported workers, fetch remote files to local temp paths."""
+    """For teleported workers, fetch remote files to local temp paths.
+
+    Always fetches from remote for teleported workers, even if a local file
+    with the same path exists (e.g., /tmp/raw.png) — the remote file is the
+    correct one.
+    """
     host = get_worker_host(name)
     if not host:
         return media_list
     result = []
     for file_path, caption in media_list:
-        if not os.path.exists(file_path):
-            local = _fetch_remote_file(host, file_path)
-            if local:
-                result.append((local, caption))
-            else:
-                print(f"Cannot fetch remote file {host}:{file_path} for {name}")
+        local = _fetch_remote_file(host, file_path)
+        if local:
+            result.append((local, caption))
         else:
-            result.append((file_path, caption))
+            print(f"Cannot fetch remote file {host}:{file_path} for {name}")
     return result
 
 

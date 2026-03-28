@@ -9301,6 +9301,605 @@ print('OK')
     fi
 }
 
+test_end_worker_teleported_uses_remote_tmux() {
+    info "Testing /end uses remote tmux kill for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_state = dict(bridge.state)
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.state['active'] = None
+
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+wm.get_registered_sessions = lambda registered=None: {
+    'ren': {'tmux': 'claude-test-ren', 'backend': 'claude'}
+}
+
+remote_calls = []
+local_calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    remote_calls.append((cmd, host))
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+def mock_run(cmd, **kwargs):
+    local_calls.append(cmd)
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote), \
+     patch('subprocess.run', side_effect=mock_run), \
+     patch('bridge.cleanup_inbox'), \
+     patch('bridge.cleanup_worker_pipe'), \
+     patch('bridge.clear_pending'), \
+     patch('bridge._set_worker_cwd'), \
+     patch('bridge._registry_remove'):
+    ok, err = wm.end('ren')
+
+assert ok, f'remote end should succeed: {err}'
+assert any(cmd[:3] == ['tmux', 'kill-session', '-t'] and host == 'mac-mini'
+           for cmd, host in remote_calls), f'remote tmux kill missing: {remote_calls}'
+assert not any(cmd[:3] == ['tmux', 'kill-session', '-t'] for cmd in local_calls), \
+    f'remote worker should not use local tmux kill: {local_calls}'
+
+bridge.WORKER_REGISTRY_FILE.write_text(json.dumps({'version': 1, 'workers': {}}))
+bridge._registry_add('lee', 'claude', 123)
+wm.get_registered_sessions = lambda registered=None: {
+    'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'}
+}
+remote_calls.clear()
+local_calls.clear()
+
+with patch('bridge._remote_run', side_effect=mock_remote), \
+     patch('subprocess.run', side_effect=mock_run), \
+     patch('bridge.cleanup_inbox'), \
+     patch('bridge.cleanup_worker_pipe'), \
+     patch('bridge.clear_pending'), \
+     patch('bridge._set_worker_cwd'), \
+     patch('bridge._registry_remove'):
+    ok, err = wm.end('lee')
+
+assert ok, f'local end should succeed: {err}'
+# _remote_run is called with host=None for local workers (routes to subprocess.run internally)
+assert any(cmd[:3] == ['tmux', 'kill-session', '-t'] and host is None
+           for cmd, host in remote_calls), \
+    f'local worker should use _remote_run(host=None) for tmux kill: {remote_calls}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.state.update(orig_state)
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/end uses remote tmux kill for teleported workers"
+    else
+        fail "/end teleported worker should use remote tmux kill"
+    fi
+}
+
+test_restart_teleported_requires_remote_dispatch() {
+    info "Testing WorkerManager.restart rejects teleported workers for remote dispatch..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+wm.get_registered_sessions = lambda registered=None: {
+    'ren': {'tmux': 'claude-test-ren', 'backend': 'claude'}
+}
+
+with patch('bridge.tmux_exists', side_effect=AssertionError('tmux_exists should not run locally for teleported worker')):
+    ok, err = wm.restart('ren', mode='resume')
+
+assert ok is False, f'teleported restart should reject local path: {(ok, err)}'
+assert err == 'use_remote_restart', f'expected sentinel, got {err!r}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "WorkerManager.restart rejects teleported workers for remote dispatch"
+    else
+        fail "WorkerManager.restart should reject teleported workers for remote dispatch"
+    fi
+}
+
+test_export_hook_env_remaps_remote_sessions_dir() {
+    info "Testing export_hook_env remaps SESSIONS_DIR for teleported workers..."
+
+    if python3 -c "
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+orig_sessions = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = Path(str(Path.home() / '.claude' / 'telegram' / 'sessions'))
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    # Match the echo HOME call (literal dollar-HOME in the cmd list)
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.export_hook_env('claude-test-ren', backend='claude', host='mac-mini')
+
+session_exports = [cmd for cmd, host in calls if host == 'mac-mini' and len(cmd) >= 6 and cmd[4] == 'SESSIONS_DIR']
+assert len(session_exports) == 1, f'expected one SESSIONS_DIR export, got {calls}'
+assert session_exports[0][5] == '/Users/beastoinagents/.claude/telegram/sessions', f'wrong path: {session_exports[0]}'
+
+calls.clear()
+with patch('bridge._remote_run', side_effect=mock_remote):
+    bridge.export_hook_env('claude-test-lee', backend='claude')
+
+local_exports = [cmd for cmd, host in calls if host is None and len(cmd) >= 6 and cmd[4] == 'SESSIONS_DIR']
+assert len(local_exports) == 1, f'expected local SESSIONS_DIR export, got {calls}'
+assert local_exports[0][5] == str(bridge.SESSIONS_DIR), f'wrong local path: {local_exports[0]}'
+
+bridge.SESSIONS_DIR = orig_sessions
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "export_hook_env remaps remote SESSIONS_DIR"
+    else
+        fail "export_hook_env should remap remote SESSIONS_DIR"
+    fi
+}
+
+test_is_online_teleported_checks_claude_process() {
+    info "Testing teleported interactive workers require tmux and Claude to be alive..."
+
+    if python3 -c "
+from unittest.mock import patch
+import bridge
+
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+session = {'tmux': 'claude-test-ren', 'backend': 'claude'}
+
+with patch('bridge.get_worker_host', return_value='mac-mini'), \
+     patch('bridge.tmux_exists', return_value=True), \
+     patch('bridge.is_claude_running', return_value=False):
+    assert wm.is_online('ren', session) is False, 'remote worker with dead claude should be offline'
+
+with patch('bridge.get_worker_host', return_value='mac-mini'), \
+     patch('bridge.tmux_exists', return_value=True), \
+     patch('bridge.is_claude_running', return_value=True):
+    assert wm.is_online('ren', session) is True, 'remote worker with live claude should be online'
+
+local_calls = []
+class FakeBackend:
+    is_interactive = True
+    def is_online(self, tmux_name):
+        local_calls.append(tmux_name)
+        return True
+
+with patch('bridge.get_worker_host', return_value=None), \
+     patch('bridge.get_backend', return_value=FakeBackend()):
+    assert wm.is_online('lee', {'tmux': 'claude-test-lee', 'backend': 'claude'}) is True
+
+assert local_calls == ['claude-test-lee'], f'local path should delegate to backend.is_online: {local_calls}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleported is_online checks both tmux and Claude"
+    else
+        fail "teleported is_online should check both tmux and Claude"
+    fi
+}
+
+test_session_helpers_read_remote_files() {
+    info "Testing session ID/CWD helpers read remote files for teleported workers..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+session_dir = bridge.SESSIONS_DIR / 'ren'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('local-stale')
+(session_dir / 'claude_session_cwd').write_text('/local/stale')
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_id'):
+        return MagicMock(returncode=0, stdout='remote-session\n', stderr='')
+    if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_cwd'):
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents/omi\n', stderr='')
+    return MagicMock(returncode=1, stdout='', stderr='missing')
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    sid = bridge.get_claude_session_id('ren')
+    assert sid == 'remote-session', f'expected remote-session, got {sid!r}'
+    scwd = bridge.get_claude_session_cwd('ren')
+    assert scwd == '/Users/beastoinagents/omi', f'expected remote cwd, got {scwd!r}'
+
+assert any(host == 'mac-mini' and cmd[0] == 'cat' for cmd, host in calls), f'remote cat missing: {calls}'
+assert bridge.get_claude_session_id('local') == ''
+
+local_dir = bridge.SESSIONS_DIR / 'lee'
+local_dir.mkdir()
+(local_dir / 'claude_session_id').write_text('local-session')
+(local_dir / 'claude_session_cwd').write_text('/tmp/local')
+assert bridge.get_claude_session_id('lee') == 'local-session'
+assert bridge.get_claude_session_cwd('lee') == '/tmp/local'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "session helpers read remote files for teleported workers"
+    else
+        fail "session helpers should read remote files for teleported workers"
+    fi
+}
+
+test_hook_failures_teleported_use_remote_files() {
+    info "Testing hook failure signals use remote files for teleported workers..."
+
+    if python3 -c "
+import json, tempfile, shutil, time
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+
+now = int(time.time())
+remote_calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    remote_calls.append((cmd, host))
+    if cmd[:1] == ['cat']:
+        lines = '\\n'.join([f'{now} Bash', f'{now - 1} Bash', f'{now - 2} Bash']) + '\\n'
+        return MagicMock(returncode=0, stdout=lines, stderr='')
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    reason = bridge._check_hook_failure_signal('ren')
+    bridge._clear_hook_failures('ren')
+
+assert reason is not None and 'hook failure signal' in reason, f'unexpected reason: {reason}'
+assert any(cmd[:1] == ['cat'] and host == 'mac-mini' for cmd, host in remote_calls), f'remote read missing: {remote_calls}'
+assert any(cmd[:2] == ['rm', '-f'] and host == 'mac-mini' for cmd, host in remote_calls), f'remote clear missing: {remote_calls}'
+
+hook_dir = Path(f'/tmp/claudecode-telegram/{bridge._node_name}/lee/hooks')
+hook_dir.mkdir(parents=True, exist_ok=True)
+failures = hook_dir / 'failures'
+failures.write_text('\\n'.join([f'{now} Bash', f'{now - 1} Bash', f'{now - 2} Bash']) + '\\n')
+assert bridge._check_hook_failure_signal('lee') is not None
+bridge._clear_hook_failures('lee')
+assert not failures.exists(), 'local hook failure file should be cleared'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmpdir, ignore_errors=True)
+shutil.rmtree(hook_dir.parent, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "hook failure signals use remote files for teleported workers"
+    else
+        fail "hook failure signals should use remote files for teleported workers"
+    fi
+}
+
+test_localize_media_teleported_fetches_remote_even_when_local_exists() {
+    info "Testing teleported media localization always fetches from remote..."
+
+    if python3 -c "
+from unittest.mock import patch
+import bridge
+
+fetch_calls = []
+def mock_fetch(host, file_path):
+    fetch_calls.append((host, file_path))
+    return '/tmp/fetched.png'
+
+with patch('bridge.get_worker_host', return_value='mac-mini'), \
+     patch('bridge._fetch_remote_file', side_effect=mock_fetch), \
+     patch('os.path.exists', return_value=True):
+    result = bridge._localize_media('ren', [('/tmp/raw.png', 'caption')])
+
+assert result == [('/tmp/fetched.png', 'caption')], f'expected fetched remote path, got {result}'
+assert fetch_calls == [('mac-mini', '/tmp/raw.png')], f'should fetch remote file regardless of local collision: {fetch_calls}'
+
+fetch_calls.clear()
+with patch('bridge.get_worker_host', return_value=None), \
+     patch('bridge._fetch_remote_file', side_effect=mock_fetch):
+    result = bridge._localize_media('lee', [('/tmp/raw.png', 'caption')])
+
+assert result == [('/tmp/raw.png', 'caption')], f'local worker should keep local path: {result}'
+assert not fetch_calls, f'local worker should not fetch remote media: {fetch_calls}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleported media localization always fetches remote files"
+    else
+        fail "teleported media localization should always fetch remote files"
+    fi
+}
+
+test_download_telegram_file_syncs_to_remote_inbox() {
+    info "Testing incoming media is synced to remote inbox for teleported workers..."
+
+    if python3 -c "
+import io, json, tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_token = bridge.BOT_TOKEN
+orig_inbox = bridge.FILE_INBOX_ROOT
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.FILE_INBOX_ROOT = tmp / 'inbox-root'
+bridge.BOT_TOKEN = 'test-token'
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+    def read(self):
+        return self.payload
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+url_calls = []
+def mock_urlopen(req, timeout=0):
+    url = req.full_url if hasattr(req, 'full_url') else req
+    url_calls.append(url)
+    if 'getFile' in url:
+        payload = json.dumps({'ok': True, 'result': {'file_path': 'photos/test.png', 'file_size': 4}}).encode()
+        return FakeResponse(payload)
+    return FakeResponse(b'data')
+
+remote_calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    remote_calls.append((cmd, host))
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+sync_calls = []
+def mock_run(cmd, **kwargs):
+    sync_calls.append(cmd)
+    return MagicMock(returncode=0, stdout='', stderr='')
+
+with patch('urllib.request.urlopen', side_effect=mock_urlopen), \
+     patch('bridge._remote_run', side_effect=mock_remote), \
+     patch('subprocess.run', side_effect=mock_run):
+    remote_path = bridge.download_telegram_file('file-1', 'ren')
+
+assert remote_path.startswith(str(bridge.FILE_INBOX_ROOT / 'ren' / 'inbox')), remote_path
+assert remote_path.endswith('.png'), remote_path
+assert any(cmd[:2] == ['mkdir', '-p'] and host == 'mac-mini' for cmd, host in remote_calls), f'remote inbox mkdir missing: {remote_calls}'
+assert any(cmd[:2] == ['chmod', '700'] and host == 'mac-mini' for cmd, host in remote_calls), f'remote inbox chmod missing: {remote_calls}'
+assert any(cmd[0] == 'rsync' and 'mac-mini:' in cmd[-1] for cmd in sync_calls), f'remote inbox rsync missing: {sync_calls}'
+
+bridge.WORKER_REGISTRY_FILE.write_text(json.dumps({'version': 1, 'workers': {}}))
+sync_calls.clear()
+remote_calls.clear()
+with patch('urllib.request.urlopen', side_effect=mock_urlopen), \
+     patch('bridge._remote_run', side_effect=mock_remote), \
+     patch('subprocess.run', side_effect=mock_run):
+    local_path = bridge.download_telegram_file('file-2', 'lee')
+
+assert local_path.startswith(str(bridge.FILE_INBOX_ROOT / 'lee' / 'inbox')), local_path
+assert not any(cmd[0] == 'rsync' for cmd in sync_calls), f'local inbox should not rsync: {sync_calls}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.BOT_TOKEN = orig_token
+bridge.FILE_INBOX_ROOT = orig_inbox
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "incoming media syncs to remote inbox for teleported workers"
+    else
+        fail "incoming media should sync to remote inbox for teleported workers"
+    fi
+}
+
+test_spawn_adapter_teleported_rejected() {
+    info "Testing non-interactive adapters reject teleported workers..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge._registry_add('ren', 'codex', 123, host='mac-mini')
+
+adapter = tmp / 'adapter.py'
+adapter.write_text('print(1)')
+sessions = tmp / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'lee').mkdir()
+
+with patch('subprocess.Popen', side_effect=AssertionError('Popen should not run for teleported adapter')):
+    ok = bridge._spawn_adapter(adapter, 'ren', 'hello', 'http://bridge', sessions)
+assert ok is False, 'teleported non-interactive worker should be rejected'
+
+with patch('subprocess.Popen', return_value=MagicMock()), \
+     patch('builtins.open', open):
+    ok = bridge._spawn_adapter(adapter, 'lee', 'hello', 'http://bridge', sessions)
+assert ok is True, 'local adapter should still spawn'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "non-interactive adapters reject teleported workers"
+    else
+        fail "non-interactive adapters should reject teleported workers"
+    fi
+}
+
+test_workers_remote_noninteractive_warns() {
+    info "Testing /workers warns for remote non-interactive workers..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+orig_pipe_root = bridge.WORKER_PIPE_ROOT
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge._registry_add('ren', 'codex', 123, host='mac-mini')
+
+wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
+wm.scan_tmux_sessions = lambda: {'ren': {'tmux': 'claude-test-ren', 'backend': 'codex'}}
+
+workers = wm.get_workers()
+ren = workers[0]
+assert ren['name'] == 'ren', workers
+assert 'not supported yet' in ren['note'].lower(), ren
+assert 'echo' not in ren.get('send_example', ''), ren
+assert 'mac-mini' in ren['address'], ren
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+bridge.WORKER_PIPE_ROOT = orig_pipe_root
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers warns for remote non-interactive workers"
+    else
+        fail "/workers should warn for remote non-interactive workers"
+    fi
+}
+
+test_check_adapter_log_teleported_reads_remote() {
+    info "Testing adapter log inspection reads remote logs for teleported workers..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp = Path(tmpdir)
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+orig_sessions = bridge.SESSIONS_DIR
+
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge._registry_add('ren', 'codex', 123, host='mac-mini')
+
+calls = []
+def mock_remote(cmd, host=None, **kwargs):
+    calls.append((cmd, host))
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
+        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    if cmd[:2] == ['tail', '-n']:
+        return MagicMock(returncode=0, stdout='remote adapter log\n', stderr='')
+    return MagicMock(returncode=1, stdout='', stderr='missing')
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    text = bridge._check_adapter_log('ren', tail_lines=5)
+
+assert text == 'remote adapter log\n', f'expected remote log text, got {text!r}'
+assert any(cmd[:2] == ['tail', '-n'] and host == 'mac-mini' for cmd, host in calls), f'remote tail missing: {calls}'
+
+local_dir = bridge.SESSIONS_DIR / 'lee'
+local_dir.mkdir()
+(local_dir / 'adapter.log').write_text('local adapter log\\n')
+assert bridge._check_adapter_log('lee', tail_lines=5) == 'local adapter log\\n'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "adapter log inspection reads remote logs for teleported workers"
+    else
+        fail "adapter log inspection should read remote logs for teleported workers"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1: host=None parameter tests (teleport remote dispatch)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -14055,6 +14654,17 @@ run_unit_tests() {
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_delegates_to_remote_for_teleported
+    run_test test_end_worker_teleported_uses_remote_tmux
+    run_test test_restart_teleported_requires_remote_dispatch
+    run_test test_export_hook_env_remaps_remote_sessions_dir
+    run_test test_is_online_teleported_checks_claude_process
+    run_test test_session_helpers_read_remote_files
+    run_test test_hook_failures_teleported_use_remote_files
+    run_test test_localize_media_teleported_fetches_remote_even_when_local_exists
+    run_test test_download_telegram_file_syncs_to_remote_inbox
+    run_test test_spawn_adapter_teleported_rejected
+    run_test test_workers_remote_noninteractive_warns
+    run_test test_check_adapter_log_teleported_reads_remote
     # Phase 1: Remote dispatch (host=None parameter)
     log ""
     log "── Remote Dispatch Tests (Phase 1) ─────────────────────────────────────"

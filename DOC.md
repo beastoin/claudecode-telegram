@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.28.0
+> Version: 0.28.1
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,27 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.28.1 - Fix 11 teleport gaps (Codex-audited)
+
+**Systematic fix of all remaining teleport-unaware code paths**, identified by Codex audit.
+
+**CRASH fixes (5):**
+- `/end` command: tmux kill-session now routes through `_remote_run(host=host)` for teleported workers
+- `WorkerManager.restart()`: returns `(False, "use_remote_restart")` sentinel for teleported workers — callers route to `_restart_remote_worker()`
+- Media inbox: `download_telegram_file()` now rsyncs files to remote inbox after local save
+- `export_hook_env()`: remaps SESSIONS_DIR to remote `$HOME` prefix (e.g., `/Users/beastoinagents/...`)
+- `_spawn_adapter()`: guards against teleported non-interactive workers (logs warning, returns False)
+
+**WRONG fixes (6):**
+- `is_online()`: for remote interactive workers, checks both `tmux_exists` AND `is_claude_running` (was tmux-only)
+- `get_claude_session_id()`/`get_claude_session_cwd()`: reads from remote host via SSH for teleported workers
+- `_check_hook_failure_signal()`/`_clear_hook_failures()`: reads/clears signal files on remote host
+- `_localize_media()`: always fetches from remote for teleported workers (was skipping if local file existed)
+- `/workers`: non-interactive remote workers show "not supported yet" instead of local FIFO paths
+- `_check_adapter_log()`: reads adapter logs from remote host via `tail -n`
+
+**11 new TDD tests**, Codex-designed test specifications, FAST 234/2 (1 pre-existing).
 
 ### v0.28.0 - Git-based teleport sync + checkin CWD fix
 
