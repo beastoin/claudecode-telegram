@@ -5442,16 +5442,23 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                 "text": f"{name}: [File failed: {file_path}]"
             })
 
-    # Synthesize and send voice if [[speak]] tag was present
+    # Auto-TTS: synthesize and send voice alongside text
     if speak_text is not None and speak_text:
+        # Cap at 500 chars for auto-TTS to keep generation under 30s
+        # (longer text can use explicit [[speak:summary]] for a custom short version)
+        tts_text = speak_text[:500]
         def _tts_and_send():
-            voice_path = synthesize_speech(speak_text)
-            if voice_path:
-                send_voice(chat_id, voice_path, caption=f"{name}:")
-                try:
-                    os.unlink(voice_path)
-                except OSError:
-                    pass
+            try:
+                print(f"TTS starting: {len(tts_text)} chars for {name}")
+                voice_path = synthesize_speech(tts_text)
+                if voice_path:
+                    send_voice(chat_id, voice_path, caption=f"{name}:")
+                    try:
+                        os.unlink(voice_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                print(f"TTS thread error: {e}")
         # Run TTS in background thread to not block /response return
         threading.Thread(target=_tts_and_send, daemon=True).start()
 
