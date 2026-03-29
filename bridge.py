@@ -5454,10 +5454,9 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
             })
 
     # Auto-TTS: synthesize and send voice alongside text
-    if speak_text is not None and speak_text:
-        # For long text (>200 chars), synthesize_speech auto-routes to /synthesize/chunked
-        # Cap at 2000 chars to prevent extremely long synthesis (voice messages >2min)
-        tts_text = speak_text[:2000]
+    # Skip TTS for long messages (>500 chars) — voice is for short replies only
+    if speak_text is not None and speak_text and len(speak_text) <= 500:
+        tts_text = speak_text
         def _tts_and_send():
             try:
                 print(f"TTS starting: {len(tts_text)} chars for {name}")

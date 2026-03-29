@@ -1339,6 +1339,57 @@ print('OK')
     fi
 }
 
+test_auto_tts_skips_long_messages() {
+    info "Testing auto-TTS skips messages >500 chars..."
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.BOT_TOKEN = 'fake'
+bridge.admin_chat_id = 12345
+bridge.state['tts_enabled'] = True
+
+tts_calls = []
+
+def mock_tts(text, **kwargs):
+    tts_calls.append(text)
+    return '/tmp/voice.ogg'
+
+def mock_telegram_api(method, data):
+    return {'ok': True, 'result': {'message_id': 1}}
+
+# Short text (<=500 chars) — TTS should fire
+short_text = 'Short reply.'
+with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
+     patch.object(bridge, 'send_voice', return_value=True), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', short_text, 12345)
+    time.sleep(0.3)
+
+assert len(tts_calls) == 1, f'Expected 1 TTS call for short text, got {len(tts_calls)}'
+
+# Long text (>500 chars) — TTS should be skipped entirely
+tts_calls.clear()
+long_text = 'A' * 501
+with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
+     patch.object(bridge, 'send_voice', return_value=True), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', long_text, 12345)
+    time.sleep(0.3)
+
+assert len(tts_calls) == 0, f'Expected 0 TTS calls for long text, got {len(tts_calls)}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Auto-TTS skips messages >500 chars"
+    else
+        fail "Auto-TTS long message skip test failed"
+    fi
+}
+
 test_auto_tts_failure_still_sends_text() {
     info "Testing auto-TTS failure still sends text..."
     if python3 -c "
@@ -15426,6 +15477,7 @@ run_unit_tests() {
     run_test test_synthesize_speech_uses_chunked_for_long_text
     run_test test_auto_tts_sends_voice_with_response
     run_test test_speak_tag_custom_text
+    run_test test_auto_tts_skips_long_messages
     run_test test_auto_tts_failure_still_sends_text
     run_test test_voice_toggle_command
 }
