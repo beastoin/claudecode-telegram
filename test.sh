@@ -1333,6 +1333,59 @@ print('OK')
     fi
 }
 
+test_voice_toggle_command() {
+    info "Testing /voice on|off toggles auto-TTS..."
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.BOT_TOKEN = 'fake'
+bridge.admin_chat_id = 12345
+bridge.state['tts_enabled'] = True
+
+# Test /voice off disables TTS
+tts_calls = []
+
+def mock_tts(text, **kwargs):
+    tts_calls.append(text)
+    return '/tmp/voice.ogg'
+
+def mock_telegram_api(method, data):
+    return {'ok': True, 'result': {'message_id': 1}}
+
+# Disable TTS
+bridge.state['tts_enabled'] = False
+
+with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
+     patch.object(bridge, 'send_voice', return_value=True), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', 'Hello text only', 12345)
+    time.sleep(0.3)
+
+assert len(tts_calls) == 0, f'TTS should not be called when disabled, got {len(tts_calls)} calls'
+
+# Re-enable TTS
+bridge.state['tts_enabled'] = True
+
+with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
+     patch.object(bridge, 'send_voice', return_value=True), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', 'Hello with voice', 12345)
+    time.sleep(0.3)
+
+assert len(tts_calls) == 1, f'TTS should be called when enabled, got {len(tts_calls)} calls'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/voice on|off toggles auto-TTS"
+    else
+        fail "/voice toggle test failed"
+    fi
+}
+
 test_reply_forwarded_voice_gets_transcribed() {
     info "Testing reply-forwarded voice delivers transcript transparently..."
     if python3 -c "
@@ -15330,6 +15383,7 @@ run_unit_tests() {
     run_test test_auto_tts_sends_voice_with_response
     run_test test_speak_tag_custom_text
     run_test test_auto_tts_failure_still_sends_text
+    run_test test_voice_toggle_command
 }
 
 run_cli_tests() {

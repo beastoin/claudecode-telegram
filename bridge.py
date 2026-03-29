@@ -1150,6 +1150,7 @@ def is_claude_running(tmux_name: str, host: str = None) -> bool:
 state = {
     "active": None,  # Currently active session name
     "startup_notified": False,  # Whether we've sent the startup message
+    "tts_enabled": True,  # Auto-TTS for worker responses (toggle with /voice)
 }
 
 # Consecutive @mention tracking (auto-focus after 2 in a row to same worker)
@@ -1189,6 +1190,7 @@ BOT_COMMANDS = [
     {"command": "pause", "description": "Pause focused worker"},
     {"command": "restart", "description": "Restart worker (--clean for fresh)"},
     # Occasional
+    {"command": "voice", "description": "Toggle voice replies: /voice on|off"},
     {"command": "settings", "description": "Show settings"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     # Rare (onboarding/offboarding)
@@ -5348,9 +5350,9 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
     images = _localize_media(name, images)
     files = _localize_media(name, files)
 
-    # Auto-TTS: synthesize voice for every response (bridge handles it transparently)
+    # Auto-TTS: synthesize voice for every response when enabled (/voice on|off)
     # Use explicit [[speak:text]] if provided, otherwise use the clean response text
-    if speak_text is None and TTS_ENDPOINT:
+    if speak_text is None and TTS_ENDPOINT and state.get("tts_enabled", True):
         speak_text = clean_text  # raw text before HTML conversion
 
     clean_text = markdown_to_telegram_html(clean_text)
@@ -5883,6 +5885,8 @@ class CommandRouter:
             return self.cmd_restart(chat_id, arg)
         elif cmd == "/settings":
             return self.cmd_settings(chat_id)
+        elif cmd == "/voice":
+            return self.cmd_voice(arg, chat_id)
         elif cmd == "/pilot":
             return self.cmd_pilot(arg, chat_id)
         elif cmd == "/teleport":
@@ -7339,6 +7343,20 @@ class CommandRouter:
             telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
         except Exception:
             pass
+
+    def cmd_voice(self, arg, chat_id):
+        """Toggle auto-TTS for worker responses. /voice on|off or /voice to show status."""
+        arg = arg.strip().lower()
+        if arg == "on":
+            state["tts_enabled"] = True
+            self.reply(chat_id, "Voice mode ON — responses include voice messages.")
+        elif arg == "off":
+            state["tts_enabled"] = False
+            self.reply(chat_id, "Voice mode OFF — text only.")
+        else:
+            status = "ON" if state["tts_enabled"] else "OFF"
+            self.reply(chat_id, f"Voice mode: {status}\n/voice on — responses include voice\n/voice off — text only")
+        return True
 
     def cmd_settings(self, chat_id):
         def redact(s):
