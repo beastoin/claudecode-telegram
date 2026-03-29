@@ -6173,13 +6173,16 @@ class CommandRouter:
     def cmd_restart(self, chat_id, args=""):
         args = (args or "").strip()
 
-        # Parse --clean flag
+        # Parse flags
         clean = False
+        force = False
         tokens = args.split()
         remaining = []
         for t in tokens:
             if t == "--clean":
                 clean = True
+            elif t == "--force":
+                force = True
             else:
                 remaining.append(t)
         name_arg = remaining[0].lower() if remaining else ""
@@ -6221,13 +6224,18 @@ class CommandRouter:
             state["active"] = name
             save_last_active(name)
 
-        # Teleported worker: delegate to remote restart
+        # Guard: skip restart if worker is already running (unless --force)
         host = get_worker_host(name)
+        tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
+        if not force and tmux_exists(tmux_name, host=host) and is_claude_running(tmux_name, host=host):
+            self.reply(chat_id, f"{name.capitalize()} is already running. Use /restart --force {name} to force.")
+            return True
+
+        # Teleported worker: delegate to remote restart
         if host:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
-            tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
             ok, err = self._restart_remote_worker(
                 name, backend_name, backend_obj, tmux_name, host, mode)

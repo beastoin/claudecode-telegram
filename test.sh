@@ -3288,6 +3288,64 @@ print('OK')
     fi
 }
 
+test_restart_skips_running_worker() {
+    info "Testing /restart skips already-running worker..."
+    if python3 -c "
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.SESSIONS_DIR = tmp
+session_dir = tmp / 'bob'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('sess_123')
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'}}
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+
+# Worker is running — restart should be skipped
+with patch.object(bridge, 'get_worker_host', return_value=None), \
+     patch.object(bridge, 'tmux_exists', return_value=True), \
+     patch.object(bridge, 'is_claude_running', return_value=True):
+    router.cmd_restart(123, 'bob')
+
+assert any('already running' in m.lower() for m in tg.messages), f'Expected already-running msg: {tg.messages}'
+
+# With --force: should proceed to restart
+tg.messages.clear()
+restart_calls = []
+def fake_restart(name, mode='relaunch'):
+    restart_calls.append((name, mode))
+    return True, None
+bridge.restart_claude = fake_restart
+
+with patch.object(bridge, 'get_worker_host', return_value=None), \
+     patch.object(bridge, 'tmux_exists', return_value=True), \
+     patch.object(bridge, 'is_claude_running', return_value=True):
+    router.cmd_restart(123, '--force bob')
+
+assert not any('already running' in m.lower() for m in tg.messages), f'--force should not skip: {tg.messages}'
+assert len(restart_calls) == 1, f'Expected restart to be called with --force: {restart_calls}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart skips already-running worker"
+    else
+        fail "/restart running worker guard test failed"
+    fi
+}
+
 test_restart_all_no_workers() {
     info "Testing /restart all with no workers..."
 
@@ -15231,6 +15289,7 @@ run_unit_tests() {
     run_test test_restart_all_clean
     run_test test_restart_all_handles_failure
     run_test test_restart_cancel
+    run_test test_restart_skips_running_worker
     run_test test_restart_all_no_workers
     run_test test_restart_all_rejects_duplicate
     run_test test_codex_pause_clears_pending
