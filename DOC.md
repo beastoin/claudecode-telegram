@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.28.3
+> Version: 0.29.0
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,35 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.29.0 - Voice mode: STT + TTS for Telegram voice messages
+
+**New feature: optional voice mode for the bridge.**
+
+**STT (incoming voice → text):**
+- Manager voice messages are auto-transcribed via Cohere Transcribe API (Mac Mini :10110)
+- Transcript included in worker prompt: `Manager sent voice message (auto-transcribed, 5s): Transcript: ... Audio: /path`
+- Fail-open with 5s timeout — falls back to file-only delivery if STT is unavailable
+- Reply-forwarded voice messages also get transcribed (consistent with main voice branch)
+
+**TTS (outgoing text → voice):**
+- Workers add `[[speak]]` at end of response to send voice alongside text
+- `[[speak:custom summary]]` to speak different text than displayed
+- Text is always sent first; voice synthesized in background thread via Qwen3-TTS API (Mac Mini :10111)
+- Fail-open — if TTS unavailable, text still sent normally
+
+**Configuration (env vars):**
+- `STT_ENDPOINT` — STT API URL (default: Cohere on Mac Mini)
+- `TTS_ENDPOINT` — TTS API URL (default: Qwen3 on Mac Mini)
+- `TTS_VOICE` — voice preset (default: Serena)
+- `STT_TIMEOUT` / `TTS_TIMEOUT` — fail-open timeouts (5s / 30s)
+
+**Architecture (Codex-reviewed):**
+- Thin provider functions (`transcribe_voice`, `synthesize_speech`) — no class hierarchy
+- STT inline-but-fast (preserves message ordering), TTS async (background thread)
+- Provider endpoints configured via env vars, no auto-fallback to cloud (privacy/cost)
+
+11 new tests, FAST 244/1.
 
 ### v0.28.3 - Fix watchdog flapping for teleported workers
 

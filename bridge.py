@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.28.1"
+VERSION = "0.29.0"
 
 import hashlib
 import os
@@ -104,6 +104,15 @@ if not BRIDGE_PUBLIC_URL:
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
 PERSISTENCE_NOTE = "They'll stay on your team."
+
+# Voice mode: STT (speech-to-text) and TTS (text-to-speech) endpoints
+# STT: transcribe incoming voice messages so workers can read them
+# TTS: generate voice from worker text responses (explicit [[speak]] tag)
+STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
+TTS_ENDPOINT = os.environ.get("TTS_ENDPOINT", "http://100.126.187.125:10111/synthesize")
+TTS_VOICE = os.environ.get("TTS_VOICE", "Serena")
+STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))  # seconds, fail-open
+TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "30"))  # seconds, longer for synthesis
 
 # API endpoint registry — used by index, 404 handler, and worker instructions.
 # Update this when adding new endpoints.
@@ -1810,6 +1819,103 @@ def download_telegram_file(file_id, session_name):
         return str(local_path)
     except Exception as e:
         print(f"Download error: {e}")
+        return None
+
+
+def transcribe_voice(file_path: str, timeout: int = None) -> Optional[str]:
+    """Transcribe a voice file via STT endpoint. Returns text or None on failure.
+
+    Fail-open: any error (timeout, bad response, unreachable) returns None
+    so the caller can fall back to delivering the raw audio file.
+    """
+    if not STT_ENDPOINT:
+        return None
+    if timeout is None:
+        timeout = STT_TIMEOUT
+
+    try:
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            return None
+
+        # Multipart form upload matching Cohere Transcribe API
+        boundary = uuid.uuid4().hex
+        body_parts = []
+        body_parts.append(f"--{boundary}".encode())
+        content_type = mimetypes.guess_type(str(file_path_obj))[0] or "audio/ogg"
+        body_parts.append(f'Content-Disposition: form-data; name="file"; filename="{file_path_obj.name}"'.encode())
+        body_parts.append(f"Content-Type: {content_type}".encode())
+        body_parts.append(b"")
+        body_parts.append(file_path_obj.read_bytes())
+        body_parts.append(f"--{boundary}--".encode())
+        body_parts.append(b"")
+        body = b"\r\n".join(body_parts)
+
+        req = urllib.request.Request(
+            STT_ENDPOINT,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            result = json.loads(r.read())
+            text = result.get("text", "").strip()
+            if text:
+                duration = result.get("audio_duration_s", "?")
+                print(f"STT transcribed: {len(text)} chars from {duration}s audio")
+                return text
+            return None
+    except Exception as e:
+        print(f"STT error (fail-open): {e}")
+        return None
+
+
+def synthesize_speech(text: str, voice: str = None, language: str = "en") -> Optional[str]:
+    """Synthesize speech from text via TTS endpoint. Returns OGG file path or None.
+
+    Fail-open: any error returns None so caller can skip voice and send text only.
+    """
+    if not TTS_ENDPOINT:
+        return None
+    if not text or not text.strip():
+        return None
+    if voice is None:
+        voice = TTS_VOICE
+
+    try:
+        # Strip HTML tags for clean speech
+        clean = re.sub(r'<[^>]+>', '', text)
+        clean = clean.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+        clean = clean.strip()
+        if not clean:
+            return None
+
+        payload = json.dumps({
+            "text": clean[:5000],  # API limit
+            "voice": voice,
+            "language": language,
+            "format": "ogg",
+        }).encode()
+
+        req = urllib.request.Request(
+            TTS_ENDPOINT,
+            data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=TTS_TIMEOUT) as r:
+            audio_data = r.read()
+            if not audio_data:
+                return None
+
+            # Write to temp file
+            tmp_path = Path(tempfile.gettempdir()) / f"tts_{uuid.uuid4().hex}.ogg"
+            tmp_path.write_bytes(audio_data)
+            tmp_path.chmod(0o600)
+
+            duration = r.headers.get("X-Audio-Duration", "?")
+            print(f"TTS synthesized: {len(clean)} chars -> {duration}s audio")
+            return str(tmp_path)
+    except Exception as e:
+        print(f"TTS error (fail-open): {e}")
         return None
 
 
@@ -4612,6 +4718,8 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
+            "VOICE MODE: Manager voice messages are auto-transcribed (transcript included in your prompt). "
+            "To send a voice reply: add [[speak]] at the end of your response to speak the visible text, or [[speak:custom summary]] to speak different text. Voice is optional — text is always sent first. "
             "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
@@ -5228,9 +5336,26 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         clean_text, images = parse_image_tags(text)
         clean_text, files = parse_file_tags(clean_text)
 
+    # Parse [[speak]] or [[speak:custom text]] tag — extract before HTML conversion
+    speak_text = None
+    speak_match = re.search(r'\[\[speak(?::([^\]]*))?\]\]', clean_text)
+    if speak_match:
+        if speak_match.group(1) is not None:
+            speak_text = speak_match.group(1).strip()
+        else:
+            # [[speak]] without custom text — will use the visible response text
+            speak_text = ""  # sentinel: use clean_text after stripping tags
+        clean_text = clean_text[:speak_match.start()] + clean_text[speak_match.end():]
+        clean_text = clean_text.strip()
+
     # For teleported workers, fetch remote files to local temp paths
     images = _localize_media(name, images)
     files = _localize_media(name, files)
+
+    # If [[speak]] (no custom text), use the pre-HTML clean text for synthesis
+    if speak_text == "":
+        speak_text = clean_text  # raw text before HTML conversion
+
     clean_text = markdown_to_telegram_html(clean_text)
 
     # Send text message if there's text content
@@ -5318,7 +5443,18 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                 "text": f"{name}: [File failed: {file_path}]"
             })
 
-
+    # Synthesize and send voice if [[speak]] tag was present
+    if speak_text is not None and speak_text:
+        def _tts_and_send():
+            voice_path = synthesize_speech(speak_text)
+            if voice_path:
+                send_voice(chat_id, voice_path, caption=f"{name}:")
+                try:
+                    os.unlink(voice_path)
+                except OSError:
+                    pass
+        # Run TTS in background thread to not block /response return
+        threading.Thread(target=_tts_and_send, daemon=True).start()
 
 
  
@@ -5561,7 +5697,11 @@ class CommandRouter:
                         media_text = f"Manager sent audio: {title} ({duration}s)\nPath: {local_path}"
                     elif voice:
                         duration = voice.get("duration", 0)
-                        media_text = f"Manager sent voice message: ({duration}s)\nPath: {local_path}"
+                        transcript = transcribe_voice(local_path)
+                        if transcript:
+                            media_text = f"Manager sent voice message (auto-transcribed, {duration}s):\nTranscript: {transcript}\nAudio: {local_path}"
+                        else:
+                            media_text = f"Manager sent voice message: ({duration}s)\nPath: {local_path}"
                     elif video:
                         duration = video.get("duration", 0)
                         file_name = video.get("file_name", "video")
@@ -7275,6 +7415,7 @@ class CommandRouter:
         elif voice:
             file_id = voice.get("file_id")
             media_label = "voice message"
+            # Will attempt transcription after download below
         elif sticker:
             file_id = sticker.get("file_id")
             media_label = f"sticker: {sticker.get('emoji', '')}"
@@ -7285,6 +7426,13 @@ class CommandRouter:
         local_path = download_telegram_file(file_id, target_worker)
         if not local_path:
             return None
+
+        # Transcribe voice in reply-forwarded media for consistency
+        if voice:
+            transcript = transcribe_voice(local_path)
+            if transcript:
+                duration = voice.get("duration", "?")
+                return f"Manager forwarded voice message (auto-transcribed, {duration}s):\nTranscript: {transcript}\nAudio: {local_path}"
 
         return f"Manager forwarded {media_label}: {local_path}"
 

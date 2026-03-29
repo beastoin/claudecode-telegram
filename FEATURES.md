@@ -665,7 +665,9 @@ Path: <local_path>
 
 ### Supported message types and ignored content
 - Supported: text, caption, photo, document.
-- Ignored: stickers, audio, voice, video, location, polls, etc. (no response).
+- Voice messages: auto-transcribed via STT (transcript + audio path delivered to worker).
+- Audio, video, video notes, stickers: downloaded and delivered as file paths.
+- Ignored: location, polls, contacts, etc. (no response).
 - Non-admin messages are ignored entirely (no response), except the first message which establishes admin.
 
 ## Appendix C: File Allowlists & Blocklists

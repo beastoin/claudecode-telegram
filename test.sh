@@ -962,6 +962,421 @@ print('OK')
     fi
 }
 
+# ── Voice Mode Tests (STT/TTS) ──────────────────────────────────────────────
+
+test_transcribe_voice_success() {
+    info "Testing transcribe_voice returns transcript on success..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Create a temp file to simulate audio
+tmp = tempfile.NamedTemporaryFile(suffix='.ogg', delete=False)
+tmp.write(b'fake audio data')
+tmp.close()
+
+# Mock urllib to return a successful transcription
+mock_response = MagicMock()
+mock_response.read.return_value = json.dumps({'text': 'hello world', 'audio_duration_s': 2.5}).encode()
+mock_response.__enter__ = lambda s: s
+mock_response.__exit__ = MagicMock(return_value=False)
+
+try:
+    with patch('urllib.request.urlopen', return_value=mock_response):
+        result = bridge.transcribe_voice(tmp.name)
+    assert result == 'hello world', f'Expected \"hello world\", got {result!r}'
+    print('OK')
+finally:
+    os.unlink(tmp.name)
+" 2>/dev/null | grep -q "OK"; then
+        success "transcribe_voice returns transcript on success"
+    else
+        fail "transcribe_voice success test failed"
+    fi
+}
+
+test_transcribe_voice_timeout_returns_none() {
+    info "Testing transcribe_voice returns None on timeout..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+import urllib.error
+import bridge
+
+# Simulate timeout
+with patch('urllib.request.urlopen', side_effect=Exception('timeout')):
+    result = bridge.transcribe_voice('/tmp/test.ogg')
+
+assert result is None, f'Expected None, got {result!r}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "transcribe_voice returns None on timeout"
+    else
+        fail "transcribe_voice timeout test failed"
+    fi
+}
+
+test_transcribe_voice_bad_json_returns_none() {
+    info "Testing transcribe_voice returns None on bad JSON..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+mock_response = MagicMock()
+mock_response.read.return_value = b'not json'
+mock_response.__enter__ = lambda s: s
+mock_response.__exit__ = MagicMock(return_value=False)
+
+with patch('urllib.request.urlopen', return_value=mock_response):
+    result = bridge.transcribe_voice('/tmp/test.ogg')
+
+assert result is None, f'Expected None, got {result!r}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "transcribe_voice returns None on bad JSON"
+    else
+        fail "transcribe_voice bad JSON test failed"
+    fi
+}
+
+test_voice_message_includes_transcript() {
+    info "Testing incoming voice message includes transcript in worker message..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+# Set up state
+bridge.admin_chat_id = 12345
+bridge.state['active'] = 'testworker'
+
+# Track what gets routed
+routed_messages = []
+original_route = None
+
+class FakeRouter:
+    def __init__(self):
+        self.workers = MagicMock()
+        self.workers.get_registered_sessions.return_value = {'testworker': {'tmux': 'claude-test-testworker'}}
+        self.workers.is_online.return_value = True
+    def route_to_active(self, text, chat_id, msg_id):
+        routed_messages.append(text)
+    def reply(self, *args, **kwargs):
+        pass
+    def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
+        routed_messages.append(media_text)
+
+router = FakeRouter()
+
+# Build a voice message update
+update = {
+    'update_id': 1,
+    'message': {
+        'message_id': 42,
+        'chat': {'id': 12345},
+        'voice': {'file_id': 'voice123', 'duration': 5}
+    }
+}
+
+# Mock download and transcription
+with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/test.ogg'), \
+     patch.object(bridge, 'transcribe_voice', return_value='hello this is a test') as mock_stt:
+    # Call handle_message on the CommandRouter
+    bridge.CommandRouter.handle_message(router, update)
+
+# Verify transcript is included
+assert len(routed_messages) == 1, f'Expected 1 routed message, got {len(routed_messages)}'
+msg = routed_messages[0]
+assert 'hello this is a test' in msg, f'Transcript not found in: {msg}'
+assert '/tmp/inbox/test.ogg' in msg, f'Audio path not found in: {msg}'
+assert 'auto-transcribed' in msg.lower() or 'voice' in msg.lower(), f'Missing voice/transcribed label in: {msg}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Incoming voice message includes transcript"
+    else
+        fail "Voice message transcript routing test failed"
+    fi
+}
+
+test_voice_message_fallback_without_transcript() {
+    info "Testing incoming voice falls back to file-only when STT fails..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.admin_chat_id = 12345
+bridge.state['active'] = 'testworker'
+
+routed_messages = []
+
+class FakeRouter:
+    def __init__(self):
+        self.workers = MagicMock()
+        self.workers.get_registered_sessions.return_value = {'testworker': {'tmux': 'claude-test-testworker'}}
+        self.workers.is_online.return_value = True
+    def route_to_active(self, text, chat_id, msg_id):
+        routed_messages.append(text)
+    def reply(self, *args, **kwargs):
+        pass
+    def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
+        routed_messages.append(media_text)
+
+router = FakeRouter()
+
+update = {
+    'update_id': 1,
+    'message': {
+        'message_id': 42,
+        'chat': {'id': 12345},
+        'voice': {'file_id': 'voice456', 'duration': 3}
+    }
+}
+
+# STT fails (returns None)
+with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/test2.ogg'), \
+     patch.object(bridge, 'transcribe_voice', return_value=None):
+    bridge.CommandRouter.handle_message(router, update)
+
+assert len(routed_messages) == 1, f'Expected 1 routed message, got {len(routed_messages)}'
+msg = routed_messages[0]
+assert '/tmp/inbox/test2.ogg' in msg, f'Audio path not found in: {msg}'
+# Should look like old behavior — just file path
+assert 'voice message' in msg.lower(), f'Missing voice message label in: {msg}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Voice message falls back to file-only when STT fails"
+    else
+        fail "Voice message STT fallback test failed"
+    fi
+}
+
+test_synthesize_speech_success() {
+    info "Testing synthesize_speech returns file path on success..."
+    if python3 -c "
+import sys, os, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Mock urllib to return audio bytes
+mock_response = MagicMock()
+mock_response.read.return_value = b'OggS fake audio data'
+mock_response.headers = {'X-Audio-Duration': '3.5', 'X-Processing-Time': '2.1'}
+mock_response.__enter__ = lambda s: s
+mock_response.__exit__ = MagicMock(return_value=False)
+
+with patch('urllib.request.urlopen', return_value=mock_response):
+    result = bridge.synthesize_speech('Hello world')
+
+assert result is not None, 'Expected file path, got None'
+assert os.path.exists(result), f'File does not exist: {result}'
+assert result.endswith('.ogg'), f'Expected .ogg file, got: {result}'
+
+# Verify content
+with open(result, 'rb') as f:
+    content = f.read()
+assert content == b'OggS fake audio data', f'Unexpected content'
+
+os.unlink(result)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "synthesize_speech returns file path on success"
+    else
+        fail "synthesize_speech success test failed"
+    fi
+}
+
+test_synthesize_speech_timeout_returns_none() {
+    info "Testing synthesize_speech returns None on timeout..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+import bridge
+
+with patch('urllib.request.urlopen', side_effect=Exception('timeout')):
+    result = bridge.synthesize_speech('Hello world')
+
+assert result is None, f'Expected None, got {result!r}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "synthesize_speech returns None on timeout"
+    else
+        fail "synthesize_speech timeout test failed"
+    fi
+}
+
+test_speak_tag_sends_voice_message() {
+    info "Testing [[speak]] tag generates and sends voice message..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+bridge.BOT_TOKEN = 'fake'
+bridge.admin_chat_id = 12345
+
+voice_sent = []
+text_sent = []
+
+def mock_send_voice(chat_id, path, caption=None):
+    voice_sent.append((chat_id, path, caption))
+    return True
+
+def mock_telegram_api(method, data):
+    if method == 'sendMessage':
+        text_sent.append(data.get('text', ''))
+        return {'ok': True, 'result': {'message_id': 1}}
+    return {'ok': True}
+
+# Response text with [[speak]] tag
+response_text = 'Here is my answer.\n\n[[speak]]'
+
+with patch.object(bridge, 'send_voice', side_effect=mock_send_voice), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'synthesize_speech', return_value='/tmp/voice.ogg') as mock_tts, \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', response_text, 12345)
+
+# Text should be sent without [[speak]] tag
+assert len(text_sent) >= 1, f'Expected text sent, got {len(text_sent)}'
+for t in text_sent:
+    assert '[[speak]]' not in t, f'[[speak]] tag leaked to Telegram: {t}'
+
+# Voice should be synthesized from the clean text
+mock_tts.assert_called_once()
+# Voice should be sent
+assert len(voice_sent) == 1, f'Expected 1 voice sent, got {len(voice_sent)}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "[[speak]] tag generates and sends voice message"
+    else
+        fail "[[speak]] tag test failed"
+    fi
+}
+
+test_speak_tag_custom_text() {
+    info "Testing [[speak:custom text]] synthesizes custom text..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.BOT_TOKEN = 'fake'
+bridge.admin_chat_id = 12345
+
+tts_calls = []
+
+def mock_tts(text, **kwargs):
+    tts_calls.append(text)
+    return '/tmp/voice.ogg'
+
+def mock_telegram_api(method, data):
+    return {'ok': True, 'result': {'message_id': 1}}
+
+response_text = 'Complex technical explanation with code.\n\n[[speak:Here is the short summary]]'
+
+with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
+     patch.object(bridge, 'send_voice', return_value=True), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', response_text, 12345)
+
+assert len(tts_calls) == 1, f'Expected 1 TTS call, got {len(tts_calls)}'
+assert tts_calls[0] == 'Here is the short summary', f'TTS called with wrong text: {tts_calls[0]!r}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "[[speak:custom text]] synthesizes custom text"
+    else
+        fail "[[speak:custom text]] test failed"
+    fi
+}
+
+test_speak_tag_tts_failure_still_sends_text() {
+    info "Testing [[speak]] still sends text when TTS fails..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.BOT_TOKEN = 'fake'
+bridge.admin_chat_id = 12345
+
+text_sent = []
+
+def mock_telegram_api(method, data):
+    if method == 'sendMessage':
+        text_sent.append(data.get('text', ''))
+        return {'ok': True, 'result': {'message_id': 1}}
+    return {'ok': True}
+
+response_text = 'Important information.\n\n[[speak]]'
+
+with patch.object(bridge, 'synthesize_speech', return_value=None), \
+     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
+     patch.object(bridge, 'get_worker_host', return_value=None):
+    bridge.send_response_to_telegram('testworker', response_text, 12345)
+
+# Text should still be sent
+assert len(text_sent) >= 1, f'Expected text to be sent, got {len(text_sent)}'
+# Tag should not leak
+for t in text_sent:
+    assert '[[speak]]' not in t, f'[[speak]] tag leaked: {t}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "[[speak]] still sends text when TTS fails"
+    else
+        fail "[[speak]] TTS failure test failed"
+    fi
+}
+
+test_reply_forwarded_voice_gets_transcribed() {
+    info "Testing reply-forwarded voice message also gets transcribed..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+# Test _extract_reply_media with voice — should include transcript
+class FakeRouter:
+    def __init__(self):
+        self.workers = MagicMock()
+
+router = FakeRouter()
+
+reply_to = {
+    'voice': {'file_id': 'voice789', 'duration': 7},
+    'message_id': 99
+}
+
+with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/reply.ogg'), \
+     patch.object(bridge, 'transcribe_voice', return_value='forwarded voice content') as mock_stt:
+    result = bridge.CommandRouter._extract_reply_media(router, reply_to, 'testworker')
+
+assert result is not None, 'Expected media text, got None'
+assert 'forwarded voice content' in result, f'Transcript not in: {result}'
+assert '/tmp/inbox/reply.ogg' in result, f'Audio path not in: {result}'
+mock_stt.assert_called_once_with('/tmp/inbox/reply.ogg')
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Reply-forwarded voice gets transcribed"
+    else
+        fail "Reply-forwarded voice transcription test failed"
+    fi
+}
+
 test_file_validation() {
     info "Testing file validation (image path, document path, blocked filenames)..."
     if python3 -c "
@@ -14910,6 +15325,20 @@ run_unit_tests() {
     log "── send_to_worker Abstraction Tests (Unit) ─────────────────────────────"
     run_test test_send_to_worker_uses_backend_registry
     run_test test_send_to_worker_missing
+    # Unit tests - Voice Mode (STT/TTS)
+    log ""
+    log "── Voice Mode Tests (Unit) ─────────────────────────────────────────────"
+    run_test test_transcribe_voice_success
+    run_test test_transcribe_voice_timeout_returns_none
+    run_test test_transcribe_voice_bad_json_returns_none
+    run_test test_voice_message_includes_transcript
+    run_test test_voice_message_fallback_without_transcript
+    run_test test_reply_forwarded_voice_gets_transcribed
+    run_test test_synthesize_speech_success
+    run_test test_synthesize_speech_timeout_returns_none
+    run_test test_speak_tag_sends_voice_message
+    run_test test_speak_tag_custom_text
+    run_test test_speak_tag_tts_failure_still_sends_text
 }
 
 run_cli_tests() {
