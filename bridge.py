@@ -4718,8 +4718,6 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
-            "VOICE MODE: Manager voice messages are auto-transcribed (transcript included in your prompt). "
-            "To send a voice reply: add [[speak]] at the end of your response to speak the visible text, or [[speak:custom summary]] to speak different text. Voice is optional — text is always sent first. "
             "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
@@ -5336,24 +5334,23 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         clean_text, images = parse_image_tags(text)
         clean_text, files = parse_file_tags(clean_text)
 
-    # Parse [[speak]] or [[speak:custom text]] tag — extract before HTML conversion
+    # Still support explicit [[speak:custom text]] tag for custom voice text
     speak_text = None
     speak_match = re.search(r'\[\[speak(?::([^\]]*))?\]\]', clean_text)
     if speak_match:
-        if speak_match.group(1) is not None:
-            speak_text = speak_match.group(1).strip()
-        else:
-            # [[speak]] without custom text — will use the visible response text
-            speak_text = ""  # sentinel: use clean_text after stripping tags
+        custom = speak_match.group(1)
         clean_text = clean_text[:speak_match.start()] + clean_text[speak_match.end():]
         clean_text = clean_text.strip()
+        if custom is not None and custom.strip():
+            speak_text = custom.strip()
 
     # For teleported workers, fetch remote files to local temp paths
     images = _localize_media(name, images)
     files = _localize_media(name, files)
 
-    # If [[speak]] (no custom text), use the pre-HTML clean text for synthesis
-    if speak_text == "":
+    # Auto-TTS: synthesize voice for every response (bridge handles it transparently)
+    # Use explicit [[speak:text]] if provided, otherwise use the clean response text
+    if speak_text is None and TTS_ENDPOINT:
         speak_text = clean_text  # raw text before HTML conversion
 
     clean_text = markdown_to_telegram_html(clean_text)
@@ -5699,7 +5696,13 @@ class CommandRouter:
                         duration = voice.get("duration", 0)
                         transcript = transcribe_voice(local_path)
                         if transcript:
-                            media_text = f"Manager sent voice message (auto-transcribed, {duration}s):\nTranscript: {transcript}\nAudio: {local_path}"
+                            # Transparent: worker receives just the text, as if manager typed it
+                            if text:
+                                # Caption + transcript
+                                self._route_media_message(f"{text}\n\n{transcript}", text, chat_id, msg_id, msg=msg)
+                            else:
+                                self._route_media_message(transcript, transcript, chat_id, msg_id, msg=msg)
+                            return
                         else:
                             media_text = f"Manager sent voice message: ({duration}s)\nPath: {local_path}"
                     elif video:
@@ -7427,12 +7430,11 @@ class CommandRouter:
         if not local_path:
             return None
 
-        # Transcribe voice in reply-forwarded media for consistency
+        # Transcribe voice — deliver just the text transparently
         if voice:
             transcript = transcribe_voice(local_path)
             if transcript:
-                duration = voice.get("duration", "?")
-                return f"Manager forwarded voice message (auto-transcribed, {duration}s):\nTranscript: {transcript}\nAudio: {local_path}"
+                return transcript
 
         return f"Manager forwarded {media_label}: {local_path}"
 

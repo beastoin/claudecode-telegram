@@ -1045,7 +1045,7 @@ print('OK')
 }
 
 test_voice_message_includes_transcript() {
-    info "Testing incoming voice message includes transcript in worker message..."
+    info "Testing incoming voice message delivers transcript transparently..."
     if python3 -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
@@ -1058,7 +1058,6 @@ bridge.state['active'] = 'testworker'
 
 # Track what gets routed
 routed_messages = []
-original_route = None
 
 class FakeRouter:
     def __init__(self):
@@ -1074,7 +1073,6 @@ class FakeRouter:
 
 router = FakeRouter()
 
-# Build a voice message update
 update = {
     'update_id': 1,
     'message': {
@@ -1084,23 +1082,21 @@ update = {
     }
 }
 
-# Mock download and transcription
 with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/test.ogg'), \
      patch.object(bridge, 'transcribe_voice', return_value='hello this is a test') as mock_stt:
-    # Call handle_message on the CommandRouter
     bridge.CommandRouter.handle_message(router, update)
 
-# Verify transcript is included
+# Transparent: worker just gets the text, no mention of voice/audio
 assert len(routed_messages) == 1, f'Expected 1 routed message, got {len(routed_messages)}'
 msg = routed_messages[0]
 assert 'hello this is a test' in msg, f'Transcript not found in: {msg}'
-assert '/tmp/inbox/test.ogg' in msg, f'Audio path not found in: {msg}'
-assert 'auto-transcribed' in msg.lower() or 'voice' in msg.lower(), f'Missing voice/transcribed label in: {msg}'
+# Should NOT expose audio file path or voice metadata to worker
+assert '/tmp/inbox/test.ogg' not in msg, f'Audio path should be hidden: {msg}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Incoming voice message includes transcript"
+        success "Voice message delivers transcript transparently"
     else
-        fail "Voice message transcript routing test failed"
+        fail "Voice message transparent transcript test failed"
     fi
 }
 
@@ -1214,10 +1210,10 @@ print('OK')
     fi
 }
 
-test_speak_tag_sends_voice_message() {
-    info "Testing [[speak]] tag generates and sends voice message..."
+test_auto_tts_sends_voice_with_response() {
+    info "Testing auto-TTS sends voice message alongside text..."
     if python3 -c "
-import sys, os
+import sys, os, time
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock, call
 import bridge
@@ -1238,36 +1234,33 @@ def mock_telegram_api(method, data):
         return {'ok': True, 'result': {'message_id': 1}}
     return {'ok': True}
 
-# Response text with [[speak]] tag
-response_text = 'Here is my answer.\n\n[[speak]]'
+response_text = 'Here is my answer to your question.'
 
 with patch.object(bridge, 'send_voice', side_effect=mock_send_voice), \
      patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
      patch.object(bridge, 'synthesize_speech', return_value='/tmp/voice.ogg') as mock_tts, \
      patch.object(bridge, 'get_worker_host', return_value=None):
     bridge.send_response_to_telegram('testworker', response_text, 12345)
+    time.sleep(0.3)  # TTS runs in background thread
 
-# Text should be sent without [[speak]] tag
+# Text should be sent
 assert len(text_sent) >= 1, f'Expected text sent, got {len(text_sent)}'
-for t in text_sent:
-    assert '[[speak]]' not in t, f'[[speak]] tag leaked to Telegram: {t}'
 
-# Voice should be synthesized from the clean text
+# Voice should be auto-synthesized (no [[speak]] needed)
 mock_tts.assert_called_once()
-# Voice should be sent
 assert len(voice_sent) == 1, f'Expected 1 voice sent, got {len(voice_sent)}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "[[speak]] tag generates and sends voice message"
+        success "Auto-TTS sends voice alongside text"
     else
-        fail "[[speak]] tag test failed"
+        fail "Auto-TTS test failed"
     fi
 }
 
 test_speak_tag_custom_text() {
-    info "Testing [[speak:custom text]] synthesizes custom text..."
+    info "Testing [[speak:custom text]] overrides auto-TTS with custom text..."
     if python3 -c "
-import sys, os
+import sys, os, time
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
 import bridge
@@ -1291,21 +1284,22 @@ with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
      patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
      patch.object(bridge, 'get_worker_host', return_value=None):
     bridge.send_response_to_telegram('testworker', response_text, 12345)
+    time.sleep(0.3)
 
 assert len(tts_calls) == 1, f'Expected 1 TTS call, got {len(tts_calls)}'
 assert tts_calls[0] == 'Here is the short summary', f'TTS called with wrong text: {tts_calls[0]!r}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "[[speak:custom text]] synthesizes custom text"
+        success "[[speak:custom text]] overrides auto-TTS"
     else
         fail "[[speak:custom text]] test failed"
     fi
 }
 
-test_speak_tag_tts_failure_still_sends_text() {
-    info "Testing [[speak]] still sends text when TTS fails..."
+test_auto_tts_failure_still_sends_text() {
+    info "Testing auto-TTS failure still sends text..."
     if python3 -c "
-import sys, os
+import sys, os, time
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
 import bridge
@@ -1321,35 +1315,32 @@ def mock_telegram_api(method, data):
         return {'ok': True, 'result': {'message_id': 1}}
     return {'ok': True}
 
-response_text = 'Important information.\n\n[[speak]]'
+response_text = 'Important information.'
 
 with patch.object(bridge, 'synthesize_speech', return_value=None), \
      patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
      patch.object(bridge, 'get_worker_host', return_value=None):
     bridge.send_response_to_telegram('testworker', response_text, 12345)
+    time.sleep(0.3)
 
-# Text should still be sent
+# Text should still be sent even when TTS fails
 assert len(text_sent) >= 1, f'Expected text to be sent, got {len(text_sent)}'
-# Tag should not leak
-for t in text_sent:
-    assert '[[speak]]' not in t, f'[[speak]] tag leaked: {t}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "[[speak]] still sends text when TTS fails"
+        success "Auto-TTS failure still sends text"
     else
-        fail "[[speak]] TTS failure test failed"
+        fail "Auto-TTS failure test failed"
     fi
 }
 
 test_reply_forwarded_voice_gets_transcribed() {
-    info "Testing reply-forwarded voice message also gets transcribed..."
+    info "Testing reply-forwarded voice delivers transcript transparently..."
     if python3 -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
 import bridge
 
-# Test _extract_reply_media with voice — should include transcript
 class FakeRouter:
     def __init__(self):
         self.workers = MagicMock()
@@ -1365,13 +1356,13 @@ with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/rep
      patch.object(bridge, 'transcribe_voice', return_value='forwarded voice content') as mock_stt:
     result = bridge.CommandRouter._extract_reply_media(router, reply_to, 'testworker')
 
-assert result is not None, 'Expected media text, got None'
-assert 'forwarded voice content' in result, f'Transcript not in: {result}'
-assert '/tmp/inbox/reply.ogg' in result, f'Audio path not in: {result}'
+assert result is not None, 'Expected text, got None'
+# Transparent: just the transcript, no file path
+assert result == 'forwarded voice content', f'Expected just transcript, got: {result}'
 mock_stt.assert_called_once_with('/tmp/inbox/reply.ogg')
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Reply-forwarded voice gets transcribed"
+        success "Reply-forwarded voice delivers transcript transparently"
     else
         fail "Reply-forwarded voice transcription test failed"
     fi
@@ -15336,9 +15327,9 @@ run_unit_tests() {
     run_test test_reply_forwarded_voice_gets_transcribed
     run_test test_synthesize_speech_success
     run_test test_synthesize_speech_timeout_returns_none
-    run_test test_speak_tag_sends_voice_message
+    run_test test_auto_tts_sends_voice_with_response
     run_test test_speak_tag_custom_text
-    run_test test_speak_tag_tts_failure_still_sends_text
+    run_test test_auto_tts_failure_still_sends_text
 }
 
 run_cli_tests() {
