@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.29.0"
+VERSION = "0.29.1"
 
 import hashlib
 import os
@@ -112,7 +112,8 @@ STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/tran
 TTS_ENDPOINT = os.environ.get("TTS_ENDPOINT", "http://100.126.187.125:10111/synthesize")
 TTS_VOICE = os.environ.get("TTS_VOICE", "Serena")
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))  # seconds, fail-open
-TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "30"))  # seconds, longer for synthesis
+TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "60"))  # seconds, TTS runs in background thread
+TTS_CHUNKED_THRESHOLD = 200  # chars: above this, use /synthesize/chunked endpoint
 
 # API endpoint registry — used by index, 404 handler, and worker instructions.
 # Update this when adding new endpoints.
@@ -1898,8 +1899,16 @@ def synthesize_speech(text: str, voice: str = None, language: str = "en") -> Opt
             "format": "ogg",
         }).encode()
 
+        # Use chunked endpoint for longer text (splits into sentences server-side)
+        endpoint = TTS_ENDPOINT
+        if len(clean) > TTS_CHUNKED_THRESHOLD and TTS_ENDPOINT:
+            chunked_url = TTS_ENDPOINT.rstrip('/') + '/chunked'
+            # Only use chunked if it looks like /synthesize base
+            if '/synthesize' in TTS_ENDPOINT:
+                endpoint = chunked_url
+
         req = urllib.request.Request(
-            TTS_ENDPOINT,
+            endpoint,
             data=payload,
             headers={"Content-Type": "application/json"}
         )
@@ -1914,7 +1923,9 @@ def synthesize_speech(text: str, voice: str = None, language: str = "en") -> Opt
             tmp_path.chmod(0o600)
 
             duration = r.headers.get("X-Audio-Duration", "?")
-            print(f"TTS synthesized: {len(clean)} chars -> {duration}s audio")
+            proc_time = r.headers.get("X-Processing-Time", "?")
+            mode = "chunked" if endpoint != TTS_ENDPOINT else "single"
+            print(f"TTS synthesized ({mode}): {len(clean)} chars -> {duration}s audio in {proc_time}s")
             return str(tmp_path)
     except Exception as e:
         print(f"TTS error (fail-open): {e}")
@@ -5444,9 +5455,9 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     # Auto-TTS: synthesize and send voice alongside text
     if speak_text is not None and speak_text:
-        # Cap at 500 chars for auto-TTS to keep generation under 30s
-        # (longer text can use explicit [[speak:summary]] for a custom short version)
-        tts_text = speak_text[:500]
+        # For long text (>200 chars), synthesize_speech auto-routes to /synthesize/chunked
+        # Cap at 2000 chars to prevent extremely long synthesis (voice messages >2min)
+        tts_text = speak_text[:2000]
         def _tts_and_send():
             try:
                 print(f"TTS starting: {len(tts_text)} chars for {name}")

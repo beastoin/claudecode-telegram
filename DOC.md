@@ -340,6 +340,16 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.29.1 - TTS performance: 0.6B model + chunked synthesis
+
+- TTS server upgraded to Qwen3-TTS 0.6B model (15% faster, same quality)
+- `synthesize_speech()` auto-routes to `/synthesize/chunked` endpoint for text >200 chars
+- Chunked endpoint splits text into sentences, synthesizes each, concatenates with ffmpeg
+- TTS timeout increased to 60s (runs in background thread, doesn't block response)
+- Auto-TTS cap raised from 500 to 2000 chars (chunked handles longer text)
+- New test: `test_synthesize_speech_uses_chunked_for_long_text`
+- FAST: 251/1
+
 ### v0.29.0 - Voice mode: STT + TTS for Telegram voice messages
 
 **New feature: optional voice mode for the bridge.**

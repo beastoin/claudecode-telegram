@@ -1210,6 +1210,49 @@ print('OK')
     fi
 }
 
+test_synthesize_speech_uses_chunked_for_long_text() {
+    info "Testing synthesize_speech uses /synthesize/chunked for text >200 chars..."
+    if python3 -c "
+import sys, os, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock, call
+import bridge
+
+# Save original
+orig_threshold = bridge.TTS_CHUNKED_THRESHOLD
+
+# Mock urllib to capture which URL is called
+mock_response = MagicMock()
+mock_response.read.return_value = b'OggS fake audio data'
+mock_response.headers = {'X-Audio-Duration': '10.0', 'X-Processing-Time': '5.0'}
+mock_response.__enter__ = lambda s: s
+mock_response.__exit__ = MagicMock(return_value=False)
+
+# Short text: should use base /synthesize endpoint
+bridge.TTS_CHUNKED_THRESHOLD = 200
+with patch('urllib.request.urlopen', return_value=mock_response) as mock_url:
+    result = bridge.synthesize_speech('Short text')
+    called_url = mock_url.call_args[0][0].full_url
+    assert '/synthesize/chunked' not in called_url, f'Short text used chunked: {called_url}'
+    os.unlink(result)
+
+# Long text: should use /synthesize/chunked endpoint
+long_text = 'This is a test sentence. ' * 20  # ~500 chars
+with patch('urllib.request.urlopen', return_value=mock_response) as mock_url:
+    result = bridge.synthesize_speech(long_text)
+    called_url = mock_url.call_args[0][0].full_url
+    assert '/synthesize/chunked' in called_url, f'Long text did not use chunked: {called_url}'
+    os.unlink(result)
+
+bridge.TTS_CHUNKED_THRESHOLD = orig_threshold
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "synthesize_speech uses chunked for long text"
+    else
+        fail "synthesize_speech chunked routing test failed"
+    fi
+}
+
 test_auto_tts_sends_voice_with_response() {
     info "Testing auto-TTS sends voice message alongside text..."
     if python3 -c "
@@ -15380,6 +15423,7 @@ run_unit_tests() {
     run_test test_reply_forwarded_voice_gets_transcribed
     run_test test_synthesize_speech_success
     run_test test_synthesize_speech_timeout_returns_none
+    run_test test_synthesize_speech_uses_chunked_for_long_text
     run_test test_auto_tts_sends_voice_with_response
     run_test test_speak_tag_custom_text
     run_test test_auto_tts_failure_still_sends_text
