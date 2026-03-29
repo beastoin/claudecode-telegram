@@ -6331,6 +6331,29 @@ class CommandRouter:
         if mode == "resume":
             resume_id = get_claude_session_id(name) or resume_id
 
+        # Validate session is resumable on target before attempting --resume
+        # Claude stores sessions under ~/.claude/projects/-<cwd-dashes>/<session_id>.jsonl
+        # If the file doesn't exist on the target, --resume will fail immediately
+        if resume_id and target_cwd and host:
+            # Build the project dir path on the remote host
+            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+                                  capture_output=True, text=True, timeout=5)
+            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            if remote_home:
+                # Claude Code project dir: ~/.claude/projects/-<cwd with / replaced by ->
+                cwd_slug = target_cwd.replace("/", "-")
+                session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
+                check = _remote_run(["test", "-f", session_file], host=host,
+                                     capture_output=True, timeout=5)
+                if check.returncode != 0:
+                    print(f"[restart] Session {resume_id} not found on {host} at {session_file}, starting fresh")
+                    resume_id = ""
+                    # Clear stale session ID
+                    session_dir = SESSIONS_DIR / name
+                    session_dir.mkdir(parents=True, exist_ok=True)
+                    for f in session_dir.glob("*_session_id"):
+                        f.unlink()
+
         # Delegate to existing remote start flow
         ok = self._start_worker_on_target(
             name, host, target_cwd, resume_id, backend_name)

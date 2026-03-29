@@ -9833,6 +9833,86 @@ print('OK')
     fi
 }
 
+test_restart_remote_validates_session_exists() {
+    info "Testing remote restart falls back to fresh if session file missing on target..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'ren').mkdir()
+(sessions / 'ren' / 'claude_session_id').write_text('stale-session-id')
+(sessions / 'ren' / 'claude_session_cwd').write_text('/Users/beastoinagents/omi/omi-ren')
+
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+(node_dir / 'workers.json').write_text(json.dumps({
+    'ren': {'host': 'mac-mini', 'tmux': 'claude-prod-ren'}
+}))
+
+start_calls = []
+
+def mock_remote_run(cmd, **kwargs):
+    r = MagicMock(returncode=0, stdout='', stderr='')
+    cmd_str = ' '.join(str(c) for c in cmd)
+    if 'echo' in cmd_str and 'HOME' in cmd_str:
+        r.stdout = '/Users/beastoinagents\n'
+    # Session file does NOT exist on target
+    if 'test' in cmd_str and '-f' in cmd_str:
+        r.returncode = 1  # file not found
+    if 'has-session' in cmd_str:
+        r.returncode = 1  # no tmux session
+    return r
+
+def mock_start(self, name, host, cwd, session_id, backend):
+    start_calls.append({'session_id': session_id})
+    return True
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _build_welcome(self, name, backend): return 'Welcome'
+    def send(self, name, text): pass
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+
+router = bridge.CommandRouter(MagicMock(), MockWorkers())
+router.workers = MockWorkers()
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+     patch('time.sleep'):
+    ok, err = router._restart_remote_worker(
+        'ren', 'claude', bridge.get_backend('claude'),
+        'claude-prod-ren', 'mac-mini', 'resume')
+
+assert ok, f'restart should succeed, got err={err}'
+# Session ID should be empty (fell back to fresh) since file doesn't exist
+assert start_calls[0]['session_id'] == '', \
+    f'Should fall back to fresh start, but got session_id={start_calls[0][\"session_id\"]!r}'
+# Stale session ID file should be cleared
+assert not (sessions / 'ren' / 'claude_session_id').exists(), \
+    'Stale session ID file should be deleted'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Remote restart validates session exists on target"
+    else
+        fail "Remote restart session validation test failed"
+    fi
+}
+
 test_restart_delegates_to_remote_for_teleported() {
     info "Testing cmd_restart detects teleported worker and delegates to remote..."
 
@@ -15396,6 +15476,7 @@ run_unit_tests() {
     run_test test_teleport_registry_updated_before_source_kill
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
+    run_test test_restart_remote_validates_session_exists
     run_test test_restart_delegates_to_remote_for_teleported
     run_test test_end_worker_teleported_uses_remote_tmux
     run_test test_restart_teleported_requires_remote_dispatch
