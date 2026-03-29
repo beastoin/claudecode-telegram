@@ -1340,7 +1340,7 @@ print('OK')
 }
 
 test_auto_tts_skips_long_messages() {
-    info "Testing auto-TTS skips messages >500 chars..."
+    info "Testing auto-TTS skips messages >1000 chars and splits paragraphs..."
     if python3 -c "
 import sys, os, time
 sys.path.insert(0, os.getcwd())
@@ -1360,20 +1360,24 @@ def mock_tts(text, **kwargs):
 def mock_telegram_api(method, data):
     return {'ok': True, 'result': {'message_id': 1}}
 
-# Short text (<=500 chars) — TTS should fire
-short_text = 'Short reply.'
+# Multi-paragraph text under 1000 chars — should split into separate TTS calls
+tts_calls.clear()
+multi_para = 'First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph.'
 with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
      patch.object(bridge, 'send_voice', return_value=True), \
      patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
      patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', short_text, 12345)
-    time.sleep(0.3)
+    bridge.send_response_to_telegram('testworker', multi_para, 12345)
+    time.sleep(0.5)
 
-assert len(tts_calls) == 1, f'Expected 1 TTS call for short text, got {len(tts_calls)}'
+assert len(tts_calls) == 3, f'Expected 3 TTS calls (one per paragraph), got {len(tts_calls)}: {tts_calls}'
+assert tts_calls[0] == 'First paragraph here.', f'Wrong para 1: {tts_calls[0]!r}'
+assert tts_calls[1] == 'Second paragraph here.', f'Wrong para 2: {tts_calls[1]!r}'
+assert tts_calls[2] == 'Third paragraph.', f'Wrong para 3: {tts_calls[2]!r}'
 
-# Long text (>500 chars) — TTS should be skipped entirely
+# Long text (>1000 chars) — TTS should be skipped entirely
 tts_calls.clear()
-long_text = 'A' * 501
+long_text = 'A' * 1001
 with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
      patch.object(bridge, 'send_voice', return_value=True), \
      patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
@@ -1381,12 +1385,12 @@ with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
     bridge.send_response_to_telegram('testworker', long_text, 12345)
     time.sleep(0.3)
 
-assert len(tts_calls) == 0, f'Expected 0 TTS calls for long text, got {len(tts_calls)}'
+assert len(tts_calls) == 0, f'Expected 0 TTS calls for >1000 char text, got {len(tts_calls)}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Auto-TTS skips messages >500 chars"
+        success "Auto-TTS skips >1000 chars and splits paragraphs"
     else
-        fail "Auto-TTS long message skip test failed"
+        fail "Auto-TTS paragraph split test failed"
     fi
 }
 

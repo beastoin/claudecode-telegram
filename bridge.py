@@ -5454,19 +5454,23 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
             })
 
     # Auto-TTS: synthesize and send voice alongside text
-    # Skip TTS for long messages (>500 chars) — voice is for short replies only
-    if speak_text is not None and speak_text and len(speak_text) <= 500:
-        tts_text = speak_text
+    # Skip TTS for messages >1000 chars. Split into paragraphs for separate voice messages.
+    if speak_text is not None and speak_text and len(speak_text) <= 1000:
+        # Split into paragraphs (double newline), filter empty
+        paragraphs = [p.strip() for p in speak_text.split('\n\n') if p.strip()]
+        if not paragraphs:
+            paragraphs = [speak_text]
         def _tts_and_send():
             try:
-                print(f"TTS starting: {len(tts_text)} chars for {name}")
-                voice_path = synthesize_speech(tts_text)
-                if voice_path:
-                    send_voice(chat_id, voice_path, caption=f"{name}:")
-                    try:
-                        os.unlink(voice_path)
-                    except OSError:
-                        pass
+                for i, para in enumerate(paragraphs):
+                    print(f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
+                    voice_path = synthesize_speech(para)
+                    if voice_path:
+                        send_voice(chat_id, voice_path, caption=f"{name}:")
+                        try:
+                            os.unlink(voice_path)
+                        except OSError:
+                            pass
             except Exception as e:
                 print(f"TTS thread error: {e}")
         # Run TTS in background thread to not block /response return
