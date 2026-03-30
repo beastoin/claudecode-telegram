@@ -3346,6 +3346,62 @@ print('OK')
     fi
 }
 
+test_restart_inflight_dedupe() {
+    info "Testing /restart --force blocked by in-flight restart..."
+    if python3 -c "
+import time, threading
+from pathlib import Path
+from unittest.mock import patch
+import bridge
+
+tmp = Path('$(mktemp -d)')
+bridge.SESSIONS_DIR = tmp
+session_dir = tmp / 'bob'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('sess_123')
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append(text)
+        return {'ok': True}
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'}}
+
+# Clear any prior state
+bridge._restart_in_progress.pop('bob', None)
+bridge._recent_restarts.pop('bob', None)
+
+tg = FakeTelegram()
+router = bridge.CommandRouter(tg, bridge.worker_manager)
+
+# Simulate in-flight restart
+with bridge._restart_lock:
+    bridge._restart_in_progress['bob'] = time.time()
+
+# Try to restart while one is in progress — should be blocked
+with patch.object(bridge, 'get_worker_host', return_value=None), \
+     patch.object(bridge, 'tmux_exists', return_value=True), \
+     patch.object(bridge, 'is_claude_running', return_value=False):
+    router.cmd_restart(123, '--force bob')
+
+assert any('already in progress' in m.lower() for m in tg.messages), f'Expected in-progress block: {tg.messages}'
+
+# Clean up
+with bridge._restart_lock:
+    bridge._restart_in_progress.pop('bob', None)
+
+import shutil
+shutil.rmtree(str(tmp), ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/restart --force blocked by in-flight restart"
+    else
+        fail "/restart in-flight dedupe test failed"
+    fi
+}
+
 test_restart_all_no_workers() {
     info "Testing /restart all with no workers..."
 
@@ -12105,6 +12161,9 @@ def mock_send_tg(chat_id, text, **kwargs):
 
 new_cwd = '/Users/beastoinagents/omi/omi-ren'
 
+# Clear cooldown so checkin-triggered restart proceeds
+bridge._recent_restarts.pop('ren', None)
+
 class FakeHandler:
     def __init__(self):
         self.status = None
@@ -12123,7 +12182,8 @@ parsed = urlparse('/checkin?name=ren&cwd=' + quote(new_cwd))
 with patch.object(bridge, '_remote_run', side_effect=mock_remote_run), \
      patch.object(bridge, 'send_telegram_message', side_effect=mock_send_tg), \
      patch.object(bridge.CommandRouter, '_restart_remote_worker', mock_restart_remote), \
-     patch.object(bridge, '_wait_for_restart_ready', return_value=True):
+     patch.object(bridge, '_wait_for_restart_ready', return_value=True), \
+     patch.object(bridge, 'is_claude_running', return_value=False):
     bridge.Handler.handle_checkin_endpoint(handler, parsed)
 
 # Key assertion: should use _restart_remote_worker, not worker_manager.restart
@@ -12173,10 +12233,12 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
 bridge.tmux_exists = lambda _name, host=None: True
+bridge.is_claude_running = lambda _name, host=None: False  # Allow checkin restart
 bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
+bridge._recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -12254,10 +12316,12 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
 bridge.tmux_exists = lambda _name, host=None: True
+bridge.is_claude_running = lambda _name, host=None: False  # Allow checkin restart
 bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
+bridge._recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -12329,9 +12393,11 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice', 'backend': 'claude'}
 }
 bridge.tmux_exists = lambda _name, host=None: True
+bridge.is_claude_running = lambda _name, host=None: False  # Allow checkin restart
 bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (False, 'boom')
+bridge._recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -12368,6 +12434,147 @@ print('OK')
         success "/checkin?cwd restart failure sends manager follow-up"
     else
         fail "/checkin?cwd restart failure notification test failed"
+    fi
+}
+
+test_checkin_cwd_restart_blocked_by_cooldown() {
+    info "Testing /checkin?cwd restart blocked by cooldown..."
+
+    if python3 -c "
+import io, time, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp_path = Path(tmpdir)
+bridge.NODE_DIR = tmp_path
+bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+bridge.SESSIONS_DIR = tmp_path / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}cooldown-'
+bridge.admin_chat_id = None
+bridge._worker_cwds.clear()
+
+bridge._registry_add('bob', 'claude', 123)
+session_dir = bridge.ensure_session_dir('bob')
+
+old_dir = tmp_path / 'old-project'
+new_dir = tmp_path / 'new-project'
+old_dir.mkdir()
+new_dir.mkdir()
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob', 'backend': 'claude'}
+}
+bridge.tmux_exists = lambda _name, host=None: True
+bridge.is_claude_running = lambda _name, host=None: False
+bridge.export_hook_env = lambda *_args, **_kwargs: None
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
+
+restart_calls = []
+bridge.worker_manager.restart = lambda name, mode='relaunch': (restart_calls.append(1), (True, None))[1]
+bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
+bridge.send_telegram_message = lambda *a, **kw: {'ok': True}
+
+# Set recent restart to NOW — should trigger cooldown
+bridge._recent_restarts['bob'] = time.time()
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=bob&cwd=' + quote(str(new_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+body = handler.wfile.getvalue().decode()
+assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
+assert 'blocked' in body.lower(), f'Expected cooldown block message: {body}'
+assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart blocked by cooldown"
+    else
+        fail "/checkin?cwd cooldown block test failed"
+    fi
+}
+
+test_checkin_cwd_restart_blocked_by_running_claude() {
+    info "Testing /checkin?cwd restart blocked when Claude is running..."
+
+    if python3 -c "
+import io, shutil, tempfile
+from pathlib import Path
+from urllib.parse import urlparse, quote
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+tmp_path = Path(tmpdir)
+bridge.NODE_DIR = tmp_path
+bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+bridge.SESSIONS_DIR = tmp_path / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}guard-'
+bridge.admin_chat_id = None
+bridge._worker_cwds.clear()
+
+bridge._registry_add('bob', 'claude', 123)
+
+old_dir = tmp_path / 'old-project'
+new_dir = tmp_path / 'new-project'
+old_dir.mkdir()
+new_dir.mkdir()
+
+bridge.worker_manager.get_registered_sessions = lambda registered=None: {
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob', 'backend': 'claude'}
+}
+bridge.tmux_exists = lambda _name, host=None: True
+bridge.is_claude_running = lambda _name, host=None: True  # Claude IS running
+bridge.export_hook_env = lambda *_args, **_kwargs: None
+bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
+bridge._recent_restarts.pop('bob', None)  # No cooldown
+
+restart_calls = []
+bridge.worker_manager.restart = lambda name, mode='relaunch': (restart_calls.append(1), (True, None))[1]
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+    def send_response(self, code):
+        self.status = code
+    def send_header(self, key, value):
+        self.headers[key] = value
+    def end_headers(self):
+        pass
+
+handler = FakeHandler()
+parsed = urlparse('/checkin?name=bob&cwd=' + quote(str(new_dir)))
+bridge.Handler.handle_checkin_endpoint(handler, parsed)
+
+body = handler.wfile.getvalue().decode()
+assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
+assert 'skipped' in body.lower() or 'running' in body.lower(), f'Expected running guard message: {body}'
+assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/checkin?cwd restart blocked when Claude is running"
+    else
+        fail "/checkin?cwd running guard test failed"
     fi
 }
 
@@ -15370,6 +15577,7 @@ run_unit_tests() {
     run_test test_restart_all_handles_failure
     run_test test_restart_cancel
     run_test test_restart_skips_running_worker
+    run_test test_restart_inflight_dedupe
     run_test test_restart_all_no_workers
     run_test test_restart_all_rejects_duplicate
     run_test test_codex_pause_clears_pending
@@ -15551,6 +15759,8 @@ run_unit_tests() {
     run_test test_checkin_cwd_restart_notifies_manager
     run_test test_checkin_cwd_restart_prefers_admin_chat_id
     run_test test_checkin_cwd_restart_failure_notifies_manager
+    run_test test_checkin_cwd_restart_blocked_by_cooldown
+    run_test test_checkin_cwd_restart_blocked_by_running_claude
     run_test test_restart_dead_worker
     run_test test_end_removes_from_registry
     run_test test_team_shows_exited

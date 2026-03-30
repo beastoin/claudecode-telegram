@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.29.0
+> Version: 0.29.2
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,14 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.29.2 - Restart loop fix + teleport speedup
+
+- Per-worker in-flight restart lock: `_restart_in_progress` dict with threading.Lock prevents concurrent/queued restarts from firing simultaneously
+- Checkin guards: 60s cooldown + `is_claude_running` check + in-flight dedupe — all three send clear Telegram error messages (not just server logs)
+- `--force` bypasses "already running" guard but NOT in-flight dedupe (separate concerns)
+- SSH ControlMaster enabled for Mac Mini: 2.2s→0.58s per SSH call, teleport ~33s→~9s
+- 5 new tests (cooldown, running guard, in-flight dedupe, checkin blocks), FAST 258/1
 
 ### v0.29.1 - TTS performance: 0.6B model + chunked synthesis
 

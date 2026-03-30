@@ -1171,6 +1171,9 @@ _prev_children = {}  # name -> int (previous active children count, for activity
 _last_activity_ts = {}  # name -> float (last time children count changed)
 _worker_cwds = {}  # name -> cwd (RAM-only startup cwd hints)
 _recent_restarts = {}  # name -> timestamp (suppress watchdog resolved alert after restart)
+RESTART_COOLDOWN = 60  # seconds: reject checkin-triggered restarts within this window
+_restart_in_progress = {}  # name -> timestamp: set BEFORE restart, cleared after completion
+_restart_lock = threading.Lock()  # protects _restart_in_progress
 _waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
 _watchdog_lock = threading.Lock()
 
@@ -6227,20 +6230,46 @@ class CommandRouter:
         # Guard: skip restart if worker is already running (unless --force)
         host = get_worker_host(name)
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
-        if not force and tmux_exists(tmux_name, host=host) and is_claude_running(tmux_name, host=host):
+        print(f"[cmd_restart] {name}: force={force}, clean={clean}, host={host}, tmux={tmux_name}")
+        tmux_alive = tmux_exists(tmux_name, host=host)
+        claude_running = is_claude_running(tmux_name, host=host) if tmux_alive else False
+        print(f"[cmd_restart] {name}: tmux_alive={tmux_alive}, claude_running={claude_running}")
+        if not force and tmux_alive and claude_running:
+            print(f"[cmd_restart] {name}: BLOCKED (already running)")
             self.reply(chat_id, f"{name.capitalize()} is already running. Use /restart --force {name} to force.")
             return True
 
+        # In-flight dedupe: block if a restart is already in progress (even with --force)
+        with _restart_lock:
+            inflight_ts = _restart_in_progress.get(name)
+            if inflight_ts and time.time() - inflight_ts < 120:
+                print(f"[cmd_restart] {name}: BLOCKED (restart in progress since {time.time() - inflight_ts:.0f}s ago)")
+                self.reply(chat_id, f"{name.capitalize()} restart already in progress. Wait for it to finish.")
+                return True
+            _restart_in_progress[name] = time.time()
+
+        try:
+            return self._do_restart(name, session, chat_id, host, tmux_name, force, clean)
+        finally:
+            with _restart_lock:
+                _restart_in_progress.pop(name, None)
+
+    def _do_restart(self, name, session, chat_id, host, tmux_name, force, clean):
+        """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
+            resume_id = get_claude_session_id(name) if mode == "resume" else ""
+            target_cwd = get_claude_session_cwd(name)
+            print(f"[cmd_restart] {name}: remote restart mode={mode}, resume_id={resume_id}, cwd={target_cwd}")
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
             ok, err = self._restart_remote_worker(
                 name, backend_name, backend_obj, tmux_name, host, mode)
+            _recent_restarts[name] = time.time()
+            print(f"[cmd_restart] {name}: remote restart result ok={ok}, err={err}")
             if ok:
-                _recent_restarts[name] = time.time()
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
                 self.reply(chat_id, f"Could not restart \"{name}\" on {host}. {err}",
@@ -6309,27 +6338,35 @@ class CommandRouter:
         """
         resume_id = ""
         target_cwd = get_claude_session_cwd(name)
+        print(f"[_restart_remote] {name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
         if mode == "resume":
             resume_id = get_claude_session_id(name)
+            print(f"[_restart_remote] {name}: resume_id={resume_id}")
         else:
             # Clear session IDs for relaunch
             session_dir = SESSIONS_DIR / name
             session_dir.mkdir(parents=True, exist_ok=True)
-            for f in session_dir.glob("*_session_id"):
+            cleared = list(session_dir.glob("*_session_id"))
+            for f in cleared:
                 f.unlink()
             _clear_hook_failures(name)
+            print(f"[_restart_remote] {name}: cleared {len(cleared)} session files for relaunch")
 
         # Stop the remote Claude process if tmux is still alive
         if tmux_exists(tmux_name, host=host):
+            print(f"[_restart_remote] {name}: stopping remote tmux {tmux_name}")
             self._stop_worker_for_teleport(name, tmux_name, host=host)
             # Kill tmux — _start_worker_on_target creates a fresh one
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                          host=host, capture_output=True)
             time.sleep(0.5)
+        else:
+            print(f"[_restart_remote] {name}: tmux {tmux_name} not found on {host}")
 
         # Re-read session_id (hook may have updated during /exit)
         if mode == "resume":
             resume_id = get_claude_session_id(name) or resume_id
+            print(f"[_restart_remote] {name}: post-stop resume_id={resume_id}")
 
         # Validate session is resumable on target before attempting --resume
         # Claude stores sessions under ~/.claude/projects/-<cwd-dashes>/<session_id>.jsonl
@@ -6340,24 +6377,28 @@ class CommandRouter:
                                   capture_output=True, text=True, timeout=5)
             remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
             if remote_home:
-                # Claude Code project dir: ~/.claude/projects/-<cwd with / replaced by ->
+                # Claude Code project dir: ~/.claude/projects/-<cwd with / replaced by->
                 cwd_slug = target_cwd.replace("/", "-")
                 session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
                 check = _remote_run(["test", "-f", session_file], host=host,
                                      capture_output=True, timeout=5)
                 if check.returncode != 0:
-                    print(f"[restart] Session {resume_id} not found on {host} at {session_file}, starting fresh")
+                    print(f"[_restart_remote] {name}: session {resume_id} NOT found at {session_file}, starting fresh")
                     resume_id = ""
                     # Clear stale session ID
                     session_dir = SESSIONS_DIR / name
                     session_dir.mkdir(parents=True, exist_ok=True)
                     for f in session_dir.glob("*_session_id"):
                         f.unlink()
+                else:
+                    print(f"[_restart_remote] {name}: session {resume_id} validated at {session_file}")
 
         # Delegate to existing remote start flow
+        print(f"[_restart_remote] {name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
         ok = self._start_worker_on_target(
             name, host, target_cwd, resume_id, backend_name)
         if not ok:
+            print(f"[_restart_remote] {name}: _start_worker_on_target FAILED")
             return False, f"Failed to restart {name} on {host}"
 
         # Send welcome
@@ -6366,7 +6407,7 @@ class CommandRouter:
             time.sleep(3.0)
             self.workers.send(name, welcome)
 
-        print(f"Remote worker '{name}' restarted on {host} (mode={mode})")
+        print(f"[_restart_remote] {name}: restarted successfully (mode={mode})")
         return True, None
 
     # ── Restart All (sequential) ──────────────────────────────────
@@ -7884,57 +7925,113 @@ class Handler(BaseHTTPRequestHandler):
             if requested_cwd:
                 _set_worker_cwd(name, requested_cwd)
                 save_claude_session_cwd(name, requested_cwd)
+                print(f"[checkin] {name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
                 if tmux_name and tmux_exists(tmux_name, host=host):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
                     # Compare normalized paths (don't use os.path.realpath — it resolves on VPS, not remote)
                     same_cwd = pane_cwd and pane_cwd.rstrip("/") == requested_cwd.rstrip("/")
+                    print(f"[checkin] {name}: pane_cwd={pane_cwd}, same_cwd={same_cwd}")
                     if not same_cwd:
                         notify_chat_id = get_manager_chat_id(name)
-                        if notify_chat_id is not None:
-                            send_telegram_message(
-                                notify_chat_id,
-                                f"{name} is restarting in a new directory. "
-                                "Messages during restart may be lost.",
-                            )
 
-                        if host:
-                            # Teleported worker: use remote restart
-                            backend_obj_r = get_backend(backend_name)
-                            ok, err = command_router._restart_remote_worker(
-                                name, backend_name, backend_obj_r, tmux_name, host, "relaunch")
-                        else:
-                            ok, err = worker_manager.restart(name, mode="relaunch")
-                        if not ok:
+                        # Cooldown: prevent restart loops from repeated checkins
+                        last_restart = _recent_restarts.get(name, 0)
+                        elapsed = time.time() - last_restart
+                        if elapsed < RESTART_COOLDOWN:
+                            print(f"[checkin] {name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
+                            msg = (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
+                                   f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+                            if notify_chat_id is not None:
+                                send_telegram_message(notify_chat_id, msg)
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(msg.encode())
+                            return
+
+                        # Guard: skip if worker is already running Claude
+                        if is_claude_running(tmux_name, host=host):
+                            print(f"[checkin] {name}: BLOCKED restart (Claude already running in tmux)")
+                            msg = (f"Checkin restart skipped: {name} has Claude running. "
+                                   f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+                            if notify_chat_id is not None:
+                                send_telegram_message(notify_chat_id, msg)
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(msg.encode())
+                            return
+
+                        # In-flight dedupe: skip if restart already in progress
+                        with _restart_lock:
+                            inflight_ts = _restart_in_progress.get(name)
+                            if inflight_ts and time.time() - inflight_ts < 120:
+                                print(f"[checkin] {name}: BLOCKED restart (in-flight since {time.time() - inflight_ts:.0f}s ago)")
+                                msg = f"Checkin restart blocked: {name} restart already in progress ({time.time() - inflight_ts:.0f}s)."
+                                if notify_chat_id is not None:
+                                    send_telegram_message(notify_chat_id, msg)
+                                self.send_response(200)
+                                self.send_header("Content-Type", "text/plain")
+                                self.end_headers()
+                                self.wfile.write(msg.encode())
+                                return
+                            _restart_in_progress[name] = time.time()
+
+                        print(f"[checkin] {name}: triggering restart (cwd mismatch: pane={pane_cwd} vs requested={requested_cwd})")
+                        try:
+                            notify_chat_id = get_manager_chat_id(name)
                             if notify_chat_id is not None:
                                 send_telegram_message(
                                     notify_chat_id,
-                                    f"{name} could not restart. "
-                                    f"Run /restart {name} before sending new messages.",
+                                    f"{name} is restarting in a new directory. "
+                                    "Messages during restart may be lost.",
                                 )
-                            self.send_response(500)
+
+                            if host:
+                                # Teleported worker: use remote restart
+                                backend_obj_r = get_backend(backend_name)
+                                ok, err = command_router._restart_remote_worker(
+                                    name, backend_name, backend_obj_r, tmux_name, host, "relaunch")
+                            else:
+                                ok, err = worker_manager.restart(name, mode="relaunch")
+
+                            _recent_restarts[name] = time.time()
+                            print(f"[checkin] {name}: restart result ok={ok}, err={err}")
+
+                            if not ok:
+                                if notify_chat_id is not None:
+                                    send_telegram_message(
+                                        notify_chat_id,
+                                        f"{name} could not restart. "
+                                        f"Run /restart {name} before sending new messages.",
+                                    )
+                                self.send_response(500)
+                                self.send_header("Content-Type", "text/plain")
+                                self.end_headers()
+                                self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
+                                return
+
+                            if notify_chat_id is not None:
+                                if _wait_for_restart_ready(tmux_name, backend_name, host=host):
+                                    send_telegram_message(
+                                        notify_chat_id,
+                                        f"{name} is ready. Safe to send messages now.",
+                                    )
+                                else:
+                                    send_telegram_message(
+                                        notify_chat_id,
+                                        f"{name} restarted but is not ready yet. "
+                                        f"Hold messages for now. If this continues, run /restart {name}.",
+                                    )
+
+                            self.send_response(200)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
-                            self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
+                            self.wfile.write(f"Restarting in {requested_cwd}...".encode())
                             return
-
-                        if notify_chat_id is not None:
-                            if _wait_for_restart_ready(tmux_name, backend_name, host=host):
-                                send_telegram_message(
-                                    notify_chat_id,
-                                    f"{name} is ready. Safe to send messages now.",
-                                )
-                            else:
-                                send_telegram_message(
-                                    notify_chat_id,
-                                    f"{name} restarted but is not ready yet. "
-                                    f"Hold messages for now. If this continues, run /restart {name}.",
-                                )
-
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/plain")
-                        self.end_headers()
-                        self.wfile.write(f"Restarting in {requested_cwd}...".encode())
-                        return
+                        finally:
+                            with _restart_lock:
+                                _restart_in_progress.pop(name, None)
 
             welcome = worker_manager._build_welcome(name, backend_obj)
 
