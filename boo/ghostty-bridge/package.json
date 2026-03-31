@@ -1,0 +1,17 @@
+{
+  "name": "ghostty-bridge",
+  "version": "0.1.0",
+  "description": "Cross-machine IPC bridge for Ghostty terminals via MCP",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "vitest": "^3.1.1"
+  }
+}
