@@ -192,8 +192,7 @@ struct OnboardingView: View {
 
     private func installMCP() {
         let manager = MCPConfigManager()
-        // Find our own binary path
-        let binaryPath = ProcessInfo.processInfo.arguments[0]
+        let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
         do {
             try manager.install(binaryPath: binaryPath)
             mcpInstalled = true

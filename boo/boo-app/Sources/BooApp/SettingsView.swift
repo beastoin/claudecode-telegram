@@ -123,7 +123,7 @@ struct GeneralSettingsTab: View {
 
     private func toggleMCP() {
         let manager = MCPConfigManager()
-        let binaryPath = ProcessInfo.processInfo.arguments[0]
+        let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
         do {
             if mcpInstalled {
                 try manager.uninstall()
