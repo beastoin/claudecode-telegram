@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Boo App v2 — Native macOS Menu Bar</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    /* macOS Sonoma/Tahoe dark mode palette */
+    --bg-primary: rgba(30, 30, 30, 0.92);
+    --bg-secondary: rgba(255, 255, 255, 0.05);
+    --bg-tertiary: rgba(255, 255, 255, 0.03);
+    --bg-hover: rgba(255, 255, 255, 0.08);
+    --bg-selected: rgba(59, 130, 246, 0.25);
+    --text-primary: rgba(255, 255, 255, 0.92);
+    --text-secondary: rgba(255, 255, 255, 0.55);
+    --text-tertiary: rgba(255, 255, 255, 0.30);
+    --border: rgba(255, 255, 255, 0.08);
+    --accent: #4A9EFF;
+    --green: #30D158;
+    --orange: #FF9F0A;
+    --red: #FF453A;
+    --purple: #BF5AF2;
+    --separator: rgba(255, 255, 255, 0.06);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+    background: #111;
+    display: flex;
+    gap: 48px;
+    padding: 48px;
+    justify-content: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .screen-label {
+    color: var(--text-tertiary);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  /* ===== MENU BAR STRIP ===== */
+  .menubar {
+    width: 300px;
+    height: 24px;
+    background: rgba(22, 22, 22, 0.95);
+    border-radius: 6px 6px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 10px;
+    gap: 14px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .menubar-time { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .boo-icon {
+    display: flex; align-items: center; gap: 2px;
+    color: var(--text-primary); font-weight: 500; font-size: 12px;
+    position: relative;
+  }
+  .boo-icon svg { width: 16px; height: 16px; fill: currentColor; }
+  .boo-badge {
+    position: absolute; top: -5px; right: -8px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--green); font-size: 7px; font-weight: 700;
+    color: #000; display: flex; align-items: center; justify-content: center;
+  }
+
+  /* ===== POPOVER ===== */
+  .popover {
+    width: 300px;
+    background: var(--bg-primary);
+    backdrop-filter: blur(60px) saturate(180%);
+    border-radius: 10px;
+    border: 0.5px solid var(--border);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 1px rgba(255,255,255,0.1);
+    overflow: hidden;
+  }
+
+  /* ===== HEADER ===== */
+  .popover-header {
+    padding: 12px 14px 10px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .popover-title {
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+  }
+  .popover-subtitle {
+    font-size: 10px; color: var(--text-tertiary); margin-top: 1px;
+  }
+  .header-actions { display: flex; gap: 6px; }
+  .header-btn {
+    width: 22px; height: 22px; border-radius: 5px;
+    background: var(--bg-secondary); border: 0.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: var(--text-secondary); cursor: pointer;
+  }
+
+  /* ===== MACHINE PILLS ===== */
+  .machine-pills {
+    display: flex; gap: 4px; padding: 0 14px 10px;
+  }
+  .pill {
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500;
+    color: var(--text-secondary); background: var(--bg-tertiary);
+    border: 0.5px solid transparent; cursor: pointer;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .pill.active {
+    background: var(--bg-selected); color: var(--accent);
+    border-color: rgba(74, 158, 255, 0.2);
+  }
+  .pill .count {
+    font-size: 9px; font-weight: 600; opacity: 0.6;
+  }
+  .pill .conn-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+  }
+  .conn-dot.ok { background: var(--green); }
+  .conn-dot.off { background: var(--text-tertiary); }
+
+  .separator { height: 0.5px; background: var(--separator); margin: 0 14px; }
+
+  /* ===== AGENT ROW ===== */
+  .agent-list { padding: 6px 8px; }
+  .agent-row {
+    display: flex; align-items: center; padding: 6px 8px; border-radius: 6px;
+    cursor: pointer; gap: 10px;
+  }
+  .agent-row:hover { background: var(--bg-hover); }
+  .agent-row.selected { background: var(--bg-selected); }
+
+  .avatar {
+    width: 26px; height: 26px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; flex-shrink: 0;
+    position: relative;
+  }
+  .avatar.eng { background: rgba(48, 209, 88, 0.12); color: var(--green); }
+  .avatar.res { background: rgba(191, 90, 242, 0.12); color: var(--purple); }
+  .avatar.ops { background: rgba(255, 159, 10, 0.12); color: var(--orange); }
+  .avatar.dev { background: rgba(74, 158, 255, 0.12); color: var(--accent); }
+
+  .status-indicator {
+    width: 7px; height: 7px; border-radius: 50%;
+    position: absolute; bottom: -1px; right: -1px;
+    border: 1.5px solid rgba(30,30,30,0.92);
+  }
+  .status-indicator.active { background: var(--green); }
+  .status-indicator.idle { background: var(--orange); }
+  .status-indicator.offline { background: var(--text-tertiary); }
+
+  .agent-info { flex: 1; min-width: 0; }
+  .agent-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+  .agent-meta {
+    font-size: 10px; color: var(--text-tertiary);
+    display: flex; align-items: center; gap: 4px; margin-top: 1px;
+  }
+
+  .agent-right {
+    text-align: right; flex-shrink: 0;
+  }
+  .agent-status-text {
+    font-size: 10px; font-weight: 500;
+  }
+  .agent-status-text.working { color: var(--green); }
+  .agent-status-text.thinking { color: var(--purple); }
+  .agent-status-text.idle { color: var(--orange); }
+  .agent-status-text.offline { color: var(--text-tertiary); }
+  .agent-msgs {
+    font-size: 9px; color: var(--text-tertiary); margin-top: 1px;
+  }
+
+  /* ===== TUNNELS SECTION ===== */
+  .section-label {
+    font-size: 10px; font-weight: 600; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 8px 14px 4px;
+  }
+  .tunnel-row {
+    display: flex; align-items: center; padding: 5px 16px; gap: 8px;
+    font-size: 11px; color: var(--text-secondary);
+  }
+  .tunnel-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .tunnel-latency { margin-left: auto; font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+
+  /* ===== FOOTER ACTIONS ===== */
+  .footer-actions { padding: 4px 8px 8px; }
+  .action-item {
+    display: flex; align-items: center; padding: 5px 8px; border-radius: 5px;
+    font-size: 12px; color: var(--text-secondary); cursor: pointer; gap: 8px;
+  }
+  .action-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .action-icon { width: 16px; text-align: center; font-size: 12px; }
+  .action-shortcut {
+    margin-left: auto; font-size: 10px; color: var(--text-tertiary);
+    font-family: 'SF Mono', monospace;
+  }
+
+  /* ===== DETAIL WINDOW ===== */
+  .detail-window {
+    width: 360px;
+    background: var(--bg-primary);
+    backdrop-filter: blur(60px) saturate(180%);
+    border-radius: 10px;
+    border: 0.5px solid var(--border);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 1px rgba(255,255,255,0.1);
+    overflow: hidden;
+  }
+  .detail-titlebar {
+    padding: 10px 14px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 0.5px solid var(--separator);
+  }
+  .detail-close {
+    width: 12px; height: 12px; border-radius: 50%; background: var(--red);
+    cursor: pointer;
+  }
+  .detail-title {
+    font-size: 12px; font-weight: 600; color: var(--text-primary); flex: 1;
+  }
+
+  .detail-section { padding: 12px 14px; }
+  .detail-section + .detail-section { border-top: 0.5px solid var(--separator); }
+
+  /* Terminal preview */
+  .terminal-preview {
+    background: #0d0d0d; border-radius: 6px; padding: 8px 10px;
+    font-family: 'SF Mono', 'Menlo', 'Cascadia Code', monospace;
+    font-size: 10.5px; line-height: 1.65; color: #c8c8c8;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    position: relative;
+  }
+  .terminal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .terminal-tab-label {
+    font-size: 9px; color: var(--text-tertiary); font-family: -apple-system, sans-serif;
+  }
+  .terminal-refresh {
+    font-size: 9px; color: var(--accent); cursor: pointer;
+    font-family: -apple-system, sans-serif;
+  }
+  .term-prompt { color: var(--accent); }
+  .term-path { color: var(--purple); }
+  .term-cmd { color: var(--green); }
+  .term-dim { color: rgba(255,255,255,0.25); }
+  .term-output { color: var(--green); }
+
+  /* Message thread */
+  .msg-bubble {
+    display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-start;
+  }
+  .msg-avatar {
+    width: 20px; height: 20px; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 600; flex-shrink: 0; margin-top: 2px;
+  }
+  .msg-body { flex: 1; }
+  .msg-sender {
+    font-size: 10px; font-weight: 600; margin-bottom: 2px;
+  }
+  .msg-text {
+    font-size: 11px; color: var(--text-secondary); line-height: 1.4;
+  }
+  .msg-timestamp {
+    font-size: 9px; color: var(--text-tertiary); margin-top: 2px;
+  }
+
+  /* Reply bar */
+  .reply-bar {
+    display: flex; gap: 6px; padding: 10px 14px;
+    border-top: 0.5px solid var(--separator);
+  }
+  .reply-input {
+    flex: 1; background: var(--bg-secondary); border: 0.5px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 11px;
+    color: var(--text-primary); outline: none; font-family: inherit;
+  }
+  .reply-input::placeholder { color: var(--text-tertiary); }
+  .reply-send {
+    background: var(--accent); border: none; border-radius: 6px;
+    padding: 6px 10px; font-size: 10px; font-weight: 600;
+    color: #fff; cursor: pointer;
+  }
+
+  /* ===== WIDGET ===== */
+  .widget {
+    width: 170px; height: 170px;
+    background: rgba(40, 40, 42, 0.85);
+    backdrop-filter: blur(40px);
+    border-radius: 18px;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    padding: 14px;
+    display: flex; flex-direction: column;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+  }
+  .widget-header {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+  }
+  .widget-icon { font-size: 14px; }
+  .widget-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
+  .widget-agents { flex: 1; }
+  .widget-agent {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 5px;
+  }
+  .widget-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .widget-name { font-size: 10px; color: var(--text-primary); font-weight: 500; flex: 1; }
+  .widget-status { font-size: 9px; font-weight: 500; }
+  .widget-footer {
+    font-size: 9px; color: var(--text-tertiary); margin-top: auto;
+    display: flex; align-items: center; gap: 4px;
+  }
+
+  /* ===== WIDGET LARGE ===== */
+  .widget-lg {
+    width: 360px; height: 170px;
+    background: rgba(40, 40, 42, 0.85);
+    backdrop-filter: blur(40px);
+    border-radius: 18px;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    padding: 14px;
+    display: flex; flex-direction: column;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+  }
+  .widget-lg .widget-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; flex: 1;
+  }
+
+  /* ===== INSTALLER ===== */
+  .installer {
+    width: 300px;
+    background: var(--bg-primary);
+    backdrop-filter: blur(60px) saturate(180%);
+    border-radius: 10px;
+    border: 0.5px solid var(--border);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    overflow: hidden;
+  }
+  .installer-hero {
+    padding: 20px 16px 16px; text-align: center;
+  }
+  .installer-icon { font-size: 32px; margin-bottom: 8px; }
+  .installer-title {
+    font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;
+  }
+  .installer-desc {
+    font-size: 11px; color: var(--text-tertiary); line-height: 1.5;
+  }
+  .install-steps { padding: 0 14px 8px; }
+  .install-step {
+    display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  }
+  .step-num {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600; flex-shrink: 0;
+  }
+  .step-num.done { background: var(--green); color: #000; }
+  .step-num.current { background: var(--accent); color: #fff; }
+  .step-num.pending {
+    border: 1px solid var(--border); color: var(--text-tertiary);
+    background: transparent;
+  }
+  .step-text { flex: 1; }
+  .step-title { font-size: 11px; font-weight: 500; color: var(--text-primary); }
+  .step-detail { font-size: 9px; color: var(--text-tertiary); margin-top: 1px; }
+  .step-progress {
+    width: 50px; height: 3px; background: rgba(255,255,255,0.08);
+    border-radius: 2px; overflow: hidden;
+  }
+  .step-progress-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+
+  .install-btn {
+    margin: 8px 14px 14px; padding: 8px; border-radius: 6px;
+    background: var(--accent); border: none; color: #fff;
+    font-size: 12px; font-weight: 600; width: calc(100% - 28px);
+    cursor: pointer; text-align: center;
+  }
+
+  /* ===== NOTIFICATION ===== */
+  .notification {
+    width: 340px;
+    background: rgba(50, 50, 52, 0.95);
+    backdrop-filter: blur(40px);
+    border-radius: 14px;
+    border: 0.5px solid rgba(255,255,255,0.08);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+    padding: 12px 14px;
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .notif-icon {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: rgba(191, 90, 242, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0;
+  }
+  .notif-body { flex: 1; }
+  .notif-app { font-size: 10px; color: var(--text-tertiary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .notif-title { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-top: 1px; }
+  .notif-text { font-size: 11px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4; }
+  .notif-time { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
+
+  /* ===== SETTINGS ===== */
+  .settings-window {
+    width: 420px;
+    background: var(--bg-primary);
+    backdrop-filter: blur(60px);
+    border-radius: 10px;
+    border: 0.5px solid var(--border);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    overflow: hidden;
+  }
+  .settings-toolbar {
+    display: flex; align-items: center; padding: 10px 14px;
+    border-bottom: 0.5px solid var(--separator); gap: 10px;
+  }
+  .settings-toolbar .dots { display: flex; gap: 6px; }
+  .settings-toolbar .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.close { background: var(--red); }
+  .dot.min { background: var(--orange); }
+  .dot.max { background: var(--green); }
+  .settings-tab-bar {
+    display: flex; gap: 0; padding: 0 14px; border-bottom: 0.5px solid var(--separator);
+  }
+  .settings-tab {
+    padding: 8px 14px; font-size: 11px; font-weight: 500;
+    color: var(--text-secondary); border-bottom: 2px solid transparent;
+    cursor: pointer;
+  }
+  .settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .settings-body { padding: 14px; }
+  .setting-group { margin-bottom: 16px; }
+  .setting-group-label {
+    font-size: 10px; font-weight: 600; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+  }
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 0; font-size: 12px; color: var(--text-primary);
+  }
+  .setting-value {
+    font-size: 11px; color: var(--text-tertiary);
+    font-family: 'SF Mono', monospace;
+  }
+  .toggle {
+    width: 32px; height: 18px; border-radius: 9px;
+    position: relative;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle.off { background: rgba(255,255,255,0.15); }
+  .toggle::after {
+    content: ''; position: absolute;
+    width: 14px; height: 14px; border-radius: 50%; background: #fff;
+    top: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .toggle.on::after { right: 2px; }
+  .toggle.off::after { left: 2px; }
+
+  .row-group { display: flex; flex-direction: column; gap: 0; }
+</style>
+</head>
+<body>
+
+<!-- ===== 1. MENU BAR POPOVER (simplified) ===== -->
+<div class="screen">
+  <div class="screen-label">Menu Bar Popover</div>
+  <div class="menubar">
+    <span style="font-size:10px">Wi-Fi</span>
+    <span style="font-size:10px">100%</span>
+    <div class="boo-icon">
+      &#x1f47b;
+      <div class="boo-badge">5</div>
+    </div>
+    <span class="menubar-time">2:30 PM</span>
+  </div>
+  <div class="popover">
+    <div class="popover-header">
+      <div>
+        <div class="popover-title">Boo</div>
+        <div class="popover-subtitle">5 agents across 2 machines</div>
+      </div>
+      <div class="header-actions">
+        <div class="header-btn" title="Broadcast">&#x1f4e2;</div>
+        <div class="header-btn" title="Refresh">&#x21bb;</div>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- Mac Mini section -->
+    <div class="section-label" style="display:flex;align-items:center;gap:6px;">
+      <div class="conn-dot ok" style="width:5px;height:5px"></div>
+      Mac Mini
+      <span style="font-weight:400;opacity:0.5">&middot; 1ms</span>
+    </div>
+    <div class="agent-list" style="padding-top:0;">
+      <div class="agent-row">
+        <div class="avatar eng">L
+          <div class="status-indicator active"></div>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">lee</div>
+          <div class="agent-meta">engineer &middot; Tab 3</div>
+        </div>
+        <div class="agent-right">
+          <div class="agent-status-text working">working</div>
+          <div class="agent-msgs">4 msgs</div>
+        </div>
+      </div>
+      <div class="agent-row">
+        <div class="avatar res">R
+          <div class="status-indicator active"></div>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">ren</div>
+          <div class="agent-meta">researcher &middot; Tab 1</div>
+        </div>
+        <div class="agent-right">
+          <div class="agent-status-text thinking">thinking</div>
+          <div class="agent-msgs">8 msgs</div>
+        </div>
+      </div>
+      <div class="agent-row">
+        <div class="avatar ops">G
+          <div class="status-indicator idle"></div>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">geni</div>
+          <div class="agent-meta">ops &middot; Tab 5</div>
+        </div>
+        <div class="agent-right">
+          <div class="agent-status-text idle">idle 2m</div>
+          <div class="agent-msgs">2 msgs</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MacBook section -->
+    <div class="section-label" style="display:flex;align-items:center;gap:6px;">
+      <div class="conn-dot ok" style="width:5px;height:5px"></div>
+      MacBook Pro
+      <span style="font-weight:400;opacity:0.5">&middot; local</span>
+    </div>
+    <div class="agent-list" style="padding-top:0;">
+      <div class="agent-row">
+        <div class="avatar dev">K
+          <div class="status-indicator active"></div>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">kai</div>
+          <div class="agent-meta">developer &middot; Tab 1</div>
+        </div>
+        <div class="agent-right">
+          <div class="agent-status-text working">working</div>
+          <div class="agent-msgs">1 msg</div>
+        </div>
+      </div>
+      <div class="agent-row">
+        <div class="avatar eng">J
+          <div class="status-indicator active"></div>
+        </div>
+        <div class="agent-info">
+          <div class="agent-name">jin</div>
+          <div class="agent-meta">engineer &middot; Tab 2</div>
+        </div>
+        <div class="agent-right">
+          <div class="agent-status-text thinking">thinking</div>
+          <div class="agent-msgs">3 msgs</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <div class="section-label">SSH Tunnels</div>
+    <div class="tunnel-row">
+      <div class="tunnel-dot" style="background:var(--green)"></div>
+      Mac Mini (100.126.187.125)
+      <span class="tunnel-latency">1ms</span>
+    </div>
+    <div class="tunnel-row">
+      <div class="tunnel-dot" style="background:var(--text-tertiary)"></div>
+      <span style="color:var(--text-tertiary)">VPS (100.125.36.102)</span>
+      <span class="tunnel-latency" style="color:var(--red)">offline</span>
+    </div>
+
+    <div class="separator" style="margin-top:8px"></div>
+
+    <div class="footer-actions">
+      <div class="action-item">
+        <span class="action-icon">&#x2699;</span> Settings...
+        <span class="action-shortcut">&#x2318;,</span>
+      </div>
+      <div class="action-item">
+        <span class="action-icon">&#x1f47b;</span> About Boo
+      </div>
+      <div class="action-item" style="color:var(--text-tertiary)">
+        <span class="action-icon">&#x23fb;</span> Quit
+        <span class="action-shortcut">&#x2318;Q</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 2. AGENT DETAIL WINDOW ===== -->
+<div class="screen">
+  <div class="screen-label">Agent Detail (click to open)</div>
+  <div class="detail-window">
+    <div class="detail-titlebar">
+      <div class="detail-close"></div>
+      <div class="detail-title">lee &mdash; Mac Mini</div>
+      <div style="font-size:10px;color:var(--text-tertiary)">engineer &middot; 1h 23m</div>
+    </div>
+
+    <!-- Terminal preview -->
+    <div class="detail-section">
+      <div class="terminal-preview">
+        <div class="terminal-header">
+          <span class="terminal-tab-label">Tab 3 &middot; 5b08e6b0</span>
+          <span class="terminal-refresh">&#x21bb; Refresh</span>
+        </div>
+        <div><span class="term-prompt">beastoinagents@Mac-mini</span> <span class="term-path">~/omi</span> %</div>
+        <div><span class="term-cmd">claude --model opus</span></div>
+        <div class="term-dim">Claude Code v1.0.35</div>
+        <div>&nbsp;</div>
+        <div><span style="color:var(--orange)">lee&gt;</span> Running tests for PR #4931...</div>
+        <div class="term-output">&nbsp; 75/75 tests passed (12.3s)</div>
+        <div><span style="color:var(--orange)">lee&gt;</span> <span style="opacity:0.5">|</span></div>
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div class="detail-section">
+      <div class="section-label" style="padding:0 0 8px;">Messages</div>
+      <div class="msg-bubble">
+        <div class="msg-avatar" style="background:rgba(191,90,242,0.12);color:var(--purple)">R</div>
+        <div class="msg-body">
+          <div class="msg-sender" style="color:var(--purple)">ren</div>
+          <div class="msg-text">Can you check the teleport sync race condition?</div>
+          <div class="msg-timestamp">2 min ago</div>
+        </div>
+      </div>
+      <div class="msg-bubble">
+        <div class="msg-avatar" style="background:rgba(48,209,88,0.12);color:var(--green)">L</div>
+        <div class="msg-body">
+          <div class="msg-sender" style="color:var(--green)">lee</div>
+          <div class="msg-text">Found it &mdash; stash create returns empty on clean tree. PR ready.</div>
+          <div class="msg-timestamp">just now</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reply -->
+    <div class="reply-bar">
+      <input class="reply-input" placeholder="Message lee..." />
+      <button class="reply-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 3. WIDGETS ===== -->
+<div class="screen">
+  <div class="screen-label">WidgetKit</div>
+
+  <!-- Small widget -->
+  <div class="widget">
+    <div class="widget-header">
+      <span class="widget-icon">&#x1f47b;</span>
+      <span class="widget-title">Boo</span>
+    </div>
+    <div class="widget-agents">
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--green)"></div>
+        <span class="widget-name">lee</span>
+        <span class="widget-status" style="color:var(--green)">working</span>
+      </div>
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--green)"></div>
+        <span class="widget-name">ren</span>
+        <span class="widget-status" style="color:var(--purple)">thinking</span>
+      </div>
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--orange)"></div>
+        <span class="widget-name">geni</span>
+        <span class="widget-status" style="color:var(--orange)">idle</span>
+      </div>
+    </div>
+    <div class="widget-footer">
+      <div class="tunnel-dot" style="width:4px;height:4px;background:var(--green)"></div>
+      2 machines &middot; 5 terminals
+    </div>
+  </div>
+
+  <div style="height:16px"></div>
+
+  <!-- Medium widget -->
+  <div class="widget-lg">
+    <div class="widget-header">
+      <span class="widget-icon">&#x1f47b;</span>
+      <span class="widget-title">Boo &mdash; Agent Status</span>
+    </div>
+    <div class="widget-grid">
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--green)"></div>
+        <span class="widget-name">lee</span>
+        <span class="widget-status" style="color:var(--green)">working</span>
+      </div>
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--green)"></div>
+        <span class="widget-name">ren</span>
+        <span class="widget-status" style="color:var(--purple)">thinking</span>
+      </div>
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--orange)"></div>
+        <span class="widget-name">geni</span>
+        <span class="widget-status" style="color:var(--orange)">idle 2m</span>
+      </div>
+      <div class="widget-agent">
+        <div class="widget-dot" style="background:var(--text-tertiary)"></div>
+        <span class="widget-name">kai</span>
+        <span class="widget-status" style="color:var(--text-tertiary)">offline</span>
+      </div>
+    </div>
+    <div class="widget-footer">
+      <div class="tunnel-dot" style="width:4px;height:4px;background:var(--green)"></div>
+      Mac Mini 1ms &middot; MacBook local &middot; 5 terminals
+    </div>
+  </div>
+</div>
+
+<!-- ===== 4. NOTIFICATION + INSTALLER ===== -->
+<div class="screen">
+  <div class="screen-label">Notification</div>
+  <div class="notification">
+    <div class="notif-icon">&#x1f47b;</div>
+    <div class="notif-body">
+      <div class="notif-app">Boo</div>
+      <div class="notif-title">Message from ren</div>
+      <div class="notif-text">Found the race condition in teleport sync &mdash; it's in the stash create path</div>
+    </div>
+    <div class="notif-time">now</div>
+  </div>
+
+  <div style="height:24px"></div>
+  <div class="screen-label">Socket Installer</div>
+
+  <div class="installer">
+    <div class="installer-hero">
+      <div class="installer-icon">&#x1f47b;</div>
+      <div class="installer-title">Setup Ghostty Socket</div>
+      <div class="installer-desc">
+        Download the pre-built Ghostty fork with<br>control socket support.
+      </div>
+    </div>
+    <div class="separator"></div>
+    <div class="install-steps">
+      <div class="install-step">
+        <div class="step-num done">&#x2713;</div>
+        <div class="step-text">
+          <div class="step-title">Download binary</div>
+          <div class="step-detail">Universal (arm64 + x86_64) &middot; 42 MB</div>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num current">2</div>
+        <div class="step-text">
+          <div class="step-title">Configure control-socket</div>
+          <div class="step-detail">~/.config/ghostty/config</div>
+        </div>
+        <div class="step-progress"><div class="step-progress-fill" style="width:100%"></div></div>
+      </div>
+      <div class="install-step" style="opacity:0.4">
+        <div class="step-num pending">3</div>
+        <div class="step-text">
+          <div class="step-title">Launch &amp; verify</div>
+          <div class="step-detail">Test socket connection</div>
+        </div>
+      </div>
+    </div>
+    <button class="install-btn">Configuring...</button>
+  </div>
+</div>
+
+<!-- ===== 5. SETTINGS ===== -->
+<div class="screen">
+  <div class="screen-label">Settings</div>
+  <div class="settings-window">
+    <div class="settings-toolbar">
+      <div class="dots">
+        <div class="dot close"></div>
+        <div class="dot min"></div>
+        <div class="dot max"></div>
+      </div>
+      <span style="font-size:12px;font-weight:600;color:var(--text-primary);flex:1;text-align:center;">Boo Settings</span>
+    </div>
+    <div class="settings-tab-bar">
+      <div class="settings-tab active">General</div>
+      <div class="settings-tab">Machines</div>
+      <div class="settings-tab">Tunnels</div>
+      <div class="settings-tab">About</div>
+    </div>
+    <div class="settings-body">
+      <div class="setting-group">
+        <div class="setting-group-label">Ghostty Socket</div>
+        <div class="setting-row">
+          <span>Socket path</span>
+          <span class="setting-value">/tmp/ghostty.sock</span>
+        </div>
+        <div class="setting-row">
+          <span>Auto-detect Ghostty</span>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <span>Socket permissions</span>
+          <span class="setting-value">0600</span>
+        </div>
+      </div>
+      <div class="setting-group">
+        <div class="setting-group-label">Notifications</div>
+        <div class="setting-row">
+          <span>Message notifications</span>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <span>Agent offline alerts</span>
+          <div class="toggle off"></div>
+        </div>
+        <div class="setting-row">
+          <span>Sound</span>
+          <span class="setting-value">Boop</span>
+        </div>
+      </div>
+      <div class="setting-group">
+        <div class="setting-group-label">Appearance</div>
+        <div class="setting-row">
+          <span>Launch at login</span>
+          <div class="toggle on"></div>
+        </div>
+        <div class="setting-row">
+          <span>Show agent count badge</span>
+          <div class="toggle on"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

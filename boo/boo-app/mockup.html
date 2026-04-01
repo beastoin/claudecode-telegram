@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Boo App — Menu Bar Mockup</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro', sans-serif;
+    background: #1a1a2e;
+    display: flex;
+    gap: 40px;
+    padding: 40px;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+  }
+
+  .screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .screen-label {
+    color: #888;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+
+  /* Menu bar strip */
+  .menubar {
+    width: 320px;
+    height: 28px;
+    background: rgba(30, 30, 40, 0.95);
+    border-radius: 8px 8px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 12px;
+    gap: 12px;
+  }
+  .menubar-icon {
+    font-size: 14px;
+    opacity: 0.7;
+  }
+  .menubar-icon.active {
+    opacity: 1;
+  }
+  .menubar-boo {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 12px;
+    color: #e0e0e0;
+    font-weight: 500;
+    position: relative;
+  }
+  .menubar-boo .ghost {
+    font-size: 15px;
+  }
+  .menubar-boo .badge {
+    background: #00c853;
+    color: #fff;
+    font-size: 8px;
+    font-weight: 700;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: -4px;
+    right: -10px;
+  }
+
+  /* Popover card */
+  .popover {
+    width: 320px;
+    background: rgba(40, 40, 56, 0.98);
+    backdrop-filter: blur(40px);
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 0.5px rgba(255,255,255,0.05);
+    overflow: hidden;
+  }
+
+  /* Machine tabs */
+  .tabs {
+    display: flex;
+    padding: 8px 8px 0;
+    gap: 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .tab {
+    flex: 1;
+    padding: 8px 4px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.4);
+    cursor: pointer;
+    border-radius: 6px 6px 0 0;
+    position: relative;
+    transition: all 0.15s;
+  }
+  .tab.active {
+    color: #fff;
+    background: rgba(255,255,255,0.06);
+  }
+  .tab.active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 20%;
+    right: 20%;
+    height: 2px;
+    background: #7c5cff;
+    border-radius: 2px;
+  }
+  .tab .tab-icon {
+    font-size: 16px;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .tab .tab-count {
+    font-size: 9px;
+    color: rgba(255,255,255,0.3);
+    margin-left: 2px;
+  }
+  .tab.active .tab-count {
+    color: #7c5cff;
+  }
+
+  /* Section */
+  .section {
+    padding: 12px 14px 8px;
+  }
+  .section-header {
+    font-size: 10px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.3);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 8px;
+  }
+  .divider {
+    height: 1px;
+    background: rgba(255,255,255,0.06);
+    margin: 0 14px;
+  }
+
+  /* Agent row */
+  .agent-row {
+    display: flex;
+    align-items: center;
+    padding: 7px 10px;
+    border-radius: 8px;
+    margin-bottom: 3px;
+    transition: background 0.15s;
+  }
+  .agent-row:hover {
+    background: rgba(255,255,255,0.04);
+  }
+  .agent-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    margin-right: 10px;
+    flex-shrink: 0;
+  }
+  .agent-avatar.engineer { background: rgba(0, 200, 83, 0.15); color: #00c853; }
+  .agent-avatar.researcher { background: rgba(124, 92, 255, 0.15); color: #7c5cff; }
+  .agent-avatar.ops { background: rgba(255, 152, 0, 0.15); color: #ff9800; }
+  .agent-avatar.devops { background: rgba(0, 176, 255, 0.15); color: #00b0ff; }
+
+  .agent-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .agent-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+  }
+  .agent-role {
+    font-size: 10px;
+    color: rgba(255,255,255,0.35);
+    margin-top: 1px;
+  }
+  .agent-status {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.35);
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+  .status-dot.active { background: #00c853; box-shadow: 0 0 6px rgba(0,200,83,0.4); }
+  .status-dot.idle { background: #ff9800; }
+  .status-dot.offline { background: rgba(255,255,255,0.2); }
+  .agent-terminal {
+    font-size: 9px;
+    color: rgba(255,255,255,0.2);
+    font-family: 'SF Mono', 'Menlo', monospace;
+  }
+
+  /* Message row */
+  .msg-row {
+    display: flex;
+    align-items: flex-start;
+    padding: 6px 10px;
+    border-radius: 8px;
+    margin-bottom: 2px;
+  }
+  .msg-time {
+    font-size: 9px;
+    color: rgba(255,255,255,0.2);
+    width: 32px;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+  .msg-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .msg-from {
+    font-size: 10px;
+    font-weight: 600;
+    margin-bottom: 1px;
+  }
+  .msg-from.sent { color: #00c853; }
+  .msg-from.received { color: #7c5cff; }
+  .msg-text {
+    font-size: 11px;
+    color: rgba(255,255,255,0.5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Terminal grid */
+  .terminal-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+    padding: 0 4px;
+  }
+  .terminal-cell {
+    background: rgba(255,255,255,0.04);
+    border-radius: 4px;
+    padding: 6px 4px;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .terminal-cell.active-term {
+    border-color: rgba(0, 200, 83, 0.3);
+    background: rgba(0, 200, 83, 0.05);
+  }
+  .terminal-id {
+    font-size: 8px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    color: rgba(255,255,255,0.3);
+    margin-bottom: 2px;
+  }
+  .terminal-title {
+    font-size: 9px;
+    color: rgba(255,255,255,0.5);
+  }
+
+  /* Stats bar */
+  .stats-bar {
+    display: flex;
+    gap: 0;
+    padding: 10px 14px;
+    justify-content: space-between;
+  }
+  .stat {
+    text-align: center;
+    flex: 1;
+  }
+  .stat-value {
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+  }
+  .stat-label {
+    font-size: 9px;
+    color: rgba(255,255,255,0.3);
+    margin-top: 2px;
+  }
+  .stat-value.green { color: #00c853; }
+  .stat-value.purple { color: #7c5cff; }
+  .stat-value.orange { color: #ff9800; }
+
+  /* Actions */
+  .actions {
+    padding: 6px 10px 10px;
+  }
+  .action-row {
+    display: flex;
+    align-items: center;
+    padding: 7px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    transition: all 0.15s;
+    gap: 8px;
+  }
+  .action-row:hover {
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.8);
+  }
+  .action-icon {
+    font-size: 14px;
+    width: 20px;
+    text-align: center;
+  }
+  .action-shortcut {
+    margin-left: auto;
+    font-size: 10px;
+    color: rgba(255,255,255,0.15);
+    font-family: 'SF Mono', monospace;
+  }
+
+  /* Quick send */
+  .quick-send {
+    display: flex;
+    gap: 6px;
+    padding: 8px 14px 4px;
+  }
+  .quick-send input {
+    flex: 1;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: #fff;
+    outline: none;
+    font-family: inherit;
+  }
+  .quick-send input::placeholder {
+    color: rgba(255,255,255,0.2);
+  }
+  .quick-send button {
+    background: #7c5cff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 11px;
+    color: #fff;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  /* Connection indicator */
+  .connection-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.25);
+    border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .connection-bar .pipe {
+    color: rgba(255,255,255,0.1);
+  }
+
+  /* Second screen - expanded dashboard */
+  .popover.expanded {
+    width: 420px;
+  }
+
+  .agent-row-expanded {
+    display: flex;
+    align-items: center;
+    padding: 10px 14px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.04);
+  }
+  .agent-detail {
+    flex: 1;
+  }
+  .agent-detail .name-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .agent-detail .agent-name {
+    font-size: 14px;
+  }
+  .agent-detail .agent-badge {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  .agent-badge.working { background: rgba(0,200,83,0.15); color: #00c853; }
+  .agent-badge.thinking { background: rgba(124,92,255,0.15); color: #7c5cff; }
+  .agent-badge.waiting { background: rgba(255,152,0,0.15); color: #ff9800; }
+
+  .agent-detail .meta {
+    display: flex;
+    gap: 12px;
+    margin-top: 4px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.3);
+  }
+  .agent-actions {
+    display: flex;
+    gap: 4px;
+  }
+  .agent-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.04);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<!-- Screen 1: Compact menu bar popover -->
+<div class="screen">
+  <div class="screen-label">Menu Bar Popover</div>
+
+  <div class="menubar">
+    <span class="menubar-icon">&#xf0e0;</span>
+    <span class="menubar-icon">&#x1f50a;</span>
+    <div class="menubar-boo">
+      <span class="ghost">&#x1f47b;</span>
+      <div class="badge">5</div>
+    </div>
+  </div>
+
+  <div class="popover">
+    <!-- Machine tabs -->
+    <div class="tabs">
+      <div class="tab">
+        <span class="tab-icon">&#x1f4bb;</span>
+        MacBook<span class="tab-count">2</span>
+      </div>
+      <div class="tab active">
+        <span class="tab-icon">&#x1f5a5;</span>
+        Mac Mini<span class="tab-count">3</span>
+      </div>
+      <div class="tab">
+        <span class="tab-icon">&#x2601;</span>
+        VPS<span class="tab-count">0</span>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-bar">
+      <div class="stat">
+        <div class="stat-value green">3</div>
+        <div class="stat-label">Agents</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value purple">12</div>
+        <div class="stat-label">Messages</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value orange">5</div>
+        <div class="stat-label">Terminals</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Agents section -->
+    <div class="section">
+      <div class="section-header">Active Agents</div>
+      <div class="agent-row">
+        <div class="agent-avatar engineer">L</div>
+        <div class="agent-info">
+          <div class="agent-name">lee</div>
+          <div class="agent-role">engineer &#183; Tab 3</div>
+        </div>
+        <div class="agent-status">
+          <div class="status-dot active"></div>
+          working
+        </div>
+      </div>
+      <div class="agent-row">
+        <div class="agent-avatar researcher">R</div>
+        <div class="agent-info">
+          <div class="agent-name">ren</div>
+          <div class="agent-role">researcher &#183; Tab 1</div>
+        </div>
+        <div class="agent-status">
+          <div class="status-dot active"></div>
+          working
+        </div>
+      </div>
+      <div class="agent-row">
+        <div class="agent-avatar ops">G</div>
+        <div class="agent-info">
+          <div class="agent-name">geni</div>
+          <div class="agent-role">ops &#183; Tab 5</div>
+        </div>
+        <div class="agent-status">
+          <div class="status-dot idle"></div>
+          idle 2m
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Messages section -->
+    <div class="section">
+      <div class="section-header">Recent Messages</div>
+      <div class="msg-row">
+        <div class="msg-time">now</div>
+        <div class="msg-content">
+          <div class="msg-from sent">lee &#8594; ren</div>
+          <div class="msg-text">PR #4931 is ready for review, tests passing</div>
+        </div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-time">2m</div>
+        <div class="msg-content">
+          <div class="msg-from received">ren &#8594; lee</div>
+          <div class="msg-text">Found the race condition in teleport sync</div>
+        </div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-time">5m</div>
+        <div class="msg-content">
+          <div class="msg-from sent">geni &#8594; all</div>
+          <div class="msg-text">Build verified on Mac Mini, all 75 tests pass</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Quick send -->
+    <div class="quick-send">
+      <input type="text" placeholder="Message all agents..." />
+      <button>Send</button>
+    </div>
+
+    <div class="divider" style="margin-top: 8px;"></div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <div class="action-row">
+        <span class="action-icon">&#x1f50c;</span>
+        Install Ghostty Socket...
+      </div>
+      <div class="action-row">
+        <span class="action-icon">&#x2699;</span>
+        Settings...
+        <span class="action-shortcut">&#x2318;,</span>
+      </div>
+      <div class="action-row">
+        <span class="action-icon">&#x1f47b;</span>
+        About Boo
+      </div>
+      <div class="action-row" style="color: rgba(255,255,255,0.3);">
+        <span class="action-icon">&#x23fb;</span>
+        Quit Boo
+        <span class="action-shortcut">&#x2318;Q</span>
+      </div>
+    </div>
+
+    <!-- Connection bar -->
+    <div class="connection-bar">
+      <div class="status-dot active" style="width:5px;height:5px;"></div>
+      Mac Mini via SSH
+      <span class="pipe">|</span>
+      /tmp/ghostty.sock
+      <span class="pipe">|</span>
+      1ms
+    </div>
+  </div>
+</div>
+
+<!-- Screen 2: Expanded agent detail -->
+<div class="screen">
+  <div class="screen-label">Agent Detail View</div>
+
+  <div class="popover expanded">
+    <div class="tabs">
+      <div class="tab active">
+        <span class="tab-icon">&#x1f5a5;</span>
+        Mac Mini<span class="tab-count">3</span>
+      </div>
+    </div>
+
+    <!-- Agent detail card -->
+    <div class="section">
+      <div class="agent-row-expanded">
+        <div class="agent-avatar engineer" style="width:36px;height:36px;font-size:16px;margin-right:12px;">L</div>
+        <div class="agent-detail">
+          <div class="name-row">
+            <div class="agent-name">lee</div>
+            <span class="agent-badge working">working</span>
+          </div>
+          <div class="meta">
+            <span>&#x1f4bb; engineer</span>
+            <span>&#x23f1; 1h 23m</span>
+            <span>&#x1f4e8; 8 msgs</span>
+          </div>
+        </div>
+        <div class="agent-actions">
+          <div class="agent-btn" title="Send message">&#x1f4ac;</div>
+          <div class="agent-btn" title="View terminal">&#x1f5a5;</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Terminal view -->
+    <div class="section">
+      <div class="section-header">Terminal &#183; Tab 3 (5b08e6b0)</div>
+      <div style="background: #0d1117; border-radius: 8px; padding: 10px; font-family: 'SF Mono', 'Menlo', monospace; font-size: 11px; line-height: 1.6; color: #c9d1d9; margin-top: 4px; border: 1px solid rgba(255,255,255,0.06);">
+        <div><span style="color:#7c5cff">beastoinagents@Mac-mini</span> <span style="color:#4a9eff">~/omi</span> %</div>
+        <div style="color:#00c853">$ claude --model opus</div>
+        <div style="color:#888">Claude Code v1.0.35</div>
+        <div style="color:#888">Working directory: /Users/beastoinagents/omi</div>
+        <div>&nbsp;</div>
+        <div><span style="color:#ff9800">lee&gt;</span> Running tests for PR #4931...</div>
+        <div style="color:#00c853">  75/75 tests passed (12.3s)</div>
+        <div><span style="color:#ff9800">lee&gt;</span> <span style="animation:blink 1s infinite;color:#fff">|</span></div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Conversation with this agent -->
+    <div class="section">
+      <div class="section-header">Conversation with lee</div>
+      <div class="msg-row">
+        <div class="msg-time">2m</div>
+        <div class="msg-content">
+          <div class="msg-from received">ren</div>
+          <div class="msg-text">Can you check the teleport sync race condition?</div>
+        </div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-time">1m</div>
+        <div class="msg-content">
+          <div class="msg-from sent">lee</div>
+          <div class="msg-text">Found it - stash create returns empty on clean tree</div>
+        </div>
+      </div>
+      <div class="msg-row">
+        <div class="msg-time">now</div>
+        <div class="msg-content">
+          <div class="msg-from sent">lee</div>
+          <div class="msg-text">PR #4931 is ready, all tests green</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick reply -->
+    <div class="quick-send">
+      <input type="text" placeholder="Reply to lee..." />
+      <button>Send</button>
+    </div>
+
+    <div class="connection-bar">
+      <div class="status-dot active" style="width:5px;height:5px;"></div>
+      Mac Mini &#183; /tmp/ghostty.sock &#183; 1ms latency
+    </div>
+  </div>
+</div>
+
+<!-- Screen 3: Ghostty Socket Installer -->
+<div class="screen">
+  <div class="screen-label">Socket Installer</div>
+
+  <div class="popover" style="width: 340px;">
+    <div style="padding: 20px 16px; text-align: center;">
+      <div style="font-size: 40px; margin-bottom: 8px;">&#x1f47b;</div>
+      <div style="font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 4px;">Install Ghostty Socket</div>
+      <div style="font-size: 11px; color: rgba(255,255,255,0.4); line-height: 1.5;">
+        Boo needs the Ghostty fork with control socket support.<br>
+        This takes about 2 minutes.
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#00c853;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;">&#x2713;</div>
+        <div>
+          <div style="font-size:12px;color:#fff;font-weight:500;">Download Ghostty fork</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);">beastoin/ghostty &#183; 89 MB</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#7c5cff;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;">2</div>
+        <div>
+          <div style="font-size:12px;color:#fff;font-weight:500;">Build from source</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);">zig build -Doptimize=ReleaseFast</div>
+        </div>
+        <div style="margin-left:auto;">
+          <!-- Progress bar -->
+          <div style="width:60px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;overflow:hidden;">
+            <div style="width:65%;height:100%;background:#7c5cff;border-radius:2px;"></div>
+          </div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.3);text-align:right;margin-top:2px;">65%</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;opacity:0.4;">
+        <div style="width:24px;height:24px;border-radius:50%;border:1px solid rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:12px;color:rgba(255,255,255,0.3);">3</div>
+        <div>
+          <div style="font-size:12px;color:#fff;font-weight:500;">Configure control-socket</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);">~/.config/ghostty/config</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;opacity:0.4;">
+        <div style="width:24px;height:24px;border-radius:50%;border:1px solid rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:12px;color:rgba(255,255,255,0.3);">4</div>
+        <div>
+          <div style="font-size:12px;color:#fff;font-weight:500;">Launch & verify</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);">Test socket connection</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div style="padding: 12px 14px;">
+      <button style="width:100%;padding:10px;background:#7c5cff;border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">
+        Building... 65%
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+</style>
+
+</body>
+</html>
