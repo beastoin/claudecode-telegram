@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
 import BooCore
 
@@ -26,7 +27,7 @@ struct SettingsView: View {
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag("about")
         }
-        .frame(width: 500, height: 380)
+        .frame(width: 500, height: 420)
     }
 }
 
@@ -299,7 +300,12 @@ struct AddMachineSheet: View {
 
 struct InstallerSettingsTab: View {
     @State private var installStatus: InstallStatus = .notInstalled
-    @State private var isInstalling = false
+    @State private var installMessage: String?
+
+    private static let downloadURL = "https://storage.googleapis.com/omi-pr-assets/ghostty-boo/GhosttyBoo-macOS-arm64.zip"
+    private static let appName = "Ghostty Boo.app"
+    private static let systemInstallPath = "/Applications/Ghostty Boo.app"
+    private static let userInstallPath = NSString("~/Applications/Ghostty Boo.app").expandingTildeInPath
 
     enum InstallStatus {
         case notInstalled, installing, installed, error
@@ -325,15 +331,26 @@ struct InstallerSettingsTab: View {
 
                 if installStatus == .notInstalled {
                     Button {
-                        installStatus = .installing
-                        // Simulated install
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            installStatus = .installed
-                        }
+                        performInstall()
                     } label: {
                         Label("Install Ghostty Boo", systemImage: "arrow.down.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                }
+
+                if installStatus == .installed {
+                    Button {
+                        openGhosttyBoo()
+                    } label: {
+                        Label("Open Ghostty Boo", systemImage: "arrow.up.forward.app.fill")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if let message = installMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(installStatus == .error ? .red : .secondary)
                 }
 
                 Text("Ghostty Boo is an unofficial fork of Ghostty by Mitchell Hashimoto. It adds a `control-socket` config option. Your existing Ghostty config and data are preserved.")
@@ -365,6 +382,9 @@ struct InstallerSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            checkIfInstalled()
+        }
     }
 
     @ViewBuilder
@@ -388,6 +408,195 @@ struct InstallerSettingsTab: View {
             Label("Error", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+    }
+
+    // MARK: - Install Logic
+
+    private func checkIfInstalled() {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: Self.systemInstallPath) || fm.fileExists(atPath: Self.userInstallPath) {
+            installStatus = .installed
+        }
+    }
+
+    private func performInstall() {
+        installStatus = .installing
+        installMessage = "Downloading..."
+
+        Task {
+            do {
+                // 1. Download the zip
+                guard let url = URL(string: Self.downloadURL) else {
+                    throw InstallerError.message("Invalid download URL")
+                }
+                let (zipFileURL, response) = try await URLSession.shared.download(from: url)
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                    throw InstallerError.message("Download failed with HTTP \(httpResponse.statusCode)")
+                }
+
+                // Move to a stable temp path (URLSession download file is ephemeral)
+                let zipPath = NSTemporaryDirectory() + "GhosttyBoo-macOS-arm64.zip"
+                let fm = FileManager.default
+                if fm.fileExists(atPath: zipPath) {
+                    try fm.removeItem(atPath: zipPath)
+                }
+                try fm.moveItem(at: zipFileURL, to: URL(fileURLWithPath: zipPath))
+
+                await MainActor.run { installMessage = "Unzipping..." }
+
+                // 2. Unzip
+                let extractDir = "/tmp/ghostty-boo-install"
+                if fm.fileExists(atPath: extractDir) {
+                    try fm.removeItem(atPath: extractDir)
+                }
+                try fm.createDirectory(atPath: extractDir, withIntermediateDirectories: true)
+
+                let unzipProcess = Process()
+                unzipProcess.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                unzipProcess.arguments = ["-o", zipPath, "-d", extractDir]
+                unzipProcess.standardOutput = FileHandle.nullDevice
+                unzipProcess.standardError = FileHandle.nullDevice
+                try unzipProcess.run()
+                unzipProcess.waitUntilExit()
+
+                guard unzipProcess.terminationStatus == 0 else {
+                    throw InstallerError.message("Unzip failed (exit code \(unzipProcess.terminationStatus))")
+                }
+
+                // Find the .app inside extracted contents
+                let extractedItems = try fm.contentsOfDirectory(atPath: extractDir)
+                guard let appItem = extractedItems.first(where: { $0.hasSuffix(".app") }) else {
+                    throw InstallerError.message("No .app found in downloaded archive")
+                }
+                let extractedAppPath = extractDir + "/" + appItem
+
+                await MainActor.run { installMessage = "Installing to /Applications..." }
+
+                // 3. Move to /Applications, fall back to ~/Applications
+                var finalInstallPath = Self.systemInstallPath
+                var movedSuccessfully = false
+
+                // Try /Applications first
+                do {
+                    if fm.fileExists(atPath: Self.systemInstallPath) {
+                        try fm.removeItem(atPath: Self.systemInstallPath)
+                    }
+                    let mvProcess = Process()
+                    mvProcess.executableURL = URL(fileURLWithPath: "/bin/mv")
+                    mvProcess.arguments = [extractedAppPath, Self.systemInstallPath]
+                    mvProcess.standardOutput = FileHandle.nullDevice
+                    mvProcess.standardError = FileHandle.nullDevice
+                    try mvProcess.run()
+                    mvProcess.waitUntilExit()
+                    if mvProcess.terminationStatus == 0 {
+                        movedSuccessfully = true
+                    }
+                } catch {
+                    // Permission denied -- will fall back to ~/Applications
+                }
+
+                if !movedSuccessfully {
+                    await MainActor.run { installMessage = "Installing to ~/Applications..." }
+
+                    // Ensure ~/Applications exists
+                    let userAppsDir = NSString("~/Applications").expandingTildeInPath
+                    if !fm.fileExists(atPath: userAppsDir) {
+                        try fm.createDirectory(atPath: userAppsDir, withIntermediateDirectories: true)
+                    }
+                    if fm.fileExists(atPath: Self.userInstallPath) {
+                        try fm.removeItem(atPath: Self.userInstallPath)
+                    }
+                    let mvProcess = Process()
+                    mvProcess.executableURL = URL(fileURLWithPath: "/bin/mv")
+                    mvProcess.arguments = [extractedAppPath, Self.userInstallPath]
+                    mvProcess.standardOutput = FileHandle.nullDevice
+                    mvProcess.standardError = FileHandle.nullDevice
+                    try mvProcess.run()
+                    mvProcess.waitUntilExit()
+                    guard mvProcess.terminationStatus == 0 else {
+                        throw InstallerError.message("Failed to install to ~/Applications")
+                    }
+                    finalInstallPath = Self.userInstallPath
+                }
+
+                // 4. Configure control-socket in ghostty config
+                await MainActor.run { installMessage = "Configuring control-socket..." }
+                try ensureGhosttyControlSocket()
+
+                // 5. Cleanup
+                try? fm.removeItem(atPath: zipPath)
+                try? fm.removeItem(atPath: extractDir)
+
+                let displayPath = finalInstallPath.hasPrefix(NSHomeDirectory())
+                    ? "~/Applications" : "/Applications"
+                await MainActor.run {
+                    installStatus = .installed
+                    installMessage = "Installed to \(displayPath). control-socket configured."
+                }
+
+                // Clear message after 5 seconds
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                await MainActor.run { installMessage = nil }
+
+            } catch {
+                let errorMsg = (error as? InstallerError)?.localizedDescription
+                    ?? error.localizedDescription
+                await MainActor.run {
+                    installStatus = .error
+                    installMessage = errorMsg
+                }
+            }
+        }
+    }
+
+    private func openGhosttyBoo() {
+        let fm = FileManager.default
+        let path: String
+        if fm.fileExists(atPath: Self.systemInstallPath) {
+            path = Self.systemInstallPath
+        } else if fm.fileExists(atPath: Self.userInstallPath) {
+            path = Self.userInstallPath
+        } else {
+            installMessage = "Ghostty Boo.app not found"
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    private func ensureGhosttyControlSocket() throws {
+        let configDir = NSString("~/.config/ghostty").expandingTildeInPath
+        let configPath = configDir + "/config"
+        let fm = FileManager.default
+        let controlLine = "control-socket = /tmp/ghostty.sock"
+
+        if !fm.fileExists(atPath: configDir) {
+            try fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        }
+
+        if fm.fileExists(atPath: configPath) {
+            let contents = try String(contentsOfFile: configPath, encoding: .utf8)
+            if contents.contains("control-socket") {
+                return // Already configured
+            }
+            // Append the control-socket line
+            let newContents = contents.hasSuffix("\n")
+                ? contents + controlLine + "\n"
+                : contents + "\n" + controlLine + "\n"
+            try newContents.write(toFile: configPath, atomically: true, encoding: .utf8)
+        } else {
+            // Create new config file
+            try (controlLine + "\n").write(toFile: configPath, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
+private enum InstallerError: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let msg): return msg
         }
     }
 }
@@ -446,7 +655,7 @@ struct AboutSettingsTab: View {
                     HStack(spacing: 16) {
                         Link("Ghostty", destination: URL(string: "https://ghostty.org")!)
                             .font(.caption2)
-                        Link("Boo on GitHub", destination: URL(string: "https://github.com/nicobailon/boo")!)
+                        Link("Boo on GitHub", destination: URL(string: "https://github.com/beastoin/claudecode-telegram/tree/main/boo")!)
                             .font(.caption2)
                     }
                     .padding(.top, 2)
