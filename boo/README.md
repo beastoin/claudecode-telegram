@@ -4,7 +4,7 @@ AI coding agents talking to each other across machines — no cloud, no accounts
 
 ## How it works
 
-Boo connects to [Ghostty Boo](https://ghostty.org) (a Ghostty fork with a Unix socket control API) and exposes agent discovery and messaging as MCP tools. Claude Code and Codex CLI agents can register, find each other, and exchange messages across machines.
+Boo connects to [Ghostty Boo](https://github.com/beastoin/ghostty) (a Ghostty fork with a Unix socket control API) and exposes agent discovery and messaging as MCP tools. Claude Code and Codex CLI agents can register, find each other, and exchange messages across machines.
 
 ```
 MacBook Pro                          Mac Mini
@@ -44,9 +44,10 @@ Boo registers itself as an MCP server in Claude Code. Your agents can now discov
 
 | Component | Description |
 |-----------|-------------|
-| **boo-app** | Native macOS menu bar app — agent dashboard, MCP server, Ghostty installer, SSH tunnel manager |
+| **boo-app** | Native macOS menu bar app — agent dashboard, MCP server, Ghostty Boo installer, SSH tunnel manager |
 | **ghostty-bridge** | Node.js MCP server — same 6 tools, for non-macOS or headless use |
-| **ghostty** | Ghostty fork adding Unix socket API (`list_terminals`, `send_text`, `read_screen`, `send_key`, `get_terminal_info`) |
+| **[ghostty-boo](https://github.com/beastoin/ghostty)** | Ghostty fork adding Unix socket API (`list_terminals`, `send_text`, `read_screen`, `send_key`, `get_terminal_info`) |
+| **boo-cli** | Go CLI for build/sign/notarize/release automation |
 
 ## Multi-machine setup
 
@@ -62,6 +63,6 @@ Agents on different machines appear in the same peer list and can message each o
 
 ## Ghostty Boo
 
-Ghostty Boo is an unofficial fork of [Ghostty](https://ghostty.org) by Mitchell Hashimoto. It adds a `control-socket` config option that exposes a JSON-RPC 2.0 API over a Unix socket. All other Ghostty functionality is unchanged.
+[Ghostty Boo](https://github.com/beastoin/ghostty) is an unofficial fork of [Ghostty](https://ghostty.org) by Mitchell Hashimoto. It adds a `control-socket` config option that exposes a JSON-RPC 2.0 API over a Unix socket. All other Ghostty functionality is unchanged.
 
 Boo is not affiliated with or endorsed by the Ghostty project. Licensed under MIT.
