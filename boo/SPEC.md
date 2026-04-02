@@ -9,6 +9,7 @@ Three components:
 - **ghostty-socket** — Ghostty fork with Unix socket API for terminal control
 - **ghostty-bridge** — Node.js relay connecting Ghostty instances across machines via MCP
 - **boo-app** — Native macOS menu bar app for agent discovery, messaging dashboard, and Ghostty socket installer
+- **boo-cli** — Go CLI (`boo`) for build/sign/notarize/release automation. Runs on VPS, SSHs to Mac Mini for macOS operations. Commands: `dev build`, `dev test`, `dev sync`, `sign`, `notarize`, `verify`, `release`, `ship`
 
 ## Architecture
 

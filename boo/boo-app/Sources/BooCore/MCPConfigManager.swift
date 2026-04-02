@@ -58,6 +58,22 @@ public struct MCPConfigManager: Sendable {
         return servers["boo"] as? [String: Any]
     }
 
+    /// Check if the registered binary path matches the current bundle.
+    public func isStale() -> Bool {
+        guard let entry = currentEntry(),
+              let registeredPath = entry["command"] as? String else { return false }
+        let currentPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
+        return registeredPath != currentPath
+    }
+
+    /// Repair stale registration by re-installing with current binary path.
+    @discardableResult
+    public func repair() throws -> Bool {
+        try uninstall()
+        let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
+        return try install(binaryPath: binaryPath)
+    }
+
     // MARK: - Private
 
     private func readConfig() -> [String: Any]? {

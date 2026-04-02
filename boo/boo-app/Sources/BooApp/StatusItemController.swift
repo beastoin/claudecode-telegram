@@ -18,6 +18,7 @@ final class StatusItemController {
         setupButton()
         setupPopover()
         setupEventMonitor()
+        setupNotificationObserver()
     }
 
     private func setupButton() {
@@ -42,6 +43,20 @@ final class StatusItemController {
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             if let self, self.popover.isShown {
                 self.popover.performClose(nil)
+            }
+        }
+    }
+
+    private func setupNotificationObserver() {
+        NotificationCenter.default.addObserver(
+            forName: .init("ShowBooPopover"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let button = self.statusItem.button, !self.popover.isShown {
+                    self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
         }
     }

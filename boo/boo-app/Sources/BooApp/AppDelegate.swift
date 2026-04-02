@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Welcome to Boo"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 460, height: 360))
+        window.setContentSize(NSSize(width: 520, height: 460))
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
