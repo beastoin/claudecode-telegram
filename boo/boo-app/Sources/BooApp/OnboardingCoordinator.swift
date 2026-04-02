@@ -121,6 +121,9 @@ final class OnboardingCoordinator {
         var hasGhosttyBoo = await detector.detectGhosttyBooInstall()
         if hasGhosttyBoo {
             updateProbe("ghostty", state: .passed("Ghostty Boo"))
+            // Auto-launch if installed but not running
+            launchGhosttyBoo()
+            try? await Task.sleep(for: .seconds(2))
         } else {
             // Auto-install Ghostty Boo
             updateProbe("ghostty", state: .running)
@@ -142,7 +145,7 @@ final class OnboardingCoordinator {
                 hasGhosttyBoo = true
 
                 // Remove stale socket before launching so Ghostty Boo creates a fresh one
-                try? FileManager.default.removeItem(atPath: "/tmp/ghostty.sock")
+                try? FileManager.default.removeItem(atPath: "/tmp/ghostty-boo.sock")
                 // Auto-launch Ghostty Boo so socket + terminal become available
                 launchGhosttyBoo()
                 // Wait for Ghostty Boo to start and create the socket
@@ -161,7 +164,7 @@ final class OnboardingCoordinator {
             var result = await detector.probeSocket()
             if result.path == nil {
                 // Socket not responding — remove stale file, launch Ghostty Boo, retry
-                try? FileManager.default.removeItem(atPath: "/tmp/ghostty.sock")
+                try? FileManager.default.removeItem(atPath: "/tmp/ghostty-boo.sock")
                 launchGhosttyBoo()
                 try? await Task.sleep(for: .seconds(3))
                 result = await detector.probeSocket()

@@ -122,7 +122,7 @@ public actor RemoteProvisioner {
                 let tunnelConfig = TunnelConfig(
                     name: host.alias,
                     sshHost: host.alias,
-                    remoteSocket: "/tmp/ghostty.sock"
+                    remoteSocket: "/tmp/ghostty-boo.sock"
                 )
                 await tunnelManager.startTunnel(tunnelConfig)
 
@@ -164,7 +164,7 @@ public actor RemoteProvisioner {
     private func configureRemoteSocket(host: SSHHost) async -> Bool {
         let result = await runSSH(
             host: host.alias,
-            command: "mkdir -p ~/.config/ghostty && grep -q 'control-socket' ~/.config/ghostty/config 2>/dev/null || echo 'control-socket = /tmp/ghostty.sock' >> ~/.config/ghostty/config"
+            command: "mkdir -p ~/.config/ghostty && grep -q 'control-socket' ~/.config/ghostty/config 2>/dev/null || echo 'control-socket = /tmp/ghostty-boo.sock' >> ~/.config/ghostty/config"
         )
         return result != nil
     }

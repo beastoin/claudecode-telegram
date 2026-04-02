@@ -69,18 +69,9 @@ struct FirstContactView: View {
             Spacer()
 
             // Bottom
-            HStack {
-                if isRunning {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Running demo...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if demoFailed {
-                    Button("Go Back") { coordinator.back() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                } else if coordinator.demoComplete {
+            if coordinator.demoComplete && !demoFailed {
+                // Success state — prominent Continue button
+                HStack {
                     Button("Re-run Demo") {
                         coordinator.demoTranscript = []
                         coordinator.demoComplete = false
@@ -88,16 +79,35 @@ struct FirstContactView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                }
-                Spacer()
-                if coordinator.demoComplete && !demoFailed {
+                    Spacer()
                     Button("Continue") { coordinator.advance() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
                 }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 20)
+            } else {
+                HStack {
+                    if isRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Running demo...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if demoFailed {
+                        Button("Go Back") { coordinator.back() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                        Spacer()
+                        Button("Skip Demo") { coordinator.advance() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 20)
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 20)
         }
         .padding(.top, 16)
         .task {

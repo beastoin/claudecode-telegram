@@ -6,7 +6,7 @@ import BooCore
 /// Settings window — follows macOS System Settings pattern (grouped form).
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
-    @State private var socketPath = "/tmp/ghostty.sock"
+    @State private var socketPath = "/tmp/ghostty-boo.sock"
     @State private var selectedTab = "general"
 
     var body: some View {
@@ -20,7 +20,7 @@ struct SettingsView: View {
                 .tag("machines")
 
             InstallerSettingsTab()
-                .tabItem { Label("Installer", systemImage: "arrow.down.circle") }
+                .tabItem { Label("Ghostty Boo", systemImage: "terminal") }
                 .tag("installer")
 
             AboutSettingsTab()
@@ -40,9 +40,26 @@ struct GeneralSettingsTab: View {
     @State private var showNotifications = true
     @State private var mcpInstalled = false
     @State private var mcpStatusMessage: String?
+    @State private var ghosttyBooInstalled = false
 
     var body: some View {
         Form {
+            if !ghosttyBooInstalled {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ghostty Boo not found")
+                                .font(.body.weight(.medium))
+                            Text("Install Ghostty Boo from the Ghostty Boo tab to enable terminal discovery and agent communication.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section("Local Connection") {
                 TextField("Ghostty Socket Path", text: $socketPath)
                     .textFieldStyle(.roundedBorder)
@@ -102,6 +119,9 @@ struct GeneralSettingsTab: View {
         .onAppear {
             mcpInstalled = MCPConfigManager().isInstalled()
             launchAtLogin = checkLaunchAtLogin()
+            let fm = FileManager.default
+            ghosttyBooInstalled = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")
+                || fm.fileExists(atPath: NSHomeDirectory() + "/Applications/Ghostty Boo.app")
         }
     }
 
@@ -262,7 +282,8 @@ struct AddMachineSheet: View {
     @Binding var isPresented: Bool
     @State private var name = ""
     @State private var sshHost = ""
-    @State private var remoteSocket = "/tmp/ghostty.sock"
+    @State private var remoteSocket = "/tmp/ghostty-boo.sock"
+    @State private var sshHosts: [SSHHost] = []
 
     var body: some View {
         VStack(spacing: 16) {
@@ -270,9 +291,39 @@ struct AddMachineSheet: View {
                 .font(.headline)
 
             Form {
-                TextField("Name", text: $name, prompt: Text("e.g., mac-mini"))
-                TextField("SSH Host", text: $sshHost, prompt: Text("e.g., user@hostname"))
-                TextField("Remote Socket", text: $remoteSocket)
+                if !sshHosts.isEmpty {
+                    Section("From SSH Config") {
+                        ForEach(sshHosts) { host in
+                            Button {
+                                name = host.alias
+                                sshHost = host.alias
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(host.alias)
+                                            .font(.body)
+                                        Text("\(host.user)@\(host.hostname)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if sshHost == host.alias {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(.blue)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Section("Details") {
+                    TextField("Name", text: $name, prompt: Text("e.g., mac-mini"))
+                    TextField("SSH Host", text: $sshHost, prompt: Text("e.g., user@hostname"))
+                    TextField("Remote Socket", text: $remoteSocket)
+                }
             }
             .formStyle(.grouped)
 
@@ -292,7 +343,11 @@ struct AddMachineSheet: View {
             }
         }
         .padding()
-        .frame(width: 400, height: 280)
+        .frame(width: 400, height: 400)
+        .task {
+            let detector = SetupDetector()
+            sshHosts = await detector.detectSSHHosts()
+        }
     }
 }
 
@@ -359,7 +414,7 @@ struct InstallerSettingsTab: View {
                 HStack {
                     Text("control-socket")
                     Spacer()
-                    Text("/tmp/ghostty.sock")
+                    Text("/tmp/ghostty-boo.sock")
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }

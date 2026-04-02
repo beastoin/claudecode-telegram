@@ -4,6 +4,7 @@ import BooCore
 /// Main popover content — agent list grouped by machine with section headers.
 struct PopoverView: View {
     @Environment(AppState.self) private var appState
+    @State private var refreshTimer: Timer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,13 +14,6 @@ struct PopoverView: View {
                     .font(.headline)
                 Spacer()
                 connectionIndicator
-                Button {
-                    Task { await appState.refreshTerminals() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh")
                 Button {
                     if let delegate = NSApp.delegate as? AppDelegate {
                         delegate.openSettingsWindow()
@@ -84,6 +78,18 @@ struct PopoverView: View {
             }
         }
         .frame(width: 320, height: 400)
+        .onAppear {
+            // Refresh immediately when popover opens
+            Task { await appState.refreshTerminals() }
+            // Auto-refresh every 15 seconds
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in
+                Task { @MainActor in await appState.refreshTerminals() }
+            }
+        }
+        .onDisappear {
+            refreshTimer?.invalidate()
+            refreshTimer = nil
+        }
     }
 
     private var peerMachineGroups: [PeerMachineGroup] {
@@ -181,6 +187,33 @@ struct TerminalRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+        .onTapGesture {
+            focusTerminalInGhosttyBoo(terminalID: terminal.id)
+        }
+    }
+
+    private func focusTerminalInGhosttyBoo(terminalID: String) {
+        // Activate Ghostty Boo window
+        for name in ["Ghostty Boo", "GhosttyBoo"] {
+            let script = """
+            tell application "System Events"
+                if exists process "\(name)" then
+                    tell process "\(name)"
+                        set frontmost to true
+                    end tell
+                    return "ok"
+                end if
+            end tell
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try? process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 { break }
+        }
     }
 }
 

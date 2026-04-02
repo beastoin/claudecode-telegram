@@ -63,7 +63,7 @@ public actor SetupDetector {
         var paths: [String] = []
 
         // Standard locations
-        paths.append("/tmp/ghostty.sock")
+        paths.append("/tmp/ghostty-boo.sock")
         paths.append("/tmp/ghostty-test.sock")
 
         // Glob /tmp/ghostty-*.sock

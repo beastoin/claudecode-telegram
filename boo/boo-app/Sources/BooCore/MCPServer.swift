@@ -29,7 +29,7 @@ public actor MCPServer {
 
     /// Find a working Ghostty socket.
     private static func findGhosttySocket() -> String? {
-        for path in ["/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
+        for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
             let client = GhosttyClient(socketPath: path)
             if let _ = try? client.listTerminals() {
                 return path
