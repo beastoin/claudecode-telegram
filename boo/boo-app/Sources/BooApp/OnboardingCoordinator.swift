@@ -78,6 +78,13 @@ final class OnboardingCoordinator {
             let hasGhosttyBoo = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")
                 || fm.fileExists(atPath: NSHomeDirectory() + "/Applications/Ghostty Boo.app")
             if hasGhosttyBoo {
+                // Also connect socket in background so ready screen shows terminals
+                Task {
+                    let (socketPath, _) = await detector.probeSocket()
+                    if let path = socketPath {
+                        await appState.connect(socketPath: path)
+                    }
+                }
                 currentStep = .ready
                 return
             }

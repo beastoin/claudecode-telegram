@@ -77,49 +77,26 @@ public actor GhosttyBooInstaller {
         }
         let extractedAppPath = extractDir + "/" + appItem
 
-        // 3. Install to /Applications, fall back to ~/Applications
+        // 3. Install to ~/Applications (preferred — macOS restricts unsigned apps in /Applications)
         await onProgress(.installing)
-        var finalInstallPath = Self.systemInstallPath
-        var movedSuccessfully = false
-
-        do {
-            if fm.fileExists(atPath: Self.systemInstallPath) {
-                try fm.removeItem(atPath: Self.systemInstallPath)
-            }
-            let mvProcess = Process()
-            mvProcess.executableURL = URL(fileURLWithPath: "/bin/mv")
-            mvProcess.arguments = [extractedAppPath, Self.systemInstallPath]
-            mvProcess.standardOutput = FileHandle.nullDevice
-            mvProcess.standardError = FileHandle.nullDevice
-            try mvProcess.run()
-            mvProcess.waitUntilExit()
-            if mvProcess.terminationStatus == 0 {
-                movedSuccessfully = true
-            }
-        } catch {
-            // Permission denied — fall back to ~/Applications
+        let userAppsDir = NSString("~/Applications").expandingTildeInPath
+        if !fm.fileExists(atPath: userAppsDir) {
+            try fm.createDirectory(atPath: userAppsDir, withIntermediateDirectories: true)
         }
-
-        if !movedSuccessfully {
-            let userAppsDir = NSString("~/Applications").expandingTildeInPath
-            if !fm.fileExists(atPath: userAppsDir) {
-                try fm.createDirectory(atPath: userAppsDir, withIntermediateDirectories: true)
-            }
-            if fm.fileExists(atPath: Self.userInstallPath) {
-                try fm.removeItem(atPath: Self.userInstallPath)
-            }
-            let mvProcess = Process()
-            mvProcess.executableURL = URL(fileURLWithPath: "/bin/mv")
-            mvProcess.arguments = [extractedAppPath, Self.userInstallPath]
-            mvProcess.standardOutput = FileHandle.nullDevice
-            mvProcess.standardError = FileHandle.nullDevice
-            try mvProcess.run()
-            mvProcess.waitUntilExit()
-            guard mvProcess.terminationStatus == 0 else {
-                throw GhosttyBooInstallerError.message("Failed to install to ~/Applications")
-            }
-            finalInstallPath = Self.userInstallPath
+        if fm.fileExists(atPath: Self.userInstallPath) {
+            try fm.removeItem(atPath: Self.userInstallPath)
         }
+        let mvProcess = Process()
+        mvProcess.executableURL = URL(fileURLWithPath: "/bin/mv")
+        mvProcess.arguments = [extractedAppPath, Self.userInstallPath]
+        mvProcess.standardOutput = FileHandle.nullDevice
+        mvProcess.standardError = FileHandle.nullDevice
+        try mvProcess.run()
+        mvProcess.waitUntilExit()
+        guard mvProcess.terminationStatus == 0 else {
+            throw GhosttyBooInstallerError.message("Failed to install to ~/Applications")
+        }
+        let finalInstallPath = Self.userInstallPath
 
         // 4. Configure control-socket
         await onProgress(.configuring)
