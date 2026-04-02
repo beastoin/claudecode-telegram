@@ -516,6 +516,19 @@ func cmdRelease(tag string) error {
 		assets = append(assets, ReleaseAsset{Name: name, SHA256: hash})
 	}
 
+	// Write checksums file
+	checksumPath := filepath.Join("/tmp/release-assets", "SHA256SUMS.txt")
+	var checksumLines string
+	for _, a := range assets {
+		checksumLines += fmt.Sprintf("%s  %s\n", a.SHA256, a.Name)
+	}
+	if err := os.WriteFile(checksumPath, []byte(checksumLines), 0644); err != nil {
+		fail("Failed to write SHA256SUMS.txt")
+		return err
+	}
+	allFiles = append(allFiles, "SHA256SUMS.txt")
+	assets = append(assets, ReleaseAsset{Name: "SHA256SUMS.txt", SHA256: ""})
+
 	step(4, "Loading GitHub token")
 	token := loadGHToken()
 	if token == "" {
