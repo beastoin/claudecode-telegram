@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No notification setup needed — PopoverView calls openSettings: via NSApp.sendAction
 
         // Auto-connect to Ghostty socket if found
-        let socketPaths = ["/tmp/ghostty-test.sock", "/tmp/ghostty.sock"]
+        let socketPaths = ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"]
         Task {
             for path in socketPaths {
                 if FileManager.default.fileExists(atPath: path) {

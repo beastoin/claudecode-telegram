@@ -30,14 +30,17 @@ struct RemoteLinkView: View {
                 if coordinator.sshHosts.isEmpty {
                     emptyState
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(coordinator.sshHosts) { host in
-                            machineRow(host: host)
-                            if host.id != coordinator.sshHosts.last?.id {
-                                Divider()
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(coordinator.sshHosts) { host in
+                                machineRow(host: host)
+                                if host.id != coordinator.sshHosts.last?.id {
+                                    Divider()
+                                }
                             }
                         }
                     }
+                    .frame(maxHeight: 200)
                 }
             } label: {
                 Label("Discovered from ~/.ssh/config", systemImage: "doc.text")

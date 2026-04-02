@@ -116,7 +116,7 @@ public actor GhosttyBooInstaller {
         let configDir = NSString("~/.config/ghostty").expandingTildeInPath
         let configPath = configDir + "/config"
         let fm = FileManager.default
-        let controlLine = "control-socket = /tmp/ghostty.sock"
+        let controlLine = "control-socket = /tmp/ghostty-boo.sock"
 
         if !fm.fileExists(atPath: configDir) {
             try fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)

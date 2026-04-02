@@ -65,8 +65,27 @@ public actor OnboardingDemoEngine {
         machineName: String, client: GhosttyClient,
         continuation: AsyncStream<DemoLine>.Continuation
     ) async -> Bool {
-        // 1. Discover existing terminals
-        guard let existingTerminals = try? client.listTerminals(), !existingTerminals.isEmpty else {
+        // 1. Discover existing terminals — if none, open a new window
+        var existingTerminals = (try? client.listTerminals()) ?? []
+        if existingTerminals.isEmpty {
+            // Ghostty Boo is running but has no windows — open one
+            if let processName = await findGhosttyProcessName() {
+                _ = runOsascript("tell application \"\(processName)\" to activate")
+                try? await Task.sleep(for: .milliseconds(500))
+                // Cmd+N for new window
+                let script = """
+                tell application "System Events"
+                    tell process "\(processName)"
+                        keystroke "n" using command down
+                    end tell
+                end tell
+                """
+                _ = runOsascript(script)
+                try? await Task.sleep(for: .seconds(2))
+                existingTerminals = (try? client.listTerminals()) ?? []
+            }
+        }
+        guard !existingTerminals.isEmpty else {
             return false
         }
         let existingIDs = Set(existingTerminals.map(\.id))
@@ -216,7 +235,7 @@ public actor OnboardingDemoEngine {
     /// Try to launch Ghostty Boo and return socket path when ready.
     private func tryLaunchGhostty() async -> String? {
         // Delete stale socket before launching
-        try? FileManager.default.removeItem(atPath: "/tmp/ghostty.sock")
+        try? FileManager.default.removeItem(atPath: "/tmp/ghostty-boo.sock")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -231,7 +250,7 @@ public actor OnboardingDemoEngine {
             // Wait for socket (up to 5 seconds)
             for _ in 0..<10 {
                 try? await Task.sleep(for: .milliseconds(500))
-                for path in ["/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
+                for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
                     if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
                         return path
                     }
