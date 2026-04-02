@@ -60,25 +60,28 @@ final class OnboardingCoordinator {
     // MARK: - Boot Sequence
 
     func start() async {
-        // Check skip logic: if already fully configured, jump ahead
-        let mcpManager = MCPConfigManager()
-        if mcpManager.isInstalled() && !mcpManager.isStale() {
-            let (socketPath, terminals) = await detector.probeSocket()
-            if socketPath != nil && !terminals.isEmpty {
-                // Already set up — skip to ready
-                currentStep = .ready
-                return
-            }
-        }
-
-        // Set up probes
+        // Set up probes FIRST so UI always has content
         probes = [
-            Probe(id: "ghostty", label: "GHOSTTY", isBlocking: true),
+            Probe(id: "ghostty", label: "GHOSTTY BOO", isBlocking: true),
             Probe(id: "socket", label: "SOCKET", isBlocking: true),
             Probe(id: "terminals", label: "TERMINALS", isBlocking: false),
             Probe(id: "claude-mcp", label: "CLAUDE MCP", isBlocking: true),
             Probe(id: "codex-mcp", label: "CODEX MCP", isBlocking: false),
         ]
+
+        // Quick skip: use only fast, non-blocking checks (no socket IO)
+        // File reads only — no network, no process spawning
+        let mcpManager = MCPConfigManager()
+        if mcpManager.isInstalled() && !mcpManager.isStale() {
+            // Check Ghostty Boo via file system only (avoid NSWorkspace which can be slow)
+            let fm = FileManager.default
+            let hasGhosttyBoo = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")
+                || fm.fileExists(atPath: NSHomeDirectory() + "/Applications/Ghostty Boo.app")
+            if hasGhosttyBoo {
+                currentStep = .ready
+                return
+            }
+        }
 
         // Auto-fill peer name
         peerName = await detector.defaultPeerName()
@@ -100,7 +103,6 @@ final class OnboardingCoordinator {
             updateProbe("ghostty", state: .passed("Ghostty Boo"))
         } else {
             // Auto-install Ghostty Boo
-            let label = ghosttyInstalled ? "Found \(variant ?? "Ghostty") — installing Ghostty Boo..." : "Installing Ghostty Boo..."
             updateProbe("ghostty", state: .running)
             do {
                 try await installer.install { [weak self] status in
@@ -118,6 +120,11 @@ final class OnboardingCoordinator {
                     }
                 }
                 hasGhosttyBoo = true
+
+                // Auto-launch Ghostty Boo so socket + terminal become available
+                launchGhosttyBoo()
+                // Wait for Ghostty Boo to start and create the socket
+                try? await Task.sleep(for: .seconds(3))
             } catch {
                 let msg = (error as? GhosttyBooInstallerError)?.localizedDescription ?? error.localizedDescription
                 updateProbe("ghostty", state: .failed(msg))
@@ -135,7 +142,7 @@ final class OnboardingCoordinator {
                 updateProbe("socket", state: .passed("Reachable at \(path)"))
                 await appState.connect(socketPath: path)
             } else {
-                updateProbe("socket", state: .failed("No socket — Enable control-socket in Ghostty Boo config"))
+                updateProbe("socket", state: .failed("No socket — waiting for Ghostty Boo to start"))
             }
         } else {
             updateProbe("socket", state: .skipped("Waiting for Ghostty Boo"))
@@ -257,6 +264,24 @@ final class OnboardingCoordinator {
         }
     }
 
+    /// Launch Ghostty Boo so its socket and terminal become available.
+    private func launchGhosttyBoo() {
+        #if canImport(AppKit)
+        let fm = FileManager.default
+        let path: String
+        if fm.fileExists(atPath: GhosttyBooInstaller.systemInstallPath) {
+            path = GhosttyBooInstaller.systemInstallPath
+        } else if fm.fileExists(atPath: GhosttyBooInstaller.userInstallPath) {
+            path = GhosttyBooInstaller.userInstallPath
+        } else {
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        let config = NSWorkspace.OpenConfiguration()
+        NSWorkspace.shared.openApplication(at: url, configuration: config)
+        #endif
+    }
+
     // MARK: - Probe Fix Actions
 
     func fixProbe(_ id: String) async {
@@ -270,6 +295,9 @@ final class OnboardingCoordinator {
                         self.updateProbe("ghostty", state: .passed("Installed to \(path)"))
                     }
                 }
+                // Auto-launch Ghostty Boo and wait for socket
+                launchGhosttyBoo()
+                try? await Task.sleep(for: .seconds(3))
                 // Re-run socket/terminal probes after install
                 await rerunSocketProbes()
             } catch {

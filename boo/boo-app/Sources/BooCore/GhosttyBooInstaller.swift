@@ -31,12 +31,16 @@ public actor GhosttyBooInstaller {
     public func install(onProgress: @MainActor @Sendable (Status) -> Void) async throws {
         let fm = FileManager.default
 
-        // 1. Download
+        // 1. Download (30s timeout)
         await onProgress(.downloading)
         guard let url = URL(string: Self.downloadURL) else {
             throw GhosttyBooInstallerError.message("Invalid download URL")
         }
-        let (zipFileURL, response) = try await URLSession.shared.download(from: url)
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 120
+        let session = URLSession(configuration: config)
+        let (zipFileURL, response) = try await session.download(from: url)
         if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
             throw GhosttyBooInstallerError.message("Download failed with HTTP \(httpResponse.statusCode)")
         }

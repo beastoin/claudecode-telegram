@@ -89,6 +89,11 @@ public struct GhosttyClient: Sendable {
         guard fd >= 0 else { throw GhosttyClientError.connectionFailed }
         defer { close(fd) }
 
+        // Set 2-second receive timeout to avoid hanging on unresponsive sockets
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in

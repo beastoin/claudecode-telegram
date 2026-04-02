@@ -463,7 +463,9 @@ struct InstallerSettingsTab: View {
             installMessage = "Ghostty Boo.app not found"
             return
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        let url = URL(fileURLWithPath: path)
+        let config = NSWorkspace.OpenConfiguration()
+        NSWorkspace.shared.openApplication(at: url, configuration: config)
     }
 }
 
