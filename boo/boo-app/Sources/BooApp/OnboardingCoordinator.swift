@@ -86,6 +86,10 @@ final class OnboardingCoordinator {
             let hasGhosttyBoo = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")
                 || fm.fileExists(atPath: NSHomeDirectory() + "/Applications/Ghostty Boo.app")
             if hasGhosttyBoo {
+                // Set agent identity even on quick-skip so ready screen shows a name
+                let suggestion = await detector.suggestAgentIdentity()
+                peerName = suggestion.name
+                agentQuote = suggestion.quote
                 // Also connect socket in background so ready screen shows terminals
                 Task {
                     let (socketPath, _) = await detector.probeSocket()
