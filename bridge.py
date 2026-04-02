@@ -3064,6 +3064,57 @@ def set_pending(name, chat_id):
     pending.chmod(0o600)
     chat_id_file.write_text(str(chat_id))
     chat_id_file.chmod(0o600)
+    # Sync chat_id to remote host if worker is teleported.
+    # The Stop hook reads chat_id locally — without this, responses from
+    # teleported workers never reach Telegram.
+    _sync_chat_id_to_remote(name, str(chat_id_file))
+
+
+_remote_home_cache = {}  # host -> remote $HOME path
+
+def _get_remote_home(host):
+    """Get remote $HOME with caching (avoids SSH per message)."""
+    if host in _remote_home_cache:
+        return _remote_home_cache[host]
+    try:
+        r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+                        capture_output=True, text=True, timeout=5)
+        home = r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        home = ""
+    _remote_home_cache[host] = home
+    return home
+
+
+def _remap_sessions_dir(host):
+    """Remap SESSIONS_DIR to use remote host's $HOME prefix."""
+    remote_sessions_dir = str(SESSIONS_DIR)
+    local_home = os.path.expanduser("~")
+    remote_home = _get_remote_home(host)
+    if remote_home and remote_home != local_home and remote_sessions_dir.startswith(local_home):
+        remote_sessions_dir = remote_home + remote_sessions_dir[len(local_home):]
+    return remote_sessions_dir
+
+
+def _sync_chat_id_to_remote(name, local_chat_id_path):
+    """Sync chat_id file to remote host if worker is teleported there.
+
+    The Stop hook reads SESSIONS_DIR/<worker>/chat_id locally on the machine
+    where Claude runs. For teleported workers, the hook is on the remote host
+    but chat_id is only written on VPS. This bridges the gap by pushing the
+    file after each write.
+    """
+    host = get_worker_host(name)
+    if not host:
+        return
+    try:
+        remote_sessions_dir = _remap_sessions_dir(host)
+        _remote_run(["mkdir", "-p", f"{remote_sessions_dir}/{name}"],
+                     host=host, capture_output=True)
+        _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id",
+                      host=host, direction="push")
+    except Exception as e:
+        print(f"[set_pending] Failed to sync chat_id to {host} for {name}: {e}")
 
 
 def clear_pending(name):

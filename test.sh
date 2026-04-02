@@ -599,6 +599,68 @@ print('OK')
     fi
 }
 
+test_set_pending_syncs_chat_id_to_remote() {
+    info "Testing set_pending syncs chat_id to remote host..."
+    # Verifies that _sync_chat_id_to_remote is called when worker has a remote host.
+    # We mock get_worker_host to return a host and verify _remote_copy is called.
+    if python3 -c "
+import sys, os, shutil, importlib
+sys.path.insert(0, '.')
+os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'fake')
+os.environ['SESSIONS_DIR'] = '$SESSIONS_DIR'
+os.environ.setdefault('TMUX_PREFIX', 'claude-test-')
+import bridge
+
+# Track calls
+copy_calls = []
+original_remote_copy = bridge._remote_copy
+def mock_remote_copy(src, dst, host=None, direction='push'):
+    copy_calls.append({'src': src, 'dst': dst, 'host': host, 'direction': direction})
+bridge._remote_copy = mock_remote_copy
+
+# Mock _remote_run to no-op for mkdir
+original_remote_run = bridge._remote_run
+def mock_remote_run(cmd, host=None, **kwargs):
+    if cmd[0] == 'mkdir':
+        import subprocess
+        return subprocess.CompletedProcess(cmd, 0)
+    if cmd == ['bash', '-c', 'echo \$HOME']:
+        import subprocess
+        return subprocess.CompletedProcess(cmd, 0, stdout='/Users/testuser\n')
+    return original_remote_run(cmd, host=host, **kwargs)
+bridge._remote_run = mock_remote_run
+
+# Mock get_worker_host to return a remote host
+original_get_host = bridge.get_worker_host
+bridge.get_worker_host = lambda name: 'test-mac-mini' if name == 'remote_worker' else None
+
+# Test 1: remote worker should trigger sync
+bridge.set_pending('remote_worker', 99999)
+assert len(copy_calls) == 1, f'Expected 1 copy call, got {len(copy_calls)}'
+assert copy_calls[0]['host'] == 'test-mac-mini', f'Wrong host: {copy_calls[0]}'
+assert copy_calls[0]['direction'] == 'push'
+assert 'chat_id' in copy_calls[0]['dst']
+
+# Test 2: local worker should NOT trigger sync
+copy_calls.clear()
+bridge.set_pending('local_worker', 88888)
+assert len(copy_calls) == 0, f'Expected 0 copy calls for local worker, got {len(copy_calls)}'
+
+# Cleanup
+bridge._remote_copy = original_remote_copy
+bridge._remote_run = original_remote_run
+bridge.get_worker_host = original_get_host
+shutil.rmtree(bridge.get_session_dir('remote_worker'), ignore_errors=True)
+shutil.rmtree(bridge.get_session_dir('local_worker'), ignore_errors=True)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "set_pending syncs chat_id to remote host for teleported workers"
+    else
+        fail "set_pending remote sync test failed"
+    fi
+}
+
 test_cli_flags_and_commands() {
     info "Testing CLI flags and commands..."
     local all_pass=true
@@ -15745,6 +15807,7 @@ run_unit_tests() {
     run_test test_stale_pending_survives_for_watchdog
     run_test test_backend_file_is_canonical
     run_test test_pending_files
+    run_test test_set_pending_syncs_chat_id_to_remote
     # Unit tests - Worker Registry (persistent)
     log ""
     log "── Worker Registry Tests (Unit) ────────────────────────────────────────"
