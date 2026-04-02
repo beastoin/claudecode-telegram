@@ -188,6 +188,68 @@ func vpsSourcePath() string {
 	return filepath.Join(home, "claudecode-telegram", "boo", "boo-app")
 }
 
+// ── git tag ──
+
+// gitTag creates a git tag at HEAD if it doesn't already exist.
+func gitTag(tag string) error {
+	repoDir := filepath.Join(filepath.Dir(vpsSourcePath()), "..") // claudecode-telegram root
+
+	// Check if tag exists locally
+	cmd := exec.Command("git", "tag", "-l", tag)
+	cmd.Dir = repoDir
+	out, _ := cmd.Output()
+	if strings.TrimSpace(string(out)) == tag {
+		fmt.Fprintf(os.Stderr, "  Tag %s already exists locally, using it\n", tag)
+		return nil
+	}
+	// Create tag
+	step(0, fmt.Sprintf("Creating git tag %s", tag))
+	createCmd := exec.Command("git", "tag", tag)
+	createCmd.Dir = repoDir
+	createCmd.Stdout = os.Stdout
+	createCmd.Stderr = os.Stderr
+	if err := createCmd.Run(); err != nil {
+		fail(fmt.Sprintf("Failed to create tag %s", tag))
+		return err
+	}
+	// Push tag (ignore error if already exists on remote)
+	pushCmd := exec.Command("git", "push", "origin", tag)
+	pushCmd.Dir = repoDir
+	pushCmd.Stdout = os.Stdout
+	pushCmd.Stderr = os.Stderr
+	if err := pushCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "  Tag may already exist on remote, continuing\n")
+	}
+	ok(fmt.Sprintf("Tagged %s", tag))
+	return nil
+}
+
+// ── sync source to Mac Mini ──
+
+// syncBooSource rsync's boo-app source from VPS git to Mac Mini, ensuring
+// the build always uses the exact code from git (not stale files on Mac Mini).
+func syncBooSource() error {
+	src := vpsSourcePath() + "/"
+	dst := fmt.Sprintf("%s:%s/", macHost(), booSourceMac)
+	step(0, "Syncing boo-app source to Mac Mini")
+	if err := localRun("rsync", "-az", "--delete",
+		"--exclude", ".build/",
+		"--exclude", ".swiftpm/",
+		src, dst); err != nil {
+		fail("Source sync failed")
+		return err
+	}
+	// Verify key files match
+	out, err := sshOutput(fmt.Sprintf(
+		`/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" %s/Sources/BooApp/Info.plist`,
+		booSourceMac))
+	if err == nil {
+		fmt.Fprintf(os.Stderr, "  Mac Mini source version: %s\n", out)
+	}
+	ok("Source synced from VPS git")
+	return nil
+}
+
 // ── dev build ──
 
 func cmdDevBuild(target string, release bool) error {
@@ -212,6 +274,10 @@ func cmdDevBuildBoo(release bool) error {
 	if release {
 		mode = "release"
 		flags = "-c release"
+		// Sync source from VPS git before release builds
+		if err := syncBooSource(); err != nil {
+			return err
+		}
 	}
 
 	step(1, fmt.Sprintf("Building boo-app (%s) on Mac Mini", mode))
@@ -570,6 +636,7 @@ func cmdShip(tag string) error {
 		name string
 		fn   func() error
 	}{
+		{"Tag release", func() error { return gitTag(tag) }},
 		{"Build Boo (release)", func() error { return cmdDevBuildBoo(true) }},
 		{"Build Ghostty Boo (release)", func() error { return cmdDevBuildGhosttyBoo(true) }},
 		{"Sign all", func() error { return cmdSign("all") }},
