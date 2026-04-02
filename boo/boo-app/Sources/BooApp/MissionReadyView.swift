@@ -9,7 +9,6 @@ struct MissionReadyView: View {
 
     @State private var copiedName = false
     @State private var claudeEnabled = false
-    @State private var codexEnabled = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,16 +109,10 @@ struct MissionReadyView: View {
     @ViewBuilder
     private var mcpClientsCard: some View {
         let claudeOK = claudeEnabled || MCPConfigManager().isInstalled()
-        let codexManager = CodexConfigManager()
-        let codexOK = codexEnabled || codexManager.isInstalled()
-        let codexAvailable = codexManager.isCodexInstalled()
 
         GroupBox("MCP Clients") {
             VStack(alignment: .leading, spacing: 4) {
-                clientRow(name: "Claude", installed: claudeOK) { enableClaudeMCP() }
-                if codexAvailable {
-                    clientRow(name: "Codex", installed: codexOK) { enableCodexMCP() }
-                }
+                clientRow(name: "Claude Code", installed: claudeOK) { enableClaudeMCP() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -173,13 +166,6 @@ struct MissionReadyView: View {
         let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
         _ = try? manager.install(binaryPath: binaryPath)
         claudeEnabled = true
-    }
-
-    private func enableCodexMCP() {
-        let manager = CodexConfigManager()
-        let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
-        _ = try? manager.install(binaryPath: binaryPath)
-        codexEnabled = true
     }
 
     private func copyPeerName() {

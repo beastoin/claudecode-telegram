@@ -4,7 +4,9 @@ import Foundation
 /// Downloads, unzips, installs to /Applications (or ~/Applications), and configures control-socket.
 public actor GhosttyBooInstaller {
 
-    public static let downloadURL = "https://github.com/beastoin/claudecode-telegram/releases/latest/download/GhosttyBoo-macOS-arm64.zip"
+    /// Download from a pinned release tag so Boo app releases don't need to bundle Ghostty Boo.
+    /// Update this tag when a new Ghostty Boo version ships.
+    public static let downloadURL = "https://github.com/beastoin/claudecode-telegram/releases/download/boo-v0.2.4/GhosttyBoo-macOS-arm64.zip"
     public static let systemInstallPath = "/Applications/Ghostty Boo.app"
     public static let userInstallPath = NSString("~/Applications/Ghostty Boo.app").expandingTildeInPath
 
