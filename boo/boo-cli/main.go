@@ -227,12 +227,12 @@ func cmdDevBuildBoo(release bool) error {
 set -e
 APP="%s"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp %s/release/BooApp "$APP/Contents/MacOS/BooApp"
+cp %s/.build/release/BooApp "$APP/Contents/MacOS/BooApp"
 cp %s/Sources/BooApp/Info.plist "$APP/Contents/Info.plist"
 echo "Bundle created at $APP"
 ls -lh "$APP/Contents/MacOS/BooApp"
 /usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP/Contents/Info.plist"
-`, appPathBoo, swiftBuildDir, booSourceMac)); err != nil {
+`, appPathBoo, booSourceMac, booSourceMac)); err != nil {
 			fail("Bundle creation failed")
 			return err
 		}
@@ -270,7 +270,7 @@ func cmdDevBuildGhosttyBoo(release bool) error {
 	if err := ssh(fmt.Sprintf(`
 set -e
 rm -rf "%s"
-cp -R /tmp/ghostty-boo-build/Release/Ghostty*.app "%s"
+cp -R "/tmp/ghostty-boo-build/Release/Ghostty.app" "%s"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Ghostty Boo'" "%s/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '%s'" "%s/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile GhosttyBoo" "%s/Contents/Info.plist"
@@ -804,11 +804,16 @@ func flagValue(args []string, flag, def string) string {
 	return def
 }
 
+// Boolean flags that take no value — positionalArg must not skip args after these.
+var boolFlags = map[string]bool{
+	"--release": true, "--json": true, "--no-color": true, "--dry-run": true,
+}
+
 func positionalArg(args []string, def string) string {
 	for i, a := range args {
 		if !strings.HasPrefix(a, "-") {
-			// Skip values that follow a flag
-			if i > 0 && strings.HasPrefix(args[i-1], "--") {
+			// Skip values that follow a value-taking flag (not boolean flags)
+			if i > 0 && strings.HasPrefix(args[i-1], "--") && !boolFlags[args[i-1]] {
 				continue
 			}
 			return a
