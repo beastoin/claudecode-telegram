@@ -36,33 +36,18 @@ public actor SetupDetector {
 
     // MARK: - Ghostty Detection
 
-    /// Check if Ghostty or Ghostty Boo is installed.
-    public func detectGhosttyInstall() -> (installed: Bool, variant: String?) {
+    /// Check if Ghostty Boo is installed. Only Ghostty Boo counts — original Ghostty is ignored.
+    public func detectGhosttyBooInstall() -> Bool {
         #if canImport(AppKit)
-        let bundleIDs = [
-            ("com.beastoin.ghostty-boo", "Ghostty Boo"),
-            ("com.mitchellh.ghostty", "Ghostty"),
-        ]
-        for (bundleID, name) in bundleIDs {
-            if NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil {
-                return (true, name)
-            }
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.beastoin.ghostty-boo") != nil {
+            return true
         }
         #endif
-        // Fallback: check common paths
         let paths = [
             "/Applications/Ghostty Boo.app",
-            "/Applications/Ghostty.app",
             NSHomeDirectory() + "/Applications/Ghostty Boo.app",
-            NSHomeDirectory() + "/Applications/Ghostty.app",
         ]
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                let name = path.contains("Boo") ? "Ghostty Boo" : "Ghostty"
-                return (true, name)
-            }
-        }
-        return (false, nil)
+        return paths.contains { FileManager.default.fileExists(atPath: $0) }
     }
 
     // MARK: - Socket Probe

@@ -97,8 +97,7 @@ final class OnboardingCoordinator {
         // Probe 1: Ghostty Boo install (only Ghostty Boo counts — original Ghostty doesn't have our socket API)
         updateProbe("ghostty", state: .running)
         try? await Task.sleep(for: .milliseconds(400))
-        let (ghosttyInstalled, variant) = await detector.detectGhosttyInstall()
-        var hasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
+        var hasGhosttyBoo = await detector.detectGhosttyBooInstall()
         if hasGhosttyBoo {
             updateProbe("ghostty", state: .passed("Ghostty Boo"))
         } else {
@@ -223,8 +222,7 @@ final class OnboardingCoordinator {
             guard !Task.isCancelled && currentStep == .boot else { break }
 
             // Recheck ghostty
-            let (ghosttyInstalled, variant) = await detector.detectGhosttyInstall()
-            let nowHasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
+            let nowHasGhosttyBoo = await detector.detectGhosttyBooInstall()
             if nowHasGhosttyBoo {
                 if let probe = probes.first(where: { $0.id == "ghostty" }), !probe.state.isPassed {
                     updateProbe("ghostty", state: .passed("Ghostty Boo"))
