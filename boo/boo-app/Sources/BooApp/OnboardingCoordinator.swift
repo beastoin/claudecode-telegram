@@ -78,8 +78,10 @@ final class OnboardingCoordinator {
 
         // Quick skip: use only fast, non-blocking checks (no socket IO)
         // File reads only — no network, no process spawning
+        // Set BOO_FORCE_ONBOARDING=1 to bypass quick-skip (for testing/demos)
         let mcpManager = MCPConfigManager()
-        if mcpManager.isInstalled() && !mcpManager.isStale() {
+        if ProcessInfo.processInfo.environment["BOO_FORCE_ONBOARDING"] == nil
+            && mcpManager.isInstalled() && !mcpManager.isStale() {
             // Check Ghostty Boo via file system only (avoid NSWorkspace which can be slow)
             let fm = FileManager.default
             let hasGhosttyBoo = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")

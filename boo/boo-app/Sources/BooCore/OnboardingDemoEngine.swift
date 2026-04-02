@@ -46,9 +46,21 @@ public actor OnboardingDemoEngine {
 
                 let client = GhosttyClient(socketPath: socket)
 
-                // Always use scripted demo — it's reliable and shows all MCP tools.
-                // Live Claude sessions are too fragile (MCP trust prompts, API keys,
-                // stale binary paths, macOS dialogs).
+                // Try live Claude demo first — real agents talking via MCP.
+                // Uses --dangerously-skip-permissions to bypass MCP trust prompts.
+                if self.detectClaudeCLI() != nil {
+                    let done = await self.runLiveClaudeDemo(
+                        peerName: peerName, registry: registry, relay: relay,
+                        machineName: machineName, client: client,
+                        continuation: continuation
+                    )
+                    if done {
+                        continuation.finish()
+                        return
+                    }
+                }
+
+                // Fallback: scripted 3-agent demo (no Claude CLI available)
                 let done = await self.runScriptedDemo3Agents(
                     peerName: peerName, registry: registry, relay: relay,
                     machineName: machineName, client: client,
@@ -108,6 +120,129 @@ public actor OnboardingDemoEngine {
         // Return first `count` panes
         guard allPanes.count >= count else { return nil }
         return Array(allPanes.prefix(count))
+    }
+
+    // MARK: - Claude CLI Detection
+
+    /// Check if Claude Code CLI is installed and return its path.
+    private func detectClaudeCLI() -> String? {
+        let candidates = [
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            NSHomeDirectory() + "/.local/bin/claude",
+            NSHomeDirectory() + "/.claude/local/claude",
+        ]
+        for path in candidates {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        // Fallback: which
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = ["claude"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (path?.isEmpty == false) ? path : nil
+        } catch { return nil }
+    }
+
+    // MARK: - Live Claude Demo
+
+    /// Launch real Claude Code agents that talk via MCP tools.
+    /// Uses --dangerously-skip-permissions to bypass MCP trust prompts.
+    /// Falls back to scripted demo if agents fail to register within timeout.
+    private func runLiveClaudeDemo(
+        peerName: String, registry: PeerRegistry, relay: MessageRelay,
+        machineName: String, client: GhosttyClient,
+        continuation: AsyncStream<DemoLine>.Continuation
+    ) async -> Bool {
+        guard let panes = await setupTerminals(client: client, count: 3) else { return false }
+
+        let agentName = peerName.isEmpty ? "alpha" : peerName
+
+        // Clean SharedPeerStore so we only see peers from this demo
+        let sharedStore = SharedPeerStore()
+        sharedStore.removeAll()
+
+        // Clear terminals
+        for pane in panes {
+            sendToTerminal(client, pane, "clear\n")
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+
+        // Build prompts — each agent registers, then interacts via MCP
+        let prompt1 = "You are AI agent \\x27\(agentName)\\x27. Use boo MCP tools: 1) register_peer name=\\x27\(agentName)\\x27 role=\\x27claude\\x27 2) list_peers 3) send_message to \\x27scout\\x27 content \\x27hey scout, check the build logs for errors\\x27 4) Wait 15s then receive_messages. Be very concise, just call tools."
+        let prompt2 = "You are AI agent \\x27scout\\x27. Use boo MCP tools: 1) register_peer name=\\x27scout\\x27 role=\\x27claude\\x27 2) Wait 10s 3) receive_messages 4) send_message to \\x27oracle\\x27 forwarding what you received. Be very concise."
+        let prompt3 = "You are AI agent \\x27oracle\\x27. Use boo MCP tools: 1) register_peer name=\\x27oracle\\x27 role=\\x27claude\\x27 2) Wait 20s 3) receive_messages 4) Reply to sender via send_message with brief analysis. Be very concise."
+
+        // Launch 3 Claude sessions staggered
+        sendToTerminal(client, panes[0], "claude -p --dangerously-skip-permissions $'\(prompt1)'\n")
+        try? await Task.sleep(for: .seconds(2))
+        sendToTerminal(client, panes[1], "claude -p --dangerously-skip-permissions $'\(prompt2)'\n")
+        try? await Task.sleep(for: .seconds(2))
+        sendToTerminal(client, panes[2], "claude -p --dangerously-skip-permissions $'\(prompt3)'\n")
+
+        // Monitor SharedPeerStore (file-based) for peer registrations.
+        // Each claude -p session spawns a separate BooApp --mcp process with its
+        // own PeerRegistry — the only shared state is SharedPeerStore at /tmp/boo/.
+        var knownPeerNames: Set<String> = []
+        var yieldedListPeers = false
+
+        for tick in 0..<120 {
+            try? await Task.sleep(for: .seconds(1))
+
+            // Poll SharedPeerStore for new registrations
+            let sharedPeers = sharedStore.listPeers()
+            for peer in sharedPeers {
+                if !knownPeerNames.contains(peer.name) {
+                    knownPeerNames.insert(peer.name)
+                    yield(continuation, .request, "register_peer", "{ name: \"\(peer.name)\", role: \"\(peer.role ?? "claude")\" }")
+                    yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(peer.peerID))\" }")
+                }
+            }
+
+            // After seeing 3+ peers, yield list_peers
+            if sharedPeers.count >= 3 && !yieldedListPeers {
+                let names = sharedPeers.map(\.name).joined(separator: ", ")
+                yield(continuation, .request, "list_peers", "{}")
+                yield(continuation, .response, "list_peers", "[ \(names) ]")
+                yieldedListPeers = true
+            }
+
+            // After enough time with 3 peers, yield status checks and finish
+            if knownPeerNames.count >= 3 && yieldedListPeers && tick > 25 {
+                for peer in sharedPeers {
+                    yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(peer.peerID))\" }")
+                    yield(continuation, .response, "get_peer_status", "{ name: \"\(peer.name)\", status: \"active\" }")
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+
+                // Check for any messages exchanged
+                for peer in sharedPeers {
+                    let msgs = sharedStore.receiveMessages(peerID: peer.peerID)
+                    for msg in msgs {
+                        yield(continuation, .request, "receive_messages", "{ peer: \"\(peer.name)\" }")
+                        yield(continuation, .response, "receive_messages", "{ from: \"\(msg.from)\", content: \"\(msg.content)\" }")
+                    }
+                }
+                break
+            }
+
+            // Bail early if no peers after 60 seconds — claude probably failed
+            if tick > 60 && knownPeerNames.isEmpty {
+                return false
+            }
+        }
+
+        return knownPeerNames.count >= 2
     }
 
     // MARK: - Scripted 3-Agent Demo
