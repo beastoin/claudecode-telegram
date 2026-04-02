@@ -46,29 +46,21 @@ public actor OnboardingDemoEngine {
 
                 let client = GhosttyClient(socketPath: socket)
 
-                // Try live Claude demo first — real agents talking via MCP.
-                // Uses --dangerously-skip-permissions to bypass MCP trust prompts.
-                if self.detectClaudeCLI() != nil {
-                    let done = await self.runLiveClaudeDemo(
-                        peerName: peerName, registry: registry, relay: relay,
-                        machineName: machineName, client: client,
-                        continuation: continuation
-                    )
-                    if done {
-                        continuation.finish()
-                        return
-                    }
+                // Require Claude Code CLI — we are agent tools, no scripted fallback.
+                guard self.detectClaudeCLI() != nil else {
+                    self.yield(continuation, .error, "skip", "Claude Code CLI not found — install claude to run the live demo")
+                    continuation.finish()
+                    return
                 }
 
-                // Fallback: scripted 3-agent demo (no Claude CLI available)
-                let done = await self.runScriptedDemo3Agents(
+                let done = await self.runLiveClaudeDemo(
                     peerName: peerName, registry: registry, relay: relay,
                     machineName: machineName, client: client,
                     continuation: continuation
                 )
 
                 if !done {
-                    self.yield(continuation, .error, "connect", "Could not open terminal panes — open a Ghostty Boo window first")
+                    self.yield(continuation, .error, "demo", "Live demo did not complete — ensure Claude Code can access boo MCP tools")
                 }
                 continuation.finish()
             }
@@ -107,7 +99,7 @@ public actor OnboardingDemoEngine {
         var allPanes = existingTerminals.map(\.id)
         let needed = count - allPanes.count
         for _ in 0..<max(0, needed) {
-            await createNewTab(processName: processName)
+            await createNewPane(processName: processName)
             try? await Task.sleep(for: .milliseconds(800))
             if let terminals = try? client.listTerminals() {
                 let newOnes = terminals.filter { !existingIDs.contains($0.id) && !allPanes.contains($0.id) }
@@ -245,260 +237,6 @@ public actor OnboardingDemoEngine {
         return knownPeerNames.count >= 2
     }
 
-    // MARK: - Scripted 3-Agent Demo
-
-    /// Scripted demo with 3 agents showing all MCP tools in action.
-    private func runScriptedDemo3Agents(
-        peerName: String, registry: PeerRegistry, relay: MessageRelay,
-        machineName: String, client: GhosttyClient,
-        continuation: AsyncStream<DemoLine>.Continuation
-    ) async -> Bool {
-        guard let panes = await setupTerminals(client: client, count: 3) else {
-            // Fall back to 2 panes
-            guard let panes2 = await setupTerminals(client: client, count: 2) else { return false }
-            return await runScriptedDemo2Panes(
-                peerName: peerName, registry: registry, relay: relay,
-                machineName: machineName, client: client,
-                pane1: panes2[0], pane2: panes2[1],
-                continuation: continuation
-            )
-        }
-        let pane1 = panes[0], pane2 = panes[1], pane3 = panes[2]
-
-        let agent1 = peerName.isEmpty ? "alpha" : peerName
-        let agent2 = "scout"
-        let agent3 = "oracle"
-
-        // Clear panes and show headers
-        sendToTerminal(client, pane1, "clear && printf '\\033[1;36m═══ Agent: \(agent1) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "clear && printf '\\033[1;35m═══ Agent: \(agent2) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane3, "clear && printf '\\033[1;33m═══ Agent: \(agent3) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 1: Register all 3 agents
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent1)\", role: \"claude\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent1)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id1 = await registry.register(name: agent1, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id1))\" }")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m registered: \(short(id1))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent2)\", role: \"claude\" }")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent2)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id2 = await registry.register(name: agent2, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id2))\" }")
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m registered: \(short(id2))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent3)\", role: \"claude\" }")
-        sendToTerminal(client, pane3, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent3)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id3 = await registry.register(name: agent3, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id3))\" }")
-        sendToTerminal(client, pane3, "printf '\\033[32m✓\\033[0m registered: \(short(id3))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 2: List peers — all 3 visible
-        yield(continuation, .request, "list_peers", "{}")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m list_peers()\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let peers = await registry.listPeers()
-        let peerNames = peers.map(\.name).joined(separator: ", ")
-        yield(continuation, .response, "list_peers", "[ \(peerNames) ]")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m found: \(peerNames)\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 3: Agent 1 → Agent 2
-        yield(continuation, .request, "send_message", "{ to: \"\(agent2)\", content: \"scout, check the logs\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m send_message(to: \"\(agent2)\", \"scout, check the logs\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        try? await relay.send(from: id1, to: agent2, content: "scout, check the logs")
-        yield(continuation, .response, "send_message", "{ status: \"delivered\" }")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m delivered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-
-        // Show in pane 2
-        sendToTerminal(client, pane2, "printf '\\033[33m📨 from \(agent1): \"scout, check the logs\"\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 4: Agent 2 → Agent 3
-        yield(continuation, .request, "send_message", "{ to: \"\(agent3)\", content: \"oracle, need analysis on build errors\" }")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m send_message(to: \"\(agent3)\", \"oracle, need analysis on build errors\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        try? await relay.send(from: id2, to: agent3, content: "oracle, need analysis on build errors")
-        yield(continuation, .response, "send_message", "{ status: \"delivered\" }")
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m delivered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-
-        // Show in pane 3
-        sendToTerminal(client, pane3, "printf '\\033[33m📨 from \(agent2): \"oracle, need analysis on build errors\"\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 5: Agent 3 replies to both
-        try? await relay.send(from: id3, to: agent2, content: "found 2 type errors in MCPServer.swift")
-        sendToTerminal(client, pane3, "printf '\\033[36m→\\033[0m send_message(to: \"\(agent2)\", \"found 2 type errors\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane3, "printf '\\033[32m✓\\033[0m delivered\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-
-        try? await relay.send(from: id3, to: agent1, content: "analysis complete, 2 issues found")
-        sendToTerminal(client, pane3, "printf '\\033[36m→\\033[0m send_message(to: \"\(agent1)\", \"analysis complete\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane3, "printf '\\033[32m✓\\033[0m delivered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 6: Agent 1 receives messages
-        yield(continuation, .request, "receive_messages", "{ peer_id: \"\(short(id1))\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m receive_messages()\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let messages = await relay.receive(peerID: id1)
-        if let msg = messages.first {
-            yield(continuation, .response, "receive_messages", "[ { from: \"\(msg.from)\", content: \"\(msg.content)\" } ]")
-            sendToTerminal(client, pane1, "printf '\\033[33m📨 from \(msg.from): \"\(msg.content)\"\\033[0m\\n\\n'\n")
-        } else {
-            yield(continuation, .response, "receive_messages", "[]")
-        }
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Step 7: Status checks
-        yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(id2))\" }")
-        try? await Task.sleep(for: .milliseconds(300))
-        if let status = await registry.getStatus(peerID: id2) {
-            yield(continuation, .response, "get_peer_status", "{ name: \"\(status.name)\", status: \"\(status.status.rawValue)\" }")
-        }
-        try? await Task.sleep(for: .milliseconds(300))
-
-        yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(id3))\" }")
-        try? await Task.sleep(for: .milliseconds(300))
-        if let status = await registry.getStatus(peerID: id3) {
-            yield(continuation, .response, "get_peer_status", "{ name: \"\(status.name)\", status: \"\(status.status.rawValue)\" }")
-        }
-
-        // Show "try it yourself" hint
-        sendToTerminal(client, pane1, "printf '\\n\\033[1;36m─── Try it yourself ───\\033[0m\\n'\n")
-        sendToTerminal(client, pane1, "printf 'Run: \\033[1mclaude\\033[0m to start an AI session with boo MCP tools\\n'\n")
-
-        // Clean up
-        await registry.remove(peerID: id1)
-        await registry.remove(peerID: id2)
-        await registry.remove(peerID: id3)
-
-        return true
-    }
-
-    /// Fallback 2-pane scripted demo with 3 agents sharing 2 panes.
-    private func runScriptedDemo2Panes(
-        peerName: String, registry: PeerRegistry, relay: MessageRelay,
-        machineName: String, client: GhosttyClient,
-        pane1: String, pane2: String,
-        continuation: AsyncStream<DemoLine>.Continuation
-    ) async -> Bool {
-        let agent1 = peerName.isEmpty ? "alpha" : peerName
-        let agent2 = "scout"
-        let agent3 = "oracle"
-
-        // Clear panes
-        sendToTerminal(client, pane1, "clear && printf '\\033[1;36m═══ Agent: \(agent1) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "clear && printf '\\033[1;35m═══ Agents: \(agent2) & \(agent3) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Register all 3
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent1)\", role: \"claude\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent1)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id1 = await registry.register(name: agent1, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id1))\" }")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m registered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent2)\", role: \"claude\" }")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent2)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id2 = await registry.register(name: agent2, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id2))\" }")
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m registered\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent3)\", role: \"claude\" }")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent3)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id3 = await registry.register(name: agent3, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id3))\" }")
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m registered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // List peers
-        yield(continuation, .request, "list_peers", "{}")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m list_peers()\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let peers = await registry.listPeers()
-        let peerNames = peers.map(\.name).joined(separator: ", ")
-        yield(continuation, .response, "list_peers", "[ \(peerNames) ]")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m found: \(peerNames)\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Agent 1 → Agent 2
-        yield(continuation, .request, "send_message", "{ to: \"\(agent2)\", content: \"scout, check the logs\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m send_message(to: \"\(agent2)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        try? await relay.send(from: id1, to: agent2, content: "scout, check the logs")
-        yield(continuation, .response, "send_message", "{ status: \"delivered\" }")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m delivered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "printf '\\033[33m📨 \(agent2) ← \(agent1): \"scout, check the logs\"\\033[0m\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Agent 2 → Agent 3
-        try? await relay.send(from: id2, to: agent3, content: "oracle, need analysis")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m \(agent2) send_message(to: \"\(agent3)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m delivered\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "printf '\\033[33m📨 \(agent3) ← \(agent2): \"oracle, need analysis\"\\033[0m\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Agent 3 replies to agent 1
-        try? await relay.send(from: id3, to: agent1, content: "analysis complete, 2 issues found")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m \(agent3) send_message(to: \"\(agent1)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m delivered\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Agent 1 receives
-        yield(continuation, .request, "receive_messages", "{ peer_id: \"\(short(id1))\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m receive_messages()\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let messages = await relay.receive(peerID: id1)
-        if let msg = messages.first {
-            yield(continuation, .response, "receive_messages", "[ { from: \"\(msg.from)\", content: \"\(msg.content)\" } ]")
-            sendToTerminal(client, pane1, "printf '\\033[33m📨 from \(msg.from): \"\(msg.content)\"\\033[0m\\n\\n'\n")
-        } else {
-            yield(continuation, .response, "receive_messages", "[]")
-        }
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Status
-        yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(id2))\" }")
-        try? await Task.sleep(for: .milliseconds(300))
-        if let status = await registry.getStatus(peerID: id2) {
-            yield(continuation, .response, "get_peer_status", "{ name: \"\(status.name)\", status: \"\(status.status.rawValue)\" }")
-        }
-
-        sendToTerminal(client, pane1, "printf '\\n\\033[1;36m─── Try it yourself ───\\033[0m\\n'\n")
-        sendToTerminal(client, pane1, "printf 'Run: \\033[1mclaude\\033[0m to start an AI session with boo MCP tools\\n'\n")
-
-        await registry.remove(peerID: id1)
-        await registry.remove(peerID: id2)
-        await registry.remove(peerID: id3)
-
-        return true
-    }
-
     // MARK: - Ghostty Launch
 
     /// Try to launch Ghostty Boo and return socket path when ready.
@@ -543,17 +281,18 @@ public actor OnboardingDemoEngine {
         return nil
     }
 
-    /// Create a new tab in Ghostty via AppleScript.
-    private func createNewTab(processName: String) async {
+    /// Create a new pane (split) in Ghostty via AppleScript.
+    /// Uses Cmd+D for vertical split so agents show side-by-side.
+    private func createNewPane(processName: String) async {
         // Activate Ghostty first
         _ = runOsascript("tell application \"\(processName)\" to activate")
         try? await Task.sleep(for: .milliseconds(300))
 
-        // Send Cmd+T for new tab
+        // Send Cmd+D for vertical split (side-by-side panes)
         let script = """
         tell application "System Events"
             tell process "\(processName)"
-                keystroke "t" using command down
+                keystroke "d" using command down
             end tell
         end tell
         """

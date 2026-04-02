@@ -91,6 +91,85 @@ struct IntegrationTests {
     }
 }
 
+// MARK: - SSH Tunnel Integration (requires BOO_SSH_HOST env var)
+
+/// Tests that exercise the real SSH tunnel + RemoteProvisioner flow.
+/// Set BOO_SSH_HOST=localhost to run against the local machine.
+@Suite("SSH Integration", .enabled(if: ProcessInfo.processInfo.environment["BOO_SSH_HOST"] != nil))
+struct SSHIntegrationTests {
+
+    var sshHost: String {
+        ProcessInfo.processInfo.environment["BOO_SSH_HOST"]!
+    }
+
+    @Test("SSH connection test via RemoteProvisioner")
+    func sshConnection() async {
+        let provisioner = RemoteProvisioner()
+        let host = SSHHost(id: sshHost, alias: sshHost, hostname: sshHost, user: NSUserName())
+        let connected = await provisioner.testConnection(host: host)
+        #expect(connected, "SSH connection to \(sshHost) should succeed")
+    }
+
+    @Test("Detect Ghostty on remote host")
+    func detectGhostty() async {
+        let provisioner = RemoteProvisioner()
+        let host = SSHHost(id: sshHost, alias: sshHost, hostname: sshHost, user: NSUserName())
+        let (installed, hasSocket, variant, socketPath) = await provisioner.detectRemoteGhostty(host: host)
+        #expect(installed, "Ghostty should be installed on \(sshHost)")
+        #expect(hasSocket, "Ghostty should have an active socket")
+        #expect(variant != nil)
+        #expect(socketPath != nil, "Should detect active socket path")
+    }
+
+    @Test("Full provisioning pipeline creates working tunnel")
+    func fullProvision() async throws {
+        let provisioner = RemoteProvisioner()
+        let tunnelManager = SSHTunnelManager(reconnectDelay: 1, maxReconnectAttempts: 2)
+        let host = SSHHost(id: sshHost, alias: sshHost, hostname: sshHost, user: NSUserName())
+
+        var steps: [StepResult] = []
+        for await result in await provisioner.provision(
+            host: host,
+            tunnelManager: tunnelManager,
+            releaseURL: RemoteProvisioner.defaultReleaseURL
+        ) {
+            steps.append(result)
+        }
+
+        // Should have completed all the way through
+        let completedSteps = steps.compactMap { result -> ProvisionStep? in
+            if case .completed(let step, _) = result { return step }
+            return nil
+        }
+        let failedSteps = steps.compactMap { result -> (ProvisionStep, String)? in
+            if case .failed(let step, let msg) = result { return (step, msg) }
+            return nil
+        }
+
+        if let (step, msg) = failedSteps.first {
+            Issue.record("Provisioning failed at \(step.rawValue): \(msg)")
+        }
+
+        #expect(completedSteps.contains(.connecting), "Should complete connecting step")
+        #expect(completedSteps.contains(.detecting), "Should complete detecting step")
+        #expect(completedSteps.contains(.tunnel), "Should complete tunnel step")
+        #expect(completedSteps.contains(.discovered), "Should complete discovered step")
+
+        // Validate tunnel socket is usable
+        let localSocket = await tunnelManager.localSocket(host.alias)
+        #expect(localSocket != nil, "Tunnel should have a local socket")
+
+        if let path = localSocket {
+            let client = GhosttyClient(socketPath: path)
+            let terminals = try client.listTerminals()
+            #expect(!terminals.isEmpty, "Should discover terminals via tunnel")
+        }
+
+        // Cleanup
+        await tunnelManager.stopAll()
+    }
+}
+
 // MARK: - MCP → AppState E2E (no socket needed)
 
 @Suite("MCP E2E")
