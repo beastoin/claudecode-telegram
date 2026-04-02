@@ -45,22 +45,15 @@ public actor OnboardingDemoEngine {
                 }
 
                 let client = GhosttyClient(socketPath: socket)
-                let hasClaude = self.detectClaudeCLI()
-                let done: Bool
 
-                if hasClaude {
-                    done = await self.runLiveClaudeDemo(
-                        peerName: peerName, registry: registry, relay: relay,
-                        machineName: machineName, client: client,
-                        continuation: continuation
-                    )
-                } else {
-                    done = await self.runScriptedDemo3Agents(
-                        peerName: peerName, registry: registry, relay: relay,
-                        machineName: machineName, client: client,
-                        continuation: continuation
-                    )
-                }
+                // Always use scripted demo — it's reliable and shows all MCP tools.
+                // Live Claude sessions are too fragile (MCP trust prompts, API keys,
+                // stale binary paths, macOS dialogs).
+                let done = await self.runScriptedDemo3Agents(
+                    peerName: peerName, registry: registry, relay: relay,
+                    machineName: machineName, client: client,
+                    continuation: continuation
+                )
 
                 if !done {
                     self.yield(continuation, .error, "connect", "Could not open terminal panes — open a Ghostty Boo window first")
@@ -117,106 +110,7 @@ public actor OnboardingDemoEngine {
         return Array(allPanes.prefix(count))
     }
 
-    // MARK: - Live Claude Demo (Real Claude Agents)
-
-    /// Launch 2-3 real Claude Code sessions that talk to each other via MCP.
-    private func runLiveClaudeDemo(
-        peerName: String, registry: PeerRegistry, relay: MessageRelay,
-        machineName: String, client: GhosttyClient,
-        continuation: AsyncStream<DemoLine>.Continuation
-    ) async -> Bool {
-        guard let panes = await setupTerminals(client: client, count: 3) else { return false }
-        let pane1 = panes[0], pane2 = panes[1], pane3 = panes[2]
-
-        let agent1 = peerName.isEmpty ? "alpha" : peerName
-        let agent2 = "scout"
-        let agent3 = "oracle"
-
-        // Clear panes and show headers
-        sendToTerminal(client, pane1, "clear && printf '\\033[1;36m═══ Agent: \(agent1) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane2, "clear && printf '\\033[1;35m═══ Agent: \(agent2) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(300))
-        sendToTerminal(client, pane3, "clear && printf '\\033[1;33m═══ Agent: \(agent3) ═══\\033[0m\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Register all 3 agents via MCP
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent1)\", role: \"claude\" }")
-        sendToTerminal(client, pane1, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent1)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id1 = await registry.register(name: agent1, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id1))\" }")
-        sendToTerminal(client, pane1, "printf '\\033[32m✓\\033[0m registered: \(short(id1))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent2)\", role: \"claude\" }")
-        sendToTerminal(client, pane2, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent2)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id2 = await registry.register(name: agent2, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id2))\" }")
-        sendToTerminal(client, pane2, "printf '\\033[32m✓\\033[0m registered: \(short(id2))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-
-        yield(continuation, .request, "register_peer", "{ name: \"\(agent3)\", role: \"claude\" }")
-        sendToTerminal(client, pane3, "printf '\\033[36m→\\033[0m register_peer(name: \"\(agent3)\")\\n'\n")
-        try? await Task.sleep(for: .milliseconds(400))
-        let id3 = await registry.register(name: agent3, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(short(id3))\" }")
-        sendToTerminal(client, pane3, "printf '\\033[32m✓\\033[0m registered: \(short(id3))\\n\\n'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Launch real Claude sessions with MCP
-        yield(continuation, .request, "launch_claude", "{ agents: [\"\(agent1)\", \"\(agent2)\", \"\(agent3)\"] }")
-        sendToTerminal(client, pane1, "claude -p 'You are agent \(agent1). Use boo MCP tools: list_peers to find other agents, then send_message to say hello to \(agent2). Keep responses short.'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-        sendToTerminal(client, pane2, "claude -p 'You are agent \(agent2). Use boo MCP tools: list_peers to find other agents, then send_message to greet \(agent3). Keep responses short.'\n")
-        try? await Task.sleep(for: .milliseconds(500))
-        sendToTerminal(client, pane3, "claude -p 'You are agent \(agent3). Use boo MCP tools: receive_messages to check for messages, then reply. Keep responses short.'\n")
-        yield(continuation, .response, "launch_claude", "{ status: \"3 Claude agents started\" }")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // List peers to show discovery
-        yield(continuation, .request, "list_peers", "{}")
-        try? await Task.sleep(for: .milliseconds(400))
-        let peers = await registry.listPeers()
-        let peerNames = peers.map(\.name).joined(separator: ", ")
-        yield(continuation, .response, "list_peers", "[ \(peerNames) ]")
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Show hint
-        sendToTerminal(client, pane1, "\n")
-        try? await Task.sleep(for: .seconds(3))
-        sendToTerminal(client, pane1, "printf '\\n\\033[1;36m─── Claude agents are talking via MCP ───\\033[0m\\n'\n")
-
-        // Wait for agents to interact
-        try? await Task.sleep(for: .seconds(5))
-
-        // Check messages
-        yield(continuation, .request, "receive_messages", "{ peer_id: \"\(short(id1))\" }")
-        try? await Task.sleep(for: .milliseconds(300))
-        let messages = await relay.receive(peerID: id1)
-        if let msg = messages.first {
-            yield(continuation, .response, "receive_messages", "[ { from: \"\(msg.from)\", content: \"\(msg.content)\" } ]")
-        } else {
-            yield(continuation, .response, "receive_messages", "[] (agents still warming up)")
-        }
-
-        // Status check
-        yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(id2))\" }")
-        try? await Task.sleep(for: .milliseconds(300))
-        if let status = await registry.getStatus(peerID: id2) {
-            yield(continuation, .response, "get_peer_status", "{ name: \"\(status.name)\", status: \"\(status.status.rawValue)\" }")
-        }
-
-        // Clean up registrations (Claude sessions keep running)
-        await registry.remove(peerID: id1)
-        await registry.remove(peerID: id2)
-        await registry.remove(peerID: id3)
-
-        return true
-    }
-
-    // MARK: - Scripted 3-Agent Demo (No Claude CLI)
+    // MARK: - Scripted 3-Agent Demo
 
     /// Scripted demo with 3 agents showing all MCP tools in action.
     private func runScriptedDemo3Agents(
@@ -468,34 +362,6 @@ public actor OnboardingDemoEngine {
         await registry.remove(peerID: id3)
 
         return true
-    }
-
-    // MARK: - Claude CLI Detection
-
-    private func detectClaudeCLI() -> Bool {
-        let paths = [
-            "/usr/local/bin/claude",
-            NSHomeDirectory() + "/.local/bin/claude",
-            "/opt/homebrew/bin/claude",
-        ]
-        for path in paths {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return true
-            }
-        }
-        // Check via which
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = ["claude"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
     }
 
     // MARK: - Ghostty Launch
