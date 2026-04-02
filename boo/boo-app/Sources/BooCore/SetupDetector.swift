@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(AppKit)
-import AppKit
-#endif
 
 /// Probe result for a single setup check.
 public enum ProbeState: Sendable {
@@ -37,12 +34,8 @@ public actor SetupDetector {
     // MARK: - Ghostty Detection
 
     /// Check if Ghostty Boo is installed. Only Ghostty Boo counts — original Ghostty is ignored.
+    /// Uses FileManager only — NSWorkspace LaunchServices cache persists after deletion.
     public func detectGhosttyBooInstall() -> Bool {
-        #if canImport(AppKit)
-        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.beastoin.ghostty-boo") != nil {
-            return true
-        }
-        #endif
         let paths = [
             "/Applications/Ghostty Boo.app",
             NSHomeDirectory() + "/Applications/Ghostty Boo.app",

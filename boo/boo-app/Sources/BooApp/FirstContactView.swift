@@ -76,6 +76,10 @@ struct FirstContactView: View {
                     Text("Running demo...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if demoFailed {
+                    Button("Go Back") { coordinator.back() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
                 } else if coordinator.demoComplete {
                     Button("Re-run Demo") {
                         coordinator.demoTranscript = []
@@ -86,7 +90,7 @@ struct FirstContactView: View {
                     .controlSize(.small)
                 }
                 Spacer()
-                if coordinator.demoComplete {
+                if coordinator.demoComplete && !demoFailed {
                     Button("Continue") { coordinator.advance() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -99,6 +103,11 @@ struct FirstContactView: View {
         .task {
             await runDemo()
         }
+    }
+
+    /// Demo ended with an error (e.g. no Ghostty connection).
+    private var demoFailed: Bool {
+        coordinator.demoComplete && coordinator.demoTranscript.contains { $0.direction == .error }
     }
 
     // MARK: - Tool Call Row

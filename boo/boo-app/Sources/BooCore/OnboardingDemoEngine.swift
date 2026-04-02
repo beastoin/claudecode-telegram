@@ -19,8 +19,8 @@ public actor OnboardingDemoEngine {
 
     public init() {}
 
-    /// Run the demo. If socketPath is provided, tries live terminal mode.
-    /// Falls back to simulated mode if live setup fails.
+    /// Run the demo using real Ghostty terminals. Requires a connected socket.
+    /// If Ghostty is unavailable, yields an error line and finishes.
     public func runDemo(
         peerName: String,
         registry: PeerRegistry,
@@ -32,30 +32,27 @@ public actor OnboardingDemoEngine {
             Task {
                 var socket = socketPath
 
-                // If no socket, try launching Ghostty
+                // If no socket, try launching Ghostty Boo
                 if socket == nil {
                     socket = await self.tryLaunchGhostty()
                 }
 
-                // Try live demo
-                if let socket {
-                    let client = GhosttyClient(socketPath: socket)
-                    let done = await self.runLiveDemo(
-                        peerName: peerName, registry: registry, relay: relay,
-                        machineName: machineName, client: client,
-                        continuation: continuation
-                    )
-                    if done {
-                        continuation.finish()
-                        return
-                    }
+                // Require a real Ghostty connection — no fake demo
+                guard let socket else {
+                    self.yield(continuation, .error, "connect", "Ghostty Boo not connected — go back and ensure socket is working")
+                    continuation.finish()
+                    return
                 }
 
-                // Fallback: simulated demo
-                await self.runSimulatedDemo(
+                let client = GhosttyClient(socketPath: socket)
+                let done = await self.runLiveDemo(
                     peerName: peerName, registry: registry, relay: relay,
-                    machineName: machineName, continuation: continuation
+                    machineName: machineName, client: client,
+                    continuation: continuation
                 )
+                if !done {
+                    self.yield(continuation, .error, "connect", "Could not open terminal panes — open a Ghostty Boo window first")
+                }
                 continuation.finish()
             }
         }
@@ -318,112 +315,41 @@ public actor OnboardingDemoEngine {
         return true
     }
 
-    // MARK: - Simulated Demo (No Ghostty, In-Memory Only)
-
-    private func runSimulatedDemo(
-        peerName: String, registry: PeerRegistry, relay: MessageRelay,
-        machineName: String, continuation: AsyncStream<DemoLine>.Continuation
-    ) async {
-        let guideName = "boo-guide"
-        let effectiveName = peerName.isEmpty ? "user" : peerName
-
-        // Step 1: register_peer (user)
-        yield(continuation, .request, "register_peer", "{ name: \"\(effectiveName)\", role: \"claude\" }")
-        try? await Task.sleep(for: .milliseconds(400))
-        let userPeerID = await registry.register(name: effectiveName, role: "claude", machine: machineName)
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(userPeerID)\" }")
-        try? await Task.sleep(for: .milliseconds(600))
-
-        // Step 2: register_peer (guide)
-        yield(continuation, .request, "register_peer", "{ name: \"\(guideName)\", role: \"guide\" }")
-        try? await Task.sleep(for: .milliseconds(400))
-        let guidePeerID = await registry.register(name: guideName, role: "guide", machine: "local")
-        yield(continuation, .response, "register_peer", "{ peer_id: \"\(guidePeerID)\" }")
-        try? await Task.sleep(for: .milliseconds(600))
-
-        // Step 3: list_peers
-        yield(continuation, .request, "list_peers", "{}")
-        try? await Task.sleep(for: .milliseconds(400))
-        let peers = await registry.listPeers()
-        let peerList = peers.map { "{ name: \"\($0.name)\", status: \"\($0.status.rawValue)\" }" }.joined(separator: ", ")
-        yield(continuation, .response, "list_peers", "[ \(peerList) ]")
-        try? await Task.sleep(for: .milliseconds(600))
-
-        // Step 4: send_message
-        yield(continuation, .request, "send_message", "{ to: \"\(guideName)\", content: \"hello from boo\" }")
-        try? await Task.sleep(for: .milliseconds(400))
-        do {
-            try await relay.send(from: userPeerID, to: guideName, content: "hello from boo")
-            yield(continuation, .response, "send_message", "{ status: \"delivered\" }")
-        } catch {
-            yield(continuation, .error, "send_message", "{ error: \"\(error)\" }")
-        }
-        try? await Task.sleep(for: .milliseconds(600))
-
-        // Step 5: guide replies
-        do {
-            try await relay.send(from: guidePeerID, to: effectiveName, content: "welcome to boo")
-        } catch {}
-        try? await Task.sleep(for: .milliseconds(300))
-
-        // Step 6: receive_messages
-        yield(continuation, .request, "receive_messages", "{ peer_id: \"\(userPeerID)\" }")
-        try? await Task.sleep(for: .milliseconds(400))
-        let messages = await relay.receive(peerID: userPeerID)
-        if let msg = messages.first {
-            yield(continuation, .response, "receive_messages", "[ { from: \"\(msg.from)\", content: \"\(msg.content)\" } ]")
-        } else {
-            yield(continuation, .response, "receive_messages", "[]")
-        }
-        try? await Task.sleep(for: .milliseconds(600))
-
-        // Step 7: get_peer_status
-        yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(guidePeerID)\" }")
-        try? await Task.sleep(for: .milliseconds(400))
-        if let status = await registry.getStatus(peerID: guidePeerID) {
-            yield(continuation, .response, "get_peer_status", "{ name: \"\(status.name)\", status: \"\(status.status.rawValue)\" }")
-        }
-
-        // Clean up
-        await registry.remove(peerID: userPeerID)
-        await registry.remove(peerID: guidePeerID)
-    }
-
     // MARK: - Ghostty Launch
 
     /// Try to launch Ghostty Boo and return socket path when ready.
     private func tryLaunchGhostty() async -> String? {
-        for bundleID in ["com.beastoin.ghostty-boo", "com.mitchellh.ghostty"] {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = ["-b", bundleID]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
-            do {
-                try process.run()
-                process.waitUntilExit()
-                guard process.terminationStatus == 0 else { continue }
+        // Delete stale socket before launching
+        try? FileManager.default.removeItem(atPath: "/tmp/ghostty.sock")
 
-                // Wait for socket (up to 5 seconds)
-                for _ in 0..<10 {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    for path in ["/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
-                        if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
-                            return path
-                        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-b", "com.beastoin.ghostty-boo"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+
+            // Wait for socket (up to 5 seconds)
+            for _ in 0..<10 {
+                try? await Task.sleep(for: .milliseconds(500))
+                for path in ["/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
+                    if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
+                        return path
                     }
                 }
-                return nil // Launched but socket not available
-            } catch {
-                continue
             }
+            return nil // Launched but socket not available
+        } catch {
+            return nil
         }
-        return nil
     }
 
-    /// Find the running Ghostty process name for AppleScript.
+    /// Find the running Ghostty Boo process name for AppleScript.
     private func findGhosttyProcessName() async -> String? {
-        for name in ["Ghostty Boo", "Ghostty", "GhosttyBoo"] {
+        for name in ["Ghostty Boo", "GhosttyBoo"] {
             let script = "tell application \"System Events\" to return exists process \"\(name)\""
             if let result = runOsascript(script),
                result.trimmingCharacters(in: .whitespacesAndNewlines) == "true" {

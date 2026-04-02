@@ -213,13 +213,11 @@ final class OnboardingCoordinator {
             }
         }
 
-        // Auto-advance if all blocking probes pass, otherwise recheck every 3s
-        if isFullyConfigured {
-            try? await Task.sleep(for: .seconds(1.5))
-            advance()
-        } else {
+        // Start recheck loop if not all blocking probes pass (user may fix externally)
+        if !isFullyConfigured {
             recheckTask = Task { await recheckLoop() }
         }
+        // Never auto-advance — let user click Continue
     }
 
     private var recheckTask: Task<Void, Never>?
@@ -256,10 +254,8 @@ final class OnboardingCoordinator {
                 updateProbe("claude-mcp", state: .passed("Registered"))
             }
 
-            // Auto-advance when all pass
+            // Stop rechecking once all pass — user will click Continue
             if isFullyConfigured {
-                try? await Task.sleep(for: .seconds(1))
-                advance()
                 break
             }
         }
