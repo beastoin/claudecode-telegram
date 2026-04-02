@@ -142,7 +142,15 @@ private struct ProbeRow: View {
                     .foregroundStyle(.red)
                     .lineLimit(1)
 
-                if probe.id == "claude-mcp" || probe.id == "codex-mcp" {
+                if probe.id == "ghostty" {
+                    Button("Install") {
+                        if let url = URL(string: "https://github.com/beastoin/claudecode-telegram/releases/latest/download/GhosttyBoo-macOS-arm64.zip") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else if probe.id == "claude-mcp" || probe.id == "codex-mcp" {
                     Button("Fix", action: onFix)
                         .buttonStyle(.bordered)
                         .controlSize(.small)

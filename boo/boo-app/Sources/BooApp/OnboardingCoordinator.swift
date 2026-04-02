@@ -90,61 +90,92 @@ final class OnboardingCoordinator {
     }
 
     private func runProbes() async {
-        // Probe 1: Ghostty install
+        // Probe 1: Ghostty Boo install (only Ghostty Boo counts — original Ghostty doesn't have our socket API)
         updateProbe("ghostty", state: .running)
         try? await Task.sleep(for: .milliseconds(400))
         let (ghosttyInstalled, variant) = await detector.detectGhosttyInstall()
-        if ghosttyInstalled {
-            updateProbe("ghostty", state: .passed(variant ?? "Ghostty"))
+        let hasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
+        if hasGhosttyBoo {
+            updateProbe("ghostty", state: .passed("Ghostty Boo"))
+        } else if ghosttyInstalled {
+            // Original Ghostty found but not Ghostty Boo
+            updateProbe("ghostty", state: .failed("Found \(variant ?? "Ghostty") — need Ghostty Boo"))
         } else {
             updateProbe("ghostty", state: .failed("Not found — Install Ghostty Boo"))
         }
 
-        // Probe 2: Socket
+        // Probe 2: Socket — skip if Ghostty Boo not installed (no point checking)
         updateProbe("socket", state: .running)
         try? await Task.sleep(for: .milliseconds(400))
-        let (socketPath, terminals) = await detector.probeSocket()
-        if let path = socketPath {
-            updateProbe("socket", state: .passed("Reachable at \(path)"))
-            // Also connect AppState
-            await appState.connect(socketPath: path)
+        var terminals: [TerminalInfo] = []
+        if hasGhosttyBoo {
+            let result = await detector.probeSocket()
+            if let path = result.path {
+                terminals = result.terminals
+                updateProbe("socket", state: .passed("Reachable at \(path)"))
+                await appState.connect(socketPath: path)
+            } else {
+                updateProbe("socket", state: .failed("No socket — Enable control-socket in Ghostty Boo config"))
+            }
         } else {
-            updateProbe("socket", state: .failed("No socket — Enable control-socket in Ghostty config"))
+            updateProbe("socket", state: .skipped("Waiting for Ghostty Boo"))
         }
 
-        // Probe 3: Terminals
+        // Probe 3: Terminals — skip if no socket
         updateProbe("terminals", state: .running)
         try? await Task.sleep(for: .milliseconds(300))
-        if !terminals.isEmpty {
+        if !hasGhosttyBoo {
+            updateProbe("terminals", state: .skipped("Waiting for Ghostty Boo"))
+        } else if !terminals.isEmpty {
             updateProbe("terminals", state: .passed("\(terminals.count) terminal\(terminals.count == 1 ? "" : "s") discovered"))
         } else {
-            updateProbe("terminals", state: .skipped("0 terminals — open a Ghostty window"))
+            updateProbe("terminals", state: .skipped("0 terminals — open a Ghostty Boo window"))
         }
 
-        // Probe 4: Claude MCP
+        // Probe 4: Claude MCP — auto-fix if not configured
         updateProbe("claude-mcp", state: .running)
         try? await Task.sleep(for: .milliseconds(300))
         let (claudeInstalled, claudeStale) = await detector.checkClaudeMCP()
         if claudeInstalled && !claudeStale {
             updateProbe("claude-mcp", state: .passed("Registered"))
-        } else if claudeInstalled && claudeStale {
-            updateProbe("claude-mcp", state: .failed("Stale — Repair"))
         } else {
-            updateProbe("claude-mcp", state: .failed("Not configured — Enable"))
+            // Auto-fix: install or repair without user intervention
+            let manager = MCPConfigManager()
+            let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
+            do {
+                if claudeStale {
+                    try manager.repair()
+                } else {
+                    try manager.install(binaryPath: binaryPath)
+                }
+                updateProbe("claude-mcp", state: .passed("Registered"))
+            } catch {
+                updateProbe("claude-mcp", state: .failed("Error: \(error.localizedDescription)"))
+            }
         }
 
-        // Probe 5: Codex MCP
+        // Probe 5: Codex MCP — auto-fix if Codex installed but MCP not configured
         updateProbe("codex-mcp", state: .running)
         try? await Task.sleep(for: .milliseconds(300))
         let (codexExists, codexConfigured, codexStale) = await detector.checkCodexMCP()
         if !codexExists {
-            updateProbe("codex-mcp", state: .skipped("Codex CLI not installed — Skip"))
+            updateProbe("codex-mcp", state: .skipped("Codex CLI not installed"))
         } else if codexConfigured && !codexStale {
             updateProbe("codex-mcp", state: .passed("Registered"))
-        } else if codexConfigured && codexStale {
-            updateProbe("codex-mcp", state: .failed("Stale — Repair"))
         } else {
-            updateProbe("codex-mcp", state: .failed("Not configured — Enable"))
+            // Auto-fix: install or repair without user intervention
+            let manager = CodexConfigManager()
+            let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
+            do {
+                if codexStale {
+                    try manager.repair()
+                } else {
+                    try manager.install(binaryPath: binaryPath)
+                }
+                updateProbe("codex-mcp", state: .passed("Registered"))
+            } catch {
+                updateProbe("codex-mcp", state: .failed("Error: \(error.localizedDescription)"))
+            }
         }
 
         // Auto-advance if all blocking probes pass
