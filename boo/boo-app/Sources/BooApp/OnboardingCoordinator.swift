@@ -33,10 +33,12 @@ final class OnboardingCoordinator {
     var peerName: String = ""
     var sshHosts: [SSHHost] = []
     var demoComplete = false
+    var agentQuote: String = ""
 
     private let detector = SetupDetector()
     private let appState: AppState
     private let installer = GhosttyBooInstaller()
+    private var hasStarted = false
 
     init(appState: AppState) {
         self.appState = appState
@@ -60,6 +62,12 @@ final class OnboardingCoordinator {
     // MARK: - Boot Sequence
 
     func start() async {
+        // Guard against re-running on back navigation — .task fires every time
+        // BootSequenceView appears. Without this, going back from Demo re-triggers
+        // the quick-skip and jumps straight to "You're All Set".
+        guard !hasStarted else { return }
+        hasStarted = true
+
         // Set up probes FIRST so UI always has content
         probes = [
             Probe(id: "ghostty", label: "GHOSTTY BOO", isBlocking: true),
@@ -90,8 +98,10 @@ final class OnboardingCoordinator {
             }
         }
 
-        // Auto-fill peer name
-        peerName = await detector.defaultPeerName()
+        // Auto-fill peer name — ask Claude/Codex for a fun suggestion if available
+        let suggestion = await detector.suggestAgentIdentity()
+        peerName = suggestion.name
+        agentQuote = suggestion.quote
 
         // Discover SSH hosts in background
         sshHosts = await detector.detectSSHHosts()

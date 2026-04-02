@@ -29,6 +29,13 @@ struct PopoverView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Settings")
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                }
+                .buttonStyle(.borderless)
+                .help("Quit Boo")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

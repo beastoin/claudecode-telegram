@@ -126,9 +126,102 @@ public actor SetupDetector {
         return (true, configured, stale)
     }
 
-    // MARK: - Peer Name
+    // MARK: - Agent Identity
 
-    /// Generate default peer name from user@machine.
+    public struct AgentIdentity: Sendable {
+        public let name: String
+        public let quote: String
+        public let source: String  // "claude", "codex", or "fallback"
+    }
+
+    /// Detect Claude/Codex CLI and ask for a fun agent name + quote.
+    /// Falls back to a random fun name if neither CLI is available.
+    public func suggestAgentIdentity() -> AgentIdentity {
+        let hasClaude = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/claude")
+            || shellWhich("claude") != nil
+        let hasCodex = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/codex")
+            || shellWhich("codex") != nil
+
+        if hasClaude, let result = askCLI(command: "claude", args: [
+            "-p",
+            "You are naming an AI agent for a macOS app called Boo. Reply with EXACTLY two lines, nothing else. Line 1: a short creative agent name (2-3 words, fun/quirky, no quotes). Line 2: a funny one-liner quote about AI agents (no quotes)."
+        ]) {
+            return result
+        }
+
+        if hasCodex, let result = askCLI(command: "codex", args: [
+            "exec", "-q",
+            "You are naming an AI agent for a macOS app called Boo. Reply with EXACTLY two lines, nothing else. Line 1: a short creative agent name (2-3 words, fun/quirky, no quotes). Line 2: a funny one-liner quote about AI agents (no quotes)."
+        ]) {
+            return result
+        }
+
+        // Fallback: random fun name
+        let adjectives = ["Cosmic", "Sneaky", "Turbo", "Lazy", "Quantum", "Pixel", "Neon", "Chill", "Hyper", "Fuzzy"]
+        let nouns = ["Panda", "Ghost", "Falcon", "Otter", "Phoenix", "Raccoon", "Penguin", "Fox", "Owl", "Cat"]
+        let quotes = [
+            "I dream of electric sheep... and fast builds.",
+            "sudo make me a sandwich.",
+            "Have you tried turning it off and on again?",
+            "I'm not a bug, I'm a feature.",
+            "01001000 01101001 (that's 'Hi' in binary).",
+        ]
+        return AgentIdentity(
+            name: "\(adjectives.randomElement()!) \(nouns.randomElement()!)",
+            quote: quotes.randomElement()!,
+            source: "fallback"
+        )
+    }
+
+    private func shellWhich(_ command: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return path?.isEmpty == false ? path : nil
+        } catch { return nil }
+    }
+
+    private func askCLI(command: String, args: [String]) -> AgentIdentity? {
+        let process = Process()
+        if let path = shellWhich(command) {
+            process.executableURL = URL(fileURLWithPath: path)
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/\(command)")
+        }
+        process.arguments = args
+        process.environment = ProcessInfo.processInfo.environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            // 15s timeout — don't block onboarding
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+                if process.isRunning { process.terminate() }
+            }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return nil }
+            let lines = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard lines.count >= 2 else { return nil }
+            return AgentIdentity(name: lines[0], quote: lines[1], source: command)
+        } catch { return nil }
+    }
+
+    /// Generate default peer name from user@machine (legacy fallback).
     public func defaultPeerName() -> String {
         let user = NSUserName()
         let machine = Host.current().localizedName ?? "unknown"

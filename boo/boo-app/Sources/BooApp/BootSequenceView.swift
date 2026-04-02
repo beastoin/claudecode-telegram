@@ -35,11 +35,19 @@ struct BootSequenceView: View {
             }
             .padding(.horizontal, 24)
 
-            // Peer name
+            // Agent name + quote
             if coordinator.probes.allSatisfy({ !$0.state.isRunning && !$0.state.isPending }) {
                 GroupBox("Agent Name") {
-                    TextField("Agent name", text: $coordinator.peerName)
-                        .textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Agent name", text: $coordinator.peerName)
+                            .textFieldStyle(.roundedBorder)
+                        if !coordinator.agentQuote.isEmpty {
+                            Text("\"\(coordinator.agentQuote)\"")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .italic()
+                        }
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 12)
