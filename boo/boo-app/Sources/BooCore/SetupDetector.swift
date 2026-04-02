@@ -113,44 +113,22 @@ public actor SetupDetector {
         return (true, manager.isStale())
     }
 
-    // MARK: - Codex MCP
-
-    /// Check if Codex CLI MCP is configured.
-    /// Returns (installed, stale). If Codex CLI is not installed, returns nil (skip).
-    public func checkCodexMCP() -> (codexInstalled: Bool, mcpConfigured: Bool, stale: Bool) {
-        let manager = CodexConfigManager()
-        let codexExists = manager.isCodexInstalled()
-        guard codexExists else { return (false, false, false) }
-        let configured = manager.isInstalled()
-        let stale = configured ? manager.isStale() : false
-        return (true, configured, stale)
-    }
-
     // MARK: - Agent Identity
 
     public struct AgentIdentity: Sendable {
         public let name: String
         public let quote: String
-        public let source: String  // "claude", "codex", or "fallback"
+        public let source: String  // "claude" or "fallback"
     }
 
-    /// Detect Claude/Codex CLI and ask for a fun agent name + quote.
-    /// Falls back to a random fun name if neither CLI is available.
+    /// Detect Claude Code CLI and ask for a fun agent name + quote.
+    /// Falls back to a random fun name if CLI is unavailable.
     public func suggestAgentIdentity() -> AgentIdentity {
         let hasClaude = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/claude")
             || shellWhich("claude") != nil
-        let hasCodex = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/codex")
-            || shellWhich("codex") != nil
 
         if hasClaude, let result = askCLI(command: "claude", args: [
             "-p",
-            "You are naming an AI agent for a macOS app called Boo. Reply with EXACTLY two lines, nothing else. Line 1: a short creative agent name (2-3 words, fun/quirky, no quotes). Line 2: a funny one-liner quote about AI agents (no quotes)."
-        ]) {
-            return result
-        }
-
-        if hasCodex, let result = askCLI(command: "codex", args: [
-            "exec", "-q",
             "You are naming an AI agent for a macOS app called Boo. Reply with EXACTLY two lines, nothing else. Line 1: a short creative agent name (2-3 words, fun/quirky, no quotes). Line 2: a funny one-liner quote about AI agents (no quotes)."
         ]) {
             return result

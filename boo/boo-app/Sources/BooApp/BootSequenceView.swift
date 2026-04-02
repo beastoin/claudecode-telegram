@@ -154,7 +154,7 @@ private struct ProbeRow: View {
                     Button("Install") { onFix() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                } else if probe.id == "claude-mcp" || probe.id == "codex-mcp" {
+                } else if probe.id == "claude-mcp" {
                     Button("Fix", action: onFix)
                         .buttonStyle(.bordered)
                         .controlSize(.small)

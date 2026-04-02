@@ -74,13 +74,14 @@ final class OnboardingCoordinator {
             Probe(id: "socket", label: "SOCKET", isBlocking: true),
             Probe(id: "terminals", label: "TERMINALS", isBlocking: false),
             Probe(id: "claude-mcp", label: "CLAUDE MCP", isBlocking: true),
-            Probe(id: "codex-mcp", label: "CODEX MCP", isBlocking: false),
         ]
 
         // Quick skip: use only fast, non-blocking checks (no socket IO)
         // File reads only — no network, no process spawning
+        // Set BOO_FORCE_ONBOARDING=1 to bypass quick-skip (for testing/demos)
         let mcpManager = MCPConfigManager()
-        if mcpManager.isInstalled() && !mcpManager.isStale() {
+        if ProcessInfo.processInfo.environment["BOO_FORCE_ONBOARDING"] == nil
+            && mcpManager.isInstalled() && !mcpManager.isStale() {
             // Check Ghostty Boo via file system only (avoid NSWorkspace which can be slow)
             let fm = FileManager.default
             let hasGhosttyBoo = fm.fileExists(atPath: "/Applications/Ghostty Boo.app")
@@ -102,7 +103,7 @@ final class OnboardingCoordinator {
             }
         }
 
-        // Auto-fill peer name — ask Claude/Codex for a fun suggestion if available
+        // Auto-fill peer name — ask Claude Code for a fun suggestion if available
         let suggestion = await detector.suggestAgentIdentity()
         peerName = suggestion.name
         agentQuote = suggestion.quote
@@ -213,30 +214,6 @@ final class OnboardingCoordinator {
             }
         }
 
-        // Probe 5: Codex MCP — auto-fix if Codex installed but MCP not configured
-        updateProbe("codex-mcp", state: .running)
-        try? await Task.sleep(for: .milliseconds(300))
-        let (codexExists, codexConfigured, codexStale) = await detector.checkCodexMCP()
-        if !codexExists {
-            updateProbe("codex-mcp", state: .skipped("Codex CLI not installed"))
-        } else if codexConfigured && !codexStale {
-            updateProbe("codex-mcp", state: .passed("Registered"))
-        } else {
-            // Auto-fix: install or repair without user intervention
-            let manager = CodexConfigManager()
-            let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
-            do {
-                if codexStale {
-                    try manager.repair()
-                } else {
-                    try manager.install(binaryPath: binaryPath)
-                }
-                updateProbe("codex-mcp", state: .passed("Registered"))
-            } catch {
-                updateProbe("codex-mcp", state: .failed("Error: \(error.localizedDescription)"))
-            }
-        }
-
         // Start recheck loop if not all blocking probes pass (user may fix externally)
         if !isFullyConfigured {
             recheckTask = Task { await recheckLoop() }
@@ -344,20 +321,6 @@ final class OnboardingCoordinator {
                 updateProbe("claude-mcp", state: .passed("Registered"))
             } catch {
                 updateProbe("claude-mcp", state: .failed("Error: \(error.localizedDescription)"))
-            }
-
-        case "codex-mcp":
-            let manager = CodexConfigManager()
-            let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
-            do {
-                if manager.isStale() {
-                    try manager.repair()
-                } else {
-                    try manager.install(binaryPath: binaryPath)
-                }
-                updateProbe("codex-mcp", state: .passed("Registered"))
-            } catch {
-                updateProbe("codex-mcp", state: .failed("Error: \(error.localizedDescription)"))
             }
 
         default:
