@@ -302,7 +302,7 @@ struct InstallerSettingsTab: View {
     @State private var installStatus: InstallStatus = .notInstalled
     @State private var installMessage: String?
 
-    private static let downloadURL = "https://github.com/beastoin/claudecode-telegram/releases/download/boo-v0.1.0/GhosttyBoo-macOS-arm64.zip"
+    private static let downloadURL = "https://github.com/beastoin/claudecode-telegram/releases/download/boo-v0.2.0/GhosttyBoo-macOS-arm64.zip"
     private static let appName = "Ghostty Boo.app"
     private static let systemInstallPath = "/Applications/Ghostty Boo.app"
     private static let userInstallPath = NSString("~/Applications/Ghostty Boo.app").expandingTildeInPath
@@ -611,7 +611,7 @@ struct AboutSettingsTab: View {
 
                 Text("Boo")
                     .font(.title2.weight(.bold))
-                Text("v1.0.0")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0.0")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

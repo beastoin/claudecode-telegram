@@ -21,7 +21,7 @@ public enum StepResult: Sendable {
 public actor RemoteProvisioner {
 
     /// Default Ghostty Boo release URL. Override via init parameter.
-    public static let defaultReleaseURL = "https://github.com/beastoin/claudecode-telegram/releases/download/boo-v0.1.0/GhosttyBoo-macOS-arm64.zip"
+    public static let defaultReleaseURL = "https://github.com/beastoin/claudecode-telegram/releases/download/boo-v0.2.0/GhosttyBoo-macOS-arm64.zip"
 
     public init() {}
 
