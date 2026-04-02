@@ -186,11 +186,15 @@ struct FirstContactView: View {
         let engine = OnboardingDemoEngine()
         let machineName = Host.current().localizedName ?? "local"
 
+        // Pass socket path for live terminal demo if Ghostty is connected
+        let socketPath = appState.connectionStatus == .connected ? appState.socketPath : nil
+
         let stream = await engine.runDemo(
             peerName: coordinator.peerName.isEmpty ? "user" : coordinator.peerName,
             registry: appState.registry,
             relay: appState.relay,
-            machineName: machineName
+            machineName: machineName,
+            socketPath: socketPath.flatMap { $0.isEmpty ? nil : $0 }
         )
 
         for await line in stream {

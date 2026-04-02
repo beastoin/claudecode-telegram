@@ -5,6 +5,7 @@ import BooCore
 // Branch: --mcp runs headless MCP stdio server, otherwise launch GUI app
 if CommandLine.arguments.contains("--mcp") {
     let machineName = Host.current().localizedName ?? "unknown"
+    // MCPServer auto-detects Ghostty socket for cross-instance message delivery
     let server = MCPServer(machineName: machineName)
     let runner = MCPStdioRunner(server: server)
 

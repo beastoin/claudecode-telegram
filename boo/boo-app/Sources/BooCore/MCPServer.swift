@@ -2,17 +2,40 @@ import Foundation
 
 /// MCP (Model Context Protocol) stdio server.
 /// Handles JSON-RPC 2.0 messages over newline-delimited stdin/stdout.
-/// Implements the 6 boo-app MCP tools.
+/// Implements the 6 boo-app MCP tools with cross-instance support via SharedPeerStore.
 public actor MCPServer {
     private let registry: PeerRegistry
     private let relay: MessageRelay
     private let machineName: String
+    private let sharedStore: SharedPeerStore
+    private let ghosttyClient: GhosttyClient?
+    private var localPeerID: String?  // Track our own peer ID for cleanup
 
-    public init(registry: PeerRegistry? = nil, machineName: String = "") {
+    public init(registry: PeerRegistry? = nil, machineName: String = "", socketPath: String? = nil, sharedStore: SharedPeerStore? = nil) {
         let reg = registry ?? PeerRegistry()
         self.registry = reg
         self.relay = MessageRelay(registry: reg)
         self.machineName = machineName.isEmpty ? (Host.current().localizedName ?? "unknown") : machineName
+        self.sharedStore = sharedStore ?? SharedPeerStore()
+
+        // Auto-detect Ghostty socket if not provided
+        let effectiveSocket = socketPath ?? Self.findGhosttySocket()
+        if let socket = effectiveSocket {
+            self.ghosttyClient = GhosttyClient(socketPath: socket)
+        } else {
+            self.ghosttyClient = nil
+        }
+    }
+
+    /// Find a working Ghostty socket.
+    private static func findGhosttySocket() -> String? {
+        for path in ["/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
+            let client = GhosttyClient(socketPath: path)
+            if let _ = try? client.listTerminals() {
+                return path
+            }
+        }
+        return nil
     }
 
     /// Process a single line of newline-delimited JSON. Returns response line (with \n) or nil for notifications.
@@ -76,9 +99,9 @@ public actor MCPServer {
                         "name": ["type": "string", "description": "Agent name"],
                         "role": ["type": "string", "description": "Agent role"],
                     ]),
-            toolDef("list_peers", "List all registered peers",
+            toolDef("list_peers", "List all registered peers (local and cross-instance)",
                     required: [], properties: [:]),
-            toolDef("send_message", "Send a message to a peer by name",
+            toolDef("send_message", "Send a message to a peer by name (works across instances)",
                     required: ["peer_id", "to", "content"], properties: [
                         "peer_id": ["type": "string", "description": "Your peer ID"],
                         "to": ["type": "string", "description": "Recipient name"],
@@ -147,12 +170,35 @@ public actor MCPServer {
         }
         let role = args["role"] as? String
         let peerID = await registry.register(name: name, role: role, machine: machineName)
+        localPeerID = peerID
+
+        // Detect our terminal ID from environment or auto-detect
+        let terminalID = detectTerminalID()
+
+        // Also register in shared store for cross-instance discovery
+        sharedStore.registerPeer(SharedPeer(
+            peerID: peerID, name: name, role: role,
+            machine: machineName, terminalID: terminalID
+        ))
+
         return textResult(id: id, json: ["peer_id": peerID])
     }
 
     private func callListPeers(id: Any) async -> String {
-        let peers = await registry.listPeers()
-        let list = peers.map { p -> [String: Any] in
+        let localPeers = await registry.listPeers()
+        let localNames = Set(localPeers.map(\.name))
+
+        // Merge shared peers not in local registry
+        let sharedPeers = sharedStore.listPeers()
+        var allPeers = localPeers
+        for sp in sharedPeers where !localNames.contains(sp.name) {
+            allPeers.append(PeerInfo(
+                peerID: sp.peerID, name: sp.name, role: sp.role,
+                machine: sp.machine, status: .active, lastSeen: sp.lastSeen
+            ))
+        }
+
+        let list = allPeers.map { p -> [String: Any] in
             var entry: [String: Any] = [
                 "peer_id": p.peerID,
                 "name": p.name,
@@ -171,12 +217,43 @@ public actor MCPServer {
               let content = args["content"] as? String else {
             return errorResponse(id: id, code: -32602, message: "Missing required params: peer_id, to, content")
         }
+
+        // Try local relay first
         do {
             try await relay.send(from: peerID, to: to, content: content)
             return textResult(id: id, json: ["ok": true])
         } catch {
-            return errorResponse(id: id, code: -32000, message: "\(error)")
+            // Recipient not in local registry — try cross-instance delivery
         }
+
+        // Look up in shared store
+        guard let targetPeer = sharedStore.lookupPeer(name: to) else {
+            return errorResponse(id: id, code: -32000, message: "Unknown recipient: \(to)")
+        }
+
+        // Resolve sender name
+        let senderName: String
+        if let info = await registry.getStatus(peerID: peerID) {
+            senderName = info.name
+        } else if let sp = sharedStore.lookupPeer(peerID: peerID) {
+            senderName = sp.name
+        } else {
+            senderName = "unknown"
+        }
+
+        // Store message in shared inbox
+        sharedStore.storeMessage(
+            toPeerID: targetPeer.peerID,
+            message: SharedMessage(from: senderName, content: content)
+        )
+
+        // Also inject notification into recipient's terminal
+        if let terminalID = targetPeer.terminalID, let client = ghosttyClient {
+            let notification = "\n[Boo message from \(senderName)]: \(content)\n"
+            try? client.sendText(terminalID: terminalID, text: notification)
+        }
+
+        return textResult(id: id, json: ["ok": true])
     }
 
     private func callBroadcast(id: Any, args: [String: Any]) async -> String {
@@ -184,19 +261,54 @@ public actor MCPServer {
               let content = args["content"] as? String else {
             return errorResponse(id: id, code: -32602, message: "Missing required params: peer_id, content")
         }
-        do {
-            let delivered = try await relay.broadcast(from: peerID, content: content)
-            return textResult(id: id, json: ["ok": true, "delivered_to": delivered])
-        } catch {
-            return errorResponse(id: id, code: -32000, message: "\(error)")
+
+        // Resolve sender name
+        let senderName: String
+        if let info = await registry.getStatus(peerID: peerID) {
+            senderName = info.name
+        } else if let sp = sharedStore.lookupPeer(peerID: peerID) {
+            senderName = sp.name
+        } else {
+            senderName = "unknown"
         }
+
+        // Local broadcast
+        var delivered: [String] = []
+        if let localDelivered = try? await relay.broadcast(from: peerID, content: content) {
+            delivered.append(contentsOf: localDelivered)
+        }
+
+        // Cross-instance broadcast via shared store
+        let sharedPeers = sharedStore.listPeers()
+        for sp in sharedPeers where sp.peerID != peerID && !delivered.contains(sp.name) {
+            sharedStore.storeMessage(
+                toPeerID: sp.peerID,
+                message: SharedMessage(from: senderName, content: content)
+            )
+            if let terminalID = sp.terminalID, let client = ghosttyClient {
+                let notification = "\n[Boo broadcast from \(senderName)]: \(content)\n"
+                try? client.sendText(terminalID: terminalID, text: notification)
+            }
+            delivered.append(sp.name)
+        }
+
+        return textResult(id: id, json: ["ok": true, "delivered_to": delivered])
     }
 
     private func callReceiveMessages(id: Any, args: [String: Any]) async -> String {
         guard let peerID = args["peer_id"] as? String else {
             return errorResponse(id: id, code: -32602, message: "Missing required param: peer_id")
         }
-        let messages = await relay.receive(peerID: peerID)
+
+        // Local messages
+        var messages = await relay.receive(peerID: peerID)
+
+        // Shared messages (file-based inbox)
+        let sharedMsgs = sharedStore.receiveMessages(peerID: peerID)
+        for sm in sharedMsgs {
+            messages.append(PeerMessage(id: sm.id, from: sm.from, content: sm.content, timestamp: sm.timestamp))
+        }
+
         let list = messages.map { m -> [String: Any] in
             [
                 "id": m.id,
@@ -212,17 +324,55 @@ public actor MCPServer {
         guard let peerID = args["peer_id"] as? String else {
             return errorResponse(id: id, code: -32602, message: "Missing required param: peer_id")
         }
-        guard let info = await registry.getStatus(peerID: peerID) else {
-            return errorResponse(id: id, code: -32001, message: "Unknown peer: \(peerID)")
+
+        // Try local first
+        if let info = await registry.getStatus(peerID: peerID) {
+            var result: [String: Any] = [
+                "name": info.name,
+                "machine": info.machine,
+                "status": info.status == .active ? "active" : "stale",
+                "last_seen": ISO8601DateFormatter().string(from: info.lastSeen),
+            ]
+            if let role = info.role { result["role"] = role }
+            return textResult(id: id, json: result)
         }
-        var result: [String: Any] = [
-            "name": info.name,
-            "machine": info.machine,
-            "status": info.status == .active ? "active" : "stale",
-            "last_seen": ISO8601DateFormatter().string(from: info.lastSeen),
-        ]
-        if let role = info.role { result["role"] = role }
-        return textResult(id: id, json: result)
+
+        // Try shared store
+        if let sp = sharedStore.lookupPeer(peerID: peerID) {
+            var result: [String: Any] = [
+                "name": sp.name,
+                "machine": sp.machine,
+                "status": "active",
+                "last_seen": ISO8601DateFormatter().string(from: sp.lastSeen),
+            ]
+            if let role = sp.role { result["role"] = role }
+            return textResult(id: id, json: result)
+        }
+
+        return errorResponse(id: id, code: -32001, message: "Unknown peer: \(peerID)")
+    }
+
+    // MARK: - Terminal ID Detection
+
+    /// Detect which Ghostty terminal this MCP instance belongs to.
+    /// Uses BOO_TERMINAL_ID env var (set by demo engine) or falls back to heuristics.
+    private func detectTerminalID() -> String? {
+        // Check explicit env var (set by OnboardingDemoEngine before starting Claude)
+        if let envID = ProcessInfo.processInfo.environment["BOO_TERMINAL_ID"] {
+            return envID
+        }
+
+        // Fallback: try to match by working directory
+        guard let client = ghosttyClient,
+              let terminals = try? client.listTerminals() else { return nil }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        if let match = terminals.first(where: { $0.workingDirectory == cwd }) {
+            return match.id
+        }
+
+        // Last resort: focused terminal
+        return terminals.first(where: { $0.focused })?.id
     }
 
     // MARK: - Response helpers

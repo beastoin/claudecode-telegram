@@ -96,10 +96,15 @@ struct IntegrationTests {
 @Suite("MCP E2E")
 struct MCPEndToEndTests {
 
+    /// Create an isolated shared store for test use.
+    private func testSharedStore() -> SharedPeerStore {
+        SharedPeerStore(baseDir: NSTemporaryDirectory() + "boo-test-\(UUID().uuidString)")
+    }
+
     @Test("Peers registered via MCP appear in AppState")
     @MainActor func mcpToAppState() async throws {
         let state = AppState()
-        let server = MCPServer(registry: state.registry, machineName: "test-machine")
+        let server = MCPServer(registry: state.registry, machineName: "test-machine", socketPath: nil, sharedStore: testSharedStore())
 
         // Register 2 peers via MCP
         let respA = try await server.handleMessage("""
@@ -138,7 +143,7 @@ struct MCPEndToEndTests {
     @Test("Messages sent via MCP are receivable via MCP")
     @MainActor func mcpMessageRoundTrip() async throws {
         let state = AppState()
-        let server = MCPServer(registry: state.registry, machineName: "test-machine")
+        let server = MCPServer(registry: state.registry, machineName: "test-machine", socketPath: nil, sharedStore: testSharedStore())
 
         // Register 2 peers
         let respA = try await server.handleMessage("""
@@ -170,8 +175,9 @@ struct MCPEndToEndTests {
     @Test("Multi-machine peers group correctly")
     @MainActor func multiMachinePeers() async throws {
         let state = AppState()
-        let serverA = MCPServer(registry: state.registry, machineName: "mac-mini")
-        let serverB = MCPServer(registry: state.registry, machineName: "vps")
+        let store = testSharedStore()
+        let serverA = MCPServer(registry: state.registry, machineName: "mac-mini", socketPath: nil, sharedStore: store)
+        let serverB = MCPServer(registry: state.registry, machineName: "vps", socketPath: nil, sharedStore: store)
 
         // Register peers on different machines
         _ = try await serverA.handleMessage("""

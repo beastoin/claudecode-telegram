@@ -5,11 +5,17 @@ import Foundation
 @Suite("MCPServer")
 struct MCPServerTests {
 
+    /// Create an MCPServer with an isolated shared store to prevent test pollution.
+    private func makeServer() -> MCPServer {
+        let tempDir = NSTemporaryDirectory() + "boo-test-\(UUID().uuidString)"
+        return MCPServer(socketPath: nil, sharedStore: SharedPeerStore(baseDir: tempDir))
+    }
+
     // MARK: - Protocol handshake
 
     @Test("Responds to initialize with server info and capabilities")
     func initialize() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
         """)
@@ -26,7 +32,7 @@ struct MCPServerTests {
 
     @Test("Handles notifications/initialized without response")
     func initialized() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
         """)
@@ -38,7 +44,7 @@ struct MCPServerTests {
 
     @Test("Lists all 6 MCP tools")
     func toolsList() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
         """)
@@ -58,7 +64,7 @@ struct MCPServerTests {
 
     @Test("Each tool has inputSchema")
     func toolsHaveSchema() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
         """)
@@ -73,7 +79,7 @@ struct MCPServerTests {
 
     @Test("register_peer returns peer_id")
     func registerPeer() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"agent-a","role":"coder"}}}
         """)
@@ -91,7 +97,7 @@ struct MCPServerTests {
 
     @Test("list_peers returns registered peers")
     func listPeers() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         // Register first
         _ = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"agent-a","role":"coder"}}}
@@ -112,7 +118,7 @@ struct MCPServerTests {
 
     @Test("send_message then receive_messages round-trip")
     func sendReceive() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         // Register 2 peers
         let respA = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"alice"}}}
@@ -147,7 +153,7 @@ struct MCPServerTests {
 
     @Test("broadcast delivers to all except sender")
     func broadcast() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let respA = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"alice"}}}
         """)
@@ -187,7 +193,7 @@ struct MCPServerTests {
 
     @Test("get_peer_status returns peer info")
     func getPeerStatus() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let respA = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"alice","role":"coder"}}}
         """)
@@ -204,7 +210,7 @@ struct MCPServerTests {
 
     @Test("get_peer_status returns error for unknown peer")
     func getPeerStatusUnknown() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_peer_status","arguments":{"peer_id":"nonexistent"}}}
         """)
@@ -216,7 +222,7 @@ struct MCPServerTests {
 
     @Test("Unknown method returns error")
     func unknownMethod() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}
         """)
@@ -227,7 +233,7 @@ struct MCPServerTests {
 
     @Test("Unknown tool returns error")
     func unknownTool() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let resp = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nonexistent","arguments":{}}}
         """)
@@ -237,7 +243,7 @@ struct MCPServerTests {
 
     @Test("send_message to unknown peer returns error")
     func sendToUnknown() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let respA = try await server.handleMessage("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_peer","arguments":{"name":"alice"}}}
         """)
@@ -254,7 +260,7 @@ struct MCPServerTests {
 
     @Test("processLine handles newline-delimited JSON")
     func processLine() async throws {
-        let server = MCPServer()
+        let server = makeServer()
         let line = """
         {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
         """
