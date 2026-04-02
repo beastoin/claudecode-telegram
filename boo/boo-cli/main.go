@@ -341,9 +341,13 @@ cp -R "/tmp/ghostty-boo-build/Release/Ghostty.app" "%s"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier '%s'" "%s/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile GhosttyBoo" "%s/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconName GhosttyBoo" "%s/Contents/Info.plist"
+# Rename icon file to match plist
+if [ -f "%s/Contents/Resources/Ghostty.icns" ] && [ ! -f "%s/Contents/Resources/GhosttyBoo.icns" ]; then
+  mv "%s/Contents/Resources/Ghostty.icns" "%s/Contents/Resources/GhosttyBoo.icns"
+fi
 echo "Build mode:"
 "%s/Contents/MacOS/ghostty" --version 2>&1 | grep "build mode" || true
-`, appPathGhostty, appPathGhostty, appPathGhostty, bundleIDGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty)); err != nil {
+`, appPathGhostty, appPathGhostty, appPathGhostty, bundleIDGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty, appPathGhostty)); err != nil {
 		fail("App preparation failed")
 		return err
 	}

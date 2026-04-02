@@ -36,6 +36,7 @@ final class OnboardingCoordinator {
 
     private let detector = SetupDetector()
     private let appState: AppState
+    private let installer = GhosttyBooInstaller()
 
     init(appState: AppState) {
         self.appState = appState
@@ -94,14 +95,33 @@ final class OnboardingCoordinator {
         updateProbe("ghostty", state: .running)
         try? await Task.sleep(for: .milliseconds(400))
         let (ghosttyInstalled, variant) = await detector.detectGhosttyInstall()
-        let hasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
+        var hasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
         if hasGhosttyBoo {
             updateProbe("ghostty", state: .passed("Ghostty Boo"))
-        } else if ghosttyInstalled {
-            // Original Ghostty found but not Ghostty Boo
-            updateProbe("ghostty", state: .failed("Found \(variant ?? "Ghostty") — need Ghostty Boo"))
         } else {
-            updateProbe("ghostty", state: .failed("Not found — Install Ghostty Boo"))
+            // Auto-install Ghostty Boo
+            let label = ghosttyInstalled ? "Found \(variant ?? "Ghostty") — installing Ghostty Boo..." : "Installing Ghostty Boo..."
+            updateProbe("ghostty", state: .running)
+            do {
+                try await installer.install { [weak self] status in
+                    guard let self else { return }
+                    switch status {
+                    case .downloading: self.updateProbe("ghostty", state: .running)
+                    case .unzipping: break
+                    case .installing: break
+                    case .configuring: break
+                    case .done(let path):
+                        self.updateProbe("ghostty", state: .passed("Installed to \(path)"))
+                    case .error(let msg):
+                        self.updateProbe("ghostty", state: .failed(msg))
+                    case .idle: break
+                    }
+                }
+                hasGhosttyBoo = true
+            } catch {
+                let msg = (error as? GhosttyBooInstallerError)?.localizedDescription ?? error.localizedDescription
+                updateProbe("ghostty", state: .failed(msg))
+            }
         }
 
         // Probe 2: Socket — skip if Ghostty Boo not installed (no point checking)
@@ -178,10 +198,56 @@ final class OnboardingCoordinator {
             }
         }
 
-        // Auto-advance if all blocking probes pass
+        // Auto-advance if all blocking probes pass, otherwise recheck every 3s
         if isFullyConfigured {
             try? await Task.sleep(for: .seconds(1.5))
             advance()
+        } else {
+            recheckTask = Task { await recheckLoop() }
+        }
+    }
+
+    private var recheckTask: Task<Void, Never>?
+
+    /// Poll environment every 3 seconds to detect external fixes (e.g. user installed Ghostty Boo).
+    private func recheckLoop() async {
+        while !Task.isCancelled && currentStep == .boot {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled && currentStep == .boot else { break }
+
+            // Recheck ghostty
+            let (ghosttyInstalled, variant) = await detector.detectGhosttyInstall()
+            let nowHasGhosttyBoo = ghosttyInstalled && variant == "Ghostty Boo"
+            if nowHasGhosttyBoo {
+                if let probe = probes.first(where: { $0.id == "ghostty" }), !probe.state.isPassed {
+                    updateProbe("ghostty", state: .passed("Ghostty Boo"))
+                }
+
+                // Recheck socket
+                let (socketPath, terminals) = await detector.probeSocket()
+                if let path = socketPath {
+                    if let probe = probes.first(where: { $0.id == "socket" }), !probe.state.isPassed {
+                        updateProbe("socket", state: .passed("Reachable at \(path)"))
+                        await appState.connect(socketPath: path)
+                    }
+                    if !terminals.isEmpty {
+                        updateProbe("terminals", state: .passed("\(terminals.count) terminal\(terminals.count == 1 ? "" : "s") discovered"))
+                    }
+                }
+            }
+
+            // Recheck MCP
+            let (claudeInstalled, claudeStale) = await detector.checkClaudeMCP()
+            if claudeInstalled && !claudeStale {
+                updateProbe("claude-mcp", state: .passed("Registered"))
+            }
+
+            // Auto-advance when all pass
+            if isFullyConfigured {
+                try? await Task.sleep(for: .seconds(1))
+                advance()
+                break
+            }
         }
     }
 
@@ -195,6 +261,22 @@ final class OnboardingCoordinator {
 
     func fixProbe(_ id: String) async {
         switch id {
+        case "ghostty":
+            updateProbe("ghostty", state: .running)
+            do {
+                try await installer.install { [weak self] status in
+                    guard let self else { return }
+                    if case .done(let path) = status {
+                        self.updateProbe("ghostty", state: .passed("Installed to \(path)"))
+                    }
+                }
+                // Re-run socket/terminal probes after install
+                await rerunSocketProbes()
+            } catch {
+                let msg = (error as? GhosttyBooInstallerError)?.localizedDescription ?? error.localizedDescription
+                updateProbe("ghostty", state: .failed(msg))
+            }
+
         case "claude-mcp":
             let manager = MCPConfigManager()
             let binaryPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
@@ -228,6 +310,29 @@ final class OnboardingCoordinator {
         }
         // Don't auto-advance after fix — let the user see the result
         // and click Continue Anyway or wait for the initial runProbes auto-advance
+    }
+
+    // MARK: - Re-run socket probes after Ghostty Boo install
+
+    private func rerunSocketProbes() async {
+        // Brief delay for Ghostty Boo to start if user launches it
+        try? await Task.sleep(for: .milliseconds(500))
+
+        updateProbe("socket", state: .running)
+        let (socketPath, terminals) = await detector.probeSocket()
+        if let path = socketPath {
+            updateProbe("socket", state: .passed("Reachable at \(path)"))
+            await appState.connect(socketPath: path)
+        } else {
+            updateProbe("socket", state: .skipped("Open Ghostty Boo to connect"))
+        }
+
+        updateProbe("terminals", state: .running)
+        if !terminals.isEmpty {
+            updateProbe("terminals", state: .passed("\(terminals.count) terminal\(terminals.count == 1 ? "" : "s") discovered"))
+        } else {
+            updateProbe("terminals", state: .skipped("Open a Ghostty Boo window"))
+        }
     }
 
     // MARK: - Navigation
