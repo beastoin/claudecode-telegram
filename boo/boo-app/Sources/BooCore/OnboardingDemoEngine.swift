@@ -81,48 +81,69 @@ public actor OnboardingDemoEngine {
     // MARK: - Terminal Setup
 
     /// Ensure we have enough terminal panes for the demo.
-    /// Returns (pane1, pane2, pane3) terminal IDs, or nil if setup failed.
+    /// Strategy: 1) use existing terminals, 2) try pane splits, 3) fall back to new windows via `open -na`.
     private func setupTerminals(client: GhosttyClient, count: Int) async -> [String]? {
-        // Discover existing terminals — if none, open a new window
         var existingTerminals = (try? client.listTerminals()) ?? []
+
+        // If no terminals at all, launch Ghostty Boo
         if existingTerminals.isEmpty {
-            if let processName = await findGhosttyProcessName() {
-                _ = runOsascript("tell application \"\(processName)\" to activate")
-                try? await Task.sleep(for: .milliseconds(500))
-                let script = """
-                tell application "System Events"
-                    tell process "\(processName)"
-                        keystroke "n" using command down
-                    end tell
-                end tell
-                """
-                _ = runOsascript(script)
-                try? await Task.sleep(for: .seconds(2))
-                existingTerminals = (try? client.listTerminals()) ?? []
-            }
+            await launchGhosttyWindow()
+            try? await Task.sleep(for: .seconds(2))
+            existingTerminals = (try? client.listTerminals()) ?? []
         }
         guard !existingTerminals.isEmpty else { return nil }
 
-        let existingIDs = Set(existingTerminals.map(\.id))
-        guard let processName = await findGhosttyProcessName() else { return nil }
-
-        // Create enough new tabs to have `count` panes total
         var allPanes = existingTerminals.map(\.id)
-        let needed = count - allPanes.count
-        for _ in 0..<max(0, needed) {
-            await createNewPane(processName: processName)
-            try? await Task.sleep(for: .milliseconds(800))
-            if let terminals = try? client.listTerminals() {
-                let newOnes = terminals.filter { !existingIDs.contains($0.id) && !allPanes.contains($0.id) }
-                if let newPane = newOnes.first {
-                    allPanes.append(newPane.id)
+        let knownIDs = Set(allPanes)
+
+        // If we already have enough, use them
+        if allPanes.count >= count {
+            return Array(allPanes.prefix(count))
+        }
+
+        // Try pane splits first (works when BooApp has Accessibility permissions)
+        if let processName = await findGhosttyProcessName() {
+            let needed = count - allPanes.count
+            for _ in 0..<needed {
+                await createNewPane(processName: processName)
+                try? await Task.sleep(for: .milliseconds(800))
+                if let terminals = try? client.listTerminals() {
+                    let newOnes = terminals.filter { !knownIDs.contains($0.id) && !allPanes.contains($0.id) }
+                    if let newPane = newOnes.first {
+                        allPanes.append(newPane.id)
+                    }
                 }
             }
         }
 
-        // Return first `count` panes
+        // If splits didn't work, fall back to opening new Ghostty windows
+        if allPanes.count < count {
+            let stillNeeded = count - allPanes.count
+            for _ in 0..<stillNeeded {
+                await launchGhosttyWindow()
+                try? await Task.sleep(for: .seconds(2))
+                if let terminals = try? client.listTerminals() {
+                    let newOnes = terminals.filter { !knownIDs.contains($0.id) && !allPanes.contains($0.id) }
+                    if let newPane = newOnes.first {
+                        allPanes.append(newPane.id)
+                    }
+                }
+            }
+        }
+
         guard allPanes.count >= count else { return nil }
         return Array(allPanes.prefix(count))
+    }
+
+    /// Launch a new Ghostty Boo window via `open -na`.
+    private func launchGhosttyWindow() async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-na", "Ghostty Boo.app"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
     }
 
     // MARK: - Claude CLI Detection
