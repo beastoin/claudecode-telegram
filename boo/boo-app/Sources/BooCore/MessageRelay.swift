@@ -27,7 +27,7 @@ public actor MessageRelay {
     private let messageTTL: TimeInterval
     private var inboxes: [String: [StoredMessage]] = [:]  // peerID -> messages
 
-    public init(registry: PeerRegistry, messageTTL: TimeInterval = 300) { // 5 min default
+    public init(registry: PeerRegistry, messageTTL: TimeInterval = BooDefaults.messageTTL) {
         self.registry = registry
         self.messageTTL = messageTTL
     }

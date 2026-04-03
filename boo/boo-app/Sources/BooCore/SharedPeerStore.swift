@@ -3,7 +3,7 @@ import Foundation
 /// File-based shared peer and message store at /tmp/boo/.
 /// Enables cross-instance MCP communication — multiple BooApp --mcp processes
 /// can discover each other's peers and exchange messages through this shared store.
-public final class SharedPeerStore: @unchecked Sendable {
+public actor SharedPeerStore {
     private let baseDir: String
     private let peersFile: String
     private let messagesDir: String
@@ -12,7 +12,7 @@ public final class SharedPeerStore: @unchecked Sendable {
         self.baseDir = baseDir
         self.peersFile = baseDir + "/peers.json"
         self.messagesDir = baseDir + "/messages"
-        ensureDirectories()
+        Self.ensureDirectories(baseDir: baseDir, messagesDir: baseDir + "/messages")
     }
 
     // MARK: - Peers
@@ -28,7 +28,7 @@ public final class SharedPeerStore: @unchecked Sendable {
     /// List all non-expired peers.
     public func listPeers() -> [SharedPeer] {
         loadPeers().filter {
-            Date().timeIntervalSince($0.lastSeen) < 600 // 10 min TTL
+            Date().timeIntervalSince($0.lastSeen) < BooDefaults.peerTTL
         }
     }
 
@@ -54,7 +54,7 @@ public final class SharedPeerStore: @unchecked Sendable {
         savePeers([])
         // Also clean up messages
         try? FileManager.default.removeItem(atPath: messagesDir)
-        ensureDirectories()
+        Self.ensureDirectories(baseDir: baseDir, messagesDir: messagesDir)
     }
 
     // MARK: - Messages
@@ -91,7 +91,7 @@ public final class SharedPeerStore: @unchecked Sendable {
 
     // MARK: - Private
 
-    private func ensureDirectories() {
+    private static nonisolated func ensureDirectories(baseDir: String, messagesDir: String) {
         for dir in [baseDir, messagesDir] {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)

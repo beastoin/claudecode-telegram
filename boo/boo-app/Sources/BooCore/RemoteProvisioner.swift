@@ -32,7 +32,8 @@ public actor RemoteProvisioner {
     }
 
     /// Check if Ghostty is installed on the remote machine and whether control-socket is configured.
-    public func detectRemoteGhostty(host: SSHHost) async -> (installed: Bool, hasSocket: Bool, variant: String?) {
+    /// Returns the actual active socket path if found.
+    public func detectRemoteGhostty(host: SSHHost) async -> (installed: Bool, hasSocket: Bool, variant: String?, socketPath: String?) {
         // Check for Ghostty apps
         let appCheck = await runSSH(
             host: host.alias,
@@ -43,17 +44,34 @@ public actor RemoteProvisioner {
         let hasBoo = apps.contains { $0.contains("Ghostty Boo") }
         let hasGhostty = !apps.isEmpty
 
-        guard hasGhostty else { return (false, false, nil) }
+        guard hasGhostty else { return (false, false, nil, nil) }
 
         // Check for control-socket in config
         let configCheck = await runSSH(
             host: host.alias,
-            command: "grep -l control-socket ~/.config/ghostty/config ~/Library/Application\\ Support/com.mitchellh.ghostty/config 2>/dev/null; true"
+            command: "grep -h control-socket ~/.config/ghostty/config ~/Library/Application\\ Support/com.mitchellh.ghostty/config 2>/dev/null; true"
         )
-        let hasSocket = !(configCheck?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let configSocket = configCheck?.components(separatedBy: "\n")
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("control-socket") else { return nil }
+                let parts = trimmed.split(separator: "=", maxSplits: 1)
+                return parts.count == 2 ? parts[1].trimmingCharacters(in: .whitespaces) : nil
+            }
+            .first
+
+        // Probe for the actual active socket — config may not match reality
+        let socketProbe = await runSSH(
+            host: host.alias,
+            command: "for s in /tmp/ghostty-boo.sock /tmp/ghostty.sock /tmp/ghostty-test.sock; do [ -S \"$s\" ] && echo \"$s\"; done; true"
+        )
+        let activeSockets = socketProbe?.components(separatedBy: "\n").filter { !$0.isEmpty } ?? []
+        let activeSocket = activeSockets.first ?? configSocket
+
+        let hasSocket = activeSocket != nil
         let variant = hasBoo ? "Ghostty Boo" : "Ghostty"
 
-        return (true, hasSocket, variant)
+        return (true, hasSocket, variant, activeSocket)
     }
 
     /// Run the full provisioning pipeline for a host.
@@ -76,13 +94,14 @@ public actor RemoteProvisioner {
 
                 // Step 2: Detect
                 continuation.yield(.inProgress(.detecting))
-                let (installed, hasSocket, variant) = await detectRemoteGhostty(host: host)
+                let (installed, hasSocket, variant, detectedSocket) = await detectRemoteGhostty(host: host)
+                var remoteSocketPath = detectedSocket ?? "/tmp/ghostty-boo.sock"
 
                 if installed && hasSocket {
-                    continuation.yield(.completed(.detecting, "\(variant ?? "Ghostty") with control-socket"))
+                    continuation.yield(.completed(.detecting, "\(variant ?? "Ghostty") with socket at \(remoteSocketPath)"))
                     // Skip install and configure
                 } else if installed {
-                    continuation.yield(.completed(.detecting, "\(variant ?? "Ghostty") found (no control-socket)"))
+                    continuation.yield(.completed(.detecting, "\(variant ?? "Ghostty") found (no socket)"))
 
                     // Step 4: Configure control-socket
                     continuation.yield(.inProgress(.configuring))
@@ -92,6 +111,7 @@ public actor RemoteProvisioner {
                         continuation.finish()
                         return
                     }
+                    remoteSocketPath = "/tmp/ghostty-boo.sock"
                     continuation.yield(.completed(.configuring, "control-socket enabled"))
                 } else {
                     continuation.yield(.completed(.detecting, "No Ghostty found"))
@@ -114,6 +134,7 @@ public actor RemoteProvisioner {
                         continuation.finish()
                         return
                     }
+                    remoteSocketPath = "/tmp/ghostty-boo.sock"
                     continuation.yield(.completed(.configuring, "control-socket enabled"))
                 }
 
@@ -122,7 +143,7 @@ public actor RemoteProvisioner {
                 let tunnelConfig = TunnelConfig(
                     name: host.alias,
                     sshHost: host.alias,
-                    remoteSocket: "/tmp/ghostty-boo.sock"
+                    remoteSocket: remoteSocketPath
                 )
                 await tunnelManager.startTunnel(tunnelConfig)
 
