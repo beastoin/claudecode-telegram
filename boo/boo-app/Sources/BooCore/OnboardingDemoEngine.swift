@@ -206,8 +206,9 @@ public actor OnboardingDemoEngine {
         try? await Task.sleep(for: .milliseconds(500))
 
         // Launch 3 interactive Claude sessions (not -p, so they stay alive for push messages)
+        // Set BOO_TERMINAL_ID so each MCP process knows its terminal for push injection
         for pane in panes {
-            sendToTerminal(client, pane, "claude --dangerously-skip-permissions\n")
+            sendToTerminal(client, pane, "export BOO_TERMINAL_ID=\(pane) && claude --dangerously-skip-permissions\n")
         }
 
         // Wait for Claude to start, then accept the folder trust prompt (press Enter)
