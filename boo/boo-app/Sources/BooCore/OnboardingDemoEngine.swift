@@ -220,16 +220,18 @@ public actor OnboardingDemoEngine {
         // Send initial instructions to each agent via terminal input.
         // Push messaging injects text into the terminal as user input,
         // so interactive Claude sessions will see messages from other agents naturally.
-        let instruction1 = "You are agent \"\(agentName)\". Use boo MCP tools: 1) register_peer name=\"\(agentName)\" role=\"claude\" 2) list_peers 3) send_message to \"scout\" with content \"hey scout, check the build logs\". Stay alive — you'll receive push messages in this terminal. Be concise."
+        let instruction1 = "You are agent \"\(agentName)\". Use boo MCP tools: 1) register_peer name=\"\(agentName)\" role=\"claude\" 2) list_peers — you should see only yourself. 3) Wait 30 seconds for other agents to register. 4) list_peers again — you should see scout and oracle. 5) send_message to=\"scout\" content=\"hey scout, check the build logs\". Stay alive for push messages. Be concise."
         let instruction2 = "You are agent \"scout\". Use boo MCP tools: 1) register_peer name=\"scout\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, forward it to \"oracle\" via send_message. Be concise."
         let instruction3 = "You are agent \"oracle\". Use boo MCP tools: 1) register_peer name=\"oracle\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, reply to the sender with a brief analysis. Be concise."
 
+        // Launch agents staggered: scout and oracle first so they register before
+        // the lead agent tries to send_message to them.
         // Use \r (carriage return) to submit — Claude's TUI uses raw mode where \r = Enter
-        sendToTerminal(client, panes[0], instruction1 + "\r")
-        try? await Task.sleep(for: .seconds(3))
         sendToTerminal(client, panes[1], instruction2 + "\r")
         try? await Task.sleep(for: .seconds(3))
         sendToTerminal(client, panes[2], instruction3 + "\r")
+        try? await Task.sleep(for: .seconds(3))
+        sendToTerminal(client, panes[0], instruction1 + "\r")
 
         // Monitor SharedPeerStore for peer registrations and message activity.
         // Push messages are injected directly into terminals — no polling needed by agents.
