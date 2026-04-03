@@ -53,6 +53,17 @@ public actor OnboardingDemoEngine {
                     return
                 }
 
+                // Pre-check: verify boo MCP is configured in Claude Code
+                let mcpConfig = MCPConfigManager()
+                if !mcpConfig.isInstalled() {
+                    self.yield(continuation, .error, "mcp", "Boo MCP not configured — open Settings and click Install MCP")
+                    continuation.finish()
+                    return
+                }
+                if mcpConfig.isStale() {
+                    try? mcpConfig.repair()
+                }
+
                 let done = await self.runLiveClaudeDemo(
                     peerName: peerName, registry: registry, relay: relay,
                     machineName: machineName, client: client,
@@ -156,7 +167,10 @@ public actor OnboardingDemoEngine {
         machineName: String, client: GhosttyClient,
         continuation: AsyncStream<DemoLine>.Continuation
     ) async -> Bool {
-        guard let panes = await setupTerminals(client: client, count: 3) else { return false }
+        guard let panes = await setupTerminals(client: client, count: 3) else {
+            yield(continuation, .error, "setup", "Could not create 3 terminal panes — try splitting Ghostty manually first")
+            return false
+        }
 
         let agentName = peerName.isEmpty ? "alpha" : peerName
 
@@ -257,7 +271,7 @@ public actor OnboardingDemoEngine {
             // Wait for socket (up to 5 seconds)
             for _ in 0..<10 {
                 try? await Task.sleep(for: .milliseconds(500))
-                for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
+                for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
                     if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
                         return path
                     }
@@ -271,7 +285,7 @@ public actor OnboardingDemoEngine {
 
     /// Find the running Ghostty Boo process name for AppleScript.
     private func findGhosttyProcessName() async -> String? {
-        for name in ["Ghostty Boo", "GhosttyBoo"] {
+        for name in ["Ghostty Boo", "GhosttyBoo", "ghostty"] {
             let script = "tell application \"System Events\" to return exists process \"\(name)\""
             if let result = runOsascript(script),
                result.trimmingCharacters(in: .whitespacesAndNewlines) == "true" {
@@ -281,22 +295,32 @@ public actor OnboardingDemoEngine {
         return nil
     }
 
-    /// Create a new pane (split) in Ghostty via AppleScript.
-    /// Uses Cmd+D for vertical split so agents show side-by-side.
+    /// Create a new pane (split) in Ghostty via AppleScript menu click.
+    /// Uses "Split Right" menu item for reliability (keystroke approach is fragile).
     private func createNewPane(processName: String) async {
         // Activate Ghostty first
         _ = runOsascript("tell application \"\(processName)\" to activate")
         try? await Task.sleep(for: .milliseconds(300))
 
-        // Send Cmd+D for vertical split (side-by-side panes)
-        let script = """
+        // Use menu click — more reliable than keystroke injection
+        let menuScript = """
         tell application "System Events"
             tell process "\(processName)"
-                keystroke "d" using command down
+                click menu item "Split Right" of menu 1 of menu bar item "Window" of menu bar 1
             end tell
         end tell
         """
-        _ = runOsascript(script)
+        if runOsascript(menuScript) == nil {
+            // Fallback to keystroke if menu click fails
+            let keystrokeScript = """
+            tell application "System Events"
+                tell process "\(processName)"
+                    keystroke "d" using command down
+                end tell
+            end tell
+            """
+            _ = runOsascript(keystrokeScript)
+        }
     }
 
     // MARK: - Helpers
