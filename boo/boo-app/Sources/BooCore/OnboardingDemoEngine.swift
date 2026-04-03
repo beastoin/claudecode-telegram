@@ -162,7 +162,7 @@ public actor OnboardingDemoEngine {
 
         // Clean SharedPeerStore so we only see peers from this demo
         let sharedStore = SharedPeerStore()
-        sharedStore.removeAll()
+        await sharedStore.removeAll()
 
         // Clear terminals
         for pane in panes {
@@ -192,7 +192,7 @@ public actor OnboardingDemoEngine {
             try? await Task.sleep(for: .seconds(1))
 
             // Poll SharedPeerStore for new registrations
-            let sharedPeers = sharedStore.listPeers()
+            let sharedPeers = await sharedStore.listPeers()
             for peer in sharedPeers {
                 if !knownPeerNames.contains(peer.name) {
                     knownPeerNames.insert(peer.name)
@@ -219,7 +219,7 @@ public actor OnboardingDemoEngine {
 
                 // Check for any messages exchanged
                 for peer in sharedPeers {
-                    let msgs = sharedStore.receiveMessages(peerID: peer.peerID)
+                    let msgs = await sharedStore.receiveMessages(peerID: peer.peerID)
                     for msg in msgs {
                         yield(continuation, .request, "receive_messages", "{ peer: \"\(peer.name)\" }")
                         yield(continuation, .response, "receive_messages", "{ from: \"\(msg.from)\", content: \"\(msg.content)\" }")

@@ -78,6 +78,11 @@ boo-app wraps the same bridge logic in a native macOS menu bar app with visual a
 | 13 | boo-app includes installer | Discovering and installing the Ghostty fork + configuring control-socket should be one click, not manual setup. |
 | 14 | boo-app follows Apple Human Interface Guidelines | Native macOS look and feel — use Apple design system ([macOS 26 Figma kit](https://www.figma.com/community/file/1543337041090580818/macos-26)) for controls, spacing, typography, menu bar popover sizing, and dark mode colors. Must feel like a system app, not a web app in a window. |
 | 15 | Three-click onboarding | Download → launch → click "Enable MCP" → done. First-run wizard auto-detects Ghostty, offers fork install if missing, one-click MCP registration via MCPConfigManager. Brew formula + .app bundle for distribution. No terminal, no git clone, no manual config. |
+| 16 | Push-based message delivery | Dual-path: terminal injection (Ghostty `sendText`) for reliability + MCP channel notifications (`notifications/claude/channel`) for structured metadata. Terminal injection works with any agent IDE; channel notifications are Claude Code-specific but future-proof. |
+| 17 | PeerDirectory facade over dual stores | PeerRegistry (in-memory, per-process) and SharedPeerStore (file-based, cross-process) serve different consistency models. PeerDirectory actor unifies query logic without merging storage. |
+| 18 | Tool handlers extracted from MCP protocol | MCPServer handles JSON-RPC framing and MCP handshake only. Tool implementations live in ToolHandlers with a shared ToolContext struct. Adding a tool = adding one function. |
+| 19 | SharedPeerStore as actor | Cross-process file store must be Sendable. Actor isolation prevents in-process races; atomic file writes mitigate cross-process races. |
+| 20 | No per-peer Unix sockets | Ghostty sockets already provide per-terminal IPC. Per-peer sockets would duplicate tunnel infrastructure and not help MCP clients (which use stdio). |
 
 ## API
 
@@ -112,3 +117,4 @@ boo-app wraps the same bridge logic in a native macOS menu bar app with visual a
 | M4 | Multi-machine — SSH tunnels, cross-machine messaging | Done |
 | M5 | boo-app — Swift menu bar app, agent dashboard, Ghostty installer | Done |
 | M6 | boo-app MCP — native MCP server replacing Node.js bridge on macOS | Done |
+| M7 | Push messaging + architecture — dual-path delivery, tool extraction, PeerDirectory, actor safety | In Progress |

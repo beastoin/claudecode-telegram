@@ -12,6 +12,7 @@ public struct PeerInfo: Sendable {
     public let name: String
     public let role: String?
     public let machine: String
+    public let terminalID: String?
     public let status: PeerStatus
     public let lastSeen: Date
 }
@@ -24,6 +25,7 @@ public actor PeerRegistry {
         let name: String
         let role: String?
         let machine: String
+        let terminalID: String?
         var lastSeen: Date
     }
 
@@ -31,20 +33,20 @@ public actor PeerRegistry {
     private var nameIndex: [String: String] = [:]   // name -> peerID
     private let peerTTL: TimeInterval
 
-    public init(peerTTL: TimeInterval = 600) { // 10 min default
+    public init(peerTTL: TimeInterval = BooDefaults.peerTTL) {
         self.peerTTL = peerTTL
     }
 
     /// Register a peer. If a peer with the same name exists, it's replaced.
     @discardableResult
-    public func register(name: String, role: String? = nil, machine: String = "") -> String {
+    public func register(name: String, role: String? = nil, machine: String = "", terminalID: String? = nil) -> String {
         // Remove old registration with same name
         if let oldID = nameIndex[name] {
             peers.removeValue(forKey: oldID)
         }
 
         let id = UUID().uuidString.lowercased()
-        let record = PeerRecord(peerID: id, name: name, role: role, machine: machine, lastSeen: Date())
+        let record = PeerRecord(peerID: id, name: name, role: role, machine: machine, terminalID: terminalID, lastSeen: Date())
         peers[id] = record
         nameIndex[name] = id
         return id
@@ -56,7 +58,7 @@ public actor PeerRegistry {
         return peers.values.map { r in
             PeerInfo(
                 peerID: r.peerID, name: r.name, role: r.role,
-                machine: r.machine,
+                machine: r.machine, terminalID: r.terminalID,
                 status: now.timeIntervalSince(r.lastSeen) < peerTTL ? .active : .stale,
                 lastSeen: r.lastSeen
             )
@@ -69,7 +71,7 @@ public actor PeerRegistry {
         let now = Date()
         return PeerInfo(
             peerID: r.peerID, name: r.name, role: r.role,
-            machine: r.machine,
+            machine: r.machine, terminalID: r.terminalID,
             status: now.timeIntervalSince(r.lastSeen) < peerTTL ? .active : .stale,
             lastSeen: r.lastSeen
         )
