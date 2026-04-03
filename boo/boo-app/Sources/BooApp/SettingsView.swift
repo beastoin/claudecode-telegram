@@ -534,7 +534,7 @@ struct AboutSettingsTab: View {
 
                 Text("Boo")
                     .font(.title2.weight(.bold))
-                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0.0")")
+                Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? BooDefaults.appVersion)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

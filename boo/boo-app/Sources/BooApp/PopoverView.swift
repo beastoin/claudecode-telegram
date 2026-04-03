@@ -79,11 +79,19 @@ struct PopoverView: View {
         }
         .frame(width: 320, height: 400)
         .onAppear {
-            // Refresh immediately when popover opens
-            Task { await appState.refreshTerminals() }
-            // Auto-refresh every 15 seconds
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in
-                Task { @MainActor in await appState.refreshTerminals() }
+            // Refresh all data immediately when popover opens
+            Task {
+                await appState.refreshTerminals()
+                await appState.refreshPeers()
+                await appState.refreshTunnelStatuses()
+            }
+            // Auto-refresh every 5 seconds
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                Task { @MainActor in
+                    await appState.refreshTerminals()
+                    await appState.refreshPeers()
+                    await appState.refreshTunnelStatuses()
+                }
             }
         }
         .onDisappear {
@@ -194,7 +202,25 @@ struct TerminalRow: View {
 
     private func focusTerminalInGhosttyBoo(terminalID: String) {
         // Activate Ghostty Boo window
-        for name in ["Ghostty Boo", "GhosttyBoo"] {
+        activateGhosttyWindow()
+
+        // Send a brief marker to the target terminal so user can identify it
+        if let client = Self.findGhosttyClient() {
+            // Send an empty Enter to bring the cursor to the target pane's attention
+            try? client.sendText(terminalID: terminalID, text: "")
+        }
+    }
+
+    private static func findGhosttyClient() -> GhosttyClient? {
+        for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
+            let client = GhosttyClient(socketPath: path)
+            if let _ = try? client.listTerminals() { return client }
+        }
+        return nil
+    }
+
+    private func activateGhosttyWindow() {
+        for name in ["Ghostty Boo", "GhosttyBoo", "Ghostty"] {
             let script = """
             tell application "System Events"
                 if exists process "\(name)" then
@@ -236,6 +262,11 @@ struct PeerRow: View {
                 }
             }
             Spacer()
+            if peer.terminalID != nil {
+                Image(systemName: "terminal")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             Circle()
                 .fill(peer.status == .active ? .green : .secondary)
                 .frame(width: 6, height: 6)
@@ -243,6 +274,35 @@ struct PeerRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+        .onTapGesture {
+            if let terminalID = peer.terminalID {
+                focusPeerTerminal(terminalID: terminalID)
+            }
+        }
+    }
+
+    private func focusPeerTerminal(terminalID: String) {
+        // Activate Ghostty window
+        for name in ["Ghostty Boo", "GhosttyBoo", "Ghostty"] {
+            let script = """
+            tell application "System Events"
+                if exists process "\(name)" then
+                    tell process "\(name)"
+                        set frontmost to true
+                    end tell
+                    return "ok"
+                end if
+            end tell
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try? process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 { break }
+        }
     }
 }
 

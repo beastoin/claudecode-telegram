@@ -53,6 +53,17 @@ public actor OnboardingDemoEngine {
                     return
                 }
 
+                // Pre-check: verify boo MCP is configured in Claude Code
+                let mcpConfig = MCPConfigManager()
+                if !mcpConfig.isInstalled() {
+                    self.yield(continuation, .error, "mcp", "Boo MCP not configured — open Settings and click Install MCP")
+                    continuation.finish()
+                    return
+                }
+                if mcpConfig.isStale() {
+                    try? mcpConfig.repair()
+                }
+
                 let done = await self.runLiveClaudeDemo(
                     peerName: peerName, registry: registry, relay: relay,
                     machineName: machineName, client: client,
@@ -70,48 +81,69 @@ public actor OnboardingDemoEngine {
     // MARK: - Terminal Setup
 
     /// Ensure we have enough terminal panes for the demo.
-    /// Returns (pane1, pane2, pane3) terminal IDs, or nil if setup failed.
+    /// Strategy: 1) use existing terminals, 2) try pane splits, 3) fall back to new windows via `open -na`.
     private func setupTerminals(client: GhosttyClient, count: Int) async -> [String]? {
-        // Discover existing terminals — if none, open a new window
         var existingTerminals = (try? client.listTerminals()) ?? []
+
+        // If no terminals at all, launch Ghostty Boo
         if existingTerminals.isEmpty {
-            if let processName = await findGhosttyProcessName() {
-                _ = runOsascript("tell application \"\(processName)\" to activate")
-                try? await Task.sleep(for: .milliseconds(500))
-                let script = """
-                tell application "System Events"
-                    tell process "\(processName)"
-                        keystroke "n" using command down
-                    end tell
-                end tell
-                """
-                _ = runOsascript(script)
-                try? await Task.sleep(for: .seconds(2))
-                existingTerminals = (try? client.listTerminals()) ?? []
-            }
+            await launchGhosttyWindow()
+            try? await Task.sleep(for: .seconds(2))
+            existingTerminals = (try? client.listTerminals()) ?? []
         }
         guard !existingTerminals.isEmpty else { return nil }
 
-        let existingIDs = Set(existingTerminals.map(\.id))
-        guard let processName = await findGhosttyProcessName() else { return nil }
-
-        // Create enough new tabs to have `count` panes total
         var allPanes = existingTerminals.map(\.id)
-        let needed = count - allPanes.count
-        for _ in 0..<max(0, needed) {
-            await createNewPane(processName: processName)
-            try? await Task.sleep(for: .milliseconds(800))
-            if let terminals = try? client.listTerminals() {
-                let newOnes = terminals.filter { !existingIDs.contains($0.id) && !allPanes.contains($0.id) }
-                if let newPane = newOnes.first {
-                    allPanes.append(newPane.id)
+        let knownIDs = Set(allPanes)
+
+        // If we already have enough, use them
+        if allPanes.count >= count {
+            return Array(allPanes.prefix(count))
+        }
+
+        // Try pane splits first (works when BooApp has Accessibility permissions)
+        if let processName = await findGhosttyProcessName() {
+            let needed = count - allPanes.count
+            for _ in 0..<needed {
+                await createNewPane(processName: processName)
+                try? await Task.sleep(for: .milliseconds(800))
+                if let terminals = try? client.listTerminals() {
+                    let newOnes = terminals.filter { !knownIDs.contains($0.id) && !allPanes.contains($0.id) }
+                    if let newPane = newOnes.first {
+                        allPanes.append(newPane.id)
+                    }
                 }
             }
         }
 
-        // Return first `count` panes
+        // If splits didn't work, fall back to opening new Ghostty windows
+        if allPanes.count < count {
+            let stillNeeded = count - allPanes.count
+            for _ in 0..<stillNeeded {
+                await launchGhosttyWindow()
+                try? await Task.sleep(for: .seconds(2))
+                if let terminals = try? client.listTerminals() {
+                    let newOnes = terminals.filter { !knownIDs.contains($0.id) && !allPanes.contains($0.id) }
+                    if let newPane = newOnes.first {
+                        allPanes.append(newPane.id)
+                    }
+                }
+            }
+        }
+
         guard allPanes.count >= count else { return nil }
         return Array(allPanes.prefix(count))
+    }
+
+    /// Launch a new Ghostty Boo window via `open -na`.
+    private func launchGhosttyWindow() async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-na", "Ghostty Boo.app"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
     }
 
     // MARK: - Claude CLI Detection
@@ -148,15 +180,18 @@ public actor OnboardingDemoEngine {
 
     // MARK: - Live Claude Demo
 
-    /// Launch real Claude Code agents that talk via MCP tools.
+    /// Launch real Claude Code agents in interactive mode with push messaging.
     /// Uses --dangerously-skip-permissions to bypass MCP trust prompts.
-    /// Falls back to scripted demo if agents fail to register within timeout.
+    /// Agents stay alive and receive messages via terminal injection (no polling).
     private func runLiveClaudeDemo(
         peerName: String, registry: PeerRegistry, relay: MessageRelay,
         machineName: String, client: GhosttyClient,
         continuation: AsyncStream<DemoLine>.Continuation
     ) async -> Bool {
-        guard let panes = await setupTerminals(client: client, count: 3) else { return false }
+        guard let panes = await setupTerminals(client: client, count: 3) else {
+            yield(continuation, .error, "setup", "Could not create 3 terminal panes — try splitting Ghostty manually first")
+            return false
+        }
 
         let agentName = peerName.isEmpty ? "alpha" : peerName
 
@@ -170,28 +205,45 @@ public actor OnboardingDemoEngine {
         }
         try? await Task.sleep(for: .milliseconds(500))
 
-        // Build prompts — each agent registers, then interacts via MCP
-        let prompt1 = "You are AI agent \\x27\(agentName)\\x27. Use boo MCP tools: 1) register_peer name=\\x27\(agentName)\\x27 role=\\x27claude\\x27 2) list_peers 3) send_message to \\x27scout\\x27 content \\x27hey scout, check the build logs for errors\\x27 4) Wait 15s then receive_messages. Be very concise, just call tools."
-        let prompt2 = "You are AI agent \\x27scout\\x27. Use boo MCP tools: 1) register_peer name=\\x27scout\\x27 role=\\x27claude\\x27 2) Wait 10s 3) receive_messages 4) send_message to \\x27oracle\\x27 forwarding what you received. Be very concise."
-        let prompt3 = "You are AI agent \\x27oracle\\x27. Use boo MCP tools: 1) register_peer name=\\x27oracle\\x27 role=\\x27claude\\x27 2) Wait 20s 3) receive_messages 4) Reply to sender via send_message with brief analysis. Be very concise."
+        // Launch 3 interactive Claude sessions (not -p, so they stay alive for push messages)
+        // Set BOO_TERMINAL_ID so each MCP process knows its terminal for push injection
+        for pane in panes {
+            sendToTerminal(client, pane, "export BOO_TERMINAL_ID=\(pane) && claude --dangerously-skip-permissions\n")
+        }
 
-        // Launch 3 Claude sessions staggered
-        sendToTerminal(client, panes[0], "claude -p --dangerously-skip-permissions $'\(prompt1)'\n")
-        try? await Task.sleep(for: .seconds(2))
-        sendToTerminal(client, panes[1], "claude -p --dangerously-skip-permissions $'\(prompt2)'\n")
-        try? await Task.sleep(for: .seconds(2))
-        sendToTerminal(client, panes[2], "claude -p --dangerously-skip-permissions $'\(prompt3)'\n")
+        // Wait for Claude to start, then accept the folder trust prompt (press Enter)
+        try? await Task.sleep(for: .seconds(4))
+        for pane in panes {
+            sendToTerminal(client, pane, "\r")  // Accept "Yes, I trust this folder"
+        }
+        try? await Task.sleep(for: .seconds(5))
 
-        // Monitor SharedPeerStore (file-based) for peer registrations.
-        // Each claude -p session spawns a separate BooApp --mcp process with its
-        // own PeerRegistry — the only shared state is SharedPeerStore at /tmp/boo/.
+        // Send initial instructions to each agent via terminal input.
+        // Push messaging injects text into the terminal as user input,
+        // so interactive Claude sessions will see messages from other agents naturally.
+        let instruction1 = "You are agent \"\(agentName)\". Use boo MCP tools: 1) register_peer name=\"\(agentName)\" role=\"claude\" 2) list_peers — you should see only yourself. 3) Wait 30 seconds for other agents to register. 4) list_peers again — you should see scout and oracle. 5) send_message to=\"scout\" content=\"hey scout, check the build logs\". Stay alive for push messages. Be concise."
+        let instruction2 = "You are agent \"scout\". Use boo MCP tools: 1) register_peer name=\"scout\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, forward it to \"oracle\" via send_message. Be concise."
+        let instruction3 = "You are agent \"oracle\". Use boo MCP tools: 1) register_peer name=\"oracle\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, reply to the sender with a brief analysis. Be concise."
+
+        // Launch agents staggered: scout and oracle first so they register before
+        // the lead agent tries to send_message to them.
+        // Use \r (carriage return) to submit — Claude's TUI uses raw mode where \r = Enter
+        sendToTerminal(client, panes[1], instruction2 + "\r")
+        try? await Task.sleep(for: .seconds(3))
+        sendToTerminal(client, panes[2], instruction3 + "\r")
+        try? await Task.sleep(for: .seconds(3))
+        sendToTerminal(client, panes[0], instruction1 + "\r")
+
+        // Monitor SharedPeerStore for peer registrations and message activity.
+        // Push messages are injected directly into terminals — no polling needed by agents.
+        // We still monitor SharedPeerStore to update the demo UI transcript.
         var knownPeerNames: Set<String> = []
         var yieldedListPeers = false
+        var yieldedMessages = false
 
         for tick in 0..<120 {
             try? await Task.sleep(for: .seconds(1))
 
-            // Poll SharedPeerStore for new registrations
             let sharedPeers = await sharedStore.listPeers()
             for peer in sharedPeers {
                 if !knownPeerNames.contains(peer.name) {
@@ -201,7 +253,6 @@ public actor OnboardingDemoEngine {
                 }
             }
 
-            // After seeing 3+ peers, yield list_peers
             if sharedPeers.count >= 3 && !yieldedListPeers {
                 let names = sharedPeers.map(\.name).joined(separator: ", ")
                 yield(continuation, .request, "list_peers", "{}")
@@ -209,26 +260,28 @@ public actor OnboardingDemoEngine {
                 yieldedListPeers = true
             }
 
-            // After enough time with 3 peers, yield status checks and finish
-            if knownPeerNames.count >= 3 && yieldedListPeers && tick > 25 {
+            // Check for messages — agents use push mode so messages flow via terminal injection
+            if knownPeerNames.count >= 2 && !yieldedMessages && tick > 15 {
+                for peer in sharedPeers {
+                    let msgs = await sharedStore.receiveMessages(peerID: peer.peerID)
+                    for msg in msgs {
+                        yield(continuation, .request, "send_message", "{ to: \"\(peer.name)\", content: \"\(msg.content.prefix(40))\" }")
+                        yield(continuation, .response, "send_message", "{ pushed to terminal }")
+                        yieldedMessages = true
+                    }
+                }
+            }
+
+            // Done when we have peers and some message activity (or enough time passed)
+            if knownPeerNames.count >= 3 && yieldedListPeers && tick > 30 {
                 for peer in sharedPeers {
                     yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(peer.peerID))\" }")
                     yield(continuation, .response, "get_peer_status", "{ name: \"\(peer.name)\", status: \"active\" }")
                     try? await Task.sleep(for: .milliseconds(300))
                 }
-
-                // Check for any messages exchanged
-                for peer in sharedPeers {
-                    let msgs = await sharedStore.receiveMessages(peerID: peer.peerID)
-                    for msg in msgs {
-                        yield(continuation, .request, "receive_messages", "{ peer: \"\(peer.name)\" }")
-                        yield(continuation, .response, "receive_messages", "{ from: \"\(msg.from)\", content: \"\(msg.content)\" }")
-                    }
-                }
                 break
             }
 
-            // Bail early if no peers after 60 seconds — claude probably failed
             if tick > 60 && knownPeerNames.isEmpty {
                 return false
             }
@@ -257,7 +310,7 @@ public actor OnboardingDemoEngine {
             // Wait for socket (up to 5 seconds)
             for _ in 0..<10 {
                 try? await Task.sleep(for: .milliseconds(500))
-                for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
+                for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty.sock", "/tmp/ghostty-test.sock"] {
                     if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
                         return path
                     }
@@ -271,7 +324,7 @@ public actor OnboardingDemoEngine {
 
     /// Find the running Ghostty Boo process name for AppleScript.
     private func findGhosttyProcessName() async -> String? {
-        for name in ["Ghostty Boo", "GhosttyBoo"] {
+        for name in ["Ghostty Boo", "GhosttyBoo", "ghostty"] {
             let script = "tell application \"System Events\" to return exists process \"\(name)\""
             if let result = runOsascript(script),
                result.trimmingCharacters(in: .whitespacesAndNewlines) == "true" {
@@ -281,22 +334,32 @@ public actor OnboardingDemoEngine {
         return nil
     }
 
-    /// Create a new pane (split) in Ghostty via AppleScript.
-    /// Uses Cmd+D for vertical split so agents show side-by-side.
+    /// Create a new pane (split) in Ghostty via AppleScript menu click.
+    /// Uses "Split Right" menu item for reliability (keystroke approach is fragile).
     private func createNewPane(processName: String) async {
         // Activate Ghostty first
         _ = runOsascript("tell application \"\(processName)\" to activate")
         try? await Task.sleep(for: .milliseconds(300))
 
-        // Send Cmd+D for vertical split (side-by-side panes)
-        let script = """
+        // Use menu click — more reliable than keystroke injection
+        let menuScript = """
         tell application "System Events"
             tell process "\(processName)"
-                keystroke "d" using command down
+                click menu item "Split Right" of menu 1 of menu bar item "Window" of menu bar 1
             end tell
         end tell
         """
-        _ = runOsascript(script)
+        if runOsascript(menuScript) == nil {
+            // Fallback to keystroke if menu click fails
+            let keystrokeScript = """
+            tell application "System Events"
+                tell process "\(processName)"
+                    keystroke "d" using command down
+                end tell
+            end tell
+            """
+            _ = runOsascript(keystrokeScript)
+        }
     }
 
     // MARK: - Helpers

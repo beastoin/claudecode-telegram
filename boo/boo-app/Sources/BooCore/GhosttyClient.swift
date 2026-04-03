@@ -79,6 +79,20 @@ public struct GhosttyClient: Sendable {
         return info
     }
 
+    /// Sends a key event to a terminal (with optional modifiers).
+    /// Modifiers: "super", "ctrl", "alt", "shift"
+    public func sendKey(terminalID: String, key: String, modifiers: [String]? = nil) throws {
+        var paramsObj: [String: JSONValue] = [
+            "terminal_id": .string(terminalID),
+            "key": .string(key),
+        ]
+        if let mods = modifiers, !mods.isEmpty {
+            paramsObj["modifiers"] = .array(mods.map { .string($0) })
+        }
+        let resp = try call(method: "send_key", params: .object(paramsObj))
+        if resp.error != nil { throw rpcError(resp) }
+    }
+
     // MARK: - Private
 
     private func call(method: String, params: JSONValue?) throws -> JSONRPCResponse {

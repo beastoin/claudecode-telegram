@@ -7,4 +7,7 @@ public enum BooDefaults {
 
     /// Message time-to-live: 5 minutes.
     public static let messageTTL: TimeInterval = 300
+
+    /// App version — single source of truth for display when Bundle.main has no Info.plist.
+    public static let appVersion = "0.2.7"
 }

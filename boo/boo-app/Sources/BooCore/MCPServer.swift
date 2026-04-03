@@ -27,7 +27,7 @@ public actor MCPServer {
     public var registry: PeerRegistry { toolContext.registry }
 
     private static func findGhosttySocket() -> String? {
-        for path in ["/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
+        for path in ["/tmp/ghostty.sock", "/tmp/ghostty-boo.sock", "/tmp/ghostty-test.sock"] {
             if let _ = try? GhosttyClient(socketPath: path).listTerminals() {
                 return path
             }
