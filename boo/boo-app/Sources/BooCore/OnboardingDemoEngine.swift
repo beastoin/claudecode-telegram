@@ -180,9 +180,9 @@ public actor OnboardingDemoEngine {
 
     // MARK: - Live Claude Demo
 
-    /// Launch real Claude Code agents that talk via MCP tools.
+    /// Launch real Claude Code agents in interactive mode with push messaging.
     /// Uses --dangerously-skip-permissions to bypass MCP trust prompts.
-    /// Falls back to scripted demo if agents fail to register within timeout.
+    /// Agents stay alive and receive messages via terminal injection (no polling).
     private func runLiveClaudeDemo(
         peerName: String, registry: PeerRegistry, relay: MessageRelay,
         machineName: String, client: GhosttyClient,
@@ -205,28 +205,42 @@ public actor OnboardingDemoEngine {
         }
         try? await Task.sleep(for: .milliseconds(500))
 
-        // Build prompts — each agent registers, then interacts via MCP
-        let prompt1 = "You are AI agent \\x27\(agentName)\\x27. Use boo MCP tools: 1) register_peer name=\\x27\(agentName)\\x27 role=\\x27claude\\x27 2) list_peers 3) send_message to \\x27scout\\x27 content \\x27hey scout, check the build logs for errors\\x27 4) Wait 15s then receive_messages. Be very concise, just call tools."
-        let prompt2 = "You are AI agent \\x27scout\\x27. Use boo MCP tools: 1) register_peer name=\\x27scout\\x27 role=\\x27claude\\x27 2) Wait 10s 3) receive_messages 4) send_message to \\x27oracle\\x27 forwarding what you received. Be very concise."
-        let prompt3 = "You are AI agent \\x27oracle\\x27. Use boo MCP tools: 1) register_peer name=\\x27oracle\\x27 role=\\x27claude\\x27 2) Wait 20s 3) receive_messages 4) Reply to sender via send_message with brief analysis. Be very concise."
+        // Launch 3 interactive Claude sessions (not -p, so they stay alive for push messages)
+        for pane in panes {
+            sendToTerminal(client, pane, "claude --dangerously-skip-permissions\n")
+        }
 
-        // Launch 3 Claude sessions staggered
-        sendToTerminal(client, panes[0], "claude -p --dangerously-skip-permissions $'\(prompt1)'\n")
-        try? await Task.sleep(for: .seconds(2))
-        sendToTerminal(client, panes[1], "claude -p --dangerously-skip-permissions $'\(prompt2)'\n")
-        try? await Task.sleep(for: .seconds(2))
-        sendToTerminal(client, panes[2], "claude -p --dangerously-skip-permissions $'\(prompt3)'\n")
+        // Wait for Claude to start, then accept the folder trust prompt (press Enter)
+        try? await Task.sleep(for: .seconds(4))
+        for pane in panes {
+            sendToTerminal(client, pane, "\r")  // Accept "Yes, I trust this folder"
+        }
+        try? await Task.sleep(for: .seconds(5))
 
-        // Monitor SharedPeerStore (file-based) for peer registrations.
-        // Each claude -p session spawns a separate BooApp --mcp process with its
-        // own PeerRegistry — the only shared state is SharedPeerStore at /tmp/boo/.
+        // Send initial instructions to each agent via terminal input.
+        // Push messaging injects text into the terminal as user input,
+        // so interactive Claude sessions will see messages from other agents naturally.
+        let instruction1 = "You are agent \"\(agentName)\". Use boo MCP tools: 1) register_peer name=\"\(agentName)\" role=\"claude\" 2) list_peers 3) send_message to \"scout\" with content \"hey scout, check the build logs\". Stay alive — you'll receive push messages in this terminal. Be concise."
+        let instruction2 = "You are agent \"scout\". Use boo MCP tools: 1) register_peer name=\"scout\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, forward it to \"oracle\" via send_message. Be concise."
+        let instruction3 = "You are agent \"oracle\". Use boo MCP tools: 1) register_peer name=\"oracle\" role=\"claude\" 2) list_peers. Then wait — messages will appear here via push. When you get one, reply to the sender with a brief analysis. Be concise."
+
+        // Use \r (carriage return) to submit — Claude's TUI uses raw mode where \r = Enter
+        sendToTerminal(client, panes[0], instruction1 + "\r")
+        try? await Task.sleep(for: .seconds(3))
+        sendToTerminal(client, panes[1], instruction2 + "\r")
+        try? await Task.sleep(for: .seconds(3))
+        sendToTerminal(client, panes[2], instruction3 + "\r")
+
+        // Monitor SharedPeerStore for peer registrations and message activity.
+        // Push messages are injected directly into terminals — no polling needed by agents.
+        // We still monitor SharedPeerStore to update the demo UI transcript.
         var knownPeerNames: Set<String> = []
         var yieldedListPeers = false
+        var yieldedMessages = false
 
         for tick in 0..<120 {
             try? await Task.sleep(for: .seconds(1))
 
-            // Poll SharedPeerStore for new registrations
             let sharedPeers = await sharedStore.listPeers()
             for peer in sharedPeers {
                 if !knownPeerNames.contains(peer.name) {
@@ -236,7 +250,6 @@ public actor OnboardingDemoEngine {
                 }
             }
 
-            // After seeing 3+ peers, yield list_peers
             if sharedPeers.count >= 3 && !yieldedListPeers {
                 let names = sharedPeers.map(\.name).joined(separator: ", ")
                 yield(continuation, .request, "list_peers", "{}")
@@ -244,26 +257,28 @@ public actor OnboardingDemoEngine {
                 yieldedListPeers = true
             }
 
-            // After enough time with 3 peers, yield status checks and finish
-            if knownPeerNames.count >= 3 && yieldedListPeers && tick > 25 {
+            // Check for messages — agents use push mode so messages flow via terminal injection
+            if knownPeerNames.count >= 2 && !yieldedMessages && tick > 15 {
+                for peer in sharedPeers {
+                    let msgs = await sharedStore.receiveMessages(peerID: peer.peerID)
+                    for msg in msgs {
+                        yield(continuation, .request, "send_message", "{ to: \"\(peer.name)\", content: \"\(msg.content.prefix(40))\" }")
+                        yield(continuation, .response, "send_message", "{ pushed to terminal }")
+                        yieldedMessages = true
+                    }
+                }
+            }
+
+            // Done when we have peers and some message activity (or enough time passed)
+            if knownPeerNames.count >= 3 && yieldedListPeers && tick > 30 {
                 for peer in sharedPeers {
                     yield(continuation, .request, "get_peer_status", "{ peer_id: \"\(short(peer.peerID))\" }")
                     yield(continuation, .response, "get_peer_status", "{ name: \"\(peer.name)\", status: \"active\" }")
                     try? await Task.sleep(for: .milliseconds(300))
                 }
-
-                // Check for any messages exchanged
-                for peer in sharedPeers {
-                    let msgs = await sharedStore.receiveMessages(peerID: peer.peerID)
-                    for msg in msgs {
-                        yield(continuation, .request, "receive_messages", "{ peer: \"\(peer.name)\" }")
-                        yield(continuation, .response, "receive_messages", "{ from: \"\(msg.from)\", content: \"\(msg.content)\" }")
-                    }
-                }
                 break
             }
 
-            // Bail early if no peers after 60 seconds — claude probably failed
             if tick > 60 && knownPeerNames.isEmpty {
                 return false
             }
