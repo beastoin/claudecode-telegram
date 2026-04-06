@@ -1546,6 +1546,1059 @@ print('OK')
     fi
 }
 
+test_transcript_renders_html() {
+    info "Testing _render_transcript_html produces valid HTML..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+# Create a fake transcript JSONL
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'test-sid', 'version': '2.1.85', 'gitBranch': 'main'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi there! How can I help?'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'test-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='test-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker')
+
+    import base64, re
+    assert '<!DOCTYPE html>' in html, 'Missing DOCTYPE'
+    assert 'testworker' in html, 'Missing worker name'
+    assert 'Hello world' in html, 'Missing user message'
+    # Assistant text is base64-encoded in data-md attr (rendered client-side by marked.js)
+    md_vals = [base64.b64decode(m).decode() for m in re.findall(r'data-md=\"([^\"]+)\"', html)]
+    assert any('Hi there!' in v for v in md_vals), f'Missing assistant reply in data-md: {md_vals}'
+    assert 'claude-opus-4-6' in html, 'Missing model name'
+    assert 'user-msg' in html, 'Missing user CSS class'
+    assert 'a-text' in html, 'Missing assistant CSS class'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript renderer produces valid HTML"
+    else
+        fail "Transcript renderer test failed"
+    fi
+}
+
+test_transcript_missing_session() {
+    info "Testing transcript returns error for missing session..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+import bridge
+
+with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/x'), \
+     patch.object(bridge, 'get_claude_session_id', return_value=''):
+    html = bridge._render_transcript_html('nobody')
+
+assert 'No session found' in html, f'Expected error message, got: {html[:200]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript returns error for missing session"
+    else
+        fail "Missing session test failed"
+    fi
+}
+
+test_transcript_with_tool_calls() {
+    info "Testing transcript renders tool_use and tool_result blocks..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Read my file'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'tool-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_abc123', 'name': 'Read', 'input': {'file_path': '/tmp/hello.txt'}}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_abc123', 'content': 'file contents here', 'is_error': False}]}, 'timestamp': '2026-04-05T10:00:02Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'Let me analyze this file...'}, {'type': 'text', 'text': 'The file contains hello.'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:03Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd2')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'tool-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd2'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='tool-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('toolworker')
+
+    import base64, re
+    assert 'hello.txt' in html, 'Missing file path'
+    # Result merged into tool block (no separate t-result)
+    assert 't-result' not in html, 'Separate t-result should not exist (merged into tool block)'
+    assert 'file contents here' in html, 'Missing tool output merged into tool block'
+    assert 'act' in html, 'Read with result should become expandable act block'
+    assert 't-name' not in html, 'Tool name text should not appear (icon-only per AmpCode)'
+    assert 'Thinking' in html, 'Missing thinking block'
+    md_vals = [base64.b64decode(m).decode() for m in re.findall(r'data-md=\"([^\"]+)\"', html)]
+    assert any('The file contains hello.' in v for v in md_vals), f'Missing final text in data-md: {md_vals}'
+    assert '1 tool call' in html, 'Missing tool call count'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript renders tool calls and thinking"
+    else
+        fail "Tool calls transcript test failed"
+    fi
+}
+
+test_transcript_default_last_page() {
+    info "Testing transcript defaults to last page..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+# Create 120 entries so we get multiple pages at per_page=50
+entries = []
+for i in range(120):
+    entries.append({'type': 'user', 'message': {'role': 'user', 'content': f'Message {i}'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'page-sid', 'version': '2.1.85'})
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'page-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='page-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        # page=None = default = last page
+        html = bridge._render_transcript_html('testworker', per_page=50)
+
+    # 120 entries / 50 = 3 pages. Default should show page 3
+    assert 'Message 119' in html, 'Last message not on default page'
+    assert 'Message 0' not in html, 'First message should NOT be on last page'
+    assert 'pg-cur' in html, 'Missing pagination current marker'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript defaults to last page"
+    else
+        fail "Default last page test failed"
+    fi
+}
+
+test_transcript_bm25_search() {
+    info "Testing BM25 search ranks results by relevance..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'general conversation about weather'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'bm25-sid', 'version': '2.1.85'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'teleport teleport teleport worker to mac'}, 'timestamp': '2026-04-05T10:00:01Z', 'sessionId': 'bm25-sid'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'one mention of teleport here'}, 'timestamp': '2026-04-05T10:00:02Z', 'sessionId': 'bm25-sid'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'bm25-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='bm25-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker', page=1, search_query='teleport')
+
+    assert 'ranked by relevance' in html, 'Missing relevance info'
+    assert 'Found 2 matching' in html, f'Expected 2 results'
+    # The entry with 3x teleport should rank higher (appear first)
+    pos_3x = html.find('teleport teleport teleport')
+    pos_1x = html.find('one mention of teleport')
+    assert pos_3x < pos_1x, f'Higher TF entry should rank first: {pos_3x} vs {pos_1x}'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "BM25 search ranks by relevance"
+    else
+        fail "BM25 search test failed"
+    fi
+}
+
+test_transcript_unicode() {
+    info "Testing transcript handles unicode/UTF-8 content..."
+    if python3 -c "
+import sys, os, json, tempfile, base64, re
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'こんにちは世界 🌍 café résumé naïve'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'utf8-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Héllo! 你好 🎉 Ñoño über Straße'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'utf8-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='utf8-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker')
+
+    # User message should have unicode rendered directly (HTML-escaped)
+    assert 'こんにちは世界' in html, 'Missing Japanese text in user message'
+    assert '🌍' in html, 'Missing emoji in user message'
+    assert 'café' in html, 'Missing accented text'
+    # Assistant text is base64 — verify the data-md roundtrips UTF-8
+    md_vals = [base64.b64decode(m).decode('utf-8') for m in re.findall(r'data-md=\"([^\"]+)\"', html)]
+    assert any('你好' in v for v in md_vals), f'Missing Chinese text in data-md: {md_vals}'
+    assert any('🎉' in v for v in md_vals), f'Missing emoji in data-md: {md_vals}'
+    assert any('Straße' in v for v in md_vals), f'Missing German text in data-md: {md_vals}'
+    # Verify decodeB64Utf8 function is in the JS
+    assert 'decodeB64Utf8' in html, 'Missing UTF-8 base64 decoder function'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript handles unicode/UTF-8 content"
+    else
+        fail "Unicode transcript test failed"
+    fi
+}
+
+test_transcript_edit_diff_rendering() {
+    info "Testing transcript renders Edit tool as colored diff..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Fix the bug'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'diff-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_abc', 'name': 'Edit', 'input': {'file_path': '/home/user/src/app.py', 'old_string': 'x = 1\ny = 2', 'new_string': 'x = 10\ny = 20\nz = 30'}}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'diff-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='diff-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker')
+
+    assert 'diff-add' in html, 'Missing diff-add class'
+    assert 'diff-del' in html, 'Missing diff-del class'
+    assert 'diff-stat' in html, 'Missing diff stats'
+    # Per-edit: old=2, new=3 → overlap=2, pure_add=1, pure_del=0
+    assert '+1' in html, 'Missing add count (+1 pure additions)'
+    assert '~2' in html, 'Missing mod count (~2 modified lines)'
+    assert 'app.py' in html, 'Missing filename in diff header'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript renders Edit diffs with coloring"
+    else
+        fail "Edit diff rendering test failed"
+    fi
+}
+
+test_transcript_turn_grouping() {
+    info "Testing assistant turns grouped in turn-body..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'grp-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi!'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_1', 'name': 'Read', 'input': {'file_path': '/tmp/test.txt'}}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:02Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'file content'}]}, 'timestamp': '2026-04-05T10:00:03Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'grp-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='grp-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker')
+
+    thread_html = html[html.find('id=\"thread\"'):]
+    # Assistant content grouped in turn-body (no avatar — AmpCode style)
+    assert 'turn-body' in thread_html, 'Missing turn-body grouping'
+    # No Claude avatar (removed per AmpCode match)
+    assert 'cl-av' not in thread_html, 'Should not have Claude avatar'
+    # User message should have image avatar
+    assert 'class=\"u-av\"' in thread_html, 'Missing user avatar'
+    assert 'u-label' not in html, 'Should not have Human label (AmpCode: no labels)'
+    # Tool result merged into tool block inside turn-body
+    assert 't-result' not in thread_html, 'No separate t-result (merged into tool block)'
+    tb_start = thread_html.find('turn-body')
+    act_pos = thread_html.find('class=\"act\"', tb_start)
+    assert tb_start < act_pos, 'Tool block (with merged result) should be inside turn-body'
+    assert 'file content' in thread_html, 'Merged result content should appear in tool block'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Assistant turns grouped under Claude avatar"
+    else
+        fail "Turn grouping test failed"
+    fi
+}
+
+test_transcript_hides_system_messages() {
+    info "Testing transcript hides task-notification and system-reminder messages..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'sys-sid', 'version': '2.1.85'},
+    {'type': 'user', 'message': {'role': 'user', 'content': '<task-notification>\n<task-id>abc123</task-id>\n<status>completed</status>\n<summary>Background command done</summary>\n</task-notification>'}, 'timestamp': '2026-04-05T10:00:01Z', 'sessionId': 'sys-sid'},
+    {'type': 'user', 'message': {'role': 'user', 'content': '<system-reminder>\nSome internal reminder\n</system-reminder>'}, 'timestamp': '2026-04-05T10:00:02Z', 'sessionId': 'sys-sid'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Real user message'}, 'timestamp': '2026-04-05T10:00:03Z', 'sessionId': 'sys-sid'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'sys-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='sys-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker')
+
+    assert 'Hello world' in html, 'Real user message should appear'
+    assert 'Real user message' in html, 'Second real user message should appear'
+    assert 'task-notification' not in html, 'task-notification should be hidden'
+    assert 'system-reminder' not in html, 'system-reminder should be hidden'
+    assert 'Background command done' not in html, 'Task summary should be hidden'
+    # Count user-msg divs - should be exactly 2 (the real messages)
+    count = html.count('class=\"user-msg\"')
+    assert count == 2, f'Expected 2 user messages, got {count}'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript hides system messages"
+    else
+        fail "System message hiding test failed"
+    fi
+}
+
+test_rewind_generates_token_url() {
+    info "Testing /rewind generates time-limited token URL..."
+    if python3 -c "
+import sys, os, json, tempfile, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from pathlib import Path
+import bridge
+
+# Setup: create a router with a mock reply
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+router.workers = MagicMock()
+router.workers.get_all_names.return_value = ['alice']
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+# Use BRIDGE_PUBLIC_URL (Tailscale IP — no cloudflare)
+with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
+    router.cmd_rewind('alice', 12345)
+
+assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}'
+reply = replies[0]
+assert 'alice' in reply, f'Reply should mention alice: {reply}'
+assert 'http://100.125.36.102:8271/transcript/alice' in reply, f'Should use Tailscale IP: {reply}'
+assert 'trycloudflare' not in reply, f'Should NOT use cloudflare: {reply}'
+assert 'token=' in reply, f'Should contain token param: {reply}'
+# Token should be in REWIND_TOKENS
+assert len(bridge.REWIND_TOKENS) > 0, 'Should have stored a rewind token'
+token = list(bridge.REWIND_TOKENS.keys())[0]
+entry = bridge.REWIND_TOKENS[token]
+assert entry['name'] == 'alice', f'Token should be for alice: {entry}'
+assert entry['expires_at'] > time.time(), 'Token should not be expired yet'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Rewind generates time-limited token URL"
+    else
+        fail "Rewind token URL test failed"
+    fi
+}
+
+test_rewind_token_auth_required() {
+    info "Testing transcript requires valid rewind token..."
+    if python3 -c "
+import sys, os, json, tempfile, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from pathlib import Path
+import bridge
+
+# Ensure REWIND_TOKENS is empty
+bridge.REWIND_TOKENS.clear()
+
+# Create a mock HTTP handler
+handler = MagicMock()
+handler.send_response = MagicMock()
+handler.send_header = MagicMock()
+handler.end_headers = MagicMock()
+handler.wfile = MagicMock()
+handler.wfile.write = MagicMock()
+
+from urllib.parse import urlparse, parse_qs
+
+# Test 1: No token → 403
+parsed = urlparse('/transcript/alice')
+bridge.Handler.handle_transcript_endpoint(handler, parsed)
+handler.send_response.assert_called_with(403)
+
+# Test 2: Wrong token → 403
+handler.reset_mock()
+parsed = urlparse('/transcript/alice?token=badtoken')
+bridge.Handler.handle_transcript_endpoint(handler, parsed)
+handler.send_response.assert_called_with(403)
+
+# Test 3: Valid token → 200
+handler.reset_mock()
+bridge.REWIND_TOKENS['goodtoken'] = {'name': 'alice', 'expires_at': time.time() + 300}
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'test-sid.jsonl'
+    transcript.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'hello'}, 'sessionId': 'test-sid', 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='test-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        parsed = urlparse('/transcript/alice?token=goodtoken')
+        bridge.Handler.handle_transcript_endpoint(handler, parsed)
+
+handler.send_response.assert_called_with(200)
+
+# Test 4: Expired token → 403
+handler.reset_mock()
+bridge.REWIND_TOKENS['expiredtoken'] = {'name': 'alice', 'expires_at': time.time() - 10}
+parsed = urlparse('/transcript/alice?token=expiredtoken')
+bridge.Handler.handle_transcript_endpoint(handler, parsed)
+handler.send_response.assert_called_with(403)
+
+# Cleanup
+bridge.REWIND_TOKENS.clear()
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript requires valid rewind token"
+    else
+        fail "Rewind token auth test failed"
+    fi
+}
+
+test_rewind_no_args_shows_usage() {
+    info "Testing /rewind with no args shows usage..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+router.workers = MagicMock()
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+router.cmd_rewind('', 12345)
+assert len(replies) == 1
+assert 'Usage' in replies[0], f'Should show usage: {replies[0]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Rewind shows usage without args"
+    else
+        fail "Rewind usage test failed"
+    fi
+}
+
+test_transcript_prompts_filter() {
+    info "Testing transcript prompts-only filter..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+import bridge
+
+# Create transcript with user + assistant entries
+with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+    entries = [
+        {'type': 'user', 'message': {'role': 'user', 'content': 'hello world'}, 'timestamp': '2026-04-05T10:00:00Z'},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi!'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+        {'type': 'user', 'message': {'role': 'user', 'content': 'second prompt'}, 'timestamp': '2026-04-05T10:01:00Z'},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Ok'}]}, 'timestamp': '2026-04-05T10:01:01Z'},
+    ]
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+    tpath = f.name
+
+from unittest.mock import patch
+with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+    # Without filter: shows all entries
+    html_all = bridge._render_transcript_html('test')
+    assert 'hello world' in html_all
+    assert 'a-text markdown' in html_all  # assistant blocks visible
+
+    # With filter=prompts: only user messages
+    html_filt = bridge._render_transcript_html('test', filter_mode='prompts')
+    assert 'hello world' in html_filt
+    assert 'second prompt' in html_filt
+    assert 'Showing prompts only' in html_filt
+    # No assistant text blocks in the content area (before script tag)
+    assert 'a-text markdown' not in html_filt.split('<script>')[0]
+
+os.unlink(tpath)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript prompts-only filter works"
+    else
+        fail "Transcript prompts-only filter failed"
+    fi
+}
+
+test_transcript_dynamic_avatars() {
+    info "Testing transcript dynamic avatars for team members..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+import bridge
+
+# Test _detect_message_author
+author, av, display = bridge._detect_message_author('ryo: fix the bug')
+assert author == 'ryo', f'Expected ryo, got {author}'
+assert 'viewBox' in av, 'Team member should get SVG avatar'
+assert display == 'fix the bug', f'Display should strip prefix, got: {display}'
+
+# Manager prefix
+author2, av2, display2 = bridge._detect_message_author('manager: check this')
+assert author2 == 'manager', f'Expected manager, got {author2}'
+assert 'github' in av2.lower() or 'img' in av2, 'Manager should get GitHub avatar'
+assert display2 == 'check this'
+
+# No prefix → default manager
+author3, av3, display3 = bridge._detect_message_author('just a plain message')
+assert author3 == 'manager'
+assert 'img' in av3
+
+# Test avatar uniqueness
+av_ryo = bridge._generate_member_avatar('ryo')
+av_mon = bridge._generate_member_avatar('mon')
+av_lee = bridge._generate_member_avatar('lee')
+assert av_ryo != av_mon, 'Different members should have different avatars'
+assert av_ryo != av_lee
+assert av_mon != av_lee
+
+# Verify determinism
+assert bridge._generate_member_avatar('ryo') == av_ryo, 'Same name should give same avatar'
+
+# Verify 100+ unique variants
+avatars = set()
+for name in list(bridge._TEAM_MEMBERS) + ['alice', 'bob', 'carol', 'dave', 'eve', 'frank', 'grace',
+    'heidi', 'ivan', 'judy', 'karl', 'larry', 'mallory', 'nancy', 'oscar', 'peggy',
+    'quinn', 'romeo', 'steve', 'trudy', 'ursula', 'victor', 'wendy', 'xavier', 'yvonne', 'zach',
+    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa',
+    'lambda', 'mu', 'nu', 'xi', 'omicron', 'pi', 'rho', 'sigma', 'tau', 'upsilon', 'phi',
+    'chi', 'psi', 'omega', 'ant', 'bee', 'cat', 'dog', 'elk', 'fox', 'gnu', 'hen', 'ibis',
+    'jay', 'koi', 'lynx', 'moth', 'newt', 'owl', 'pig', 'quail', 'ram', 'seal', 'toad',
+    'urchin', 'vole', 'wolf', 'yak', 'zebu', 'atom', 'bolt', 'cog', 'dart', 'edge',
+    'flux', 'grit', 'haze', 'icon', 'jest', 'knot', 'lens', 'mist', 'node', 'opus',
+    'pulse', 'rift', 'shard', 'tide', 'unit', 'vex', 'warp', 'xray', 'yield', 'zinc']:
+    avatars.add(bridge._generate_member_avatar(name))
+assert len(avatars) >= 100, f'Expected 100+ unique avatars, got {len(avatars)}'
+print(f'OK ({len(avatars)} unique avatars)')
+" 2>/dev/null | grep -q "OK"; then
+        success "Dynamic avatars work with 100+ variants"
+    else
+        fail "Dynamic avatar test failed"
+    fi
+}
+
+test_transcript_sidebar_stats() {
+    info "Testing transcript sidebar shows duration/tokens/file size..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+import bridge
+
+# Create transcript with usage data and timestamps spread over 2 hours
+with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+    entries = [
+        {'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'},
+        {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'reply'}],
+         'usage': {'input_tokens': 5000, 'cache_read_input_tokens': 3000, 'output_tokens': 1200}},
+         'timestamp': '2026-04-05T12:30:00Z'},
+    ]
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+    tpath = f.name
+
+from unittest.mock import patch
+with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+    html = bridge._render_transcript_html('test')
+    # Duration should show 2h 30m
+    assert '2h 30m' in html, f'Expected 2h 30m duration in sidebar'
+    # Token counts
+    assert '8,000' in html, f'Expected 8,000 input tokens (5000+3000)'
+    assert '1,200' in html, f'Expected 1,200 output tokens'
+    # File size should be present (small file)
+    assert 'KB' in html or ' B' in html, 'Expected file size in sidebar'
+
+os.unlink(tpath)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Transcript sidebar shows duration/tokens/file size"
+    else
+        fail "Transcript sidebar stats failed"
+    fi
+}
+
+
+# ── Transcript Index Tests (transcript-index.py) ──────────────────────────
+
+test_tindex_missing_file() {
+    info "Testing transcript-index.py handles missing JSONL..."
+    if result=$(python3 transcript-index.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['entries'] == [], f'Expected empty entries, got {d[\"entries\"]}'
+assert d['total'] == 0, f'Expected total=0, got {d[\"total\"]}'
+assert d['total_pages'] == 0
+assert d['page'] == 1
+print('OK')
+" && success "transcript-index.py handles missing JSONL" || fail "Missing file test failed"
+    else
+        fail "transcript-index.py crashed on missing file"
+    fi
+    rm -f /tmp/test-tindex-missing.db
+}
+
+test_tindex_empty_file() {
+    info "Testing transcript-index.py handles empty JSONL..."
+    local tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['entries'] == [], f'Expected empty entries'
+assert d['total'] == 0
+print('OK')
+" && success "transcript-index.py handles empty JSONL" || fail "Empty file test failed"
+    else
+        fail "transcript-index.py crashed on empty file"
+    fi
+    rm -f "$tmp" /tmp/test-tindex-empty.db
+}
+
+test_tindex_basic_indexing() {
+    info "Testing transcript-index.py indexes entries into SQLite..."
+    local tmp=$(mktemp /tmp/tindex-basic-XXXX.jsonl)
+    local db="/tmp/test-tindex-basic.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'test', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi there'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Thanks'}, 'timestamp': '2026-04-05T10:00:02Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json, sqlite3
+d = json.load(sys.stdin)
+assert d['total'] == 3, f'Expected 3 entries, got {d[\"total\"]}'
+assert len(d['entries']) == 3
+assert d['entries'][0]['type'] == 'user'
+assert d['entries'][1]['type'] == 'assistant'
+# Verify SQLite db was created with correct rows
+db = sqlite3.connect('$db')
+count = db.execute('SELECT COUNT(*) FROM entries').fetchone()[0]
+assert count == 3, f'SQLite has {count} rows, expected 3'
+# Verify raw_json is valid JSON
+import json as j2
+parsed = j2.loads(d['entries'][0]['raw_json'])
+assert parsed['message']['content'] == 'Hello world'
+db.close()
+print('OK')
+" && success "transcript-index.py indexes entries" || fail "Basic indexing test failed"
+    else
+        fail "transcript-index.py crashed on basic indexing"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_skips_noise() {
+    info "Testing transcript-index.py skips noise entry types..."
+    local tmp=$(mktemp /tmp/tindex-noise-XXXX.jsonl)
+    local db="/tmp/test-tindex-noise.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello'}, 'timestamp': '2026-04-05T10:00:00Z'},
+    {'type': 'progress', 'data': {}},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'system', 'message': {'role': 'system', 'content': 'sys msg'}},
+    {'type': 'queue-operation', 'data': {}},
+    {'type': 'file-history-snapshot', 'data': {}},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Bye'}, 'timestamp': '2026-04-05T10:00:02Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 3, f'Expected 3 (skipping noise), got {d[\"total\"]}'
+types = [e['type'] for e in d['entries']]
+assert 'progress' not in types
+assert 'system' not in types
+assert 'queue-operation' not in types
+print('OK')
+" && success "transcript-index.py skips noise types" || fail "Noise skip test failed"
+    else
+        fail "transcript-index.py crashed on noise entries"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_plain_text_extraction() {
+    info "Testing transcript-index.py extracts searchable plain text..."
+    local tmp=$(mktemp /tmp/tindex-text-XXXX.jsonl)
+    local db="/tmp/test-tindex-text.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hi there friend'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'ls -la /tmp'}}]}, 'timestamp': '2026-04-05T10:00:02Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 -c "
+import sqlite3
+db = sqlite3.connect('$db')
+rows = db.execute('SELECT plain_text FROM entries ORDER BY idx').fetchall()
+assert 'Hello world' in rows[0][0], f'User text not extracted: {rows[0][0]}'
+assert 'Hi there friend' in rows[1][0], f'Assistant text not extracted: {rows[1][0]}'
+assert 'ls -la /tmp' in rows[2][0], f'Tool input not extracted: {rows[2][0]}'
+db.close()
+print('OK')
+" 2>/dev/null | grep -q "OK" && success "Plain text extraction works" || fail "Plain text extraction failed"
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_incremental() {
+    info "Testing transcript-index.py indexes only new bytes..."
+    local tmp=$(mktemp /tmp/tindex-incr-XXXX.jsonl)
+    local db="/tmp/test-tindex-incr.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'First'}, 'timestamp': '2026-04-05T10:00:00Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Reply1'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Second'}, 'timestamp': '2026-04-05T10:00:02Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    # First index
+    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    # Append 2 more entries
+    python3 -c "
+import json
+new = [
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Reply2'}]}, 'timestamp': '2026-04-05T10:00:03Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Third'}, 'timestamp': '2026-04-05T10:00:04Z'},
+]
+with open('$tmp', 'a') as f:
+    for e in new:
+        f.write(json.dumps(e) + '\n')
+"
+    # Re-index (incremental)
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 5, f'Expected 5 after incremental, got {d[\"total\"]}'
+assert d['entries'][0]['type'] == 'user'
+assert d['entries'][4]['type'] == 'user'
+print('OK')
+" && success "Incremental indexing works" || fail "Incremental indexing test failed"
+    else
+        fail "transcript-index.py crashed on incremental"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_no_reindex_unchanged() {
+    info "Testing transcript-index.py skips reindex when file unchanged..."
+    local tmp=$(mktemp /tmp/tindex-noop-XXXX.jsonl)
+    local db="/tmp/test-tindex-noop.db"
+    python3 -c "
+import json
+with open('$tmp', 'w') as f:
+    f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
+"
+    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    # Get db mtime
+    local mtime1=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
+    sleep 1
+    # Run again — should skip indexing
+    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    local mtime2=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
+    # Note: mtime may change due to SQLite WAL, so just check total is still 1
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 1, f'Expected 1, got {d[\"total\"]}'
+print('OK')
+" && success "No reindex when unchanged" || fail "No-reindex test failed"
+    else
+        fail "transcript-index.py crashed on no-reindex"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_pagination() {
+    info "Testing transcript-index.py pagination..."
+    local tmp=$(mktemp /tmp/tindex-page-XXXX.jsonl)
+    local db="/tmp/test-tindex-page.db"
+    python3 -c "
+import json
+with open('$tmp', 'w') as f:
+    for i in range(120):
+        e = {'type': 'user', 'message': {'role': 'user', 'content': f'Message {i}'}, 'timestamp': f'2026-04-05T10:{i//60:02d}:{i%60:02d}Z'}
+        f.write(json.dumps(e) + '\n')
+"
+    # Default (no --page) should be last page
+    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 120
+assert d['total_pages'] == 3
+assert d['page'] == 3, f'Default page should be 3 (last), got {d[\"page\"]}'
+assert len(d['entries']) == 20, f'Last page should have 20 entries, got {len(d[\"entries\"])}'
+print('OK1')
+" 2>/dev/null | grep -q "OK1" || { fail "Pagination default-last-page failed"; rm -f "$tmp" "$db"; return; }
+    # Explicit page 1
+    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['page'] == 1
+assert len(d['entries']) == 50
+assert json.loads(d['entries'][0]['raw_json'])['message']['content'] == 'Message 0'
+print('OK2')
+" 2>/dev/null | grep -q "OK2" || { fail "Pagination page-1 failed"; rm -f "$tmp" "$db"; return; }
+    # Page 2
+    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['page'] == 2
+assert len(d['entries']) == 50
+assert json.loads(d['entries'][0]['raw_json'])['message']['content'] == 'Message 50'
+print('OK3')
+" 2>/dev/null | grep -q "OK3" && success "Pagination works" || fail "Pagination page-2 failed"
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_fts5_search() {
+    info "Testing transcript-index.py FTS5 search with BM25 ranking..."
+    local tmp=$(mktemp /tmp/tindex-search-XXXX.jsonl)
+    local db="/tmp/test-tindex-search.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'general conversation about weather'}, 'timestamp': '2026-04-05T10:00:00Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'teleport teleport teleport worker to mac'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'one mention of teleport here'}, 'timestamp': '2026-04-05T10:00:02Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total_results'] == 2, f'Expected 2 results, got {d[\"total_results\"]}'
+# 3x teleport should rank higher (first)
+first_text = json.loads(d['entries'][0]['raw_json'])
+assert 'teleport teleport teleport' in str(first_text), f'3x teleport should be first'
+print('OK')
+" && success "FTS5 search ranks correctly" || fail "FTS5 search ranking failed"
+    else
+        fail "transcript-index.py crashed on search"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_search_no_results() {
+    info "Testing transcript-index.py search with no matches..."
+    local tmp=$(mktemp /tmp/tindex-nores-XXXX.jsonl)
+    local db="/tmp/test-tindex-nores.db"
+    python3 -c "
+import json
+with open('$tmp', 'w') as f:
+    f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total_results'] == 0
+assert d['entries'] == []
+print('OK')
+" && success "Search no-results works" || fail "Search no-results failed"
+    else
+        fail "transcript-index.py crashed on empty search"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_filter_prompts() {
+    info "Testing transcript-index.py prompts filter..."
+    local tmp=$(mktemp /tmp/tindex-filter-XXXX.jsonl)
+    local db="/tmp/test-tindex-filter.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Real prompt'}, 'timestamp': '2026-04-05T10:00:00Z'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Reply'}]}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': '<task-notification>system stuff</task-notification>'}, 'timestamp': '2026-04-05T10:00:02Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': '<system-reminder>internal</system-reminder>'}, 'timestamp': '2026-04-05T10:00:03Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'result'}]}, 'timestamp': '2026-04-05T10:00:04Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Another real prompt'}, 'timestamp': '2026-04-05T10:00:05Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 2, f'Expected 2 prompts, got {d[\"total\"]}'
+texts = [json.loads(e['raw_json'])['message']['content'] for e in d['entries']]
+assert 'Real prompt' in texts
+assert 'Another real prompt' in texts
+print('OK')
+" && success "Prompts filter works" || fail "Prompts filter failed"
+    else
+        fail "transcript-index.py crashed on filter"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tindex_stats() {
+    info "Testing transcript-index.py stats query..."
+    local tmp=$(mktemp /tmp/tindex-stats-XXXX.jsonl)
+    local db="/tmp/test-tindex-stats.db"
+    python3 -c "
+import json
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'Fix the bug'}, 'timestamp': '2026-04-05T10:00:00Z', 'version': '2.1.85', 'gitBranch': 'main'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+        {'type': 'tool_use', 'id': 't1', 'name': 'Edit', 'input': {'file_path': '/tmp/app.py', 'old_string': 'x = 1\ny = 2', 'new_string': 'x = 10\ny = 20\nz = 30'}},
+    ], 'model': 'claude-opus-4-6', 'usage': {'input_tokens': 5000, 'cache_read_input_tokens': 3000, 'output_tokens': 1200}}, 'timestamp': '2026-04-05T12:30:00Z'},
+]
+with open('$tmp', 'w') as f:
+    for e in entries:
+        f.write(json.dumps(e) + '\n')
+"
+    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['n_user'] == 1, f'n_user={d[\"n_user\"]}'
+assert d['n_tool'] == 1, f'n_tool={d[\"n_tool\"]}'
+assert d['n_edit'] == 1, f'n_edit={d[\"n_edit\"]}'
+assert d['input_tokens'] == 8000, f'input_tokens={d[\"input_tokens\"]}'
+assert d['output_tokens'] == 1200, f'output_tokens={d[\"output_tokens\"]}'
+assert d['model'] == 'claude-opus-4-6', f'model={d[\"model\"]}'
+assert d['version'] == '2.1.85', f'version={d[\"version\"]}'
+assert d['duration'] == '2h 30m', f'duration={d[\"duration\"]}'
+assert d['n_files'] == 1
+# Per-edit: old=2, new=3 → overlap=2, add=1, del=0
+assert d['lines_add'] == 1, f'lines_add={d[\"lines_add\"]}'
+assert d['lines_mod'] == 2, f'lines_mod={d[\"lines_mod\"]}'
+assert d['lines_del'] == 0, f'lines_del={d[\"lines_del\"]}'
+print('OK')
+" && success "Stats query works" || fail "Stats query failed"
+    else
+        fail "transcript-index.py crashed on stats"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+# ── End Transcript Index Tests ────────────────────────────────────────────
+
 test_reply_forwarded_voice_gets_transcribed() {
     info "Testing reply-forwarded voice delivers transcript transparently..."
     if python3 -c "
@@ -10031,6 +11084,85 @@ print('OK')
     fi
 }
 
+test_restart_remote_remaps_cwd_home() {
+    info "Testing remote restart remaps VPS \$HOME to target \$HOME in CWD..."
+
+    if python3 -c "
+import json, tempfile, os
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions = Path(tmpdir) / 'sessions'
+sessions.mkdir()
+(sessions / 'x').mkdir()
+# CWD has VPS path (the bug: stale VPS path synced to remote)
+(sessions / 'x' / 'claude_session_cwd').write_text('/home/claude/claudecode-telegram')
+(sessions / 'x' / 'claude_session_id').write_text('test-session-id')
+
+node_dir = Path(tmpdir) / 'node'
+node_dir.mkdir()
+(node_dir / 'workers.json').write_text(json.dumps({
+    'x': {'host': 'mac-mini', 'tmux': 'claude-prod-x'}
+}))
+
+start_calls = []
+
+def mock_remote_run(cmd, **kwargs):
+    r = MagicMock(returncode=0, stdout='', stderr='')
+    cmd_str = ' '.join(str(c) for c in cmd)
+    if 'echo' in cmd_str and 'HOME' in cmd_str:
+        r.stdout = '/Users/beastoinagents\n'
+    if 'test' in cmd_str and '-f' in cmd_str:
+        r.returncode = 0  # session file exists
+    if 'has-session' in cmd_str:
+        r.returncode = 1  # no tmux
+    return r
+
+def mock_start(self, name, host, cwd, session_id, backend):
+    start_calls.append({'cwd': cwd})
+    return True
+
+class MockWorkers:
+    tmux_prefix = 'claude-prod-'
+    sessions_dir = sessions
+    def _build_welcome(self, name, backend): return 'Welcome'
+    def send(self, name, text): pass
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_node_dir = bridge.NODE_DIR
+orig_home = os.path.expanduser('~')
+bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = node_dir
+
+router = bridge.CommandRouter(MagicMock(), MockWorkers())
+router.workers = MockWorkers()
+
+with patch('bridge._remote_run', side_effect=mock_remote_run), \
+     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+     patch('time.sleep'):
+    ok, err = router._restart_remote_worker(
+        'x', 'claude', bridge.get_backend('claude'),
+        'claude-prod-x', 'mac-mini', 'resume')
+
+assert ok, f'restart should succeed, got err={err}'
+# CWD should be remapped from /home/claude/... to /Users/beastoinagents/...
+actual_cwd = start_calls[0]['cwd']
+assert actual_cwd == '/Users/beastoinagents/claudecode-telegram', \
+    f'CWD should be remapped to Mac Mini path, got: {actual_cwd!r}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node_dir
+import shutil; shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Remote restart remaps VPS \$HOME in CWD to target \$HOME"
+    else
+        fail "Remote restart CWD remapping test failed"
+    fi
+}
+
 test_restart_delegates_to_remote_for_teleported() {
     info "Testing cmd_restart detects teleported worker and delegates to remote..."
 
@@ -15747,6 +16879,7 @@ run_unit_tests() {
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_remote_validates_session_exists
+    run_test test_restart_remote_remaps_cwd_home
     run_test test_restart_delegates_to_remote_for_teleported
     run_test test_end_worker_teleported_uses_remote_tmux
     run_test test_restart_teleported_requires_remote_dispatch
@@ -15897,6 +17030,40 @@ run_unit_tests() {
     run_test test_auto_tts_skips_long_messages
     run_test test_auto_tts_failure_still_sends_text
     run_test test_voice_toggle_command
+    # Unit tests - Transcript Viewer
+    log ""
+    log "── Transcript Viewer Tests (Unit) ──────────────────────────────────────"
+    rm -f /tmp/transcript-cache/*.db /tmp/transcript-cache/*.db-wal /tmp/transcript-cache/*.db-shm 2>/dev/null
+    run_test test_transcript_renders_html
+    run_test test_transcript_missing_session
+    run_test test_transcript_with_tool_calls
+    run_test test_transcript_default_last_page
+    run_test test_transcript_bm25_search
+    run_test test_transcript_unicode
+    run_test test_transcript_edit_diff_rendering
+    run_test test_transcript_turn_grouping
+    run_test test_transcript_hides_system_messages
+    run_test test_rewind_generates_token_url
+    run_test test_rewind_token_auth_required
+    run_test test_rewind_no_args_shows_usage
+    run_test test_transcript_prompts_filter
+    run_test test_transcript_dynamic_avatars
+    run_test test_transcript_sidebar_stats
+    # Unit tests - Transcript Index (transcript-index.py)
+    log ""
+    log "── Transcript Index Tests (Unit) ───────────────────────────────────────"
+    run_test test_tindex_missing_file
+    run_test test_tindex_empty_file
+    run_test test_tindex_basic_indexing
+    run_test test_tindex_skips_noise
+    run_test test_tindex_plain_text_extraction
+    run_test test_tindex_incremental
+    run_test test_tindex_no_reindex_unchanged
+    run_test test_tindex_pagination
+    run_test test_tindex_fts5_search
+    run_test test_tindex_search_no_results
+    run_test test_tindex_filter_prompts
+    run_test test_tindex_stats
 }
 
 run_cli_tests() {
