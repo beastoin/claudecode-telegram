@@ -9627,13 +9627,22 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 per_page = 50
             search_query = qs.get("q", [""])[0].strip()
             filter_mode = qs.get("filter", [""])[0].strip()
-            # Check if transcript needs remote sync (returns "syncing" sentinel)
-            _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
-            if _tp == "syncing":
-                sync_key = f"{name}:{_sid}"
-                html_content = _render_transcript_loading(name, _sid, token or "", sync_key)
-            else:
-                html_content = _render_transcript_html(
+            # Remote workers use SSH via transcript-index.py — skip rsync loading page
+            host = get_worker_host(name)
+            if not host:
+                # Local workers: check if transcript needs remote sync
+                _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
+                if _tp == "syncing":
+                    sync_key = f"{name}:{_sid}"
+                    html_content = _render_transcript_loading(name, _sid, token or "", sync_key)
+                    body = html_content.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            html_content = _render_transcript_html(
                     name, session_id=session_id,
                     page=page, per_page=per_page, search_query=search_query,
                     token=token or "", filter_mode=filter_mode)
