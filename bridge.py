@@ -123,6 +123,7 @@ API_ENDPOINTS = {
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
     "GET /health/workers": "Watchdog state for all workers",
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
+    "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
     "POST /response": "Hook: send Claude response to Telegram",
     "POST /notify": "Send notification to all admin chats",
 }
@@ -1164,6 +1165,7 @@ _last_child_ts = {}
 _last_seen_claude = {}
 _last_hook_ts = {}
 _last_alert_ts = {}
+_alert_msg_ids = {}  # name -> message_id of last bad-state alert (for edit on recovery)
 _idle_streak = {}
 _prev_worker_states = {}
 _consecutive_probe_failures = {}
@@ -1189,6 +1191,7 @@ LAST_ACTIVE_FILE = NODE_DIR / "last_active"
 
 # Rewind tokens: {token_str: {"name": worker, "expires_at": timestamp}}
 REWIND_TOKENS = {}
+PR_REVIEW_TOKENS = {}
 REWIND_TIMEOUT = 5 * 60  # 5 minutes
 
 BOT_COMMANDS = [
@@ -1203,6 +1206,7 @@ BOT_COMMANDS = [
     {"command": "settings", "description": "Show settings"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
+    {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
     # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
@@ -3446,8 +3450,11 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         result = telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
         if result and result.get("ok"):
             print(f"[watchdog] Alert sent for {name} ({state}): {text[:80]}")
+            msg_id = result.get("result", {}).get("message_id")
             with _watchdog_lock:
                 _last_alert_ts[name] = now
+                if msg_id:
+                    _alert_msg_ids[name] = (msg_id, text)
         else:
             print(f"[watchdog] Alert FAILED for {name} ({state}): {result}")
     except Exception as e:
@@ -3479,6 +3486,24 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         return
 
     _last_resolved_ts[name] = now
+
+    # Edit the old alert to show resolved
+    with _watchdog_lock:
+        alert_info = _alert_msg_ids.pop(name, None)
+    if alert_info:
+        old_msg_id, old_text = alert_info
+        resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
+        try:
+            telegram_api("editMessageText", {
+                "chat_id": admin_chat_id,
+                "message_id": old_msg_id,
+                "text": resolved_text,
+            })
+            print(f"[watchdog] Edited alert for {name} -> resolved")
+            return
+        except Exception:
+            pass  # Fall through to send new message
+
     text = f"✅ {name} is back to normal."
     try:
         telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
@@ -4818,10 +4843,16 @@ class WorkerManager:
         if SANDBOX_ENABLED and backend_obj.is_interactive:
             welcome += " Running in sandbox mode (Docker container)."
 
-        # Append manager note if set (with {name} substitution)
+        # Append manager note if set (with {name} and {machine} substitution)
         note = read_checkin_note()
         if note:
             rendered = note.replace("{name}", name)
+            host = get_worker_host(name)
+            if host:
+                machine = f"Mac Mini ({host})"
+            else:
+                machine = "VPS (100.125.36.102)"
+            rendered = rendered.replace("{machine}", machine)
             welcome += f"\n\nMANAGER NOTE:\n{rendered}"
             print(f"Checkin note included for {name}")
 
@@ -5703,9 +5734,10 @@ class CommandRouter:
                     self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
-                local_path = download_telegram_file(file_id, state["active"])
+                download_target = self._resolve_media_target(text, msg)
+                local_path = download_telegram_file(file_id, download_target)
                 if local_path:
-                    gif_text = f"Manager sent GIF: {local_path}"
+                    gif_text = f"Manager sent GIF: `{local_path}`"
                     if text:
                         gif_text = f"{text}\n\n{gif_text}"
                     self._route_media_message(gif_text, text, chat_id, msg_id, msg=msg)
@@ -5730,9 +5762,10 @@ class CommandRouter:
                     self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
-                local_path = download_telegram_file(file_id, state["active"])
+                download_target = self._resolve_media_target(text, msg)
+                local_path = download_telegram_file(file_id, download_target)
                 if local_path:
-                    image_text = f"Manager sent image: {local_path}"
+                    image_text = f"Manager sent image: `{local_path}`"
                     if text:
                         image_text = f"{text}\n\n{image_text}"
                     self._route_media_message(image_text, text, chat_id, msg_id, msg=msg)
@@ -5752,13 +5785,14 @@ class CommandRouter:
                     self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
-                local_path = download_telegram_file(file_id, state["active"])
+                download_target = self._resolve_media_target(text, msg)
+                local_path = download_telegram_file(file_id, download_target)
                 if local_path:
                     file_name = document.get("file_name", "unknown")
                     file_size = document.get("file_size", 0)
                     mime_type = document.get("mime_type", "unknown")
                     size_str = format_file_size(file_size)
-                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: {local_path}"
+                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: `{local_path}`"
                     if text:
                         file_text = f"{text}\n\n{file_text}"
                     self._route_media_message(file_text, text, chat_id, msg_id, msg=msg)
@@ -5780,12 +5814,13 @@ class CommandRouter:
                     self.reply(chat_id, "No focused worker. Use /focus <name> first.")
                     return
 
-                local_path = download_telegram_file(file_id, state["active"])
+                download_target = self._resolve_media_target(text, msg)
+                local_path = download_telegram_file(file_id, download_target)
                 if local_path:
                     if audio:
                         title = audio.get("title", audio.get("file_name", "audio"))
                         duration = audio.get("duration", 0)
-                        media_text = f"Manager sent audio: {title} ({duration}s)\nPath: {local_path}"
+                        media_text = f"Manager sent audio: {title} ({duration}s)\nPath: `{local_path}`"
                     elif voice:
                         duration = voice.get("duration", 0)
                         transcript = transcribe_voice(local_path)
@@ -5798,14 +5833,14 @@ class CommandRouter:
                                 self._route_media_message(transcript, transcript, chat_id, msg_id, msg=msg)
                             return
                         else:
-                            media_text = f"Manager sent voice message: ({duration}s)\nPath: {local_path}"
+                            media_text = f"Manager sent voice message: ({duration}s)\nPath: `{local_path}`"
                     elif video:
                         duration = video.get("duration", 0)
                         file_name = video.get("file_name", "video")
-                        media_text = f"Manager sent video: {file_name} ({duration}s)\nPath: {local_path}"
+                        media_text = f"Manager sent video: {file_name} ({duration}s)\nPath: `{local_path}`"
                     elif video_note:
                         duration = video_note.get("duration", 0)
-                        media_text = f"Manager sent video note: ({duration}s)\nPath: {local_path}"
+                        media_text = f"Manager sent video note: ({duration}s)\nPath: `{local_path}`"
                     elif sticker:
                         emoji = sticker.get("emoji", "")
                         media_text = f"Manager sent sticker: {emoji}\nPath: {local_path}"
@@ -5983,6 +6018,8 @@ class CommandRouter:
             return self.cmd_pilot(arg, chat_id)
         elif cmd == "/rewind":
             return self.cmd_rewind(arg, chat_id)
+        elif cmd == "/pr":
+            return self.cmd_pr_review(arg, chat_id)
         elif cmd == "/teleport":
             return self.cmd_teleport(arg, chat_id)
         elif cmd == "/teleport-check":
@@ -6079,6 +6116,50 @@ class CommandRouter:
         base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
         url = f"{base_url}/transcript/{name}?token={token}"
         self.reply(chat_id, f"⏪ Rewind for {name} (5min)\n{url}")
+        return True
+
+    def cmd_pr_review(self, arg, chat_id):
+        if not arg:
+            self.reply(chat_id, "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
+            return True
+        arg = arg.strip()
+        # Parse PR URL (supports #issuecomment-XXXXX fragments)
+        clean_url = arg.split('#')[0]
+        m = re.match(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)', clean_url)
+        if not m:
+            # Try bare number (assume BasedHardware/omi)
+            try:
+                pr_num = int(clean_url)
+                owner, repo = 'BasedHardware', 'omi'
+            except ValueError:
+                self.reply(chat_id, "Invalid PR URL. Example: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
+                return True
+        else:
+            owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
+
+        self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
+
+        # Run pr-review.py — pass full URL (with fragment) so it can highlight linked comment
+        script_path = Path(__file__).parent / "pr-review.py"
+        out_path = f"/tmp/pr-review-{pr_num}.html"
+        try:
+            r = subprocess.run(
+                [sys.executable, str(script_path), arg, "--no-serve"],
+                capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 or not os.path.exists(out_path):
+                self.reply(chat_id, f"Failed to generate PR review:\n{r.stderr[:500]}", outcome="Needs decision")
+                return True
+        except subprocess.TimeoutExpired:
+            self.reply(chat_id, "PR review generation timed out (>120s).", outcome="Needs decision")
+            return True
+
+        # Generate token and serve via existing transcript-like endpoint
+        import secrets, time as _time
+        token = secrets.token_urlsafe(32)
+        PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _time.time() + 300}
+        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+        url = f"{base_url}/pr-review/{pr_num}?token={token}"
+        self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
         return True
 
     def cmd_focus(self, name, chat_id):
@@ -6951,6 +7032,12 @@ class CommandRouter:
             # to the target machine, not the stale VPS path.
             save_claude_session_cwd(name, target_cwd)
 
+            # Clear local session ID cache — the target may create a new session
+            # (e.g., different project, expired session). Without clearing, VPS
+            # returns the stale ID instead of SSH-fetching the real one from target.
+            # The hook's /response POST will repopulate it on first response.
+            clear_claude_session_id(name)
+
             self._teleport_notify(chat_id,
                 f"Starting {name} on {target_host or 'local'}...")
             ok = self._start_worker_on_target(
@@ -7378,15 +7465,37 @@ class CommandRouter:
                     capture_output=True, timeout=10)
 
     def _sync_credentials_to_target(self, target_host):
-        """Copy Claude credentials to target (always overwrite — tokens expire).
+        """Copy Claude credentials to target if target has no valid token.
 
         ~/.claude/.credentials.json has the actual access/refresh tokens.
         Without it, Claude starts unauthenticated on the target machine.
-        Always overwrite: target may have expired tokens from a previous teleport.
+        Skip if target already has a valid (non-expired) token with a DIFFERENT
+        refresh token — means target was logged in independently.
         """
         local_creds = os.path.expanduser("~/.claude/.credentials.json")
         if not os.path.exists(local_creds):
             return
+
+        # Check if target already has valid credentials with a different token
+        try:
+            r = _remote_run(["cat", ".claude/.credentials.json"],
+                             host=target_host, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                remote_data = json.loads(r.stdout)
+                local_data = json.loads(open(local_creds).read())
+                remote_oauth = remote_data.get("claudeAiOauth", {})
+                local_oauth = local_data.get("claudeAiOauth", {})
+                remote_refresh = remote_oauth.get("refreshToken", "")
+                local_refresh = local_oauth.get("refreshToken", "")
+                remote_exp = remote_oauth.get("expiresAt", 0)
+                now_ms = int(time.time() * 1000)
+                # Skip if target has a DIFFERENT refresh token that hasn't expired
+                if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
+                    print(f"[creds] Target {target_host} has independent valid credentials, skipping sync")
+                    return
+        except Exception:
+            pass  # Can't check — fall through to sync
+
         _remote_run(["mkdir", "-p", ".claude"],
                      host=target_host, capture_output=True)
         # Atomic: rsync to tmp, then mv (avoids truncated file on crash)
@@ -7399,6 +7508,7 @@ class CommandRouter:
                      host=target_host, capture_output=True)
         _remote_run(["chmod", "600", ".claude/.credentials.json"],
                      host=target_host, capture_output=True)
+        print(f"[creds] Synced credentials to {target_host}")
 
     def _start_worker_on_target(self, name, target_host, target_cwd,
                                  session_id, backend_name):
@@ -7666,6 +7776,21 @@ class CommandRouter:
                 return candidate
         return None
 
+    def _resolve_media_target(self, caption, msg):
+        """Determine which worker's inbox to download media into.
+
+        Uses same priority as _route_media_message: @mentions > reply-to > active.
+        Returns the target worker name (or state["active"] as fallback).
+        """
+        if caption:
+            targets, _ = self.parse_at_mentions(caption)
+            if targets:
+                return targets[0]
+        reply_worker = self._worker_from_reply(msg)
+        if reply_worker:
+            return reply_worker
+        return state["active"]
+
     def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
         """Route a media message, honoring @mentions in caption or reply-to context."""
         if caption:
@@ -7924,6 +8049,11 @@ def _resolve_transcript_path(name: str, session_id: str = None):
                         transcript_path = local_tmp
                     elif sync_info and sync_info["status"] == "syncing":
                         return "syncing", sid, cwd
+                    elif sync_info and sync_info["status"] == "error":
+                        # Don't retry forever — return None so caller shows error
+                        err = sync_info.get("error", "unknown error")
+                        print(f"[transcript] sync failed for {name}:{sid}: {err}")
+                        return None, sid, cwd
                     else:
                         # Start background sync
                         t = threading.Thread(target=_start_transcript_sync,
@@ -9113,6 +9243,18 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = chat_id_file.read_text().strip()
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
+            # Update session ID cache if provided (keeps VPS in sync with remote workers)
+            hook_sid = data.get("session_id", "")
+            if hook_sid:
+                try:
+                    sid_file = ensure_session_dir(session_name) / "claude_session_id"
+                    old_sid = sid_file.read_text().strip() if sid_file.exists() else ""
+                    if old_sid != hook_sid:
+                        sid_file.write_text(hook_sid)
+                        sid_file.chmod(0o600)
+                except Exception:
+                    pass
+
             # Send response using shared helper
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
 
@@ -9149,6 +9291,11 @@ class Handler(BaseHTTPRequestHandler):
         # Handle /transcript/<name> endpoint
         if parsed.path.startswith("/transcript/"):
             self.handle_transcript_endpoint(parsed)
+            return
+
+        # Handle /pr-review/<pr_num> endpoint
+        if parsed.path.startswith("/pr-review/"):
+            self.handle_pr_review_endpoint(parsed)
             return
 
         # API index (also serves as health check — returns 200)
@@ -9375,6 +9522,46 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def handle_pr_review_endpoint(self, parsed):
+        """Serve generated PR review HTML.
+
+        Requires a valid token (?token=...) generated by /pr command.
+        Token expires after 5 minutes (same as rewind).
+        """
+        import time as _time
+        params = dict(parse_qs(parsed.query))
+        token = params.get("token", [None])[0]
+
+        # Cleanup expired tokens
+        now = _time.time()
+        expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
+        for k in expired:
+            del PR_REVIEW_TOKENS[k]
+
+        if not token or token not in PR_REVIEW_TOKENS:
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>")
+            return
+
+        info = PR_REVIEW_TOKENS[token]
+        pr_num = info["pr_num"]
+        html_path = f"/tmp/pr-review-{pr_num}.html"
+
+        if not os.path.exists(html_path):
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(f"<h2>PR review not found</h2><p>File {html_path} missing. Re-run /pr command.</p>".encode())
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        with open(html_path, "rb") as f:
+            self.wfile.write(f.read())
 
     def handle_transcript_endpoint(self, parsed):
         """Serve polished HTML transcript for a worker.
