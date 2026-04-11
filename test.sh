@@ -2599,6 +2599,750 @@ print('OK')
 
 # ── End Transcript Index Tests ────────────────────────────────────────────
 
+# ── Team Chat Index Tests (team-chat-index.py) ───────────────────────────
+
+test_tcindex_missing_file() {
+    info "Testing team-chat-index.py handles missing JSONL..."
+    if result=$(python3 team-chat-index.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tcindex-missing.db --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['messages'] == [], f'Expected empty messages, got {d[\"messages\"]}'
+assert d['total'] == 0, f'Expected total=0, got {d[\"total\"]}'
+assert d['total_pages'] == 0
+assert d['page'] == 1
+print('OK')
+" && success "team-chat-index.py handles missing JSONL" || fail "Missing file test failed"
+    else
+        fail "team-chat-index.py crashed on missing file"
+    fi
+    rm -f /tmp/test-tcindex-missing.db
+}
+
+test_tcindex_empty_file() {
+    info "Testing team-chat-index.py handles empty JSONL..."
+    local tmp=$(mktemp /tmp/tcindex-empty-XXXX.jsonl)
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db /tmp/test-tcindex-empty.db --query entries 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['messages'] == [], 'Expected empty messages'
+assert d['total'] == 0
+print('OK')
+" && success "team-chat-index.py handles empty JSONL" || fail "Empty file test failed"
+    else
+        fail "team-chat-index.py crashed on empty file"
+    fi
+    rm -f "$tmp" /tmp/test-tcindex-empty.db
+}
+
+test_tcindex_basic_indexing() {
+    info "Testing team-chat-index.py indexes messages into SQLite..."
+    local tmp=$(mktemp /tmp/tcindex-basic-XXXX.jsonl)
+    local db="/tmp/test-tcindex-basic.db"
+    python3 -c "
+import json
+msgs = [
+    {'id': 100, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Hello team good morning', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 101, 'timestamp': '2026-04-05T10:00:30', 'timestamp_unix': 1775120430, 'from': 'beasts', 'text': 'lee:\nGood morning manager', 'target_agents': ['lee'], 'has_command': False, 'reply_to': None},
+    {'id': 102, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'Thinh', 'text': '@lee check the PR please', 'target_agents': ['lee'], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json, sqlite3
+d = json.load(sys.stdin)
+assert d['total'] == 3, f'Expected 3 messages, got {d[\"total\"]}'
+assert len(d['messages']) == 3
+assert d['messages'][0]['msg_id'] == 100
+assert d['messages'][1]['msg_id'] == 101
+assert d['messages'][2]['msg_id'] == 102
+# Verify SQLite
+db = sqlite3.connect('$db')
+count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+assert count == 3, f'SQLite has {count} rows, expected 3'
+db.close()
+print('OK')
+" && success "team-chat-index.py indexes messages" || fail "Basic indexing test failed"
+    else
+        fail "team-chat-index.py crashed on basic indexing"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_sender_resolution() {
+    info "Testing team-chat-index.py resolves sender names correctly..."
+    local tmp=$(mktemp /tmp/tcindex-sender-XXXX.jsonl)
+    local db="/tmp/test-tcindex-sender.db"
+    python3 -c "
+import json
+msgs = [
+    {'id': 200, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Hello from manager', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 201, 'timestamp': '2026-04-05T10:00:30', 'timestamp_unix': 1775120430, 'from': 'beasts', 'text': 'lee:\nI am lee responding', 'target_agents': ['lee'], 'has_command': False, 'reply_to': None},
+    {'id': 202, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'beasts', 'text': 'System notification text here', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 203, 'timestamp': '2026-04-05T10:01:30', 'timestamp_unix': 1775120490, 'from': 'beasts', 'text': 'mon: Here is the cost analysis', 'target_agents': ['mon'], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+msgs = d['messages']
+assert msgs[0]['display_sender'] == 'manager', f'Thinh should be manager, got {msgs[0][\"display_sender\"]}'
+assert msgs[1]['display_sender'] == 'lee', f'beasts+lee: should be lee, got {msgs[1][\"display_sender\"]}'
+assert msgs[1]['text'] == 'I am lee responding', f'lee text should have prefix stripped, got {msgs[1][\"text\"]}'
+assert msgs[2]['display_sender'] == 'beasts', f'beasts without prefix should stay beasts, got {msgs[2][\"display_sender\"]}'
+assert msgs[3]['display_sender'] == 'mon', f'beasts+mon: should be mon, got {msgs[3][\"display_sender\"]}'
+assert msgs[3]['text'] == 'Here is the cost analysis', f'mon text prefix not stripped: {msgs[3][\"text\"]}'
+print('OK')
+" && success "team-chat-index.py resolves senders" || fail "Sender resolution test failed"
+    else
+        fail "team-chat-index.py crashed on sender resolution"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_incremental() {
+    info "Testing team-chat-index.py indexes incrementally..."
+    local tmp=$(mktemp /tmp/tcindex-incr-XXXX.jsonl)
+    local db="/tmp/test-tcindex-incr.db"
+    # Write 3 messages
+    python3 -c "
+import json
+msgs = [
+    {'id': 300, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'First message here', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 301, 'timestamp': '2026-04-05T10:00:30', 'timestamp_unix': 1775120430, 'from': 'Thinh', 'text': 'Second message here', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 302, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'Thinh', 'text': 'Third message here ok', 'target_agents': [], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    # First run
+    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    # Append 2 more
+    python3 -c "
+import json
+msgs = [
+    {'id': 303, 'timestamp': '2026-04-05T10:02:00', 'timestamp_unix': 1775120520, 'from': 'Thinh', 'text': 'Fourth appended message', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 304, 'timestamp': '2026-04-05T10:03:00', 'timestamp_unix': 1775120580, 'from': 'Thinh', 'text': 'Fifth appended message', 'target_agents': [], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'a') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json, sqlite3
+d = json.load(sys.stdin)
+assert d['total'] == 5, f'Expected 5 total after incremental, got {d[\"total\"]}'
+db = sqlite3.connect('$db')
+count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+assert count == 5, f'SQLite has {count} rows, expected 5'
+# Verify idx continuity
+idxs = [r[0] for r in db.execute('SELECT idx FROM messages ORDER BY idx').fetchall()]
+assert idxs == [0, 1, 2, 3, 4], f'Indices not continuous: {idxs}'
+db.close()
+print('OK')
+" && success "team-chat-index.py incremental indexing" || fail "Incremental test failed"
+    else
+        fail "team-chat-index.py crashed on incremental"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_no_reindex_unchanged() {
+    info "Testing team-chat-index.py skips reindex when unchanged..."
+    local tmp=$(mktemp /tmp/tcindex-noreindex-XXXX.jsonl)
+    local db="/tmp/test-tcindex-noreindex.db"
+    python3 -c "
+import json
+msgs = [
+    {'id': 400, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Only message for test', 'target_agents': [], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    # First index
+    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    # Get db modification time
+    local mtime1=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
+    sleep 1
+    # Run again — should skip
+    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    local mtime2=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
+    # DB mod time should be same (WAL mode may differ, so check entry count)
+    if python3 -c "
+import sqlite3
+db = sqlite3.connect('$db')
+count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+assert count == 1, f'Expected 1, got {count} — reindexed!'
+print('OK')
+"; then
+        success "team-chat-index.py skips reindex when unchanged"
+    else
+        fail "Reindexed when file unchanged"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_pagination() {
+    info "Testing team-chat-index.py pagination..."
+    local tmp=$(mktemp /tmp/tcindex-page-XXXX.jsonl)
+    local db="/tmp/test-tcindex-page.db"
+    # Write 10 messages
+    python3 -c "
+import json
+with open('$tmp', 'w') as f:
+    for i in range(10):
+        m = {'id': 500+i, 'timestamp': f'2026-04-05T10:{i:02d}:00', 'timestamp_unix': 1775120400+i*60,
+             'from': 'Thinh', 'text': f'Message number {i} content', 'target_agents': [], 'has_command': False, 'reply_to': None}
+        f.write(json.dumps(m) + '\n')
+"
+    # Test: default page (last), per_page=3
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total'] == 10, f'Expected 10 total, got {d[\"total\"]}'
+assert d['total_pages'] == 4, f'Expected 4 pages (10/3=4), got {d[\"total_pages\"]}'
+assert d['page'] == 4, f'Default page should be last (4), got {d[\"page\"]}'
+assert len(d['messages']) == 1, f'Last page should have 1 msg, got {len(d[\"messages\"])}'
+assert d['messages'][0]['msg_id'] == 509, f'Last msg should be 509, got {d[\"messages\"][0][\"msg_id\"]}'
+print('OK - default last page')
+" && success "Pagination default last page" || fail "Pagination default page failed"
+    else
+        fail "team-chat-index.py crashed on pagination"
+    fi
+    # Test: page 1
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 --page 1 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['page'] == 1
+assert len(d['messages']) == 3
+assert d['messages'][0]['msg_id'] == 500
+assert d['messages'][2]['msg_id'] == 502
+print('OK - page 1')
+" && success "Pagination page 1" || fail "Pagination page 1 failed"
+    else
+        fail "team-chat-index.py crashed on page 1"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_fts5_search() {
+    info "Testing team-chat-index.py FTS5 search..."
+    local tmp=$(mktemp /tmp/tcindex-search-XXXX.jsonl)
+    local db="/tmp/test-tcindex-search.db"
+    python3 -c "
+import json
+msgs = [
+    {'id': 600, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Check the gemini costs please', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 601, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'beasts', 'text': 'mon:\nGemini API costs are 400 per day for gemini', 'target_agents': ['mon'], 'has_command': False, 'reply_to': None},
+    {'id': 602, 'timestamp': '2026-04-05T10:02:00', 'timestamp_unix': 1775120520, 'from': 'Thinh', 'text': 'How is the Flutter build going', 'target_agents': [], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query search --search gemini 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['total_results'] == 2, f'Expected 2 results for gemini, got {d[\"total_results\"]}'
+assert d['query'] == 'gemini'
+# msg 601 mentions gemini twice, should rank higher
+msg_ids = [m['msg_id'] for m in d['messages']]
+assert 600 in msg_ids and 601 in msg_ids, f'Expected 600 and 601 in results, got {msg_ids}'
+assert 602 not in msg_ids, f'602 (Flutter) should not match gemini'
+print('OK')
+" && success "team-chat-index.py FTS5 search" || fail "FTS5 search failed"
+    else
+        fail "team-chat-index.py crashed on search"
+    fi
+    rm -f "$tmp" "$db"
+}
+
+test_tcindex_page_for_msg() {
+    info "Testing team-chat-index.py page-for-msg query..."
+    local tmp=$(mktemp /tmp/tcindex-pfm-XXXX.jsonl)
+    local db="/tmp/test-tcindex-pfm.db"
+    # Write 10 messages (ids 700-709)
+    python3 -c "
+import json
+with open('$tmp', 'w') as f:
+    for i in range(10):
+        m = {'id': 700+i, 'timestamp': f'2026-04-05T10:{i:02d}:00', 'timestamp_unix': 1775120400+i*60,
+             'from': 'Thinh', 'text': f'Message number {i} for page test', 'target_agents': [], 'has_command': False, 'reply_to': None}
+        f.write(json.dumps(m) + '\n')
+"
+    # Index first
+    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    # Test: msg 700 (idx=0) with per_page=3 → page 1
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 700 --per-page 3 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['msg_id'] == 700
+assert d['idx'] == 0
+assert d['page'] == 1, f'msg 700 (idx=0, per_page=3) should be page 1, got {d[\"page\"]}'
+print('OK - msg 700 on page 1')
+"  || fail "page-for-msg 700 failed"
+    fi
+    # Test: msg 705 (idx=5) with per_page=3 → page 2 (idx 3,4,5)
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 705 --per-page 3 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['page'] == 2, f'msg 705 (idx=5, per_page=3) should be page 2, got {d[\"page\"]}'
+print('OK - msg 705 on page 2')
+"  || fail "page-for-msg 705 failed"
+    fi
+    # Test: nonexistent msg
+    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 999 --per-page 3 2>/dev/null); then
+        echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['page'] is None, f'Nonexistent msg should return page=None, got {d[\"page\"]}'
+print('OK - nonexistent msg')
+" || fail "page-for-msg nonexistent failed"
+    fi
+    success "team-chat-index.py page-for-msg query"
+    rm -f "$tmp" "$db"
+}
+
+# ── End Team Chat Index Tests ────────────────────────────────────────────
+
+# ── Team Chat Bridge Tests ───────────────────────────────────────────────
+
+test_rewind_team_token() {
+    info "Testing /rewind team generates team chat token..."
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+bridge.REWIND_TOKENS.clear()
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+router.workers = MagicMock()
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
+    router.cmd_rewind('team', 12345)
+
+assert len(replies) == 1
+reply = replies[0]
+assert '/team-chat?' in reply, f'Should contain /team-chat URL: {reply}'
+assert 'token=' in reply
+assert 'Team chat' in reply
+
+# Verify token stored with __team__ name
+token = list(bridge.REWIND_TOKENS.keys())[0]
+entry = bridge.REWIND_TOKENS[token]
+assert entry['name'] == '__team__', f'Token name should be __team__: {entry}'
+assert entry['expires_at'] > time.time()
+
+# Also test --team variant
+bridge.REWIND_TOKENS.clear()
+replies.clear()
+with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
+    router.cmd_rewind('--team', 12345)
+assert '/team-chat?' in replies[0]
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/rewind team generates team chat token"
+    else
+        fail "Rewind team token test failed"
+    fi
+}
+
+test_team_chat_403_no_token() {
+    info "Testing /team-chat requires valid token..."
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import MagicMock
+from urllib.parse import urlparse, parse_qs
+import bridge
+
+bridge.REWIND_TOKENS.clear()
+
+handler = MagicMock()
+handler.send_response = MagicMock()
+handler.send_header = MagicMock()
+handler.end_headers = MagicMock()
+handler.wfile = MagicMock()
+handler.wfile.write = MagicMock()
+
+# No token → 403
+parsed = urlparse('/team-chat')
+bridge.Handler.handle_team_chat_endpoint(handler, parsed)
+handler.send_response.assert_called_with(403)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat requires valid token"
+    else
+        fail "Team chat 403 test failed"
+    fi
+}
+
+test_team_chat_renders_html() {
+    info "Testing /team-chat renders HTML with valid token..."
+    # Create a test JSONL
+    local tmp=$(mktemp /tmp/tchat-render-XXXX.jsonl)
+    python3 -c "
+import json
+msgs = [
+    {'id': 800, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Hello team good morning', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 801, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'beasts', 'text': 'lee:\nGood morning', 'target_agents': ['lee'], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from urllib.parse import urlparse
+import bridge
+
+# Set up test data paths
+bridge.TEAM_CHAT_JSONL = '$tmp'
+bridge.TEAM_CHAT_DB = '/tmp/test-tchat-render.db'
+
+# Add a valid token
+token = 'test-token-123'
+bridge.REWIND_TOKENS[token] = {'name': '__team__', 'expires_at': time.time() + 300}
+
+# Call the renderer directly
+html = bridge._render_team_chat_html(page=1, per_page=50, token=token)
+assert 'Team Chat' in html, f'Should contain title'
+assert 'msg-800' in html, f'Should contain msg-800 anchor'
+assert 'msg-801' in html, f'Should contain msg-801 anchor'
+assert 'manager' in html, f'Thinh should be resolved to manager'
+assert 'lee' in html, f'beasts+lee: should show as lee'
+assert 'Good morning' in html, f'Should contain message text'
+
+# Verify handler returns 200
+handler = MagicMock()
+handler.send_response = MagicMock()
+handler.send_header = MagicMock()
+handler.end_headers = MagicMock()
+buf = bytearray()
+handler.wfile = MagicMock()
+handler.wfile.write = lambda d: buf.extend(d)
+parsed = urlparse(f'/team-chat?token={token}&page=1')
+bridge.Handler.handle_team_chat_endpoint(handler, parsed)
+handler.send_response.assert_called_with(200)
+body = buf.decode('utf-8')
+assert 'msg-800' in body
+
+bridge.REWIND_TOKENS.clear()
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat renders HTML"
+    else
+        fail "Team chat render test failed"
+    fi
+    rm -f "$tmp" /tmp/test-tchat-render.db
+}
+
+test_team_chat_search() {
+    info "Testing /team-chat search returns results..."
+    local tmp=$(mktemp /tmp/tchat-search-XXXX.jsonl)
+    python3 -c "
+import json
+msgs = [
+    {'id': 900, 'timestamp': '2026-04-05T10:00:00', 'timestamp_unix': 1775120400, 'from': 'Thinh', 'text': 'Check the gemini costs analysis', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 901, 'timestamp': '2026-04-05T10:01:00', 'timestamp_unix': 1775120460, 'from': 'Thinh', 'text': 'Flutter build is ready now', 'target_agents': [], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if python3 -c "
+import sys, os, time
+sys.path.insert(0, os.getcwd())
+import bridge
+
+bridge.TEAM_CHAT_JSONL = '$tmp'
+bridge.TEAM_CHAT_DB = '/tmp/test-tchat-search.db'
+
+html = bridge._render_team_chat_html(page=1, per_page=50, search_query='gemini', token='t')
+assert 'gemini' in html.lower(), 'Should contain search term'
+assert 'msg-900' in html, 'Should show matching msg 900'
+assert 'Found' in html, 'Should show result count'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat search works"
+    else
+        fail "Team chat search test failed"
+    fi
+    rm -f "$tmp" /tmp/test-tchat-search.db
+}
+
+test_team_chat_anchor() {
+    info "Testing /team-chat messages have msg-{id} anchors..."
+    local tmp=$(mktemp /tmp/tchat-anchor-XXXX.jsonl)
+    python3 -c "
+import json
+msgs = [
+    {'id': 3167866, 'timestamp': '2026-04-06T10:04:31', 'timestamp_unix': 1775206271, 'from': 'Thinh', 'text': '@ryo check with mon about gemini costs', 'target_agents': ['ryo'], 'has_command': False, 'reply_to': None},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+import bridge
+
+bridge.TEAM_CHAT_JSONL = '$tmp'
+bridge.TEAM_CHAT_DB = '/tmp/test-tchat-anchor.db'
+
+html = bridge._render_team_chat_html(page=1, per_page=50, token='t')
+assert 'id=\"msg-3167866\"' in html, f'Should have anchor for msg 3167866'
+# Verify the JS scroll-to-hash code is present
+assert 'location.hash' in html, 'Should have hash-scroll JS'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat messages have anchors"
+    else
+        fail "Team chat anchor test failed"
+    fi
+    rm -f "$tmp" /tmp/test-tchat-anchor.db
+}
+
+test_team_chat_search_context_link() {
+    info "Testing /team-chat search results have context links..."
+    local tmp=$(mktemp /tmp/tchat-ctx-XXXX.jsonl)
+    python3 -c "
+import json
+msgs = []
+for i in range(60):
+    msgs.append({'id': 9000+i, 'timestamp': f'2026-04-06T10:{i:02d}:00', 'timestamp_unix': 1775206000+i*60, 'from': 'Thinh' if i%2==0 else 'beasts', 'text': f'message number {i} about deployment' if i == 55 else f'message {i}', 'target_agents': [], 'has_command': False, 'reply_to': None})
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+import bridge
+
+bridge.TEAM_CHAT_JSONL = '$tmp'
+bridge.TEAM_CHAT_DB = '/tmp/test-tchat-ctx.db'
+
+# Search for 'deployment' — msg 55 is on page 2 (idx 55, per_page 50)
+html = bridge._render_team_chat_html(page=1, per_page=50, search_query='deployment', token='t')
+# Should contain context link arrow pointing to page 2
+assert 'ctx-link' in html, 'Should have context link class'
+assert 'page=2' in html, f'Should link to page 2 where msg lives'
+assert '#msg-9055' in html, 'Should anchor to the message'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat search context links work"
+    else
+        fail "Team chat search context link test failed"
+    fi
+    rm -f "$tmp" /tmp/test-tchat-ctx.db
+}
+
+test_team_chat_reply_context() {
+    info "Testing /team-chat renders reply context..."
+    local tmp=$(mktemp /tmp/tchat-reply-XXXX.jsonl)
+    python3 -c "
+import json
+msgs = [
+    {'id': 8001, 'timestamp': '2026-04-06T10:00:00', 'timestamp_unix': 1775206000, 'from': 'Thinh', 'text': 'what is the status of PR 123?', 'target_agents': [], 'has_command': False, 'reply_to': None},
+    {'id': 8002, 'timestamp': '2026-04-06T10:01:00', 'timestamp_unix': 1775206060, 'from': 'beasts', 'text': 'lee: PR 123 is merged and deployed', 'target_agents': [], 'has_command': False, 'reply_to': 8001},
+]
+with open('$tmp', 'w') as f:
+    for m in msgs:
+        f.write(json.dumps(m) + '\n')
+"
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+import bridge
+
+bridge.TEAM_CHAT_JSONL = '$tmp'
+bridge.TEAM_CHAT_DB = '/tmp/test-tchat-reply.db'
+
+html = bridge._render_team_chat_html(page=1, per_page=50, token='t')
+# Should have reply context block
+assert 'reply-ctx' in html, 'Should have reply context class'
+assert '#msg-8001' in html, 'Reply should link to original message'
+# Should show the replied-to message sender/text
+assert 'manager' in html, 'Reply context should show sender'
+assert 'status of PR 123' in html, 'Reply context should show text snippet'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/team-chat reply context works"
+    else
+        fail "Team chat reply context test failed"
+    fi
+    rm -f "$tmp" /tmp/test-tchat-reply.db
+}
+
+# ── End Team Chat Bridge Tests ───────────────────────────────────────────
+
+# ── Memory Subcommand Tests ─────────────────────────────────────────────
+
+test_memory_status_subcommand() {
+    info "Testing /memory status returns stack status..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+router.cmd_memory('status', 12345)
+
+assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}'
+r = replies[0]
+assert 'Memory Stack Status' in r, f'Should contain status header: {r[:100]}'
+assert 'Chunks' in r, f'Should contain chunk count: {r[:200]}'
+assert 'Messages' in r, f'Should contain message count: {r[:200]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/memory status works"
+    else
+        fail "/memory status subcommand failed"
+    fi
+}
+
+test_memory_wakeup_subcommand() {
+    info "Testing /memory wake-up returns L0+L1 text..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+router.cmd_memory('wake-up', 12345)
+
+assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}'
+r = replies[0]
+assert 'L0' in r or 'TEAM IDENTITY' in r, f'Should contain L0: {r[:100]}'
+assert 'L1' in r or 'ESSENTIAL STORY' in r, f'Should contain L1: {r[:100]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/memory wake-up works"
+    else
+        fail "/memory wake-up subcommand failed"
+    fi
+}
+
+test_memory_wakeup_with_wing() {
+    info "Testing /memory wake-up omi passes wing filter..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+captured = []
+class FakeStack:
+    def wake_up(self, wing=None):
+        captured.append(wing)
+        return '## L0\ntest\n## L1\ntest'
+
+with patch('team_memory.memory_stack.MemoryStack', return_value=FakeStack()):
+    router.cmd_memory('wake-up omi', 12345)
+
+assert len(captured) == 1 and captured[0] == 'omi', f'Expected wing=omi, got {captured}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/memory wake-up omi passes wing"
+    else
+        fail "/memory wake-up with wing failed"
+    fi
+}
+
+test_memory_recall_subcommand() {
+    info "Testing /memory recall --wing=omi --room=prs..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+captured = []
+class FakeStack:
+    def recall(self, wing=None, room=None):
+        captured.append((wing, room))
+        return 'Recall results for omi/prs'
+
+with patch('team_memory.memory_stack.MemoryStack', return_value=FakeStack()):
+    router.cmd_memory('recall --wing=omi --room=prs', 12345)
+
+assert len(captured) == 1, f'Expected 1 recall call, got {len(captured)}'
+assert captured[0] == ('omi', 'prs'), f'Expected (omi, prs), got {captured[0]}'
+assert 'Recall results' in replies[0]
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/memory recall with wing/room works"
+    else
+        fail "/memory recall subcommand failed"
+    fi
+}
+
+test_memory_status_failure_isolation() {
+    info "Testing /memory status handles MemoryStack failure gracefully..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+import bridge
+
+router = bridge.CommandRouter.__new__(bridge.CommandRouter)
+replies = []
+router.reply = lambda cid, msg, **kw: replies.append(msg)
+
+with patch('team_memory.memory_stack.MemoryStack', side_effect=RuntimeError('DB gone')):
+    router.cmd_memory('status', 12345)
+
+assert len(replies) == 1
+assert 'failed' in replies[0].lower() or 'error' in replies[0].lower(), f'Should report error: {replies[0]}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/memory status handles failure gracefully"
+    else
+        fail "/memory status failure isolation failed"
+    fi
+}
+
+# ── End Memory Subcommand Tests ─────────────────────────────────────────
+
 test_reply_forwarded_voice_gets_transcribed() {
     info "Testing reply-forwarded voice delivers transcript transparently..."
     if python3 -c "
@@ -6832,6 +7576,87 @@ PYEOF
         success "Media with @mention routes to mentioned worker"
     else
         fail "Media @mention routing test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
+test_media_downloads_to_mentioned_worker_inbox() {
+    info "Testing media downloads to @mentioned worker's inbox, not active worker..."
+
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_media_dl_target_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile, json
+from pathlib import Path
+from unittest.mock import MagicMock, patch, call
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+# Create two workers: alice (active) and bob (mentioned)
+for name in ['alice', 'bob']:
+    d = sessions_dir / name
+    d.mkdir()
+    (d / 'chat_id').write_text('12345')
+    (d / 'backend').write_text('claude')
+
+bridge.state['active'] = 'alice'
+orig_admin = bridge.admin_chat_id
+bridge.admin_chat_id = 12345
+
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice'},
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob'},
+}
+mock_workers.is_online.return_value = True
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+mock_workers.send.return_value = True
+router.workers = mock_workers
+router.telegram = MagicMock()
+
+# Simulate sending a photo with @bob in caption
+# Track which session_name download_telegram_file is called with
+with patch('bridge.download_telegram_file', return_value='/tmp/fake.jpg') as mock_dl:
+    update = {
+        'message': {
+            'chat': {'id': 12345},
+            'message_id': 1,
+            'text': '@bob check this screenshot',
+            'caption': '@bob check this screenshot',
+            'photo': [
+                {'file_id': 'small_id', 'file_size': 100},
+                {'file_id': 'large_id', 'file_size': 5000},
+            ],
+        }
+    }
+    router.handle_message(update)
+
+    # CRITICAL: download_telegram_file must be called with bob (mentioned), NOT alice (active)
+    mock_dl.assert_called_once()
+    dl_args = mock_dl.call_args[0]
+    assert dl_args[1] == 'bob', f'download target should be bob, got: {dl_args[1]}'
+
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+bridge.admin_chat_id = orig_admin
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "Media downloads to @mentioned worker's inbox"
+    else
+        fail "Media download target test failed"
     fi
     rm -f "$tmpscript" "$tmpout"
 }
@@ -16459,6 +17284,94 @@ test_checkin_note() {
     fi
 }
 
+test_checkin_note_machine_substitution() {
+    info "Testing checkin note {machine} substitution for local and teleported workers..."
+
+    local result
+    result=$(python3 -c "
+import os, sys, json, tempfile, unittest.mock as mock
+
+# Setup test dirs
+tmpdir = tempfile.mkdtemp()
+team_dir = os.path.join(tmpdir, 'team')
+os.makedirs(team_dir)
+node_dir = os.path.join(tmpdir, 'node')
+os.makedirs(node_dir)
+
+# Write checkin note with {machine} placeholder
+with open(os.path.join(team_dir, 'checkin-note.txt'), 'w') as f:
+    f.write('You are {name}. You are on: {machine}.')
+
+# Write registry with a remote worker
+with open(os.path.join(node_dir, 'workers.json'), 'w') as f:
+    json.dump({'workers': {'remotetest': {'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}}}, f)
+
+# Patch globals before import
+os.environ['TELEGRAM_BOT_TOKEN'] = 'fake'
+os.environ['TEAM_DIR'] = team_dir
+os.environ['SESSIONS_DIR'] = os.path.join(node_dir, 'sessions')
+os.environ['NODE_DIR'] = node_dir
+
+with mock.patch.dict(os.environ, {
+    'TELEGRAM_BOT_TOKEN': 'fake',
+    'TEAM_DIR': team_dir,
+    'SESSIONS_DIR': os.path.join(node_dir, 'sessions'),
+    'NODE_DIR': node_dir,
+}):
+    import importlib
+    # We can test the substitution logic directly
+    from bridge import read_checkin_note, get_worker_host
+    import bridge
+    old_team_dir = bridge.TEAM_DIR
+    old_node_dir = bridge.NODE_DIR
+    old_checkin = bridge._CHECKIN_NOTE_PATH
+    old_registry = bridge.WORKER_REGISTRY_FILE
+    try:
+        bridge.TEAM_DIR = team_dir
+        bridge._CHECKIN_NOTE_PATH = os.path.join(team_dir, 'checkin-note.txt')
+        bridge.NODE_DIR = __import__('pathlib').Path(node_dir)
+        bridge.WORKER_REGISTRY_FILE = bridge.NODE_DIR / 'workers.json'
+
+        note = read_checkin_note()
+        assert '{machine}' in note, f'note missing placeholder: {note}'
+
+        # Local worker: no host → VPS
+        rendered_local = note.replace('{name}', 'localtest')
+        host = get_worker_host('localtest')
+        if host:
+            rendered_local = rendered_local.replace('{machine}', f'Mac Mini ({host})')
+        else:
+            rendered_local = rendered_local.replace('{machine}', 'VPS (100.125.36.102)')
+        assert 'VPS' in rendered_local, f'local should get VPS: {rendered_local}'
+        assert '{machine}' not in rendered_local
+
+        # Remote worker: has host → Mac Mini
+        rendered_remote = note.replace('{name}', 'remotetest')
+        host = get_worker_host('remotetest')
+        if host:
+            rendered_remote = rendered_remote.replace('{machine}', f'Mac Mini ({host})')
+        else:
+            rendered_remote = rendered_remote.replace('{machine}', 'VPS (100.125.36.102)')
+        assert 'Mac Mini' in rendered_remote, f'remote should get Mac Mini: {rendered_remote}'
+        assert '{machine}' not in rendered_remote
+
+        print('LOCAL=' + rendered_local)
+        print('REMOTE=' + rendered_remote)
+    finally:
+        bridge.TEAM_DIR = old_team_dir
+        bridge._CHECKIN_NOTE_PATH = old_checkin
+        bridge.NODE_DIR = old_node_dir
+        bridge.WORKER_REGISTRY_FILE = old_registry
+        import shutil
+        shutil.rmtree(tmpdir)
+")
+    if echo "$result" | grep -q "LOCAL=.*VPS" && echo "$result" | grep -q "REMOTE=.*Mac Mini"; then
+        success "{machine} resolves to VPS for local, Mac Mini for remote"
+    else
+        fail "{machine} substitution failed: $result"
+    fi
+}
+
 test_health_workers_endpoint() {
     info "Testing /health/workers endpoint..."
 
@@ -16801,6 +17714,7 @@ run_unit_tests() {
     run_test test_format_response_strips_name_prefix
     run_test test_manager_prefix_on_route_message
     run_test test_media_at_mention_routes_to_mentioned_worker
+    run_test test_media_downloads_to_mentioned_worker_inbox
     run_test test_media_reply_to_routes_to_replied_worker
     run_test test_reply_with_mention_forwards_replied_media
     run_test test_get_any_session_id
@@ -16996,6 +17910,7 @@ run_unit_tests() {
     log "── Misc Behavior Tests (Unit) ──────────────────────────────────────────"
     run_test test_watchdog_alert_on_stuck
     run_test test_extra_mounts_docker_cmd
+    run_test test_checkin_note_machine_substitution
     # Unit tests - File validation
     log ""
     log "── File Validation Tests (Unit) ────────────────────────────────────────"
@@ -17064,6 +17979,36 @@ run_unit_tests() {
     run_test test_tindex_search_no_results
     run_test test_tindex_filter_prompts
     run_test test_tindex_stats
+    # Unit tests - Team Chat Index (team-chat-index.py)
+    log ""
+    log "── Team Chat Index Tests (Unit) ────────────────────────────────────────"
+    run_test test_tcindex_missing_file
+    run_test test_tcindex_empty_file
+    run_test test_tcindex_basic_indexing
+    run_test test_tcindex_sender_resolution
+    run_test test_tcindex_incremental
+    run_test test_tcindex_no_reindex_unchanged
+    run_test test_tcindex_pagination
+    run_test test_tcindex_fts5_search
+    run_test test_tcindex_page_for_msg
+    # Unit tests - Team Chat Bridge (bridge.py team chat integration)
+    log ""
+    log "── Team Chat Bridge Tests (Unit) ───────────────────────────────────────"
+    run_test test_rewind_team_token
+    run_test test_team_chat_403_no_token
+    run_test test_team_chat_renders_html
+    run_test test_team_chat_search
+    run_test test_team_chat_anchor
+    run_test test_team_chat_search_context_link
+    run_test test_team_chat_reply_context
+    # Unit tests - Memory Subcommands (/memory status, wake-up, recall)
+    log ""
+    log "── Memory Subcommand Tests (Unit) ─────────────────────────────────────"
+    run_test test_memory_status_subcommand
+    run_test test_memory_wakeup_subcommand
+    run_test test_memory_wakeup_with_wing
+    run_test test_memory_recall_subcommand
+    run_test test_memory_status_failure_isolation
 }
 
 run_cli_tests() {

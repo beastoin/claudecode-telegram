@@ -256,8 +256,8 @@ def generate_html(meta, files, pr_num, owner, repo, comments=None, reviews=None,
         rid = rv.get('id', 0)
         user = rv.get('user', '')
         state = rv.get('state', '')
-        state_icon = {{'APPROVED': '+', 'CHANGES_REQUESTED': '-', 'COMMENTED': '~'}}.get(state, '?')
-        state_class = {{'APPROVED': 'added', 'CHANGES_REQUESTED': 'removed', 'COMMENTED': 'modified'}}.get(state, '')
+        state_icon = {'APPROVED': '+', 'CHANGES_REQUESTED': '-', 'COMMENTED': '~'}.get(state, '?')
+        state_class = {'APPROVED': 'added', 'CHANGES_REQUESTED': 'removed', 'COMMENTED': 'modified'}.get(state, '')
         state_label = state.lower().replace('_', ' ')
         date = (rv.get('submitted_at', '') or '')[:10]
         body_escaped = html.escape(rv.get('body', '') or '(no comment)', quote=True)
@@ -266,7 +266,7 @@ def generate_html(meta, files, pr_num, owner, repo, comments=None, reviews=None,
             <div class="file-header" onclick="toggleSection(this)">
                 <svg class="chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                 <span class="file-path">Review: {html.escape(user)}</span>
-                <span class="file-badge {status_class}">{state_label}</span>
+                <span class="file-badge {state_class}">{state_label}</span>
                 <span class="diff-stat">{date}</span>
             </div>
             <div class="file-body"><div class="discussion-card">

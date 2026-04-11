@@ -209,7 +209,7 @@ if ! command -v timeout &>/dev/null; then
     fi
 fi
 (
-    ${TIMEOUT_CMD:+$TIMEOUT_CMD 5} python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT"
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD 5} python3 "$SCRIPT_DIR/forward-to-bridge.py" "$TMPFILE" "$BRIDGE_SESSION" "$BRIDGE_ENDPOINT" "$SESSION_ID"
     rm -f "$TMPFILE"
 ) &
 

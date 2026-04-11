@@ -123,6 +123,7 @@ API_ENDPOINTS = {
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
     "GET /health/workers": "Watchdog state for all workers",
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
+    "GET /team-chat": "Team Telegram chat viewer (requires rewind token)",
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
     "POST /response": "Hook: send Claude response to Telegram",
     "POST /notify": "Send notification to all admin chats",
@@ -1207,6 +1208,7 @@ BOT_COMMANDS = [
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
+    {"command": "memory", "description": "Search team chat memory: /memory <query>"},
     # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
@@ -1214,7 +1216,7 @@ BOT_COMMANDS = [
 
 BLOCKED_COMMANDS = [
     "/mcp", "/help", "/config", "/model", "/compact", "/cost",
-    "/doctor", "/init", "/login", "/logout", "/memory", "/permissions",
+    "/doctor", "/init", "/login", "/logout", "/permissions",
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
 ]
 
@@ -6020,6 +6022,8 @@ class CommandRouter:
             return self.cmd_rewind(arg, chat_id)
         elif cmd == "/pr":
             return self.cmd_pr_review(arg, chat_id)
+        elif cmd == "/memory":
+            return self.cmd_memory(arg, chat_id)
         elif cmd == "/teleport":
             return self.cmd_teleport(arg, chat_id)
         elif cmd == "/teleport-check":
@@ -6106,14 +6110,20 @@ class CommandRouter:
 
     def cmd_rewind(self, name, chat_id):
         if not name:
-            self.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
+            self.reply(chat_id, "Usage: /rewind <name>\n/rewind team — view team chat", outcome="Needs decision")
             return True
         name = name.lower().strip()
         import secrets, time as _time
         token = secrets.token_urlsafe(32)
+        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+        # Team chat viewer
+        if name in ("team", "--team"):
+            REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _time.time() + REWIND_TIMEOUT}
+            url = f"{base_url}/team-chat?token={token}"
+            self.reply(chat_id, f"\U0001f4ac Team chat (5min)\n{url}")
+            return True
         REWIND_TOKENS[token] = {"name": name, "expires_at": _time.time() + REWIND_TIMEOUT}
         # Use Tailscale IP (private network) — never route through cloudflare
-        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
         url = f"{base_url}/transcript/{name}?token={token}"
         self.reply(chat_id, f"⏪ Rewind for {name} (5min)\n{url}")
         return True
@@ -6160,6 +6170,180 @@ class CommandRouter:
         base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
         url = f"{base_url}/pr-review/{pr_num}?token={token}"
         self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
+        return True
+
+    def cmd_memory(self, query, chat_id):
+        """Search team chat memory. /memory <query> [--agent X] [--days N] [--from X]"""
+        if not query:
+            self.reply(chat_id,
+                       "Usage: /memory <query>\n"
+                       "Examples:\n"
+                       "  /memory what did I tell kai about auth\n"
+                       "  /memory PR 6377 --agent taro\n"
+                       "  /memory OTP problem --days 30\n"
+                       "  /memory update  (re-index latest export)\n"
+                       "  /memory status  (stack health)\n"
+                       "  /memory wake-up [wing]  (L0+L1 context)\n"
+                       "  /memory recall --wing=X [--room=Y]",
+                       outcome="Needs decision")
+            return True
+
+        # Subcommand: /memory update — trigger incremental ingest
+        if query.strip().lower() == "update":
+            return self._memory_update(chat_id)
+
+        # Subcommand: /memory status — memory stack health
+        if query.strip().lower() == "status":
+            try:
+                from team_memory.memory_stack import MemoryStack
+                stack = MemoryStack()
+                info = stack.status()
+                wings = info.get("wing_distribution", {})
+                wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
+                lines = [
+                    "Memory Stack Status:",
+                    f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
+                    f"  Messages: {info.get('total_messages', 0)}",
+                    f"  Summaries: {info.get('total_summaries', 0)}",
+                    f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
+                    f"  L1 essential: last 7 days, top 15 items",
+                ]
+                self.reply(chat_id, "\n".join(lines))
+            except Exception as e:
+                self.reply(chat_id, f"Memory status failed: {e}")
+            return True
+
+        # Subcommand: /memory wake-up [wing] — L0+L1 wake-up text
+        if query.strip().lower().startswith("wake-up"):
+            try:
+                from team_memory.memory_stack import MemoryStack
+                stack = MemoryStack()
+                parts = query.strip().split()
+                wing = parts[1] if len(parts) > 1 else None
+                text = stack.wake_up(wing=wing)
+                if len(text) > 4000:
+                    text = text[:3997] + "..."
+                self.reply(chat_id, text)
+            except Exception as e:
+                self.reply(chat_id, f"Memory wake-up failed: {e}")
+            return True
+
+        # Subcommand: /memory recall --wing=X --room=Y — L2 on-demand
+        if query.strip().lower().startswith("recall"):
+            try:
+                from team_memory.memory_stack import MemoryStack
+                stack = MemoryStack()
+                wing = room = None
+                for part in query.split():
+                    if part.startswith("--wing="):
+                        wing = part.split("=", 1)[1]
+                    elif part.startswith("--room="):
+                        room = part.split("=", 1)[1]
+                text = stack.recall(wing=wing, room=room)
+                if len(text) > 4000:
+                    text = text[:3997] + "..."
+                self.reply(chat_id, text)
+            except Exception as e:
+                self.reply(chat_id, f"Memory recall failed: {e}")
+            return True
+
+        self.reply(chat_id, "Searching memory...")
+
+        try:
+            from team_memory.search import search_memory
+            result = search_memory(query)
+        except Exception as e:
+            self.reply(chat_id, f"Memory search failed: {e}", outcome="Needs decision")
+            return True
+
+        answer = result.get("answer", "")
+        sources = result.get("results", [])
+
+        if not answer and not sources:
+            self.reply(chat_id, "No results found.")
+            return True
+
+        # Format response per spec
+        lines = []
+        if answer:
+            lines.append(f"\U0001f9e0 {answer}")
+        else:
+            lines.append("\U0001f9e0 No direct answer found.")
+
+        if sources:
+            lines.append("")
+            # Generate a single rewind token for all source links
+            import secrets, time as _time
+            tc_token = secrets.token_urlsafe(32)
+            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _time.time() + REWIND_TIMEOUT}
+            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+
+            lines.append("\U0001f4ce Sources:")
+            for i, r in enumerate(sources[:3], 1):
+                # Show first 2 lines of chunk, truncated
+                chunk_lines = r.get("text", "").split("\n")
+                preview = "\n".join(chunk_lines[:2])
+                if len(preview) > 200:
+                    preview = preview[:197] + "..."
+                # Deep link to team chat page
+                source_link = ""
+                chunk_id = r.get("_id", "")
+                if chunk_id.startswith("tg_"):
+                    parts = chunk_id.split("_")
+                    if len(parts) >= 2:
+                        try:
+                            first_msg_id = int(parts[1])
+                            page_info = _run_team_chat_query("page-for-msg", msg_id=first_msg_id)
+                            if page_info and page_info.get("page"):
+                                source_link = f"\n{base_url}/team-chat?token={tc_token}&page={page_info['page']}#msg-{first_msg_id}"
+                        except (ValueError, IndexError):
+                            pass
+                lines.append(f"{i}. {preview}{source_link}")
+
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def _memory_update(self, chat_id):
+        """Run incremental ingest from latest export in ~/team/exports/."""
+        import glob as _glob
+        exports_dir = os.path.expanduser("~/team/exports")
+        zips = sorted(_glob.glob(os.path.join(exports_dir, "ChatExport_*.json.zip")))
+        if not zips:
+            self.reply(chat_id, f"No exports found in {exports_dir}/", outcome="Needs decision")
+            return True
+
+        latest = zips[-1]
+        self.reply(chat_id, f"Indexing from {os.path.basename(latest)}...")
+
+        try:
+            # Parse
+            parse_script = str(Path(__file__).parent / "team_memory" / "parse.py")
+            parsed_path = "/tmp/team-memory-parsed-full.jsonl"
+            r = subprocess.run(
+                [sys.executable, parse_script, "--zip", latest, "--out", parsed_path],
+                capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                self.reply(chat_id, f"Parse failed: {r.stderr[:300]}", outcome="Needs decision")
+                return True
+
+            # Ingest (incremental)
+            ingest_script = str(Path(__file__).parent / "team_memory" / "ingest.py")
+            r = subprocess.run(
+                [sys.executable, ingest_script, parsed_path, "--incremental"],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                self.reply(chat_id, f"Ingest failed: {r.stderr[:300]}", outcome="Needs decision")
+                return True
+
+            # Extract stats from output
+            lines = r.stdout.strip().split("\n")
+            summary = lines[-1] if lines else "Done"
+            self.reply(chat_id, f"Memory updated.\n{summary}")
+
+        except subprocess.TimeoutExpired:
+            self.reply(chat_id, "Memory update timed out.", outcome="Needs decision")
+        except Exception as e:
+            self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
         return True
 
     def cmd_focus(self, name, chat_id):
@@ -7920,6 +8104,88 @@ _TRANSCRIPT_SYNC_LOCK = threading.Lock()
 
 # Path to transcript-index.py script (same directory as bridge.py)
 TRANSCRIPT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcript-index.py")
+TEAM_CHAT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team-chat-index.py")
+TEAM_CHAT_JSONL = "/tmp/team-memory-parsed-full.jsonl"
+TEAM_CHAT_DB = "/tmp/team-chat-cache/team.db"
+TEAM_CHAT_MEDIA_DIR = os.path.expanduser("~/team/exports/chat-full")
+
+
+def _render_md_to_html(md_text):
+    """Simple markdown to HTML renderer for file previews."""
+    import re as _re, html as _html
+    h = _html.escape(md_text)
+    # Headers
+    h = _re.sub(r'^######\s+(.+)$', r'<h6>\1</h6>', h, flags=_re.MULTILINE)
+    h = _re.sub(r'^#####\s+(.+)$', r'<h5>\1</h5>', h, flags=_re.MULTILINE)
+    h = _re.sub(r'^####\s+(.+)$', r'<h4>\1</h4>', h, flags=_re.MULTILINE)
+    h = _re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', h, flags=_re.MULTILINE)
+    h = _re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', h, flags=_re.MULTILINE)
+    h = _re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', h, flags=_re.MULTILINE)
+    # Code blocks (fenced)
+    h = _re.sub(r'```[a-z]*\n(.*?)```', r'<pre class="md-code"><code>\1</code></pre>', h, flags=_re.DOTALL)
+    # Inline code
+    h = _re.sub(r'`([^`]+)`', r'<code class="md-inline">\1</code>', h)
+    # Bold + italic
+    h = _re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', h)
+    h = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', h)
+    h = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', h)
+    # Horizontal rule
+    h = _re.sub(r'^---+$', r'<hr>', h, flags=_re.MULTILINE)
+    # Unordered lists
+    h = _re.sub(r'^[-*]\s+(.+)$', r'<li>\1</li>', h, flags=_re.MULTILINE)
+    # Links
+    h = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', h)
+    # Line breaks → paragraphs (double newline)
+    h = _re.sub(r'\n{2,}', '</p><p>', h)
+    # Single newlines → <br>
+    h = h.replace('\n', '<br>')
+    # Clean up br inside pre
+    h = _re.sub(r'(<pre[^>]*>.*?</pre>)', lambda m: m.group(0).replace('<br>', '\n'), h, flags=_re.DOTALL)
+    # Clean up br inside headers
+    for tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        h = _re.sub(rf'(<{tag}>.*?</{tag}>)', lambda m: m.group(0).replace('<br>', ''), h, flags=_re.DOTALL)
+    return f'<p>{h}</p>'
+
+
+def _render_csv_to_html(csv_text):
+    """Render CSV as an HTML table."""
+    import csv as _csv, io as _io, html as _html
+    esc = _html.escape
+    reader = _csv.reader(_io.StringIO(csv_text))
+    rows = []
+    for i, row in enumerate(reader):
+        if i > 200:  # cap rows
+            break
+        cells = ''.join(f'<td>{esc(c)}</td>' for c in row)
+        if i == 0:
+            cells = ''.join(f'<th>{esc(c)}</th>' for c in row)
+        rows.append(f'<tr>{cells}</tr>')
+    header = rows[0] if rows else ''
+    body = ''.join(rows[1:]) if len(rows) > 1 else ''
+    return f'<div class="file-body file-body-csv"><table><thead>{header}</thead><tbody>{body}</tbody></table></div>'
+
+
+def _run_team_chat_query(query_type, **kwargs):
+    """Run team-chat-index.py via subprocess. Returns parsed JSON dict."""
+    cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
+           "--jsonl", TEAM_CHAT_JSONL,
+           "--db", TEAM_CHAT_DB,
+           "--query", query_type]
+    if kwargs.get("page") is not None:
+        cmd.extend(["--page", str(kwargs["page"])])
+    if kwargs.get("per_page") is not None:
+        cmd.extend(["--per-page", str(kwargs["per_page"])])
+    if kwargs.get("search"):
+        cmd.extend(["--search", kwargs["search"]])
+    if kwargs.get("msg_id") is not None:
+        cmd.extend(["--msg-id", str(kwargs["msg_id"])])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout)
+    except Exception as e:
+        print(f"Team chat query error: {e}")
+    return None
 
 
 def _run_transcript_query(jsonl_path, sid, query, host=None, **kwargs):
@@ -8493,6 +8759,406 @@ vertical-align:middle;margin-right:8px}}
 </div></body></html>'''
 
 
+def _render_team_chat_html(page: int = None, per_page: int = 50,
+                           search_query: str = "", token: str = "") -> str:
+    """Render team Telegram chat as paginated HTML page."""
+    import html as html_mod
+    esc = html_mod.escape
+
+    if search_query:
+        query_result = _run_team_chat_query("search", search=search_query,
+                                            page=page or 1, per_page=per_page)
+    else:
+        query_result = _run_team_chat_query("entries", page=page, per_page=per_page)
+
+    if not query_result:
+        return ('<html><body style="background:#0b0d0b;color:#e5e5e0;font-family:system-ui;padding:40px">'
+                '<h1>Team chat not available</h1>'
+                '<p>Run <code>/memory update</code> to index the latest export.</p></body></html>')
+
+    messages = query_result.get("messages", [])
+    if search_query:
+        total = query_result.get("total_results", 0)
+    else:
+        total = query_result.get("total", 0)
+    total_pages = query_result.get("total_pages", 1)
+    page = query_result.get("page", 1)
+
+    # Pagination query string (needed by message blocks for reply/context links)
+    qs_parts = []
+    if token:
+        qs_parts.append(f"token={esc(token)}")
+    if per_page != 50:
+        qs_parts.append(f"per_page={per_page}")
+    if search_query:
+        qs_parts.append(f"q={esc(search_query)}")
+    qs_base = "&".join(qs_parts)
+
+    def page_url(p):
+        parts = [f"page={p}"]
+        if qs_base:
+            parts.append(qs_base)
+        return "?" + "&".join(parts)
+
+    # Build msg_id → message lookup for reply context
+    msg_by_id = {m.get("msg_id"): m for m in messages if m.get("msg_id")}
+
+    # For reply-to messages not on this page, batch-fetch from DB
+    missing_reply_ids = set()
+    for msg in messages:
+        rid = msg.get("reply_to")
+        if rid and rid not in msg_by_id:
+            missing_reply_ids.add(rid)
+    reply_cache = {}
+    if missing_reply_ids:
+        for rid in missing_reply_ids:
+            r = _run_team_chat_query("msg-by-id", msg_id=rid)
+            if r and r.get("idx") is not None:
+                reply_cache[rid] = r
+
+    # Build message blocks
+    blocks = []
+    for msg in messages:
+        msg_id = msg.get("msg_id", 0)
+        sender = msg.get("display_sender", "")
+        text = esc(msg.get("text", ""))
+        ts = msg.get("timestamp", "")
+        reply_to = msg.get("reply_to")
+        # Auto-link URLs
+        text = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', text)
+        # Newlines to <br>
+        text = text.replace("\n", "<br>")
+
+        # Reply context
+        reply_html = ""
+        if reply_to:
+            replied = msg_by_id.get(reply_to)
+            if replied:
+                rsender = esc(replied.get("display_sender", ""))
+                rtext = esc(replied.get("text", "")[:120])
+                if len(replied.get("text", "")) > 120:
+                    rtext += "..."
+                reply_html = (f'<a class="reply-ctx" href="#msg-{reply_to}">'
+                              f'<span class="reply-name">{rsender}</span> {rtext}</a>')
+            else:
+                # Reply to message on another page — fetch text and link to its page
+                rinfo = reply_cache.get(reply_to)
+                if rinfo and rinfo.get("page"):
+                    rpage = rinfo["page"]
+                    rurl = f"?page={rpage}&{qs_base}#msg-{reply_to}" if qs_base else f"?page={rpage}#msg-{reply_to}"
+                    rsender = esc(rinfo.get("display_sender", ""))
+                    rtext_raw = rinfo.get("text", "")
+                    rtext = esc(rtext_raw[:120])
+                    if len(rtext_raw) > 120:
+                        rtext += "..."
+                    reply_html = (f'<a class="reply-ctx" href="{rurl}">'
+                                  f'<span class="reply-name">{rsender}</span> {rtext}</a>')
+
+        # Avatar
+        if sender == "manager":
+            av = _MANAGER_AV
+        elif sender in _TEAM_MEMBERS:
+            av = _generate_member_avatar(sender)
+        else:
+            av = _generate_member_avatar(sender or "system")
+
+        name_html = f'<span class="u-name">{esc(sender)}</span>'
+        ts_html = f'<span class="ts" data-ts="{esc(ts)}">{esc(ts[11:16]) if len(ts) > 16 else ""}</span>'
+
+        # In search mode, add "view in context" link
+        ctx_link = ""
+        if search_query and msg.get("idx") is not None:
+            ctx_page = (msg["idx"] // per_page) + 1
+            ctx_qs = f"page={ctx_page}"
+            if token:
+                ctx_qs += f"&token={esc(token)}"
+            if per_page != 50:
+                ctx_qs += f"&per_page={per_page}"
+            ctx_link = f' <a class="ctx-link" href="?{ctx_qs}#msg-{msg_id}" title="View in context">\u2197</a>'
+
+        # Media rendering (photo / file)
+        media_html = ""
+        photo = msg.get("photo", "")
+        file_path_val = msg.get("file", "")
+        file_name = msg.get("file_name", "")
+        media_token = f"token={esc(token)}" if token else ""
+        if photo:
+            from urllib.parse import quote as _url_quote
+            media_url = f"/team-chat-media/{_url_quote(photo, safe='/')}?{media_token}"
+            media_html = (f'<div class="media-wrap">'
+                          f'<a href="{media_url}" target="_blank">'
+                          f'<img class="chat-photo" src="{media_url}" loading="lazy" alt=""></a>'
+                          f'</div>')
+        elif file_path_val and not file_path_val.startswith("(File not included"):
+            from urllib.parse import quote as _url_quote
+            media_url = f"/team-chat-media/{_url_quote(file_path_val, safe='/')}?{media_token}"
+            display_name = esc(file_name) if file_name else esc(file_path_val.split("/")[-1])
+            ext = os.path.splitext(file_path_val)[1].lower()
+            # Image files — render inline like photos
+            if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"):
+                media_html = (f'<div class="media-wrap">'
+                              f'<a href="{media_url}" target="_blank">'
+                              f'<img class="chat-photo" src="{media_url}" loading="lazy" alt=""></a>'
+                              f'<a class="file-dl" href="{media_url}" download="{esc(file_name or "")}">{display_name}</a>'
+                              f'</div>')
+            # Previewable text/code files — render inline, open by default
+            elif ext in (".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".py",
+                         ".sh", ".js", ".ts", ".go", ".rs", ".toml", ".log"):
+                _chev = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>'
+                # Read file content for inline rendering
+                _file_full = os.path.join(TEAM_CHAT_MEDIA_DIR, file_path_val)
+                _file_content = ""
+                try:
+                    with open(_file_full, "r", encoding="utf-8", errors="replace") as _ff:
+                        _file_content = _ff.read(64_000)  # cap at 64KB
+                except Exception:
+                    pass
+                if ext == ".md":
+                    # Render markdown to HTML
+                    _rendered = _render_md_to_html(_file_content)
+                    _body = f'<div class="file-body file-body-md">{_rendered}</div>'
+                elif ext in (".py", ".sh", ".js", ".ts", ".go", ".rs"):
+                    _body = f'<pre class="file-body file-body-code"><code>{esc(_file_content)}</code></pre>'
+                elif ext in (".json", ".yaml", ".yml", ".toml"):
+                    _body = f'<pre class="file-body file-body-code"><code>{esc(_file_content)}</code></pre>'
+                elif ext == ".csv":
+                    _body = _render_csv_to_html(_file_content)
+                else:
+                    # .txt, .log — plain preformatted
+                    _body = f'<pre class="file-body file-body-text">{esc(_file_content)}</pre>'
+                media_html = (f'<div class="media-wrap">'
+                              f'<details class="file-card" open>'
+                              f'<summary class="file-header">'
+                              f'<span class="file-icon">&#128196;</span> {display_name}'
+                              f'<a class="file-dl-btn" href="{media_url}" download="{esc(file_name or "")}" onclick="event.stopPropagation()">&#8615;</a>'
+                              f'{_chev}'
+                              f'</summary>'
+                              f'{_body}'
+                              f'</details></div>')
+            # PDF — collapsible viewer (iframe, open by default)
+            elif ext == ".pdf":
+                _chev = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>'
+                media_html = (f'<div class="media-wrap">'
+                              f'<details class="file-card" open>'
+                              f'<summary class="file-header">'
+                              f'<span class="file-icon">&#128195;</span> {display_name}'
+                              f'<a class="file-dl-btn" href="{media_url}" download="{esc(file_name or "")}" onclick="event.stopPropagation()">&#8615;</a>'
+                              f'{_chev}'
+                              f'</summary>'
+                              f'<iframe class="file-preview file-preview-pdf" src="{media_url}"></iframe>'
+                              f'</details></div>')
+            # Other files — download card
+            else:
+                media_html = (f'<div class="media-wrap">'
+                              f'<a class="file-card-link" href="{media_url}" download="{esc(file_name or "")}">'
+                              f'<span class="file-icon">&#128206;</span> {display_name}'
+                              f'</a></div>')
+
+        blocks.append(
+            f'<div class="chat-msg" id="msg-{msg_id}">'
+            f'{av}<div class="chat-body">'
+            f'{name_html} {ts_html}{ctx_link}'
+            f'{reply_html}'
+            f'{media_html}'
+            f'<div class="chat-text">{text}</div>'
+            f'</div></div>'
+        )
+
+    # Pagination nav
+    nav_html = ""
+    if total_pages > 1:
+        nav_items = []
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(1)}">First</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(page-1)}">Prev</a>')
+        start_p = max(1, page - 3)
+        end_p = min(total_pages, start_p + 6)
+        start_p = max(1, end_p - 6)
+        for p in range(start_p, end_p + 1):
+            cls = " pg-cur" if p == page else ""
+            nav_items.append(f'<a class="pg-btn{cls}" href="{page_url(p)}">{p}</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(page+1)}">Next</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(total_pages)}">Last</a>')
+        nav_html = f'<nav class="pg">{"".join(nav_items)}<span class="pg-info">Page {page}/{total_pages} ({total} messages)</span></nav>'
+
+    search_val = esc(search_query) if search_query else ""
+    search_result = ""
+    if search_query:
+        search_result = f'<div class="search-info">Found {total} matching messages for "<strong>{esc(search_query)}</strong>"</div>'
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+:root {{
+  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
+  --user-bg:rgba(255,255,255,.04); --code-bg:#1a1c1a; --link:#75dbf0; --radius:6px;
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
+}}
+@media(prefers-color-scheme:light){{
+  :root{{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
+    --user-bg:rgba(0,0,0,.03);--code-bg:#f4f4f0;--link:#0969da;}}
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+html{{font-size:14px}}
+body{{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
+  -webkit-font-smoothing:antialiased}}
+.wrap{{max-width:48rem;margin:0 auto;padding:24px 16px 80px}}
+header{{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}}
+h1{{font-size:1.3rem;font-weight:700}}
+.meta{{color:var(--muted);font-size:.85rem;margin-top:4px}}
+/* Search */
+.search-bar{{display:flex;gap:8px;margin-bottom:16px}}
+.search-bar input{{flex:1;background:var(--code-bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:8px 12px;color:var(--fg);font-size:.9rem;
+  font-family:var(--sans);outline:none}}
+.search-bar input:focus{{border-color:var(--link)}}
+.search-bar button{{background:var(--code-bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:8px 16px;color:var(--fg);cursor:pointer;
+  font-family:var(--sans);font-size:.9rem}}
+.search-bar button:hover{{border-color:var(--muted)}}
+.search-info{{background:rgba(117,219,240,.06);border:1px solid rgba(117,219,240,.15);
+  border-radius:var(--radius);padding:8px 12px;margin-bottom:16px;font-size:.85rem;color:var(--link)}}
+/* Pagination */
+.pg{{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:16px 0;font-size:.85rem}}
+.pg-btn{{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--fg);text-decoration:none;transition:border-color .15s}}
+.pg-btn:hover{{border-color:var(--muted)}}
+.pg-cur{{background:var(--link);color:#000;border-color:var(--link);font-weight:600}}
+.pg-dis{{opacity:.3;pointer-events:none}}
+.pg-info{{margin-left:8px;color:var(--muted)}}
+/* Chat messages */
+.thread{{display:flex;flex-direction:column;gap:4px}}
+.chat-msg{{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:8px 8px;
+  border-radius:8px;transition:background .2s}}
+.chat-msg:target{{background:rgba(117,219,240,.1)}}
+.chat-msg:hover{{background:var(--user-bg)}}
+.chat-body{{min-width:0}}
+.u-av{{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px}}
+.u-av img{{width:100%;height:100%;object-fit:cover;border-radius:50%}}
+.u-av svg{{width:100%;height:100%}}
+.u-name{{font-weight:600;font-size:.85rem;margin-right:6px}}
+.ts{{font-size:.75rem;color:var(--muted)}}
+.chat-text{{white-space:pre-wrap;word-break:break-word;font-size:.9rem;line-height:1.6;margin-top:2px}}
+.chat-text a{{color:var(--link)}}
+/* Media */
+.media-wrap{{margin:4px 0 6px}}
+.chat-photo{{max-width:100%;border-radius:8px;display:block;cursor:pointer;
+  border:1px solid var(--border)}}
+.chat-photo:hover{{opacity:.9}}
+.file-dl{{display:block;font-size:.75rem;color:var(--muted);margin-top:2px;text-decoration:none}}
+.file-dl:hover{{color:var(--link)}}
+.file-card{{background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden}}
+.file-header{{display:flex;align-items:center;gap:6px;padding:8px 10px;font-size:.85rem;
+  color:var(--fg);cursor:pointer;list-style:none}}
+.file-header::-webkit-details-marker{{display:none}}
+.file-header:hover{{background:var(--user-bg)}}
+.file-header .chev{{margin-left:auto;width:14px;height:14px;color:var(--muted);
+  transition:transform .15s;flex-shrink:0}}
+details.file-card[open] .chev{{transform:rotate(90deg)}}
+details.file-card[open] .file-header{{border-bottom:1px solid var(--border)}}
+.file-icon{{font-size:1rem}}
+.file-dl-btn{{margin-left:auto;color:var(--muted);text-decoration:none;font-size:1rem;
+  padding:0 4px;border-radius:4px}}
+.file-dl-btn:hover{{color:var(--link);background:rgba(117,219,240,.08)}}
+.file-preview{{width:100%;height:300px;border:0;background:var(--bg);color:var(--fg)}}
+.file-preview-pdf{{height:500px}}
+/* Inline file content */
+.file-body{{padding:12px 14px;font-size:.85rem;line-height:1.6;color:var(--fg);
+  max-height:500px;overflow:auto;border-top:1px solid var(--border)}}
+.file-body-md{{font-family:var(--sans)}}
+.file-body-md h1,.file-body-md h2,.file-body-md h3,.file-body-md h4{{margin:12px 0 6px;font-weight:600}}
+.file-body-md h1{{font-size:1.3rem}}.file-body-md h2{{font-size:1.1rem}}.file-body-md h3{{font-size:.95rem}}
+.file-body-md p{{margin:4px 0}}.file-body-md li{{margin:2px 0 2px 16px;list-style:disc}}
+.file-body-md hr{{border:0;border-top:1px solid var(--border);margin:10px 0}}
+.file-body-md a{{color:var(--link)}}.file-body-md strong{{font-weight:600}}
+.file-body-md .md-code{{background:var(--code-bg);padding:8px 10px;border-radius:4px;display:block;
+  font-family:var(--mono);font-size:.8rem;overflow-x:auto;white-space:pre;margin:6px 0}}
+.file-body-md .md-inline{{background:var(--code-bg);padding:1px 4px;border-radius:3px;font-family:var(--mono);font-size:.8rem}}
+.file-body-code{{font-family:var(--mono);white-space:pre;overflow-x:auto;margin:0;
+  background:var(--code-bg);border-top:1px solid var(--border)}}
+.file-body-code code{{font-size:.8rem;line-height:1.5}}
+.file-body-text{{font-family:var(--mono);white-space:pre-wrap;word-break:break-word;margin:0;
+  background:var(--code-bg);border-top:1px solid var(--border)}}
+.file-body-csv{{overflow-x:auto;border-top:1px solid var(--border)}}
+.file-body-csv table{{width:100%;border-collapse:collapse;font-size:.8rem}}
+.file-body-csv th,.file-body-csv td{{padding:4px 8px;border:1px solid var(--border);text-align:left}}
+.file-body-csv th{{background:var(--card);font-weight:600;position:sticky;top:0}}
+.file-card-link{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+  background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--fg);text-decoration:none;font-size:.85rem}}
+.file-card-link:hover{{border-color:var(--link);color:var(--link)}}
+/* Reply context */
+.reply-ctx{{display:block;border-left:3px solid var(--link);padding:2px 8px;margin:2px 0 4px;
+  font-size:.8rem;color:var(--muted);text-decoration:none;border-radius:2px;
+  background:rgba(117,219,240,.04);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}}
+.reply-ctx:hover{{background:rgba(117,219,240,.1);color:var(--fg)}}
+.reply-name{{font-weight:600;color:var(--link);margin-right:4px}}
+/* Context link (search → full view) */
+.ctx-link{{font-size:.75rem;color:var(--muted);text-decoration:none;margin-left:4px;
+  opacity:.6;transition:opacity .15s}}
+.ctx-link:hover{{opacity:1;color:var(--link)}}
+/* Jump buttons */
+.jump{{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:6px}}
+.jump a{{width:32px;height:32px;border-radius:50%;background:var(--code-bg);border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;color:var(--muted);text-decoration:none;font-size:1rem;
+  transition:border-color .15s}}
+.jump a:hover{{border-color:var(--muted);color:var(--fg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>Team Chat</h1>
+<div class="meta">Telegram chat history</div>
+</header>
+
+<form class="search-bar" method="get">
+<input type="text" name="q" value="{search_val}" placeholder="Search messages...">
+<button type="submit">Search</button>
+<input type="hidden" name="token" value="{esc(token)}">
+{"" if per_page == 50 else f'<input type="hidden" name="per_page" value="{per_page}">'}
+</form>
+
+{search_result}
+{nav_html}
+
+<div class="thread" id="thread">
+{"".join(blocks)}
+</div>
+
+{nav_html}
+</div>
+
+<div class="jump">
+<a href="#" onclick="window.scrollTo(0,0);return false">&uarr;</a>
+<a href="#" onclick="window.scrollTo(0,document.body.scrollHeight);return false">&darr;</a>
+</div>
+
+<script>
+// Render timestamps in browser timezone
+document.querySelectorAll('.ts[data-ts]').forEach(el => {{
+  try {{
+    const d = new Date(el.dataset.ts);
+    if (!isNaN(d)) el.textContent = d.toLocaleString(undefined, {{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}});
+  }} catch(e) {{}}
+}});
+// Scroll to target anchor if present
+if (location.hash) {{
+  const el = document.querySelector(location.hash);
+  if (el) setTimeout(() => el.scrollIntoView({{behavior:'smooth',block:'center'}}), 100);
+}}
+</script>
+</body>
+</html>'''
+
+
 def _render_transcript_html(name: str, session_id: str = None,
                             page: int = None, per_page: int = 50,
                             search_query: str = "", token: str = "",
@@ -8891,17 +9557,17 @@ mark{{background:rgba(250,204,21,.25);color:inherit;border-radius:2px;padding:0 
 .act-h svg{{width:14px;height:14px;color:var(--muted);flex-shrink:0}}
 .act-body{{border-top:1px solid var(--border);padding:0;font-family:var(--mono);
   font-size:.75rem;line-height:1.6;white-space:pre-wrap;word-break:break-all;
-  color:var(--muted);max-height:400px;overflow-y:auto;background:var(--code-bg)}}
+  color:var(--muted);background:var(--code-bg)}}
 .act-cmd{{padding:8px 12px;color:var(--fg)}}
 .act-out{{padding:8px 12px;border-top:1px solid var(--border);color:var(--muted)}}
 .act-out-err{{color:var(--red)}}
 .act-err>.act-h .chev{{color:#bd2b2b}}
 .act-body .t-out{{padding:8px 12px;white-space:pre-wrap;word-break:break-word;font-size:.75rem;
-  color:var(--muted);max-height:400px;overflow-y:auto;font-family:var(--mono);line-height:1.6;border:0}}
+  color:var(--muted);font-family:var(--mono);line-height:1.6;border:0}}
 /* Diff display */
 .diff-act .act-h{{gap:8px}}
 .diff-body{{border-top:1px solid var(--border);padding:0;font-family:var(--mono);
-  font-size:.75rem;line-height:1.7;max-height:500px;overflow:auto;background:var(--code-bg)}}
+  font-size:.75rem;line-height:1.7;overflow-x:auto;background:var(--code-bg)}}
 .diff-add,.diff-del,.diff-ctx{{padding:0 12px 0 0;white-space:pre;display:flex}}
 .diff-add{{background:var(--diff-add-bg);color:var(--diff-add-fg)}}
 .diff-del{{background:var(--diff-del-bg);color:var(--diff-del-fg)}}
@@ -8918,7 +9584,7 @@ mark{{background:rgba(250,204,21,.25);color:inherit;border-radius:2px;padding:0 
 .think-h::-webkit-details-marker{{display:none}}
 .think-h:hover{{color:var(--fg)}}
 .think-t{{padding:10px 12px;white-space:pre-wrap;word-break:break-word;font-size:.8rem;
-  color:var(--muted);max-height:500px;overflow-y:auto;font-family:var(--sans);font-style:italic;line-height:1.6}}
+  color:var(--muted);font-family:var(--sans);font-style:italic;line-height:1.6}}
 /* (tool outputs merged into tool_use blocks) */
 /* Chevrons */
 .chev{{width:14px;height:14px;transition:transform .15s ease;flex-shrink:0}}
@@ -9293,6 +9959,17 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_transcript_endpoint(parsed)
             return
 
+        # Handle /team-chat-media/<path> endpoint (photos/files from chat export)
+        # Must be checked BEFORE /team-chat to avoid prefix collision
+        if parsed.path.startswith("/team-chat-media/"):
+            self.handle_team_chat_media(parsed)
+            return
+
+        # Handle /team-chat endpoint
+        if parsed.path.startswith("/team-chat"):
+            self.handle_team_chat_endpoint(parsed)
+            return
+
         # Handle /pr-review/<pr_num> endpoint
         if parsed.path.startswith("/pr-review/"):
             self.handle_pr_review_endpoint(parsed)
@@ -9659,6 +10336,145 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def handle_team_chat_endpoint(self, parsed):
+        """Serve team Telegram chat viewer.
+
+        GET /team-chat?token=...
+        GET /team-chat?token=...&page=2
+        GET /team-chat?token=...&q=search+term
+        """
+        try:
+            import time as _time
+            qs = parse_qs(parsed.query)
+            # Token auth — same as transcript endpoint
+            now = _time.time()
+            expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
+            for k in expired:
+                del REWIND_TOKENS[k]
+            token = qs.get("token", [None])[0]
+            if not token or token not in REWIND_TOKENS:
+                body = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Session Expired</title>
+<style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;
+align-items:center;justify-content:center;min-height:100vh;margin:0;
+background:#0b0d0b;color:#e5e5e0}
+.card{text-align:center;max-width:400px;padding:40px}
+h1{font-size:1.5rem;margin-bottom:12px}
+p{color:#878b86;line-height:1.6;margin:8px 0}
+code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
+</style></head><body><div class="card">
+<h1>Session Expired</h1>
+<p>This link has expired or is invalid.</p>
+<p>Send <code>/rewind team</code> in Telegram to get a fresh 5-minute link.</p>
+</div></body></html>""".encode("utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+
+            page_raw = qs.get("page", [None])[0]
+            try:
+                page = max(1, int(page_raw)) if page_raw is not None else None
+            except (ValueError, TypeError):
+                page = None
+            try:
+                per_page = max(1, min(500, int(qs.get("per_page", [50])[0])))
+            except (ValueError, TypeError):
+                per_page = 50
+            search_query = qs.get("q", [""])[0].strip()
+
+            html_content = _render_team_chat_html(
+                page=page, per_page=per_page,
+                search_query=search_query, token=token)
+            body = html_content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            print(f"Team chat endpoint error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def handle_team_chat_media(self, parsed):
+        """Serve media files (photos/files) from team chat export.
+
+        GET /team-chat-media/photos/photo_1@28-01-2026_18-09-13.jpg?token=...
+        GET /team-chat-media/files/somefile.pdf?token=...
+
+        Requires valid rewind token (same as /team-chat).
+        Only serves files under TEAM_CHAT_MEDIA_DIR (no path traversal).
+        """
+        import time as _time
+        qs = parse_qs(parsed.query)
+
+        # Token auth
+        now = _time.time()
+        token = qs.get("token", [None])[0]
+        if not token or token not in REWIND_TOKENS or REWIND_TOKENS[token]["expires_at"] <= now:
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        # Refresh token expiry on access
+        REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+
+        # Extract relative path (after /team-chat-media/)
+        from urllib.parse import unquote
+        rel_path = unquote(parsed.path[len("/team-chat-media/"):])
+        # Security: prevent path traversal
+        rel_path = os.path.normpath(rel_path)
+        if rel_path.startswith("..") or rel_path.startswith("/"):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        full_path = os.path.join(TEAM_CHAT_MEDIA_DIR, rel_path)
+        # Double-check it's still under the media dir
+        if not os.path.abspath(full_path).startswith(os.path.abspath(TEAM_CHAT_MEDIA_DIR)):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        if not os.path.isfile(full_path):
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        # Determine content type
+        ext = os.path.splitext(full_path)[1].lower()
+        content_types = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+            ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+            ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+            ".pdf": "application/pdf", ".txt": "text/plain",
+            ".md": "text/plain", ".json": "application/json",
+            ".csv": "text/csv", ".zip": "application/zip",
+        }
+        ctype = content_types.get(ext, "application/octet-stream")
+
+        try:
+            with open(full_path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
 
 
 # ============================================================
