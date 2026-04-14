@@ -56,5 +56,6 @@ else
     CHECKIN_URL="http://localhost:${BRIDGE_PORT}/checkin?name=$WORKER_NAME"
 fi
 
-# Curl with short timeout; print to stdout for Claude context injection
-curl -s --max-time 3 "$CHECKIN_URL" 2>/dev/null || true
+# Curl with timeout; print to stdout for Claude context injection
+# 10s timeout: teleported workers reach bridge over Tailscale (~4-5s RTT)
+curl -s --max-time 10 "$CHECKIN_URL" 2>/dev/null || true
