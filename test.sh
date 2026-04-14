@@ -12411,7 +12411,7 @@ print('OK')
 }
 
 test_session_helpers_read_remote_files() {
-    info "Testing session ID/CWD helpers read remote files for teleported workers..."
+    info "Testing session CWD helper reads remote file for teleported workers..."
 
     if python3 -c "
 import tempfile, shutil
@@ -12429,10 +12429,9 @@ bridge.NODE_DIR = tmp
 bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.SESSIONS_DIR = tmp / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
+# Teleported worker with NO local cwd cache — must SSH fetch
 session_dir = bridge.SESSIONS_DIR / 'ren'
 session_dir.mkdir()
-(session_dir / 'claude_session_id').write_text('local-stale')
-(session_dir / 'claude_session_cwd').write_text('/local/stale')
 bridge._registry_add('ren', 'claude', 123, host='mac-mini')
 
 calls = []
@@ -12440,26 +12439,20 @@ def mock_remote(cmd, host=None, **kwargs):
     calls.append((cmd, host))
     if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
         return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
-    if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_id'):
-        return MagicMock(returncode=0, stdout='remote-session\n', stderr='')
     if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_cwd'):
         return MagicMock(returncode=0, stdout='/Users/beastoinagents/omi\n', stderr='')
     return MagicMock(returncode=1, stdout='', stderr='missing')
 
 with patch('bridge._remote_run', side_effect=mock_remote):
-    sid = bridge.get_claude_session_id('ren')
-    assert sid == 'remote-session', f'expected remote-session, got {sid!r}'
     scwd = bridge.get_claude_session_cwd('ren')
     assert scwd == '/Users/beastoinagents/omi', f'expected remote cwd, got {scwd!r}'
 
 assert any(host == 'mac-mini' and cmd[0] == 'cat' for cmd, host in calls), f'remote cat missing: {calls}'
-assert bridge.get_claude_session_id('local') == ''
 
+# Local worker: reads local cache directly
 local_dir = bridge.SESSIONS_DIR / 'lee'
 local_dir.mkdir()
-(local_dir / 'claude_session_id').write_text('local-session')
 (local_dir / 'claude_session_cwd').write_text('/tmp/local')
-assert bridge.get_claude_session_id('lee') == 'local-session'
 assert bridge.get_claude_session_cwd('lee') == '/tmp/local'
 
 bridge.NODE_DIR = orig_node
@@ -12468,9 +12461,170 @@ bridge.SESSIONS_DIR = orig_sessions
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "session helpers read remote files for teleported workers"
+        success "session CWD helper reads remote file for teleported workers"
     else
-        fail "session helpers should read remote files for teleported workers"
+        fail "session CWD helper should read remote files for teleported workers"
+    fi
+}
+
+test_scan_latest_session_id_local() {
+    info "Testing _scan_latest_session_id returns latest JSONL by mtime (local)..."
+
+    if python3 -c "
+import os, tempfile, shutil, time
+from pathlib import Path
+import bridge
+
+projects_dir = Path(tempfile.mkdtemp())
+cwd = '/tmp/scan-test-abc'
+slug = bridge._project_slug(cwd)
+slug_dir = projects_dir / slug
+slug_dir.mkdir(parents=True)
+
+old_path = slug_dir / 'aaaaaaaa-1111-2222-3333-444444444444.jsonl'
+new_path = slug_dir / 'bbbbbbbb-5555-6666-7777-888888888888.jsonl'
+old_path.write_text('')
+new_path.write_text('')
+now = time.time()
+os.utime(old_path, (now - 100, now - 100))
+os.utime(new_path, (now, now))
+
+orig = bridge.CLAUDE_PROJECTS_DIR
+bridge.CLAUDE_PROJECTS_DIR = projects_dir
+try:
+    sid = bridge._scan_latest_session_id(cwd)
+    assert sid == 'bbbbbbbb-5555-6666-7777-888888888888', f'got {sid!r}'
+    # Empty slug dir returns empty
+    empty_cwd = '/tmp/scan-test-empty'
+    (projects_dir / bridge._project_slug(empty_cwd)).mkdir()
+    assert bridge._scan_latest_session_id(empty_cwd) == ''
+    # Missing slug dir returns empty
+    assert bridge._scan_latest_session_id('/tmp/scan-test-missing') == ''
+finally:
+    bridge.CLAUDE_PROJECTS_DIR = orig
+    shutil.rmtree(projects_dir, ignore_errors=True)
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_scan_latest_session_id returns latest JSONL stem"
+    else
+        fail "_scan_latest_session_id local scan test failed"
+    fi
+}
+
+test_get_claude_session_id_authoritative_overrides_stale() {
+    info "Testing get_claude_session_id(authoritative=True) overrides stale cache..."
+
+    if python3 -c "
+import os, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+projects_dir = Path(tempfile.mkdtemp())
+
+orig_sessions = bridge.SESSIONS_DIR
+orig_projects = bridge.CLAUDE_PROJECTS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.CLAUDE_PROJECTS_DIR = projects_dir
+bridge.NODE_DIR = tmpdir
+bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
+
+session_dir = bridge.SESSIONS_DIR / 'worker1'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('stale-uuid-does-not-exist')
+(session_dir / 'claude_session_cwd').write_text('/tmp/scan-test-def')
+
+cwd = '/tmp/scan-test-def'
+slug = bridge._project_slug(cwd)
+slug_dir = projects_dir / slug
+slug_dir.mkdir(parents=True)
+real_uuid = 'real-uuid-abc123-def456-7890-111213141516'
+(slug_dir / f'{real_uuid}.jsonl').write_text('')
+
+bridge._registry_add('worker1', 'claude', 123)
+
+# Non-authoritative: returns stale cache (fast path)
+sid_stale = bridge.get_claude_session_id('worker1')
+assert sid_stale == 'stale-uuid-does-not-exist', f'non-auth should trust cache, got {sid_stale!r}'
+
+# Authoritative: scans, overrides cache
+sid = bridge.get_claude_session_id('worker1', authoritative=True)
+assert sid == real_uuid, f'expected {real_uuid!r}, got {sid!r}'
+
+cached = (session_dir / 'claude_session_id').read_text().strip()
+assert cached == real_uuid, f'cache not refreshed: got {cached!r}'
+
+# Next non-authoritative read picks up refreshed cache
+assert bridge.get_claude_session_id('worker1') == real_uuid
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.CLAUDE_PROJECTS_DIR = orig_projects
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmpdir, ignore_errors=True)
+shutil.rmtree(projects_dir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_claude_session_id authoritative overrides stale cache"
+    else
+        fail "authoritative scan override test failed"
+    fi
+}
+
+test_get_claude_session_id_authoritative_remote() {
+    info "Testing get_claude_session_id(authoritative=True) scans remote for teleported workers..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
+bridge.NODE_DIR = tmpdir
+bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+session_dir = bridge.SESSIONS_DIR / 'ren'
+session_dir.mkdir()
+(session_dir / 'claude_session_id').write_text('stale-vps-cache')
+(session_dir / 'claude_session_cwd').write_text('/Users/beastoinagents/omi/omi-ren')
+bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+
+# Mock _remote_run so the ls returns a newest jsonl
+def mock_remote(cmd, host=None, **kwargs):
+    if len(cmd) == 3 and cmd[0] == 'bash' and 'ls -1t' in cmd[2] and '.claude/projects' in cmd[2]:
+        return MagicMock(returncode=0,
+                         stdout='/Users/beastoinagents/.claude/projects/-Users-beastoinagents-omi-omi-ren/fresh-mac-uuid.jsonl\n',
+                         stderr='')
+    return MagicMock(returncode=1, stdout='', stderr='unexpected')
+
+with patch('bridge._remote_run', side_effect=mock_remote):
+    sid = bridge.get_claude_session_id('ren', authoritative=True)
+
+assert sid == 'fresh-mac-uuid', f'expected fresh-mac-uuid, got {sid!r}'
+cached = (session_dir / 'claude_session_id').read_text().strip()
+assert cached == 'fresh-mac-uuid', f'cache should be refreshed: {cached!r}'
+
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge.SESSIONS_DIR = orig_sessions
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "authoritative scan works for remote teleported workers"
+    else
+        fail "remote authoritative scan test failed"
     fi
 }
 
@@ -17803,6 +17957,9 @@ run_unit_tests() {
     run_test test_is_online_teleported_ssh_failure_assumes_online
     run_test test_is_online_teleported_checks_claude_process
     run_test test_session_helpers_read_remote_files
+    run_test test_scan_latest_session_id_local
+    run_test test_get_claude_session_id_authoritative_overrides_stale
+    run_test test_get_claude_session_id_authoritative_remote
     run_test test_hook_failures_teleported_use_remote_files
     run_test test_localize_media_teleported_fetches_remote_even_when_local_exists
     run_test test_download_telegram_file_syncs_to_remote_inbox

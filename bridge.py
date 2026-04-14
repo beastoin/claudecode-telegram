@@ -1190,6 +1190,10 @@ NODE_DIR = SESSIONS_DIR.parent  # ~/.claude/telegram/nodes/<node>
 LAST_CHAT_ID_FILE = NODE_DIR / "last_chat_id"
 LAST_ACTIVE_FILE = NODE_DIR / "last_active"
 
+# Claude Code stores transcripts at ~/.claude/projects/<slug>/<uuid>.jsonl.
+# Overridable in tests.
+CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
+
 # Rewind tokens: {token_str: {"name": worker, "expires_at": timestamp}}
 REWIND_TOKENS = {}
 PR_REVIEW_TOKENS = {}
@@ -3041,8 +3045,109 @@ def _read_session_file(name, filename):
     return ""
 
 
-def get_claude_session_id(name):
-    return _read_session_file(name, "claude_session_id")
+def _scan_latest_session_id(cwd: str, host: str = None) -> str:
+    """Return the UUID of the most-recently-modified JSONL in <slug>/ on `host`.
+
+    Source of truth for the "current" session Claude Code is writing to.
+    host=None → scan local filesystem. host set → SSH + `ls -1t`.
+    Returns "" if the slug dir is missing/empty or the scan errors out.
+    """
+    if not cwd:
+        return ""
+    slug = _project_slug(cwd)
+    if host:
+        try:
+            cmd = [
+                "bash", "-c",
+                f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1',
+            ]
+            r = _remote_run(cmd, host=host, capture_output=True,
+                            text=True, timeout=10)
+            if r.returncode != 0:
+                return ""
+            path = (r.stdout or "").strip()
+            if not path:
+                return ""
+            return os.path.basename(path).removesuffix(".jsonl")
+        except Exception:
+            return ""
+    # Local scan
+    slug_dir = CLAUDE_PROJECTS_DIR / slug
+    if not slug_dir.is_dir():
+        return ""
+    try:
+        jsonls = [p for p in slug_dir.iterdir()
+                  if p.is_file() and p.suffix == ".jsonl"]
+    except OSError:
+        return ""
+    if not jsonls:
+        return ""
+    latest = max(jsonls, key=lambda p: p.stat().st_mtime)
+    return latest.stem
+
+
+def _cache_session_id(name: str, sid: str) -> None:
+    """Write session_id to local VPS cache file (best effort, 0o600)."""
+    if not sid:
+        return
+    try:
+        d = ensure_session_dir(name)
+        f = d / "claude_session_id"
+        f.write_text(sid)
+        f.chmod(0o600)
+    except Exception:
+        pass
+
+
+def get_claude_session_id(name: str, authoritative: bool = False) -> str:
+    """Return the Claude Code session UUID for a worker.
+
+    The local `claude_session_id` file is a cache/hint populated by
+    (a) the Stop hook POST to /response and (b) this function's scan fallback.
+    The *authoritative* source is the latest-mtime JSONL under
+    `~/.claude/projects/<slug>/` on the host where the worker is running.
+
+    authoritative=False (default): return the cached value if present.
+        If the cache is empty, scan the transcript dir and cache the result.
+    authoritative=True: always scan the transcript dir and refresh the cache.
+        Use this for correctness-critical call sites — /rewind, /restart,
+        memory source deep-links — where a stale UUID leads to "transcript
+        not available" or a failed `--resume`. Falls back to cached value
+        if the scan itself fails (SSH down, dir missing).
+    """
+    cache_file = get_session_dir(name) / "claude_session_id"
+
+    def _read_cache():
+        if cache_file.exists():
+            val = cache_file.read_text().strip()
+            if val:
+                return val
+        return ""
+
+    if not authoritative:
+        val = _read_cache()
+        if val:
+            return val
+        # Self-heal: cache empty, try to populate via scan
+        cwd = get_claude_session_cwd(name)
+        if cwd:
+            host = get_worker_host(name)
+            scanned = _scan_latest_session_id(cwd, host=host)
+            if scanned:
+                _cache_session_id(name, scanned)
+                return scanned
+        return ""
+
+    # Authoritative: always scan
+    cwd = get_claude_session_cwd(name)
+    if cwd:
+        host = get_worker_host(name)
+        scanned = _scan_latest_session_id(cwd, host=host)
+        if scanned:
+            _cache_session_id(name, scanned)
+            return scanned
+    # Scan failed — better to return stale cache than nothing
+    return _read_cache()
 
 
 def get_claude_session_cwd(name):
@@ -5034,7 +5139,7 @@ class WorkerManager:
         resume_cwd = ""
         session_dir = self.sessions_dir / name
         if mode == "resume":
-            resume_id = get_claude_session_id(name)
+            resume_id = get_claude_session_id(name, authoritative=True)
             resume_cwd = get_claude_session_cwd(name)
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -5138,7 +5243,7 @@ class WorkerManager:
         resume_id = ""
         resume_cwd = ""
         if mode == "resume":
-            resume_id = get_claude_session_id(name)
+            resume_id = get_claude_session_id(name, authoritative=True)
             resume_cwd = get_claude_session_cwd(name)
         else:
             session_dir = self.sessions_dir / name
@@ -6610,7 +6715,7 @@ class CommandRouter:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
-            resume_id = get_claude_session_id(name) if mode == "resume" else ""
+            resume_id = get_claude_session_id(name, authoritative=True) if mode == "resume" else ""
             target_cwd = get_claude_session_cwd(name)
             print(f"[cmd_restart] {name}: remote restart mode={mode}, resume_id={resume_id}, cwd={target_cwd}")
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
@@ -6702,7 +6807,7 @@ class CommandRouter:
 
         print(f"[_restart_remote] {name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
         if mode == "resume":
-            resume_id = get_claude_session_id(name)
+            resume_id = get_claude_session_id(name, authoritative=True)
             print(f"[_restart_remote] {name}: resume_id={resume_id}")
         else:
             # Clear session IDs for relaunch
@@ -6727,7 +6832,7 @@ class CommandRouter:
 
         # Re-read session_id (hook may have updated during /exit)
         if mode == "resume":
-            resume_id = get_claude_session_id(name) or resume_id
+            resume_id = get_claude_session_id(name, authoritative=True) or resume_id
             print(f"[_restart_remote] {name}: post-stop resume_id={resume_id}")
 
         # Validate session is resumable on target before attempting --resume
@@ -7287,7 +7392,7 @@ class CommandRouter:
 
     def _stop_worker_for_teleport(self, name, tmux_name, host=None):
         """Gracefully stop Claude Code and return session_id."""
-        session_id = get_claude_session_id(name)
+        session_id = get_claude_session_id(name, authoritative=True)
 
         # Send /exit for graceful shutdown
         _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"],
@@ -7313,7 +7418,7 @@ class CommandRouter:
             time.sleep(1)
 
         # Re-read session ID (hook may have updated it during /exit)
-        return get_claude_session_id(name) or session_id
+        return get_claude_session_id(name, authoritative=True) or session_id
 
     def _sync_working_directory(self, source_cwd, target_cwd,
                                  source_host=None, target_host=None,
@@ -8284,7 +8389,7 @@ def _resolve_transcript_path(name: str, session_id: str = None):
     For remote workers, returns ("syncing", sid, cwd) if sync is in progress.
     """
     cwd = get_claude_session_cwd(name) or os.path.expanduser("~")
-    sid = session_id or get_claude_session_id(name)
+    sid = session_id or get_claude_session_id(name, authoritative=True)
     if not sid:
         return None, "", cwd
 
@@ -9177,7 +9282,7 @@ def _render_transcript_html(name: str, session_id: str = None,
     host = get_worker_host(name)
     if host:
         cwd = get_claude_session_cwd(name) or ""
-        sid = session_id or get_claude_session_id(name)
+        sid = session_id or get_claude_session_id(name, authoritative=True)
         if not sid:
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
         remote_home = _get_remote_home(host) or ""

@@ -340,6 +340,23 @@ This prevents other users on multi-user systems from reading chat IDs or session
 
 ## Changelog
 
+### v0.30.0 - Self-healing session ID cache for teleported workers
+
+**Problem:** VPS-cached `claude_session_id` for teleported workers kept going stale. `/rewind`, `/restart`, and `/memory` would hand out UUIDs whose JSONL file no longer existed on the worker's current host — because the cache was trusted unconditionally and the SSH fallback *wrote back stale values* into the VPS cache, making the staleness permanent.
+
+**Root cause:** `_read_session_file` was local-cache-first. After teleport cleared the VPS cache, repopulation relied on the Stop hook POST, which could silently miss (crash, timeout, `/exit`+resume before the first assistant turn). Once anything read first, the SSH fallback cached whatever was sitting on Mac Mini — which could itself be stale — and the cache never re-validated.
+
+**Fix:**
+- New authoritative source of truth: `_scan_latest_session_id(cwd, host=)` — the most-recently-modified JSONL under `~/.claude/projects/<slug>/` on the worker's current host (local path for local workers, single `ls -1t | head -1` SSH for teleported).
+- `get_claude_session_id(name, authoritative=False)` — new flag. Non-authoritative (default) keeps fast-path local-cache reads for display UI. Authoritative always scans and refreshes the cache, falling back to stale cache only if the scan fails.
+- Correctness-critical call sites flipped to `authoritative=True`: `/rewind` resolution, `/restart` (direct + remote), transcript HTML endpoint, `start_worker` resume path, `_stop_worker_for_teleport`.
+- The cache is now an optimization, not a source of truth. Stale cache self-heals on the next authoritative read (one scan per stale read, then good).
+
+**New tests:**
+- `test_scan_latest_session_id_local` — scan returns newest-mtime JSONL stem
+- `test_get_claude_session_id_authoritative_overrides_stale` — stale cache overridden and refreshed
+- `test_get_claude_session_id_authoritative_remote` — SSH `ls -1t` path for teleported workers
+
 ### v0.29.2 - Restart loop fix + teleport speedup
 
 - Per-worker in-flight restart lock: `_restart_in_progress` dict with threading.Lock prevents concurrent/queued restarts from firing simultaneously
