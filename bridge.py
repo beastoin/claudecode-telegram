@@ -103,6 +103,10 @@ if not BRIDGE_PUBLIC_URL:
         pass
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
+# BRIDGE_SSH_TARGET: ssh alias that remote machines use to reach the bridge host.
+# Used by /workers?from= when a remote caller needs to address a bridge-local peer.
+# Default "vps" matches team convention; override per deployment if needed.
+BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 PERSISTENCE_NOTE = "They'll stay on your team."
 
 # Voice mode: STT (speech-to-text) and TTS (text-to-speech) endpoints
@@ -1766,10 +1770,14 @@ def stop_pipe_reader(name: str):
         print(f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
 
-def get_workers():
-    """Get all active workers with their communication details."""
+def get_workers(caller_from: str = None):
+    """Get all active workers with their communication details.
+
+    If ``caller_from`` is set to a worker name, ``send_example`` for each peer
+    is rendered from that caller's machine perspective.
+    """
     _sync_worker_manager()
-    return worker_manager.get_workers()
+    return worker_manager.get_workers(caller_from=caller_from)
 
 
 def download_telegram_file(file_id, session_name):
@@ -4850,29 +4858,41 @@ class WorkerManager:
 
         return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
 
-    def get_workers(self):
-        """Get all active workers with their communication details."""
+    def get_workers(self, caller_from: str = None):
+        """Get all active workers with their communication details.
+
+        If ``caller_from`` is the name of a registered worker, each ``send_example``
+        is rendered from that caller's perspective: bare tmux/pipe when caller
+        and peer share a machine, ssh-wrapped when they don't. When ``caller_from``
+        is None, the bridge's own perspective is used (legacy behavior).
+        """
         self._sync_paths()
         workers = []
         registered = self.get_registered_sessions()
+        caller_host = get_worker_host(caller_from) if caller_from else None
         for name, info in registered.items():
             backend_name = get_worker_backend(name, info)
             backend = get_backend(backend_name)
+            peer_host = get_worker_host(name)
 
             # Registry-only workers (tmux gone): non-interactive can still serve via pipe
             if "tmux" not in info:
                 if not backend.is_interactive:
                     pipe_path = ensure_worker_pipe(name)
+                    pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
+                    send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
                     workers.append({
                         "name": name,
+                        "machine": peer_host or "",
                         "protocol": "pipe",
                         "address": str(pipe_path),
-                        "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
+                        "send_example": send_example,
                         "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
                     })
                 else:
                     workers.append({
                         "name": name,
+                        "machine": peer_host or "",
                         "protocol": "none",
                         "address": "",
                         "status": "exited",
@@ -4881,52 +4901,70 @@ class WorkerManager:
                 continue
 
             if not backend.is_interactive:
-                host = get_worker_host(name)
-                if host:
+                if peer_host:
                     # Non-interactive remote workers can't use local pipes
                     workers.append({
                         "name": name,
+                        "machine": peer_host,
                         "protocol": "none",
-                        "address": f"{host}:{info.get('tmux', '')}",
-                        "note": f"Non-interactive ({backend_name}) on {host}. Remote pipe not supported yet.",
+                        "address": f"{peer_host}:{info.get('tmux', '')}",
+                        "note": f"Non-interactive ({backend_name}) on {peer_host}. Remote pipe not supported yet.",
                     })
                 else:
                     pipe_path = ensure_worker_pipe(name)
+                    pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
+                    send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
                     workers.append({
                         "name": name,
+                        "machine": peer_host or "",
                         "protocol": "pipe",
                         "address": str(pipe_path),
-                        "send_example": f"echo 'YOUR_NAME: your message here' > {pipe_path} &",
+                        "send_example": send_example,
                         "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
                     })
             else:
                 tmux_name = info.get("tmux")
-                host = get_worker_host(name)
-                if host:
-                    # Teleported worker: wrap tmux commands in SSH
-                    tmux_cmd = (
-                        f"echo 'YOUR_NAME: your message here' | "
-                        f"tmux load-buffer - && "
-                        f"tmux paste-buffer -p -r -t {tmux_name} && "
-                        f"sleep 1 && tmux send-keys -t {tmux_name} Enter"
-                    )
-                    send_example = f"ssh {host} \"{tmux_cmd}\""
-                    workers.append({
-                        "name": name,
-                        "protocol": "tmux",
-                        "address": f"{host}:{tmux_name}",
-                        "send_example": send_example,
-                        "note": f"Teleported to {host}. Uses SSH + paste-buffer -p (bracketed paste). Always prefix your name."
-                    })
+                tmux_cmd = (
+                    f"echo 'YOUR_NAME: your message here' | "
+                    f"tmux load-buffer - && "
+                    f"tmux paste-buffer -p -r -t {tmux_name} && "
+                    f"sleep 1 && tmux send-keys -t {tmux_name} Enter"
+                )
+                send_example = self._wrap_for_caller(tmux_cmd, peer_host, caller_host)
+                if peer_host and caller_host == peer_host:
+                    note = f"On {peer_host} (same machine as caller). Uses paste-buffer -p. Always prefix your name."
+                elif peer_host:
+                    note = f"On {peer_host}. Uses SSH + paste-buffer -p (bracketed paste). Always prefix your name."
+                elif caller_host:
+                    note = f"On bridge host (cross-machine from caller). Uses SSH + paste-buffer -p. Always prefix your name."
                 else:
-                    workers.append({
-                        "name": name,
-                        "protocol": "tmux",
-                        "address": tmux_name,
-                        "send_example": f"echo 'YOUR_NAME: your message here' | tmux load-buffer - && tmux paste-buffer -p -r -t {tmux_name} && sleep 1 && tmux send-keys -t {tmux_name} Enter",
-                        "note": "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
-                    })
+                    note = "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
+                workers.append({
+                    "name": name,
+                    "machine": peer_host or "",
+                    "protocol": "tmux",
+                    "address": f"{peer_host}:{tmux_name}" if peer_host else tmux_name,
+                    "send_example": send_example,
+                    "note": note,
+                })
         return workers
+
+    def _wrap_for_caller(self, cmd: str, peer_host: str, caller_host: str) -> str:
+        """Wrap a shell command so it executes on the peer's machine from the caller's POV.
+
+        - Same machine (incl. both None): bare command, no ssh.
+        - Caller on bridge, peer remote: ssh to peer's host (legacy behavior).
+        - Caller remote, peer on bridge: ssh to BRIDGE_SSH_TARGET.
+        - Caller and peer on different remotes: ssh directly to peer's host.
+        """
+        if caller_host == peer_host:
+            return cmd
+        if peer_host is None:
+            ssh_target = BRIDGE_SSH_TARGET
+        else:
+            ssh_target = peer_host
+        escaped = cmd.replace('"', '\\"')
+        return f'ssh {ssh_target} "{escaped}"'
 
     def _build_welcome(self, name: str, backend_obj) -> str:
         """Build welcome/instructions message for a worker."""
@@ -4934,7 +4972,7 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
-            "MESSAGING WORKERS: Run `curl -s $BRIDGE_URL/workers` to discover other workers — returns names, protocols, and ready-to-use send commands. Always call /workers before messaging, never guess addresses. "
+            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns names, protocols, and ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
@@ -10048,7 +10086,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Handle /workers endpoint for inter-worker discovery
         if parsed.path == "/workers":
-            self.handle_workers_endpoint()
+            self.handle_workers_endpoint(parsed)
             return
 
         # Handle /checkin endpoint for worker instruction refresh
@@ -10092,14 +10130,18 @@ class Handler(BaseHTTPRequestHandler):
         # Unknown GET endpoint
         self._send_unknown_endpoint("GET", parsed.path)
 
-    def handle_workers_endpoint(self):
+    def handle_workers_endpoint(self, parsed=None):
         """Return list of active workers with communication details.
 
-        GET /workers
-        Response: {"workers": [{"name": ..., "protocol": ..., "address": ..., "send_example": ...}, ...]}
+        GET /workers                 — bridge-POV send_example (legacy)
+        GET /workers?from=<name>     — caller-POV send_example, wraps ssh if cross-machine
+        Response: {"workers": [{"name": ..., "machine": ..., "protocol": ..., "address": ..., "send_example": ...}, ...]}
         """
         try:
-            workers = get_workers()
+            caller_from = None
+            if parsed is not None:
+                caller_from = parse_qs(parsed.query).get("from", [None])[0]
+            workers = get_workers(caller_from=caller_from)
             response = {"workers": workers}
 
             self.send_response(200)

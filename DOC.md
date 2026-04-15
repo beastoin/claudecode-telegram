@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.29.2
+> Version: 0.30.1
 
 ## Current Philosophy (Summary)
 
@@ -339,6 +339,33 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.30.1 - Caller-aware `/workers?from=<name>` for cross-machine sends
+
+**Problem:** `/workers` returned a bridge-POV `send_example` (e.g., `tmux paste-buffer ...`) that fails when the caller lives on a different machine than the bridge. Example: kai (Mac Mini) queried `/workers` for mon (VPS/bridge), got a bare tmux command, tried to run it locally, and hit "session not found" — because mon's tmux lives on VPS, not Mac Mini.
+
+**Why not centralize sends via `POST /send`?** That would fight the project's "decentralized worker comms" principle. The bridge is a discovery service, not a router. Workers execute their own tmux/SSH commands directly.
+
+**Fix (minimal — ~30 lines, zero new endpoints):**
+- `GET /workers?from=<caller_name>` — bridge resolves the caller's machine and renders each peer's `send_example` from the caller's POV.
+- New `_wrap_for_caller(cmd, peer_host, caller_host)` helper handles the four cases:
+  - Same machine (incl. both bridge-local): bare command, no ssh
+  - Caller on bridge, peer remote: `ssh <peer_host> "..."` (legacy behavior)
+  - Caller remote, peer on bridge: `ssh $BRIDGE_SSH_TARGET "..."` (new)
+  - Caller and peer on different remotes: `ssh <peer_host> "..."` direct
+- New env var `BRIDGE_SSH_TARGET` (default `"vps"`) — the ssh alias remote machines use to reach the bridge host.
+- Each worker dict now includes a `machine` field (empty string for bridge-local) so callers can inspect machine placement.
+- Welcome message updated to instruct workers to always call `curl -s "$BRIDGE_URL/workers?from=<your_name>"` instead of bare `/workers`.
+- Legacy `GET /workers` (no `?from=`) still returns bridge-POV output unchanged.
+
+**New tests (5):**
+- `test_workers_from_caller_remote_to_local_peer` — remote caller gets `ssh vps` wrap for bridge-local peer
+- `test_workers_from_caller_same_remote_machine_bare` — same-machine peers get bare tmux (no ssh)
+- `test_workers_from_caller_local_to_remote_peer` — bridge-local caller keeps legacy ssh wrap for remote peer
+- `test_workers_no_from_backward_compat` — omitting `?from=` preserves legacy bridge-POV behavior
+- `test_workers_from_includes_machine_id` — each worker dict has `machine` field
+
+**Parked (out of scope for this fix):** Machine/MachineAdapter abstraction, generation fencing for the teleport race, `POST /send` centralized router, outbox for offline non-interactive workers. See `SDD-host-awareness.md` for the rejected over-engineered proposal.
 
 ### v0.30.0 - Self-healing session ID cache for teleported workers
 

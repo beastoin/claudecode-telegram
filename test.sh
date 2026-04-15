@@ -10850,6 +10850,238 @@ print('OK')
     fi
 }
 
+test_workers_from_caller_remote_to_local_peer() {
+    info "Testing /workers?from= wraps bridge-local peer in ssh for remote caller..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.BRIDGE_SSH_TARGET = 'vps'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'kai': {'tmux': '${TEST_TMUX_PREFIX}wkr-kai', 'chat_id': 1},
+    'mon': {'tmux': '${TEST_TMUX_PREFIX}wkr-mon', 'chat_id': 2},
+}
+
+bridge._registry_add('kai', 'claude', 1)
+bridge._registry_add('mon', 'claude', 2)
+# kai lives on mac-mini, mon lives on bridge host (None)
+bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/project')
+
+workers = bridge.worker_manager.get_workers(caller_from='kai')
+mon = next((w for w in workers if w['name'] == 'mon'), None)
+assert mon is not None, f'mon missing: {[w[\"name\"] for w in workers]}'
+assert mon['protocol'] == 'tmux', f'expected tmux protocol: {mon}'
+assert 'ssh vps' in mon['send_example'], \
+    f'expected ssh vps wrap for remote caller to bridge-local peer, got: {mon[\"send_example\"]}'
+assert 'paste-buffer -p -r' in mon['send_example'], \
+    f'ssh wrap should still use paste-buffer -p -r: {mon[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers?from= wraps bridge-local peer in ssh for remote caller"
+    else
+        fail "/workers?from= remote-to-local ssh wrap test failed"
+    fi
+}
+
+test_workers_from_caller_same_remote_machine_bare() {
+    info "Testing /workers?from= uses bare tmux when caller and peer share remote machine..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'kai': {'tmux': '${TEST_TMUX_PREFIX}wkr-kai', 'chat_id': 1},
+    'luck': {'tmux': '${TEST_TMUX_PREFIX}wkr-luck', 'chat_id': 2},
+}
+
+bridge._registry_add('kai', 'claude', 1)
+bridge._registry_add('luck', 'claude', 2)
+# Both on mac-mini
+bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/project')
+bridge._registry_update_teleport('luck', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/other')
+
+workers = bridge.worker_manager.get_workers(caller_from='kai')
+luck = next((w for w in workers if w['name'] == 'luck'), None)
+assert luck is not None, f'luck missing: {[w[\"name\"] for w in workers]}'
+assert 'ssh' not in luck['send_example'], \
+    f'same-machine peers should not have ssh wrap, got: {luck[\"send_example\"]}'
+assert 'paste-buffer -p -r' in luck['send_example'], \
+    f'bare tmux should use paste-buffer: {luck[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers?from= uses bare tmux for same-machine peers"
+    else
+        fail "/workers?from= same-machine bare tmux test failed"
+    fi
+}
+
+test_workers_from_caller_local_to_remote_peer() {
+    info "Testing /workers?from= still ssh-wraps remote peer for bridge-local caller..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'mon': {'tmux': '${TEST_TMUX_PREFIX}wkr-mon', 'chat_id': 1},
+    'kai': {'tmux': '${TEST_TMUX_PREFIX}wkr-kai', 'chat_id': 2},
+}
+
+bridge._registry_add('mon', 'claude', 1)
+bridge._registry_add('kai', 'claude', 2)
+# mon on bridge (None), kai on mac-mini
+bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/project')
+
+workers = bridge.worker_manager.get_workers(caller_from='mon')
+kai = next((w for w in workers if w['name'] == 'kai'), None)
+assert kai is not None
+assert 'ssh beastoin-agents-f1-mac-mini' in kai['send_example'], \
+    f'expected ssh to mac-mini for bridge-local caller to remote peer: {kai[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers?from= ssh-wraps remote peer for bridge-local caller"
+    else
+        fail "/workers?from= local-to-remote test failed"
+    fi
+}
+
+test_workers_no_from_backward_compat() {
+    info "Testing /workers without ?from= preserves bridge-POV send_example..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'mon': {'tmux': '${TEST_TMUX_PREFIX}wkr-mon', 'chat_id': 1},
+    'kai': {'tmux': '${TEST_TMUX_PREFIX}wkr-kai', 'chat_id': 2},
+}
+
+bridge._registry_add('mon', 'claude', 1)
+bridge._registry_add('kai', 'claude', 2)
+bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/project')
+
+# No caller_from → behaves as bridge-POV (existing behavior)
+workers = bridge.worker_manager.get_workers()
+mon = next((w for w in workers if w['name'] == 'mon'), None)
+kai = next((w for w in workers if w['name'] == 'kai'), None)
+assert mon is not None and kai is not None
+assert 'ssh' not in mon['send_example'], \
+    f'no-caller mon should be bare tmux (bridge POV): {mon[\"send_example\"]}'
+assert 'ssh beastoin-agents-f1-mac-mini' in kai['send_example'], \
+    f'no-caller kai should be ssh-wrapped (bridge POV): {kai[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers without ?from= preserves bridge-POV behavior"
+    else
+        fail "/workers backward-compat test failed"
+    fi
+}
+
+test_workers_from_includes_machine_id() {
+    info "Testing /workers?from= includes machine_id field on each worker..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'mon': {'tmux': '${TEST_TMUX_PREFIX}wkr-mon', 'chat_id': 1},
+    'kai': {'tmux': '${TEST_TMUX_PREFIX}wkr-kai', 'chat_id': 2},
+}
+
+bridge._registry_add('mon', 'claude', 1)
+bridge._registry_add('kai', 'claude', 2)
+bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
+                                  home_host=None, home_cwd='/home/claude/project')
+
+workers = bridge.worker_manager.get_workers(caller_from='mon')
+mon = next((w for w in workers if w['name'] == 'mon'), None)
+kai = next((w for w in workers if w['name'] == 'kai'), None)
+assert mon.get('machine') in (None, '', 'bridge'), \
+    f'bridge-local worker should have empty/bridge machine, got: {mon.get(\"machine\")}'
+assert kai.get('machine') == 'beastoin-agents-f1-mac-mini', \
+    f'remote worker should have host as machine, got: {kai.get(\"machine\")}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/workers?from= includes machine field on each worker"
+    else
+        fail "/workers?from= machine field test failed"
+    fi
+}
+
 test_teleport_preflight_uses_public_url() {
     info "Testing teleport preflight uses BRIDGE_PUBLIC_URL when BRIDGE_URL is localhost..."
 
@@ -17935,6 +18167,11 @@ run_unit_tests() {
     run_test test_sync_working_directory_full_flag_uses_rsync
     run_test test_sync_working_directory_git_fail_falls_back
     run_test test_workers_send_example_ssh_for_teleported
+    run_test test_workers_from_caller_remote_to_local_peer
+    run_test test_workers_from_caller_same_remote_machine_bare
+    run_test test_workers_from_caller_local_to_remote_peer
+    run_test test_workers_no_from_backward_compat
+    run_test test_workers_from_includes_machine_id
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url
