@@ -1,0 +1,130 @@
+name: ren
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+  CLAUDE_CONFIG_DIR:
+    source: default
+    default: "$HOME/.claude"
+    required: true
+  BRIDGE_URL:
+    source: flag
+    default: "http://100.125.36.102:8271"
+    required: true
+  HOST:
+    source: default
+    default: "beastoin-agents-f1-mac-mini"
+    required: true
+  TMUX_PREFIX:
+    source: default
+    default: "claude-prod-"
+    required: true
+  SESSIONS_DIR:
+    source: default
+    default: "$HOME/.claude/telegram/nodes/prod/sessions"
+    required: true
+  TZ:
+    source: default
+    default: "UTC"
+    required: true
+  SWIFT_BUILD_DIR:
+    source: default
+    default: "/tmp/swift-build-beastoinagents"
+    required: false
+  ANTHROPIC_API_KEY:
+    source: creds
+    required: true
+dirs:
+  - $CLAUDE_CONFIG_DIR/hooks
+  - $SESSIONS_DIR/ren
+  - $HOME/team/ren
+  - $HOME/team/ren/inbox
+files:
+  - source: knowledge/charter.md
+    dest: $HOME/team/ren/charter.md
+  - source: knowledge/playbook.md
+    dest: $HOME/team/ren/playbook.md
+  - source: knowledge/kanban.md
+    dest: $HOME/team/ren/kanban.md
+  - source: knowledge/current_state.md
+    dest: $HOME/team/ren/current_state.md
+hooks:
+  - event: SessionStart
+    matcher: "compact|resume|init|start"
+    command: $CLAUDE_CONFIG_DIR/hooks/checkin-on-start.sh
+    source: hooks/checkin-on-start.sh
+  - event: Stop
+    command: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+    source: hooks/send-to-telegram.sh
+tools:
+  - name: agent-swift
+    path: /opt/homebrew/bin/agent-swift
+    description: macOS app testing via Accessibility API
+    required: true
+  - name: beast
+    path: $HOME/bin/beast
+    description: CLI for auth-inject, evidence upload, deploy-guide, doctor
+    required: true
+  - name: cliclick
+    path: /opt/homebrew/bin/cliclick
+    description: Coordinate-based mouse/keyboard control
+    required: false
+  - name: peekaboo
+    path: /opt/homebrew/bin/peekaboo
+    description: Window/screen capture tool
+    required: false
+  - name: screencapture-ssh
+    path: /usr/local/bin/screencapture-ssh
+    description: Screenshot workaround for SSH sessions
+    required: false
+  - name: cwebp
+    path: /opt/homebrew/bin/cwebp
+    description: WebP image conversion
+    required: false
+  - name: adb
+    path: /opt/homebrew/bin/adb
+    description: Android device control
+    required: false
+  - name: gh
+    path: $HOME/bin/gh
+    description: GitHub CLI
+    required: true
+  - name: xcrun
+    path: /usr/bin/xcrun
+    description: Xcode toolchain runner (required for Swift builds)
+    required: true
+projects:
+  - name: omi
+    path: $HOME/omi/omi-ren
+    description: AI wearable monorepo (Flutter app + Python backend + Swift desktop + Next.js web)
+  - name: claudecode-telegram
+    path: $HOME/claudecode-telegram
+    description: Telegram bridge for Claude Code agents
+machine:
+  os: macOS
+  arch: arm64
+  hostname: beastoin-agents-f1-mac-mini
+  tailscale_ip: 100.126.187.125
+  connected_devices:
+    - type: android
+      model: Pixel 7a
+      serial: 33041JEHN18287
+      connection: USB
+  ssh_targets:
+    - alias: vps
+      host: 100.125.36.102
+      user: claude
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/
+    expect: exit 0
+    required: true
+  - name: agent-swift-accessible
+    check: agent-swift doctor 2>&1 | grep -q "accessibility.*ok\|passed"
+    expect: exit 0
+    required: false
+  - name: xcode-toolchain
+    check: xcrun --sdk macosx --show-sdk-path
+    expect: exit 0
+    required: true

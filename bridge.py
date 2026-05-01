@@ -26,6 +26,13 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Dict, Optional, Protocol
 
+try:
+    from bridge_grpc import BridgeGRPCServer
+    BRIDGE_GRPC_IMPORT_ERROR = None
+except ImportError as e:
+    BridgeGRPCServer = None
+    BRIDGE_GRPC_IMPORT_ERROR = e
+
 
 # ============================================================
 # CONFIGURATION
@@ -47,6 +54,9 @@ if NODE_NAME and not os.environ.get("PORT"):
 else:
     PORT = int(os.environ.get("PORT", "8270"))
 
+GRPC_PORT = int(os.environ.get("BRIDGE_GRPC_PORT", str(PORT + 1)))
+grpc_server = None  # initialized in main()
+
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
 
@@ -62,23 +72,6 @@ else:
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 
-# MCP tool inventory (system prompt injection)
-MCP_INVENTORY_ENABLED = os.environ.get("MCP_INVENTORY_ENABLED", "1") != "0"
-MCP_CONFIG_PATHS = [
-    Path(p.strip()).expanduser()
-    for p in os.environ.get("MCP_CONFIG_PATHS", "").split(",")
-    if p.strip()
-]
-MCP_PROJECT_FILES = [
-    name.strip()
-    for name in os.environ.get("MCP_PROJECT_FILES", ".mcp.json,.mcp.jsonc").split(",")
-    if name.strip()
-]
-MCP_PROJECT_ROOT = os.environ.get("MCP_PROJECT_ROOT", "").strip()
-MCP_PROJECT_SEARCH_DEPTH = int(os.environ.get("MCP_PROJECT_SEARCH_DEPTH", "6"))
-MCP_INVENTORY_MAX_CHARS = int(os.environ.get("MCP_INVENTORY_MAX_CHARS", "2000"))
-MCP_INVENTORY_INCLUDE_COMMAND = os.environ.get("MCP_INVENTORY_INCLUDE_COMMAND", "0") == "1"
-MCP_INVENTORY_INCLUDE_ENV_KEYS = os.environ.get("MCP_INVENTORY_INCLUDE_ENV_KEYS", "1") != "0"
 
 # BRIDGE_URL: hook callback target. Localhost URLs are always derived from PORT to
 # prevent stale-port inheritance when restarting. Only non-localhost URLs (for
@@ -191,177 +184,10 @@ ALERT_COOLDOWN = 180
 # CORE: Backend Protocol + implementations
 # ============================================================
 
-def _strip_json_comments(text: str) -> str:
-    """Remove // and /* */ comments for jsonc-like files."""
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    text = re.sub(r"(^|\s)//.*$", r"\1", text, flags=re.MULTILINE)
-    return text
-
-
-def _read_json_file(path: Path) -> Optional[dict]:
-    try:
-        raw = path.read_text()
-    except Exception:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            return json.loads(_strip_json_comments(raw))
-        except json.JSONDecodeError:
-            return None
-
-
-def _extract_mcp_servers(config: dict) -> dict:
-    if not isinstance(config, dict):
-        return {}
-
-    candidates = []
-    if isinstance(config.get("mcpServers"), dict):
-        candidates.append(config["mcpServers"])
-    if isinstance(config.get("mcp"), dict):
-        mcp = config["mcp"]
-        if isinstance(mcp.get("servers"), dict):
-            candidates.append(mcp["servers"])
-        if isinstance(mcp.get("mcpServers"), dict):
-            candidates.append(mcp["mcpServers"])
-    if isinstance(config.get("servers"), dict):
-        candidates.append(config["servers"])
-
-    servers = {}
-    for candidate in candidates:
-        for name, data in candidate.items():
-            if isinstance(data, dict):
-                servers[name] = data
-            else:
-                servers[name] = {"_raw": data}
-    return servers
-
-
-def _find_project_mcp_files(start_dir: Path) -> list[Path]:
-    if not start_dir:
-        return []
-    try:
-        current = start_dir.resolve()
-    except Exception:
-        current = start_dir
-
-    found = []
-    depth = max(MCP_PROJECT_SEARCH_DEPTH, 0)
-    for _ in range(depth + 1):
-        for name in MCP_PROJECT_FILES:
-            candidate = current / name
-            if candidate.exists():
-                found.append(candidate)
-        if current.parent == current:
-            break
-        current = current.parent
-    return found
-
-
-def _format_mcp_source(path: Path) -> str:
-    try:
-        if path.resolve() == CLAUDE_SETTINGS_FILE.resolve():
-            return "settings.json"
-    except Exception:
-        pass
-    return path.name
-
-
-def _normalize_server_info(name: str, data: dict, source: str) -> dict:
-    info = {"name": name, "source": source}
-    if isinstance(data, dict):
-        description = data.get("description") or data.get("desc")
-        if isinstance(description, str) and description.strip():
-            info["description"] = description.strip()
-        env = data.get("env") or data.get("environment") or {}
-        if MCP_INVENTORY_INCLUDE_ENV_KEYS and isinstance(env, dict):
-            env_keys = sorted(k for k in env.keys() if isinstance(k, str))
-            if env_keys:
-                info["env_keys"] = env_keys
-        if MCP_INVENTORY_INCLUDE_COMMAND:
-            command = data.get("command")
-            if isinstance(command, str) and command.strip():
-                info["command"] = command.strip()
-    return info
-
-
-def build_mcp_inventory_prompt(cwd: Optional[str] = None) -> str:
-    if not MCP_INVENTORY_ENABLED:
-        return ""
-
-    paths = []
-    if MCP_CONFIG_PATHS:
-        paths.extend(MCP_CONFIG_PATHS)
-    else:
-        paths.append(CLAUDE_SETTINGS_FILE)
-
-    project_root = Path(MCP_PROJECT_ROOT).expanduser() if MCP_PROJECT_ROOT else None
-    if not project_root and cwd:
-        project_root = Path(cwd).expanduser()
-    if project_root:
-        paths.extend(_find_project_mcp_files(project_root))
-
-    # De-dupe while preserving order
-    seen = set()
-    unique_paths = []
-    for path in paths:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_paths.append(path)
-
-    servers = {}
-    for path in unique_paths:
-        if not path.exists():
-            continue
-        config = _read_json_file(path)
-        if not config:
-            continue
-        for name, data in _extract_mcp_servers(config).items():
-            servers[name] = _normalize_server_info(name, data, _format_mcp_source(path))
-
-    if not servers:
-        return ""
-
-    lines = [
-        "MCP tool inventory (auto-loaded at startup).",
-        "Use only tools listed here. If tools change, restart this worker to reload MCP.",
-        "To see exact tool names/params, run `/mcp list` in Claude Code.",
-        "Servers:",
-    ]
-    for name in sorted(servers.keys()):
-        info = servers[name]
-        line = f"- {name} (source: {info.get('source', 'unknown')})"
-        description = info.get("description")
-        if description:
-            line += f" — {description}"
-        env_keys = info.get("env_keys") if MCP_INVENTORY_INCLUDE_ENV_KEYS else None
-        if env_keys:
-            line += f" [env: {', '.join(env_keys)}]"
-        command = info.get("command") if MCP_INVENTORY_INCLUDE_COMMAND else None
-        if command:
-            line += f" [cmd: {command}]"
-        lines.append(line)
-
-    prompt = "\n".join(lines)
-    if len(prompt) <= MCP_INVENTORY_MAX_CHARS:
-        return prompt
-
-    short_lines = lines[:4] + [f"- {name}" for name in sorted(servers.keys())]
-    prompt = "\n".join(short_lines)
-    if len(prompt) > MCP_INVENTORY_MAX_CHARS:
-        prompt = prompt[: max(MCP_INVENTORY_MAX_CHARS - 3, 0)] + "..."
-    return prompt
-
-
-def build_claude_start_cmd(resume_id: str = "", append_system_prompt: str = "") -> str:
+def build_claude_start_cmd(resume_id: str = "") -> str:
     cmd = ["claude"]
     if resume_id:
         cmd.extend(["--resume", resume_id])
-    if append_system_prompt:
-        cmd.extend(["--append-system-prompt", append_system_prompt])
     cmd.append("--dangerously-skip-permissions")
     return " ".join(shlex.quote(part) for part in cmd)
 
@@ -372,7 +198,7 @@ class Backend(Protocol):
     binary: str  # CLI binary name (e.g. "claude", "codex")
     is_interactive: bool
 
-    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         """Return the shell command to start this CLI in tmux."""
         ...
 
@@ -988,8 +814,8 @@ class ClaudeBackend:
     binary = "claude"
     is_interactive = True
 
-    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
-        return build_claude_start_cmd(resume_id, append_system_prompt)
+    def start_cmd(self, resume_id: str = "") -> str:
+        return build_claude_start_cmd(resume_id)
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
@@ -1012,7 +838,7 @@ class CodexBackend:
     binary = "codex"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -1030,7 +856,7 @@ class GeminiBackend:
     binary = "gemini"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Gemini worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -1048,7 +874,7 @@ class OpenCodeBackend:
     binary = "opencode"
     is_interactive = False
 
-    def start_cmd(self, resume_id: str = "", append_system_prompt: str = "") -> str:
+    def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'OpenCode worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
@@ -1777,7 +1603,7 @@ def get_workers(caller_from: str = None):
     is rendered from that caller's machine perspective.
     """
     _sync_worker_manager()
-    return worker_manager.get_workers(caller_from=caller_from)
+    return _merge_grpc_workers(worker_manager.get_workers(caller_from=caller_from))
 
 
 def download_telegram_file(file_id, session_name):
@@ -4704,6 +4530,21 @@ def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
     return DEFAULT_BACKEND
 
 
+def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") -> bool:
+    if grpc_server is None:
+        return False
+
+    try:
+        if not grpc_server.is_worker_connected(name):
+            return False
+        if grpc_server.send_to_worker(name, message, from_name):
+            return True
+        print(f"gRPC send failed for '{name}', falling back to tmux backend")
+    except Exception as e:
+        print(f"gRPC send error for '{name}', falling back to tmux backend: {e}")
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CORE: WorkerManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4846,6 +4687,8 @@ class WorkerManager:
     def send(self, name: str, message: str, chat_id: int = None, session: dict = None) -> bool:
         """Send message to worker using backend registry."""
         self._sync_paths()
+        if _send_to_grpc_worker(name, message, "manager"):
+            return True
         if not session:
             sessions = self.get_registered_sessions()
             session = sessions.get(name)
@@ -5055,18 +4898,14 @@ class WorkerManager:
             backend_file = self.sessions_dir / name / "backend"
             backend_file.write_text(backend)
 
-        append_prompt = ""
-        if backend_obj.name == "claude":
-            append_prompt = build_mcp_inventory_prompt(pane_cwd)
-
         if SANDBOX_ENABLED and backend_obj.is_interactive:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name, append_system_prompt=append_prompt)
+            docker_cmd = get_docker_run_cmd(name)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
             print(f"Started worker '{name}' in sandbox mode")
         else:
-            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd(append_system_prompt=append_prompt)}'
+            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
@@ -5219,20 +5058,15 @@ class WorkerManager:
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
         time.sleep(0.3)
 
-        append_prompt = ""
-        if backend.name == "claude":
-            inventory_cwd = startup_cwd or get_claude_session_cwd(name)
-            append_prompt = build_mcp_inventory_prompt(inventory_cwd)
-
         if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
             time.sleep(0.5)
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
+            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
-            start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
+            start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
@@ -5292,18 +5126,13 @@ class WorkerManager:
         if startup_cwd:
             save_claude_session_cwd(name, startup_cwd)
 
-        append_prompt = ""
-        if backend.name == "claude":
-            inventory_cwd = startup_cwd or get_claude_session_cwd(name)
-            append_prompt = build_mcp_inventory_prompt(inventory_cwd)
-
         if SANDBOX_ENABLED and backend.is_interactive:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id, append_system_prompt=append_prompt)
+            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
         else:
-            start_cmd = backend.start_cmd(resume_id, append_system_prompt=append_prompt)
+            start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
@@ -5449,7 +5278,7 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host)
 
 
-def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""):
+def get_docker_run_cmd(name, resume_id: str = ""):
     """Build docker run command for sandbox mode.
 
     Default: mounts ~ to /workspace (rw)
@@ -5515,7 +5344,7 @@ def get_docker_run_cmd(name, resume_id: str = "", append_system_prompt: str = ""
     cmd_parts.append(SANDBOX_IMAGE)
 
     # Run claude with --dangerously-skip-permissions (same as non-sandbox)
-    cmd_parts.append(build_claude_start_cmd(resume_id, append_system_prompt))
+    cmd_parts.append(build_claude_start_cmd(resume_id))
 
     return " ".join(cmd_parts)
 
@@ -5529,6 +5358,8 @@ def stop_docker_container(name):
 
 def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bool:
     """Send a message to a worker using the appropriate backend."""
+    if _send_to_grpc_worker(name, message, "manager"):
+        return True
     _sync_worker_manager()
     return worker_manager.send(name, message, chat_id)
 
@@ -5724,7 +5555,92 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         threading.Thread(target=_tts_and_send, daemon=True).start()
 
 
- 
+def handle_grpc_worker_response(name: str, text: str, payload: bytes = b""):
+    """Route a gRPC worker response through the same Telegram path as hooks."""
+    try:
+        if not name or not text:
+            print(f"gRPC response ignored: missing worker name or text")
+            return
+
+        chat_id_file = get_chat_id_file(name)
+        if not chat_id_file.exists():
+            print(f"gRPC response: no chat_id for session '{name}'")
+            return
+
+        chat_id = chat_id_file.read_text().strip()
+        print(f"gRPC response: {name} -> chat {chat_id} ({len(text)} chars)")
+
+        if payload:
+            try:
+                data = json.loads(payload.decode("utf-8"))
+                session_id = data.get("session_id", "")
+                if session_id:
+                    sid_file = ensure_session_dir(name) / "claude_session_id"
+                    old_sid = sid_file.read_text().strip() if sid_file.exists() else ""
+                    if old_sid != session_id:
+                        sid_file.write_text(session_id)
+                        sid_file.chmod(0o600)
+            except Exception as e:
+                print(f"gRPC response payload ignored for '{name}': {e}")
+
+        send_response_to_telegram(name, text, int(chat_id), log_prefix="gRPC response")
+        clear_pending(name)
+        mark_hook_event(name)
+    except Exception as e:
+        print(f"gRPC response error for '{name}': {e}")
+
+
+def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict):
+    tool_names = ", ".join(sorted(tools.keys())) if tools else "none"
+    host_label = host or "unknown-host"
+    version_label = version or "unknown-version"
+    print(f"gRPC worker registered: {name} ({host_label}, {version_label}, tools: {tool_names})")
+
+
+def handle_grpc_worker_disconnect(name: str):
+    print(f"gRPC worker disconnected: {name}")
+
+
+def handle_grpc_jsonl_received(stream_id: str, data: bytes):
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", stream_id or "stream")
+    jsonl_dir = SESSIONS_DIR / "grpc-jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    jsonl_dir.chmod(0o700)
+    path = jsonl_dir / f"{safe_id}.jsonl"
+    path.write_bytes(data)
+    path.chmod(0o600)
+    print(f"gRPC JSONL received: {stream_id or safe_id} -> {path} ({len(data)} bytes)")
+
+
+def _merge_grpc_workers(workers: list) -> list:
+    """Include connected gRPC workers in /workers without changing tmux entries."""
+    if grpc_server is None:
+        return workers
+
+    try:
+        connected = grpc_server.get_connected_workers()
+    except Exception as e:
+        print(f"gRPC worker list unavailable: {e}")
+        return workers
+
+    existing = {worker.get("name") for worker in workers}
+    for worker in workers:
+        if worker.get("name") in connected:
+            worker["grpc_connected"] = True
+
+    for name in connected:
+        if name in existing:
+            continue
+        workers.append({
+            "name": name,
+            "machine": "",
+            "protocol": "grpc",
+            "address": f"{BRIDGE_BIND}:{GRPC_PORT}",
+            "grpc_connected": True,
+            "note": "Connected over gRPC MessageStream. Manager messages route through the gRPC stream.",
+        })
+
+    return workers
 
 
 def create_session(name, backend: str = DEFAULT_BACKEND, chat_id: int = None):
@@ -6298,12 +6214,12 @@ class CommandRouter:
         try:
             r = subprocess.run(
                 [sys.executable, str(script_path), arg, "--no-serve"],
-                capture_output=True, text=True, timeout=120)
+                capture_output=True, text=True, timeout=300)
             if r.returncode != 0 or not os.path.exists(out_path):
                 self.reply(chat_id, f"Failed to generate PR review:\n{r.stderr[:500]}", outcome="Needs decision")
                 return True
         except subprocess.TimeoutExpired:
-            self.reply(chat_id, "PR review generation timed out (>120s).", outcome="Needs decision")
+            self.reply(chat_id, "PR review generation timed out (>300s).", outcome="Needs decision")
             return True
 
         # Generate token and serve via existing transcript-like endpoint
@@ -6949,7 +6865,7 @@ class CommandRouter:
         return True
 
     def _run_restart_all_sequence(self, chat_id, names, mode):
-        delay_s = 2.5
+        delay_s = 7
         failed = []
         try:
             total = len(names)
@@ -8350,6 +8266,8 @@ def _run_transcript_query(jsonl_path, sid, query, host=None, **kwargs):
         cmd.extend(["--search", kwargs["search"]])
     if kwargs.get("filter_mode"):
         cmd.extend(["--filter", kwargs["filter_mode"]])
+    if kwargs.get("sort") and kwargs["sort"] != "relevance":
+        cmd.extend(["--sort", kwargs["sort"]])
     try:
         if host:
             # For remote workers, use the script on the remote host
@@ -9305,7 +9223,7 @@ if (location.hash) {{
 def _render_transcript_html(name: str, session_id: str = None,
                             page: int = None, per_page: int = 50,
                             search_query: str = "", token: str = "",
-                            filter_mode: str = "") -> str:
+                            filter_mode: str = "", search_sort: str = "relevance") -> str:
     """Render a worker's transcript as polished HTML (ampcode.com style).
 
     Supports pagination (?page=N&per_page=50) and search (?q=term).
@@ -9345,7 +9263,7 @@ def _render_transcript_html(name: str, session_id: str = None,
     if search_query:
         query_result = _run_transcript_query(
             jsonl_path, sid, "search+stats", host=host,
-            search=search_query, page=page or 1, per_page=per_page)
+            search=search_query, page=page or 1, per_page=per_page, sort=search_sort)
     else:
         query_result = _run_transcript_query(
             jsonl_path, sid, "entries+stats", host=host,
@@ -9460,10 +9378,17 @@ def _render_transcript_html(name: str, session_id: str = None,
         curl = _ctx_url(entry)
         is_assistant = (etype == "assistant" and role == "assistant")
         if is_assistant:
-            if not in_assistant_turn:
-                blocks.append(f'<div class="turn-body"{anchor}>')
-                in_assistant_turn = True
-            blocks.append(h)
+            if curl:
+                if in_assistant_turn:
+                    blocks.append('</div>')
+                    in_assistant_turn = False
+                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
+                blocks.append(h)
+            else:
+                if not in_assistant_turn:
+                    blocks.append(f'<div class="turn-body"{anchor}>')
+                    in_assistant_turn = True
+                blocks.append(h)
         else:
             if in_assistant_turn:
                 blocks.append('</div>')
@@ -9516,7 +9441,23 @@ def _render_transcript_html(name: str, session_id: str = None,
     search_val = esc(search_query) if search_query else ""
     search_result = ""
     if search_query:
-        search_result = f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" (ranked by relevance)</div>'
+        sort_label = "by time" if search_sort == "time" else "by relevance"
+        alt_sort = "time" if search_sort == "relevance" else "relevance"
+        alt_label = "time" if search_sort == "relevance" else "relevance"
+        sort_qs = []
+        if token:
+            sort_qs.append(f"token={esc(token)}")
+        if session_id:
+            sort_qs.append(f"sid={esc(session_id)}")
+        sort_qs.append(f"q={esc(search_query)}")
+        if per_page != 50:
+            sort_qs.append(f"per_page={per_page}")
+        sort_qs.append(f"sort={alt_sort}")
+        sort_url = f'?{"&".join(sort_qs)}'
+        search_result = (
+            f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" '
+            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>'
+        )
 
     # Build prompts filter URL (toggle on/off)
     _filt_qs = []
@@ -9944,6 +9885,22 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_notify(body)
             return
 
+        # PR comment endpoint
+        if self.path == "/pr-comment":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_pr_comment(body)
+            return
+
+        if self.path == "/pr-general-comment":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_pr_general_comment(body)
+            return
+
+        if self.path == "/pr-merge":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_pr_merge(body)
+            return
+
         # Only accept Telegram webhook on root path — 404 for unknown POST paths
         parsed = urlparse(self.path)
         if parsed.path != "/":
@@ -10111,6 +10068,15 @@ class Handler(BaseHTTPRequestHandler):
         # Handle /team-chat endpoint
         if parsed.path.startswith("/team-chat"):
             self.handle_team_chat_endpoint(parsed)
+            return
+
+        # Handle /pr-file-content (lazy fetch for expand context)
+        if parsed.path == "/pr-file-content":
+            self.handle_pr_file_content(parsed)
+            return
+
+        if parsed.path == "/pr-keepalive":
+            self.handle_pr_keepalive(parsed)
             return
 
         # Handle /pr-review/<pr_num> endpoint
@@ -10347,6 +10313,209 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
+    def handle_pr_file_content(self, parsed):
+        """Fetch file content from GitHub for diff context expansion."""
+        import time as _time
+        import base64 as _b64
+        params = dict(parse_qs(parsed.query))
+        token = params.get("token", [None])[0]
+
+        now = _time.time()
+        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+
+        owner = params.get("owner", [None])[0]
+        repo = params.get("repo", [None])[0]
+        path = params.get("path", [None])[0]
+        ref = params.get("ref", [None])[0]
+
+        if not all([owner, repo, path, ref]):
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        try:
+            r = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/contents/{path}?ref={ref}",
+                 "--jq", ".content"],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                self.send_response(404)
+                self.end_headers()
+                return
+            raw = _b64.b64decode(r.stdout.strip()).decode('utf-8', errors='replace')
+            lines = raw.splitlines()
+            body = json.dumps(lines, ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except subprocess.TimeoutExpired:
+            self.send_response(504)
+            self.end_headers()
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
+
+    def handle_pr_keepalive(self, parsed):
+        """Extend PR review token expiry on client activity."""
+        import time as _time
+        params = dict(parse_qs(parsed.query))
+        token = params.get("token", [None])[0]
+        now = _time.time()
+        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
+            self.send_response(403)
+            self.end_headers()
+            return
+        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        self.send_response(204)
+        self.end_headers()
+
+    def handle_pr_general_comment(self, body: bytes):
+        """Post a general (non-inline) comment on a PR via GitHub API."""
+        import time as _time
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Invalid JSON")
+            return
+
+        token = data.get("token", "")
+        now = _time.time()
+        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired")
+            return
+        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+
+        owner = data.get("owner", "")
+        repo = data.get("repo", "")
+        pr_num = data.get("pr_num", 0)
+        comment_body = data.get("body", "").strip()
+        if not all([owner, repo, pr_num, comment_body]):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing required fields")
+            return
+
+        try:
+            r = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/issues/{pr_num}/comments",
+                 "--method", "POST", "-f", f"body={comment_body}"],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(f"GitHub API error: {r.stderr[:200]}".encode())
+                return
+        except subprocess.TimeoutExpired:
+            self.send_response(504)
+            self.end_headers()
+            self.wfile.write(b"GitHub API timeout")
+            return
+
+        # Notify Telegram
+        try:
+            notify_text = f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}"
+            import urllib.request
+            req = urllib.request.Request(
+                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
+                data=json.dumps({"text": notify_text}).encode(),
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+        # Route to workers via @mentions
+        targets, _ = command_router.parse_at_mentions(comment_body)
+        if targets:
+            worker_msg = (
+                f"manager: PR #{pr_num} review comment\n\n"
+                f"{comment_body}"
+            )
+            for t in targets:
+                send_to_worker(t, worker_msg)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok": true}')
+
+    def handle_pr_merge(self, body: bytes):
+        """Merge a PR via GitHub API."""
+        import time as _time
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Invalid JSON")
+            return
+
+        token = data.get("token", "")
+        now = _time.time()
+        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired")
+            return
+        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+
+        owner = data.get("owner", "")
+        repo = data.get("repo", "")
+        pr_num = data.get("pr_num", 0)
+        merge_method = data.get("merge_method", "merge")
+        if merge_method not in ("merge", "squash", "rebase"):
+            merge_method = "merge"
+
+        if not all([owner, repo, pr_num]):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing required fields")
+            return
+
+        try:
+            r = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}/merge",
+                 "--method", "PUT", "-f", f"merge_method={merge_method}"],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                err = r.stderr.strip()[:300] or r.stdout.strip()[:300]
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(f"Merge failed: {err}".encode())
+                return
+        except subprocess.TimeoutExpired:
+            self.send_response(504)
+            self.end_headers()
+            self.wfile.write(b"Merge API timeout")
+            return
+
+        # Notify Telegram
+        try:
+            notify_text = f"\u2705 PR #{pr_num} merged ({merge_method}) via review page"
+            import urllib.request
+            req = urllib.request.Request(
+                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
+                data=json.dumps({"text": notify_text}).encode(),
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok": true}')
+
     def handle_pr_review_endpoint(self, parsed):
         """Serve generated PR review HTML.
 
@@ -10386,6 +10555,96 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(html_path, "rb") as f:
             self.wfile.write(f.read())
+
+    def handle_pr_comment(self, body: bytes):
+        """Post an inline comment on a PR via GitHub API + notify Telegram."""
+        import time as _time
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Invalid JSON")
+            return
+
+        token = data.get("token", "")
+        now = _time.time()
+        expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
+        for k in expired:
+            del PR_REVIEW_TOKENS[k]
+        if not token or token not in PR_REVIEW_TOKENS:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired - reload the PR review page")
+            return
+
+        # Extend token expiry on use
+        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+
+        owner = data.get("owner", "")
+        repo = data.get("repo", "")
+        pr_num = data.get("pr_num", 0)
+        path = data.get("path", "")
+        line = data.get("line", 0)
+        side = data.get("side", "RIGHT")
+        comment_body = data.get("body", "").strip()
+        head_sha = data.get("head_sha", "")
+
+        if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing required fields")
+            return
+
+        # Post to GitHub via gh api
+        try:
+            gh_payload = json.dumps({
+                "body": comment_body,
+                "commit_id": head_sha,
+                "path": path,
+                "line": line,
+                "side": side,
+            })
+            r = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
+                 "--method", "POST", "--input", "-"],
+                input=gh_payload, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                err = r.stderr.strip() or r.stdout.strip()
+                print(f"[pr-comment] GitHub API error: {err}")
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(f"GitHub API error: {err}".encode())
+                return
+        except subprocess.TimeoutExpired:
+            self.send_response(504)
+            self.end_headers()
+            self.wfile.write(b"GitHub API timeout")
+            return
+
+        # Send to Telegram as manager notification
+        if admin_chat_id:
+            tg_text = (
+                f"\U0001f4ac PR #{pr_num} comment\n"
+                f"{path}:{line}\n\n"
+                f"{comment_body}"
+            )
+            telegram.send_message(admin_chat_id, tg_text)
+
+        # Route to workers via @mentions (same rule as Telegram messages)
+        targets, _ = command_router.parse_at_mentions(comment_body)
+        if targets:
+            worker_msg = (
+                f"manager: PR #{pr_num} review comment on {path}:{line}\n\n"
+                f"{comment_body}"
+            )
+            for t in targets:
+                send_to_worker(t, worker_msg)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ok": True}).encode())
 
     def handle_transcript_endpoint(self, parsed):
         """Serve polished HTML transcript for a worker.
@@ -10450,6 +10709,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             except (ValueError, TypeError):
                 per_page = 50
             search_query = qs.get("q", [""])[0].strip()
+            search_sort = qs.get("sort", ["relevance"])[0].strip()
+            if search_sort not in ("relevance", "time"):
+                search_sort = "relevance"
             filter_mode = qs.get("filter", [""])[0].strip()
             # Remote workers use SSH via transcript-index.py — skip rsync loading page
             host = get_worker_host(name)
@@ -10469,7 +10731,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             html_content = _render_transcript_html(
                     name, session_id=session_id,
                     page=page, per_page=per_page, search_query=search_query,
-                    token=token or "", filter_mode=filter_mode)
+                    token=token or "", filter_mode=filter_mode, search_sort=search_sort)
             body = html_content.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -10646,12 +10908,19 @@ def graceful_shutdown(signum, frame):
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
 
+    if grpc_server is not None:
+        try:
+            grpc_server.stop()
+            print("gRPC server stopped")
+        except Exception as e:
+            print(f"gRPC server stop failed: {e}")
+
     send_shutdown_message()
     sys.exit(0)
 
 
 def main():
-    global admin_chat_id
+    global admin_chat_id, grpc_server
 
     if not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
@@ -10764,6 +11033,22 @@ def main():
 
     watchdog = threading.Thread(target=watchdog_loop, daemon=True)
     watchdog.start()
+
+    if BridgeGRPCServer is not None:
+        try:
+            grpc_server = BridgeGRPCServer(
+                on_worker_response=handle_grpc_worker_response,
+                on_worker_register=handle_grpc_worker_register,
+                on_worker_disconnect=handle_grpc_worker_disconnect,
+                on_jsonl_received=handle_grpc_jsonl_received,
+            )
+            grpc_server.start(GRPC_PORT)
+            print(f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
+        except Exception as e:
+            grpc_server = None
+            print(f"gRPC server disabled: {e}")
+    elif BRIDGE_GRPC_IMPORT_ERROR is not None:
+        print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
 
     try:
         ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()

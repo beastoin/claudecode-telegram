@@ -1733,7 +1733,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
          patch('pathlib.Path.home', return_value=Path(tmpdir)):
         html = bridge._render_transcript_html('testworker', page=1, search_query='teleport')
 
-    assert 'ranked by relevance' in html, 'Missing relevance info'
+    assert 'sorted by relevance' in html, 'Missing relevance info'
     assert 'Found 2 matching' in html, f'Expected 2 results'
     # The entry with 3x teleport should rank higher (appear first)
     pos_3x = html.find('teleport teleport teleport')
@@ -1744,6 +1744,105 @@ with tempfile.TemporaryDirectory() as tmpdir:
         success "BM25 search ranks by relevance"
     else
         fail "BM25 search test failed"
+    fi
+}
+
+test_transcript_search_assistant_ctx_link() {
+    info "Testing search results have context links on assistant entries..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'tell me about deployments'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'ctx-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Here is the deployment status for your cluster'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'what about the database?'}, 'timestamp': '2026-04-05T10:00:02Z', 'sessionId': 'ctx-sid'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'The database deployment is running normally'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:03Z'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'ctx-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='ctx-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        html = bridge._render_transcript_html('testworker', page=1, search_query='deployment')
+
+    # Both assistant entries mention deployment — they should have ctx-wrap links
+    assert 'ctx-wrap' in html, 'Missing ctx-wrap links in search results'
+    # Assistant entries have class 'a-text' — verify they are inside ctx-wrap anchors
+    import re
+    # ctx-wrap links that contain assistant content (a-text divs)
+    assistant_ctx = re.findall(r'<a class=\"ctx-wrap\"[^>]*>.*?class=\"a-text', html, re.DOTALL)
+    assert len(assistant_ctx) >= 1, f'Expected assistant entries wrapped in ctx-wrap, got {len(assistant_ctx)}: search should make assistant results clickable'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Search results have context links on assistant entries"
+    else
+        fail "Search results missing context links on assistant entries"
+    fi
+}
+
+test_transcript_search_sort_toggle() {
+    info "Testing search results support sort by time vs relevance..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch
+from pathlib import Path
+import bridge
+
+entries = [
+    {'type': 'user', 'message': {'role': 'user', 'content': 'first deploy question'}, 'timestamp': '2026-04-05T10:00:00Z', 'sessionId': 'sort-sid', 'version': '2.1.85'},
+    {'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'deploy info here'}], 'model': 'claude-opus-4-6'}, 'timestamp': '2026-04-05T10:00:01Z'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'general conversation no match'}, 'timestamp': '2026-04-05T10:00:02Z', 'sessionId': 'sort-sid'},
+    {'type': 'user', 'message': {'role': 'user', 'content': 'deploy deploy deploy many mentions'}, 'timestamp': '2026-04-05T10:00:03Z', 'sessionId': 'sort-sid'},
+]
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    slug = bridge._project_slug('/tmp/testcwd')
+    project_dir = Path(tmpdir) / '.claude' / 'projects' / slug
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / 'sort-sid.jsonl'
+    with open(transcript, 'w') as f:
+        for e in entries:
+            f.write(json.dumps(e) + '\n')
+
+    with patch.object(bridge, 'get_claude_session_cwd', return_value='/tmp/testcwd'), \
+         patch.object(bridge, 'get_claude_session_id', return_value='sort-sid'), \
+         patch('pathlib.Path.home', return_value=Path(tmpdir)):
+        # Default (relevance): high-TF entry should come first
+        html_rel = bridge._render_transcript_html('testworker', page=1, search_query='deploy', search_sort='relevance')
+        # Time sort: entries in chronological order
+        html_time = bridge._render_transcript_html('testworker', page=1, search_query='deploy', search_sort='time')
+
+    # Relevance: 'deploy deploy deploy' (idx 3, more TF) before 'first deploy' (idx 0)
+    pos_many_rel = html_rel.find('deploy deploy deploy')
+    pos_first_rel = html_rel.find('first deploy')
+    assert pos_many_rel < pos_first_rel, f'Relevance sort should put high-TF first: {pos_many_rel} vs {pos_first_rel}'
+
+    # Time: 'first deploy' (idx 0) before 'deploy deploy deploy' (idx 3)
+    pos_first_time = html_time.find('first deploy')
+    pos_many_time = html_time.find('deploy deploy deploy')
+    assert pos_first_time < pos_many_time, f'Time sort should put earlier entry first: {pos_first_time} vs {pos_many_time}'
+
+    # Both HTML pages should have sort toggle links
+    assert 'sort=time' in html_rel, 'Relevance page should have link to switch to time sort'
+    assert 'sort=relevance' in html_time, 'Time page should have link to switch to relevance sort'
+    print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Search results support sort by time vs relevance"
+    else
+        fail "Search sort toggle test failed"
     fi
 }
 
@@ -4543,62 +4642,29 @@ print('OK')
     fi
 }
 
-test_mcp_inventory_prompt() {
-    info "Testing MCP inventory prompt generation..."
+test_claude_start_cmd() {
+    info "Testing claude start command generation..."
 
     if python3 - <<'PY' 2>/dev/null | grep -q "OK"; then
-import os
-import json
-import tempfile
-from pathlib import Path
-
-tmp = Path(tempfile.mkdtemp())
-settings = tmp / "settings.json"
-project = tmp / "repo"
-project.mkdir()
-project_file = project / ".mcp.json"
-
-settings.write_text(json.dumps({
-    "mcpServers": {
-        "mixpanel": {
-            "command": "mixpanel-mcp",
-            "env": {"MIXPANEL_TOKEN": "secret-token"}
-        }
-    }
-}))
-project_file.write_text(json.dumps({
-    "servers": {
-        "figma": {
-            "command": "figma-mcp",
-            "description": "Figma tools"
-        }
-    }
-}))
-
-os.environ["CLAUDE_SETTINGS_FILE"] = str(settings)
-os.environ["MCP_PROJECT_ROOT"] = str(project)
-os.environ["MCP_PROJECT_FILES"] = ".mcp.json"
-os.environ["MCP_PROJECT_SEARCH_DEPTH"] = "1"
-os.environ["MCP_INVENTORY_ENABLED"] = "1"
-os.environ["MCP_INVENTORY_MAX_CHARS"] = "4000"
-
+import os, sys
+sys.path.insert(0, os.environ.get("BRIDGE_DIR", "."))
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "fake")
 import bridge
 
-prompt = bridge.build_mcp_inventory_prompt(str(project))
-assert "mixpanel" in prompt, f"expected mixpanel in prompt: {prompt}"
-assert "figma" in prompt, f"expected figma in prompt: {prompt}"
-assert "secret-token" not in prompt, "secret should not be in prompt"
-
-cmd = bridge.build_claude_start_cmd("abc123", "tool inventory")
-assert "--append-system-prompt" in cmd, f"append flag missing: {cmd}"
+cmd = bridge.build_claude_start_cmd("abc123")
 assert "--resume" in cmd, f"resume flag missing: {cmd}"
 assert "--dangerously-skip-permissions" in cmd, f"danger flag missing: {cmd}"
+assert "--append-system-prompt" not in cmd, f"append flag should be removed: {cmd}"
+
+cmd2 = bridge.build_claude_start_cmd()
+assert "--resume" not in cmd2, f"resume should not be present: {cmd2}"
+assert "--dangerously-skip-permissions" in cmd2, f"danger flag missing: {cmd2}"
 
 print("OK")
 PY
-        success "MCP inventory prompt generation works"
+        success "Claude start command generation works"
     else
-        fail "MCP inventory prompt test failed"
+        fail "Claude start command test failed"
     fi
 }
 
@@ -4993,7 +5059,7 @@ router = bridge.CommandRouter(tg, bridge.worker_manager)
 router.cmd_restart(123, 'all')
 
 # Wait for background thread to finish
-router._restart_all_thread.join(timeout=20)
+router._restart_all_thread.join(timeout=30)
 
 # Should restart all 3 workers
 assert len(restart_log) == 3, f'expected 3 restarts, got {len(restart_log)}: {restart_log}'
@@ -5098,8 +5164,8 @@ tg = FakeTelegram()
 router = bridge.CommandRouter(tg, bridge.worker_manager)
 router.cmd_restart(123, 'all')
 
-# Wait for completion
-for _ in range(100):
+# Wait for completion (7s delay between workers = ~21s for 3 workers)
+for _ in range(300):
     with router._restart_all_lock:
         if not router._restart_all_running:
             break
@@ -18054,7 +18120,7 @@ run_unit_tests() {
     run_test test_hire_backend_parsing
     run_test test_hire_binary_check
     run_test test_relaunch_binary_check
-    run_test test_mcp_inventory_prompt
+    run_test test_claude_start_cmd
     run_test test_team_output_includes_backend
     run_test test_progress_output_includes_backend
     run_test test_worker_send_uses_backend
@@ -18348,6 +18414,8 @@ run_unit_tests() {
     run_test test_transcript_with_tool_calls
     run_test test_transcript_default_last_page
     run_test test_transcript_bm25_search
+    run_test test_transcript_search_assistant_ctx_link
+    run_test test_transcript_search_sort_toggle
     run_test test_transcript_unicode
     run_test test_transcript_edit_diff_rendering
     run_test test_transcript_turn_grouping

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged files for leaked secrets using trufflehog.
+# Install: git config core.hooksPath git-hooks
+set -euo pipefail
+
+TRUFFLEHOG="${TRUFFLEHOG:-$HOME/bin/trufflehog}"
+if ! command -v "$TRUFFLEHOG" &>/dev/null; then
+  echo "[pre-commit] trufflehog not found at $TRUFFLEHOG — skipping secret scan"
+  exit 0
+fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+while IFS= read -r file; do
+  mkdir -p "$tmpdir/$(dirname "$file")"
+  git show ":$file" > "$tmpdir/$file" 2>/dev/null || true
+done <<< "$staged"
+
+exclude_file="$(git rev-parse --show-toplevel)/.trufflehogignore"
+exclude_flag=""
+if [ -f "$exclude_file" ]; then
+  exclude_flag="--exclude-paths=$exclude_file"
+fi
+
+output=$("$TRUFFLEHOG" filesystem "$tmpdir" \
+  --no-update \
+  --no-verification \
+  --fail \
+  --exclude-detectors Box \
+  $exclude_flag \
+  -j 2>/dev/null) || exit_code=$?
+
+if [ "${exit_code:-0}" -eq 183 ]; then
+  echo ""
+  echo "========================================"
+  echo "  SECRET DETECTED — commit blocked"
+  echo "========================================"
+  echo ""
+  echo "$output" | while IFS= read -r line; do
+    detector=$(echo "$line" | grep -o '"DetectorName":"[^"]*"' | cut -d'"' -f4)
+    file=$(echo "$line" | grep -o '"file":"[^"]*"' | cut -d'"' -f4 | sed "s|$tmpdir/||")
+    [ -n "$detector" ] && echo "  $detector  →  $file"
+  done
+  echo ""
+  echo "Fix: remove the secret, use env vars, or add to .gitignore"
+  echo "Bypass (emergency only): git commit --no-verify"
+  echo ""
+  exit 1
+fi

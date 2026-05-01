@@ -1,0 +1,113 @@
+syntax = "proto3";
+package workerforge;
+option go_package = "github.com/beastoin/claudecode-telegram/forge/proto/workerforge";
+
+service Bridge {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc MessageStream(stream WorkerMessage) returns (stream BridgeMessage);
+  rpc StreamJSONL(stream JSONLChunk) returns (StreamAck);
+  rpc PullKnowledge(KnowledgeRequest) returns (stream KnowledgeChunk);
+  rpc CheckUpgrade(UpgradeCheckRequest) returns (UpgradeCheckResponse);
+  rpc DownloadBinary(DownloadRequest) returns (stream BinaryChunk);
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message RegisterRequest {
+  string name = 1;
+  string host = 2;
+  string version = 3;
+  map<string, string> tools = 4;
+}
+
+message RegisterResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message HeartbeatRequest {
+  string name = 1;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+message DeregisterRequest {
+  string name = 1;
+}
+
+message DeregisterResponse {
+  bool ok = 1;
+}
+
+message BridgeMessage {
+  string type = 1;
+  string text = 2;
+  string from = 3;
+  bytes payload = 4;
+}
+
+message WorkerMessage {
+  string type = 1;
+  string text = 2;
+  bytes payload = 3;
+}
+
+message JSONLChunk {
+  string stream_id = 1;
+  bytes data = 2;
+  bool final = 3;
+}
+
+message StreamAck {
+  bool ok = 1;
+  int64 bytes_received = 2;
+}
+
+message KnowledgeRequest {
+  string name = 1;
+  string type = 2;
+}
+
+message KnowledgeChunk {
+  bytes data = 1;
+  bool final = 2;
+}
+
+message UpgradeCheckRequest {
+  string name = 1;
+  string current_version = 2;
+}
+
+message UpgradeCheckResponse {
+  bool available = 1;
+  string version = 2;
+  string checksum = 3;
+  int64 size = 4;
+}
+
+message DownloadRequest {
+  string name = 1;
+  string version = 2;
+  string target = 3;
+}
+
+message BinaryChunk {
+  bytes data = 1;
+  bool final = 2;
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}

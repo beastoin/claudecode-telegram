@@ -1,0 +1,286 @@
+name: mon
+version: 2.0.0
+
+vars:
+  HOME:
+    source: env
+    required: true
+    description: "home directory"
+  CLAUDE_CONFIG_DIR:
+    source: default
+    default: "$HOME/.claude"
+    required: true
+    description: "claude code config root"
+  CLAUDE_PROJECTS_DIR:
+    source: default
+    default: "$HOME/.claude/projects"
+    required: true
+    description: "claude project-scoped config"
+  CLAUDE_PROJECT_SLUG:
+    source: default
+    default: "-home-claude-ops"
+    required: true
+    description: "project slug for ~/ops working directory"
+  BRIDGE_URL:
+    source: flag
+    default: "http://100.125.36.102:8271"
+    required: true
+    description: "claudecode-telegram bridge URL"
+  HOST:
+    source: default
+    default: "triassic-4"
+    required: true
+    description: "VPS hostname"
+  TMUX_PREFIX:
+    source: default
+    default: "claude-prod-"
+    required: true
+    description: "tmux session name prefix"
+  SESSIONS_DIR:
+    source: default
+    default: "$HOME/.claude/telegram/nodes/prod/sessions"
+    required: true
+    description: "telegram bridge session persistence"
+  MONITOR_ENV:
+    source: default
+    default: "$HOME/.config/omi/monitor/.env"
+    required: true
+    description: "API keys for Stripe, Mixpanel, Shopify, OpenAI, Deepgram, Grafana, Anthropic, Sentry"
+  AGENT_ENV:
+    source: default
+    default: "$HOME/.config/claudecode-telegram/agent.env"
+    required: true
+    description: "GH_TOKEN, NPM_TOKEN, Figma token"
+
+  # Credentials (resolved from encrypted creds bundle)
+  ANTHROPIC_API_KEY:
+    source: creds
+    required: true
+  GH_TOKEN:
+    source: creds
+    required: true
+    description: "GitHub CLI auth"
+  STRIPE_RESTRICTED_KEY:
+    source: creds
+    required: true
+    description: "Stripe read-only API key"
+  OPENAI_ADMIN_KEY:
+    source: creds
+    required: true
+    description: "OpenAI admin costs/usage API"
+  DEEPGRAM_API_KEY:
+    source: creds
+    required: true
+    description: "Deepgram usage API"
+  DEEPGRAM_PROJECT_ID:
+    source: creds
+    required: true
+  MIXPANEL_SA_USERNAME:
+    source: creds
+    required: true
+  MIXPANEL_SA_SECRET:
+    source: creds
+    required: true
+  SHOPIFY_ACCESS_TOKEN:
+    source: creds
+    required: true
+  GRAFANA_TOKEN:
+    source: creds
+    required: true
+  GRAFANA_URL:
+    source: creds
+    required: true
+  ANTHROPIC_ADMIN_KEY:
+    source: creds
+    required: true
+    description: "Anthropic org cost/usage reports"
+  SENTRY_AUTH_TOKEN:
+    source: creds
+    required: false
+    description: "Sentry crash reporting"
+
+dirs:
+  # Claude config
+  - $CLAUDE_CONFIG_DIR/hooks
+  - $CLAUDE_CONFIG_DIR/skills
+  - $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory
+  # Worker identity
+  - $HOME/team/mon
+  # Session persistence
+  - $SESSIONS_DIR/mon
+  # Working directory
+  - $HOME/ops
+  - $HOME/ops/data
+  # GCP/kube config
+  - $HOME/.config/gcloud
+  - $HOME/.config/omi/gcp
+  - $HOME/.kube
+
+files:
+  # ── Worker identity & knowledge ──
+  - source: ~/team/mon/charter.md
+    dest: $HOME/team/mon/charter.md
+  - source: ~/team/mon/playbook.md
+    dest: $HOME/team/mon/playbook.md
+  - source: ~/team/mon/kanban.md
+    dest: $HOME/team/mon/kanban.md
+    merge: true
+    integrity: skip
+  - source: ~/team/mon/current_state.md
+    dest: $HOME/team/mon/current_state.md
+    merge: true
+    integrity: skip
+  - source: ~/team/mon/soul.md
+    dest: $HOME/team/mon/soul.md
+  - source: ~/team/playbook.md
+    dest: $HOME/team/playbook.md
+  - source: ~/team/learnings.md
+    dest: $HOME/team/learnings.md
+
+  # ── Claude global config ──
+  - source: ~/.claude/CLAUDE.md
+    dest: $CLAUDE_CONFIG_DIR/CLAUDE.md
+  - source: ~/.claude/settings.json
+    dest: $CLAUDE_CONFIG_DIR/settings.json
+
+  # ── Memory (mutable, merge on rebuild) ──
+  - source: ~/.claude/projects/-home-claude-ops/memory/
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/
+    merge: true
+    integrity: skip
+
+  # ── Skills ──
+  - source: ~/.claude/skills/mon-daily-ops-email/
+    dest: $CLAUDE_CONFIG_DIR/skills/mon-daily-ops-email/
+  - source: ~/.claude/skills/mon-weekly-cto-email/
+    dest: $CLAUDE_CONFIG_DIR/skills/mon-weekly-cto-email/
+  - source: ~/.claude/skills/concise-cto-report/
+    dest: $CLAUDE_CONFIG_DIR/skills/concise-cto-report/
+  - source: ~/.claude/skills/omi-monthly-report/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-monthly-report/
+  - source: ~/.claude/skills/omi-incident-detection/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-incident-detection/
+  - source: ~/.claude/skills/omi-deep-rca/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-deep-rca/
+  - source: ~/.claude/skills/omi-prod-deploy-monitor/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-prod-deploy-monitor/
+  - source: ~/.claude/skills/omi-pr-workflow/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-workflow/
+  - source: ~/.claude/skills/omi-preflight/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-preflight/
+  - source: ~/.claude/skills/omi-safe-pr-reporting/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-safe-pr-reporting/
+  - source: ~/.claude/skills/omi-issue-analyze/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-issue-analyze/
+  - source: ~/.claude/skills/gws-oauth-reauth/
+    dest: $CLAUDE_CONFIG_DIR/skills/gws-oauth-reauth/
+
+  # ── Encrypted credentials ──
+  - source: ~/.config/omi/monitor/.env
+    dest: $MONITOR_ENV
+    encrypted: true
+  - source: ~/.config/claudecode-telegram/agent.env
+    dest: $AGENT_ENV
+    encrypted: true
+  - source: ~/.config/omi/gcp/service-account.json
+    dest: $HOME/.config/omi/gcp/service-account.json
+    encrypted: true
+  - source: ~/.kube/config
+    dest: $HOME/.kube/config
+    encrypted: true
+  - source: ~/.config/gcloud/beastoin-agents.json
+    dest: $HOME/.config/gcloud/beastoin-agents.json
+    encrypted: true
+  - source: ~/.config/gcloud/active_config
+    dest: $HOME/.config/gcloud/active_config
+  - source: ~/.config/gcloud/configurations/
+    dest: $HOME/.config/gcloud/configurations/
+
+  # ── Shared team scripts ──
+  - source: ~/team/scripts/ops_email_send.py
+    dest: $HOME/team/scripts/ops_email_send.py
+
+tools:
+  - name: tmux
+    check: tmux -V
+    required: true
+  - name: gcloud
+    check: gcloud --version | head -1
+    required: true
+  - name: kubectl
+    check: kubectl version --client -o yaml | head -1
+    required: true
+  - name: gh
+    check: gh --version | head -1
+    required: true
+  - name: gws
+    check: gws --version
+    required: true
+    description: "Google Workspace CLI (Gmail, Drive, Sheets)"
+  - name: python3
+    check: python3 --version
+    required: true
+  - name: codex
+    check: codex --version
+    required: false
+    description: "OpenAI Codex for code review and advisor consultation"
+  - name: adb
+    check: adb version | head -1
+    required: false
+    description: "Android debug bridge for emulator screenshots"
+  - name: agent-flutter
+    check: agent-flutter --help | head -1
+    required: false
+    description: "Flutter app UI automation"
+  - name: bq
+    check: bq version
+    required: true
+    description: "BigQuery CLI for GCP billing export queries"
+  - name: curl
+    check: curl --version | head -1
+    required: true
+  - name: jq
+    check: jq --version
+    required: true
+  - name: cwebp
+    check: cwebp -version
+    required: false
+    description: "WebP image conversion for screenshots"
+
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/
+    expect: exit 0
+    required: true
+  - name: gcloud-auth
+    check: gcloud auth print-access-token --quiet 2>/dev/null | head -c 10
+    expect: exit 0
+    required: true
+    description: "GCP service account authenticated"
+  - name: kubectl-cluster
+    check: kubectl cluster-info 2>/dev/null | head -1
+    expect: exit 0
+    required: true
+    description: "can reach GKE prod cluster"
+  - name: gh-auth
+    check: gh auth status 2>&1 | grep -q "Logged in"
+    expect: exit 0
+    required: true
+    description: "GitHub CLI authenticated"
+  - name: monitor-env-loaded
+    check: test -f $MONITOR_ENV
+    expect: exit 0
+    required: true
+    description: "API keys file exists"
+
+hooks:
+  - event: SessionStart
+    matcher: "compact|resume|init|start"
+    command: $CLAUDE_CONFIG_DIR/hooks/checkin-on-start.sh
+    source: ~/.claude/hooks/checkin-on-start.sh
+  - event: PostToolUseFailure
+    command: $CLAUDE_CONFIG_DIR/hooks/on-tool-failure.sh
+    source: ~/.claude/hooks/on-tool-failure.sh
+  - event: Stop
+    command: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+    source: ~/.claude/hooks/send-to-telegram.sh

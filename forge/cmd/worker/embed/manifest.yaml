@@ -1,0 +1,21 @@
+name: mon
+version: 0.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+  CLAUDE_CONFIG_DIR:
+    source: default
+    default: "$HOME/.claude"
+    required: true
+  BRIDGE_URL:
+    source: flag
+    default: "http://localhost:8271"
+    required: true
+dirs:
+  - $CLAUDE_CONFIG_DIR/hooks
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/health
+    expect: exit 0
+    required: true

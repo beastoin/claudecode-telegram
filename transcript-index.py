@@ -203,12 +203,11 @@ def _query_entries(db, page=None, per_page=50, filter_mode=""):
     }
 
 
-def _query_search(db, search_term, page=1, per_page=50):
-    """FTS5 BM25 search query."""
+def _query_search(db, search_term, page=1, per_page=50, sort="relevance"):
+    """FTS5 BM25 search query. sort='relevance' (BM25) or 'time' (chronological)."""
     if not search_term:
         return {"entries": [], "total_results": 0, "total_pages": 0, "page": 1, "query": ""}
 
-    # FTS5 match query with BM25 ranking
     count_row = db.execute(
         "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
         (search_term,),
@@ -222,12 +221,13 @@ def _query_search(db, search_term, page=1, per_page=50):
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
 
+    order_clause = "ORDER BY e.idx" if sort == "time" else "ORDER BY f.rank"
     rows = db.execute(
-        """SELECT e.idx, e.type, e.role, e.timestamp, e.raw_json, f.rank
+        f"""SELECT e.idx, e.type, e.role, e.timestamp, e.raw_json, f.rank
            FROM entries_fts f
            JOIN entries e ON f.rowid = e.idx
            WHERE entries_fts MATCH ?
-           ORDER BY f.rank
+           {order_clause}
            LIMIT ? OFFSET ?""",
         (search_term, per_page, offset),
     ).fetchall()
@@ -363,6 +363,8 @@ def main():
     parser.add_argument("--search", type=str, default="", help="Search term (for search query)")
     parser.add_argument("--filter", type=str, default="", dest="filter_mode",
                         help="Filter mode (e.g., 'prompts')")
+    parser.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"],
+                        help="Sort order for search results (default: relevance)")
     args = parser.parse_args()
 
     # Handle missing/nonexistent JSONL
@@ -398,7 +400,7 @@ def main():
                                 filter_mode=args.filter_mode)
     elif args.query == "search":
         result = _query_search(db, args.search, page=args.page or 1,
-                               per_page=args.per_page)
+                               per_page=args.per_page, sort=args.sort)
     elif args.query == "stats":
         result = _query_stats(db)
     elif args.query == "entries+stats":
@@ -408,7 +410,7 @@ def main():
         result = entries
     elif args.query == "search+stats":
         search = _query_search(db, args.search, page=args.page or 1,
-                               per_page=args.per_page)
+                               per_page=args.per_page, sort=args.sort)
         search["stats"] = _query_stats(db)
         result = search
 

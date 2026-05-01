@@ -545,17 +545,88 @@ Status: READY (1 optional warning)
 
 ## Extract Behavior
 
-One loop iterates all `files:` entries. Three flags control special handling:
+One loop iterates all `files:` entries. Four flags control special handling:
 
 ```
 For each file in manifest files:
-  encrypted: true → decrypt from creds.age first
-  merge: true     → keep disk version if it exists and differs (it's newer)
-  integrity: skip → exempt from watchdog integrity checks (for files that change at runtime)
-  default         → write from binary, overwrite if exists
+  encrypted: true   → decrypt from creds.age first
+  merge: true       → keep disk version if it exists and differs (it's newer)
+  integrity: skip   → exempt from watchdog integrity checks (for files that change at runtime)
+  overwrite: always → always write, even if dest exists and differs (worker-owned files)
+  default           → CONFLICT CHECK: if dest exists and content differs, STOP with error
 
 After writing each file:
   Compute SHA256 → compare against checksums.json → STOP if mismatch (corrupt binary)
+```
+
+### Extract Safety (Conflict Detection)
+
+**Problem**: Workers share directories (e.g. `~/.claude/hooks/`). Extracting one worker's
+files can silently overwrite another worker's files, breaking the entire system. This happened
+when mon2's extract overwrote `forward-to-bridge.py` with an older version, breaking the Stop
+hook for ALL workers.
+
+**Rule**: Before overwriting any existing file, compare content. If the existing file differs
+from the embedded version, STOP and report the conflict. The user must explicitly choose to
+override or skip.
+
+```
+./mon --bridge-url http://...
+
+Extract conflict detected:
+
+  CONFLICT  ~/.claude/hooks/forward-to-bridge.py
+            Existing file differs from embedded version.
+            Existing: 1531 bytes, modified 2026-04-14 12:50
+            Embedded: 1247 bytes
+
+  CONFLICT  ~/.claude/hooks/send-to-telegram.sh
+            Existing file differs from embedded version.
+            Existing: 8996 bytes, modified 2026-04-07 13:34
+            Embedded: 8812 bytes
+
+  OK        ~/team/mon2/charter.md (new file)
+  OK        ~/team/mon2/playbook.md (new file)
+
+2 conflicts detected. Options:
+  --force-extract     Override all conflicting files
+  --skip-conflicts    Keep existing files, extract only new ones
+
+To inspect differences:
+  diff <(./mon --show-embedded hooks/forward-to-bridge.py) ~/.claude/hooks/forward-to-bridge.py
+```
+
+### Conflict check behavior by file flag
+
+| Flag | Existing file matches | Existing file differs | No existing file |
+|------|----------------------|----------------------|------------------|
+| *(default)* | Write (no-op, same content) | **STOP with conflict** | Write |
+| `merge: true` | Skip (keep disk) | Skip (keep disk) | Write |
+| `overwrite: always` | Write | Write (force) | Write |
+| `encrypted: true` | Write (no-op, same content) | **STOP with conflict** | Write |
+
+### CLI flags for conflict resolution
+
+| Flag | Behavior |
+|------|----------|
+| `--force-extract` | Override all conflicting files (user verified) |
+| `--skip-conflicts` | Keep existing files, only write new ones |
+| *(neither)* | **STOP with error listing all conflicts** |
+
+### Manifest `overwrite` flag
+
+For files the worker truly owns (charter, playbook, etc.), use `overwrite: always` to skip
+conflict checking:
+
+```yaml
+files:
+  - source: knowledge/charter.md
+    dest: $HOME/team/mon2/charter.md
+    overwrite: always                    # worker-owned, always write
+
+  - source: hooks/send-to-telegram.sh
+    dest: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+    # no overwrite flag → conflict check (shared file)
 ```
 
 ## File Integrity

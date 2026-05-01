@@ -1,0 +1,13 @@
+# Git internals
+\.git/
+# Binaries and build artifacts
+^kubectl$
+build/
+node_modules/
+boo/.*corpus/
+go\.sum
+# Proto generated files
+proto/.*\.pb\.go$
+proto/python/
+# Scratch/experiment directory (test fixtures with example JWT/OAuth tokens)
+void/

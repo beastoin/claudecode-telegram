@@ -1,0 +1,235 @@
+name: chen
+version: 1.0.0
+
+vars:
+  HOME:
+    source: env
+    required: true
+  CLAUDE_CONFIG_DIR:
+    source: default
+    default: "$HOME/.claude"
+    required: true
+  CLAUDE_PROJECTS_DIR:
+    source: default
+    default: "$CLAUDE_CONFIG_DIR/projects"
+    required: true
+  CLAUDE_PROJECT_SLUG:
+    source: default
+    default: "-home-claude-omi-omi-chen"
+    required: true
+  BRIDGE_URL:
+    source: flag
+    default: "http://100.125.36.102:8271"
+    required: true
+  HOST:
+    source: default
+    default: "triassic-4"
+    required: true
+  TMUX_PREFIX:
+    source: default
+    default: "claude-prod-"
+    required: true
+  SESSIONS_DIR:
+    source: default
+    default: "$HOME/.claude/telegram/nodes/prod/sessions"
+    required: true
+  TZ:
+    source: default
+    default: "UTC"
+    required: true
+  JAVA_HOME:
+    source: default
+    default: "$HOME/tools/jdk-21.0.6+7"
+    required: false
+  ANDROID_HOME:
+    source: default
+    default: "$HOME/Android/Sdk"
+    required: false
+  GH_TOKEN:
+    source: creds
+    required: true
+  GH_TOKEN_BEASTOIN:
+    source: creds
+    required: true
+  ANTHROPIC_API_KEY:
+    source: creds
+    required: true
+
+dirs:
+  - $CLAUDE_CONFIG_DIR/hooks
+  - $SESSIONS_DIR/chen
+  - $HOME/team/chen
+  - $HOME/team/scripts
+  - $HOME/omi/omi-chen
+  - $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory
+  - $HOME/.config/gws
+
+files:
+  # Team knowledge
+  - source: ~/team/chen/charter.md
+    dest: $HOME/team/chen/charter.md
+  - source: ~/team/chen/playbook.md
+    dest: $HOME/team/chen/playbook.md
+  - source: ~/team/chen/kanban.md
+    dest: $HOME/team/chen/kanban.md
+    merge: true
+    integrity: skip
+  - source: ~/team/chen/current_state.md
+    dest: $HOME/team/chen/current_state.md
+    merge: true
+    integrity: skip
+  - source: ~/team/chen/soul.md
+    dest: $HOME/team/chen/soul.md
+
+  # Shared team files
+  - source: ~/team/learnings.md
+    dest: $HOME/team/learnings.md
+    merge: true
+    integrity: skip
+  - source: ~/team/playbook.md
+    dest: $HOME/team/playbook.md
+
+  # Ops email sender
+  - source: ~/team/scripts/ops_email_send.py
+    dest: $HOME/team/scripts/ops_email_send.py
+
+  # Memory (auto-memory, persists across conversations)
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/MEMORY.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/MEMORY.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/feedback_revert_via_api.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/feedback_revert_via_api.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/feedback_issues_facts_not_code.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/feedback_issues_facts_not_code.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/feedback_deployment_steps.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/feedback_deployment_steps.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/feedback_omi_qos_naming.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/feedback_omi_qos_naming.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/project_team_finn.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/project_team_finn.md
+    merge: true
+    integrity: skip
+  - source: ~/.claude/projects/-home-claude-omi-omi-chen/memory/reference_teleport.md
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/reference_teleport.md
+    merge: true
+    integrity: skip
+
+  # Skills
+  - source: ~/.claude/skills/chen-daily-ops-email/
+    dest: $CLAUDE_CONFIG_DIR/skills/chen-daily-ops-email/
+  - source: ~/.claude/skills/chen-weekly-repo-report/
+    dest: $CLAUDE_CONFIG_DIR/skills/chen-weekly-repo-report/
+  - source: ~/.claude/skills/chen-monthly-repo-report/
+    dest: $CLAUDE_CONFIG_DIR/skills/chen-monthly-repo-report/
+  - source: ~/.claude/skills/omi-issue-triage/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-issue-triage/
+  - source: ~/.claude/skills/omi-pr-review/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-review/
+  - source: ~/.claude/skills/omi-pr-review-reviewer/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-review-reviewer/
+  - source: ~/.claude/skills/omi-pr-review-contributor/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-review-contributor/
+  - source: ~/.claude/skills/omi-pr-review-tester/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-review-tester/
+  - source: ~/.claude/skills/omi-pr-workflow/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-workflow/
+  - source: ~/.claude/skills/omi-pr-scan/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-scan/
+  - source: ~/.claude/skills/omi-pr-rescue/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-rescue/
+  - source: ~/.claude/skills/omi-pr-evidence-upload/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-evidence-upload/
+  - source: ~/.claude/skills/github-pr-issue-comment/
+    dest: $CLAUDE_CONFIG_DIR/skills/github-pr-issue-comment/
+
+  # GWS credentials (encrypted)
+  - source: ~/.config/gws/client_secret.json
+    dest: $HOME/.config/gws/client_secret.json
+    encrypted: true
+  - source: ~/.config/gws/credentials.json
+    dest: $HOME/.config/gws/credentials.json
+    encrypted: true
+
+  # SSH config for Mac Mini access
+  - source: ~/.ssh/config
+    dest: $HOME/.ssh/config
+    encrypted: true
+
+  # Hooks
+  - source: ~/.claude/hooks/checkin-on-start.sh
+    dest: $CLAUDE_CONFIG_DIR/hooks/checkin-on-start.sh
+  - source: ~/.claude/hooks/send-to-telegram.sh
+    dest: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+  - source: ~/.claude/hooks/on-tool-failure.sh
+    dest: $CLAUDE_CONFIG_DIR/hooks/on-tool-failure.sh
+
+tools:
+  - name: gh
+    check: gh --version
+    required: true
+  - name: gcloud
+    check: gcloud --version 2>/dev/null | head -1
+    required: false
+  - name: kubectl
+    check: kubectl version --client --short 2>/dev/null
+    required: false
+  - name: tmux
+    check: tmux -V
+    required: true
+  - name: gws
+    check: $HOME/bin/gws --version 2>/dev/null || echo "gws present"
+    required: true
+  - name: black
+    check: black --version
+    required: false
+  - name: beast
+    check: beast --version 2>/dev/null || echo "beast present"
+    required: false
+  - name: codex
+    check: $HOME/bin/codex --version 2>/dev/null || echo "codex present"
+    required: false
+  - name: adb
+    check: adb --version 2>/dev/null | head -1
+    required: false
+  - name: agent-flutter
+    check: agent-flutter --version 2>/dev/null || echo "agent-flutter present"
+    required: false
+
+hooks:
+  - event: SessionStart
+    matcher: "compact|resume|init|start"
+    command: $CLAUDE_CONFIG_DIR/hooks/checkin-on-start.sh
+    source: ~/.claude/hooks/checkin-on-start.sh
+  - event: Stop
+    command: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+    source: ~/.claude/hooks/send-to-telegram.sh
+  - event: PostToolUseFailure
+    command: $CLAUDE_CONFIG_DIR/hooks/on-tool-failure.sh
+    source: ~/.claude/hooks/on-tool-failure.sh
+
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/
+    expect: exit 0
+    required: true
+  - name: gh-authenticated
+    check: gh auth status 2>&1 | grep -q "Logged in"
+    expect: exit 0
+    required: true
+  - name: omi-repo-accessible
+    check: test -d $HOME/omi/omi-chen/.git
+    expect: exit 0
+    required: true
+  - name: gws-credentials-present
+    check: test -f $HOME/.config/gws/credentials.json
+    expect: exit 0
+    required: true
