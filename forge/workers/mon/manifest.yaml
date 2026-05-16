@@ -143,6 +143,10 @@ files:
   - source: ~/.claude/settings.json
     dest: $CLAUDE_CONFIG_DIR/settings.json
     integrity: skip
+  - source: ~/.claude/.credentials.json
+    dest: $CLAUDE_CONFIG_DIR/.credentials.json
+    encrypted: true
+    overwrite: always
 
   # ── Memory (mutable, merge on rebuild) ──
   - source: ~/.claude/projects/-home-claude-ops/memory/

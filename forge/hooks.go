@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type HookManager struct {
@@ -99,6 +100,11 @@ func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) e
 	hooksValue, ok := settings["hooks"].(map[string]any)
 	if !ok {
 		hooksValue = map[string]any{}
+	}
+
+	for event, rawEntries := range hooksValue {
+		entries, _ := rawEntries.([]any)
+		hooksValue[event] = pruneStaleHooks(entries, configDir)
 	}
 
 	for _, hook := range manifest.Hooks {
@@ -240,4 +246,44 @@ func hookGroupsToAny(groups []map[string]any) []any {
 		entries = append(entries, group)
 	}
 	return entries
+}
+
+func pruneStaleHooks(entries []any, configDir string) []any {
+	hooksDir := filepath.Join(configDir, "hooks") + string(filepath.Separator)
+	var result []any
+	for _, entry := range entries {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			result = append(result, entry)
+			continue
+		}
+		hooks, _ := entryMap["hooks"].([]any)
+		if hooks == nil {
+			if cmd, _ := entryMap["command"].(string); cmd != "" {
+				if filepath.IsAbs(cmd) && strings.Contains(cmd, "/.claude/hooks/") && !strings.HasPrefix(cmd, hooksDir) {
+					continue
+				}
+			}
+			result = append(result, entry)
+			continue
+		}
+		var live []any
+		for _, h := range hooks {
+			hMap, ok := h.(map[string]any)
+			if !ok {
+				live = append(live, h)
+				continue
+			}
+			cmd, _ := hMap["command"].(string)
+			if cmd != "" && filepath.IsAbs(cmd) && strings.Contains(cmd, "/.claude/hooks/") && !strings.HasPrefix(cmd, hooksDir) {
+				continue
+			}
+			live = append(live, h)
+		}
+		if len(live) > 0 {
+			entryMap["hooks"] = live
+			result = append(result, entryMap)
+		}
+	}
+	return result
 }

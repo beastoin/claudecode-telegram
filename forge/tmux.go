@@ -133,7 +133,10 @@ func (t *TmuxRuntime) ConfigureRuntime(config RuntimeConfig) error {
 
 	configDir := t.Environment["CLAUDE_CONFIG_DIR"]
 	if configDir != "" && t.Environment["ANTHROPIC_API_KEY"] != "" {
-		t.APIKeyHelper = filepath.Join(configDir, "hooks", "api-key-helper.sh")
+		credsFile := filepath.Join(configDir, ".credentials.json")
+		if _, err := os.Stat(credsFile); err != nil {
+			t.APIKeyHelper = filepath.Join(configDir, "hooks", "api-key-helper.sh")
+		}
 	}
 
 	return nil
