@@ -102,7 +102,7 @@ func shellQuote(value string) string {
 
 	for _, ch := range value {
 		switch ch {
-		case ' ', '\t', '\n', '"':
+		case ' ', '\t', '\n', '"', '{', '}', '$', '`', '\\', '!', '(', ')', '[', ']', '|', '&', ';', '<', '>', '~', '#', '*', '?':
 			return fmt.Sprintf("%q", value)
 		}
 	}
