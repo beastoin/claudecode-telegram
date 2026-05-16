@@ -49,15 +49,15 @@ func (a App) Run(opts RunOptions) error {
 		return err
 	}
 
-	tools, err := Bootstrap(a.Manifest, a.GOOS, a.Runner)
-	if err != nil {
-		return err
-	}
-
 	if a.HookManager.Source == nil {
 		a.HookManager.Source = a.Source
 	}
 	if err := a.HookManager.Install(a.Manifest, resolved); err != nil {
+		return err
+	}
+
+	tools, err := Bootstrap(a.Manifest, a.GOOS, a.Runner)
+	if err != nil {
 		return err
 	}
 
