@@ -907,7 +907,8 @@ WantedBy=multi-user.target
 - [x] tmux session management, Claude CLI spawn, hooks
 - [x] Watchdog loop
 - [x] E2E test: build binary → run → verify tmux + bridge registration + watchdog (test-e2e.sh, 11 assertions)
-- [ ] Live test: ./mon on VPS (same host as bridge, gRPC localhost)
+- [x] Live test: --check READY on VPS (13MB binary, 12 tools, 5 readiness checks pass)
+- [ ] Live run test (deferred — would conflict with prod claude-prod-mon session)
 
 ### Phase 2: gRPC Transport + Cross-Host
 - [x] Proto definition: Bridge service (Register, MessageStream, Heartbeat, StreamJSONL, PullKnowledge, CheckUpgrade, DownloadBinary)
@@ -928,7 +929,7 @@ WantedBy=multi-user.target
 - [x] Worker inventory (workers.yaml — 20 workers, roles, platforms, creds)
 - [x] Manifest template (workers/_template/manifest.yaml)
 - [x] Pilot manifests (chen, mon, ren)
-- [ ] Write manifests for remaining 17 workers
+- [x] Write manifests for remaining 17 workers (dean, finn, geni, hiro, jin, kai, kelvin, kenji, lee, luck, noa, ryo, seth, sora, taro, x, yuki)
 - [ ] Package all workers (package-all script)
 - [ ] Per-worker least-privilege credentials
 

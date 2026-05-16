@@ -1,0 +1,161 @@
+name: ryo
+version: 1.0.0
+
+vars:
+  HOME:
+    source: env
+    required: true
+    description: "home directory"
+  CLAUDE_CONFIG_DIR:
+    source: default
+    default: "$HOME/.claude"
+    required: true
+    description: "claude code config root"
+  CLAUDE_PROJECTS_DIR:
+    source: default
+    default: "$HOME/.claude/projects"
+    required: true
+    description: "claude project-scoped config"
+  CLAUDE_PROJECT_SLUG:
+    source: default
+    default: "-home-claude-omi"
+    required: true
+    description: "project slug for working directory"
+  BRIDGE_URL:
+    source: flag
+    default: "http://100.125.36.102:8271"
+    required: true
+    description: "claudecode-telegram bridge URL"
+  HOST:
+    source: default
+    default: "triassic-4"
+    required: true
+    description: "hostname"
+  TMUX_PREFIX:
+    source: default
+    default: "claude-prod-"
+    required: true
+    description: "tmux session name prefix"
+  SESSIONS_DIR:
+    source: default
+    default: "$HOME/.claude/telegram/nodes/prod/sessions"
+    required: true
+    description: "telegram bridge session persistence"
+  AGENT_ENV:
+    source: default
+    default: "$HOME/.config/claudecode-telegram/agent.env"
+    required: true
+    description: "GH_TOKEN, NPM_TOKEN"
+
+  # --- Credentials (from encrypted bundle) ---
+  ANTHROPIC_API_KEY:
+    source: creds
+    required: true
+  GH_TOKEN:
+    source: creds
+    required: true
+    description: "GitHub CLI auth"
+  OPENAI_API_KEY:
+    source: creds
+    required: true
+
+dirs:
+  - $CLAUDE_CONFIG_DIR/hooks
+  - $CLAUDE_CONFIG_DIR/skills
+  - $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory
+  - $HOME/team/ryo
+  - $SESSIONS_DIR/ryo
+  - $HOME/omi
+
+files:
+  # --- Worker identity & knowledge ---
+  - source: ~/team/ryo/charter.md
+    dest: $HOME/team/ryo/charter.md
+  - source: ~/team/ryo/playbook.md
+    dest: $HOME/team/ryo/playbook.md
+  - source: ~/team/ryo/kanban.md
+    dest: $HOME/team/ryo/kanban.md
+    merge: true
+    integrity: skip
+  - source: ~/team/ryo/current_state.md
+    dest: $HOME/team/ryo/current_state.md
+    merge: true
+    integrity: skip
+  - source: ~/team/playbook.md
+    dest: $HOME/team/playbook.md
+  - source: ~/team/learnings.md
+    dest: $HOME/team/learnings.md
+
+  # --- Claude global config ---
+  - source: ~/.claude/CLAUDE.md
+    dest: $CLAUDE_CONFIG_DIR/CLAUDE.md
+  - source: ~/.claude/settings.json
+    dest: $CLAUDE_CONFIG_DIR/settings.json
+
+  # --- Memory (mutable, merge on rebuild) ---
+  - source: ~/.claude/projects/$CLAUDE_PROJECT_SLUG/memory/
+    dest: $CLAUDE_PROJECTS_DIR/$CLAUDE_PROJECT_SLUG/memory/
+    merge: true
+    integrity: skip
+
+  # --- Skills ---
+  - source: ~/.claude/skills/omi-pr-workflow/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-pr-workflow/
+  - source: ~/.claude/skills/omi-preflight/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-preflight/
+  - source: ~/.claude/skills/omi-safe-pr-reporting/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-safe-pr-reporting/
+
+  # --- Encrypted credentials ---
+  - source: ~/.config/claudecode-telegram/agent.env
+    dest: $AGENT_ENV
+    encrypted: true
+
+tools:
+  - name: tmux
+    check: tmux -V
+    required: true
+  - name: gh
+    check: gh --version | head -1
+    required: true
+  - name: python3
+    check: python3 --version
+    required: true
+  - name: curl
+    check: curl --version | head -1
+    required: true
+  - name: jq
+    check: jq --version
+    required: true
+  - name: git
+    check: git --version
+    required: true
+  - name: node
+    check: node --version
+    required: true
+  - name: flutter
+    check: flutter --version | head -1
+    required: true
+
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/
+    expect: exit 0
+    required: true
+  - name: gh-auth
+    check: gh auth status 2>&1 | grep -q "Logged in"
+    expect: exit 0
+    required: true
+    description: "GitHub CLI authenticated"
+
+hooks:
+  - event: SessionStart
+    matcher: "compact|resume|init|start"
+    command: $CLAUDE_CONFIG_DIR/hooks/checkin-on-start.sh
+    source: ~/.claude/hooks/checkin-on-start.sh
+  - event: PostToolUseFailure
+    command: $CLAUDE_CONFIG_DIR/hooks/on-tool-failure.sh
+    source: ~/.claude/hooks/on-tool-failure.sh
+  - event: Stop
+    command: $CLAUDE_CONFIG_DIR/hooks/send-to-telegram.sh
+    source: ~/.claude/hooks/send-to-telegram.sh
