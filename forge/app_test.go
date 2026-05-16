@@ -400,6 +400,209 @@ func TestAppRun_StopsBeforeRuntimeWhenReadinessFails(t *testing.T) {
 	}
 }
 
+func TestIntegration_AppRun_FullManifest(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".claude")
+	runtime := &stubRuntime{}
+	transport := &appTransportSpy{runtime: runtime}
+	runner := &stubRunner{
+		results: map[string]RunResult{
+			"tmux -V":             {ExitCode: 0, Stdout: "tmux 3.4"},
+			"curl http://bridge/": {ExitCode: 0, Stdout: "ok"},
+		},
+	}
+
+	source := MapFileSource{
+		"team/test/charter.md":                   []byte("charter content"),
+		".claude/skills/my-skill/SKILL.md":       []byte("# Skill"),
+		".claude/skills/my-skill/helpers.sh":     []byte("#!/bin/bash"),
+	}
+
+	allFiles := map[string][]byte{
+		"files/team/test/charter.md":              []byte("charter content"),
+		"files/.claude/skills/my-skill/SKILL.md":  []byte("# Skill"),
+		"files/.claude/skills/my-skill/helpers.sh": []byte("#!/bin/bash"),
+		"files/hooks/test-hook.sh":                []byte("#!/bin/sh\necho hook\n"),
+		"team/test/charter.md":                    []byte("charter content"),
+		".claude/skills/my-skill/SKILL.md":        []byte("# Skill"),
+		".claude/skills/my-skill/helpers.sh":      []byte("#!/bin/bash"),
+		"hooks/test-hook.sh":                      []byte("#!/bin/sh\necho hook\n"),
+	}
+
+	manifest := &Manifest{
+		Name:    "test",
+		Version: "1.0.0",
+		Vars: map[string]VarSpec{
+			"HOME":             {Source: "env", Required: true},
+			"CLAUDE_CONFIG_DIR": {Source: "default", Default: "$HOME/.claude", Required: true},
+			"BRIDGE_URL":       {Source: "flag", Required: true},
+		},
+		Files: []FileSpec{
+			{Source: "~/team/test/charter.md", Dest: "$HOME/team/test/charter.md", ContentKey: "team/test/charter.md"},
+			{Source: "~/.claude/skills/my-skill/", Dest: "$HOME/.claude/skills/my-skill/", ContentKey: ".claude/skills/my-skill"},
+		},
+		Tools: []ToolSpec{
+			{Name: "tmux", Check: "tmux -V", Required: true},
+		},
+		Readiness: []ReadinessCheck{
+			{Name: "bridge", Check: "curl http://bridge/", Expect: "exit 0", Required: true},
+		},
+		Hooks: []HookSpec{
+			{Event: "Stop", Command: "$CLAUDE_CONFIG_DIR/hooks/test-hook.sh", Source: "hooks/test-hook.sh"},
+		},
+	}
+
+	hookSource := MapFileSource{
+		"hooks/test-hook.sh": []byte("#!/bin/sh\necho hook\n"),
+	}
+
+	err := (App{
+		Manifest: manifest,
+		Source:   source,
+		Verifier: NewChecksumVerifier(checksumMap(t, allFiles)),
+		Runner:   runner,
+		Runtime:  runtime,
+		Transport: transport,
+		HookManager: HookManager{Source: hookSource},
+		GOOS:    "linux",
+	}).Run(RunOptions{
+		Resolve: ResolveOptions{
+			Env:   map[string]string{"HOME": root},
+			Flags: map[string]string{"BRIDGE_URL": "http://bridge"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("app.Run() error = %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(root, "team/test/charter.md"), "charter content")
+	assertFileContent(t, filepath.Join(root, ".claude/skills/my-skill/SKILL.md"), "# Skill")
+	assertFileContent(t, filepath.Join(root, ".claude/skills/my-skill/helpers.sh"), "#!/bin/bash")
+
+	hookPath := filepath.Join(configDir, "hooks", "test-hook.sh")
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("hook not extracted: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(configDir, "settings.json")); err != nil {
+		t.Fatalf("settings.json not created: %v", err)
+	}
+
+	if runtime.startCalls != 1 {
+		t.Fatalf("runtime.startCalls = %d, want 1", runtime.startCalls)
+	}
+
+	hasConnect := false
+	hasRegister := false
+	for _, e := range transport.events {
+		if e == "connect" {
+			hasConnect = true
+		}
+		if e == "register" {
+			hasRegister = true
+		}
+	}
+	if !hasConnect {
+		t.Error("transport never connected")
+	}
+	if !hasRegister {
+		t.Error("transport never registered")
+	}
+}
+
+func TestIntegration_ReadinessBlocksOnChecksumDrift(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dest := filepath.Join(root, "team", "mon", "charter.md")
+
+	// Pre-extract the file with correct content.
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(dest, []byte("charter"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	// Tamper the file before calling app.Run.
+	if err := os.WriteFile(dest, []byte("tampered"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(tamper) error = %v", err)
+	}
+
+	source := MapFileSource{
+		"knowledge/charter.md": []byte("charter"),
+	}
+	checksums := checksumMap(t, map[string][]byte{
+		"files/knowledge/charter.md": []byte("charter"),
+		"knowledge/charter.md":       []byte("charter"),
+	})
+
+	runtime := &stubRuntime{}
+	runner := &stubRunner{
+		results: map[string]RunResult{
+			"tmux -V": {ExitCode: 0, Stdout: "tmux 3.4"},
+		},
+	}
+	manifest := &Manifest{
+		Name:    "mon",
+		Version: "1.0.0",
+		Vars: map[string]VarSpec{
+			"HOME": {
+				Source:   "env",
+				Required: true,
+			},
+			"CLAUDE_CONFIG_DIR": {
+				Source:   "default",
+				Default:  "$HOME/.claude",
+				Required: true,
+			},
+		},
+		Files: []FileSpec{
+			{
+				Source: "knowledge/charter.md",
+				Dest:   "$HOME/team/mon/charter.md",
+			},
+		},
+		Tools: []ToolSpec{
+			{
+				Name:     "tmux",
+				Check:    "tmux -V",
+				Required: true,
+			},
+		},
+	}
+
+	// Use SkipConflicts so Extract keeps the tampered file on disk
+	// instead of returning a conflict error. The post-extract verify
+	// step then detects the checksum mismatch.
+	err := (App{
+		Manifest:    manifest,
+		Source:      source,
+		Verifier:    NewChecksumVerifier(checksums),
+		Runner:      runner,
+		Runtime:     runtime,
+		HookManager: HookManager{},
+		GOOS:        "linux",
+	}).Run(RunOptions{
+		Resolve: ResolveOptions{
+			Env: map[string]string{"HOME": root},
+		},
+		SkipConflicts: true,
+	})
+
+	if err == nil {
+		t.Fatal("app.Run() error = nil, want checksum mismatch")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("app.Run() error = %v, want checksum mismatch", err)
+	}
+	if runtime.startCalls != 0 {
+		t.Fatalf("runtime.startCalls = %d, want 0", runtime.startCalls)
+	}
+}
+
 type mutatingRunner struct {
 	t        *testing.T
 	results  map[string]RunResult

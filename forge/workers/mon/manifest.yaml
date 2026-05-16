@@ -142,6 +142,7 @@ files:
     dest: $CLAUDE_CONFIG_DIR/CLAUDE.md
   - source: ~/.claude/settings.json
     dest: $CLAUDE_CONFIG_DIR/settings.json
+    integrity: skip
 
   # ── Memory (mutable, merge on rebuild) ──
   - source: ~/.claude/projects/-home-claude-ops/memory/

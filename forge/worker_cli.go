@@ -17,15 +17,16 @@ import (
 
 type WorkerCLIOptions struct {
 	BridgeURL     string
-	Session       string
-	LaunchCommand string
-	Identity      string
-	Check         bool
-	Verify        bool
-	NameOverride  string
-	ForceExtract  bool
-	SkipConflicts bool
-	EmbeddedPath  string
+	Session        string
+	LaunchCommand  string
+	Identity       string
+	Check          bool
+	Verify         bool
+	NameOverride   string
+	SessionPrefix  string
+	ForceExtract   bool
+	SkipConflicts  bool
+	EmbeddedPath   string
 }
 
 type EmbeddedAssets struct {
@@ -62,6 +63,7 @@ func ParseWorkerCLI(args []string) (WorkerCLIOptions, error) {
 	fs.BoolVar(&opts.Check, "check", false, "run readiness checks and exit")
 	fs.BoolVar(&opts.Verify, "verify", false, "verify extracted file integrity and exit")
 	fs.StringVar(&opts.NameOverride, "name-override", "", "override worker name")
+	fs.StringVar(&opts.SessionPrefix, "session-prefix", "", "tmux session name prefix (default: claude-prod-)")
 	fs.BoolVar(&opts.ForceExtract, "force-extract", false, "override all conflicting files during extract")
 	fs.BoolVar(&opts.SkipConflicts, "skip-conflicts", false, "keep existing files, extract only new ones")
 	fs.StringVar(&opts.EmbeddedPath, "show-embedded", "", "print embedded file at path and exit")
@@ -195,9 +197,13 @@ func parseChecksums(data []byte) (map[string]string, error) {
 }
 
 func defaultWorkerRuntimeFactory(manifest *Manifest, opts WorkerCLIOptions, runner Runner) Runtime {
+	prefix := "claude-prod-"
+	if opts.SessionPrefix != "" {
+		prefix = opts.SessionPrefix
+	}
 	tmuxRuntime := &TmuxRuntime{
 		Runner:        runner,
-		Session:       "claude-prod-" + manifest.Name,
+		Session:       prefix + manifest.Name,
 		AdoptSession:  opts.Session,
 		LaunchCommand: opts.LaunchCommand,
 	}

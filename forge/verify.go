@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type VerifyOptions struct {
@@ -67,10 +68,32 @@ func EnumerateExtractedArtifacts(manifest *Manifest, vars map[string]string) ([]
 			return nil, fmt.Errorf("expand destination %q: %w", file.Dest, err)
 		}
 
+		info, statErr := os.Stat(dest)
+		if statErr == nil && info.IsDir() {
+			prefix := strings.TrimSuffix(contentKey, "/") + "/"
+			walkErr := filepath.Walk(dest, func(path string, fi os.FileInfo, wErr error) error {
+				if wErr != nil || fi.IsDir() {
+					return wErr
+				}
+				rel, _ := filepath.Rel(dest, path)
+				artifacts = append(artifacts, ExtractedArtifact{
+					ContentKey:       prefix + rel,
+					Dest:             path,
+					SkipVerification: file.Integrity == "skip" || file.Merge,
+					Critical:         !file.Merge && file.Integrity != "skip",
+				})
+				return nil
+			})
+			if walkErr != nil {
+				return nil, fmt.Errorf("walk directory %q: %w", dest, walkErr)
+			}
+			continue
+		}
+
 		artifacts = append(artifacts, ExtractedArtifact{
 			ContentKey:       contentKey,
 			Dest:             dest,
-			SkipVerification: file.Integrity == "skip",
+			SkipVerification: file.Integrity == "skip" || file.Merge,
 			Critical:         !file.Merge && file.Integrity != "skip",
 		})
 	}

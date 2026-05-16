@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,76 @@ func TestRunVerifyMode_VerifiesHookFilesAndSkipsRuntimeMutableFiles(t *testing.T
 	}
 	if len(report.Skipped) != 1 || report.Skipped[0] != "files/memory/state.md" {
 		t.Fatalf("report.Skipped = %#v, want files/memory/state.md", report.Skipped)
+	}
+}
+
+func TestIntegration_VerifyModeDetectsTamper(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	manifestYAML := []byte(`
+name: tamper-test
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+files:
+  - source: knowledge/charter.md
+    dest: $HOME/team/tamper-test/charter.md
+`)
+	manifest, err := ParseManifest(manifestYAML)
+	if err != nil {
+		t.Fatalf("ParseManifest() error = %v", err)
+	}
+
+	source := MapFileSource{
+		"knowledge/charter.md": []byte("charter content"),
+	}
+
+	checksums := checksumMap(t, map[string][]byte{
+		"files/knowledge/charter.md": []byte("charter content"),
+		"knowledge/charter.md":       []byte("charter content"),
+	})
+
+	// Extract the file with checksum verification.
+	err = Extract(manifest, ExtractOptions{
+		Vars:     map[string]string{"HOME": root},
+		Source:   source,
+		Verifier: NewChecksumVerifier(checksums),
+	})
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+
+	dest := filepath.Join(root, "team", "tamper-test", "charter.md")
+	assertFileContent(t, dest, "charter content")
+
+	// Verify passes on the untampered file.
+	_, err = RunVerifyMode(manifest, VerifyOptions{
+		Resolve:   ResolveOptions{Env: map[string]string{"HOME": root}},
+		Checksums: checksums,
+	})
+	if err != nil {
+		t.Fatalf("RunVerifyMode() before tamper error = %v", err)
+	}
+
+	// Tamper the file on disk.
+	if err := os.WriteFile(dest, []byte("tampered content"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(tamper) error = %v", err)
+	}
+
+	// Verify now detects the tamper.
+	_, err = RunVerifyMode(manifest, VerifyOptions{
+		Resolve:   ResolveOptions{Env: map[string]string{"HOME": root}},
+		Checksums: checksums,
+	})
+	if err == nil {
+		t.Fatal("RunVerifyMode() after tamper error = nil, want checksum mismatch")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("RunVerifyMode() after tamper error = %v, want checksum mismatch", err)
 	}
 }
 

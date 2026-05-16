@@ -12,7 +12,7 @@ LDFLAGS_RELEASE := -s -w -X $(MODULE).Version=$(VERSION)
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/arm64
 
-.PHONY: build build-worker build-all build-release test test-e2e clean proto
+.PHONY: build build-worker build-all build-release test test-e2e test-e2e-full test-e2e-fresh test-acceptance test-all clean proto
 
 build:
 	@mkdir -p $(BUILD_DIR)
@@ -55,6 +55,17 @@ test:
 
 test-e2e:
 	$(GO) test -tags e2e -run TestE2E ./...
+
+test-e2e-full:
+	bash test-e2e-full.sh
+
+test-e2e-fresh:
+	bash test-e2e-fresh-home.sh
+
+test-acceptance:
+	bash test-acceptance.sh
+
+test-all: test test-e2e-full test-e2e-fresh test-acceptance
 
 clean:
 	rm -rf $(BUILD_DIR)

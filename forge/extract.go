@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -15,6 +16,10 @@ type EmbeddedFileSource interface {
 
 const credsBundleVarsPath = "creds/__vars__.json"
 
+type DirLister interface {
+	ListDir(path string) ([]string, error)
+}
+
 type MapFileSource map[string][]byte
 
 func (m MapFileSource) ReadFile(path string) ([]byte, error) {
@@ -23,6 +28,21 @@ func (m MapFileSource) ReadFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("embedded file %q not found", path)
 	}
 	return append([]byte(nil), data...), nil
+}
+
+func (m MapFileSource) ListDir(dir string) ([]string, error) {
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	var paths []string
+	for key := range m {
+		if strings.HasPrefix(key, prefix) {
+			paths = append(paths, key)
+		}
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("directory %q not found or empty", dir)
+	}
+	return paths, nil
 }
 
 type Decryptor interface {
@@ -88,6 +108,42 @@ type ExtractOptions struct {
 	SkipConflicts  bool
 }
 
+func ExpandDirSources(files []FileSpec, source EmbeddedFileSource) []FileSpec {
+	lister, ok := source.(DirLister)
+	if !ok {
+		return files
+	}
+	var result []FileSpec
+	for _, f := range files {
+		key := f.Source
+		if f.ContentKey != "" {
+			key = f.ContentKey
+		}
+		subPaths, err := lister.ListDir(key)
+		if err != nil || len(subPaths) == 0 {
+			if strings.HasSuffix(f.Source, "/") && (err != nil || len(subPaths) == 0) {
+				continue
+			}
+			result = append(result, f)
+			continue
+		}
+		prefix := strings.TrimSuffix(key, "/") + "/"
+		for _, sp := range subPaths {
+			rel := strings.TrimPrefix(sp, prefix)
+			result = append(result, FileSpec{
+				Source:     sp,
+				Dest:       filepath.Join(f.Dest, rel),
+				ContentKey: sp,
+				Encrypted:  f.Encrypted,
+				Merge:      f.Merge,
+				Integrity:  f.Integrity,
+				Overwrite:  f.Overwrite,
+			})
+		}
+	}
+	return result
+}
+
 func Extract(manifest *Manifest, opts ExtractOptions) error {
 	type pendingFile struct {
 		dest       string
@@ -98,7 +154,8 @@ func Extract(manifest *Manifest, opts ExtractOptions) error {
 	var conflicts []ExtractConflict
 	var pending []pendingFile
 
-	for _, file := range manifest.Files {
+	files := ExpandDirSources(manifest.Files, opts.Source)
+	for _, file := range files {
 		contentKey := file.Source
 		if file.ContentKey != "" {
 			contentKey = file.ContentKey
@@ -216,6 +273,33 @@ func (s FSFileSource) ReadFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	return append([]byte(nil), data...), nil
+}
+
+func (s FSFileSource) ListDir(dir string) ([]string, error) {
+	if s.FS == nil {
+		return nil, fmt.Errorf("no filesystem available")
+	}
+	info, err := fs.Stat(s.FS, dir)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("not a directory: %q", dir)
+	}
+	var paths []string
+	err = fs.WalkDir(s.FS, dir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("directory %q is empty", dir)
+	}
+	return paths, nil
 }
 
 func (d *StubBundleDecryptor) Decrypt(ciphertext []byte) ([]byte, error) {

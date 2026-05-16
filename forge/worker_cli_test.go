@@ -438,6 +438,25 @@ func (r *launchCapturingRuntime) Start() error {
 	return r.err
 }
 
+func TestWorkerCLI_SessionPrefixOverridesDefault(t *testing.T) {
+	t.Parallel()
+
+	manifest := &Manifest{Name: "mon"}
+	runner := ShellRunner{}
+
+	defaultRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{}, runner)
+	tmux := defaultRT.(*TmuxRuntime)
+	if tmux.Session != "claude-prod-mon" {
+		t.Fatalf("default session = %q, want claude-prod-mon", tmux.Session)
+	}
+
+	customRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{SessionPrefix: "claude-test-"}, runner)
+	tmux = customRT.(*TmuxRuntime)
+	if tmux.Session != "claude-test-mon" {
+		t.Fatalf("custom session = %q, want claude-test-mon", tmux.Session)
+	}
+}
+
 type workerWatchdogSpy struct {
 	ctx context.Context
 }

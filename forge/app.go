@@ -27,6 +27,8 @@ type App struct {
 }
 
 func (a App) Run(opts RunOptions) error {
+	a.Manifest.Files = ExpandDirSources(a.Manifest.Files, a.Source)
+
 	resolved, err := ResolveVars(a.Manifest, opts.Resolve)
 	if err != nil {
 		return err
