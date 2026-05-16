@@ -124,6 +124,7 @@ API_ENDPOINTS = {
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
     "POST /response": "Hook: send Claude response to Telegram",
     "POST /notify": "Send notification to all admin chats",
+    "POST /register": "Forge worker registration (name, host, version, tools)",
 }
 
 # Sandbox mode: run Claude Code in Docker container for isolation
@@ -1000,6 +1001,8 @@ _alert_msg_ids = {}  # name -> message_id of last bad-state alert (for edit on r
 _idle_streak = {}
 _prev_worker_states = {}
 _consecutive_probe_failures = {}
+_consecutive_good_probes = {}  # name -> int (consecutive good states after bad)
+_consecutive_bad_probes = {}  # name -> int (consecutive bad states for remote workers)
 _idle_child_baseline = {}  # name -> int (MCP server child count at idle)
 _prev_children = {}  # name -> int (previous active children count, for activity detection)
 _last_activity_ts = {}  # name -> float (last time children count changed)
@@ -1240,6 +1243,60 @@ RESERVED_NAMES = {
 
 
 # ============================================================
+# MESSAGE TRANSPORT ABSTRACTION
+# ============================================================
+
+TRANSPORT_MODE = os.environ.get("TRANSPORT", "telegram")
+
+
+class MessageTransport:
+    """Interface for all outbound messaging from bridge to manager."""
+
+    @property
+    def name(self) -> str:
+        raise NotImplementedError
+
+    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+        raise NotImplementedError
+
+    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_video(self, chat_id, video_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+        raise NotImplementedError
+
+    def send_sticker(self, chat_id, sticker_path) -> bool:
+        raise NotImplementedError
+
+    def send_chat_action(self, chat_id, action) -> None:
+        raise NotImplementedError
+
+    def set_reaction(self, chat_id, message_id, reaction) -> None:
+        raise NotImplementedError
+
+    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+        raise NotImplementedError
+
+    def setup_commands(self, commands) -> None:
+        raise NotImplementedError
+
+    def download_file(self, file_id, session_name) -> str | None:
+        raise NotImplementedError
+
+
+# ============================================================
 # TELEGRAM API
 # ============================================================
 
@@ -1299,17 +1356,433 @@ class TelegramAPI:
         return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
-telegram = TelegramAPI(BOT_TOKEN)
+class TelegramTransport(MessageTransport):
+    """Transport that sends messages via Telegram Bot API."""
+
+    def __init__(self, token: str):
+        self._api = TelegramAPI(token)
+
+    @property
+    def name(self) -> str:
+        return "telegram"
+
+    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        # Use module-level telegram_api so tests can mock bridge.telegram_api
+        return telegram_api("sendMessage", payload)
+
+    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+        if not BOT_TOKEN:
+            return False
+        ok, validated = validate_photo_path(photo_path)
+        if not ok:
+            print(validated)
+            return False
+        photo_path = validated
+        boundary = uuid.uuid4().hex
+        content_type = mimetypes.guess_type(str(photo_path))[0] or "image/jpeg"
+        body_parts = []
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+        body_parts.append(b"")
+        body_parts.append(str(chat_id).encode())
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(f'Content-Disposition: form-data; name="photo"; filename="{photo_path.name}"'.encode())
+        body_parts.append(f"Content-Type: {content_type}".encode())
+        body_parts.append(b"")
+        body_parts.append(photo_path.read_bytes())
+        if caption:
+            body_parts.append(f"--{boundary}".encode())
+            body_parts.append(b'Content-Disposition: form-data; name="caption"')
+            body_parts.append(b"")
+            body_parts.append(caption.encode())
+        body_parts.append(f"--{boundary}--".encode())
+        body_parts.append(b"")
+        body = b"\r\n".join(body_parts)
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result = json.loads(r.read())
+                if result.get("ok"):
+                    print(f"Photo sent: {photo_path.name}")
+                    return True
+                else:
+                    print(f"sendPhoto failed: {result}")
+                    return False
+        except Exception as e:
+            print(f"sendPhoto error: {e}")
+            return False
+
+    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+        if not BOT_TOKEN:
+            return False
+        ok, validated = validate_photo_path(animation_path)
+        if not ok:
+            print(validated)
+            return False
+        animation_path = validated
+        boundary = uuid.uuid4().hex
+        content_type = "video/mp4" if animation_path.suffix.lower() == ".mp4" else "image/gif"
+        body_parts = []
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+        body_parts.append(b"")
+        body_parts.append(str(chat_id).encode())
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(f'Content-Disposition: form-data; name="animation"; filename="{animation_path.name}"'.encode())
+        body_parts.append(f"Content-Type: {content_type}".encode())
+        body_parts.append(b"")
+        body_parts.append(animation_path.read_bytes())
+        if caption:
+            body_parts.append(f"--{boundary}".encode())
+            body_parts.append(b'Content-Disposition: form-data; name="caption"')
+            body_parts.append(b"")
+            body_parts.append(caption.encode())
+        body_parts.append(f"--{boundary}--".encode())
+        body_parts.append(b"")
+        body = b"\r\n".join(body_parts)
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendAnimation",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result = json.loads(r.read())
+                if result.get("ok"):
+                    print(f"Animation sent: {animation_path.name}")
+                    return True
+                else:
+                    print(f"sendAnimation failed: {result}")
+                    return False
+        except Exception as e:
+            print(f"sendAnimation error: {e}")
+            return False
+
+    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+        if not BOT_TOKEN:
+            return False
+        ok, validated = validate_document_path(doc_path)
+        if not ok:
+            print(validated)
+            return False
+        doc_path = validated
+        boundary = uuid.uuid4().hex
+        content_type = mimetypes.guess_type(str(doc_path))[0] or "application/octet-stream"
+        body_parts = []
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+        body_parts.append(b"")
+        body_parts.append(str(chat_id).encode())
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(f'Content-Disposition: form-data; name="document"; filename="{doc_path.name}"'.encode())
+        body_parts.append(f"Content-Type: {content_type}".encode())
+        body_parts.append(b"")
+        body_parts.append(doc_path.read_bytes())
+        if caption:
+            body_parts.append(f"--{boundary}".encode())
+            body_parts.append(b'Content-Disposition: form-data; name="caption"')
+            body_parts.append(b"")
+            body_parts.append(caption.encode())
+        body_parts.append(f"--{boundary}--".encode())
+        body_parts.append(b"")
+        body = b"\r\n".join(body_parts)
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result = json.loads(r.read())
+                if result.get("ok"):
+                    print(f"Document sent: {doc_path.name}")
+                    return True
+                else:
+                    print(f"sendDocument failed: {result}")
+                    return False
+        except Exception as e:
+            print(f"sendDocument error: {e}")
+            return False
+
+    def _send_media_multipart(self, chat_id, file_path, field_name, api_method, caption=None) -> bool:
+        if not BOT_TOKEN:
+            return False
+        boundary = uuid.uuid4().hex
+        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        body_parts = []
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
+        body_parts.append(b"")
+        body_parts.append(str(chat_id).encode())
+        body_parts.append(f"--{boundary}".encode())
+        body_parts.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"'.encode())
+        body_parts.append(f"Content-Type: {content_type}".encode())
+        body_parts.append(b"")
+        body_parts.append(file_path.read_bytes())
+        if caption:
+            body_parts.append(f"--{boundary}".encode())
+            body_parts.append(b'Content-Disposition: form-data; name="caption"')
+            body_parts.append(b"")
+            body_parts.append(caption.encode())
+        body_parts.append(f"--{boundary}--".encode())
+        body_parts.append(b"")
+        body = b"\r\n".join(body_parts)
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/{api_method}",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result = json.loads(r.read())
+                if result.get("ok"):
+                    print(f"{api_method} sent: {file_path.name}")
+                    return True
+                else:
+                    print(f"{api_method} failed: {result}")
+                    return False
+        except Exception as e:
+            print(f"{api_method} error: {e}")
+            return False
+
+    def send_video(self, chat_id, video_path, caption=None) -> bool:
+        ok, validated = validate_document_path(video_path)
+        if not ok:
+            print(validated)
+            return False
+        return self._send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
+
+    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+        ok, validated = validate_document_path(audio_path)
+        if not ok:
+            print(validated)
+            return False
+        return self._send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
+
+    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+        ok, validated = validate_document_path(voice_path)
+        if not ok:
+            print(validated)
+            return False
+        return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
+
+    def send_sticker(self, chat_id, sticker_path) -> bool:
+        sticker_path = Path(sticker_path)
+        if not sticker_path.exists() or not sticker_path.is_file():
+            print(f"Sticker not found: {sticker_path}")
+            return False
+        return self._send_media_multipart(chat_id, sticker_path, "sticker", "sendSticker")
+
+    def send_chat_action(self, chat_id, action) -> None:
+        telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def set_reaction(self, chat_id, message_id, reaction) -> None:
+        telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": reaction})
+
+    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return telegram_api("editMessageText", payload)
+
+    def setup_commands(self, commands) -> None:
+        telegram_api("setMyCommands", {"commands": commands})
+
+    def download_file(self, file_id, session_name) -> str | None:
+        if not BOT_TOKEN:
+            return None
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                data=json.dumps({"file_id": file_id}).encode(),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as r:
+                result = json.loads(r.read())
+                if not result.get("ok"):
+                    print(f"getFile failed: {result}")
+                    return None
+                file_info = result.get("result", {})
+        except Exception as e:
+            print(f"getFile error: {e}")
+            return None
+        file_path = file_info.get("file_path")
+        file_size = file_info.get("file_size", 0)
+        if not file_path:
+            print("No file_path in response")
+            return None
+        if file_size > MAX_FILE_SIZE:
+            print(f"File too large: {file_size} > {MAX_FILE_SIZE}")
+            return None
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        inbox = ensure_inbox_dir(session_name)
+        ext = Path(file_path).suffix or ""
+        local_filename = f"{uuid.uuid4().hex}{ext}"
+        local_path = inbox / local_filename
+        try:
+            req = urllib.request.Request(download_url)
+            with urllib.request.urlopen(req, timeout=60) as r:
+                content = r.read()
+                if len(content) > MAX_FILE_SIZE:
+                    print(f"Downloaded file too large: {len(content)}")
+                    return None
+                local_path.write_bytes(content)
+                local_path.chmod(0o600)
+            print(f"Downloaded file: {local_path}")
+            host = get_worker_host(session_name)
+            if host:
+                remote_inbox = str(inbox)
+                _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True)
+                _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True)
+                subprocess.run(
+                    ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
+                    capture_output=True, timeout=15)
+            return str(local_path)
+        except Exception as e:
+            print(f"Download error: {e}")
+            return None
+
+
+class LocalTransport(MessageTransport):
+    """Transport that logs messages to stdout. For testing without Telegram."""
+
+    def __init__(self):
+        self._log_file = os.environ.get("TRANSPORT_LOG", "")
+
+    @property
+    def name(self) -> str:
+        return "local"
+
+    def _log(self, method, chat_id, **kwargs):
+        msg = f"[local-transport] {method} chat_id={chat_id}"
+        for k, v in kwargs.items():
+            if v is not None:
+                msg += f" {k}={v}"
+        print(msg)
+        if self._log_file:
+            with open(self._log_file, "a") as f:
+                f.write(msg + "\n")
+
+    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+        self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
+        return {"ok": True, "result": {"message_id": 1}}
+
+    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+        self._log("send_photo", chat_id, path=photo_path, caption=caption)
+        return True
+
+    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+        self._log("send_document", chat_id, path=doc_path, caption=caption)
+        return True
+
+    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+        self._log("send_animation", chat_id, path=animation_path, caption=caption)
+        return True
+
+    def send_video(self, chat_id, video_path, caption=None) -> bool:
+        self._log("send_video", chat_id, path=video_path, caption=caption)
+        return True
+
+    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+        self._log("send_audio", chat_id, path=audio_path, caption=caption)
+        return True
+
+    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+        self._log("send_voice", chat_id, path=voice_path, caption=caption)
+        return True
+
+    def send_sticker(self, chat_id, sticker_path) -> bool:
+        self._log("send_sticker", chat_id, path=sticker_path)
+        return True
+
+    def send_chat_action(self, chat_id, action) -> None:
+        self._log("send_chat_action", chat_id, action=action)
+
+    def set_reaction(self, chat_id, message_id, reaction) -> None:
+        self._log("set_reaction", chat_id, message_id=message_id)
+
+    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+        self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
+        return {"ok": True, "result": {"message_id": message_id}}
+
+    def setup_commands(self, commands) -> None:
+        self._log("setup_commands", 0, count=len(commands))
+
+    def download_file(self, file_id, session_name) -> str | None:
+        self._log("download_file", 0, file_id=file_id, session=session_name)
+        return None
+
+
+def _init_transport() -> MessageTransport:
+    if TRANSPORT_MODE == "local":
+        return LocalTransport()
+    return TelegramTransport(BOT_TOKEN)
+
+
+transport = _init_transport()
 
 
 def telegram_api(method, data):
-    return telegram.api(method, data)
+    """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
+    if TRANSPORT_MODE == "local":
+        print(f"[local-transport] telegram_api {method} {str(data)[:100]}")
+        return {"ok": True, "result": {"message_id": 1}}
+    if isinstance(transport, TelegramTransport):
+        return transport._api.api(method, data)
+    return None
 
 
 def send_telegram_message(chat_id: int, text: str):
     """Send a plain Telegram message."""
-    return telegram.send_message(chat_id, text)
+    return transport.send_text(chat_id, text)
 
+
+def download_telegram_file(file_id, session_name):
+    """Download a Telegram file to the session inbox.
+    Tests can patch bridge.download_telegram_file to intercept file downloads.
+    Delegates to transport.download_file() internally.
+    """
+    return transport.download_file(file_id, session_name)
+
+
+# Backward-compat module-level media stubs.
+# Tests patch these (e.g. patch.object(bridge, 'send_voice', ...)).
+# Production code routes through transport.*; these stubs allow test mocking.
+def send_voice(chat_id, voice_path, caption=None):
+    return transport.send_voice(chat_id, voice_path, caption)
+
+
+def send_photo(chat_id, photo_path, caption=None):
+    return transport.send_photo(chat_id, photo_path, caption)
+
+
+def send_animation(chat_id, animation_path, caption=None):
+    return transport.send_animation(chat_id, animation_path, caption)
+
+
+def send_document(chat_id, doc_path, caption=None):
+    return transport.send_document(chat_id, doc_path, caption)
+
+
+def send_video(chat_id, video_path, caption=None):
+    return transport.send_video(chat_id, video_path, caption)
+
+
+def send_audio(chat_id, audio_path, caption=None):
+    return transport.send_audio(chat_id, audio_path, caption)
+
+
+def send_sticker(chat_id, sticker_path):
+    return transport.send_sticker(chat_id, sticker_path)
 
 
 # ============================================================
@@ -1606,76 +2079,7 @@ def get_workers(caller_from: str = None):
     return _merge_grpc_workers(worker_manager.get_workers(caller_from=caller_from))
 
 
-def download_telegram_file(file_id, session_name):
-    """Download a file from Telegram to the session's inbox.
-
-    Returns the local file path or None on failure.
-    SECURITY: Files are sandboxed in session's inbox directory.
-    """
-    if not BOT_TOKEN:
-        return None
-
-    # Get file info from Telegram
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-            data=json.dumps({"file_id": file_id}).encode(),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as r:
-            result = json.loads(r.read())
-            if not result.get("ok"):
-                print(f"getFile failed: {result}")
-                return None
-            file_info = result.get("result", {})
-    except Exception as e:
-        print(f"getFile error: {e}")
-        return None
-
-    file_path = file_info.get("file_path")
-    file_size = file_info.get("file_size", 0)
-
-    if not file_path:
-        print("No file_path in response")
-        return None
-
-    # Check file size
-    if file_size > MAX_FILE_SIZE:
-        print(f"File too large: {file_size} > {MAX_FILE_SIZE}")
-        return None
-
-    # Download the file
-    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    inbox = ensure_inbox_dir(session_name)
-
-    # Generate unique filename with original extension
-    ext = Path(file_path).suffix or ""
-    local_filename = f"{uuid.uuid4().hex}{ext}"
-    local_path = inbox / local_filename
-
-    try:
-        req = urllib.request.Request(download_url)
-        with urllib.request.urlopen(req, timeout=60) as r:
-            content = r.read()
-            if len(content) > MAX_FILE_SIZE:
-                print(f"Downloaded file too large: {len(content)}")
-                return None
-            local_path.write_bytes(content)
-            local_path.chmod(0o600)
-        print(f"Downloaded file: {local_path}")
-        # For teleported workers, sync file to remote inbox
-        host = get_worker_host(session_name)
-        if host:
-            remote_inbox = str(inbox)
-            _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True)
-            _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True)
-            subprocess.run(
-                ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
-                capture_output=True, timeout=15)
-        return str(local_path)
-    except Exception as e:
-        print(f"Download error: {e}")
-        return None
+# download_telegram_file removed — use download_telegram_file() instead
 
 
 def transcribe_voice(file_path: str, timeout: int = None) -> Optional[str]:
@@ -1807,137 +2211,6 @@ def validate_photo_path(photo_path):
     return True, photo_path
 
 
-def send_photo(chat_id, photo_path, caption=None):
-    """Send a photo to Telegram using multipart/form-data.
-
-    SECURITY: Path is validated before sending.
-    Returns True on success, False on failure.
-    """
-    if not BOT_TOKEN:
-        return False
-
-    ok, validated = validate_photo_path(photo_path)
-    if not ok:
-        print(validated)
-        return False
-
-    photo_path = validated
-
-    # Build multipart form data
-    boundary = uuid.uuid4().hex
-    content_type = mimetypes.guess_type(str(photo_path))[0] or "image/jpeg"
-
-    body_parts = []
-
-    # chat_id field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
-    body_parts.append(b"")
-    body_parts.append(str(chat_id).encode())
-
-    # photo field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(f'Content-Disposition: form-data; name="photo"; filename="{photo_path.name}"'.encode())
-    body_parts.append(f"Content-Type: {content_type}".encode())
-    body_parts.append(b"")
-    body_parts.append(photo_path.read_bytes())
-
-    # caption field (optional)
-    if caption:
-        body_parts.append(f"--{boundary}".encode())
-        body_parts.append(b'Content-Disposition: form-data; name="caption"')
-        body_parts.append(b"")
-        body_parts.append(caption.encode())
-
-    body_parts.append(f"--{boundary}--".encode())
-    body_parts.append(b"")
-
-    body = b"\r\n".join(body_parts)
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.loads(r.read())
-            if result.get("ok"):
-                print(f"Photo sent: {photo_path.name}")
-                return True
-            else:
-                print(f"sendPhoto failed: {result}")
-                return False
-    except Exception as e:
-        print(f"sendPhoto error: {e}")
-        return False
-
-
-def send_animation(chat_id, animation_path, caption=None):
-    """Send an animation (GIF) to Telegram using multipart/form-data.
-
-    SECURITY: Path is validated before sending.
-    Returns True on success, False on failure.
-    """
-    if not BOT_TOKEN:
-        return False
-
-    ok, validated = validate_photo_path(animation_path)
-    if not ok:
-        print(validated)
-        return False
-
-    animation_path = validated
-
-    boundary = uuid.uuid4().hex
-    content_type = "video/mp4" if animation_path.suffix.lower() == ".mp4" else "image/gif"
-
-    body_parts = []
-
-    # chat_id field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
-    body_parts.append(b"")
-    body_parts.append(str(chat_id).encode())
-
-    # animation field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(f'Content-Disposition: form-data; name="animation"; filename="{animation_path.name}"'.encode())
-    body_parts.append(f"Content-Type: {content_type}".encode())
-    body_parts.append(b"")
-    body_parts.append(animation_path.read_bytes())
-
-    # caption field (optional)
-    if caption:
-        body_parts.append(f"--{boundary}".encode())
-        body_parts.append(b'Content-Disposition: form-data; name="caption"')
-        body_parts.append(b"")
-        body_parts.append(caption.encode())
-
-    body_parts.append(f"--{boundary}--".encode())
-    body_parts.append(b"")
-
-    body = b"\r\n".join(body_parts)
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendAnimation",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.loads(r.read())
-            if result.get("ok"):
-                print(f"Animation sent: {animation_path.name}")
-                return True
-            else:
-                print(f"sendAnimation failed: {result}")
-                return False
-    except Exception as e:
-        print(f"sendAnimation error: {e}")
-        return False
-
-
 def is_blocked_filename(filename):
     """Check if filename matches blocked patterns (secrets, credentials, etc.)."""
     name_lower = filename.lower()
@@ -1981,171 +2254,11 @@ def validate_document_path(doc_path):
     return True, doc_path
 
 
-def send_document(chat_id, doc_path, caption=None):
-    """Send a document to Telegram using multipart/form-data.
-
-    SECURITY: Path and filename are validated before sending.
-    Returns True on success, False on failure.
-    """
-    if not BOT_TOKEN:
-        return False
-
-    ok, validated = validate_document_path(doc_path)
-    if not ok:
-        print(validated)
-        return False
-
-    doc_path = validated
-
-    # Build multipart form data
-    boundary = uuid.uuid4().hex
-    content_type = mimetypes.guess_type(str(doc_path))[0] or "application/octet-stream"
-
-    body_parts = []
-
-    # chat_id field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
-    body_parts.append(b"")
-    body_parts.append(str(chat_id).encode())
-
-    # document field
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(f'Content-Disposition: form-data; name="document"; filename="{doc_path.name}"'.encode())
-    body_parts.append(f"Content-Type: {content_type}".encode())
-    body_parts.append(b"")
-    body_parts.append(doc_path.read_bytes())
-
-    # caption field (optional)
-    if caption:
-        body_parts.append(f"--{boundary}".encode())
-        body_parts.append(b'Content-Disposition: form-data; name="caption"')
-        body_parts.append(b"")
-        body_parts.append(caption.encode())
-
-    body_parts.append(f"--{boundary}--".encode())
-    body_parts.append(b"")
-
-    body = b"\r\n".join(body_parts)
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.loads(r.read())
-            if result.get("ok"):
-                print(f"Document sent: {doc_path.name}")
-                return True
-            else:
-                print(f"sendDocument failed: {result}")
-                return False
-    except Exception as e:
-        print(f"sendDocument error: {e}")
-        return False
-
-
-def _send_media_multipart(chat_id, file_path, field_name, api_method, caption=None):
-    """Generic multipart upload for any Telegram media method.
-
-    Args:
-        chat_id: Telegram chat ID
-        file_path: Path object to the file
-        field_name: API field name (e.g. "video", "audio", "voice")
-        api_method: API method (e.g. "sendVideo", "sendAudio", "sendVoice")
-        caption: Optional caption
-    Returns True on success.
-    """
-    if not BOT_TOKEN:
-        return False
-
-    boundary = uuid.uuid4().hex
-    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-
-    body_parts = []
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(b'Content-Disposition: form-data; name="chat_id"')
-    body_parts.append(b"")
-    body_parts.append(str(chat_id).encode())
-
-    body_parts.append(f"--{boundary}".encode())
-    body_parts.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"'.encode())
-    body_parts.append(f"Content-Type: {content_type}".encode())
-    body_parts.append(b"")
-    body_parts.append(file_path.read_bytes())
-
-    if caption:
-        body_parts.append(f"--{boundary}".encode())
-        body_parts.append(b'Content-Disposition: form-data; name="caption"')
-        body_parts.append(b"")
-        body_parts.append(caption.encode())
-
-    body_parts.append(f"--{boundary}--".encode())
-    body_parts.append(b"")
-    body = b"\r\n".join(body_parts)
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/{api_method}",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.loads(r.read())
-            if result.get("ok"):
-                print(f"{api_method} sent: {file_path.name}")
-                return True
-            else:
-                print(f"{api_method} failed: {result}")
-                return False
-    except Exception as e:
-        print(f"{api_method} error: {e}")
-        return False
-
-
 # Media extensions routed to specialized Telegram API methods
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
 VOICE_EXTENSIONS = {".ogg", ".opus", ".oga"}
 STICKER_EXTENSIONS = {".tgs"}  # animated stickers; static .webp handled by sendPhoto
-
-
-def send_video(chat_id, video_path, caption=None):
-    """Send video via sendVideo (shows player with controls)."""
-    ok, validated = validate_document_path(video_path)
-    if not ok:
-        print(validated)
-        return False
-    return _send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
-
-
-def send_audio(chat_id, audio_path, caption=None):
-    """Send audio via sendAudio (shows audio player UI)."""
-    ok, validated = validate_document_path(audio_path)
-    if not ok:
-        print(validated)
-        return False
-    return _send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
-
-
-def send_voice(chat_id, voice_path, caption=None):
-    """Send voice message via sendVoice (shows voice bubble)."""
-    ok, validated = validate_document_path(voice_path)
-    if not ok:
-        print(validated)
-        return False
-    return _send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
-
-
-def send_sticker(chat_id, sticker_path):
-    """Send sticker via sendSticker."""
-    sticker_path = Path(sticker_path)
-    if not sticker_path.exists() or not sticker_path.is_file():
-        print(f"Sticker not found: {sticker_path}")
-        return False
-    return _send_media_multipart(chat_id, sticker_path, "sticker", "sendSticker")
 
 
 # ============================================================
@@ -2782,10 +2895,9 @@ def update_bot_commands():
     for name in sorted(registered.keys()):
         commands.append({"command": name, "description": f"Message {name}"})
 
-    result = telegram_api("setMyCommands", {"commands": commands})
-    if result and result.get("ok"):
-        worker_count = len(registered)
-        print(f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
+    transport.setup_commands(commands)
+    worker_count = len(registered)
+    print(f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
 
 
 # ============================================================
@@ -2985,10 +3097,15 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
 
 
 def get_claude_session_cwd(name):
-    return _read_session_file(name, "claude_session_cwd")
+    cwd = _read_session_file(name, "claude_session_cwd")
+    if cwd:
+        cwd = os.path.expanduser(cwd)
+    return cwd
 
 
 def save_claude_session_cwd(name, cwd):
+    if cwd:
+        cwd = os.path.expanduser(cwd)
     d = ensure_session_dir(name)
     f = d / "claude_session_cwd"
     f.write_text(cwd)
@@ -3388,7 +3505,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     else:
         text = f"{name}: {state} ({reason}). Check /team"
     try:
-        result = telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
+        result = transport.send_text(admin_chat_id, text)
         if result and result.get("ok"):
             print(f"[watchdog] Alert sent for {name} ({state}): {text[:80]}")
             msg_id = result.get("result", {}).get("message_id")
@@ -3435,11 +3552,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         old_msg_id, old_text = alert_info
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
         try:
-            telegram_api("editMessageText", {
-                "chat_id": admin_chat_id,
-                "message_id": old_msg_id,
-                "text": resolved_text,
-            })
+            transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
             print(f"[watchdog] Edited alert for {name} -> resolved")
             return
         except Exception:
@@ -3447,7 +3560,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     text = f"✅ {name} is back to normal."
     try:
-        telegram_api("sendMessage", {"chat_id": admin_chat_id, "text": text})
+        transport.send_text(admin_chat_id, text)
     except Exception as e:
         print(f"Watchdog resolved alert error: {e}")
 
@@ -3481,18 +3594,47 @@ def _handle_watchdog_transition(
             return since is not None and (now - since) >= START_GRACE
         return True
 
+    GOOD_PROBE_THRESHOLD = 3
+    BAD_PROBE_THRESHOLD = 3
+
+    is_remote = bool(get_worker_host(name))
+
     if state in bad_states:
-        if state_changed:
+        with _watchdog_lock:
+            _consecutive_good_probes[name] = 0
+
+        if is_remote and state in {"OFFLINE", "DEAD"}:
+            with _watchdog_lock:
+                _consecutive_bad_probes[name] = _consecutive_bad_probes.get(name, 0) + 1
+                bad_count = _consecutive_bad_probes[name]
+            if bad_count < BAD_PROBE_THRESHOLD:
+                return
+
+        if state_changed or prev_state is None:
             if eligible_for_alert():
                 print(f"[watchdog] State change {name}: {prev_state} -> {state} ({reason}), sending alert")
                 _send_watchdog_alert(name, state, reason)
         elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert():
             _send_watchdog_alert(name, state, reason)
+        with _watchdog_lock:
+            _prev_worker_states[name] = state
+        return
 
-    if state_changed and prev_state in bad_states and state in good_states:
-        _send_resolved_alert(name, state)
+    if state in good_states and prev_state in bad_states:
+        with _watchdog_lock:
+            _consecutive_good_probes[name] = _consecutive_good_probes.get(name, 0) + 1
+            _consecutive_bad_probes[name] = 0
+            good_count = _consecutive_good_probes[name]
+        if good_count >= GOOD_PROBE_THRESHOLD:
+            _send_resolved_alert(name, state)
+            with _watchdog_lock:
+                _consecutive_good_probes[name] = 0
+                _prev_worker_states[name] = state
+        return
 
     with _watchdog_lock:
+        _consecutive_good_probes[name] = 0
+        _consecutive_bad_probes[name] = 0
         _prev_worker_states[name] = state
 
 
@@ -3537,6 +3679,7 @@ def watchdog_loop():
                     remote_workers.setdefault(host, []).append((name, tmux_name))
 
             remote_pane_pids = {}  # tmux_name -> pane_pid (across all hosts)
+            failed_hosts = set()  # hosts where SSH probe failed this cycle
             for host, workers in remote_workers.items():
                 try:
                     r = _remote_run(
@@ -3547,8 +3690,10 @@ def watchdog_loop():
                             parts = line.strip().split()
                             if len(parts) >= 2 and parts[1].isdigit():
                                 remote_pane_pids[parts[0]] = parts[1]
+                    else:
+                        failed_hosts.add(host)
                 except Exception:
-                    pass
+                    failed_hosts.add(host)
 
             for name, session in registered.items():
                 backend_name = get_worker_backend(name, session)
@@ -3599,6 +3744,11 @@ def watchdog_loop():
                     continue
 
                 if probe_failed and not tmux_exists and _consecutive_probe_failures.get(name, 0) < 3:
+                    continue
+
+                # Skip remote workers whose host SSH probe failed this cycle
+                host = get_worker_host(name)
+                if host and host in failed_hosts and not tmux_exists:
                     continue
 
                 backend = backend_info.get(name)
@@ -5256,6 +5406,21 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
     For remote hosts, remaps SESSIONS_DIR to use the remote $HOME prefix
     (e.g., /home/claude/... → /Users/beastoinagents/...).
     """
+    # Guard: don't overwrite env if session belongs to another live bridge.
+    # Prevents test/dev bridges from clobbering prod workers.
+    our_url = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
+    try:
+        r = _remote_run(["tmux", "show-environment", "-t", tmux_name, "BRIDGE_URL"],
+                        host=host, capture_output=True, text=True, timeout=3)
+        existing = r.stdout.strip().split("=", 1)[-1] if r.returncode == 0 else ""
+        if existing and existing != our_url:
+            import urllib.request
+            urllib.request.urlopen(existing, timeout=1).read()
+            print(f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
+            return
+    except Exception:
+        pass  # other bridge dead or unreachable — safe to claim
+
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host)
     # Remap SESSIONS_DIR for remote hosts (different $HOME path)
@@ -5368,10 +5533,11 @@ def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
     """Fetch a file from a remote host via rsync to a local temp path.
 
     Returns local temp path on success, None on failure.
+    Preserves the original filename so Telegram displays it correctly.
     """
-    suffix = Path(remote_path).suffix
-    fd, local_path = tempfile.mkstemp(suffix=suffix, prefix="remote-file-")
-    os.close(fd)
+    original_name = Path(remote_path).name
+    tmp_dir = tempfile.mkdtemp(prefix="remote-file-")
+    local_path = os.path.join(tmp_dir, original_name)
     try:
         r = subprocess.run(
             ["rsync", "-az", f"{host}:{remote_path}", local_path],
@@ -5380,7 +5546,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
             return local_path
     except Exception as e:
         print(f"Remote file fetch failed: {host}:{remote_path} -> {e}")
-    os.unlink(local_path)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     return None
 
 
@@ -5462,7 +5628,10 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
             if prev_msg_id:
                 msg_data["reply_to_message_id"] = prev_msg_id
 
-            result = telegram_api("sendMessage", msg_data)
+            result = transport.send_text(
+                chat_id, part, parse_mode="HTML",
+                reply_to=prev_msg_id if prev_msg_id else None
+            )
             if result and result.get("ok"):
                 prev_msg_id = result.get("result", {}).get("message_id")
                 if len(formatted_parts) > 1:
@@ -5479,9 +5648,10 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                     # Strip HTML tags and decode entities for readable plain text
                     plain_text = re.sub(r'<[^>]+>', '', part)
                     plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                    plain_data = {k: v for k, v in msg_data.items() if k != "parse_mode"}
-                    plain_data["text"] = plain_text
-                    result = telegram_api("sendMessage", plain_data)
+                    result = transport.send_text(
+                        chat_id, plain_text,
+                        reply_to=prev_msg_id if prev_msg_id else None
+                    )
                     if result and result.get("ok"):
                         prev_msg_id = result.get("result", {}).get("message_id")
                         print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
@@ -5504,10 +5674,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         if sent:
             print(f"Image sent: {name} -> {img_path}")
         else:
-            telegram_api("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"{name}: [Image failed: {img_path}]"
-            })
+            transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
 
     # Send files — route to specialized API method by extension
     for file_path, file_caption in files:
@@ -5526,10 +5693,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         if sent:
             print(f"File sent: {name} -> {file_path}")
         else:
-            telegram_api("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"{name}: [File failed: {file_path}]"
-            })
+            transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
     # Auto-TTS: synthesize and send voice alongside text
     # Skip TTS for messages >1000 chars. Split into paragraphs for separate voice messages.
@@ -5685,7 +5849,7 @@ def switch_session(name):
 def send_typing_loop(chat_id, session_name):
     """Send typing indicator while request is pending."""
     while is_pending(session_name):
-        telegram_api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        transport.send_chat_action(chat_id, "typing")
         time.sleep(4)
 
 
@@ -5718,10 +5882,7 @@ def send_shutdown_message():
 
     print(f"Sending shutdown to {len(chat_ids)} chat(s)...")
     for chat_id in chat_ids:
-        telegram_api("sendMessage", {
-            "chat_id": chat_id,
-            "text": "Going offline briefly. Your team stays the same."
-        })
+        transport.send_text(chat_id, "Going offline briefly. Your team stays the same.")
     print("Shutdown notifications sent")
 
 
@@ -5729,9 +5890,65 @@ def send_shutdown_message():
 # NON-CORE: CommandRouter
 # ============================================================
 
+class _LegacyTransportAdapter(MessageTransport):
+    """Wraps legacy TelegramAPI-style objects (with send_message/set_reaction)
+    for backward compat with tests that pass FakeTelegram to CommandRouter."""
+
+    def __init__(self, legacy):
+        self._legacy = legacy
+
+    @property
+    def name(self) -> str:
+        return "legacy-adapter"
+
+    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+        result = self._legacy.send_message(chat_id, text)
+        return result if result else {"ok": True, "result": {"message_id": 1}}
+
+    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+        return False
+
+    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+        return False
+
+    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+        return False
+
+    def send_video(self, chat_id, video_path, caption=None) -> bool:
+        return False
+
+    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+        return False
+
+    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+        return False
+
+    def send_sticker(self, chat_id, sticker_path) -> bool:
+        return False
+
+    def send_chat_action(self, chat_id, action) -> None:
+        pass
+
+    def set_reaction(self, chat_id, message_id, reaction) -> None:
+        if hasattr(self._legacy, 'set_reaction'):
+            self._legacy.set_reaction(chat_id, message_id, reaction)
+
+    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+        return {"ok": True, "result": {"message_id": message_id}}
+
+    def setup_commands(self, commands) -> None:
+        pass
+
+    def download_file(self, file_id, session_name) -> str | None:
+        return None
+
+
 class CommandRouter:
-    def __init__(self, telegram_api: TelegramAPI, workers: WorkerManager):
-        self.telegram = telegram_api
+    def __init__(self, transport, workers: WorkerManager):
+        # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
+        if transport is not None and not isinstance(transport, MessageTransport):
+            transport = _LegacyTransportAdapter(transport)
+        self.transport = transport
         self.workers = workers
         # Restart-all state
         self._restart_all_lock = threading.Lock()
@@ -5740,7 +5957,8 @@ class CommandRouter:
         self._restart_all_thread = None
 
     def reply(self, chat_id, text, outcome=None):
-        self.telegram.send_message(chat_id, text)
+        if self.transport is not None:
+            self.transport.send_text(chat_id, text)
 
     def send_startup_message(self, chat_id):
         registered = self.workers.get_registered_sessions()
@@ -6103,7 +6321,7 @@ class CommandRouter:
                 self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
                 return True
             if prev_focus != worker_name:
-                self.telegram.send_message(chat_id, f"Now talking to {worker_name.capitalize()}.")
+                self.transport.send_text(chat_id, f"Now talking to {worker_name.capitalize()}.")
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
             return True
 
@@ -6815,9 +7033,10 @@ class CommandRouter:
                     print(f"[_restart_remote] {name}: session {resume_id} validated at {session_file}")
 
         # Delegate to existing remote start flow
+        # skip_session_sync=True: worker was already on this host, target session files are authoritative
         print(f"[_restart_remote] {name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
         ok = self._start_worker_on_target(
-            name, host, target_cwd, resume_id, backend_name)
+            name, host, target_cwd, resume_id, backend_name, skip_session_sync=True)
         if not ok:
             print(f"[_restart_remote] {name}: _start_worker_on_target FAILED")
             return False, f"Failed to restart {name} on {host}"
@@ -7213,6 +7432,7 @@ class CommandRouter:
             source_host = get_worker_host(name)
 
             source_cwd = get_claude_session_cwd(name)
+            print(f"[teleport] {name}: source_host={source_host}, source_cwd={source_cwd}, target_host={target_host}, target_cwd={target_cwd}")
             if not target_cwd:
                 target_cwd = source_cwd
                 # Remap home directory when source and target have different $HOME
@@ -7225,6 +7445,17 @@ class CommandRouter:
                     remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
                     if remote_home and remote_home != local_home and target_cwd.startswith(local_home):
                         target_cwd = remote_home + target_cwd[len(local_home):]
+
+            # Expand ~ in target_cwd to remote $HOME
+            if target_cwd and target_cwd.startswith("~") and target_host:
+                r_home = _remote_run(
+                    ["bash", "-c", "echo $HOME"], host=target_host,
+                    capture_output=True, text=True, timeout=5)
+                remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                if remote_home:
+                    target_cwd = remote_home + target_cwd[1:]
+            elif target_cwd and target_cwd.startswith("~"):
+                target_cwd = os.path.expanduser(target_cwd)
 
             # Write teleport state for crash recovery
             ensure_session_dir(name)
@@ -7239,11 +7470,14 @@ class CommandRouter:
 
             self._teleport_notify(chat_id, f"Stopping {name}...")
             session_id = self._stop_worker_for_teleport(name, tmux_name, source_host)
+            print(f"[teleport] {name}: stopped, session_id={session_id}")
 
             if source_cwd and target_cwd:
                 self._teleport_notify(chat_id, f"Syncing working directory...")
+                print(f"[teleport] {name}: syncing {source_cwd} → {target_cwd}")
                 ok = self._sync_working_directory(
                     source_cwd, target_cwd, source_host, target_host, full_sync)
+                print(f"[teleport] {name}: working dir sync ok={ok}")
                 if not ok:
                     self._teleport_rollback(name, tmux_name, source_host, source_cwd,
                                             session_id, backend_name, chat_id,
@@ -7254,6 +7488,7 @@ class CommandRouter:
                 self._teleport_notify(chat_id, "Syncing session transcript...")
                 self._sync_session_transcript(
                     session_id, source_cwd, target_cwd, source_host, target_host)
+                print(f"[teleport] {name}: transcript sync done")
 
             # On teleport out: push team configs + install hooks on target
             # On teleback: skip — VPS is source of truth for team-scope config
@@ -7261,6 +7496,7 @@ class CommandRouter:
                 self._teleport_notify(chat_id, "Syncing team config and hooks...")
                 self._sync_shared_repos(target_host, chat_id)
                 self._install_hooks_on_target(target_host)
+                print(f"[teleport] {name}: team config + hooks synced")
 
             # ── PHASE 2: Commit ──
 
@@ -7283,8 +7519,10 @@ class CommandRouter:
 
             self._teleport_notify(chat_id,
                 f"Starting {name} on {target_host or 'local'}...")
+            print(f"[teleport] {name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={session_id}, backend={backend_name})")
             ok = self._start_worker_on_target(
                 name, target_host, target_cwd, session_id, backend_name)
+            print(f"[teleport] {name}: _start_worker_on_target returned {ok}")
             if not ok:
                 # Clean up target, restart source
                 _remote_run(["tmux", "kill-session", "-t", tmux_name],
@@ -7512,16 +7750,20 @@ class CommandRouter:
         # Push local changes to bare repo (VPS side)
         for repo_name, repo_path in git_repos.items():
             if os.path.isdir(os.path.join(repo_path, ".git")):
-                subprocess.run(
-                    ["git", "-C", repo_path, "add", "-A"],
-                    capture_output=True, timeout=10)
-                subprocess.run(
-                    ["git", "-C", repo_path, "commit", "-m",
-                     f"teleport sync: {repo_name}"],
-                    capture_output=True, timeout=10)
-                subprocess.run(
-                    ["git", "-C", repo_path, "push", "origin", "master"],
-                    capture_output=True, timeout=15)
+                try:
+                    subprocess.run(
+                        ["git", "-C", repo_path, "add", "-A"],
+                        capture_output=True, timeout=10)
+                    subprocess.run(
+                        ["git", "-C", repo_path, "commit", "-m",
+                         f"teleport sync: {repo_name}"],
+                        capture_output=True, timeout=10)
+                    subprocess.run(
+                        ["git", "-C", repo_path, "push", "origin", "master"],
+                        capture_output=True, timeout=60)
+                    print(f"[teleport] git sync succeeded for {repo_name}")
+                except subprocess.TimeoutExpired:
+                    print(f"[teleport] git sync timed out for {repo_name}, continuing")
 
         # Pull on target
         for repo_name in git_repos:
@@ -7754,7 +7996,7 @@ class CommandRouter:
         print(f"[creds] Synced credentials to {target_host}")
 
     def _start_worker_on_target(self, name, target_host, target_cwd,
-                                 session_id, backend_name):
+                                 session_id, backend_name, skip_session_sync=False):
         """Create tmux session on target and start Claude Code with --resume."""
         tmux_name = f"{TMUX_PREFIX}{name}"
 
@@ -7766,8 +8008,9 @@ class CommandRouter:
         # Create new session
         r = _remote_run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
-            host=target_host, capture_output=True)
+            host=target_host, capture_output=True, text=True)
         if r.returncode != 0:
+            print(f"[teleport] tmux new-session failed: rc={r.returncode} stderr={r.stderr[:200] if r.stderr else ''}")
             return False
 
         time.sleep(0.5)
@@ -7784,7 +8027,8 @@ class CommandRouter:
                 target_sessions_dir = remote_home + target_sessions_dir[len(local_home):]
 
         # Sync session files (chat_id, session_id, cwd) to target
-        if target_host:
+        # Skip for remote restarts — worker was already on target, target files are authoritative
+        if target_host and not skip_session_sync:
             self._sync_session_files_to_target(name, target_sessions_dir, target_host)
 
         # Sync credentials if target lacks them
@@ -7826,6 +8070,7 @@ class CommandRouter:
         if target_cwd:
             start_cmd = f'cd {shlex.quote(target_cwd)} && {start_cmd}'
 
+        print(f"[teleport] start_cmd={start_cmd}")
         _remote_run(
             ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
             host=target_host, capture_output=True)
@@ -7841,16 +8086,29 @@ class CommandRouter:
                              host=target_host, capture_output=True)
 
         # Verify Claude is running (retry up to 30s for startup)
-        for _ in range(30):
+        for attempt in range(30):
             time.sleep(1)
             r = _remote_run(
                 ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
                 host=target_host, capture_output=True, text=True)
             if r.returncode != 0:
+                if attempt % 10 == 0:
+                    print(f"[teleport] verify attempt {attempt}: tmux display-message failed rc={r.returncode}")
                 continue
             pane_pid = r.stdout.strip()
-            if pane_pid and _get_claude_pid(pane_pid, host=target_host):
+            claude_pid = _get_claude_pid(pane_pid, host=target_host) if pane_pid else None
+            if claude_pid:
+                print(f"[teleport] verified: claude running as pid {claude_pid} (pane {pane_pid})")
                 return True
+            if attempt % 10 == 0:
+                print(f"[teleport] verify attempt {attempt}: pane_pid={pane_pid}, no claude yet")
+                # Capture pane to see what's happening
+                cap = _remote_run(
+                    ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                    host=target_host, capture_output=True, text=True, timeout=5)
+                if cap.returncode == 0:
+                    print(f"[teleport] pane content: {cap.stdout[:300]}")
+        print(f"[teleport] verify FAILED after 30 attempts")
         return False
 
     def _teleport_rollback(self, name, tmux_name, source_host, source_cwd,
@@ -7858,6 +8116,10 @@ class CommandRouter:
         """Roll back a failed teleport by restarting on source."""
         self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
         try:
+            # Restore source CWD (may have been overwritten with target path)
+            if source_cwd:
+                save_claude_session_cwd(name, source_cwd)
+
             # Ensure tmux session exists on source
             if not tmux_exists(tmux_name, host=source_host):
                 _remote_run(
@@ -7886,7 +8148,7 @@ class CommandRouter:
     def _teleport_notify(self, chat_id, text):
         """Send progress notification during teleport."""
         try:
-            telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+            transport.send_text(chat_id, text)
         except Exception:
             pass
 
@@ -8148,10 +8410,10 @@ class CommandRouter:
         if msg_id and send_ok:
             host = get_worker_host(session_name)
             if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host):
-                self.telegram.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+                self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
-command_router = CommandRouter(telegram, worker_manager)
+command_router = CommandRouter(transport, worker_manager)
 
 # ============================================================
 # TRANSCRIPT VIEWER
@@ -9865,6 +10127,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, body: bytes, status: int = 200):
+        """Send HTML response, gzip-compressed if client supports it."""
+        accept = self.headers.get("Accept-Encoding", "")
+        if "gzip" in accept and len(body) > 1024:
+            import gzip as _gzip
+            compressed = _gzip.compress(body, compresslevel=6)
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+        else:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
     def _send_unknown_endpoint(self, method: str, path: str):
         """Return 404 JSON for unrecognized endpoints with available alternatives."""
         self._send_json(404, {
@@ -9899,6 +10180,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/pr-merge":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             self.handle_pr_merge(body)
+            return
+
+        if self.path == "/register":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_forge_register(body)
             return
 
         # Only accept Telegram webhook on root path — 404 for unknown POST paths
@@ -9962,7 +10248,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_ids = get_all_chat_ids()
             sent = 0
             for chat_id in chat_ids:
-                result = telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+                result = transport.send_text(chat_id, text)
                 if result and result.get("ok"):
                     sent += 1
 
@@ -9976,6 +10262,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def handle_forge_register(self, body: bytes = b""):
+        """Accept registration from forge-built worker binaries.
+
+        POST /register — worker announces itself to the bridge.
+        Body: {"Name": "workerName", "Host": "hostname", "Version": "1.0.0", "Tools": {...}}
+        Response: {"ok": true}
+        """
+        try:
+            data = json.loads(body) if body else {}
+            name = data.get("Name", data.get("name", ""))
+            host = data.get("Host", data.get("host", ""))
+            version = data.get("Version", data.get("version", ""))
+            if name:
+                print(f"Forge worker registered: {name} (host={host}, version={version})")
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            print(f"Register error: {e}")
+            self._send_json(500, {"ok": False, "error": str(e)})
 
     def handle_hook_response(self, body: bytes = b""):
         """Handle response forwarded from Claude hook.
@@ -10550,11 +10855,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"<h2>PR review not found</h2><p>File {html_path} missing. Re-run /pr command.</p>".encode())
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
         with open(html_path, "rb") as f:
-            self.wfile.write(f.read())
+            self._send_html(f.read())
 
     def handle_pr_comment(self, body: bytes):
         """Post an inline comment on a PR via GitHub API + notify Telegram."""
@@ -10629,7 +10931,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"{path}:{line}\n\n"
                 f"{comment_body}"
             )
-            telegram.send_message(admin_chat_id, tg_text)
+            transport.send_text(admin_chat_id, tg_text)
 
         # Route to workers via @mentions (same rule as Telegram messages)
         targets, _ = command_router.parse_at_mentions(comment_body)
@@ -10732,12 +11034,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     name, session_id=session_id,
                     page=page, per_page=per_page, search_query=search_query,
                     token=token or "", filter_mode=filter_mode, search_sort=search_sort)
-            body = html_content.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_html(html_content.encode("utf-8"))
         except Exception as e:
             print(f"Transcript endpoint error: {e}")
             import traceback
@@ -10801,12 +11098,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             html_content = _render_team_chat_html(
                 page=page, per_page=per_page,
                 search_query=search_query, token=token)
-            body = html_content.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_html(html_content.encode("utf-8"))
         except Exception as e:
             print(f"Team chat endpoint error: {e}")
             import traceback
@@ -10922,7 +11214,7 @@ def graceful_shutdown(signum, frame):
 def main():
     global admin_chat_id, grpc_server
 
-    if not BOT_TOKEN:
+    if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
         return
 
@@ -11025,7 +11317,7 @@ def main():
         if SANDBOX_ENABLED:
             lines.append(f"Sandbox: {Path.home()} → /workspace")
 
-        result = telegram_api("sendMessage", {"chat_id": last_chat_id, "text": "\n".join(lines)})
+        result = transport.send_text(last_chat_id, "\n".join(lines))
         if result and result.get("ok"):
             print(f"Sent startup notification to chat {last_chat_id}")
         else:

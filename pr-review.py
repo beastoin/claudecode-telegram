@@ -191,26 +191,28 @@ def fetch_pr_cached(owner, repo, pr_num, cache=None, fresh=False):
     new_head_sha = meta.get("head_sha", "")
     head_changed = not cached or cached["head_sha"] != new_head_sha
 
-    # 2. Files: re-fetch if head_sha changed, else use cache
-    if head_changed:
-        print("  Fetching file patches (head SHA changed)..." if cached else "  Fetching file patches...")
-        files = fetch_pr_files(owner, repo, pr_num)
+    # 2. Parallel fetch: files + comments + reviews + commit list
+    need_files = head_changed or cache.get_files(pr_key, new_head_sha) is None
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        if need_files:
+            print("  Fetching file patches (head SHA changed)..." if cached and head_changed else "  Fetching file patches...")
+            results["files"] = pool.submit(fetch_pr_files, owner, repo, pr_num)
+        results["comments"] = pool.submit(fetch_pr_comments, owner, repo, pr_num)
+        results["reviews"] = pool.submit(fetch_pr_reviews, owner, repo, pr_num)
+        results["commit_list"] = pool.submit(_fetch_commit_list, owner, repo, pr_num)
+
+    if need_files:
+        files = results["files"].result()
         cache.set_files(pr_key, new_head_sha, files)
     else:
         files = cache.get_files(pr_key, new_head_sha)
-        if files is None:
-            print("  Fetching file patches (cache miss)...")
-            files = fetch_pr_files(owner, repo, pr_num)
-            cache.set_files(pr_key, new_head_sha, files)
-        else:
-            print(f"  Files: cached ({len(files)} files)")
+        print(f"  Files: cached ({len(files)} files)")
 
-    # 3. Comments & reviews: always fetch (lightweight), update cache if changed
     cached_comments = cache.get_comments(pr_key) if cached else []
     cached_reviews = cache.get_reviews(pr_key) if cached else []
-
-    comments = fetch_pr_comments(owner, repo, pr_num)
-    reviews = fetch_pr_reviews(owner, repo, pr_num)
+    comments = results["comments"].result()
+    reviews = results["reviews"].result()
     if len(comments) != len(cached_comments) or len(reviews) != len(cached_reviews):
         if cached:
             print(f"  Comments/reviews updated ({len(cached_comments)}->{len(comments)}, "
@@ -224,9 +226,8 @@ def fetch_pr_cached(owner, repo, pr_num, cache=None, fresh=False):
         comments = cached_comments
         reviews = cached_reviews
 
-    # 4. Commits: fetch list, only fetch file patches for new commits
-    print("  Fetching commits...")
-    commit_list = _fetch_commit_list(owner, repo, pr_num)
+    # 3. Commits: use parallel-fetched list, fetch file patches for new ones
+    commit_list = results["commit_list"].result()
     cached_commits = cache.get_commits(pr_key)
     to_fetch_commits = []
     commit_map = {}
@@ -249,7 +250,7 @@ def fetch_pr_cached(owner, repo, pr_num, cache=None, fresh=False):
     else:
         print(f"  Commits: all {len(commits)} cached")
 
-    # 5. User profiles: cached with 24h TTL
+    # 4. User profiles: cached with 24h TTL
     usernames = {meta.get('user', '')}
     for c in comments:
         usernames.add(c.get('user', ''))
@@ -1198,9 +1199,11 @@ tr.search-match td.code mark{{background:rgba(117,219,240,.15);color:var(--link)
 .disc-body blockquote{{border-left:3px solid var(--border);padding-left:10px;
   color:var(--muted);margin:.4em 0}}
 .disc-body img{{max-width:100%;border-radius:var(--radius)}}
-.disc-body table{{border-collapse:collapse;margin:.5em 0;font-size:.85em}}
-.disc-body th,.disc-body td{{border:1px solid var(--border);padding:4px 8px}}
-.disc-body th{{background:var(--user-bg);font-weight:600}}
+.disc-body table{{border-collapse:collapse;margin:.5em 0;font-size:.85em;
+  display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}}
+.disc-body th,.disc-body td{{border:1px solid var(--border);padding:6px 10px;white-space:nowrap}}
+.disc-body td{{white-space:normal;min-width:80px}}
+.disc-body th{{background:var(--user-bg);font-weight:600;white-space:nowrap}}
 
 /* Commit diffs */
 .disc-commit .commit-title{{font-size:.875rem;font-weight:500;margin-bottom:8px;line-height:1.5}}

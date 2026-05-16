@@ -897,34 +897,39 @@ WantedBy=multi-user.target
 ## Migration Plan
 
 ### Phase 1: Core Binary + Local MVP
-- [ ] Define manifest schema with vars, dirs, knowledge, skills, creds, tools, readiness
-- [ ] Go project: worker-forge/ with embed, age, CLI
-- [ ] Phase 0: var resolution engine ($HOME, $NAME, overrides)
-- [ ] Phase 1: extract to resolved paths, memory merge
-- [ ] Phase 2: tool bootstrap (OS-aware: linux vs darwin)
-- [ ] Phase 3: readiness checks + auto-fix
-- [ ] `--check` flag (preparation + readiness only)
-- [ ] tmux session management, Claude CLI spawn, hooks
-- [ ] Watchdog loop
-- [ ] Test: ./mon on VPS (same host as bridge, gRPC localhost)
+- [x] Define manifest schema with vars, dirs, knowledge, skills, creds, tools, readiness
+- [x] Go project: worker-forge/ with embed, age, CLI
+- [x] Phase 0: var resolution engine ($HOME, $NAME, overrides)
+- [x] Phase 1: extract to resolved paths, memory merge
+- [x] Phase 2: tool bootstrap (OS-aware: linux vs darwin)
+- [x] Phase 3: readiness checks + auto-fix
+- [x] `--check` flag (preparation + readiness only)
+- [x] tmux session management, Claude CLI spawn, hooks
+- [x] Watchdog loop
+- [x] E2E test: build binary → run → verify tmux + bridge registration + watchdog (test-e2e.sh, 11 assertions)
+- [ ] Live test: ./mon on VPS (same host as bridge, gRPC localhost)
 
 ### Phase 2: gRPC Transport + Cross-Host
-- [ ] Proto definition: Bridge service (Register, MessageStream, Heartbeat, StreamJSONL)
-- [ ] Bridge: gRPC server (grpcio) on dedicated port, alongside existing HTTP
-- [ ] Binary: gRPC client, connect to bridge, register
-- [ ] Bridge: MessageStream for bidirectional message routing
-- [ ] StreamJSONL: transcript/log streaming from worker to bridge
-- [ ] Cross-compile: darwin/arm64
-- [ ] Test: ./mon on Mac Mini, bridge on VPS
+- [x] Proto definition: Bridge service (Register, MessageStream, Heartbeat, StreamJSONL, PullKnowledge, CheckUpgrade, DownloadBinary)
+- [x] Bridge: gRPC server (grpcio) on dedicated port, alongside existing HTTP (bridge_grpc.py)
+- [x] Binary: gRPC client, connect to bridge, register (transport.go GRPCTransport)
+- [x] Bridge: MessageStream for bidirectional message routing
+- [x] StreamJSONL: transcript/log streaming from worker to bridge
+- [x] Cross-compile: linux/amd64, linux/arm64, darwin/arm64 (Makefile build-all)
+- [ ] Live test: ./mon on Mac Mini, bridge on VPS
 
 ### Phase 3: Self-Upgrade
-- [ ] Pre-built upgrade (download + replace)
-- [ ] Source rebuild (transient key)
-- [ ] Rollback on failure
+- [x] Pre-built upgrade (download + verify + atomic replace) — upgrade.go
+- [x] Rollback on failure — upgrade.go
+- [ ] Source rebuild (transient key) — DEFERRED per Codex recommendation
+- [ ] Live test
 
 ### Phase 4: All Workers
-- [ ] Write manifests for each worker
-- [ ] Package remaining workers
+- [x] Worker inventory (workers.yaml — 20 workers, roles, platforms, creds)
+- [x] Manifest template (workers/_template/manifest.yaml)
+- [x] Pilot manifests (chen, mon, ren)
+- [ ] Write manifests for remaining 17 workers
+- [ ] Package all workers (package-all script)
 - [ ] Per-worker least-privilege credentials
 
 ## Key Decisions

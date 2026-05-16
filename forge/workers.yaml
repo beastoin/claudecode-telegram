@@ -1,0 +1,181 @@
+version: 1
+bridge_url: "http://100.125.36.102:8271"
+
+common:
+  tools: [tmux, gh, python3, curl, jq, git]
+  hooks: [SessionStart, Stop, PostToolUseFailure]
+  creds: [GH_TOKEN, ANTHROPIC_API_KEY]
+
+workers:
+  # --- Already have manifests ---
+  - name: chen
+    role: RepoOps
+    host: vps
+    platform: linux
+    manifest: workers/chen/manifest.yaml
+
+  - name: mon
+    role: Ops
+    host: vps
+    platform: linux
+    manifest: workers/mon/manifest.yaml
+
+  - name: ren
+    role: Dev
+    host: vps
+    platform: linux
+    manifest: workers/ren/manifest.yaml
+
+  # --- Need manifests ---
+  - name: dean
+    role: Dev
+    host: mac-mini
+    platform: darwin
+    project_slug: "-Users-beastoinagents-boo-boo-cli"
+    working_dir: ~/boo/boo-cli
+    extra_tools: [swift, xcodebuild]
+    extra_creds: []
+
+  - name: finn
+    role: Dev
+    host: mac-mini
+    platform: darwin
+    project_slug: "-Users-beastoinagents-boo-boo-cli"
+    working_dir: ~/boo/boo-cli
+    extra_tools: [swift, xcodebuild]
+    extra_creds: []
+
+  - name: geni
+    role: Researcher
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-research"
+    working_dir: ~/research
+    extra_tools: []
+    extra_creds: []
+
+  - name: hiro
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter, adb, kubectl]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: jin
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: kai
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: kelvin
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi-omi2"
+    working_dir: ~/omi/omi2
+    extra_tools: [node, flutter, adb]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: kenji
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi-omi-kenji"
+    working_dir: ~/omi/omi-kenji
+    extra_tools: [node, flutter, adb]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: lee
+    role: InfraDev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-claudecode-telegram"
+    working_dir: ~/claudecode-telegram
+    extra_tools: [make, codex]
+    extra_creds: []
+
+  - name: luck
+    role: PeopleOps
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-team"
+    working_dir: ~/team
+    extra_tools: []
+    extra_creds: []
+
+  - name: noa
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: ryo
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: seth
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node]
+    extra_creds: []
+
+  - name: sora
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-beast"
+    working_dir: ~/beast
+    extra_tools: [node, make]
+    extra_creds: []
+
+  - name: taro
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: x
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]
+
+  - name: yuki
+    role: Dev
+    host: vps
+    platform: linux
+    project_slug: "-home-claude-omi"
+    working_dir: ~/omi
+    extra_tools: [node, flutter]
+    extra_creds: [OPENAI_API_KEY]

@@ -2093,6 +2093,8 @@ handler.send_header = MagicMock()
 handler.end_headers = MagicMock()
 handler.wfile = MagicMock()
 handler.wfile.write = MagicMock()
+handler.headers = {'Accept-Encoding': ''}
+handler._send_html = bridge.Handler._send_html.__get__(handler)
 
 from urllib.parse import urlparse, parse_qs
 
@@ -3141,6 +3143,8 @@ handler.end_headers = MagicMock()
 buf = bytearray()
 handler.wfile = MagicMock()
 handler.wfile.write = lambda d: buf.extend(d)
+handler.headers = {'Accept-Encoding': ''}
+handler._send_html = bridge.Handler._send_html.__get__(handler)
 parsed = urlparse(f'/team-chat?token={token}&page=1')
 bridge.Handler.handle_team_chat_endpoint(handler, parsed)
 handler.send_response.assert_called_with(200)
@@ -7928,24 +7932,32 @@ def fake_resolved(name, new_state):
 
 orig_alert = bridge._send_watchdog_alert
 orig_resolved = bridge._send_resolved_alert
+orig_get_host = bridge.get_worker_host
 bridge._send_watchdog_alert = fake_alert
 bridge._send_resolved_alert = fake_resolved
+bridge.get_worker_host = lambda name: None  # local workers
 
 # Clear state
 with bridge._watchdog_lock:
     bridge._prev_worker_states.clear()
+    bridge._consecutive_good_probes.clear()
+    bridge._consecutive_bad_probes.clear()
 
 now = time.time()
 
-# Transition to STUCK (bad state) should trigger alert
+# Local worker: STUCK triggers alert immediately
 bridge._handle_watchdog_transition('worker1', 'STUCK', 'age=600s', now, now=now)
 assert len(alerts) == 1, f'Expected 1 alert, got {len(alerts)}'
 assert alerts[0] == ('worker1', 'STUCK', 'age=600s')
 
-# Transition from STUCK to READY should trigger resolved
+# Transition from STUCK to READY requires 3 consecutive good probes
 alerts.clear()
 bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
-assert len(resolved) == 1, f'Expected 1 resolved, got {len(resolved)}'
+assert len(resolved) == 0, f'Expected 0 resolved after 1 good probe, got {len(resolved)}'
+bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
+assert len(resolved) == 0, f'Expected 0 resolved after 2 good probes, got {len(resolved)}'
+bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
+assert len(resolved) == 1, f'Expected 1 resolved after 3 good probes, got {len(resolved)}'
 assert resolved[0] == ('worker1', 'READY')
 assert len(alerts) == 0, 'No alert for good state'
 
@@ -7955,10 +7967,53 @@ resolved.clear()
 bridge._handle_watchdog_transition('worker1', 'BUSY_THINKING', 'cpu=20', now, now=now)
 assert len(alerts) == 0 and len(resolved) == 0, 'READY->BUSY_THINKING should fire nothing'
 
-bridge._send_watchdog_alert = orig_alert
-bridge._send_resolved_alert = orig_resolved
+# --- Remote worker: OFFLINE/DEAD requires 3 consecutive bad probes ---
+alerts.clear()
+resolved.clear()
+bridge.get_worker_host = lambda name: 'remote-host'  # remote workers
 with bridge._watchdog_lock:
     bridge._prev_worker_states.clear()
+    bridge._consecutive_good_probes.clear()
+    bridge._consecutive_bad_probes.clear()
+
+since_past = now - 60  # past START_GRACE so eligible_for_alert is True
+
+# First bad probe: suppressed
+bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
+assert len(alerts) == 0, f'Remote: expected 0 alerts after 1 bad probe, got {len(alerts)}'
+
+# Second bad probe: still suppressed
+bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
+assert len(alerts) == 0, f'Remote: expected 0 alerts after 2 bad probes, got {len(alerts)}'
+
+# Third bad probe: alert fires
+bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
+assert len(alerts) == 1, f'Remote: expected 1 alert after 3 bad probes, got {len(alerts)}'
+
+# Good probe resets bad counter — but needs 3 good probes to resolve
+alerts.clear()
+bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
+assert len(resolved) == 0, f'Remote: expected 0 resolved after 1 good probe, got {len(resolved)}'
+bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
+bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
+assert len(resolved) == 1, f'Remote: expected 1 resolved after 3 good probes, got {len(resolved)}'
+
+# After resolve, single bad probe should not alert (absorbed)
+alerts.clear()
+resolved.clear()
+bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 10s', since_past, now=now)
+assert len(alerts) == 0, f'Remote: single bad probe after resolve should be absorbed, got {len(alerts)}'
+# Good probe resets — no resolved since prev_state is still READY
+bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
+assert len(alerts) == 0 and len(resolved) == 0, 'Remote: transient blip absorbed cleanly'
+
+bridge._send_watchdog_alert = orig_alert
+bridge._send_resolved_alert = orig_resolved
+bridge.get_worker_host = orig_get_host
+with bridge._watchdog_lock:
+    bridge._prev_worker_states.clear()
+    bridge._consecutive_good_probes.clear()
+    bridge._consecutive_bad_probes.clear()
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -12056,10 +12111,11 @@ def mock_remote_run(cmd, **kwargs):
     return r
 
 orig_start = bridge.CommandRouter._start_worker_on_target
-def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_name):
+def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_name, skip_session_sync=False):
     start_worker_calls.append({
         'name': name, 'host': target_host, 'cwd': target_cwd,
-        'session_id': session_id, 'backend': backend_name
+        'session_id': session_id, 'backend': backend_name,
+        'skip_session_sync': skip_session_sync
     })
     return True
 
@@ -12111,6 +12167,8 @@ assert len(start_worker_calls) == 1, f'Expected 1 start call, got {start_worker_
 assert start_worker_calls[0]['host'] == 'mac-mini'
 assert start_worker_calls[0]['session_id'] == 'sess-uuid-123', \
     f'Should pass session_id for resume, got {start_worker_calls[0][\"session_id\"]}'
+assert start_worker_calls[0]['skip_session_sync'] == True, \
+    f'Remote restart should skip session sync (target files are authoritative)'
 
 # Should have sent welcome
 assert len(send_calls) == 1, f'Expected welcome, got {send_calls}'
@@ -12163,7 +12221,7 @@ def mock_remote_run(cmd, **kwargs):
         r.returncode = 1  # no tmux session
     return r
 
-def mock_start(self, name, host, cwd, session_id, backend):
+def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
     start_calls.append({'session_id': session_id})
     return True
 
@@ -12243,7 +12301,7 @@ def mock_remote_run(cmd, **kwargs):
         r.returncode = 1  # no tmux
     return r
 
-def mock_start(self, name, host, cwd, session_id, backend):
+def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
     start_calls.append({'cwd': cwd})
     return True
 
@@ -13469,15 +13527,18 @@ def mock_remote(cmd, host=None, **kwargs):
     # Handle echo HOME call for SESSIONS_DIR remapping
     if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
         return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
+    # Guard reads current BRIDGE_URL via show-environment (return empty = no prior owner)
+    if 'show-environment' in cmd and 'BRIDGE_URL' in cmd:
+        return MagicMock(returncode=1, stdout='', stderr='')
     return MagicMock(returncode=0, stdout='', stderr='')
 
 with patch('bridge._remote_run', side_effect=mock_remote):
     bridge.export_hook_env('claude-prod-ren', host='mac-mini')
 
-# Should have 6 calls: 5 set-environment + 1 echo HOME (for SESSIONS_DIR remapping)
-assert len(calls) == 6, f'Expected 6 calls (5 set-env + 1 echo HOME), got {len(calls)}'
+# 7 calls: 1 show-environment guard + 5 set-environment + 1 echo HOME
+assert len(calls) == 7, f'Expected 7 calls (1 guard + 5 set-env + 1 echo HOME), got {len(calls)}'
 assert all(c['host'] == 'mac-mini' for c in calls), f'All calls should target mac-mini'
-set_env_calls = [c for c in calls if 'set-environment' in ' '.join(c['cmd'])]
+set_env_calls = [c for c in calls if 'set-environment' in ' '.join(c['cmd']) and 'show' not in ' '.join(c['cmd'])]
 assert len(set_env_calls) == 5, f'Expected 5 set-environment calls, got {len(set_env_calls)}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -18088,6 +18149,230 @@ print('OK')
     tmux kill-session -t "$test_session" 2>/dev/null || true
 }
 
+# ── export_hook_env Guard Tests ────────────────────────────────────────────
+
+test_export_hook_env_skips_live_bridge() {
+    info "Testing export_hook_env skips sessions owned by another live bridge..."
+
+    local test_session="${TEST_TMUX_PREFIX}guardtest"
+    tmux new-session -d -s "$test_session" "bash --norc --noprofile" 2>/dev/null || true
+    sleep 0.2
+
+    # Set the session's BRIDGE_URL to our running test bridge (port $PORT)
+    tmux set-environment -t "$test_session" BRIDGE_URL "http://localhost:$PORT"
+
+    # Now try to export_hook_env from a DIFFERENT bridge URL.
+    # The guard should detect that localhost:$PORT is alive and SKIP.
+    if python3 -c "
+import bridge
+import os
+
+# Temporarily pretend we are a different bridge
+orig_url = bridge.BRIDGE_URL
+orig_port = bridge.PORT
+bridge.BRIDGE_URL = 'http://localhost:99999'
+bridge.PORT = 99999
+try:
+    bridge.export_hook_env('$test_session')
+finally:
+    bridge.BRIDGE_URL = orig_url
+    bridge.PORT = orig_port
+
+# Verify the session still points to the original URL (not overwritten)
+import subprocess
+r = subprocess.run(['tmux', 'show-environment', '-t', '$test_session', 'BRIDGE_URL'],
+                   capture_output=True, text=True)
+url = r.stdout.strip().split('=', 1)[-1]
+assert url == 'http://localhost:$PORT', f'Expected http://localhost:$PORT, got {url}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "export_hook_env skips session owned by live bridge"
+    else
+        fail "export_hook_env should skip session owned by live bridge"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+}
+
+test_export_hook_env_overwrites_dead_bridge() {
+    info "Testing export_hook_env overwrites sessions with dead bridge URL..."
+
+    local test_session="${TEST_TMUX_PREFIX}guardtest2"
+    tmux new-session -d -s "$test_session" "bash --norc --noprofile" 2>/dev/null || true
+    sleep 0.2
+
+    # Set session to point to a dead bridge (port 19999 — nothing there)
+    tmux set-environment -t "$test_session" BRIDGE_URL "http://localhost:19999"
+
+    # export_hook_env should overwrite because 19999 is dead
+    if python3 -c "
+import bridge
+bridge.export_hook_env('$test_session')
+
+import subprocess
+r = subprocess.run(['tmux', 'show-environment', '-t', '$test_session', 'BRIDGE_URL'],
+                   capture_output=True, text=True)
+url = r.stdout.strip().split('=', 1)[-1]
+assert url == bridge.BRIDGE_URL, f'Expected {bridge.BRIDGE_URL}, got {url}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "export_hook_env overwrites session with dead bridge URL"
+    else
+        fail "export_hook_env should overwrite dead bridge URL"
+    fi
+
+    tmux kill-session -t "$test_session" 2>/dev/null || true
+}
+
+# ── Transport Abstraction Tests ────────────────────────────────────────────
+
+test_transport_interface_exists() {
+    info "Testing MessageTransport base class exists..."
+
+    if python3 -c "
+import bridge
+cls = bridge.MessageTransport
+methods = ['send_text', 'send_photo', 'send_document', 'send_animation',
+           'send_video', 'send_audio', 'send_voice', 'send_sticker',
+           'send_chat_action', 'set_reaction', 'edit_message',
+           'setup_commands', 'download_file']
+for m in methods:
+    assert m in dir(cls), f'missing {m}'
+assert 'name' in dir(cls), 'missing name property'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "MessageTransport base class has all required methods"
+    else
+        fail "MessageTransport base class missing methods"
+    fi
+}
+
+test_local_transport_send_text() {
+    info "Testing LocalTransport.send_text returns stub response..."
+
+    if python3 -c "
+import bridge
+lt = bridge.LocalTransport()
+result = lt.send_text(123, 'hello world')
+assert result == {'ok': True, 'result': {'message_id': 1}}, f'unexpected: {result}'
+assert lt.name == 'local'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "LocalTransport.send_text returns correct stub"
+    else
+        fail "LocalTransport.send_text failed"
+    fi
+}
+
+test_local_transport_media_methods() {
+    info "Testing LocalTransport media methods return True..."
+
+    if python3 -c "
+import bridge
+lt = bridge.LocalTransport()
+assert lt.send_photo(1, '/tmp/x.png') == True
+assert lt.send_document(1, '/tmp/x.pdf') == True
+assert lt.send_animation(1, '/tmp/x.gif') == True
+assert lt.send_video(1, '/tmp/x.mp4') == True
+assert lt.send_audio(1, '/tmp/x.mp3') == True
+assert lt.send_voice(1, '/tmp/x.ogg') == True
+assert lt.send_sticker(1, '/tmp/x.webp') == True
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "LocalTransport media methods all return True"
+    else
+        fail "LocalTransport media methods failed"
+    fi
+}
+
+test_local_transport_log_file() {
+    info "Testing LocalTransport logs to file when TRANSPORT_LOG set..."
+
+    local log_file
+    log_file=$(mktemp /tmp/transport-log-XXXXXX.log)
+    rm -f "$log_file"
+
+    if TRANSPORT_LOG="$log_file" python3 -c "
+import os
+os.environ['TRANSPORT_LOG'] = '$log_file'
+import importlib
+import bridge
+lt = bridge.LocalTransport()
+lt.send_text(42, 'test message')
+lt.send_photo(42, '/tmp/pic.png', caption='a photo')
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        if [[ -f "$log_file" ]] && grep -q "send_text" "$log_file" && grep -q "send_photo" "$log_file"; then
+            success "LocalTransport writes to TRANSPORT_LOG file"
+        else
+            fail "LocalTransport log file missing or incomplete"
+        fi
+    else
+        fail "LocalTransport log file test failed"
+    fi
+    rm -f "$log_file"
+}
+
+test_transport_init_selects_correctly() {
+    info "Testing _init_transport selects based on TRANSPORT_MODE..."
+
+    if python3 -c "
+import bridge
+# Current TRANSPORT_MODE is 'telegram' (default in test)
+# We test the logic directly
+if bridge.TRANSPORT_MODE == 'telegram':
+    assert isinstance(bridge.transport, bridge.TelegramTransport), f'expected TelegramTransport, got {type(bridge.transport)}'
+elif bridge.TRANSPORT_MODE == 'local':
+    assert isinstance(bridge.transport, bridge.LocalTransport), f'expected LocalTransport, got {type(bridge.transport)}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_init_transport selects correct transport"
+    else
+        fail "_init_transport selection failed"
+    fi
+}
+
+test_forge_register_endpoint() {
+    info "Testing POST /register returns 200..."
+
+    local http_code response
+
+    # Basic registration
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/register" \
+        -H "Content-Type: application/json" \
+        -d '{"Name":"testworker","Host":"vps","Version":"1.0.0","Tools":{"tmux":"3.4"}}')
+    if [[ "$http_code" == "200" ]]; then
+        success "POST /register returns 200"
+    else
+        fail "POST /register should return 200, got $http_code"
+    fi
+
+    # Verify response is JSON with ok=true
+    response=$(curl -s -X POST "http://localhost:$PORT/register" \
+        -H "Content-Type: application/json" \
+        -d '{"Name":"testworker","Host":"vps","Version":"1.0.0"}')
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('ok') == True, f'expected ok=true, got {d}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "POST /register returns {ok: true}"
+    else
+        fail "POST /register should return ok=true: $response"
+    fi
+
+    # Empty body should still return 200 (graceful)
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/register" \
+        -H "Content-Type: application/json" \
+        -d '{}')
+    if [[ "$http_code" == "200" ]]; then
+        success "POST /register handles empty body gracefully"
+    else
+        fail "POST /register empty body should return 200, got $http_code"
+    fi
+}
+
 # ============================================================
 # TEST RUNNERS
 # ============================================================
@@ -18471,6 +18756,14 @@ run_unit_tests() {
     run_test test_memory_wakeup_with_wing
     run_test test_memory_recall_subcommand
     run_test test_memory_status_failure_isolation
+    # Unit tests - Transport Abstraction
+    log ""
+    log "── Transport Abstraction Tests (Unit) ──────────────────────────────────"
+    run_test test_transport_interface_exists
+    run_test test_local_transport_send_text
+    run_test test_local_transport_media_methods
+    run_test test_local_transport_log_file
+    run_test test_transport_init_selects_correctly
 }
 
 run_cli_tests() {
@@ -18514,6 +18807,7 @@ run_integration_tests() {
     run_test test_unknown_post_returns_404
     run_test test_known_endpoints_unchanged
     run_test test_webhook_root_still_works
+    run_test test_forge_register_endpoint
     # Admin tests
     log ""
     log "── Admin Tests ─────────────────────────────────────────────────────────"
@@ -18593,6 +18887,11 @@ run_integration_tests() {
     log "── Tmux/Process Inspection Tests (Integration) ─────────────────────────"
     run_test test_tmux_prompt_empty
     run_test test_process_inspection_functions
+    # export_hook_env guard tests
+    log ""
+    log "── export_hook_env Guard Tests (Integration) ───────────────────────────"
+    run_test test_export_hook_env_skips_live_bridge
+    run_test test_export_hook_env_overwrites_dead_bridge
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }
