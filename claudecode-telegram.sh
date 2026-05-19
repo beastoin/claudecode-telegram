@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.30.1"
+VERSION="0.30.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,6 +302,55 @@ bridge_notify() {
         -d "$body" >/dev/null 2>&1 || true
 }
 
+# Poll fallback: getUpdates long-polling when webhook/tunnel DNS fails
+_poll_fallback_pid=""
+
+start_poll_fallback() {
+    local token="$1" port="$2"
+    [[ -n "$_poll_fallback_pid" ]] && return 0
+
+    telegram_api "$token" "deleteWebhook" "{}" >/dev/null 2>&1 || true
+    sleep 1
+
+    python3 -u -c '
+import os, time, json, urllib.request, sys
+token, bridge = sys.argv[1], sys.argv[2]
+offset = 0
+print(f"Poll fallback started (bridge={bridge})", flush=True)
+while True:
+    try:
+        url = f"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30"
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=35) as resp:
+            data = json.loads(resp.read())
+        if not data.get("ok"):
+            time.sleep(1)
+            continue
+        for update in data.get("result", []):
+            uid = update["update_id"]
+            try:
+                req = urllib.request.Request(
+                    f"{bridge}/", data=json.dumps(update).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=5)
+            except Exception as e:
+                print(f"Forward failed {uid}: {e}", flush=True)
+            offset = uid + 1
+    except Exception as e:
+        print(f"Poll error: {e}", flush=True)
+        time.sleep(2)
+' "$token" "http://localhost:$port" >> "${node_dir:-/tmp}/poll-fallback.log" 2>&1 &
+    _poll_fallback_pid=$!
+    log "Poll fallback started (PID $_poll_fallback_pid)"
+}
+
+stop_poll_fallback() {
+    [[ -z "$_poll_fallback_pid" ]] && return 0
+    kill "$_poll_fallback_pid" 2>/dev/null || true
+    wait "$_poll_fallback_pid" 2>/dev/null || true
+    _poll_fallback_pid=""
+    log "Poll fallback stopped"
+}
+
 start_tunnel() {
     local port="$1" log_file="$2"
     cloudflared tunnel --url "http://localhost:$port" > "$log_file" 2>&1 &
@@ -313,7 +362,7 @@ wait_for_tunnel_url() {
     local url="" attempts=0
     while [[ -z "$url" && $attempts -lt $timeout ]]; do
         sleep 1
-        url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$log_file" 2>/dev/null | head -1 || true)
+        url=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' "$log_file" 2>/dev/null | grep -v 'api\.trycloudflare\.com' | head -1 || true)
         ((attempts++))
     done
     echo "$url"
@@ -326,7 +375,7 @@ restart_tunnel_with_retry() {
     local tunnel_pid="" new_url=""
 
     while [[ $attempt -le $max_attempts ]]; do
-        [[ $attempt -gt 1 ]] && log "Tunnel restart attempt $attempt/$max_attempts (waiting ${backoff}s)..."
+        [[ $attempt -gt 1 ]] && log "Tunnel restart attempt $attempt/$max_attempts (waiting ${backoff}s)..." >&2
         [[ $attempt -gt 1 ]] && sleep "$backoff"
 
         # Kill any existing tunnel process
@@ -571,15 +620,19 @@ cmd_run() {
     # Cleanup on exit
     cleanup_and_exit() {
         log ""
-        log "Shutting down node '$node'..."
+        log "Shutting down node '${node:-unknown}'..."
+        stop_poll_fallback
         [[ -n "${tunnel_pid:-}" ]] && kill "$tunnel_pid" 2>/dev/null || true
         [[ -n "${bridge_pid:-}" ]] && kill "$bridge_pid" 2>/dev/null || true
-        rm -f "$pid_file" "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
+        [[ -n "${pid_file:-}" ]] && rm -f "$pid_file"
+        [[ -n "${node_dir:-}" ]] && rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
         exit 0
     }
     trap cleanup_and_exit EXIT INT TERM
 
     # 5. Watchdog loop
+    local webhook_check_counter=0
+    local polling_active=false
     while true; do
         if ! kill -0 "$bridge_pid" 2>/dev/null; then
             error "Bridge died unexpectedly"
@@ -603,9 +656,14 @@ cmd_run() {
                 new_url=$(restart_tunnel_with_retry "$port" "$node_dir" 3)
 
                 if [[ -z "$new_url" ]]; then
-                    error "Failed to restart tunnel after 3 attempts"
-                    bridge_notify "$port" "❌ Tunnel restart failed after 3 attempts. Bridge may be offline."
-                    exit 1
+                    warn "Tunnel restart failed after 3 attempts"
+                    if ! $polling_active; then
+                        bridge_notify "$port" "⚠️ Tunnel dead. Switching to poll fallback..."
+                        start_poll_fallback "$token" "$port"
+                        polling_active=true
+                    fi
+                    sleep 10
+                    continue
                 fi
 
                 tunnel_pid=$(cat "$node_dir/tunnel.pid")
@@ -615,7 +673,7 @@ cmd_run() {
 
                 local webhook_ok=false
                 local webhook_response=""
-                for delay in 0 5 15 30 60 90 120 180; do
+                for delay in 0 5 15 30; do
                     [[ $delay -gt 0 ]] && { log "Waiting ${delay}s for DNS..."; sleep "$delay"; }
                     webhook_response=$(telegram_set_webhook "$token" "$tunnel_url")
                     if echo "$webhook_response" | grep -q '"ok":true'; then
@@ -626,12 +684,51 @@ cmd_run() {
                 done
 
                 if $webhook_ok; then
+                    if $polling_active; then
+                        stop_poll_fallback
+                        polling_active=false
+                    fi
                     success "Webhook updated"
                     bridge_notify "$port" "✅ Tunnel reconnected"
                 else
-                    warn "Webhook update failed after all retries"
-                    log "Last response: $webhook_response"
-                    bridge_notify "$port" "⚠️ Tunnel reconnected but webhook update failed. May need manual intervention."
+                    warn "Webhook DNS not ready yet"
+                    if ! $polling_active; then
+                        start_poll_fallback "$token" "$port"
+                        polling_active=true
+                        bridge_notify "$port" "📡 Using poll fallback while DNS propagates..."
+                    fi
+                fi
+            fi
+
+            # Health-check poll process (every cycle when active)
+            if $polling_active && [[ -n "$_poll_fallback_pid" ]] && ! kill -0 "$_poll_fallback_pid" 2>/dev/null; then
+                warn "Poll fallback process died, restarting..."
+                _poll_fallback_pid=""
+                start_poll_fallback "$token" "$port"
+            fi
+
+            # Periodic check (every ~60s = 6 x 10s sleep cycles)
+            webhook_check_counter=$(( (webhook_check_counter + 1) % 6 ))
+            if [[ $webhook_check_counter -eq 0 ]]; then
+                if $polling_active; then
+                    # Try to restore webhook while polling covers us
+                    local wh_resp; wh_resp=$(telegram_set_webhook "$token" "$tunnel_url" 2>/dev/null || true)
+                    if echo "$wh_resp" | grep -q '"ok":true'; then
+                        stop_poll_fallback
+                        polling_active=false
+                        success "Webhook restored, poll fallback stopped"
+                        bridge_notify "$port" "✅ Webhook restored (DNS resolved)"
+                    fi
+                else
+                    local wh_info; wh_info=$(telegram_api "$token" "getWebhookInfo" "{}" 2>/dev/null || true)
+                    local wh_url; wh_url=$(echo "$wh_info" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+                    if [[ -z "$wh_url" || "$wh_url" != *"$tunnel_url"* ]]; then
+                        local wh_resp; wh_resp=$(telegram_set_webhook "$token" "$tunnel_url" 2>/dev/null || true)
+                        if echo "$wh_resp" | grep -q '"ok":true'; then
+                            success "Webhook re-registered (was stale/empty)"
+                            bridge_notify "$port" "✅ Webhook re-registered"
+                        fi
+                    fi
                 fi
             fi
         fi
