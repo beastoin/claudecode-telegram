@@ -33,6 +33,20 @@ except ImportError as e:
     BridgeGRPCServer = None
     BRIDGE_GRPC_IMPORT_ERROR = e
 
+try:
+    from gmail_connector import GmailConnector
+    GMAIL_IMPORT_ERROR = None
+except ImportError as e:
+    GmailConnector = None
+    GMAIL_IMPORT_ERROR = e
+
+try:
+    from github_connector import GitHubConnector
+    GITHUB_IMPORT_ERROR = None
+except ImportError as e:
+    GitHubConnector = None
+    GITHUB_IMPORT_ERROR = e
+
 
 # ============================================================
 # CONFIGURATION
@@ -56,6 +70,8 @@ else:
 
 GRPC_PORT = int(os.environ.get("BRIDGE_GRPC_PORT", str(PORT + 1)))
 grpc_server = None  # initialized in main()
+gmail_connector_instance = None  # initialized in main()
+github_connector_instance = None  # initialized in main()
 
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
@@ -164,6 +180,21 @@ WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 DEFAULT_BACKEND = "claude"
 DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 PENDING_TIMEOUT = 600
+
+# Gmail connector: poll Gmail for manager emails with @worker mentions
+GMAIL_ENABLED = os.environ.get("GMAIL_ENABLED", "0") == "1"
+GMAIL_POLL_INTERVAL = int(os.environ.get("GMAIL_POLL_INTERVAL", "45"))
+GMAIL_FROM_FILTER = os.environ.get("GMAIL_FROM_FILTER", "ngocthinhdp@gmail.com")
+GMAIL_GWS_BIN = os.environ.get("GMAIL_GWS_BIN", os.path.expanduser("~/bin/gws"))
+if GMAIL_ENABLED and not GMAIL_FROM_FILTER.strip():
+    raise RuntimeError("GMAIL_FROM_FILTER must be set when GMAIL_ENABLED=1 (security: sender filter required)")
+
+GITHUB_ENABLED = os.environ.get("BRIDGE_GHPOLL_ENABLED", "0") == "1"
+GITHUB_POLL_INTERVAL = int(os.environ.get("BRIDGE_GHPOLL_INTERVAL", "60"))
+GITHUB_REPO = os.environ.get("BRIDGE_GHPOLL_REPO", "BasedHardware/omi")
+GITHUB_FROM_USER = os.environ.get("BRIDGE_GHPOLL_USER", "beastoin")
+if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
+    raise RuntimeError("BRIDGE_GHPOLL_USER must be set when BRIDGE_GHPOLL_ENABLED=1 (security: sender filter required)")
 
 # Team directory: shared knowledge base (soul docs, kanban, playbook, etc.)
 TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
@@ -1011,6 +1042,7 @@ _recent_restarts = {}  # name -> timestamp (suppress watchdog resolved alert aft
 RESTART_COOLDOWN = 60  # seconds: reject checkin-triggered restarts within this window
 _restart_in_progress = {}  # name -> timestamp: set BEFORE restart, cleared after completion
 _restart_lock = threading.Lock()  # protects _restart_in_progress
+_force_restart_pending_cwd = {}  # name -> True: force restart completed, allow one post-restart CWD fix
 _waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
 _watchdog_lock = threading.Lock()
 
@@ -1741,9 +1773,9 @@ def telegram_api(method, data):
     return None
 
 
-def send_telegram_message(chat_id: int, text: str):
-    """Send a plain Telegram message."""
-    return transport.send_text(chat_id, text)
+def send_telegram_message(chat_id: int, text: str, parse_mode=None):
+    """Send a Telegram message, optionally with parse_mode (HTML or MarkdownV2)."""
+    return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
 
 def download_telegram_file(file_id, session_name):
@@ -3795,13 +3827,15 @@ def watchdog_loop():
                     with _watchdog_lock:
                         _last_child_ts[name] = now
 
-                # Activity detection: if children count changed or CPU is active,
+                # Activity detection: if children count increased or CPU is active,
                 # worker is doing something. Reset the stale-pending timer so
                 # long autonomous work doesn't trigger false STUCK alerts.
+                # Only increases count — background sleep cycling (exit+restart)
+                # causes ±1 flicker that shouldn't reset the timer.
                 with _watchdog_lock:
                     prev_children = _prev_children.get(name)
-                    activity_changed = (prev_children is not None and prev_children != children)
-                    if activity_changed or cpu >= CPU_ACTIVE:
+                    activity_increased = (prev_children is not None and children > prev_children)
+                    if activity_increased or cpu >= CPU_ACTIVE:
                         _last_activity_ts[name] = now
                     _prev_children[name] = children
                     last_activity = _last_activity_ts.get(name, 0.0)
@@ -4711,10 +4745,12 @@ class WorkerManager:
             self.tmux_prefix = TMUX_PREFIX
 
     def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
-        """Resolve startup cwd with priority: explicit > RAM hint > fallback."""
+        """Resolve startup cwd with priority: explicit > RAM hint > disk > fallback."""
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
             candidate = normalize_cwd(_get_worker_cwd(name))
+        if not candidate:
+            candidate = normalize_cwd(get_claude_session_cwd(name))
         if candidate:
             if os.path.isdir(candidate):
                 return candidate
@@ -4965,7 +5001,7 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
-            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns names, protocols, and ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. "
+            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
@@ -5198,7 +5234,13 @@ class WorkerManager:
                     claude_pid = _get_claude_pid(pane_pid)
                     if claude_pid:
                         subprocess.run(["kill", claude_pid], capture_output=True)
-                        time.sleep(0.5)
+            # Poll until Claude has actually exited (fixed sleep races with slow exits)
+            for _ in range(20):
+                if not is_claude_running(tmux_name):
+                    break
+                time.sleep(0.25)
+            else:
+                print(f"[restart] {name}: Claude still running after 5s kill wait")
 
         export_hook_env(tmux_name, backend_name)
         time.sleep(0.3)
@@ -6875,7 +6917,10 @@ class CommandRouter:
             _restart_in_progress[name] = time.time()
 
         try:
-            return self._do_restart(name, session, chat_id, host, tmux_name, force, clean)
+            result = self._do_restart(name, session, chat_id, host, tmux_name, force, clean)
+            if force:
+                _force_restart_pending_cwd[name] = True
+            return result
         finally:
             with _restart_lock:
                 _restart_in_progress.pop(name, None)
@@ -10479,16 +10524,20 @@ class Handler(BaseHTTPRequestHandler):
                         last_restart = _recent_restarts.get(name, 0)
                         elapsed = time.time() - last_restart
                         if elapsed < RESTART_COOLDOWN:
-                            print(f"[checkin] {name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
-                            msg = (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
-                                   f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
-                            if notify_chat_id is not None:
-                                send_telegram_message(notify_chat_id, msg)
-                            self.send_response(200)
-                            self.send_header("Content-Type", "text/plain")
-                            self.end_headers()
-                            self.wfile.write(msg.encode())
-                            return
+                            # Narrow exemption: allow one CWD repair after force restart
+                            if _force_restart_pending_cwd.pop(name, False):
+                                print(f"[checkin] {name}: cooldown bypassed (post-force CWD repair)")
+                            else:
+                                print(f"[checkin] {name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
+                                msg = (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
+                                       f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+                                if notify_chat_id is not None:
+                                    send_telegram_message(notify_chat_id, msg)
+                                self.send_response(200)
+                                self.send_header("Content-Type", "text/plain")
+                                self.end_headers()
+                                self.wfile.write(msg.encode())
+                                return
 
                         # Guard: skip if worker is already running Claude
                         if is_claude_running(tmux_name, host=host):
@@ -11207,12 +11256,26 @@ def graceful_shutdown(signum, frame):
         except Exception as e:
             print(f"gRPC server stop failed: {e}")
 
+    if gmail_connector_instance is not None:
+        try:
+            gmail_connector_instance.stop()
+            print("Gmail connector stopped")
+        except Exception:
+            pass
+
+    if github_connector_instance is not None:
+        try:
+            github_connector_instance.stop()
+            print("GitHub connector stopped")
+        except Exception:
+            pass
+
     send_shutdown_message()
     sys.exit(0)
 
 
 def main():
-    global admin_chat_id, grpc_server
+    global admin_chat_id, grpc_server, gmail_connector_instance, github_connector_instance
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
@@ -11341,6 +11404,100 @@ def main():
             print(f"gRPC server disabled: {e}")
     elif BRIDGE_GRPC_IMPORT_ERROR is not None:
         print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
+
+    gmail_connector_instance = None
+    if GMAIL_ENABLED and GmailConnector is not None:
+        def _gmail_on_message(targets, html_text, plain_text=None, attachments=None):
+            if plain_text is None:
+                plain_text = html_text
+            if admin_chat_id:
+                try:
+                    send_telegram_message(admin_chat_id, html_text, parse_mode="HTML")
+                except Exception:
+                    send_telegram_message(admin_chat_id, plain_text)
+                for att in (attachments or []):
+                    fpath = att.get("path", "")
+                    fname = att.get("filename", "")
+                    if not fpath or not os.path.isfile(fpath):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    caption = f"📧 {fname}"
+                    if ext in ALLOWED_IMAGE_EXTENSIONS:
+                        send_photo(admin_chat_id, fpath, caption)
+                    elif ext in VIDEO_EXTENSIONS:
+                        send_video(admin_chat_id, fpath, caption)
+                    else:
+                        send_document(admin_chat_id, fpath, caption)
+                    print(f"[gmail] attachment -> Telegram: {fname}")
+            if targets:
+                for name in targets:
+                    send_to_worker(name, plain_text)
+                    print(f"[gmail] -> {name}: {plain_text[:80]}...")
+            else:
+                print(f"[gmail] -> Telegram only (no mentions): {plain_text[:80]}...")
+
+        def _gmail_get_workers():
+            return set(get_registered_sessions().keys())
+
+        def _gmail_on_alert(text):
+            if admin_chat_id:
+                try:
+                    send_telegram_message(admin_chat_id, text)
+                except Exception as e:
+                    print(f"[gmail] Failed to send Telegram alert: {e}")
+
+        gmail_connector_instance = GmailConnector(
+            gws_bin=GMAIL_GWS_BIN,
+            from_filter=GMAIL_FROM_FILTER,
+            poll_interval=GMAIL_POLL_INTERVAL,
+            on_message=_gmail_on_message,
+            get_registered_workers=_gmail_get_workers,
+            on_alert=_gmail_on_alert,
+        )
+        gmail_connector_instance.start()
+        print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
+    elif GMAIL_ENABLED and GmailConnector is None:
+        print(f"Gmail connector disabled: {GMAIL_IMPORT_ERROR}")
+
+    github_connector_instance = None
+    if GITHUB_ENABLED and GitHubConnector is not None:
+        def _github_on_message(targets, html_text, plain_text=None, attachments=None):
+            if plain_text is None:
+                plain_text = html_text
+            if admin_chat_id:
+                try:
+                    send_telegram_message(admin_chat_id, html_text, parse_mode="HTML")
+                except Exception:
+                    send_telegram_message(admin_chat_id, plain_text)
+            if targets:
+                for name in targets:
+                    send_to_worker(name, plain_text)
+                    print(f"[github] -> {name}: {plain_text[:80]}...")
+            else:
+                print(f"[github] -> Telegram only (no mentions): {plain_text[:80]}...")
+
+        def _github_get_workers():
+            return set(get_registered_sessions().keys())
+
+        def _github_on_alert(text):
+            if admin_chat_id:
+                try:
+                    send_telegram_message(admin_chat_id, text)
+                except Exception as e:
+                    print(f"[github] Failed to send Telegram alert: {e}")
+
+        github_connector_instance = GitHubConnector(
+            repo=GITHUB_REPO,
+            from_user=GITHUB_FROM_USER,
+            poll_interval=GITHUB_POLL_INTERVAL,
+            on_message=_github_on_message,
+            get_registered_workers=_github_get_workers,
+            on_alert=_github_on_alert,
+        )
+        github_connector_instance.start()
+        print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {GITHUB_REPO}")
+    elif GITHUB_ENABLED and GitHubConnector is None:
+        print(f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
 
     try:
         ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()
