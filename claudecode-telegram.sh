@@ -430,6 +430,15 @@ cmd_run() {
     local node
     node=$(resolve_target_node)
 
+    # Auto-source node env file (connector vars, tokens, etc.)
+    local env_file="$HOME/.config/claudecode-telegram/${node}.env"
+    if [[ -f "$env_file" ]]; then
+        set -a
+        source "$env_file"
+        set +a
+        log "Loaded env from $env_file"
+    fi
+
     # Parse args first (CLI takes precedence over config)
     local port="" tunnel_url="" no_tunnel=false
 
@@ -498,6 +507,12 @@ cmd_run() {
     export SESSIONS_DIR="$sessions_dir" TMUX_PREFIX="$tmux_prefix"
     export CLAUDE_DIR="$CLAUDE_DIR" CLAUDE_SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 
+    # Gmail connector env vars (pass through if set)
+    [[ -n "${GMAIL_ENABLED:-}" ]] && export GMAIL_ENABLED
+    [[ -n "${GMAIL_POLL_INTERVAL:-}" ]] && export GMAIL_POLL_INTERVAL
+    [[ -n "${GMAIL_FROM_FILTER:-}" ]] && export GMAIL_FROM_FILTER
+    [[ -n "${GMAIL_GWS_BIN:-}" ]] && export GMAIL_GWS_BIN
+
     # Sandbox mode env vars
     export SANDBOX_ENABLED="${SANDBOX:-0}"
     export SANDBOX_IMAGE="${SANDBOX_IMAGE:-claudecode-telegram:latest}"
@@ -529,6 +544,7 @@ cmd_run() {
 
     local tunnel_pid=""
     local tunnel_log=""
+    local polling_active=false
 
     # Start tunnel (or use provided URL)
     if [[ -n "$tunnel_url" ]]; then
@@ -543,21 +559,33 @@ cmd_run() {
         tunnel_url=$(wait_for_tunnel_url "$tunnel_log" 30)
 
         if [[ -z "$tunnel_url" ]]; then
-            error "Could not get tunnel URL"
+            warn "Could not get tunnel URL — starting with poll fallback"
             kill "$tunnel_pid" 2>/dev/null || true
-            exit 1
-        fi
+            tunnel_pid=""
 
-        success "Tunnel: $tunnel_url"
-        echo "$tunnel_url" > "$node_dir/tunnel_url"
-        sleep 3
+            # Start bridge first so poll fallback can forward to it
+            python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
+            local bridge_pid=$!
+            echo "$bridge_pid" > "$node_dir/bridge.pid"
+            echo "$port" > "$node_dir/port"
+            sleep 2
+
+            start_poll_fallback "$token" "$port"
+            polling_active=true
+        else
+            success "Tunnel: $tunnel_url"
+            echo "$tunnel_url" > "$node_dir/tunnel_url"
+            sleep 3
+        fi
     fi
 
-    # Start bridge server in background
-    python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
-    local bridge_pid=$!
-    echo "$bridge_pid" > "$node_dir/bridge.pid"
-    echo "$port" > "$node_dir/port"
+    # Start bridge server in background (skip if already started in poll fallback path)
+    if [[ -z "${bridge_pid:-}" ]]; then
+        python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
+        local bridge_pid=$!
+        echo "$bridge_pid" > "$node_dir/bridge.pid"
+        echo "$port" > "$node_dir/port"
+    fi
 
     # Save bot info for status command
     local bot_info; bot_info=$(telegram_api "$token" "getMe" "{}")
@@ -567,39 +595,39 @@ cmd_run() {
     fi
     sleep 1
 
-    # Set webhook
-    local current_webhook=""
-    local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
-    current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+    # Set webhook (skip if in poll fallback mode — no tunnel)
+    if [[ -n "$tunnel_url" ]]; then
+        local current_webhook=""
+        local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
+        current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
 
-    if [[ "$current_webhook" == "$tunnel_url" ]]; then
-        log "$(dim "Webhook already configured")"
-        success "Webhook: $tunnel_url"
-    else
-        log "Setting webhook..."
-        local r ok=false
-
-        for delay in 0 1 2 5 15 30 60; do
-            [[ $delay -gt 0 ]] && { log "Webhook not ready, retrying in ${delay}s..."; sleep "$delay"; }
-            r=$(telegram_set_webhook "$token" "$tunnel_url")
-            if echo "$r" | grep -q '"ok":true'; then
-                ok=true
-                break
-            fi
-        done
-
-        log ""
-        if $ok; then
-            success "Webhook configured"
+        if [[ "$current_webhook" == "$tunnel_url" ]]; then
+            log "$(dim "Webhook already configured")"
+            success "Webhook: $tunnel_url"
         else
-            error "Webhook setup failed (DNS may still be propagating)"
-            hint "Retry manually: ./claudecode-telegram.sh webhook $tunnel_url"
-            # Cleanup before exit
-            [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null
-            [[ -n "$tunnel_pid" ]] && kill "$tunnel_pid" 2>/dev/null
-            rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/pid"
-            exit 1
+            log "Setting webhook..."
+            local r ok=false
+
+            for delay in 0 1 2 5 15 30 60; do
+                [[ $delay -gt 0 ]] && { log "Webhook not ready, retrying in ${delay}s..."; sleep "$delay"; }
+                r=$(telegram_set_webhook "$token" "$tunnel_url")
+                if echo "$r" | grep -q '"ok":true'; then
+                    ok=true
+                    break
+                fi
+            done
+
+            log ""
+            if $ok; then
+                success "Webhook configured"
+            else
+                warn "Webhook DNS not ready yet — falling back to poll mode"
+                start_poll_fallback "$token" "$port"
+                polling_active=true
+            fi
         fi
+    else
+        success "Running in poll fallback mode (no tunnel)"
     fi
 
     log ""
@@ -632,7 +660,7 @@ cmd_run() {
 
     # 5. Watchdog loop
     local webhook_check_counter=0
-    local polling_active=false
+    # polling_active may already be true if tunnel failed on startup
     while true; do
         if ! kill -0 "$bridge_pid" 2>/dev/null; then
             error "Bridge died unexpectedly"
