@@ -5057,6 +5057,7 @@ class WorkerManager:
         )
         if result.returncode != 0:
             return False, "Could not start the worker workspace"
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True)
 
         time.sleep(0.5)
         startup_cwd = self._get_startup_cwd(name)
@@ -5097,8 +5098,6 @@ class WorkerManager:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend_obj.is_interactive:
                 time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
-                time.sleep(0.3)
                 subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
 
         if backend_obj.is_interactive:
@@ -5291,6 +5290,7 @@ class WorkerManager:
         )
         if result.returncode != 0:
             return False, "Could not create worker workspace"
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True)
 
         time.sleep(0.5)
         export_hook_env(tmux_name, backend_name)
@@ -5331,8 +5331,6 @@ class WorkerManager:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
             if backend.is_interactive:
                 time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "2"])
-                time.sleep(0.3)
                 subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
 
         welcome = self._build_welcome(name, backend)
@@ -6866,6 +6864,14 @@ class CommandRouter:
         if name_arg == "all":
             return self._cmd_restart_all(chat_id, clean)
 
+        # Branch: /restart name1 name2 name3 ... (multi-worker restart)
+        if len(remaining) > 1:
+            names = [n.lower() for n in remaining]
+            self.reply(chat_id, f"Restarting {len(names)} workers: {', '.join(names)}...")
+            for n in names:
+                self.cmd_restart(chat_id, f"{'--clean ' if clean else ''}{'--force ' if force else ''}{n}")
+            return True
+
         if name_arg:
             name = name_arg
         else:
@@ -8057,6 +8063,8 @@ class CommandRouter:
         if r.returncode != 0:
             print(f"[teleport] tmux new-session failed: rc={r.returncode} stderr={r.stderr[:200] if r.stderr else ''}")
             return False
+        _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
+                    host=target_host, capture_output=True)
 
         time.sleep(0.5)
 
@@ -8170,6 +8178,8 @@ class CommandRouter:
                 _remote_run(
                     ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
                     host=source_host, capture_output=True)
+                _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
+                            host=source_host, capture_output=True)
 
             # Restart Claude Code on source
             backend = get_backend(backend_name)

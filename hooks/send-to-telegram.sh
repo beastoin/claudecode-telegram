@@ -16,8 +16,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT=$(cat)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Get session name from tmux (works even without TMUX env var)
@@ -78,7 +80,7 @@ fi
 # Determine file paths
 SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
 SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
-if [ -n "$SESSION_ID" ] && [ -d "$SESSION_DIR" ]; then
+if [ -n "$SESSION_ID" ] && [ -d "$SESSION_DIR" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     SESSION_ID_FILE="$SESSION_DIR/claude_session_id"
     echo "$SESSION_ID" > "$SESSION_ID_FILE"
     chmod 600 "$SESSION_ID_FILE"
@@ -105,32 +107,63 @@ else
     BRIDGE_ENDPOINT="http://localhost:${BRIDGE_PORT}/response"
 fi
 
-# Find last user message line
-LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1 || true)
-[ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
-
-# Extract text from transcript (with retry for race condition)
+# Extract assistant text from the tail of the JSONL.
+# Reads last 500 lines (fast on any file size), skips tool_result user entries.
 extract_from_transcript() {
-    local tmp=$(mktemp)
-    cat "$TRANSCRIPT_PATH" > "$tmp" 2>/dev/null
-    local lines=$(tail -n "+$LAST_USER_LINE" "$tmp" | grep '"type":"assistant"') || { rm -f "$tmp"; return 1; }
-    TEXT=$(echo "$lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text | select(. != "(no content)")] | join("\n\n")') || { rm -f "$tmp"; return 1; }
-    rm -f "$tmp"
-    [ -n "$TEXT" ] && [ "$TEXT" != "null" ]
+    TEXT=$(tail -500 "$TRANSCRIPT_PATH" 2>/dev/null | jq -rs '
+      reverse |
+      reduce .[] as $line (
+        {found: false, texts: []};
+        if .found then .
+        elif ($line.type == "user" and ([$line.message.content[]? | select(.type == "tool_result")] | length == 0)) then .found = true
+        elif ($line.type == "assistant") then
+          .texts += [$line.message.content[]? | select(.type == "text") | .text | select(. != null and . != "(no content)")]
+        else .
+        end
+      ) | .texts | reverse | join("\n\n")
+    ') || return 1
+    [ -n "$TEXT" ]
 }
 
-# Try transcript extraction first (10 attempts × 500ms = 5s max)
+HOOK_LOG="/tmp/hook-debug-${BRIDGE_SESSION}.log"
 TEXT=""
-for attempt in $(seq 1 10); do
-    if extract_from_transcript; then
-        break
+
+# Priority 1: Use last_assistant_message from hook input (most reliable)
+if [ -n "$LAST_MSG" ]; then
+    TEXT="$LAST_MSG"
+    echo "[$(date +%T)] session=$BRIDGE_SESSION using last_assistant_message, len=${#TEXT}" >> "$HOOK_LOG"
+fi
+
+# Priority 2: Extract from transcript via jq (skip if stale)
+if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
+    TRANSCRIPT_STALE=false
+    if [ -f "$TRANSCRIPT_PATH" ]; then
+        TRANSCRIPT_MTIME=$(stat -c %Y "$TRANSCRIPT_PATH" 2>/dev/null || stat -f%m "$TRANSCRIPT_PATH" 2>/dev/null || echo 0)
+        NOW=$(date +%s)
+        TRANSCRIPT_AGE=$(( NOW - TRANSCRIPT_MTIME ))
+        echo "[$(date +%T)] session=$BRIDGE_SESSION transcript age=${TRANSCRIPT_AGE}s" >> "$HOOK_LOG"
+        if [ "$TRANSCRIPT_AGE" -gt 30 ]; then
+            TRANSCRIPT_STALE=true
+            echo "[$(date +%T)] STALE transcript, skipping jq" >> "$HOOK_LOG"
+        fi
     fi
-    sleep 0.5
-done
+
+    if ! $TRANSCRIPT_STALE; then
+        for attempt in $(seq 1 10); do
+            if extract_from_transcript; then
+                echo "[$(date +%T)] jq extraction OK on attempt $attempt, len=${#TEXT}" >> "$HOOK_LOG"
+                break
+            fi
+            echo "[$(date +%T)] jq extraction FAILED attempt $attempt" >> "$HOOK_LOG"
+            sleep 0.5
+        done
+    fi
+fi
 
 # Fallback: extract from tmux capture (enabled by default, set TMUX_FALLBACK=0 to disable)
 TMUX_FALLBACK_USED=false
 if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
+    echo "[$(date +%T)] TEXT empty/null after jq phase, entering tmux fallback" >> "$HOOK_LOG"
     if [ "${TMUX_FALLBACK:-1}" != "0" ] && [ -n "$SESSION_NAME" ]; then
         TMUX_FALLBACK_USED=true
         # Capture pane content (last 500 lines)
@@ -160,6 +193,7 @@ if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
                 # Skip status lines and UI elements
                 if ($0 ~ /^[·✶✻⏵⎿]/) next
                 if ($0 ~ /stop hook/ || $0 ~ /Whirring/ || $0 ~ /Herding/ || $0 ~ /Mulling/ || $0 ~ /Recombobulating/ || $0 ~ /Cooked for/ || $0 ~ /Saut/) next
+                if ($0 ~ /interrupting/ || $0 ~ /[↓↑].*tokens/) next
                 if ($0 ~ /^[a-z]+:$/) next
                 if ($0 ~ /Tip:/) next
                 # Continuation of response (remove leading indent)
@@ -178,10 +212,12 @@ if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
             }
         ')
     fi
+    echo "[$(date +%T)] tmux fallback result: text_len=${#TEXT}" >> "$HOOK_LOG"
 fi
 
 # Add warning when using tmux fallback (ultra-short for busy managers)
 if $TMUX_FALLBACK_USED && [ -n "$TEXT" ] && [ "$TEXT" != "null" ]; then
+    echo "[$(date +%T)] ADDING incomplete warning (tmux fallback used)" >> "$HOOK_LOG"
     TEXT="$TEXT
 
 ⚠️ May be incomplete. Retry if needed."
@@ -194,7 +230,6 @@ if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
 fi
 
 # Forward to bridge (non-blocking with timeout)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMPFILE=$(mktemp)
 echo "$TEXT" > "$TMPFILE"
 
