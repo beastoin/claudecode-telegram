@@ -126,6 +126,7 @@ extract_from_transcript() {
 }
 
 HOOK_LOG="/tmp/hook-debug-${BRIDGE_SESSION}.log"
+JSONL_HEALTHY=true
 TEXT=""
 
 # Priority 1: Use last_assistant_message from hook input (most reliable)
@@ -144,7 +145,8 @@ if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
         echo "[$(date +%T)] session=$BRIDGE_SESSION transcript age=${TRANSCRIPT_AGE}s" >> "$HOOK_LOG"
         if [ "$TRANSCRIPT_AGE" -gt 30 ]; then
             TRANSCRIPT_STALE=true
-            echo "[$(date +%T)] STALE transcript, skipping jq" >> "$HOOK_LOG"
+            JSONL_HEALTHY=false
+            echo "[$(date +%T)] STALE transcript (${TRANSCRIPT_AGE}s), skipping jq" >> "$HOOK_LOG"
         fi
     fi
 
@@ -227,6 +229,19 @@ fi
 if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then
     rm -f "$PENDING_FILE"
     exit 0
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JSONL health alert: notify bridge when transcript stops being written
+# Rate-limited: one alert per worker per hour
+# ─────────────────────────────────────────────────────────────────────────────
+if ! $JSONL_HEALTHY; then
+    HEALTH_ENDPOINT="${BRIDGE_URL%/}/health-alert"
+    curl -s -m 3 -X POST "$HEALTH_ENDPOINT" \
+        -H "Content-Type: application/json" \
+        -d "{\"worker\":\"$BRIDGE_SESSION\",\"issue\":\"jsonl_stale\",\"transcript_age\":$TRANSCRIPT_AGE,\"transcript_path\":\"$TRANSCRIPT_PATH\"}" \
+        >/dev/null 2>&1 &
+    echo "[$(date +%T)] HEALTH ALERT sent: jsonl_stale age=${TRANSCRIPT_AGE}s" >> "$HOOK_LOG"
 fi
 
 # Forward to bridge (non-blocking with timeout)

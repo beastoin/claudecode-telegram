@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.29.1"
+VERSION = "0.31.0"
 
 import hashlib
 import os
@@ -138,9 +138,11 @@ API_ENDPOINTS = {
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
     "GET /team-chat": "Team Telegram chat viewer (requires rewind token)",
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
+    "POST /send": "Send a prompt to a worker: {worker, message}",
     "POST /response": "Hook: send Claude response to Telegram",
     "POST /notify": "Send notification to all admin chats",
-    "POST /register": "Forge worker registration (name, host, version, tools)",
+    "POST /health-alert": "Hook: JSONL health alert (stale transcript detection)",
+    "POST /register": "Forge/callback worker registration (name, host, version, tools, callback_url)",
 }
 
 # Sandbox mode: run Claude Code in Docker container for isolation
@@ -1203,6 +1205,29 @@ def _registry_add(name: str, backend: str, chat_id: int = None, host: str = None
         }
         if host:
             entry["host"] = host
+        data["workers"][name] = entry
+        _save_registry(data)
+
+
+def _registry_add_callback(name: str, callback_url: str, host: str = "", version: str = "", tools: dict = None):
+    """Add an HTTP callback worker to the persistent registry."""
+    with _watchdog_lock:
+        data = _load_registry()
+        if "workers" not in data:
+            data = {"version": 1, "workers": {}}
+        entry = {
+            "backend": DEFAULT_BACKEND,
+            "protocol": "http",
+            "callback_url": callback_url.rstrip("/"),
+            "chat_id": None,
+            "hire_time": int(time.time()),
+        }
+        if host:
+            entry["host"] = host
+        if version:
+            entry["version"] = version
+        if isinstance(tools, dict):
+            entry["tools"] = tools
         data["workers"][name] = entry
         _save_registry(data)
 
@@ -4729,6 +4754,30 @@ def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") ->
     return False
 
 
+def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: dict = None) -> bool:
+    callback_url = (session or {}).get("callback_url", "")
+    if not callback_url:
+        callback_url = _load_registry().get("workers", {}).get(name, {}).get("callback_url", "")
+    if not callback_url:
+        return False
+    msg_url = callback_url.rstrip("/")
+    if not msg_url.endswith("/msg"):
+        msg_url = f"{msg_url}/msg"
+    body = json.dumps({"from": from_name, "text": message}).encode()
+    req = urllib.request.Request(
+        msg_url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"Callback send failed for '{name}' at {msg_url}: {e}")
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CORE: WorkerManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4830,10 +4879,17 @@ class WorkerManager:
         for name, info in registry.get("workers", {}).items():
             if name not in registered:
                 entry = {"backend": info.get("backend", DEFAULT_BACKEND)}
+                for key in ("protocol", "callback_url", "host", "version"):
+                    if info.get(key):
+                        entry[key] = info.get(key)
                 # Teleported workers: inject tmux name so they don't appear as "exited"
-                if info.get("host"):
+                if info.get("host") and not info.get("callback_url"):
                     entry["tmux"] = f"{self.tmux_prefix}{name}"
                 registered[name] = entry
+            else:
+                for key in ("protocol", "callback_url", "host", "version"):
+                    if info.get(key):
+                        registered[name][key] = info.get(key)
 
         if state["active"] and state["active"] not in registered:
             state["active"] = None
@@ -4850,6 +4906,9 @@ class WorkerManager:
             session = sessions.get(name)
         if not session:
             return False
+
+        if session.get("callback_url"):
+            return True
 
         backend_name = normalize_backend(session.get("backend"))
         backend = get_backend(backend_name)
@@ -4881,6 +4940,9 @@ class WorkerManager:
         if not session:
             return False
 
+        if session.get("callback_url"):
+            return _send_to_callback_worker(name, message, "manager", session)
+
         backend_name = normalize_backend(session.get("backend"))
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
@@ -4900,6 +4962,27 @@ class WorkerManager:
         registered = self.get_registered_sessions()
         caller_host = get_worker_host(caller_from) if caller_from else None
         for name, info in registered.items():
+            callback_url = info.get("callback_url", "")
+            if callback_url:
+                msg_url = callback_url.rstrip("/")
+                if not msg_url.endswith("/msg"):
+                    msg_url = f"{msg_url}/msg"
+                payload = json.dumps({"from": "YOUR_NAME", "text": "your message here"})
+                send_example = (
+                    f"curl -sS -X POST {shlex.quote(msg_url)} "
+                    f"-H 'Content-Type: application/json' "
+                    f"--data-raw {shlex.quote(payload)}"
+                )
+                workers.append({
+                    "name": name,
+                    "machine": info.get("host", ""),
+                    "protocol": "http",
+                    "address": msg_url,
+                    "send_example": send_example,
+                    "note": "HTTP callback worker. POST JSON with from/text. Always set from to your worker name.",
+                })
+                continue
+
             backend_name = get_worker_backend(name, info)
             backend = get_backend(backend_name)
             peer_host = get_worker_host(name)
@@ -10221,6 +10304,11 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_notify(body)
             return
 
+        if self.path == "/send":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_send_endpoint(body)
+            return
+
         # PR comment endpoint
         if self.path == "/pr-comment":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -10240,6 +10328,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/register":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             self.handle_forge_register(body)
+            return
+
+        if self.path == "/health-alert":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_health_alert(body)
             return
 
         # Only accept Telegram webhook on root path — 404 for unknown POST paths
@@ -10318,11 +10411,38 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
+    def handle_health_alert(self, body: bytes = b""):
+        """Handle JSONL health alerts from stop hook.
+
+        POST /health-alert — hook reports a worker's JSONL transcript is stale.
+        Body: {"worker": "name", "issue": "jsonl_stale", "transcript_age": 3600, ...}
+        Sends a one-time Telegram alert to admin so they can restart the worker.
+        """
+        try:
+            data = json.loads(body) if body else {}
+            worker = data.get("worker", "unknown")
+            issue = data.get("issue", "unknown")
+            age = data.get("transcript_age", 0)
+
+            age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
+            alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
+            print(f"Health alert: {worker} — {issue} (age={age}s)")
+
+            chat_ids = get_all_chat_ids()
+            for chat_id in chat_ids:
+                transport.send_text(chat_id, alert_text)
+
+            self._send_json(200, {"ok": True})
+        except Exception as e:
+            print(f"Health alert error: {e}")
+            self._send_json(500, {"ok": False, "error": str(e)})
+
     def handle_forge_register(self, body: bytes = b""):
         """Accept registration from forge-built worker binaries.
 
         POST /register — worker announces itself to the bridge.
         Body: {"Name": "workerName", "Host": "hostname", "Version": "1.0.0", "Tools": {...}}
+        Callback workers may include {"callback_url": "http://host:port"}.
         Response: {"ok": true}
         """
         try:
@@ -10330,12 +10450,48 @@ class Handler(BaseHTTPRequestHandler):
             name = data.get("Name", data.get("name", ""))
             host = data.get("Host", data.get("host", ""))
             version = data.get("Version", data.get("version", ""))
+            callback_url = data.get("CallbackURL", data.get("callback_url", data.get("callbackUrl", "")))
+            tools = data.get("Tools", data.get("tools", {}))
             if name:
-                print(f"Forge worker registered: {name} (host={host}, version={version})")
+                if callback_url:
+                    _registry_add_callback(name, callback_url, host=host, version=version, tools=tools)
+                    print(f"Callback worker registered: {name} (host={host}, url={callback_url}, version={version})")
+                else:
+                    print(f"Forge worker registered: {name} (host={host}, version={version})")
             self._send_json(200, {"ok": True})
         except Exception as e:
             print(f"Register error: {e}")
             self._send_json(500, {"ok": False, "error": str(e)})
+
+    def handle_send_endpoint(self, body: bytes = b""):
+        """Send a manager prompt to a worker.
+
+        POST /send
+        Body: {"worker": "name", "message": "text"}
+        """
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        worker = str(data.get("worker", "")).strip()
+        message = data.get("message", data.get("text", ""))
+        if not worker:
+            self._send_json(400, {"ok": False, "error": "Missing worker"})
+            return
+        if not isinstance(message, str) or not message.strip():
+            self._send_json(400, {"ok": False, "error": "Missing message"})
+            return
+
+        delivered = send_to_worker(worker, message)
+        status = 200 if delivered else 404
+        self._send_json(status, {
+            "ok": delivered,
+            "worker": worker,
+            "delivered": delivered,
+            "error": None if delivered else "Worker not found or not reachable",
+        })
 
     def handle_hook_response(self, body: bytes = b""):
         """Handle response forwarded from Claude hook.
