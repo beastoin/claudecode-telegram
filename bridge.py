@@ -6481,31 +6481,65 @@ class CommandRouter:
 
     def cmd_pilot(self, name, chat_id):
         if not name:
-            self.reply(chat_id, "Usage: /pilot <name>", outcome="Needs decision")
+            self.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
             return True
-        name = name.lower().strip()
-        # Resolve to tmux session name
+        names = name.lower().strip().split()
         prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
-        session_name = f"{prefix}{name}" if not name.startswith("claude-") else name
         pilot_port = os.environ.get("PILOT_PORT", "10170")
+        import urllib.request, json as _json, time as _time
+        from urllib.parse import urlparse, quote as _urlquote
+        if "all" in names:
+            registered = worker_manager.scan_tmux_sessions()
+            registry = _load_registry()
+            for rname, rinfo in registry.get("workers", {}).items():
+                if rinfo.get("host") and rname not in registered:
+                    registered[rname] = {"tmux": f"{prefix}{rname}", "host": rinfo["host"]}
+            if not registered:
+                self.reply(chat_id, "No active workers found", outcome="Needs decision")
+                return True
+            names = sorted(registered.keys())
+        enabled = []
+        session_names = []
+        errors = []
+        for n in names:
+            session_name = f"{prefix}{n}" if not n.startswith("claude-") else n
+            try:
+                worker_host = get_worker_host(n)
+                url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
+                if worker_host:
+                    url += f"&host={_urlquote(worker_host)}"
+                req = urllib.request.Request(url, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    _json.loads(resp.read())
+                enabled.append(n)
+                session_names.append(session_name)
+            except Exception as e:
+                errors.append(f"{n}: {e}")
+        if not enabled:
+            self.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
+            return True
+        ts = _time.strftime("%m%d-%H%M")
+        if len(enabled) <= 3:
+            slug = "-".join(enabled) + "-" + ts
+        else:
+            slug = f"team{len(enabled)}-{ts}"
         try:
-            import urllib.request
-            import json as _json
-            # Pass remote host to pilot if worker is teleported
-            worker_host = get_worker_host(name)
-            url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
-            if worker_host:
-                url += f"&host={urllib.parse.quote(worker_host)}"
-            req = urllib.request.Request(url, method="POST")
+            payload = _json.dumps({"slug": slug, "sessions": session_names, "ttl": 300}).encode()
+            req = urllib.request.Request(
+                f"http://localhost:{pilot_port}/api/grid-session",
+                data=payload, method="POST",
+                headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=5) as resp:
-                data = _json.loads(resp.read())
-            # Derive host from BRIDGE_PUBLIC_URL (auto-detected at startup)
-            from urllib.parse import urlparse
-            host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
-            pilot_url = f"http://{host}:{pilot_port}/session/{session_name}"
-            self.reply(chat_id, f"✈️ Pilot on for {name} (5min)\n{pilot_url}")
-        except Exception as e:
-            self.reply(chat_id, f"Pilot error: {e}", outcome="Needs decision")
+                _json.loads(resp.read())
+        except Exception:
+            pass
+        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
+        pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
+        names_str = ", ".join(enabled)
+        msg = f"✈️ Pilot: {names_str} (5min)\n{pilot_url}"
+        if errors:
+            msg += f"\n⚠️ Failed: {'; '.join(errors)}"
+        self.reply(chat_id, msg)
         return True
 
     def cmd_rewind(self, name, chat_id):

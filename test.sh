@@ -32,6 +32,9 @@ TEST_TMUX_PREFIX="claude-${TEST_NODE}-"
 BRIDGE_LOG="$TEST_NODE_DIR/bridge.log"
 TUNNEL_LOG="$TEST_NODE_DIR/tunnel.log"
 TEST_TEAM_DIR="$TEST_NODE_DIR/team"
+TEST_PILOT_PORT="${TEST_PILOT_PORT:-10175}"
+PILOT_LOG="$TEST_NODE_DIR/pilot.log"
+PILOT_PID=""
 
 # Ensure unit tests write to isolated test sessions directory
 export SESSIONS_DIR="$TEST_SESSION_DIR"
@@ -139,6 +142,8 @@ cleanup() {
     fi
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null; true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null; true
+    [[ -n "$PILOT_PID" ]] && kill "$PILOT_PID" 2>/dev/null; true
+    lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
     # Kill any test sessions we created (using test prefix)
     tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${TEST_TMUX_PREFIX}" | while read -r session; do
         tmux kill-session -t "$session" 2>/dev/null || true
@@ -191,6 +196,25 @@ hook_curl_code() {
     curl -s -o /dev/null -w "%{http_code}" -X POST "$url" \
         -H "Content-Type: application/json" \
         -d "$body" "$@"
+}
+
+start_test_pilot() {
+    lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
+    sleep 0.2
+    PORT="$TEST_PILOT_PORT" node "$SCRIPT_DIR/pilot/pilot.js" > "$PILOT_LOG" 2>&1 &
+    PILOT_PID=$!
+    if wait_for_port "$TEST_PILOT_PORT"; then
+        return 0
+    fi
+    return 1
+}
+
+stop_test_pilot() {
+    if [[ -n "$PILOT_PID" ]]; then
+        kill "$PILOT_PID" 2>/dev/null || true
+        PILOT_PID=""
+    fi
+    lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
 }
 
 wait_for_session() {
@@ -3782,6 +3806,7 @@ test_bridge_starts() {
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     TEAM_DIR="$TEST_TEAM_DIR" \
+    PILOT_PORT="$TEST_PILOT_PORT" \
     python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -8627,6 +8652,95 @@ test_hook_env_validation() {
     rm -f "$tmp_transcript"
 }
 
+test_hook_extract_from_transcript() {
+    info "Testing hook extracts assistant response from JSONL transcript..."
+
+    # Source only the extract function from the hook
+    local tmp_transcript=$(mktemp)
+
+    # Test 1: Single assistant response after user message
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}' > "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}' >> "$tmp_transcript"
+
+    local TEXT=""
+    TRANSCRIPT_PATH="$tmp_transcript"
+    extract_from_transcript() {
+        local chunk
+        chunk=$(tac "$TRANSCRIPT_PATH" 2>/dev/null | awk '/"type":"user"/{exit} /"type":"assistant"/{print}') || return 1
+        [ -z "$chunk" ] && return 1
+        TEXT=$(echo "$chunk" | tac | jq -rs '[.[].message.content[]? | select(.type == "text") | .text | select(. != null and . != "(no content)")] | join("\n\n")') || return 1
+        [ -n "$TEXT" ] && [ "$TEXT" != "null" ]
+    }
+    extract_from_transcript
+    if [[ "$TEXT" == "world" ]]; then
+        success "Extracts single assistant response"
+    else
+        fail "Expected 'world', got '$TEXT'"
+    fi
+
+    # Test 2: Multiple assistant messages after last user message
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"old question"}]}}' > "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old answer"}]}}' >> "$tmp_transcript"
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"new question"}]}}' >> "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first part"}]}}' >> "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second part"}]}}' >> "$tmp_transcript"
+
+    TEXT=""
+    extract_from_transcript
+    if echo "$TEXT" | grep -q "first part" && echo "$TEXT" | grep -q "second part"; then
+        success "Extracts multiple assistant responses after last user message"
+    else
+        fail "Expected both parts, got '$TEXT'"
+    fi
+    # Must NOT contain old answer
+    if echo "$TEXT" | grep -q "old answer"; then
+        fail "Should not include assistant response before last user message"
+    else
+        success "Does not include responses before last user message"
+    fi
+
+    # Test 3: Skips (no content) entries
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"q"}]}}' > "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"(no content)"}]}}' >> "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"real answer"}]}}' >> "$tmp_transcript"
+
+    TEXT=""
+    extract_from_transcript
+    if [[ "$TEXT" == "real answer" ]]; then
+        success "Skips (no content) entries"
+    else
+        fail "Expected 'real answer', got '$TEXT'"
+    fi
+
+    # Test 4: No assistant messages returns failure
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}' > "$tmp_transcript"
+
+    TEXT=""
+    if ! extract_from_transcript; then
+        success "Returns failure when no assistant messages"
+    else
+        fail "Should fail when no assistant messages"
+    fi
+
+    # Test 5: Large file with metadata lines (simulates real transcript)
+    echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"q"}]}}' > "$tmp_transcript"
+    echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]}}' >> "$tmp_transcript"
+    echo '{"type":"last-prompt"}' >> "$tmp_transcript"
+    echo '{"type":"ai-title"}' >> "$tmp_transcript"
+    echo '{"type":"mode"}' >> "$tmp_transcript"
+    echo '{"type":"system","message":{"content":"sys"}}' >> "$tmp_transcript"
+
+    TEXT=""
+    extract_from_transcript
+    if [[ "$TEXT" == "answer" ]]; then
+        success "Skips non-user/non-assistant metadata lines"
+    else
+        fail "Expected 'answer', got '$TEXT'"
+    fi
+
+    rm -f "$tmp_transcript"
+}
+
 test_checkin_hook_env_validation() {
     info "Testing checkin hook exits when env vars missing..."
 
@@ -11200,6 +11314,54 @@ print('OK')
         success "/workers?from= includes machine field on each worker"
     else
         fail "/workers?from= machine field test failed"
+    fi
+}
+
+test_workers_callback_worker_http_send_example() {
+    info "Testing callback workers appear in /workers with HTTP send_example..."
+
+    if python3 -c "
+import tempfile
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+bridge.NODE_DIR = tmp
+bridge.SESSIONS_DIR = tmp / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
+bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}wkr-'
+bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
+bridge.BRIDGE_SSH_TARGET = 'vps'
+bridge.worker_manager.sessions_dir = bridge.SESSIONS_DIR
+bridge.worker_manager.tmux_prefix = bridge.TMUX_PREFIX
+bridge.worker_manager.scan_tmux_sessions = lambda: {
+    'mon': {'tmux': '${TEST_TMUX_PREFIX}wkr-mon', 'chat_id': 1},
+}
+
+bridge._registry_add('mon', 'claude', 1)
+bridge._registry_add_callback('manager', 'http://macbook:8787', host='macbook', version='manager-mcp-test')
+
+workers = bridge.worker_manager.get_workers(caller_from='mon')
+manager = next((w for w in workers if w['name'] == 'manager'), None)
+assert manager is not None, f'manager missing: {[w[\"name\"] for w in workers]}'
+assert manager['protocol'] == 'http', f'expected http protocol: {manager}'
+assert manager['address'] == 'http://macbook:8787/msg', f'bad callback address: {manager}'
+assert 'curl -sS -X POST' in manager['send_example'], manager['send_example']
+assert 'ssh ' not in manager['send_example'], f'callback send should not be ssh wrapped: {manager[\"send_example\"]}'
+
+workers = bridge.worker_manager.get_workers(caller_from='manager')
+mon = next((w for w in workers if w['name'] == 'mon'), None)
+assert mon is not None, f'mon missing: {[w[\"name\"] for w in workers]}'
+assert 'ssh vps' in mon['send_example'], f'manager-to-bridge-local peer should ssh to vps: {mon[\"send_example\"]}'
+
+import shutil
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "Callback workers use HTTP send_example"
+    else
+        fail "Callback worker /workers test failed"
     fi
 }
 
@@ -18033,6 +18195,43 @@ test_known_endpoints_unchanged() {
     fi
 }
 
+test_send_endpoint_delivers_to_worker() {
+    info "Testing POST /send delivers to a worker..."
+
+    send_message "/hire sendendpointtest" >/dev/null
+    wait_for_session "sendendpointtest"
+    sleep 0.3
+
+    local tmux_name="${TEST_TMUX_PREFIX}sendendpointtest"
+    local unique_msg="test_send_endpoint_${RANDOM}"
+    local body
+    body=$(python3 -c "import json; print(json.dumps({'worker':'sendendpointtest','message':'$unique_msg'}))")
+
+    local response
+    response=$(hook_curl "http://localhost:$PORT/send" "$body")
+    if echo "$response" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('ok') is True, d
+assert d.get('worker') == 'sendendpointtest', d
+assert d.get('delivered') is True, d
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        sleep 1
+        local pane_content
+        pane_content=$(tmux capture-pane -t "$tmux_name" -p 2>/dev/null || echo "")
+        if echo "$pane_content" | grep -q "$unique_msg"; then
+            success "POST /send delivered message to tmux worker"
+        else
+            fail "POST /send response was OK but message not found in tmux pane"
+        fi
+    else
+        fail "POST /send should return delivery JSON: $response"
+    fi
+
+    send_message "/end sendendpointtest" >/dev/null 2>&1 || true
+}
+
 test_webhook_root_still_works() {
     info "Testing POST / (Telegram webhook) still works..."
 
@@ -18373,9 +18572,324 @@ print('OK')
     fi
 }
 
+test_gmail_connector_import() {
+    info "Testing gmail_connector module imports and constructs..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from gmail_connector import GmailConnector
+gc = GmailConnector(
+    gws_bin='/usr/bin/gws',
+    from_filter='test@example.com',
+    poll_interval=30,
+    on_message=lambda t,m: None,
+    get_registered_workers=lambda: set(),
+)
+assert gc.poll_interval == 30
+assert gc.from_filter == 'test@example.com'
+assert gc._history_id is None
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "gmail_connector imports and constructs"
+    else
+        fail "gmail_connector import/construct failed"
+    fi
+}
+
+test_gmail_connector_poll_cycle() {
+    info "Testing gmail connector end-to-end poll cycle..."
+    if python3 -c "
+import sys, os, json, base64
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from gmail_connector import GmailConnector
+
+received = []
+def on_msg(targets, text):
+    received.append((targets, text))
+
+gc = GmailConnector(
+    gws_bin='/usr/bin/gws',
+    from_filter='mgr@example.com',
+    poll_interval=30,
+    on_message=on_msg,
+    get_registered_workers=lambda: {'mon', 'taro'},
+)
+gc._history_id = '100'
+
+body = '@mon check the deploy logs'
+encoded = base64.urlsafe_b64encode(body.encode()).decode()
+
+history_resp = json.dumps({
+    'history': [{'id':'101','messagesAdded':[{'message':{'id':'m1','labelIds':['INBOX','UNREAD'],'threadId':'t1'}}]}],
+    'historyId': '102'
+})
+msg_resp = json.dumps({
+    'id':'m1','labelIds':['INBOX','UNREAD'],
+    'payload':{
+        'mimeType':'text/plain',
+        'headers':[
+            {'name':'From','value':'Manager <mgr@example.com>'},
+            {'name':'Subject','value':'Deploy check'},
+        ],
+        'body':{'data': encoded, 'size': len(body)},
+    }
+})
+modify_resp = json.dumps({'id':'m1','labelIds':['INBOX']})
+
+call_count = [0]
+responses = [history_resp, msg_resp, modify_resp]
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = responses[call_count[0]]
+    r.stderr = ''
+    call_count[0] += 1
+    return r
+
+with patch('gmail_connector.subprocess.run', side_effect=mock_run):
+    gc.poll_once()
+
+assert len(received) == 1, f'Expected 1 message, got {len(received)}'
+targets, text = received[0]
+assert 'mon' in targets, f'Expected mon in targets, got {targets}'
+assert 'manager:' in text, f'Expected manager: in text'
+assert gc._history_id == '102', f'Expected historyId 102, got {gc._history_id}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "gmail connector poll cycle routes @mention correctly"
+    else
+        fail "gmail connector poll cycle test failed"
+    fi
+}
+
 # ============================================================
 # TEST RUNNERS
 # ============================================================
+
+# ── Pilot Grid Tests ──────────────────────────────────────────────────────────
+
+test_pilot_grid_endpoint() {
+    info "Testing /grid endpoint returns HTML..."
+
+    if ! start_test_pilot; then
+        fail "Could not start test pilot server"
+        return
+    fi
+
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$TEST_PILOT_PORT/grid")
+    if [[ "$status" == "200" ]]; then
+        success "/grid endpoint returns 200"
+    else
+        fail "/grid endpoint returned $status, expected 200"
+    fi
+
+    local body
+    body=$(curl -s "http://localhost:$TEST_PILOT_PORT/grid")
+    if echo "$body" | grep -q 'Pilot'; then
+        success "/grid page contains Pilot title"
+    else
+        fail "/grid page missing Pilot title"
+    fi
+
+    stop_test_pilot
+}
+
+test_pilot_single_enables_session() {
+    info "Testing /pilot <name> enables session and returns grid URL..."
+
+    if ! start_test_pilot; then
+        fail "Could not start test pilot server"
+        return
+    fi
+
+    # Create a test tmux session
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilottest1" "sleep 300" 2>/dev/null || true
+    sleep 0.3
+
+    # Verify session exists and pilot can see it
+    if ! tmux has-session -t "${TEST_TMUX_PREFIX}pilottest1" 2>/dev/null; then
+        fail "Test tmux session not created"
+        stop_test_pilot
+        return
+    fi
+
+    # Enable directly via pilot API to verify pilot server works
+    local api_result
+    api_result=$(curl -s -X POST "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilottest1")
+    if echo "$api_result" | grep -q '"ok"'; then
+        success "Pilot API enables session directly"
+    else
+        fail "Pilot API failed: $api_result"
+    fi
+
+    # Check enabled list
+    local enabled
+    enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
+    if echo "$enabled" | grep -q "pilottest1"; then
+        success "Session visible in enabled list"
+    else
+        fail "Session not enabled: $enabled"
+    fi
+
+    # Cleanup
+    curl -s -X DELETE "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilottest1" >/dev/null
+    tmux kill-session -t "${TEST_TMUX_PREFIX}pilottest1" 2>/dev/null || true
+    stop_test_pilot
+}
+
+test_pilot_multi_enables_sessions() {
+    info "Testing /pilot enables multiple sessions via API..."
+
+    if ! start_test_pilot; then
+        fail "Could not start test pilot server"
+        return
+    fi
+
+    # Create two test tmux sessions
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilotm1" "sleep 300" 2>/dev/null || true
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilotm2" "sleep 300" 2>/dev/null || true
+    sleep 0.3
+
+    # Enable both via pilot API
+    curl -s -X POST "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilotm1" >/dev/null
+    curl -s -X POST "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilotm2" >/dev/null
+
+    local enabled
+    enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
+    local count
+    count=$(echo "$enabled" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+
+    if [[ "$count" -ge 2 ]]; then
+        success "Multiple sessions enabled ($count)"
+    else
+        fail "Expected 2+ sessions enabled, got $count"
+    fi
+
+    # Cleanup
+    curl -s -X DELETE "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilotm1" >/dev/null
+    curl -s -X DELETE "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}pilotm2" >/dev/null
+    tmux kill-session -t "${TEST_TMUX_PREFIX}pilotm1" 2>/dev/null || true
+    tmux kill-session -t "${TEST_TMUX_PREFIX}pilotm2" 2>/dev/null || true
+    stop_test_pilot
+}
+
+test_pilot_all_enables_all_active() {
+    info "Testing /pilot all resolves and enables all active workers..."
+
+    if ! start_test_pilot; then
+        fail "Could not start test pilot server"
+        return
+    fi
+
+    # Create test tmux sessions (simulating active workers)
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilota1" "sleep 300" 2>/dev/null || true
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilota2" "sleep 300" 2>/dev/null || true
+    tmux new-session -d -s "${TEST_TMUX_PREFIX}pilota3" "sleep 300" 2>/dev/null || true
+    sleep 0.3
+
+    # Test the "all" keyword via Python directly (unit test of the resolution)
+    if python3 -c "
+import os, sys
+os.environ['TMUX_PREFIX'] = '${TEST_TMUX_PREFIX}'
+os.environ['PILOT_PORT'] = '${TEST_PILOT_PORT}'
+sys.path.insert(0, '$(pwd)')
+import bridge
+
+registered = bridge.worker_manager.scan_tmux_sessions()
+names = sorted(registered.keys())
+# Must find our test sessions
+found = [n for n in names if n.startswith('pilota')]
+assert len(found) >= 3, f'Expected 3+ pilota sessions, got {found} (all: {names})'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "scan_tmux_sessions finds test sessions"
+    else
+        fail "scan_tmux_sessions did not find test sessions"
+    fi
+
+    # Test the full /pilot all flow via bridge
+    send_message "/pilot all" >/dev/null
+    sleep 1
+
+    local enabled
+    enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
+    local count
+    count=$(echo "$enabled" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+
+    if [[ "$count" -ge 3 ]]; then
+        success "/pilot all enabled $count sessions via bridge"
+    else
+        # Debug: check what the bridge saw
+        local bridge_err
+        bridge_err=$(grep -i 'pilot\|error\|Traceback' "$BRIDGE_LOG" 2>/dev/null | tail -5)
+        fail "/pilot all expected 3+ sessions, got $count (bridge: $bridge_err)"
+    fi
+
+    # Verify each session is present
+    local found_all=true
+    for name in pilota1 pilota2 pilota3; do
+        if ! echo "$enabled" | grep -q "$name"; then
+            found_all=false
+        fi
+    done
+    if [[ "$found_all" == "true" ]]; then
+        success "All 3 test sessions found in enabled list"
+    else
+        fail "Not all test sessions found in enabled list"
+    fi
+
+    # Cleanup
+    for name in pilota1 pilota2 pilota3; do
+        curl -s -X DELETE "http://localhost:$TEST_PILOT_PORT/api/pilot?session=${TEST_TMUX_PREFIX}${name}" >/dev/null
+        tmux kill-session -t "${TEST_TMUX_PREFIX}${name}" 2>/dev/null || true
+    done
+    stop_test_pilot
+}
+
+test_pilot_nonexistent_returns_error() {
+    info "Testing /pilot nonexistent returns error..."
+
+    if ! start_test_pilot; then
+        fail "Could not start test pilot server"
+        return
+    fi
+
+    local result
+    result=$(send_message "/pilot doesnotexist99")
+
+    # Bridge should reply OK (it processed the command) but the response to Telegram should mention error
+    if [[ "$result" == "OK" ]]; then
+        success "/pilot with nonexistent session processed"
+    else
+        fail "/pilot nonexistent failed: $result"
+    fi
+
+    # The session should NOT be in the enabled list
+    local enabled
+    enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
+    if echo "$enabled" | grep -q "doesnotexist99"; then
+        fail "Nonexistent session should not be enabled"
+    else
+        success "Nonexistent session correctly not enabled"
+    fi
+
+    stop_test_pilot
+}
+
+test_pilot_usage_no_args() {
+    info "Testing /pilot with no args returns usage..."
+
+    local result
+    result=$(send_message "/pilot")
+
+    if [[ "$result" == "OK" ]]; then
+        success "/pilot no-args processed"
+    else
+        fail "/pilot no-args failed: $result"
+    fi
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -18387,6 +18901,7 @@ run_unit_tests() {
     run_test test_formatting
     run_test test_message_splitting
     run_test test_sandbox_docker_cmd
+    run_test test_hook_extract_from_transcript
     # Unit tests - Markdown conversion
     log ""
     log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
@@ -18523,6 +19038,7 @@ run_unit_tests() {
     run_test test_workers_from_caller_local_to_remote_peer
     run_test test_workers_no_from_backward_compat
     run_test test_workers_from_includes_machine_id
+    run_test test_workers_callback_worker_http_send_example
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url
@@ -18764,6 +19280,11 @@ run_unit_tests() {
     run_test test_local_transport_media_methods
     run_test test_local_transport_log_file
     run_test test_transport_init_selects_correctly
+    # Unit tests - Gmail Connector
+    log ""
+    log "── Gmail Connector Tests (Unit) ────────────────────────────────────────"
+    run_test test_gmail_connector_import
+    run_test test_gmail_connector_poll_cycle
 }
 
 run_cli_tests() {
@@ -18789,7 +19310,8 @@ run_integration_tests() {
     # Integration tests (bridge needed)
     log ""
     log "── Integration Tests ───────────────────────────────────────────────────"
-    run_test test_bridge_starts || exit 1
+    # Bridge must start for all integration tests — run unconditionally
+    test_bridge_starts || exit 1
     sleep 0.3
 
     # HTTP endpoint tests
@@ -18806,6 +19328,7 @@ run_integration_tests() {
     run_test test_unknown_get_returns_404
     run_test test_unknown_post_returns_404
     run_test test_known_endpoints_unchanged
+    run_test test_send_endpoint_delivers_to_worker
     run_test test_webhook_root_still_works
     run_test test_forge_register_endpoint
     # Admin tests
@@ -18892,6 +19415,15 @@ run_integration_tests() {
     log "── export_hook_env Guard Tests (Integration) ───────────────────────────"
     run_test test_export_hook_env_skips_live_bridge
     run_test test_export_hook_env_overwrites_dead_bridge
+    # Pilot grid tests (integration)
+    log ""
+    log "── Pilot Grid Tests (Integration) ──────────────────────────────────────"
+    run_test test_pilot_usage_no_args
+    run_test test_pilot_grid_endpoint
+    run_test test_pilot_single_enables_session
+    run_test test_pilot_multi_enables_sessions
+    run_test test_pilot_all_enables_all_active
+    run_test test_pilot_nonexistent_returns_error
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
 }

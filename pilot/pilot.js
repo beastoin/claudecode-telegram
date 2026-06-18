@@ -18,6 +18,7 @@ const ACTIVE_CONNECTIONS = new Map();
 const ENABLED_SESSIONS = new Map(); // sessionName -> { host?: string }
 const SESSION_TIMERS = new Map(); // sessionName -> timeout handle
 const PILOT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const GRID_SESSIONS = new Map(); // slug -> { sessions: [...], createdAt, expiresAt, timer }
 
 function enableSession(sessionName, host) {
   ENABLED_SESSIONS.set(sessionName, { host: host || null });
@@ -40,6 +41,29 @@ function refreshSessionTimer(sessionName) {
     console.log(`[pilot] auto-disabling ${sessionName} (5min idle)`);
     disableSession(sessionName);
   }, PILOT_TIMEOUT_MS));
+}
+
+function createGridSession(slug, sessionNames, ttlMs) {
+  const existing = GRID_SESSIONS.get(slug);
+  if (existing && existing.timer) clearTimeout(existing.timer);
+  const now = Date.now();
+  const expiresAt = now + ttlMs;
+  const timer = setTimeout(() => {
+    console.log(`[pilot] grid session '${slug}' expired`);
+    GRID_SESSIONS.delete(slug);
+  }, ttlMs);
+  GRID_SESSIONS.set(slug, { sessions: sessionNames, createdAt: now, expiresAt, timer });
+  return { slug, expiresAt };
+}
+
+function getGridSession(slug) {
+  const gs = GRID_SESSIONS.get(slug);
+  if (!gs) return null;
+  if (Date.now() >= gs.expiresAt) {
+    GRID_SESSIONS.delete(slug);
+    return null;
+  }
+  return gs;
 }
 
 const MIME_TYPES = {
@@ -103,6 +127,35 @@ function getTokenForTemplates(urlObj) {
 
 function tokenSearch(token) {
   return token ? `?token=${encodeURIComponent(token)}` : '';
+}
+
+async function diagnoseRemote(host, sessionName) {
+  try {
+    await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host, 'true'], { timeout: 5000 });
+  } catch {
+    return `Cannot reach ${host} — SSH connection failed`;
+  }
+  try {
+    await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host, `tmux has-session -t '${sessionName.replace(/'/g, "'\\''")}'`], { timeout: 5000 });
+  } catch {
+    return `Session ${sessionName} does not exist on ${host}`;
+  }
+  try {
+    const { stdout } = await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host,
+      'ptys=$(sysctl -n kern.tty.ptmx_max 2>/dev/null || echo 0); used=$(lsof /dev/ptmx 2>/dev/null | tail -n+2 | wc -l | tr -d " "); echo "$used/$ptys"'
+    ], { timeout: 5000 });
+    const parts = stdout.trim().split('/');
+    if (parts.length === 2) {
+      const used = parseInt(parts[0], 10);
+      const max = parseInt(parts[1], 10);
+      if (max > 0 && used >= max) {
+        return `PTY exhaustion on ${host}: ${used}/${max} PTYs in use — cannot allocate terminal (try killing Terminal.app or leaked processes)`;
+      }
+    }
+  } catch {
+    // PTY check failed, not fatal
+  }
+  return null;
 }
 
 async function execTmux(args, host) {
@@ -203,7 +256,10 @@ async function sessionExists(sessionName) {
 }
 
 function sendJson(res, statusCode, data) {
-  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
   res.end(JSON.stringify(data));
 }
 
@@ -428,7 +484,8 @@ function renderIndexPage({ sessions, token, enabledCount }) {
 </html>`;
 }
 
-function renderSessionPage({ sessionName, token, readonly }) {
+function renderSessionPage({ sessionName, token, readonly, embed }) {
+  const hideChrome = embed ? 'display:none !important;' : '';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -466,6 +523,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
         padding: 10px 12px;
         background: var(--panel);
         border-bottom: 1px solid var(--line);
+        ${hideChrome}
       }
       .back {
         color: var(--text);
@@ -506,9 +564,15 @@ function renderSessionPage({ sessionName, token, readonly }) {
       #terminal {
         flex: 1;
         min-height: 0;
-        padding: 10px;
+        padding: ${embed ? '0' : '10px'};
         position: relative;
+        ${embed ? 'overflow: hidden;' : ''}
       }
+      ${embed ? `
+      #terminal *, #terminal ::-webkit-scrollbar { scrollbar-width: none; }
+      #terminal *::-webkit-scrollbar { display: none; }
+      html, body { overflow: hidden; }
+      ` : ''}
       #mobile-input {
         position: absolute;
         top: 0; left: 0;
@@ -533,6 +597,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
         left: 0;
         right: 0;
         z-index: 20;
+        ${hideChrome}
       }
       .toolbar button {
         background: #1a2744;
@@ -557,6 +622,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
         background: rgba(3, 6, 13, 0.85);
         z-index: 30;
         padding: 14px;
+        ${hideChrome}
       }
       .select-panel {
         width: 100%;
@@ -626,6 +692,8 @@ function renderSessionPage({ sessionName, token, readonly }) {
         <button class="key-enter" data-seq="cr">Enter</button>
         <button id="ctrl-btn">Ctrl</button>
         <button data-seq="esc">Esc</button>
+        <button data-seq="up">▲</button>
+        <button data-seq="down">▼</button>
         <button data-seq="pageup">PgUp</button>
         <button data-seq="pagedn">PgDn</button>
         <button data-seq="first">First</button>
@@ -648,6 +716,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
       const sessionName = ${JSON.stringify(sessionName)};
       const token = ${JSON.stringify(token)};
       const readonly = ${readonly ? 'true' : 'false'};
+      const embed = ${embed ? 'true' : 'false'};
       const statusDot = document.getElementById('status-dot');
       const statusText = document.getElementById('status-text');
 
@@ -683,7 +752,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
           cols: 80,
           rows: 24,
           fontFamily: 'JetBrains Mono, Menlo, Monaco, monospace',
-          fontSize: 14,
+          fontSize: embed ? 10 : 14,
         });
         fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -701,6 +770,8 @@ function renderSessionPage({ sessionName, token, readonly }) {
 
       let ws;
       let reconnectTimer = null;
+      let reconnectAttempts = 0;
+      let reconnectStopped = false;
 
       function websocketUrl() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -718,15 +789,24 @@ function renderSessionPage({ sessionName, token, readonly }) {
       }
 
       function connect() {
+        if (reconnectStopped) return;
         setStatus('connecting', 'connecting');
         ws = new WebSocket(websocketUrl());
 
-        ws.onopen = () => setStatus('connected', 'connected');
+        ws.onopen = () => { setStatus('connected', 'connected'); reconnectAttempts = 0; };
         ws.onmessage = (event) => terminal.write(event.data);
         ws.onerror = () => setStatus('disconnected', 'error');
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           setStatus('disconnected', 'disconnected');
-          reconnectTimer = setTimeout(connect, 2000);
+          // code 4000 = diagnostic failure (PTY exhaustion, host unreachable, etc.)
+          if (event.code === 4000) {
+            reconnectStopped = true;
+            terminal.write('\\r\\n\\x1b[33mReconnect stopped — fix the issue above, then refresh the page.\\x1b[0m\\r\\n');
+            return;
+          }
+          reconnectAttempts++;
+          const delay = Math.min(2000 * Math.pow(2, reconnectAttempts - 1), 30000);
+          reconnectTimer = setTimeout(connect, delay);
         };
       }
 
@@ -752,7 +832,7 @@ function renderSessionPage({ sessionName, token, readonly }) {
       });
 
       // Toolbar buttons (touch devices)
-      const SEQ = { cr: '\\r', esc: '\\x1b', pageup: '\\x02\\x1b[5~', pagedn: '\\x1b[6~', last: 'q' };
+      const SEQ = { cr: '\\r', esc: '\\x1b', up: '\\x1b[A', down: '\\x1b[B', pageup: '\\x02\\x1b[5~', pagedn: '\\x1b[6~', last: 'q' };
       // First needs split sends (Ctrl+B [ then M-<) with delay so terminal parses correctly
       const MULTI = { first: ['\\x02[', '\\x1b<'] };
       document.querySelectorAll('#toolbar button[data-seq]').forEach((btn) => {
@@ -924,6 +1004,431 @@ function renderSessionPage({ sessionName, token, readonly }) {
 </html>`;
 }
 
+function renderGridPage({ token, slug, gridSession }) {
+  const expiresAt = gridSession ? gridSession.expiresAt : 0;
+  const filterSessions = gridSession ? JSON.stringify(gridSession.sessions) : 'null';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pilot${slug ? ' — ' + escapeHtml(slug) : ''}</title>
+  <style>
+    :root {
+      --bg: #0a0a08;
+      --surface: #1a1814;
+      --border: #3d362e;
+      --text: #40d870;
+      --text-muted: #2a7a40;
+      --green: #40d870;
+      --accent: #60ff90;
+      --hover: #252018;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+      overflow-x: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .topbar h1 {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 8px rgba(64, 216, 112, 0.5);
+    }
+    .worker-count { color: var(--text-muted); font-size: 12px; }
+    .countdown {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .countdown.urgent { color: #f59e0b; text-shadow: 0 0 4px rgba(245, 158, 11, 0.4); }
+    .countdown.expired { color: #ef4444; }
+    .topbar-actions { margin-left: auto; }
+
+    .btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: inherit;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .btn:hover { background: var(--hover); text-shadow: 0 0 6px rgba(64, 216, 112, 0.4); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(min(480px, 100%), 1fr));
+      gap: 10px;
+      padding: 10px;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel:hover { border-color: var(--accent); }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      flex-shrink: 0;
+      box-shadow: 0 0 4px var(--green);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .worker-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--green);
+      text-shadow: 0 0 6px rgba(74, 222, 128, 0.3);
+    }
+
+    .panel-terminal {
+      height: 260px;
+      position: relative;
+      background: #001200;
+      border-radius: 12px;
+      overflow: hidden;
+      margin: 6px;
+    }
+    .panel-terminal iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      pointer-events: none;
+      filter: saturate(0.5) brightness(1.1);
+    }
+    /* CRT scanlines */
+    .panel-terminal::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0,0,0,0.3) 0px,
+        rgba(0,0,0,0.3) 1px,
+        transparent 1px,
+        transparent 2px
+      );
+      pointer-events: none;
+      z-index: 2;
+      border-radius: 12px;
+    }
+    /* CRT screen glow + heavy vignette */
+    .panel-terminal::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(
+        ellipse 80% 80% at center,
+        rgba(50, 200, 80, 0.06) 0%,
+        rgba(30, 140, 50, 0.03) 40%,
+        rgba(0, 0, 0, 0.7) 100%
+      );
+      pointer-events: none;
+      z-index: 3;
+      border-radius: 12px;
+    }
+    .panel {
+      background: #001200;
+      border: 1px solid #1a3a1a;
+      border-radius: 8px;
+      box-shadow: 0 0 12px rgba(50, 200, 80, 0.08);
+    }
+    .panel:hover {
+      border-color: var(--green);
+      box-shadow: 0 0 20px rgba(50, 200, 80, 0.15);
+    }
+    .panel-header {
+      background: rgba(0, 18, 0, 0.8);
+      border-bottom: 1px solid #1a3a1a;
+    }
+    /* Flicker animation */
+    @keyframes flicker {
+      0% { opacity: 1; }
+      3% { opacity: 0.97; }
+      6% { opacity: 1; }
+      92% { opacity: 1; }
+      94% { opacity: 0.96; }
+      96% { opacity: 1; }
+    }
+    .panel-terminal iframe {
+      animation: flicker 4s linear infinite;
+    }
+
+    .focus-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 50;
+      display: none;
+      flex-direction: column;
+    }
+    .focus-overlay.active { display: flex; }
+
+    .focus-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .focus-worker-name {
+      font-size: 13px;
+      color: var(--green);
+      text-shadow: 0 0 6px rgba(64, 216, 112, 0.4);
+    }
+    .focus-overlay iframe {
+      flex: 1;
+      border: none;
+      width: 100%;
+      background: #001200;
+    }
+
+    /* Solo mode — single worker, full screen */
+    .solo {
+      position: fixed;
+      top: 38px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+    .solo iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #001200;
+    }
+
+    .empty-state {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 80px 20px;
+      font-size: 14px;
+    }
+
+    @media (max-width: 500px) {
+      .grid { grid-template-columns: 1fr; gap: 4px; padding: 4px; }
+      .panel-terminal { height: 200px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Pilot</h1>
+    <span class="worker-count" id="worker-count"></span>
+    <span class="countdown" id="countdown"></span>
+    <div class="topbar-actions">
+      <button class="btn" id="refresh-button">Refresh</button>
+    </div>
+  </header>
+
+  <div class="grid" id="grid-container"><div class="empty-state">Loading...</div></div>
+
+  <div class="focus-overlay" id="focus-overlay">
+    <div class="focus-bar">
+      <button class="btn" id="back-to-grid">&larr; Grid</button>
+      <span class="focus-worker-name" id="focus-worker-name"></span>
+    </div>
+    <iframe id="focus-iframe" src="about:blank"></iframe>
+  </div>
+
+  <script>
+    window.onerror = function(msg, src, line) {
+      document.getElementById('grid-container').innerHTML =
+        '<div class="empty-state">JS Error: ' + msg + ' (line ' + line + ')</div>';
+    };
+    var authToken = ${JSON.stringify(token)};
+    var tokenQuery = authToken ? '?token=' + encodeURIComponent(authToken) : '';
+    var expiresAt = ${expiresAt};
+    var filterSessions = ${filterSessions};
+
+    var gridContainer = document.getElementById('grid-container');
+    var workerCountEl = document.getElementById('worker-count');
+    var countdownEl = document.getElementById('countdown');
+    var focusOverlay = document.getElementById('focus-overlay');
+    var focusIframe = document.getElementById('focus-iframe');
+    var focusWorkerName = document.getElementById('focus-worker-name');
+
+    var sessions = [];
+
+    function updateCountdown() {
+      if (!expiresAt) return;
+      var remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+      var min = Math.floor(remaining / 60);
+      var sec = remaining % 60;
+      countdownEl.textContent = min + ':' + (sec < 10 ? '0' : '') + sec;
+      if (remaining <= 0) {
+        countdownEl.textContent = 'expired';
+        countdownEl.className = 'countdown expired';
+      } else if (remaining <= 60) {
+        countdownEl.className = 'countdown urgent';
+      }
+    }
+    if (expiresAt) {
+      updateCountdown();
+      setInterval(updateCountdown, 1000);
+    }
+
+    function extractWorkerName(sessionName) {
+      return sessionName.replace(/^claude-[^-]+-/, '');
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function sessionUrl(sessionName, opts) {
+      var url = '/session/' + encodeURIComponent(sessionName) + tokenQuery;
+      var sep = tokenQuery ? '&' : '?';
+      if (opts && opts.readonly) { url += sep + 'readonly=1'; sep = '&'; }
+      if (opts && opts.embed) { url += sep + 'embed=1'; sep = '&'; }
+      return url;
+    }
+
+    function buildGrid() {
+      if (!sessions.length) {
+        gridContainer.innerHTML = '<div class="empty-state">' +
+          'No sessions enabled.<br>Use /pilot name1 name2 in Telegram.</div>';
+        workerCountEl.textContent = '';
+        return;
+      }
+
+      if (sessions.length === 1) {
+        workerCountEl.textContent = extractWorkerName(sessions[0].name);
+        gridContainer.className = 'solo';
+        gridContainer.innerHTML =
+          '<iframe src="' + escapeHtml(sessionUrl(sessions[0].name, { embed: true })) + '"></iframe>';
+        return;
+      }
+
+      gridContainer.className = 'grid';
+      workerCountEl.textContent = sessions.length + ' workers';
+
+      gridContainer.innerHTML = sessions.map(function(session) {
+        var name = extractWorkerName(session.name);
+        var src = sessionUrl(session.name, { readonly: true, embed: true });
+        return '<div class="panel" data-session="' + escapeHtml(session.name) + '">' +
+          '<div class="panel-header">' +
+          '<span class="status-dot"></span>' +
+          '<span class="worker-name">' + escapeHtml(name) + '</span>' +
+          '</div>' +
+          '<div class="panel-terminal">' +
+          '<iframe src="' + escapeHtml(src) + '" loading="lazy"></iframe>' +
+          '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function openFocusView(sessionName) {
+      focusWorkerName.textContent = extractWorkerName(sessionName);
+      focusIframe.src = sessionUrl(sessionName, {});
+      focusOverlay.classList.add('active');
+    }
+
+    function closeFocusView() {
+      focusOverlay.classList.remove('active');
+      focusIframe.src = 'about:blank';
+    }
+
+    gridContainer.addEventListener('click', function(event) {
+      if (sessions.length <= 1) return;
+      var panel = event.target.closest('.panel');
+      if (panel) openFocusView(panel.getAttribute('data-session'));
+    });
+
+    document.getElementById('back-to-grid').addEventListener('click', closeFocusView);
+
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape' && focusOverlay.classList.contains('active')) {
+        closeFocusView();
+      }
+    });
+
+    document.getElementById('refresh-button').addEventListener('click', function() {
+      loadEnabledSessions();
+    });
+
+    function cacheBust(url) {
+      return url + (url.indexOf('?') === -1 ? '?' : '&') + '_t=' + Date.now();
+    }
+
+    async function loadEnabledSessions() {
+      try {
+        var response = await fetch(cacheBust('/api/enabled' + tokenQuery));
+        if (!response.ok) return;
+        var newSessions = await response.json();
+        if (filterSessions) {
+          newSessions = newSessions.filter(function(s) {
+            return filterSessions.indexOf(s.name) !== -1;
+          });
+        }
+        var oldKeys = sessions.map(function(s) { return s.name; }).sort().join(',');
+        var newKeys = newSessions.map(function(s) { return s.name; }).sort().join(',');
+        sessions = newSessions;
+        if (oldKeys !== newKeys) buildGrid();
+      } catch (err) { /* retry next interval */ }
+    }
+
+    (async function init() {
+      try {
+        await loadEnabledSessions();
+        buildGrid();
+        setInterval(loadEnabledSessions, 15000);
+      } catch (err) {
+        gridContainer.innerHTML = '<div class="empty-state">Error: ' + err.message + '</div>';
+      }
+    })();
+  </script>
+</body>
+</html>`;
+}
+
 async function handleHttp(req, res) {
   const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = urlObj.pathname;
@@ -993,6 +1498,47 @@ try {
         enabledCount: ENABLED_SESSIONS.size,
       })
     );
+    return;
+  }
+
+  if (pathname === '/grid' || pathname.startsWith('/grid/')) {
+    const slug = pathname === '/grid' ? null : decodeURIComponent(pathname.slice('/grid/'.length));
+    const gs = slug ? getGridSession(slug) : null;
+    if (slug && !gs) {
+      sendHtml(res, 404, `<!doctype html><html><body style="background:#0a0a08;color:#40d870;font-family:monospace;padding:40px;text-align:center"><h2>Session expired</h2><p>This pilot session has ended. Run /pilot again from Telegram.</p></body></html>`);
+      return;
+    }
+    sendHtml(
+      res,
+      200,
+      renderGridPage({
+        token: getTokenForTemplates(urlObj),
+        slug: slug || null,
+        gridSession: gs,
+      })
+    );
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/grid-session') {
+    try {
+      const body = await new Promise((resolve, reject) => {
+        let data = '';
+        req.on('data', (c) => { data += c; if (data.length > 1e5) reject(new Error('too large')); });
+        req.on('end', () => resolve(data));
+        req.on('error', reject);
+      });
+      const { slug, sessions: sessionNames, ttl } = JSON.parse(body);
+      if (!slug || !Array.isArray(sessionNames) || !sessionNames.length) {
+        sendJson(res, 400, { error: 'slug and sessions[] required' });
+        return;
+      }
+      const ttlMs = Math.min((ttl || 300) * 1000, 30 * 60 * 1000);
+      const result = createGridSession(slug, sessionNames, ttlMs);
+      sendJson(res, 200, { ok: true, slug: result.slug, expiresAt: result.expiresAt });
+    } catch (e) {
+      sendJson(res, 400, { error: e.message });
+    }
     return;
   }
 
@@ -1097,6 +1643,7 @@ try {
         sessionName,
         token: getTokenForTemplates(urlObj),
         readonly: urlObj.searchParams.get('readonly') === '1',
+        embed: urlObj.searchParams.get('embed') === '1',
       })
     );
     return;
@@ -1196,7 +1743,7 @@ function closeConnection(ws) {
   }
 }
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', async (ws, req) => {
   const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const sessionName = urlObj.searchParams.get('session') || '';
   const readonly = urlObj.searchParams.get('readonly') === '1';
@@ -1204,9 +1751,33 @@ wss.on('connection', (ws, req) => {
   const rows = parseIntOrDefault(urlObj.searchParams.get('rows'), 24);
 
   console.log(`[ws] connect session=${sessionName} readonly=${readonly} cols=${cols} rows=${rows}`);
+
+  if (!isEnabledSessionName(sessionName)) {
+    console.log(`[ws] session not enabled: ${sessionName}`);
+    ws.send(`\r\n\x1b[31mSession expired — run /pilot ${sessionName.replace(/^claude-prod-/, '')} again from Telegram\x1b[0m\r\n`);
+    ws.close(4000, 'session not enabled');
+    return;
+  }
+
   refreshSessionTimer(sessionName);
 
   const host = getSessionHost(sessionName);
+
+  // Pre-flight: diagnose common failures before spawning PTY
+  if (host) {
+    try {
+      const diag = await diagnoseRemote(host, sessionName);
+      if (diag) {
+        console.log(`[ws] pre-flight failed session=${sessionName}: ${diag}`);
+        ws.send(`\r\n\x1b[31m${diag}\x1b[0m\r\n`);
+        ws.close(4000, diag);
+        return;
+      }
+    } catch (err) {
+      console.log(`[ws] pre-flight error session=${sessionName}: ${err.message}`);
+    }
+  }
+
   const ptyCmd = host
     ? { file: 'ssh', args: ['-t', '-o', 'ConnectTimeout=3', host, 'tmux', 'attach-session', '-t', sessionName] }
     : { file: 'tmux', args: ['attach-session', '-t', sessionName] };
@@ -1221,6 +1792,12 @@ wss.on('connection', (ws, req) => {
     },
   });
 
+  // Force tmux to resize the window to match this client (avoids dot-fill)
+  setTimeout(() => {
+    execTmux(['resize-window', '-t', sessionName, '-x', String(cols), '-y', String(rows)], host)
+      .catch(() => {});
+  }, 300);
+
   ACTIVE_CONNECTIONS.set(ws, ptyProcess);
 
   ptyProcess.onData((data) => {
@@ -1233,8 +1810,19 @@ wss.on('connection', (ws, req) => {
     console.log(`[ws] pty exit session=${sessionName} code=${exitCode}`);
     ACTIVE_CONNECTIONS.delete(ws);
     if (ws.readyState === ws.OPEN) {
-      ws.send(`\r\n\x1b[33mSession exited (code ${exitCode})\x1b[0m\r\n`);
-      ws.close();
+      if (exitCode !== 0 && host) {
+        diagnoseRemote(host, sessionName).then((reason) => {
+          const msg = reason || `Session exited (code ${exitCode})`;
+          ws.send(`\r\n\x1b[31m${msg}\x1b[0m\r\n`);
+          ws.close(4000, msg);
+        }).catch(() => {
+          ws.send(`\r\n\x1b[33mSession exited (code ${exitCode})\x1b[0m\r\n`);
+          ws.close();
+        });
+      } else {
+        ws.send(`\r\n\x1b[33mSession exited (code ${exitCode})\x1b[0m\r\n`);
+        ws.close();
+      }
     }
   });
 
@@ -1248,6 +1836,8 @@ wss.on('connection', (ws, req) => {
           const nextCols = parseIntOrDefault(String(payload.cols || ''), cols);
           const nextRows = parseIntOrDefault(String(payload.rows || ''), rows);
           ptyProcess.resize(nextCols, nextRows);
+          execTmux(['resize-window', '-t', sessionName, '-x', String(nextCols), '-y', String(nextRows)], host)
+            .catch(() => {});
           return;
         }
       } catch {
