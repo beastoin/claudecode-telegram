@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -323,5 +324,103 @@ func TestIntegration_SettingsMergePreservesExistingConfig(t *testing.T) {
 	}
 	if _, ok := permissions2["allow"]; !ok {
 		t.Fatal("permissions.allow missing after second install")
+	}
+}
+
+func TestInstallSettings_NullHookEventsNotPropagated(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".claude")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate settings.json with null hook events (the bug scenario).
+	raw := []byte(`{
+  "hooks": {
+    "Stop": null,
+    "SessionStart": null,
+    "PostToolUseFailure": null
+  },
+  "model": "claude-opus-4-6"
+}`)
+	settingsPath := filepath.Join(configDir, "settings.json")
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run InstallSettings with a manifest that has one Stop hook.
+	manager := HookManager{}
+	manifest := &Manifest{
+		Hooks: []HookSpec{
+			{Event: "Stop", Command: configDir + "/hooks/forge-hook.sh"},
+		},
+	}
+	vars := map[string]string{"CLAUDE_CONFIG_DIR": configDir}
+
+	if err := manager.InstallSettings(manifest, vars); err != nil {
+		t.Fatalf("InstallSettings error: %v", err)
+	}
+
+	// Read back and verify no null values remain.
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(data), "null") {
+		t.Errorf("settings.json still contains null after InstallSettings:\n%s", data)
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := settings["hooks"].(map[string]any)
+
+	// Stop should have the forge hook (not null).
+	stopEntries, ok := hooks["Stop"].([]any)
+	if !ok || stopEntries == nil {
+		t.Fatalf("Stop is nil or wrong type, got %T: %v", hooks["Stop"], hooks["Stop"])
+	}
+	if len(stopEntries) == 0 {
+		t.Fatal("Stop has zero entries, expected forge hook")
+	}
+
+	// SessionStart and PostToolUseFailure had null + no manifest hook.
+	// They should be removed entirely, not written as null.
+	for _, event := range []string{"SessionStart", "PostToolUseFailure"} {
+		val, exists := hooks[event]
+		if exists && val == nil {
+			t.Errorf("hooks[%q] is null — should be removed or empty array", event)
+		}
+	}
+}
+
+func TestPruneStaleHooks_ReturnsEmptySliceNotNil(t *testing.T) {
+	t.Parallel()
+
+	// When all entries are pruned, result should be [] not nil (avoids JSON null).
+	entries := []any{
+		map[string]any{
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": "/other-node/.claude/hooks/stale-hook.sh",
+				},
+			},
+		},
+	}
+
+	result := pruneStaleHooks(entries, "/home/claude/.claude")
+	if result == nil {
+		t.Fatal("pruneStaleHooks returned nil, want empty slice (would serialize as JSON null)")
+	}
+
+	data, _ := json.Marshal(result)
+	if string(data) == "null" {
+		t.Errorf("json.Marshal(result) = %q, want []", string(data))
 	}
 }

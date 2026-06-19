@@ -17,3 +17,7 @@ type RuntimeConfig struct {
 type RuntimeConfigurer interface {
 	ConfigureRuntime(config RuntimeConfig) error
 }
+
+type LaunchCommander interface {
+	SetLaunchCommand(command string)
+}

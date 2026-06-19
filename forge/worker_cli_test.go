@@ -431,10 +431,7 @@ type launchCapturingRuntime struct {
 }
 
 func (r *launchCapturingRuntime) Start() error {
-	if err := r.writeAPIKeyHelper(); err != nil {
-		return err
-	}
-	r.launch = r.launchCommand()
+	r.launch = r.LaunchCommand
 	return r.err
 }
 

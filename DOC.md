@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.30.1
+> Version: 0.31.0
 
 ## Current Philosophy (Summary)
 
@@ -14,7 +14,7 @@
 | **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves bridge process |
 | **Admin config** | Pre-set via `ADMIN_CHAT_ID` or auto-learn first user |
 | **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
-| **Decentralized worker comms** | Bridge provides discovery only; workers communicate directly via protocol |
+| **Decentralized worker comms** | Worker-to-worker sends stay direct; manager tooling may use bridge control-plane APIs |
 
 ---
 
@@ -186,7 +186,7 @@ Interactive vs non-interactive detection is backend-driven (`backend.is_interact
 
 **Status:** Available (tmux send-keys + named pipes)
 
-**Design philosophy:** Bridge provides discovery only; workers communicate directly using the provided protocol. The bridge does NOT route messages between workers - it only tells workers how to reach each other. This means:
+**Design philosophy:** Bridge provides discovery only for worker-to-worker messaging; workers communicate directly using the provided protocol. Manager tools may use bridge control-plane APIs such as `POST /send` to reach workers, but the bridge does NOT route worker-to-worker messages. This means:
 - **No manager visibility:** Private worker-to-worker conversations stay private
 - **Direct P2P communication:** Workers talk to each other without bridge involvement
 - **Protocol flexibility:** Each worker advertises how to reach it (tmux, pipe, etc.)
@@ -339,6 +339,19 @@ This prevents other users on multi-user systems from reading chat IDs or session
 ---
 
 ## Changelog
+
+### v0.31.0 - Manager MCP bridge send endpoint
+
+**New features:**
+- Added `POST /send` for manager-side tools to deliver `{worker, message}` prompts through the existing `send_to_worker()` routing path.
+- Added `mcp_server.py`, a minimal stdio MCP server for Claude Code with `list_workers`, `send_message`, and `get_response` tools.
+
+**Architecture notes:**
+- Worker-to-worker messaging remains decentralized through `/workers` discovery and direct tmux/pipe commands.
+- `/send` is a manager control-plane endpoint for MCP integrations, not a replacement for direct worker peer messaging.
+
+**Tests:**
+- Added `test_send_endpoint_delivers_to_worker` covering real tmux delivery through `POST /send`.
 
 ### v0.30.1 - Caller-aware `/workers?from=<name>` for cross-machine sends
 

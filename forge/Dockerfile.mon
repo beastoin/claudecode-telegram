@@ -1,0 +1,48 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOME=/home/mon
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tmux curl jq python3 git ca-certificates gnupg sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# gh CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/githubcli.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
+
+# gcloud + kubectl + bq
+RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli kubectl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js (for Claude CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
+
+# Claude CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# mon user (can sudo for package installs)
+RUN useradd -m -s /bin/bash -d /home/mon mon \
+    && echo "mon ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/mon
+
+# gws (Google Workspace CLI)
+COPY gws /usr/local/bin/gws
+RUN chmod 755 /usr/local/bin/gws
+
+# Mon binary
+COPY mon-linux-amd64 /usr/local/bin/mon
+RUN chmod 755 /usr/local/bin/mon
+
+USER mon
+WORKDIR /home/mon
+
+ENTRYPOINT ["mon", "--force-extract"]

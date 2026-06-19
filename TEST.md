@@ -324,6 +324,7 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_reply_context` | Reply context payload |
 | `test_reply_with_explicit_context` | Explicit context format |
 | `test_send_to_worker_integration` | send_to_worker integration path |
+| `test_send_endpoint_delivers_to_worker` | POST /send delivers through bridge routing |
 | `test_session_files` | Session file permissions |
 | `test_secure_directory_permissions` | Directory permissions 0700 |
 | `test_inbox_directory` | Inbox directory creation |

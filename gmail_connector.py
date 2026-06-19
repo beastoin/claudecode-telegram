@@ -378,7 +378,8 @@ class GmailConnector(BaseConnector):
         plain_text += att_line
 
         if targets and message_id:
-            reply_hint = f"\n\nReply: beast email send -s \"Re: {subject}\" --thread-id {thread_id} --in-reply-to \"{message_id}\" --body \"your reply\""
+            reply_hint = f"\n\nReply (prefer HTML): beast email send -s \"Re: {subject}\" --thread-id {thread_id} --in-reply-to \"{message_id}\" --html-file /tmp/reply.html"
+            reply_hint += f"\nReply (plain text): beast email send -s \"Re: {subject}\" --thread-id {thread_id} --in-reply-to \"{message_id}\" --body \"your reply\""
             plain_text += reply_hint
 
         downloaded = []

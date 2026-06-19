@@ -2,11 +2,8 @@ package forge
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRealTmux_CommandsAreCorrect(t *testing.T) {
@@ -35,7 +32,7 @@ func TestRealTmux_CommandsAreCorrect(t *testing.T) {
 	got := strings.Join(recorder.calls, "|")
 	want := strings.Join([]string{
 		"tmux new-session -d -s claude-prod-mon",
-		"tmux send-keys -t claude-prod-mon claude --dangerously-skip-permissions Enter",
+		"tmux send-keys -t claude-prod-mon bash Enter",
 		"tmux send-keys -t claude-prod-mon hello world Enter",
 		"tmux has-session -t claude-prod-mon",
 	}, "|")
@@ -68,10 +65,9 @@ func TestTmuxRuntime_StartNewSessionLaunchesClaudeCommand(t *testing.T) {
 	}
 }
 
-func TestTmuxRuntime_AdoptSessionOnlyRenamesAndDoesNotRelaunchClaude(t *testing.T) {
+func TestTmuxRuntime_AdoptSessionOnlyRenamesAndDoesNotRelaunch(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
 	recorder := &commandRecorder{}
 	runtime := &TmuxRuntime{
 		Commander:     recorder,
@@ -81,7 +77,6 @@ func TestTmuxRuntime_AdoptSessionOnlyRenamesAndDoesNotRelaunchClaude(t *testing.
 		Environment: map[string]string{
 			"BRIDGE_URL": "http://bridge",
 		},
-		APIKeyHelper: filepath.Join(root, ".claude", "hooks", "api-key-helper.sh"),
 	}
 
 	if err := runtime.Start(); err != nil {
@@ -100,7 +95,7 @@ func TestTmuxRuntime_StartReturnsLaunchError(t *testing.T) {
 
 	recorder := &erroringCommandRecorder{
 		errs: map[string]error{
-			"tmux send-keys -t claude-prod-mon claude --dangerously-skip-permissions Enter": errors.New("send failed"),
+			"tmux send-keys -t claude-prod-mon bash Enter": errors.New("send failed"),
 		},
 	}
 	runtime := &TmuxRuntime{
@@ -162,7 +157,7 @@ func TestTmuxRuntime_SetsEnvironmentVariables(t *testing.T) {
 		"tmux new-session -d -s claude-prod-mon",
 		"tmux set-environment -t claude-prod-mon BRIDGE_URL http://bridge",
 		"tmux set-environment -t claude-prod-mon TMUX_PREFIX claude-prod-",
-		"tmux send-keys -t claude-prod-mon claude --dangerously-skip-permissions Enter",
+		"tmux send-keys -t claude-prod-mon bash Enter",
 	}, "|")
 	if got != want {
 		t.Fatalf("recorder.calls = %q, want %q", got, want)
@@ -228,61 +223,13 @@ func TestTmuxRuntime_EnvironmentEmptyMapIsNoOp(t *testing.T) {
 	}
 }
 
-func TestTmuxRuntime_WritesAPIKeyHelper(t *testing.T) {
+func TestTmuxRuntime_DefaultLaunchCommandIsBash(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".claude")
 	recorder := &commandRecorder{}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
-	}
-	if err := runtime.ConfigureRuntime(RuntimeConfig{
-		Vars: map[string]string{
-			"CLAUDE_CONFIG_DIR": configDir,
-			"ANTHROPIC_API_KEY": "secret-key",
-		},
-	}); err != nil {
-		t.Fatalf("runtime.ConfigureRuntime() error = %v", err)
-	}
-
-	if err := runtime.Start(); err != nil {
-		t.Fatalf("runtime.Start() error = %v", err)
-	}
-
-	helperPath := filepath.Join(configDir, "hooks", "api-key-helper.sh")
-	data, err := os.ReadFile(helperPath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(%q) error = %v", helperPath, err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "ANTHROPIC_API_KEY") {
-		t.Fatalf("helper content = %q, want ANTHROPIC_API_KEY lookup", content)
-	}
-	if !strings.Contains(content, "tmux show-environment") {
-		t.Fatalf("helper content = %q, want tmux show-environment fallback", content)
-	}
-}
-
-func TestTmuxRuntime_ConstructsLaunchCommandWithSettings(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".claude")
-	recorder := &commandRecorder{}
-	runtime := &TmuxRuntime{
-		Commander: recorder,
-		Session:   "claude-prod-mon",
-	}
-	if err := runtime.ConfigureRuntime(RuntimeConfig{
-		Vars: map[string]string{
-			"CLAUDE_CONFIG_DIR": configDir,
-			"ANTHROPIC_API_KEY": "secret-key",
-		},
-	}); err != nil {
-		t.Fatalf("runtime.ConfigureRuntime() error = %v", err)
 	}
 
 	if err := runtime.Start(); err != nil {
@@ -290,90 +237,28 @@ func TestTmuxRuntime_ConstructsLaunchCommandWithSettings(t *testing.T) {
 	}
 
 	launch := recorder.calls[len(recorder.calls)-1]
-	helperPath := filepath.Join(configDir, "hooks", "api-key-helper.sh")
-	if !strings.Contains(launch, "--settings") {
-		t.Fatalf("launch call = %q, want --settings", launch)
-	}
-	if !strings.Contains(launch, helperPath) {
-		t.Fatalf("launch call = %q, want helper path %q", launch, helperPath)
+	if !strings.Contains(launch, "bash") {
+		t.Fatalf("launch call = %q, want bash (generic default)", launch)
 	}
 }
 
-func TestTmuxRuntime_LaunchCommandIncludesAutoAccept(t *testing.T) {
+func TestTmuxRuntime_SetLaunchCommandOverridesDefault(t *testing.T) {
 	t.Parallel()
 
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".claude")
 	recorder := &commandRecorder{}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
 	}
-	if err := runtime.ConfigureRuntime(RuntimeConfig{
-		Vars: map[string]string{
-			"CLAUDE_CONFIG_DIR": configDir,
-			"ANTHROPIC_API_KEY": "secret-key",
-		},
-	}); err != nil {
-		t.Fatalf("runtime.ConfigureRuntime() error = %v", err)
-	}
+	runtime.SetLaunchCommand("claude --dangerously-skip-permissions")
 
 	if err := runtime.Start(); err != nil {
 		t.Fatalf("runtime.Start() error = %v", err)
 	}
 
 	launch := recorder.calls[len(recorder.calls)-1]
-	if !strings.Contains(launch, "--dangerously-skip-permissions") {
-		t.Fatalf("launch call = %q, want --dangerously-skip-permissions", launch)
-	}
-}
-
-func TestTmuxRuntime_LaunchCommandUsesDontAskWhenRunningAsRoot(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".claude")
-	recorder := &commandRecorder{
-		results: map[string]RunResult{
-			"tmux capture-pane -t claude-prod-mon -p -S -60": {Stdout: ""},
-		},
-	}
-	runtime := &TmuxRuntime{
-		Commander: recorder,
-		Session:   "claude-prod-mon",
-		IsRoot: func() bool {
-			return true
-		},
-		Sleep: func(time.Duration) {},
-	}
-	if err := runtime.ConfigureRuntime(RuntimeConfig{
-		Vars: map[string]string{
-			"CLAUDE_CONFIG_DIR": configDir,
-			"ANTHROPIC_API_KEY": "secret-key",
-		},
-	}); err != nil {
-		t.Fatalf("runtime.ConfigureRuntime() error = %v", err)
-	}
-
-	if err := runtime.Start(); err != nil {
-		t.Fatalf("runtime.Start() error = %v", err)
-	}
-
-	var launch string
-	for _, call := range recorder.calls {
-		if strings.Contains(call, "tmux send-keys -t claude-prod-mon claude") {
-			launch = call
-			break
-		}
-	}
-	if launch == "" {
-		t.Fatalf("recorder.calls = %#v, want launch call", recorder.calls)
-	}
-	if !strings.Contains(launch, "--permission-mode dontAsk") {
-		t.Fatalf("launch call = %q, want --permission-mode dontAsk", launch)
-	}
-	if strings.Contains(launch, "--dangerously-skip-permissions") {
-		t.Fatalf("launch call = %q, want no dangerous skip flag", launch)
+	if !strings.Contains(launch, "claude --dangerously-skip-permissions") {
+		t.Fatalf("launch call = %q, want claude --dangerously-skip-permissions", launch)
 	}
 }
 

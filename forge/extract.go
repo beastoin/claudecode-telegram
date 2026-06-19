@@ -149,6 +149,7 @@ func Extract(manifest *Manifest, opts ExtractOptions) error {
 		dest       string
 		data       []byte
 		contentKey string
+		skipVerify bool
 	}
 
 	var conflicts []ExtractConflict
@@ -218,7 +219,7 @@ func Extract(manifest *Manifest, opts ExtractOptions) error {
 			}
 		}
 
-		pending = append(pending, pendingFile{dest: dest, data: data, contentKey: contentKey})
+		pending = append(pending, pendingFile{dest: dest, data: data, contentKey: contentKey, skipVerify: file.Integrity == "skip" || file.Merge})
 	}
 
 	if len(conflicts) > 0 {
@@ -234,7 +235,7 @@ func Extract(manifest *Manifest, opts ExtractOptions) error {
 			return fmt.Errorf("write %q: %w", pf.dest, err)
 		}
 
-		if opts.Verifier != nil {
+		if opts.Verifier != nil && !pf.skipVerify {
 			if err := opts.Verifier.Verify(pf.contentKey, pf.data); err != nil {
 				return fmt.Errorf("verify %q: %w", pf.contentKey, err)
 			}

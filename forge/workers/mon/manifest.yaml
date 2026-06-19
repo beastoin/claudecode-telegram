@@ -140,6 +140,10 @@ files:
   # ── Claude global config ──
   - source: ~/.claude/CLAUDE.md
     dest: $CLAUDE_CONFIG_DIR/CLAUDE.md
+  - source: ~/.claude/.claude.json
+    dest: $CLAUDE_CONFIG_DIR/.claude.json
+    merge: true
+    integrity: skip
   - source: ~/.claude/settings.json
     dest: $CLAUDE_CONFIG_DIR/settings.json
     integrity: skip

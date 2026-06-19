@@ -752,7 +752,7 @@ function renderSessionPage({ sessionName, token, readonly, embed }) {
           cols: 80,
           rows: 24,
           fontFamily: 'JetBrains Mono, Menlo, Monaco, monospace',
-          fontSize: embed ? 10 : 14,
+          fontSize: embed ? 13 : 14,
         });
         fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);

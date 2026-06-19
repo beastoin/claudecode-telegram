@@ -1,13 +1,9 @@
 package forge
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 type CommandExecutor interface {
@@ -21,9 +17,6 @@ type TmuxRuntime struct {
 	AdoptSession  string
 	LaunchCommand string
 	Environment   map[string]string
-	APIKeyHelper  string
-	IsRoot        func() bool
-	Sleep         func(time.Duration)
 }
 
 func (t *TmuxRuntime) Start() error {
@@ -45,10 +38,6 @@ func (t *TmuxRuntime) Start() error {
 		if _, err := t.exec("tmux", "set-environment", "-t", t.Session, key, value); err != nil {
 			return err
 		}
-	}
-
-	if err := t.writeAPIKeyHelper(); err != nil {
-		return err
 	}
 
 	_, err = t.exec("tmux", "send-keys", "-t", t.Session, t.launchCommand(), "Enter")
@@ -118,9 +107,13 @@ func joinShellCommand(args ...string) string {
 	return strings.Join(quoted, " ")
 }
 
+func (t *TmuxRuntime) SetLaunchCommand(command string) {
+	t.LaunchCommand = command
+}
+
 func (t *TmuxRuntime) launchCommand() string {
 	if t.LaunchCommand == "" {
-		return t.defaultLaunchCommand()
+		return "bash"
 	}
 	return t.LaunchCommand
 }
@@ -130,67 +123,6 @@ func (t *TmuxRuntime) ConfigureRuntime(config RuntimeConfig) error {
 	if t.Environment == nil {
 		t.Environment = map[string]string{}
 	}
-
-	configDir := t.Environment["CLAUDE_CONFIG_DIR"]
-	if configDir != "" && t.Environment["ANTHROPIC_API_KEY"] != "" {
-		credsFile := filepath.Join(configDir, ".credentials.json")
-		if _, err := os.Stat(credsFile); err != nil {
-			t.APIKeyHelper = filepath.Join(configDir, "hooks", "api-key-helper.sh")
-		}
-	}
-
-	return nil
-}
-
-func (t *TmuxRuntime) defaultLaunchCommand() string {
-	args := []string{"claude"}
-
-	if t.APIKeyHelper != "" {
-		settingsJSON, err := json.Marshal(map[string]string{
-			"apiKeyHelper": t.APIKeyHelper,
-		})
-		if err == nil {
-			args = append(args, "--settings", string(settingsJSON))
-		}
-	}
-
-	if t.isRootUser() {
-		args = append(args, "--permission-mode", "dontAsk")
-	} else {
-		args = append(args, "--dangerously-skip-permissions")
-	}
-	return joinShellCommand(args...)
-}
-
-func (t *TmuxRuntime) writeAPIKeyHelper() error {
-	if t.APIKeyHelper == "" || t.Environment["ANTHROPIC_API_KEY"] == "" {
-		return nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(t.APIKeyHelper), 0o755); err != nil {
-		return fmt.Errorf("create api key helper dir: %w", err)
-	}
-
-	const script = `#!/bin/bash
-set -euo pipefail
-
-key="${ANTHROPIC_API_KEY:-}"
-if [ -z "$key" ]; then
-  session_name="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
-  if [ -n "$session_name" ]; then
-    tmux_value="$(tmux show-environment -t "$session_name" ANTHROPIC_API_KEY 2>/dev/null || true)"
-    key="${tmux_value#*=}"
-  fi
-fi
-
-[ -n "$key" ] || exit 1
-printf '%s\n' "$key"
-`
-
-	if err := os.WriteFile(t.APIKeyHelper, []byte(script), 0o700); err != nil {
-		return fmt.Errorf("write api key helper: %w", err)
-	}
-
 	return nil
 }
 
@@ -203,17 +135,3 @@ func sortedEnvKeys(values map[string]string) []string {
 	return keys
 }
 
-func (t *TmuxRuntime) isRootUser() bool {
-	if t.IsRoot != nil {
-		return t.IsRoot()
-	}
-	return os.Geteuid() == 0
-}
-
-func (t *TmuxRuntime) sleep(delay time.Duration) {
-	if t.Sleep != nil {
-		t.Sleep(delay)
-		return
-	}
-	time.Sleep(delay)
-}

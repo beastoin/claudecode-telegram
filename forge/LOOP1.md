@@ -36,6 +36,20 @@ Phase 5: WATCH
   Ongoing health monitoring
 ```
 
+### Operational Modes
+
+| Flag | What it does | Exits? |
+|------|-------------|--------|
+| *(none)* | Run worker (bare metal, tmux) | No — runs until signal |
+| `--isolated` | Run worker in container | No — runs until `--stop` |
+| `--check` | Show resolved vars, tools, readiness | Yes |
+| `--verify` | Verify extracted files match checksums | Yes |
+| `--onboard` | First-time setup (extract + hooks + auth) | Yes |
+| `--stop` | Stop running worker (bare metal or isolated) | Yes |
+| `--health` | Is the worker running and healthy? | Yes |
+
+`--onboard` is the recommended first step on a fresh host or container. It runs extraction with `--force-extract` semantics (no conflict prompts), installs hooks, writes the Claude CLI onboarding marker (`.claude.json`), and installs the API key helper script. After `--onboard` completes, the binary can be run normally.
+
 ### Runtime Modes
 
 The binary uses a `Runtime` interface so the input mechanism is swappable. Today only tmux is implemented — future runtimes (direct PTY/stdin, programmatic API) plug in here.
@@ -48,6 +62,100 @@ The binary uses a `Runtime` interface so the input mechanism is swappable. Today
 **`--session`**: useful for migrating live workers. Binary attaches to the named session, renames it to its convention if needed, and takes ownership. No restart, no downtime.
 
 **Why tmux for now**: the bridge injects messages via `tmux send-keys` (paste into pane). Without tmux, we'd need an alternative input path (stdin pipe, programmatic API). The `Runtime` interface keeps the door open without solving that problem today.
+
+### Isolated Mode: `--isolated` (Architecture Decision)
+
+**Rule: The standalone binary owns its own isolation. The user says WHAT they want, not HOW.**
+
+The user is a manager. They think: "run mon", "run mon isolated", "stop mon", "is mon healthy?" They don't think in terms of Docker, podman, OCI images, drivers, or deployment targets.
+
+**Complete CLI (user perspective):**
+
+```
+./mon                      Run worker (bare metal, tmux)
+./mon --isolated           Run worker isolated (in a container)
+./mon --check              Is the environment ready?
+./mon --check --isolated   Is the environment ready for isolated run?
+./mon --stop               Stop worker (bare metal or isolated — doesn't matter)
+./mon --health             Is the worker running and healthy?
+./mon --verify             Are extracted files intact?
+./mon --onboard            First-time setup
+```
+
+That's it. The user never needs to know what "Docker" or "podman" is.
+
+**User flow:**
+
+```bash
+# New machine: set up, check, run
+./mon --onboard --identity ~/.age/forge.key --bridge-url http://...
+./mon --check
+./mon
+
+# Same thing, but isolated
+./mon --onboard --identity ~/.age/forge.key --bridge-url http://...
+./mon --check --isolated
+./mon --isolated
+
+# Is it alive?
+./mon --health
+
+# Stop it
+./mon --stop
+```
+
+**How isolation works (implementation detail — user doesn't see this):**
+
+The binary embeds a Dockerfile template. When `--isolated` is used:
+
+1. Builds image if not cached (from embedded template + self)
+2. Derives volumes from manifest `dirs:`
+3. Starts container with the binary as entrypoint (normal startup inside)
+4. `--stop` finds and stops the container
+5. `--health` checks container + internal health
+
+The container runtime is auto-detected (docker → podman → fail) or overridable via `FORGE_RUNTIME=podman` env var for advanced users. Never a flag — the flag space stays clean for user intent.
+
+```
+┌─────────────────────────────────────────────────────┐
+│ HOST: ./mon --isolated --identity ~/.age/forge.key  │
+│                                                     │
+│  1. Auto-detect runtime (docker/podman)             │
+│  2. Build image if needed (embedded Dockerfile)     │
+│  3. Derive volumes from manifest dirs:              │
+│  4. Start container → mon --force-extract inside    │
+└─────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────┐
+│ INSIDE CONTAINER: mon --force-extract --bridge-url  │
+│                                                     │
+│  Normal startup: Phase 0 → 1 → 2 → 3 → 4 → 5      │
+│  (binary doesn't know it's in a container)          │
+└─────────────────────────────────────────────────────┘
+```
+
+**Volume derivation (automatic from manifest):**
+
+The binary reads its own `dirs:` to compute what needs persistence:
+- `$HOME` ← persistent home
+- `$HOME/team` ← team knowledge
+
+**Safety:**
+
+- `--isolated` refuses to start if already running (use `--replace` to restart)
+- Never writes decrypted creds into image build context
+- `--stop` only touches containers labeled `worker-forge.name=<manifest.name>`
+
+**Advanced override (env var, not flag):**
+
+| Env Var | Purpose | Default |
+|---------|---------|---------|
+| `FORGE_RUNTIME` | Container runtime override | auto-detect (docker → podman) |
+| `FORGE_DATA_DIR` | Persistent data location | `./forge-<name>-data` |
+| `FORGE_IMAGE_TAG` | Custom image tag | `worker-forge/<name>:<version>` |
+
+Advanced users set env vars. Normal users never see them.
 
 ## Phase 0: Preparation
 
@@ -682,6 +790,52 @@ Integrity Check:
 Status: VERIFIED (6 checked, 20 skipped)
 ```
 
+### `--onboard` flag
+
+First-time setup for fresh hosts or containers. Runs extract + hooks + auth state, then exits. Designed for headless/Docker environments where the Claude CLI's interactive onboarding wizard would block.
+
+```
+./mon --onboard --bridge-url http://100.125.36.102:8271 --identity ~/.age/forge.key
+
+Onboarding mon v2.0.0
+
+✓ Files extracted
+✓ Hooks installed
+✓ Onboarding marker written
+✓ API key helper installed
+
+✓ Onboard complete. Run without --onboard to start.
+```
+
+**What it does (in order):**
+
+1. **Phase 0: Resolve vars** — same as normal startup
+2. **Extract all files** — uses `ForceExtract: true` (no conflict prompts — onboard is explicit setup)
+3. **Install hooks** — writes hook scripts + patches `settings.json`
+4. **Write onboarding marker** — creates `$CLAUDE_CONFIG_DIR/.claude.json` with `hasCompletedOnboarding: true` (skips Claude CLI's interactive theme/login wizard on first launch)
+5. **Install API key helper** — writes `$CLAUDE_CONFIG_DIR/hooks/api-key-helper.sh` that reads `ANTHROPIC_API_KEY` from tmux environment (fallback auth for Claude CLI)
+
+**When to use:**
+
+| Scenario | Command |
+|----------|---------|
+| Fresh VPS, first deploy | `./mon --onboard --identity ~/.age/forge.key --bridge-url ...` |
+| Docker container setup | `docker run ... mon --onboard --identity /tmp/identity.agekey` |
+| After rebuild (re-extract) | `./mon --onboard --identity ~/.age/forge.key --bridge-url ...` |
+| Then run normally | `./mon --bridge-url ...` |
+
+**Differences from normal startup:**
+
+| Aspect | `--onboard` | Normal run |
+|--------|-------------|------------|
+| Conflict handling | Always force-extract | Stop on conflict (or `--force-extract`/`--skip-conflicts`) |
+| Phases executed | 0 → extract → hooks → auth marker | 0 → 1 → 2 → 3 → 4 → 5 (full lifecycle) |
+| Runtime (tmux) | Not started | Started |
+| Bridge connection | Not established | Connected via gRPC |
+| Exit behavior | Exits after setup | Runs until signal |
+
+**Idempotent:** Safe to run multiple times. Skips onboarding marker if `.claude.json` already exists. Overwrites extracted files (force mode). Re-installs hooks.
+
 ## Local Watchdog
 
 ```
@@ -857,6 +1011,16 @@ Output:
     checksums.txt.sig
 ```
 
+### `worker-forge fleet` (future — multi-worker only)
+
+For managing multiple workers across hosts. Individual lifecycle is handled by the worker binary itself (`mon --isolated`, `mon --stop`). This CLI handles what individual binaries can't — running many at once.
+
+```
+worker-forge fleet start --all              Start all workers
+worker-forge fleet stop --all               Stop all workers
+worker-forge fleet status                   Health dashboard
+```
+
 ## OS Service Integration
 
 ```ini
@@ -904,10 +1068,12 @@ WantedBy=multi-user.target
 - [x] Phase 2: tool bootstrap (OS-aware: linux vs darwin)
 - [x] Phase 3: readiness checks + auto-fix
 - [x] `--check` flag (preparation + readiness only)
+- [x] `--onboard` flag (extract + hooks + auth marker for headless/Docker setup)
 - [x] tmux session management, Claude CLI spawn, hooks
 - [x] Watchdog loop
 - [x] E2E test: build binary → run → verify tmux + bridge registration + watchdog (test-e2e.sh, 11 assertions)
 - [x] Live test: --check READY on VPS (13MB binary, 12 tools, 5 readiness checks pass)
+- [x] Live test: --onboard on triassic-4 Docker (extract + hooks + auth marker + Claude CLI launch)
 - [ ] Live run test (deferred — would conflict with prod claude-prod-mon session)
 
 ### Phase 2: gRPC Transport + Cross-Host
@@ -933,6 +1099,19 @@ WantedBy=multi-user.target
 - [ ] Package all workers (package-all script)
 - [ ] Per-worker least-privilege credentials
 
+### Phase 5: Isolated Mode (`--isolated`)
+- [x] Docker proof-of-concept (`run-mon-docker.sh` — validates the flow)
+- [x] Dockerfile.mon (Ubuntu 24.04 + all mon tools + Claude CLI)
+- [x] Volume persistence (data-dir for /home/mon, /home/mon/team)
+- [ ] Embed Dockerfile template in worker binary
+- [ ] `--isolated` flag: auto-detect runtime, build image, start container
+- [ ] `--stop` flag: stop worker (bare metal tmux kill OR container stop)
+- [ ] `--health` flag: check worker health (tmux alive OR container running)
+- [ ] Volume derivation from manifest (dirs: → mount points)
+- [ ] Runtime auto-detection (docker → podman → error)
+- [ ] Remove `run-mon-docker.sh` (superseded by `--isolated`)
+- [ ] Podman support (validates abstraction works)
+
 ## Key Decisions
 
 | Decision | Choice | Why |
@@ -948,6 +1127,9 @@ WantedBy=multi-user.target
 | Memory merge | Keep disk if newer | Memory evolves at runtime |
 | Worker identity | Name-based | Stable across rebuilds |
 | Transport | gRPC over Tailscale | Typed contracts, bidirectional streaming, JSONL support |
+| Isolated mode | `--isolated` flag (user intent, not implementation) | Standalone principle + user-first: "run isolated" not "docker run" |
+| Onboard built-in | `--onboard` flag in worker binary | Self-managing principle: binary sets up its own auth |
+| Fleet external | `worker-forge deploy --all` for multi-worker | Binary manages itself, not others |
 
 ## Open Questions
 

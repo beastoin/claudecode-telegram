@@ -52,10 +52,11 @@ type ReadinessCheck struct {
 }
 
 type HookSpec struct {
-	Event   string `yaml:"event"`
-	Matcher string `yaml:"matcher"`
-	Command string `yaml:"command"`
-	Source  string `yaml:"source"`
+	Event     string `yaml:"event"`
+	Matcher   string `yaml:"matcher"`
+	Command   string `yaml:"command"`
+	Source    string `yaml:"source"`
+	Generated bool   `yaml:"-"`
 }
 
 func ParseManifest(data []byte) (*Manifest, error) {

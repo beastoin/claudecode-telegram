@@ -23,6 +23,19 @@ var checksumsJSON []byte
 var credsEncrypted []byte
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "emit" {
+		emitOpts, err := forge.ParseEmitArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := forge.RunEmit(emitOpts, os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	filesFS, err := fs.Sub(embeddedFiles, "embed/files")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

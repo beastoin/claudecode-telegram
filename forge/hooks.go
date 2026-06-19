@@ -103,8 +103,17 @@ func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) e
 	}
 
 	for event, rawEntries := range hooksValue {
-		entries, _ := rawEntries.([]any)
-		hooksValue[event] = pruneStaleHooks(entries, configDir)
+		entries, ok := rawEntries.([]any)
+		if !ok || entries == nil {
+			delete(hooksValue, event)
+			continue
+		}
+		pruned := pruneStaleHooks(entries, configDir)
+		if len(pruned) == 0 {
+			delete(hooksValue, event)
+		} else {
+			hooksValue[event] = pruned
+		}
 	}
 
 	for _, hook := range manifest.Hooks {
@@ -250,7 +259,7 @@ func hookGroupsToAny(groups []map[string]any) []any {
 
 func pruneStaleHooks(entries []any, configDir string) []any {
 	hooksDir := filepath.Join(configDir, "hooks") + string(filepath.Separator)
-	var result []any
+	result := []any{}
 	for _, entry := range entries {
 		entryMap, ok := entry.(map[string]any)
 		if !ok {

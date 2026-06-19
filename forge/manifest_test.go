@@ -752,7 +752,7 @@ func TestTmuxRuntime_StartNewSession(t *testing.T) {
 
 	want := []string{
 		"tmux new-session -d -s claude-prod-mon",
-		`tmux send-keys -t claude-prod-mon "claude --dangerously-skip-permissions" Enter`,
+		`tmux send-keys -t claude-prod-mon bash Enter`,
 	}
 	if got := runner.commands; strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("runner.commands = %#v, want %#v", got, want)

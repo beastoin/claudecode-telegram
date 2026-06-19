@@ -1,6 +1,9 @@
 package forge
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 type RunOptions struct {
 	Context       context.Context
@@ -24,6 +27,9 @@ type App struct {
 	Watchdog    WatchdogRunner
 	HookManager HookManager
 	GOOS        string
+	Connector   Connector
+	ConnectorCfg ConnectorConfig
+	Engine      EngineDriver
 }
 
 func (a App) Run(opts RunOptions) error {
@@ -49,11 +55,30 @@ func (a App) Run(opts RunOptions) error {
 		return err
 	}
 
-	if a.HookManager.Source == nil {
-		a.HookManager.Source = a.Source
-	}
-	if err := a.HookManager.Install(a.Manifest, resolved); err != nil {
-		return err
+	var enginePrepared *PreparedEngine
+	if a.Engine != nil {
+		var err error
+		enginePrepared, err = a.Engine.Prepare(opts.Context, PrepareRequest{
+			Manifest: a.Manifest,
+			Vars:     resolved,
+			GOOS:     a.GOOS,
+			Source:   a.Source,
+		})
+		if err != nil {
+			return err
+		}
+		for k, v := range enginePrepared.Env {
+			if v != "" {
+				resolved[k] = v
+			}
+		}
+	} else {
+		if a.HookManager.Source == nil {
+			a.HookManager.Source = a.Source
+		}
+		if err := a.HookManager.Install(a.Manifest, resolved); err != nil {
+			return err
+		}
 	}
 
 	tools, err := Bootstrap(a.Manifest, a.GOOS, a.Runner)
@@ -85,6 +110,17 @@ func (a App) Run(opts RunOptions) error {
 				return err
 			}
 		}
+
+		if a.Engine != nil && enginePrepared != nil {
+			spec, err := a.Engine.StartSpec(opts.Context, enginePrepared)
+			if err != nil {
+				return err
+			}
+			if launcher, ok := a.Runtime.(LaunchCommander); ok && len(spec.Command) > 0 {
+				launcher.SetLaunchCommand(joinShellCommand(spec.Command...))
+			}
+		}
+
 		if err := a.Runtime.Start(); err != nil {
 			return err
 		}
@@ -103,6 +139,24 @@ func (a App) Run(opts RunOptions) error {
 			Version: a.Manifest.Version,
 			Tools:   installedTools(tools),
 		})
+	}
+
+	// Start connector host if configured
+	var connectorErr <-chan error
+	if a.Connector != nil && opts.Context != nil {
+		cfg := a.ConnectorCfg
+		cfg.WorkerName = a.Manifest.Name
+		if cfg.BridgeURL == "" {
+			cfg.BridgeURL = resolved["BRIDGE_URL"]
+		}
+
+		host := NewConnectorHost(a.Connector, a.Runtime, cfg)
+		ch := make(chan error, 1)
+		go func() {
+			ch <- host.Run(opts.Context)
+		}()
+		connectorErr = ch
+		defer host.Stop()
 	}
 
 	if opts.Context != nil {
@@ -136,7 +190,17 @@ func (a App) Run(opts RunOptions) error {
 			}
 		}
 		if watchdog != nil {
-			return watchdog.Run(opts.Context)
+			if connectorErr == nil {
+				return watchdog.Run(opts.Context)
+			}
+			watchdogDone := make(chan error, 1)
+			go func() { watchdogDone <- watchdog.Run(opts.Context) }()
+			select {
+			case err := <-connectorErr:
+				return fmt.Errorf("connector: %w", err)
+			case err := <-watchdogDone:
+				return err
+			}
 		}
 	}
 

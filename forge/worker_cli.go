@@ -9,10 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type WorkerCLIOptions struct {
@@ -22,11 +24,17 @@ type WorkerCLIOptions struct {
 	Identity       string
 	Check          bool
 	Verify         bool
+	Onboard        bool
+	Isolated       bool
+	Stop           bool
+	Health         bool
 	NameOverride   string
 	SessionPrefix  string
 	ForceExtract   bool
 	SkipConflicts  bool
 	EmbeddedPath   string
+	ConnectorType  string
+	ConnectorConf  map[string]string
 }
 
 type EmbeddedAssets struct {
@@ -49,6 +57,8 @@ type WorkerDeps struct {
 	Stdout         io.Writer
 	RuntimeFactory WorkerRuntimeFactory
 	Watchdog       WatchdogRunner
+	Connector      Connector
+	Engine         EngineDriver
 }
 
 func ParseWorkerCLI(args []string) (WorkerCLIOptions, error) {
@@ -62,17 +72,45 @@ func ParseWorkerCLI(args []string) (WorkerCLIOptions, error) {
 	fs.StringVar(&opts.Identity, "identity", "", "age identity path or key")
 	fs.BoolVar(&opts.Check, "check", false, "run readiness checks and exit")
 	fs.BoolVar(&opts.Verify, "verify", false, "verify extracted file integrity and exit")
+	fs.BoolVar(&opts.Onboard, "onboard", false, "extract files, set up Claude CLI auth, and exit")
+	fs.BoolVar(&opts.Isolated, "isolated", false, "run worker in an isolated container")
+	fs.BoolVar(&opts.Stop, "stop", false, "stop running worker (bare metal or isolated)")
+	fs.BoolVar(&opts.Health, "health", false, "check if worker is running and healthy")
 	fs.StringVar(&opts.NameOverride, "name-override", "", "override worker name")
 	fs.StringVar(&opts.SessionPrefix, "session-prefix", "", "tmux session name prefix (default: claude-prod-)")
 	fs.BoolVar(&opts.ForceExtract, "force-extract", false, "override all conflicting files during extract")
 	fs.BoolVar(&opts.SkipConflicts, "skip-conflicts", false, "keep existing files, extract only new ones")
 	fs.StringVar(&opts.EmbeddedPath, "show-embedded", "", "print embedded file at path and exit")
+	fs.StringVar(&opts.ConnectorType, "connector", "", "connector type (bridge, telegram, telegram-poll, local, slack, whatsapp)")
+
+	var connectorFlags stringSlice
+	fs.Var(&connectorFlags, "connector-opt", "connector option as key=value (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return WorkerCLIOptions{}, err
 	}
 
+	opts.ConnectorConf = parseConnectorOpts(connectorFlags)
 	return opts, nil
+}
+
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func parseConnectorOpts(flags []string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range flags {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) == 2 {
+			m[parts[0]] = parts[1]
+		}
+	}
+	return m
 }
 
 func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
@@ -98,6 +136,27 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		runner = ShellRunner{}
 	}
 
+	// Modes that don't need creds or var resolution
+	if opts.Stop {
+		return StopWorker(manifest, runner, deps.Stdout)
+	}
+
+	if opts.Health {
+		return HealthCheck(manifest, runner, deps.Stdout)
+	}
+
+	if opts.Isolated {
+		return RunIsolated(IsolatedRunOpts{
+			Manifest:      manifest,
+			Identity:      opts.Identity,
+			BridgeURL:     opts.BridgeURL,
+			Stdout:        deps.Stdout,
+			Runner:        runner,
+			SessionPrefix: opts.SessionPrefix,
+		})
+	}
+
+	// Full resolution needed for remaining modes
 	resolve := ResolveOptions{
 		Env: currentEnvMap(),
 		Flags: map[string]string{
@@ -146,22 +205,52 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		return writeString(deps.Stdout, FormatVerifyReport(*report))
 	}
 
+	if opts.Onboard {
+		return runOnboard(manifest, deps, opts, resolve, checksums)
+	}
+
 	runtimeFactory := deps.RuntimeFactory
 	if runtimeFactory == nil {
 		runtimeFactory = defaultWorkerRuntimeFactory
 	}
 
+	// Resolve connector
+	connector := deps.Connector
+	var connectorCfg ConnectorConfig
+	if opts.ConnectorType != "" && connector == nil {
+		var err error
+		connector, err = NewConnector(opts.ConnectorType)
+		if err != nil {
+			return fmt.Errorf("connector: %w", err)
+		}
+	}
+	if connector != nil {
+		connectorCfg = ConnectorConfig{
+			WorkerName: manifest.Name,
+			BridgeURL:  opts.BridgeURL,
+			Config:     opts.ConnectorConf,
+		}
+	}
+
+	engine := deps.Engine
+	if engine == nil {
+		engine, _ = NewEngineDriver("claude-code")
+	}
+
 	app := App{
-		Manifest:    manifest,
-		Source:      FSFileSource{FS: deps.Assets.Files, CredsEncrypted: deps.Assets.CredsEncrypted},
-		Decryptor:   decryptor,
-		Verifier:    NewChecksumVerifier(checksums),
-		Runner:      runner,
-		Runtime:     runtimeFactory(manifest, opts, runner),
-		Transport:   deps.Transport,
-		Watchdog:    deps.Watchdog,
-		HookManager: deps.HookManager,
-		GOOS:        firstNonEmptyString(deps.GOOS, runtime.GOOS),
+		Manifest:     manifest,
+		Source:       FSFileSource{FS: deps.Assets.Files, CredsEncrypted: deps.Assets.CredsEncrypted},
+		Decryptor:    decryptor,
+		Verifier:     NewChecksumVerifier(checksums),
+		Runner:       runner,
+		Runtime:      runtimeFactory(manifest, opts, runner),
+		Transport:    deps.Transport,
+		Watchdog:     deps.Watchdog,
+		HookManager:  deps.HookManager,
+		GOOS:         firstNonEmptyString(deps.GOOS, runtime.GOOS),
+		Connector:    connector,
+		ConnectorCfg: connectorCfg,
+		Engine:       engine,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -396,4 +485,94 @@ func embeddedRuntimeSourceKey(source string, encrypted bool) string {
 		return buildArtifactKey(source, true)
 	}
 	return canonicalSource(source)
+}
+
+func runOnboard(manifest *Manifest, deps WorkerDeps, opts WorkerCLIOptions, resolve ResolveOptions, checksums map[string]string) error {
+	resolved, err := ResolveVars(manifest, resolve)
+	if err != nil {
+		return fmt.Errorf("resolve vars: %w", err)
+	}
+
+	stdout := deps.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	fmt.Fprintf(stdout, "Onboarding %s v%s\n\n", manifest.Name, manifest.Version)
+
+	// Step 1: Extract files
+	source := FSFileSource{FS: deps.Assets.Files, CredsEncrypted: deps.Assets.CredsEncrypted}
+	decryptor, err := resolveWorkerDecryptor(opts, deps.Decryptor)
+	if err != nil {
+		return err
+	}
+
+	if err := Extract(manifest, ExtractOptions{
+		Vars:          resolved,
+		Source:        source,
+		Decryptor:     decryptor,
+		Verifier:      NewChecksumVerifier(checksums),
+		ForceExtract:  true,
+		SkipConflicts: false,
+	}); err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	fmt.Fprintf(stdout, "✓ Files extracted\n")
+
+	// Step 2: Install hooks
+	hookMgr := deps.HookManager
+	if hookMgr.Source == nil {
+		hookMgr.Source = source
+	}
+	if err := hookMgr.Install(manifest, resolved); err != nil {
+		return fmt.Errorf("hooks: %w", err)
+	}
+	fmt.Fprintf(stdout, "✓ Hooks installed\n")
+
+	// Step 3: Write onboarding marker
+	configDir := resolved["CLAUDE_CONFIG_DIR"]
+	if configDir == "" {
+		return fmt.Errorf("CLAUDE_CONFIG_DIR not resolved")
+	}
+
+	claudeJSON := filepath.Join(configDir, ".claude.json")
+	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
+		marker := []byte(`{"hasCompletedOnboarding":true,"lastOnboardingVersion":"0.0.0","firstStartTime":"` +
+			time.Now().UTC().Format(time.RFC3339) + `"}`)
+		if err := os.WriteFile(claudeJSON, marker, 0o600); err != nil {
+			return fmt.Errorf("write onboarding marker: %w", err)
+		}
+		fmt.Fprintf(stdout, "✓ Onboarding marker written\n")
+	} else {
+		fmt.Fprintf(stdout, "✓ Onboarding marker exists\n")
+	}
+
+	// Step 4: Write api-key-helper
+	apiKey := resolved["ANTHROPIC_API_KEY"]
+	if apiKey != "" {
+		helperPath := filepath.Join(configDir, "hooks", "api-key-helper.sh")
+		if err := os.MkdirAll(filepath.Dir(helperPath), 0o755); err != nil {
+			return fmt.Errorf("create hooks dir: %w", err)
+		}
+		helperScript := `#!/bin/bash
+set -euo pipefail
+key="${ANTHROPIC_API_KEY:-}"
+if [ -z "$key" ]; then
+  session_name="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+  if [ -n "$session_name" ]; then
+    tmux_value="$(tmux show-environment -t "$session_name" ANTHROPIC_API_KEY 2>/dev/null || true)"
+    key="${tmux_value#*=}"
+  fi
+fi
+[ -n "$key" ] || exit 1
+printf '%s\n' "$key"
+`
+		if err := os.WriteFile(helperPath, []byte(helperScript), 0o700); err != nil {
+			return fmt.Errorf("write api-key-helper: %w", err)
+		}
+		fmt.Fprintf(stdout, "✓ API key helper installed\n")
+	}
+
+	fmt.Fprintf(stdout, "\n✓ Onboard complete. Run without --onboard to start.\n")
+	return nil
 }
