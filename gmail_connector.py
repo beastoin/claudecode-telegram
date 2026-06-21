@@ -38,7 +38,6 @@ class GmailConnector(BaseConnector):
             on_alert=on_alert,
         )
         self.gws_bin = gws_bin
-        self.from_filter = self.sender_filter
         self._history_id: Optional[str] = None
 
     def preflight_check(self) -> tuple:
@@ -181,9 +180,6 @@ class GmailConnector(BaseConnector):
             })
         for sub in part.get("parts", []):
             self._find_attachments(sub, result)
-
-    def is_from_allowed_sender(self, message: dict) -> bool:
-        return self.extract_sender(message) == self.from_filter
 
     def is_inbox_unread(self, label_ids: list) -> bool:
         return "INBOX" in label_ids and "UNREAD" in label_ids
@@ -347,7 +343,7 @@ class GmailConnector(BaseConnector):
             return
 
         is_sent = self.is_sent_message(message)
-        if not self.is_from_allowed_sender(message):
+        if not self.is_allowed_sender(message):
             return
 
         body = self.extract_body_text(message)
@@ -424,11 +420,11 @@ class GmailConnector(BaseConnector):
                 self._send_alert("Gmail connector disabled — cannot get historyId")
                 self._stop_event.set()
                 return
-        print(f"[gmail] Started (interval={self.poll_interval}s, from={self.from_filter}, historyId={self._history_id})")
+        print(f"[gmail] Started (interval={self.poll_interval}s, from={self.sender_filter}, historyId={self._history_id})")
         self._catchup_unread()
 
     def _catchup_unread(self):
-        q = f"from:{self.from_filter} is:unread in:inbox newer_than:1d"
+        q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"
         params = json.dumps({"userId": "me", "maxResults": 5, "q": q})
         data = self._run_gws("messages", "list", "--params", params)
         if not data or "messages" not in data:
@@ -436,7 +432,7 @@ class GmailConnector(BaseConnector):
         msg_ids = [m["id"] for m in data["messages"]]
         if not msg_ids:
             return
-        print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.from_filter}")
+        print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
         for msg_id in msg_ids:
             try:
                 self._process_message(msg_id)

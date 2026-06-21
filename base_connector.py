@@ -37,6 +37,15 @@ class BaseConnector:
     def poll_once(self):
         raise NotImplementedError
 
+    def extract_sender(self, message) -> str:
+        """Return the lowercase sender identity from a raw message.
+        Subclasses MUST override this."""
+        raise NotImplementedError
+
+    def is_allowed_sender(self, message) -> bool:
+        """Check if message is from the allowed sender. Uses extract_sender()."""
+        return self.extract_sender(message) == self.sender_filter
+
     def _on_preflight_ok(self):
         """Called after successful preflight, before poll loop starts."""
         pass

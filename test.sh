@@ -18582,11 +18582,11 @@ gc = GmailConnector(
     gws_bin='/usr/bin/gws',
     from_filter='test@example.com',
     poll_interval=30,
-    on_message=lambda t,m: None,
+    on_message=lambda targets, html, plain=None, att=None: None,
     get_registered_workers=lambda: set(),
 )
 assert gc.poll_interval == 30
-assert gc.from_filter == 'test@example.com'
+assert gc.sender_filter == 'test@example.com'
 assert gc._history_id is None
 print('OK')
 " 2>/dev/null | grep -q "OK"; then

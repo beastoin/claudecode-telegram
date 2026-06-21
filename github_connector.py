@@ -38,7 +38,6 @@ class GitHubConnector(BaseConnector):
         )
         self.beast_bin = beast_bin or os.path.expanduser("~/bin/beast")
         self.repo = repo
-        self.from_user = self.sender_filter
         self._last_poll_time: Optional[str] = None
         self._seen_ids: set = set()
 
@@ -62,7 +61,7 @@ class GitHubConnector(BaseConnector):
                 print(f"[github] First run — no events to seed")
         else:
             print(f"[github] Restart — {self._seen_id_count()} events already tracked, skipping seed")
-        print(f"[github] Started (interval={self.poll_interval}s, repo={self.repo}, user={self.from_user}, since={self._last_poll_time})")
+        print(f"[github] Started (interval={self.poll_interval}s, repo={self.repo}, user={self.sender_filter}, since={self._last_poll_time})")
 
     def _has_seen_ids(self) -> bool:
         raw = self._run_beast("github", "cache-status", "--json", timeout=10)
@@ -111,7 +110,7 @@ class GitHubConnector(BaseConnector):
     def _get_all_comments(self, since: str) -> Optional[list]:
         raw = self._run_beast(
             "github", "events",
-            "--user", self.from_user,
+            "--user", self.sender_filter,
             "--count", "50",
             "--json", "--new-only",
             timeout=30,
@@ -128,9 +127,8 @@ class GitHubConnector(BaseConnector):
             print(f"[github] beast JSON error: {e}")
             return None
 
-    def is_from_target_user(self, comment: dict) -> bool:
-        user = comment.get("user", {}).get("login", "").lower()
-        return user == self.from_user
+    def extract_sender(self, comment) -> str:
+        return comment.get("user", {}).get("login", "").lower()
 
     def extract_issue_context(self, comment: dict) -> dict:
         if comment.get("issue_num") and comment.get("kind"):
@@ -213,7 +211,7 @@ class GitHubConnector(BaseConnector):
         if comment_id in self._seen_ids:
             return
         self._seen_ids.add(comment_id)
-        if not self.is_from_target_user(comment):
+        if not self.is_allowed_sender(comment):
             return
         body = comment.get("body", "").strip()
         if not body:

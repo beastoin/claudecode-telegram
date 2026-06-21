@@ -11605,9 +11605,8 @@ def main():
     elif BRIDGE_GRPC_IMPORT_ERROR is not None:
         print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
 
-    gmail_connector_instance = None
-    if GMAIL_ENABLED and GmailConnector is not None:
-        def _gmail_on_message(targets, html_text, plain_text=None, attachments=None):
+    def _connector_on_message(tag):
+        def handler(targets, html_text, plain_text=None, attachments=None):
             if plain_text is None:
                 plain_text = html_text
             if admin_chat_id:
@@ -11628,31 +11627,36 @@ def main():
                         send_video(admin_chat_id, fpath, caption)
                     else:
                         send_document(admin_chat_id, fpath, caption)
-                    print(f"[gmail] attachment -> Telegram: {fname}")
+                    print(f"[{tag}] attachment -> Telegram: {fname}")
             if targets:
                 for name in targets:
                     send_to_worker(name, plain_text)
-                    print(f"[gmail] -> {name}: {plain_text[:80]}...")
+                    print(f"[{tag}] -> {name}: {plain_text[:80]}...")
             else:
-                print(f"[gmail] -> Telegram only (no mentions): {plain_text[:80]}...")
+                print(f"[{tag}] -> Telegram only (no mentions): {plain_text[:80]}...")
+        return handler
 
-        def _gmail_get_workers():
-            return set(get_registered_sessions().keys())
+    def _connector_get_workers():
+        return set(get_registered_sessions().keys())
 
-        def _gmail_on_alert(text):
+    def _connector_on_alert(tag):
+        def handler(text):
             if admin_chat_id:
                 try:
                     send_telegram_message(admin_chat_id, text)
                 except Exception as e:
-                    print(f"[gmail] Failed to send Telegram alert: {e}")
+                    print(f"[{tag}] Failed to send Telegram alert: {e}")
+        return handler
 
+    gmail_connector_instance = None
+    if GMAIL_ENABLED and GmailConnector is not None:
         gmail_connector_instance = GmailConnector(
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
-            on_message=_gmail_on_message,
-            get_registered_workers=_gmail_get_workers,
-            on_alert=_gmail_on_alert,
+            on_message=_connector_on_message("gmail"),
+            get_registered_workers=_connector_get_workers,
+            on_alert=_connector_on_alert("gmail"),
         )
         gmail_connector_instance.start()
         print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
@@ -11661,38 +11665,13 @@ def main():
 
     github_connector_instance = None
     if GITHUB_ENABLED and GitHubConnector is not None:
-        def _github_on_message(targets, html_text, plain_text=None, attachments=None):
-            if plain_text is None:
-                plain_text = html_text
-            if admin_chat_id:
-                try:
-                    send_telegram_message(admin_chat_id, html_text, parse_mode="HTML")
-                except Exception:
-                    send_telegram_message(admin_chat_id, plain_text)
-            if targets:
-                for name in targets:
-                    send_to_worker(name, plain_text)
-                    print(f"[github] -> {name}: {plain_text[:80]}...")
-            else:
-                print(f"[github] -> Telegram only (no mentions): {plain_text[:80]}...")
-
-        def _github_get_workers():
-            return set(get_registered_sessions().keys())
-
-        def _github_on_alert(text):
-            if admin_chat_id:
-                try:
-                    send_telegram_message(admin_chat_id, text)
-                except Exception as e:
-                    print(f"[github] Failed to send Telegram alert: {e}")
-
         github_connector_instance = GitHubConnector(
             repo=GITHUB_REPO,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
-            on_message=_github_on_message,
-            get_registered_workers=_github_get_workers,
-            on_alert=_github_on_alert,
+            on_message=_connector_on_message("github"),
+            get_registered_workers=_connector_get_workers,
+            on_alert=_connector_on_alert("github"),
         )
         github_connector_instance.start()
         print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {GITHUB_REPO}")
