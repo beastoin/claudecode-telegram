@@ -18605,8 +18605,8 @@ from unittest.mock import patch, MagicMock
 from gmail_connector import GmailConnector
 
 received = []
-def on_msg(targets, text):
-    received.append((targets, text))
+def on_msg(targets, html_text, plain_text=None, attachments=None):
+    received.append((targets, html_text))
 
 gc = GmailConnector(
     gws_bin='/usr/bin/gws',
@@ -18653,7 +18653,7 @@ with patch('gmail_connector.subprocess.run', side_effect=mock_run):
 assert len(received) == 1, f'Expected 1 message, got {len(received)}'
 targets, text = received[0]
 assert 'mon' in targets, f'Expected mon in targets, got {targets}'
-assert 'manager:' in text, f'Expected manager: in text'
+assert 'Deploy check' in text, f'Expected subject in text, got: {text[:100]}'
 assert gc._history_id == '102', f'Expected historyId 102, got {gc._history_id}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then

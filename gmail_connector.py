@@ -347,7 +347,7 @@ class GmailConnector(BaseConnector):
             return
 
         is_sent = self.is_sent_message(message)
-        if not is_sent and not self.is_from_allowed_sender(message):
+        if not self.is_from_allowed_sender(message):
             return
 
         body = self.extract_body_text(message)
