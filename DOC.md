@@ -336,6 +336,41 @@ All session files use restrictive permissions:
 
 This prevents other users on multi-user systems from reading chat IDs or session data.
 
+### Connector Sender Allowlists
+
+External connectors (Gmail, GitHub) poll third-party APIs and forward messages into the bridge. Each connector has a **mandatory sender filter** — only messages from the configured sender are forwarded to Telegram and routed to workers. Everything else is silently dropped.
+
+| Connector | Env var | Default | What it filters |
+|-----------|---------|---------|-----------------|
+| Gmail | `GMAIL_FROM_FILTER` | `ngocthinhdp@gmail.com` | Email `From:` header must match |
+| GitHub | `BRIDGE_GHPOLL_USER` | `beastoin` | Comment `user.login` must match |
+
+**Architecture:**
+
+```
+                          ┌─────────────────────────────┐
+  Gmail API ← gws CLI ──►│                             │
+                          │  BaseConnector              │
+                          │  ├─ sender_filter (required) │
+                          │  ├─ extract_sender() ←──── subclass overrides
+                          │  └─ is_allowed_sender() ──► reject if mismatch
+                          │                             │
+  GitHub API ← beast ───►│  on_message() ────────────► Telegram + workers
+                          └─────────────────────────────┘
+```
+
+**Security invariants:**
+- `sender_filter` cannot be empty — `BaseConnector.__init__` raises `ValueError`
+- `is_allowed_sender()` lives in the base class — subclasses override `extract_sender()` only, cannot bypass the check
+- CLIs (gws, beast) are dumb transport — they fetch and return JSON, they don't filter
+
+**Adding a new connector:**
+1. Subclass `BaseConnector`
+2. Override `extract_sender(message)` — return lowercased sender identity
+3. Override `preflight_check()` and `poll_once()`
+4. Add an env var for the sender filter (fail-closed: require non-empty)
+5. Wire in `bridge.py` using `_connector_on_message(tag)`, `_connector_get_workers`, `_connector_on_alert(tag)`
+
 ---
 
 ## Changelog
