@@ -18663,6 +18663,349 @@ print('OK')
     fi
 }
 
+# ── GitHub Connector Tests (Unit) ─────────────────────────────────────────────
+
+test_github_connector_import() {
+    info "Testing github_connector module imports and constructs..."
+    if python3 -c "
+import sys, os
+sys.path.insert(0, os.getcwd())
+from github_connector import GitHubConnector
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda targets, html, plain=None, att=None: None,
+    get_registered_workers=lambda: set(),
+)
+assert gc.poll_interval == 60
+assert gc.sender_filter == 'testuser'
+assert gc.repo == 'TestOrg/TestRepo'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "github_connector imports and constructs"
+    else
+        fail "github_connector import/construct failed"
+    fi
+}
+
+test_github_connector_uses_gh_api() {
+    info "Testing github_connector fetches from gh api, not beast events..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda targets, html, plain=None, att=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+)
+
+# Mock gh api to return issue comments
+issue_comments = [
+    {'id': 1001, 'user': {'login': 'testuser'}, 'body': 'test comment',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/1#issuecomment-1001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/1',
+     'created_at': '2026-06-22T00:00:00Z', 'updated_at': '2026-06-22T00:00:00Z'},
+]
+pr_comments = []
+
+call_log = []
+def mock_run(cmd, **kwargs):
+    call_log.append(cmd)
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str:
+        r.stdout = json.dumps(issue_comments)
+    elif '/pulls/comments' in cmd_str:
+        r.stdout = json.dumps(pr_comments)
+    else:
+        r.stdout = '[]'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+
+# Must NOT call beast
+for cmd in call_log:
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    assert 'beast' not in cmd_str, f'Should not call beast, but called: {cmd_str}'
+
+# Must call gh api with /issues/comments
+gh_calls = [' '.join(c) for c in call_log if 'gh' in str(c[0])]
+issue_call = [c for c in gh_calls if '/issues/comments' in c]
+assert len(issue_call) >= 1, f'Expected gh api /issues/comments call, got: {gh_calls}'
+
+# Must return the comment
+assert result is not None, 'Expected comments list'
+assert len(result) == 1, f'Expected 1 comment, got {len(result)}'
+assert result[0]['id'] == 1001
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector uses gh api not beast events"
+    else
+        fail "github_connector uses gh api not beast events"
+    fi
+}
+
+test_github_connector_merges_issue_and_pr_comments() {
+    info "Testing github_connector merges issue + PR review comments..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda targets, html, plain=None, att=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+)
+
+issue_comments = [
+    {'id': 1001, 'user': {'login': 'testuser'}, 'body': 'issue comment',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/1#issuecomment-1001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/1',
+     'created_at': '2026-06-22T00:00:00Z', 'updated_at': '2026-06-22T00:00:00Z'},
+]
+pr_comments = [
+    {'id': 2001, 'user': {'login': 'testuser'}, 'body': 'pr review comment',
+     'html_url': 'https://github.com/TestOrg/TestRepo/pull/2#discussion_r2001',
+     'pull_request_url': 'https://api.github.com/repos/TestOrg/TestRepo/pulls/2',
+     'created_at': '2026-06-22T00:01:00Z', 'updated_at': '2026-06-22T00:01:00Z'},
+]
+
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str:
+        r.stdout = json.dumps(issue_comments)
+    elif '/pulls/comments' in cmd_str:
+        r.stdout = json.dumps(pr_comments)
+    else:
+        r.stdout = '[]'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+
+assert len(result) == 2, f'Expected 2 merged comments, got {len(result)}'
+ids = {c['id'] for c in result}
+assert 1001 in ids and 2001 in ids, f'Expected both comment IDs, got {ids}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector merges issue and PR comments"
+    else
+        fail "github_connector merges issue and PR comments"
+    fi
+}
+
+test_github_connector_dedup_comments() {
+    info "Testing github_connector deduplicates by comment ID..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda targets, html, plain=None, att=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+)
+
+# Same comment appears in both endpoints (shouldn't happen, but defensive)
+dup_comment = {'id': 1001, 'user': {'login': 'testuser'}, 'body': 'same comment',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/1#issuecomment-1001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/1',
+     'created_at': '2026-06-22T00:00:00Z', 'updated_at': '2026-06-22T00:00:00Z'}
+
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    r.stdout = json.dumps([dup_comment])
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+
+assert len(result) == 1, f'Expected 1 deduped comment, got {len(result)}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector deduplicates by comment ID"
+    else
+        fail "github_connector deduplicates by comment ID"
+    fi
+}
+
+test_github_connector_preflight_uses_gh() {
+    info "Testing github_connector preflight uses gh, not beast..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda targets, html, plain=None, att=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+)
+
+call_log = []
+def mock_run(cmd, **kwargs):
+    call_log.append(cmd)
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    r.stdout = '{}'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    with patch('os.path.isfile', return_value=True):
+        ok, msg = gc.preflight_check()
+
+assert ok, f'Preflight should pass, got: {msg}'
+for cmd in call_log:
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    assert 'beast' not in cmd_str, f'Should not call beast, but called: {cmd_str}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector preflight uses gh not beast"
+    else
+        fail "github_connector preflight uses gh not beast"
+    fi
+}
+
+test_github_connector_poll_cycle() {
+    info "Testing github_connector end-to-end poll cycle delivers comment..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+received = []
+def on_msg(targets, html_text, plain_text=None, attachments=None):
+    received.append((targets, html_text, plain_text))
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=on_msg,
+    get_registered_workers=lambda: {'mon', 'taro'},
+    gh_bin='/usr/bin/gh',
+)
+gc._last_poll_time = '2026-06-21T00:00:00Z'
+
+issue_comments = [
+    {'id': 5001, 'user': {'login': 'testuser'}, 'body': '@mon check the deploy',
+     'html_url': 'https://github.com/TestOrg/TestRepo/pull/42#issuecomment-5001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/42',
+     'created_at': '2026-06-22T01:00:00Z', 'updated_at': '2026-06-22T01:00:00Z'},
+]
+
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str:
+        r.stdout = json.dumps(issue_comments)
+    elif '/pulls/comments' in cmd_str:
+        r.stdout = json.dumps([])
+    else:
+        r.stdout = '[]'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    gc.poll_once()
+
+assert len(received) == 1, f'Expected 1 delivered message, got {len(received)}'
+targets, html, plain = received[0]
+assert 'mon' in targets, f'Expected mon in targets, got {targets}'
+assert '#42' in html, f'Expected #42 in html, got: {html[:200]}'
+assert 'check the deploy' in plain, f'Expected body in plain, got: {plain[:200]}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector poll cycle delivers comment"
+    else
+        fail "github_connector poll cycle failed"
+    fi
+}
+
+test_github_connector_filters_sender() {
+    info "Testing github_connector ignores comments from other users..."
+    if python3 -c "
+import sys, os, json
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+received = []
+def on_msg(targets, html_text, plain_text=None, attachments=None):
+    received.append((targets, html_text))
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=on_msg,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+)
+gc._last_poll_time = '2026-06-21T00:00:00Z'
+
+issue_comments = [
+    {'id': 6001, 'user': {'login': 'otheruser'}, 'body': 'someone else comment',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/1#issuecomment-6001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/1',
+     'created_at': '2026-06-22T01:00:00Z', 'updated_at': '2026-06-22T01:00:00Z'},
+]
+
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str:
+        r.stdout = json.dumps(issue_comments)
+    else:
+        r.stdout = '[]'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    gc.poll_once()
+
+assert len(received) == 0, f'Expected 0 messages for other user, got {len(received)}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector filters sender correctly"
+    else
+        fail "github_connector filters sender"
+    fi
+}
+
 # ============================================================
 # TEST RUNNERS
 # ============================================================
@@ -19285,6 +19628,16 @@ run_unit_tests() {
     log "── Gmail Connector Tests (Unit) ────────────────────────────────────────"
     run_test test_gmail_connector_import
     run_test test_gmail_connector_poll_cycle
+    # Unit tests - GitHub Connector
+    log ""
+    log "── GitHub Connector Tests (Unit) ───────────────────────────────────────"
+    run_test test_github_connector_import
+    run_test test_github_connector_uses_gh_api
+    run_test test_github_connector_merges_issue_and_pr_comments
+    run_test test_github_connector_dedup_comments
+    run_test test_github_connector_preflight_uses_gh
+    run_test test_github_connector_poll_cycle
+    run_test test_github_connector_filters_sender
 }
 
 run_cli_tests() {

@@ -1,11 +1,11 @@
 """GitHub polling connector for claudecode-telegram bridge.
 
-Polls GitHub issue/PR comments via beast CLI for new comments from a
-configured user, parses @worker mentions, and delivers to workers.
+Polls GitHub issue/PR comments via gh CLI (direct repo API) for new
+comments from a configured user, parses @worker mentions, and delivers
+to workers.
 """
 
 import json
-import os
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -27,7 +27,6 @@ class GitHubConnector(BaseConnector):
         on_message: Callable = None,
         get_registered_workers: Callable = None,
         on_alert: Optional[Callable] = None,
-        beast_bin: str = "",
     ):
         super().__init__(
             sender_filter=from_user,
@@ -36,96 +35,77 @@ class GitHubConnector(BaseConnector):
             get_registered_workers=get_registered_workers,
             on_alert=on_alert,
         )
-        self.beast_bin = beast_bin or os.path.expanduser("~/bin/beast")
+        self.gh_bin = gh_bin or "gh"
         self.repo = repo
         self._last_poll_time: Optional[str] = None
         self._seen_ids: set = set()
 
     def preflight_check(self) -> tuple:
-        if not os.path.isfile(self.beast_bin):
-            return False, f"beast binary not found: {self.beast_bin}"
-        raw = self._run_beast("github", "cache-status", "--json", timeout=10)
-        if raw is None:
-            return False, "beast github not responding"
-        return True, "OK"
+        try:
+            result = subprocess.run(
+                [self.gh_bin, "api", f"/repos/{self.repo}", "--jq", ".id"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return False, f"gh api failed: {result.stderr.strip()}"
+            return True, "OK"
+        except FileNotFoundError:
+            return False, f"gh binary not found: {self.gh_bin}"
+        except Exception as e:
+            return False, f"gh error: {e}"
 
     def _on_preflight_ok(self):
         self._last_poll_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Only seed on first-ever run (no seen_ids in DB).
-        # On restart, skip seed so comments posted during downtime get delivered.
-        if not self._has_seen_ids():
+        if not self._seen_ids:
             seed = self._get_all_comments(self._last_poll_time)
             if seed:
-                print(f"[github] First run — seeded {len(seed)} existing events as seen")
+                for c in seed:
+                    self._seen_ids.add(c.get("id"))
+                print(f"[github] First run — seeded {len(seed)} existing comments as seen")
             else:
-                print(f"[github] First run — no events to seed")
+                print(f"[github] First run — no comments to seed")
         else:
-            print(f"[github] Restart — {self._seen_id_count()} events already tracked, skipping seed")
+            print(f"[github] Restart — {len(self._seen_ids)} comments already tracked")
         print(f"[github] Started (interval={self.poll_interval}s, repo={self.repo}, user={self.sender_filter}, since={self._last_poll_time})")
 
-    def _has_seen_ids(self) -> bool:
-        raw = self._run_beast("github", "cache-status", "--json", timeout=10)
-        if not raw:
-            return False
-        try:
-            import sqlite3
-            db_path = json.loads(raw).get("db_path", "")
-            if not db_path:
-                return False
-            conn = sqlite3.connect(db_path)
-            count = conn.execute("SELECT COUNT(*) FROM seen_ids WHERE repo='_events'").fetchone()[0]
-            conn.close()
-            return count > 0
-        except Exception:
-            return False
-
-    def _seen_id_count(self) -> int:
-        try:
-            import sqlite3
-            raw = self._run_beast("github", "cache-status", "--json", timeout=10)
-            if not raw:
-                return 0
-            db_path = json.loads(raw).get("db_path", "")
-            conn = sqlite3.connect(db_path)
-            count = conn.execute("SELECT COUNT(*) FROM seen_ids WHERE repo='_events'").fetchone()[0]
-            conn.close()
-            return count
-        except Exception:
-            return 0
-
-    def _run_beast(self, *args, timeout=30) -> Optional[str]:
+    def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
         try:
             result = subprocess.run(
-                [self.beast_bin] + list(args),
+                [self.gh_bin, "api", endpoint, "--paginate"],
                 capture_output=True, text=True, timeout=timeout,
             )
             if result.returncode != 0:
-                print(f"[github] beast error: {result.stderr.strip()}")
+                print(f"[github] gh api error: {result.stderr.strip()}")
                 return None
             return result.stdout.strip()
         except Exception as e:
-            print(f"[github] beast exception: {e}")
+            print(f"[github] gh api exception: {e}")
             return None
 
     def _get_all_comments(self, since: str) -> Optional[list]:
-        raw = self._run_beast(
-            "github", "events",
-            "--user", self.sender_filter,
-            "--count", "50",
-            "--json", "--new-only",
-            timeout=30,
+        issue_raw = self._gh_api(
+            f"/repos/{self.repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
         )
-        if raw is None:
+        pr_raw = self._gh_api(
+            f"/repos/{self.repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
+        )
+        if issue_raw is None and pr_raw is None:
             return None
-        try:
-            comments = json.loads(raw)
-            for c in comments:
-                if isinstance(c.get("user"), str):
-                    c["user"] = {"login": c["user"]}
-            return comments
-        except json.JSONDecodeError as e:
-            print(f"[github] beast JSON error: {e}")
-            return None
+        seen = set()
+        merged = []
+        for raw in [issue_raw, pr_raw]:
+            if not raw:
+                continue
+            try:
+                comments = json.loads(raw)
+                for c in comments:
+                    cid = c.get("id")
+                    if cid not in seen:
+                        seen.add(cid)
+                        merged.append(c)
+            except json.JSONDecodeError as e:
+                print(f"[github] JSON error: {e}")
+        return merged
 
     def extract_sender(self, comment) -> str:
         return comment.get("user", {}).get("login", "").lower()
