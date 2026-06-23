@@ -6,6 +6,7 @@ to workers.
 """
 
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -27,6 +28,7 @@ class GitHubConnector(BaseConnector):
         on_message: Callable = None,
         get_registered_workers: Callable = None,
         on_alert: Optional[Callable] = None,
+        state_file: str = "",
     ):
         super().__init__(
             sender_filter=from_user,
@@ -37,6 +39,7 @@ class GitHubConnector(BaseConnector):
         )
         self.gh_bin = gh_bin or "gh"
         self.repo = repo
+        self._state_file = state_file
         self._last_poll_time: Optional[str] = None
         self._seen_ids: set = set()
 
@@ -54,9 +57,42 @@ class GitHubConnector(BaseConnector):
         except Exception as e:
             return False, f"gh error: {e}"
 
+    def _load_state(self):
+        if not self._state_file:
+            return False
+        try:
+            with open(self._state_file) as f:
+                state = json.load(f)
+            if state.get("last_poll_time"):
+                self._last_poll_time = state["last_poll_time"]
+            for sid in state.get("seen_ids", []):
+                self._seen_ids.add(sid)
+            return bool(self._last_poll_time)
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            return False
+
+    def _save_state(self):
+        if not self._state_file:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            state = {
+                "last_poll_time": self._last_poll_time,
+                "seen_ids": list(self._seen_ids)[-500:],
+            }
+            tmp = self._state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, self._state_file)
+        except Exception as e:
+            print(f"[github] Failed to save state: {e}")
+
     def _on_preflight_ok(self):
-        self._last_poll_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if not self._seen_ids:
+        restored = self._load_state()
+        if restored:
+            print(f"[github] Restart — restored state: {len(self._seen_ids)} seen IDs, since={self._last_poll_time}")
+        else:
+            self._last_poll_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             seed = self._get_all_comments(self._last_poll_time)
             if seed:
                 for c in seed:
@@ -64,8 +100,7 @@ class GitHubConnector(BaseConnector):
                 print(f"[github] First run — seeded {len(seed)} existing comments as seen")
             else:
                 print(f"[github] First run — no comments to seed")
-        else:
-            print(f"[github] Restart — {len(self._seen_ids)} comments already tracked")
+            self._save_state()
         print(f"[github] Started (interval={self.poll_interval}s, repo={self.repo}, user={self.sender_filter}, since={self._last_poll_time})")
 
     def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
@@ -226,6 +261,7 @@ class GitHubConnector(BaseConnector):
                 print(f"[github] Error processing comment {comment.get('id')}: {e}")
         self._last_poll_time = now
         self._prune_seen_ids()
+        self._save_state()
 
     def _prune_seen_ids(self):
         if len(self._seen_ids) > 500:

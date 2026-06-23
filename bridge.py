@@ -11672,6 +11672,7 @@ def main():
             on_message=_connector_on_message("github"),
             get_registered_workers=_connector_get_workers,
             on_alert=_connector_on_alert("github"),
+            state_file=str(NODE_DIR / "github_state.json"),
         )
         github_connector_instance.start()
         print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {GITHUB_REPO}")

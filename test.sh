@@ -19006,6 +19006,174 @@ print('OK')
     fi
 }
 
+test_github_connector_delivers_after_downtime() {
+    info "Testing github_connector delivers comments posted during downtime..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+# Simulate: bridge was running, saved state, then went down.
+# A comment was posted during downtime. On restart, it should be delivered.
+
+tmpdir = tempfile.mkdtemp()
+state_file = os.path.join(tmpdir, 'github_state.json')
+
+# Step 1: First run — seed existing comments
+received = []
+def on_msg(targets, html_text, plain_text=None, attachments=None):
+    received.append((targets, html_text, plain_text))
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=on_msg,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+    state_file=state_file,
+)
+
+old_comment = {'id': 7001, 'user': {'login': 'testuser'}, 'body': 'old comment before downtime',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/1#issuecomment-7001',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/1',
+     'created_at': '2026-06-22T01:00:00Z', 'updated_at': '2026-06-22T01:00:00Z'}
+
+def mock_run_seed(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str or '/pulls/comments' in cmd_str:
+        r.stdout = json.dumps([old_comment])
+    else:
+        r.stdout = '{}'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run_seed):
+    gc._on_preflight_ok()
+    # Do one poll to save state
+    gc.poll_once()
+
+assert 7001 in gc._seen_ids, 'Old comment should be seeded as seen'
+assert os.path.exists(state_file), 'State file should exist after poll'
+assert len(received) == 0, f'Old comment should not be delivered (seeded), got {len(received)}'
+
+# Step 2: Bridge goes down. New comment posted during downtime.
+# Step 3: Bridge restarts — new GitHubConnector instance with same state_file
+
+received2 = []
+def on_msg2(targets, html_text, plain_text=None, attachments=None):
+    received2.append((targets, html_text, plain_text))
+
+gc2 = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=on_msg2,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+    state_file=state_file,
+)
+
+# Both old and new comments returned by API (since= from saved state)
+new_comment = {'id': 7002, 'user': {'login': 'testuser'}, 'body': 'posted during downtime!',
+     'html_url': 'https://github.com/TestOrg/TestRepo/issues/2#issuecomment-7002',
+     'issue_url': 'https://api.github.com/repos/TestOrg/TestRepo/issues/2',
+     'created_at': '2026-06-23T01:00:00Z', 'updated_at': '2026-06-23T01:00:00Z'}
+
+def mock_run_restart(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
+    if '/issues/comments' in cmd_str or '/pulls/comments' in cmd_str:
+        r.stdout = json.dumps([old_comment, new_comment])
+    else:
+        r.stdout = '{}'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run_restart):
+    gc2._on_preflight_ok()
+    gc2.poll_once()
+
+# Old comment should NOT be re-delivered (was in saved seen_ids)
+# New comment SHOULD be delivered
+assert len(received2) == 1, f'Expected 1 new comment delivered after restart, got {len(received2)}'
+assert 'posted during downtime' in received2[0][2], f'Expected new comment body, got: {received2[0][2][:100]}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector delivers comments posted during downtime"
+    else
+        fail "github_connector delivers comments posted during downtime"
+    fi
+}
+
+test_github_connector_persists_poll_time() {
+    info "Testing github_connector persists last_poll_time across restarts..."
+    if python3 -c "
+import sys, os, json, tempfile
+sys.path.insert(0, os.getcwd())
+from unittest.mock import patch, MagicMock
+from github_connector import GitHubConnector
+
+tmpdir = tempfile.mkdtemp()
+state_file = os.path.join(tmpdir, 'github_state.json')
+
+gc = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda t, h, p=None, a=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+    state_file=state_file,
+)
+
+def mock_run(cmd, **kwargs):
+    r = MagicMock()
+    r.returncode = 0
+    r.stderr = ''
+    r.stdout = '[]'
+    return r
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    gc._on_preflight_ok()
+    saved_time = gc._last_poll_time
+    gc.poll_once()
+
+# State file should have the poll time
+assert os.path.exists(state_file), 'State file should exist'
+with open(state_file) as f:
+    state = json.load(f)
+assert 'last_poll_time' in state, f'State should have last_poll_time, got: {state}'
+
+# New instance should restore the saved poll time (not reset to now-1h)
+gc2 = GitHubConnector(
+    repo='TestOrg/TestRepo',
+    from_user='testuser',
+    poll_interval=60,
+    on_message=lambda t, h, p=None, a=None: None,
+    get_registered_workers=lambda: set(),
+    gh_bin='/usr/bin/gh',
+    state_file=state_file,
+)
+
+with patch('github_connector.subprocess.run', side_effect=mock_run):
+    gc2._on_preflight_ok()
+
+# Should NOT reset to now-1h; should use saved time (or close to it)
+assert gc2._last_poll_time == state['last_poll_time'], \
+    f'Expected restored poll time {state[\"last_poll_time\"]}, got {gc2._last_poll_time}'
+print('OK')
+" 2>&1 | tail -1 | grep -q "OK"; then
+        success "github_connector persists last_poll_time across restarts"
+    else
+        fail "github_connector persists last_poll_time across restarts"
+    fi
+}
+
 # ============================================================
 # TEST RUNNERS
 # ============================================================
@@ -19638,6 +19806,8 @@ run_unit_tests() {
     run_test test_github_connector_preflight_uses_gh
     run_test test_github_connector_poll_cycle
     run_test test_github_connector_filters_sender
+    run_test test_github_connector_delivers_after_downtime
+    run_test test_github_connector_persists_poll_time
 }
 
 run_cli_tests() {
