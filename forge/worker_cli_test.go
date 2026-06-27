@@ -204,6 +204,9 @@ vars:
 `),
 		},
 		Watchdog: watchdog,
+		RuntimeFactory: func(_ *Manifest, _ WorkerCLIOptions, _ Runner) Runtime {
+			return &stubRuntime{}
+		},
 	})
 	if err != nil {
 		t.Fatalf("RunEmbeddedWorker() error = %v", err)
@@ -439,7 +442,7 @@ func TestWorkerCLI_SessionPrefixOverridesDefault(t *testing.T) {
 	t.Parallel()
 
 	manifest := &Manifest{Name: "mon"}
-	runner := ShellRunner{}
+	runner := &stubRunner{}
 
 	defaultRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{}, runner)
 	tmux := defaultRT.(*TmuxRuntime)
@@ -454,6 +457,64 @@ func TestWorkerCLI_SessionPrefixOverridesDefault(t *testing.T) {
 	}
 }
 
+func TestRunCheckMode_JSONOutput(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	runner := &stubRunner{
+		results: map[string]RunResult{
+			"claude --version":              {ExitCode: 0, Stdout: "claude 2.1.114"},
+			"curl -sf http://bridge/health": {ExitCode: 0},
+		},
+	}
+
+	err := RunEmbeddedWorker([]string{"check", "--output-json", "--bridge-url", "http://bridge"}, WorkerDeps{
+		Assets: EmbeddedAssets{
+			Manifest: []byte(`
+name: mon
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+  BRIDGE_URL:
+    source: flag
+    required: true
+tools:
+  - name: claude
+    check: claude --version
+    required: true
+readiness:
+  - name: bridge-reachable
+    check: curl -sf $BRIDGE_URL/health
+    expect: exit 0
+    required: true
+`),
+		},
+		Runner: runner,
+		GOOS:   "linux",
+		Stdout: &stdout,
+	})
+	if err != nil {
+		t.Fatalf("RunEmbeddedWorker() error = %v", err)
+	}
+
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("output is not valid JSON: %s", stdout.String())
+	}
+
+	var result CheckResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.Command != "check" {
+		t.Fatalf("result.Command = %q, want check", result.Command)
+	}
+	if result.Status != "pass" {
+		t.Fatalf("result.Status = %q, want pass", result.Status)
+	}
+}
+
 type workerWatchdogSpy struct {
 	ctx context.Context
 }
@@ -461,4 +522,366 @@ type workerWatchdogSpy struct {
 func (w *workerWatchdogSpy) Run(ctx context.Context) error {
 	w.ctx = ctx
 	return nil
+}
+
+// --- Subcommand parsing tests ---
+
+func TestParseWorkerCLI_SubcommandCheck(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"check", "--bridge-url", "http://bridge"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Check {
+		t.Fatal("opts.Check = false, want true")
+	}
+	if opts.Command != "check" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "check")
+	}
+	if opts.BridgeURL != "http://bridge" {
+		t.Fatalf("opts.BridgeURL = %q, want %q", opts.BridgeURL, "http://bridge")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandVerify(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"verify"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Verify {
+		t.Fatal("opts.Verify = false, want true")
+	}
+	if opts.Command != "verify" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "verify")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandRun(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"run", "--bridge-url", "http://bridge", "--connector", "telegram"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.Command != "run" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "run")
+	}
+	if opts.BridgeURL != "http://bridge" {
+		t.Fatalf("opts.BridgeURL = %q, want %q", opts.BridgeURL, "http://bridge")
+	}
+	if opts.ConnectorType != "telegram" {
+		t.Fatalf("opts.ConnectorType = %q, want %q", opts.ConnectorType, "telegram")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandOnboard(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"onboard", "--identity", "AGE-KEY"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Onboard {
+		t.Fatal("opts.Onboard = false, want true")
+	}
+	if opts.Command != "onboard" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "onboard")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandHealth(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"health"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Health {
+		t.Fatal("opts.Health = false, want true")
+	}
+	if opts.Command != "health" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "health")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandStop(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"stop"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Stop {
+		t.Fatal("opts.Stop = false, want true")
+	}
+	if opts.Command != "stop" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "stop")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandVersion(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"version"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.Command != "version" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "version")
+	}
+}
+
+func TestParseWorkerCLI_SubcommandDescribe(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"describe", "check"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.Command != "describe" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "describe")
+	}
+	if opts.DescribeTarget != "check" {
+		t.Fatalf("opts.DescribeTarget = %q, want %q", opts.DescribeTarget, "check")
+	}
+}
+
+func TestParseWorkerCLI_LegacyFlagsStillWork(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"--check", "--bridge-url", "http://bridge"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.Check {
+		t.Fatal("opts.Check = false, want true (legacy --check)")
+	}
+	if opts.Command != "check" {
+		t.Fatalf("opts.Command = %q, want %q (legacy flag should set command)", opts.Command, "check")
+	}
+}
+
+func TestParseWorkerCLI_OutputJSONFlag(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"check", "--output-json", "--bridge-url", "http://b"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.OutputJSON {
+		t.Fatal("opts.OutputJSON = false, want true")
+	}
+}
+
+func TestParseWorkerCLI_DryRunFlag(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI([]string{"onboard", "--dry-run"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if !opts.DryRun {
+		t.Fatal("opts.DryRun = false, want true")
+	}
+}
+
+func TestParseWorkerCLI_EnvVarFallback(t *testing.T) {
+	t.Setenv("FORGE_BRIDGE_URL", "http://env-bridge")
+	t.Setenv("FORGE_IDENTITY", "/path/to/key")
+	opts, err := ParseWorkerCLI([]string{"check"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.BridgeURL != "http://env-bridge" {
+		t.Fatalf("opts.BridgeURL = %q, want %q (from FORGE_BRIDGE_URL)", opts.BridgeURL, "http://env-bridge")
+	}
+	if opts.Identity != "/path/to/key" {
+		t.Fatalf("opts.Identity = %q, want %q (from FORGE_IDENTITY)", opts.Identity, "/path/to/key")
+	}
+}
+
+func TestParseWorkerCLI_FlagOverridesEnvVar(t *testing.T) {
+	t.Setenv("FORGE_BRIDGE_URL", "http://env-bridge")
+	opts, err := ParseWorkerCLI([]string{"check", "--bridge-url", "http://flag-bridge"})
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.BridgeURL != "http://flag-bridge" {
+		t.Fatalf("opts.BridgeURL = %q, want %q (flag should override env)", opts.BridgeURL, "http://flag-bridge")
+	}
+}
+
+func TestParseWorkerCLI_NoArgsDefaultsToRun(t *testing.T) {
+	t.Parallel()
+	opts, err := ParseWorkerCLI(nil)
+	if err != nil {
+		t.Fatalf("ParseWorkerCLI() error = %v", err)
+	}
+	if opts.Command != "run" {
+		t.Fatalf("opts.Command = %q, want %q (no args = run)", opts.Command, "run")
+	}
+}
+
+func TestRunDescribe_AllCommands(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := RunEmbeddedWorker([]string{"describe"}, WorkerDeps{
+		Assets: EmbeddedAssets{
+			Manifest: []byte(`
+name: mon
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+`),
+		},
+		Stdout: &buf,
+		Runner: &stubRunner{},
+	})
+	if err != nil {
+		t.Fatalf("RunEmbeddedWorker() error = %v", err)
+	}
+
+	if !json.Valid(buf.Bytes()) {
+		t.Fatalf("output is not valid JSON: %s", buf.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if result["worker"] != "mon" {
+		t.Fatalf("result[worker] = %v, want mon", result["worker"])
+	}
+	cmds, ok := result["commands"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result[commands] is not a map: %T", result["commands"])
+	}
+	for _, required := range []string{"run", "check", "verify", "onboard", "health", "stop"} {
+		if _, exists := cmds[required]; !exists {
+			t.Fatalf("missing command %q in describe output", required)
+		}
+	}
+}
+
+func TestRunDescribe_SingleCommand(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := RunEmbeddedWorker([]string{"describe", "check"}, WorkerDeps{
+		Assets: EmbeddedAssets{
+			Manifest: []byte(`
+name: mon
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+`),
+		},
+		Stdout: &buf,
+		Runner: &stubRunner{},
+	})
+	if err != nil {
+		t.Fatalf("RunEmbeddedWorker() error = %v", err)
+	}
+
+	if !json.Valid(buf.Bytes()) {
+		t.Fatalf("output is not valid JSON: %s", buf.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if result["command"] != "check" {
+		t.Fatalf("result[command] = %v, want check", result["command"])
+	}
+	if _, ok := result["flags"]; !ok {
+		t.Fatalf("missing flags in describe check output")
+	}
+}
+
+func TestRunOnboard_DryRun(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+
+	configDir := filepath.Join(root, ".claude")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	err := RunEmbeddedWorker(
+		[]string{"onboard", "--dry-run", "--bridge-url", "http://bridge"},
+		WorkerDeps{
+			Assets: EmbeddedAssets{
+				Manifest: []byte(`
+name: mon
+version: 1.0.0
+vars:
+  HOME:
+    source: env
+    required: true
+files:
+  - source: knowledge/charter.md
+    dest: $HOME/team/mon/charter.md
+`),
+				Files: fstest.MapFS{
+					"knowledge/charter.md": &fstest.MapFile{Data: []byte("charter content")},
+				},
+				Checksums: func() []byte {
+					d, _ := GenerateChecksumsJSON(map[string][]byte{
+						"files/knowledge/charter.md": []byte("charter content"),
+						"knowledge/charter.md":       []byte("charter content"),
+					})
+					return d
+				}(),
+			},
+			Stdout:      &buf,
+			Runner:      &stubRunner{},
+			HookManager: HookManager{},
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunEmbeddedWorker() error = %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "dry-run") && !strings.Contains(out, "would") {
+		t.Fatalf("dry-run output should indicate simulation: %s", out)
+	}
+
+	// Verify files were NOT extracted
+	destFile := filepath.Join(root, "team", "mon", "charter.md")
+	if _, err := os.Stat(destFile); err == nil {
+		t.Fatal("dry-run should not extract files, but charter.md exists")
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := RunEmbeddedWorker([]string{"version"}, WorkerDeps{
+		Assets: EmbeddedAssets{
+			Manifest: []byte(`
+name: mon
+version: 2.5.0
+vars:
+  HOME:
+    source: env
+    required: true
+`),
+		},
+		Stdout: &buf,
+		Runner: &stubRunner{},
+	})
+	if err != nil {
+		t.Fatalf("RunEmbeddedWorker() error = %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "mon") {
+		t.Fatalf("version output missing worker name: %s", out)
+	}
+	if !strings.Contains(out, "2.5.0") {
+		t.Fatalf("version output missing version: %s", out)
+	}
 }
