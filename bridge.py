@@ -138,7 +138,7 @@ API_ENDPOINTS = {
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
     "GET /team-chat": "Team Telegram chat viewer (requires rewind token)",
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
-    "POST /send": "Send a prompt to a worker: {worker, message}",
+    "POST /send": "Send a prompt to a worker: {worker, message, from (default: system)}",
     "POST /response": "Hook: send Claude response to Telegram",
     "POST /notify": "Send notification to all admin chats",
     "POST /health-alert": "Hook: JSONL health alert (stale transcript detection)",
@@ -1047,6 +1047,179 @@ _restart_lock = threading.Lock()  # protects _restart_in_progress
 _force_restart_pending_cwd = {}  # name -> True: force restart completed, allow one post-restart CWD fix
 _waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
 _watchdog_lock = threading.Lock()
+
+# Learning reminders: periodic self-learning nudges per worker
+# Two triggers: response count threshold, and idle timeout (checked by timer).
+# Anti-annoyance: after any reminder fires, all triggers suppressed until worker responds.
+# State is persisted to disk so bridge restarts don't reset progress.
+LEARNING_REMINDER_RESPONSE_THRESHOLD = 15  # fire after N worker responses
+LEARNING_REMINDER_IDLE_HOURS = 6  # fire if no worker response in N hours
+_learning_reminder_state = {}  # name -> {response_count, last_reminder_ts, last_response_ts, reminder_pending}
+_learning_reminder_lock = threading.Lock()
+_idle_scan_timer = None
+
+_LEARNING_REMINDER_TEXT = (
+    "system: Self-learning check — review your recent work. "
+    "Did you hit a surprise, get corrected, or discover a reusable pattern?\n"
+    "If yes: update ~/team/{name}/playbook.md with a \"When X, do Y, because Z\" rule. "
+    "Cross-team value? Also add to ~/team/learnings.md.\n"
+    "If nothing worth keeping, carry on. "
+    "See playbook Section 0 \"Self-Learning Protocol\" for quality guide."
+)
+
+
+def _new_reminder_state():
+    now = time.time()
+    return {
+        "response_count": 0,
+        "last_reminder_ts": now,
+        "last_response_ts": now,
+        "reminder_pending": False,
+    }
+
+
+def _learning_reminder_state_file():
+    """Path to persistent state file (NODE_DIR/learning_reminders.json)."""
+    try:
+        return os.path.join(str(NODE_DIR), "learning_reminders.json")
+    except NameError:
+        return None
+
+
+def _save_learning_reminder_state():
+    """Persist state to disk. Caller should hold _learning_reminder_lock."""
+    path = _learning_reminder_state_file()
+    if not path:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_learning_reminder_state, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"Learning reminder state save error: {e}")
+
+
+def _load_learning_reminder_state():
+    """Load persisted state from disk into _learning_reminder_state."""
+    path = _learning_reminder_state_file()
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            with _learning_reminder_lock:
+                for name, st in data.items():
+                    if isinstance(st, dict) and "response_count" in st:
+                        _learning_reminder_state[name] = st
+            print(f"Learning reminder state loaded: {len(data)} workers")
+    except Exception as e:
+        print(f"Learning reminder state load error: {e}")
+
+
+def _reset_learning_reminder(name: str):
+    """Reset learning reminder state for a worker (on hire/restart/SessionStart)."""
+    with _learning_reminder_lock:
+        _learning_reminder_state[name] = _new_reminder_state()
+        _save_learning_reminder_state()
+
+
+def _fire_reminder(name: str, st: dict):
+    """Mark state as fired and send reminder in background. Caller holds _learning_reminder_lock."""
+    st["response_count"] = 0
+    st["last_reminder_ts"] = time.time()
+    st["reminder_pending"] = True
+    _save_learning_reminder_state()
+    reminder = _LEARNING_REMINDER_TEXT.replace("{name}", name)
+    threading.Thread(
+        target=_send_learning_reminder,
+        args=(name, reminder),
+        daemon=True,
+    ).start()
+
+
+def _check_learning_reminder(name: str):
+    """Increment response count and fire learning reminder if threshold met."""
+    with _learning_reminder_lock:
+        st = _learning_reminder_state.get(name)
+        if st is None:
+            st = _new_reminder_state()
+            _learning_reminder_state[name] = st
+
+        st["last_response_ts"] = time.time()
+
+        if st.get("reminder_pending"):
+            st["reminder_pending"] = False
+            st["response_count"] = 1
+            _save_learning_reminder_state()
+            return
+
+        st["response_count"] = st.get("response_count", 0) + 1
+
+        if st["response_count"] >= LEARNING_REMINDER_RESPONSE_THRESHOLD:
+            _fire_reminder(name, st)
+        else:
+            _save_learning_reminder_state()
+
+
+def _scan_idle_workers():
+    """Check all tracked workers for idle timeout. Called periodically by timer."""
+    try:
+        now = time.time()
+        idle_threshold = LEARNING_REMINDER_IDLE_HOURS * 3600
+        to_fire = []
+
+        with _learning_reminder_lock:
+            for name, st in _learning_reminder_state.items():
+                if st.get("reminder_pending"):
+                    continue
+                if st.get("response_count", 0) <= 1:
+                    continue
+                idle_seconds = now - st.get("last_response_ts", now)
+                since_reminder = now - st.get("last_reminder_ts", now)
+                if idle_seconds >= idle_threshold and since_reminder >= idle_threshold:
+                    to_fire.append(name)
+
+            for name in to_fire:
+                _fire_reminder(name, _learning_reminder_state[name])
+    except Exception as e:
+        print(f"Learning reminder idle scan error: {e}")
+    finally:
+        _schedule_idle_scan()
+
+
+def _seed_learning_reminder_state(worker_names):
+    """Initialize state for workers not already tracked (from disk or previous session)."""
+    with _learning_reminder_lock:
+        changed = False
+        for name in worker_names:
+            if name not in _learning_reminder_state:
+                _learning_reminder_state[name] = _new_reminder_state()
+                changed = True
+        if changed:
+            _save_learning_reminder_state()
+
+
+def _schedule_idle_scan():
+    """Schedule next idle scan (every 30 minutes)."""
+    global _idle_scan_timer
+    _idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
+    _idle_scan_timer.daemon = True
+    _idle_scan_timer.start()
+
+
+def _send_learning_reminder(name: str, text: str):
+    """Send learning reminder to worker (runs in background thread)."""
+    try:
+        time.sleep(2)  # brief delay so it doesn't collide with the response
+        if send_to_worker(name, text):
+            print(f"Learning reminder sent to {name}")
+        else:
+            print(f"Learning reminder: failed to send to {name}")
+    except Exception as e:
+        print(f"Learning reminder error for {name}: {e}")
+
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
@@ -2155,7 +2328,6 @@ def transcribe_voice(file_path: str, timeout: int = None) -> Optional[str]:
         if not file_path_obj.exists():
             return None
 
-        # Multipart form upload matching Cohere Transcribe API
         boundary = uuid.uuid4().hex
         body_parts = []
         body_parts.append(f"--{boundary}".encode())
@@ -3089,6 +3261,45 @@ def _scan_latest_session_id(cwd: str, host: str = None) -> str:
     return latest.stem
 
 
+def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None:
+    """Append a session event to the worker's audit log (best effort)."""
+    if not session_id:
+        return
+    try:
+        d = ensure_session_dir(name)
+        f = d / "session_history.jsonl"
+        entry = json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "session_id": session_id,
+            "cwd": cwd or "",
+            "event": event,
+        })
+        with open(f, "a") as fh:
+            fh.write(entry + "\n")
+        f.chmod(0o600)
+    except Exception:
+        pass
+
+
+def get_session_history(name: str, event: str = None) -> list:
+    """Read the session audit log for a worker. Optional event filter."""
+    f = get_session_dir(name) / "session_history.jsonl"
+    if not f.exists():
+        return []
+    entries = []
+    for line in f.read_text().strip().splitlines():
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+            if event and e.get("event") != event:
+                continue
+            entries.append(e)
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
 def _cache_session_id(name: str, sid: str) -> None:
     """Write session_id to local VPS cache file (best effort, 0o600)."""
     if not sid:
@@ -3096,6 +3307,10 @@ def _cache_session_id(name: str, sid: str) -> None:
     try:
         d = ensure_session_dir(name)
         f = d / "claude_session_id"
+        old = f.read_text().strip() if f.exists() else ""
+        if old != sid:
+            cwd = get_claude_session_cwd(name)
+            _log_session_event(name, sid, cwd, "cache")
         f.write_text(sid)
         f.chmod(0o600)
     except Exception:
@@ -4975,7 +5190,7 @@ class WorkerManager:
                 )
                 workers.append({
                     "name": name,
-                    "machine": info.get("host", ""),
+                    "machine": info.get("host", "") or BRIDGE_SSH_TARGET,
                     "protocol": "http",
                     "address": msg_url,
                     "send_example": send_example,
@@ -4995,7 +5210,7 @@ class WorkerManager:
                     send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
                     workers.append({
                         "name": name,
-                        "machine": peer_host or "",
+                        "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "pipe",
                         "address": str(pipe_path),
                         "send_example": send_example,
@@ -5004,7 +5219,7 @@ class WorkerManager:
                 else:
                     workers.append({
                         "name": name,
-                        "machine": peer_host or "",
+                        "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "none",
                         "address": "",
                         "status": "exited",
@@ -5028,7 +5243,7 @@ class WorkerManager:
                     send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
                     workers.append({
                         "name": name,
-                        "machine": peer_host or "",
+                        "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "pipe",
                         "address": str(pipe_path),
                         "send_example": send_example,
@@ -5053,7 +5268,7 @@ class WorkerManager:
                     note = "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
                 workers.append({
                     "name": name,
-                    "machine": peer_host or "",
+                    "machine": peer_host or BRIDGE_SSH_TARGET,
                     "protocol": "tmux",
                     "address": f"{peer_host}:{tmux_name}" if peer_host else tmux_name,
                     "send_example": send_example,
@@ -5199,6 +5414,7 @@ class WorkerManager:
         state["active"] = name
         save_last_active(name)
         _registry_add(name, backend, chat_id)
+        _reset_learning_reminder(name)
 
         if not backend_obj.is_interactive:
             print(f"Created {backend} worker '{name}' (non-interactive mode)")
@@ -5324,6 +5540,23 @@ class WorkerManager:
             else:
                 print(f"[restart] {name}: Claude still running after 5s kill wait")
 
+        # Kill any stray child process (e.g. SSH, vim) before sending start command
+        if backend.is_interactive and not is_claude_running(tmux_name):
+            pane_pids = _tmux_pane_pids()
+            pane_pid = pane_pids.get(tmux_name)
+            if pane_pid:
+                stray = subprocess.run(
+                    ["pgrep", "-P", str(pane_pid)],
+                    capture_output=True, text=True, timeout=5
+                )
+                if stray.returncode == 0:
+                    for child_pid in stray.stdout.strip().splitlines():
+                        child_pid = child_pid.strip()
+                        if child_pid and child_pid.isdigit():
+                            print(f"[restart] {name}: killing stray child pid {child_pid}")
+                            subprocess.run(["kill", child_pid], capture_output=True)
+                    time.sleep(0.5)
+
         export_hook_env(tmux_name, backend_name)
         time.sleep(0.3)
 
@@ -5346,14 +5579,40 @@ class WorkerManager:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
 
-        # Re-send welcome/instructions so worker gets fresh context after restart
+        # Wait for Claude to actually start before sending welcome
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
-            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
-            self.send(name, welcome)
+            started = False
+            for _ in range(10):
+                time.sleep(1.0)
+                if is_claude_running(tmux_name):
+                    started = True
+                    break
+            if not started and resume_id:
+                print(f"[restart] {name}: resume failed (stale session {resume_id[:8]}), alerting admin")
+                session_id_path = os.path.join(
+                    os.path.expanduser("~"), ".claude", "telegram", "nodes",
+                    _node_name(), "sessions", name, "claude_session_id"
+                )
+                try:
+                    os.remove(session_id_path)
+                    print(f"[restart] {name}: cleared stale session_id file")
+                except FileNotFoundError:
+                    pass
+                if admin_chat_id:
+                    alert = (
+                        f"⚠️ {name}: resume failed (stale session ID {resume_id[:8]}…)\n"
+                        f"Session ID cleared. Use /restart --clean {name} to start fresh."
+                    )
+                    send_telegram_message(admin_chat_id, alert)
+            if started:
+                self.send(name, welcome)
+            else:
+                print(f"[restart] {name}: Claude did not start within 10s, skipping welcome")
         else:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 
+        _reset_learning_reminder(name)
         return True, None
 
     def _restart_dead_worker(self, name: str, backend_name: str, backend, tmux_name: str, mode: str):
@@ -5735,6 +5994,11 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     clean_text = markdown_to_telegram_html(clean_text)
 
+    # Debug: log when sending very short text (helps trace empty "name:" messages)
+    if clean_text and len(clean_text.strip()) <= 5:
+        print(f"{log_prefix} DEBUG short msg: {name}, text={repr(clean_text)}, "
+              f"images={len(images)}, files={len(files)}")
+
     # Send text message if there's text content
     if clean_text:
         prefix_reserve = len(name) + 30
@@ -5871,6 +6135,7 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b""):
                 print(f"gRPC response payload ignored for '{name}': {e}")
 
         send_response_to_telegram(name, text, int(chat_id), log_prefix="gRPC response")
+        _check_learning_reminder(name)
         clear_pending(name)
         mark_hook_event(name)
     except Exception as e:
@@ -6227,9 +6492,8 @@ class CommandRouter:
                         duration = voice.get("duration", 0)
                         transcript = transcribe_voice(local_path)
                         if transcript:
-                            # Transparent: worker receives just the text, as if manager typed it
+                            self.reply(chat_id, f"🎤 _{transcript}_", msg_id)
                             if text:
-                                # Caption + transcript
                                 self._route_media_message(f"{text}\n\n{transcript}", text, chat_id, msg_id, msg=msg)
                             else:
                                 self._route_media_message(transcript, transcript, chat_id, msg_id, msg=msg)
@@ -7209,11 +7473,19 @@ class CommandRouter:
             print(f"[_restart_remote] {name}: _start_worker_on_target FAILED")
             return False, f"Failed to restart {name} on {host}"
 
-        # Send welcome
+        # Wait for Claude to actually start before sending welcome
         welcome = self.workers._build_welcome(name, backend)
         if backend.is_interactive:
-            time.sleep(3.0)
-            self.workers.send(name, welcome)
+            started = False
+            for _ in range(10):
+                time.sleep(1.0)
+                if is_claude_running(tmux_name, host=host):
+                    started = True
+                    break
+            if started:
+                self.workers.send(name, welcome)
+            else:
+                print(f"[_restart_remote] {name}: Claude did not start within 10s, skipping welcome")
 
         print(f"[_restart_remote] {name}: restarted successfully (mode={mode})")
         return True, None
@@ -8428,7 +8700,6 @@ class CommandRouter:
         if not local_path:
             return None
 
-        # Transcribe voice — deliver just the text transparently
         if voice:
             transcript = transcribe_voice(local_path)
             if transcript:
@@ -10498,10 +10769,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"ok": False, "error": str(e)})
 
     def handle_send_endpoint(self, body: bytes = b""):
-        """Send a manager prompt to a worker.
+        """Send a prompt to a worker.
 
         POST /send
-        Body: {"worker": "name", "message": "text"}
+        Body: {"worker": "name", "message": "text", "from": "system"}
+        The "from" field (default "system") is prefixed to the message.
         """
         try:
             data = json.loads(body) if body else {}
@@ -10511,6 +10783,7 @@ class Handler(BaseHTTPRequestHandler):
 
         worker = str(data.get("worker", "")).strip()
         message = data.get("message", data.get("text", ""))
+        sender = str(data.get("from", "system")).strip() or "system"
         if not worker:
             self._send_json(400, {"ok": False, "error": "Missing worker"})
             return
@@ -10518,7 +10791,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "Missing message"})
             return
 
-        delivered = send_to_worker(worker, message)
+        prefixed = f"{sender}: {message}"
+        delivered = send_to_worker(worker, prefixed)
         status = 200 if delivered else 404
         self._send_json(status, {
             "ok": delivered,
@@ -10557,6 +10831,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             chat_id = chat_id_file.read_text().strip()
+
+            # Debug: log short messages to trace source of empty "name:" messages
+            if len(text.strip()) <= 5:
+                source_ip = self.client_address[0] if self.client_address else "unknown"
+                hook_sid = data.get("session_id", "")
+                escape_flag = data.get("escape", False)
+                print(f"Hook response DEBUG: {session_name} -> chat {chat_id}, "
+                      f"text={repr(text)}, len={len(text)}, "
+                      f"source={data.get('source', 'hook')}, "
+                      f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
+                      f"escape={escape_flag}, ip={source_ip}")
+
             print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
             # Update session ID cache if provided (keeps VPS in sync with remote workers)
@@ -10566,6 +10852,8 @@ class Handler(BaseHTTPRequestHandler):
                     sid_file = ensure_session_dir(session_name) / "claude_session_id"
                     old_sid = sid_file.read_text().strip() if sid_file.exists() else ""
                     if old_sid != hook_sid:
+                        cwd = get_claude_session_cwd(session_name)
+                        _log_session_event(session_name, hook_sid, cwd, "hook")
                         sid_file.write_text(hook_sid)
                         sid_file.chmod(0o600)
                 except Exception:
@@ -10573,6 +10861,9 @@ class Handler(BaseHTTPRequestHandler):
 
             # Send response using shared helper
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
+
+            # Learning reminder check (non-blocking)
+            _check_learning_reminder(session_name)
 
             # Clear pending
             clear_pending(session_name)
@@ -10710,7 +11001,13 @@ class Handler(BaseHTTPRequestHandler):
 
             if requested_cwd:
                 _set_worker_cwd(name, requested_cwd)
+                old_cwd = get_claude_session_cwd(name)
                 save_claude_session_cwd(name, requested_cwd)
+                if old_cwd and old_cwd.rstrip("/") != requested_cwd.rstrip("/"):
+                    old_sid = get_claude_session_id(name)
+                    _log_session_event(name, old_sid or "(none)", requested_cwd, "cwd_change")
+                    clear_claude_session_id(name)
+                    print(f"[checkin] {name}: CWD changed ({old_cwd} -> {requested_cwd}), cleared stale session_id")
                 print(f"[checkin] {name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
                 if tmux_name and tmux_exists(tmux_name, host=host):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
@@ -11588,6 +11885,11 @@ def main():
 
     watchdog = threading.Thread(target=watchdog_loop, daemon=True)
     watchdog.start()
+
+    _load_learning_reminder_state()
+    _seed_learning_reminder_state(registered.keys())
+    _schedule_idle_scan()
+    print(f"Learning reminder idle scan: started (every 30 min, {len(_learning_reminder_state)} workers tracked)")
 
     if BridgeGRPCServer is not None:
         try:
