@@ -12222,15 +12222,81 @@ def main():
     elif BRIDGE_GRPC_IMPORT_ERROR is not None:
         print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
 
+    _connector_message_log = {}  # tag -> deque of {ts, html, plain, targets}
+
+    def _connector_log_message(tag, html_text, plain_text, targets):
+        from collections import deque
+        if tag not in _connector_message_log:
+            _connector_message_log[tag] = deque(maxlen=20)
+        _connector_message_log[tag].append({
+            "ts": time.time(),
+            "html": html_text,
+            "plain": plain_text,
+            "targets": targets or [],
+        })
+
+    def _connector_render_html(tag, current_html):
+        """Render HTML page with current message + recent history."""
+        import html as html_mod
+        msgs = list(_connector_message_log.get(tag, []))
+        icon = "🔔" if tag == "github" else "📧"
+        title = f"{icon} {tag.title()} Messages"
+        rows = []
+        for m in msgs:
+            ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(m["ts"]))
+            who = ", ".join(m["targets"]) if m["targets"] else "broadcast"
+            content = m["html"]
+            is_current = (m == msgs[-1]) if msgs else False
+            cls = "msg current" if is_current else "msg"
+            rows.append(f'<div class="{cls}"><div class="meta">{ts} → {html_mod.escape(who)}</div><div class="body">{content}</div></div>')
+        rows_html = "\n".join(rows)
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{title}</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 2em auto; padding: 0 1em; background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ font-size: 1.3em; color: #8be9fd; }}
+.msg {{ border-left: 3px solid #444; padding: 0.5em 1em; margin: 1em 0; background: #16213e; border-radius: 4px; }}
+.msg.current {{ border-left-color: #50fa7b; background: #1a2a4a; }}
+.meta {{ font-size: 0.8em; color: #888; margin-bottom: 0.3em; }}
+.body {{ line-height: 1.5; }}
+blockquote {{ border-left: 2px solid #555; padding-left: 0.8em; color: #aaa; margin: 0.5em 0; }}
+a {{ color: #8be9fd; }}
+</style></head><body>
+<h1>{title}</h1>
+<p style="color:#888;font-size:0.85em">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""}</p>
+{rows_html}
+</body></html>"""
+
+    def _connector_short_summary(tag, plain_text):
+        """Create a max-4-line Telegram summary from plain text."""
+        lines = [l.strip() for l in plain_text.strip().splitlines() if l.strip()]
+        if len(lines) <= 3:
+            return "\n".join(lines)
+        return "\n".join(lines[:3]) + "\n…"
+
     def _connector_on_message(tag):
         def handler(targets, html_text, plain_text=None, attachments=None):
             if plain_text is None:
                 plain_text = html_text
+            _connector_log_message(tag, html_text, plain_text, targets)
             if admin_chat_id:
+                serve_url = None
                 try:
-                    send_telegram_message(admin_chat_id, html_text, parse_mode="HTML")
-                except Exception:
-                    send_telegram_message(admin_chat_id, plain_text)
+                    page_html = _connector_render_html(tag, html_text)
+                    slug = f"connector-{tag}"
+                    tmp_path = f"/tmp/connector-{tag}.html"
+                    with open(tmp_path, "w") as f:
+                        f.write(page_html)
+                    serve_url = _beast_serve_deploy(tmp_path, slug)
+                except Exception as e:
+                    print(f"[{tag}] beast serve failed: {e}")
+                summary = _connector_short_summary(tag, plain_text)
+                if serve_url:
+                    summary += f"\n{serve_url}"
+                try:
+                    send_telegram_message(admin_chat_id, summary)
+                except Exception as e:
+                    print(f"[{tag}] Telegram send failed: {e}")
                 for att in (attachments or []):
                     fpath = att.get("path", "")
                     fname = att.get("filename", "")
