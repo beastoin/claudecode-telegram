@@ -203,6 +203,8 @@ TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
 # Checkin note: read from TEAM_DIR/checkin-note.txt on each checkin/hire/restart.
 # Supports {name} placeholder for per-worker substitution.
 _CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
+# Learning reminder: read from TEAM_DIR/learning-reminder.txt on each fire.
+_LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 WATCHDOG_INTERVAL = 4
 START_GRACE = 30
 THINK_GRACE = 30
@@ -1101,13 +1103,52 @@ _learning_reminder_lock = threading.Lock()
 _idle_scan_timer = None
 
 _LEARNING_REMINDER_TEXT = (
-    "system: Self-learning check — review your recent work. "
-    "Did you hit a surprise, get corrected, or discover a reusable pattern?\n"
-    "If yes: update ~/team/{name}/playbook.md with a \"When X, do Y, because Z\" rule. "
-    "Cross-team value? Also add to ~/team/learnings.md.\n"
-    "If nothing worth keeping, carry on. "
-    "See playbook Section 0 \"Self-Learning Protocol\" for quality guide."
+    "system: Self-Learning Protocol reminder — time to check your learnings.\n\n"
+    "You own your learning. Do not wait for approval to update your playbook.\n\n"
+    "**What to capture:**\n"
+    "Decisions that surprised you, corrections from manager or teammates, "
+    "patterns you will use again, mistakes you will not repeat, "
+    "tool/API behaviors that were not obvious.\n\n"
+    "**What NOT to capture:**\n"
+    "Routine task notes, things already in the code or git history, "
+    "one-off fixes with no reuse value, debugging steps that only apply to a specific bug.\n\n"
+    "**Format:**\n"
+    'Write every rule as: "When X, do Y, because Z." '
+    'The "because Z" is the most important part — without it the rule has no context '
+    "and cannot be judged in edge cases.\n\n"
+    "**Cap:**\n"
+    "Maximum 20 active rules. When you hit 20, replace your weakest rule. "
+    "A tight playbook of battle-tested rules beats a long list nobody reads.\n\n"
+    "**Where to write:**\n"
+    "~/team/{name}/playbook.md for rules specific to your role/tools/project.\n"
+    "~/team/learnings.md for lessons that help other workers (cross-team value). "
+    "Include date, description, tags, and your name.\n"
+    "Do NOT duplicate between personal playbook and shared learnings — pick one home.\n\n"
+    "**Steps:**\n"
+    "1. Reflect — scan your recent work. Did you hit a surprise, get corrected, "
+    "or discover a reusable pattern?\n"
+    "2. If yes — read your ~/team/{name}/playbook.md, check if the lesson already exists. "
+    "Update an existing rule or add a new one.\n"
+    "3. If cross-team value — add a one-liner to ~/team/learnings.md.\n"
+    "4. If nothing worth keeping — carry on. Not every session produces a learning.\n"
+    "5. Clean — if over 20 rules, archive your weakest one.\n\n"
+    "**Quality check:**\n"
+    'Good: "When backend returns 500 on auth-token, check if Firebase emulator is running first, '
+    'because the error message says connection refused which misleads you into checking network config."\n'
+    'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
 )
+
+
+def _read_learning_reminder(name: str) -> str:
+    """Read learning reminder from file, substitute {name}. Falls back to hardcoded constant."""
+    try:
+        if os.path.isfile(_LEARNING_REMINDER_PATH):
+            text = open(_LEARNING_REMINDER_PATH).read().strip()
+            if text:
+                return text.replace("{name}", name)
+    except Exception as e:
+        print(f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
+    return _LEARNING_REMINDER_TEXT.replace("{name}", name)
 
 
 def _new_reminder_state():
@@ -1173,7 +1214,7 @@ def _fire_reminder(name: str, st: dict):
     st["last_reminder_ts"] = time.time()
     st["reminder_pending"] = True
     _save_learning_reminder_state()
-    reminder = _LEARNING_REMINDER_TEXT.replace("{name}", name)
+    reminder = _read_learning_reminder(name)
     threading.Thread(
         target=_send_learning_reminder,
         args=(name, reminder),
