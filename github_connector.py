@@ -242,7 +242,8 @@ class GitHubConnector(BaseConnector):
             reply_hint = f"\n\nView: beast github show {num} --repo {self.repo}"
             reply_hint += f"\nReply: beast github comment {num} --repo {self.repo} --body \"your reply\""
             plain_text += reply_hint
-        self.on_message(targets, html_text, plain_text, [])
+        metadata = {"number": context.get("number"), "repo": self.repo, "comment_id": comment_id}
+        self.on_message(targets, html_text, plain_text, [], metadata=metadata)
         print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
 
     def poll_once(self):

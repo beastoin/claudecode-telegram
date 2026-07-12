@@ -12365,22 +12365,50 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
             parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
         return "\n".join(parts)
 
+    def _connector_export_github(number, repo):
+        """Export a GitHub issue/PR via beast github export --serve, return public URL."""
+        try:
+            r = subprocess.run(
+                ["beast", "github", "export", str(number), "--format", "print",
+                 "--serve", "--repo", repo, "--fresh"],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                for line in r.stderr.splitlines() + r.stdout.splitlines():
+                    if "http" in line and ("localhost" in line or "serve" in line.lower()):
+                        url = line.strip().split()[-1].rstrip("/")
+                        if "localhost" in url:
+                            host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
+                            url = url.replace("localhost", host)
+                        return url
+        except Exception as e:
+            print(f"[github] export failed for #{number}: {e}")
+        return None
+
     def _connector_on_message(tag):
-        def handler(targets, html_text, plain_text=None, attachments=None):
+        def handler(targets, html_text, plain_text=None, attachments=None, metadata=None):
             if plain_text is None:
                 plain_text = html_text
             _connector_log_message(tag, html_text, plain_text, targets)
             if admin_chat_id:
                 serve_url = None
-                try:
-                    page_html = _connector_render_html(tag, html_text)
-                    slug = f"connector-{tag}"
-                    tmp_path = f"/tmp/connector-{tag}.html"
-                    with open(tmp_path, "w") as f:
-                        f.write(page_html)
-                    serve_url = _beast_serve_deploy(tmp_path, slug)
-                except Exception as e:
-                    print(f"[{tag}] beast serve failed: {e}")
+                # GitHub: use beast github export for polished thread view
+                if tag == "github" and metadata and metadata.get("number"):
+                    try:
+                        serve_url = _connector_export_github(
+                            metadata["number"], metadata.get("repo", "BasedHardware/omi"))
+                    except Exception as e:
+                        print(f"[{tag}] github export failed: {e}")
+                # Fallback: render our own HTML page
+                if not serve_url:
+                    try:
+                        page_html = _connector_render_html(tag, html_text)
+                        slug = f"connector-{tag}"
+                        tmp_path = f"/tmp/connector-{tag}.html"
+                        with open(tmp_path, "w") as f:
+                            f.write(page_html)
+                        serve_url = _beast_serve_deploy(tmp_path, slug)
+                    except Exception as e:
+                        print(f"[{tag}] beast serve failed: {e}")
                 summary = _connector_short_summary(tag, plain_text, serve_url)
                 try:
                     send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
