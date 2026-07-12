@@ -634,12 +634,16 @@ def tmux_exists(tmux_name: str, host: str = None) -> bool:
     ).returncode == 0
 
 
-def tmux_send_message(tmux_name: str, text: str, host: str = None) -> bool:
+def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool = False) -> bool:
     """Send text + Enter to tmux session via paste-buffer (reliable for long messages).
 
     Uses tmux load-buffer/paste-buffer instead of send-keys -l to avoid
     character-by-character terminal injection which causes input batching
     on long messages or rapid sends.
+
+    When literal=True, uses send-keys -l instead of paste-buffer.
+    This is needed for TUI dialogs (e.g. Claude's OAuth "Paste code here")
+    that don't support bracketed paste mode.
 
     When host is set, uses SSH and pipes text via stdin (no shared filesystem needed).
 
@@ -652,6 +656,17 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None) -> bool:
     with lock:
         flock_fd = _acquire_flock(tmux_name)
         try:
+            if literal:
+                r = _remote_run(
+                    ["tmux", "send-keys", "-t", tmux_name, "-l", text],
+                    host=host, capture_output=True,
+                )
+                if r.returncode != 0:
+                    return False
+                time.sleep(0.5)
+                r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host)
+                return r.returncode == 0
+
             buf_name = f"msg-{uuid.uuid4().hex[:8]}"
 
             if host:
@@ -856,7 +871,19 @@ class ClaudeBackend:
         host = get_worker_host(worker_name)
         if not tmux_exists(tmux_name, host=host):
             return False
-        return tmux_send_message(tmux_name, text, host=host)
+        # Claude's OAuth login dialog doesn't support bracketed paste.
+        # Detect login state and use literal send-keys instead.
+        literal = False
+        try:
+            r = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=host, capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and "Paste code here" in r.stdout:
+                literal = True
+        except Exception:
+            pass
+        return tmux_send_message(tmux_name, text, host=host, literal=literal)
 
     def is_online(self, tmux_name: str) -> bool:
         # Note: is_online doesn't have worker_name, so can't look up host.
