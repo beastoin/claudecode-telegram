@@ -11053,8 +11053,32 @@ class Handler(BaseHTTPRequestHandler):
                     _registry_add_callback(name, callback_url, host=host, version=version, tools=tools)
                     print(f"Callback worker registered: {name} (host={host}, url={callback_url}, version={version})")
                 else:
+                    _registry_add(name, DEFAULT_BACKEND, host=host)
                     print(f"Forge worker registered: {name} (host={host}, version={version})")
-            self._send_json(200, {"ok": True})
+            tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
+            import subprocess as _sp
+            conflict = False
+            active_workers = []
+            try:
+                r = _sp.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                            capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    active_workers = [s.removeprefix(TMUX_PREFIX)
+                                      for s in r.stdout.strip().split("\n")
+                                      if s.startswith(TMUX_PREFIX)]
+                    conflict = name in active_workers if name else False
+            except Exception:
+                pass
+            self._send_json(200, {
+                "ok": True,
+                "settings": {
+                    "tmux_prefix": TMUX_PREFIX,
+                    "node_name": NODE_NAME or "",
+                    "tmux_session": tmux_session,
+                },
+                "conflict": conflict,
+                "active_workers": active_workers,
+            })
         except Exception as e:
             print(f"Register error: {e}")
             self._send_json(500, {"ok": False, "error": str(e)})
