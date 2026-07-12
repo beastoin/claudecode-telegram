@@ -1075,6 +1075,21 @@ _force_restart_pending_cwd = {}  # name -> True: force restart completed, allow 
 _waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
 _watchdog_lock = threading.Lock()
 
+# Host-level health tracking: detect when machines (Mac Mini, etc.) go offline
+HOST_DOWN_THRESHOLD = 3  # consecutive SSH failures before declaring host DOWN
+_host_ssh_failures = {}  # host -> int (consecutive SSH probe failures)
+_host_down = {}  # host -> bool (True = host is DOWN)
+_host_down_since = {}  # host -> float (timestamp when host went DOWN)
+_host_last_error = {}  # host -> str (last SSH error message)
+
+# Disk space monitoring: alert when machines run low on disk
+DISK_ALERT_THRESHOLD_PCT = 90  # alert when usage exceeds this percentage
+DISK_ALERT_THRESHOLD_GB = 10  # alert when free space drops below this (GB)
+DISK_ALERT_COOLDOWN = 3600  # seconds between repeated disk alerts per host
+_host_disk_usage = {}  # host -> {pct: int, free_gb: float, total_gb: float, ts: float}
+_host_disk_alert_ts = {}  # host -> float (last disk alert timestamp)
+_host_disk_alerted = {}  # host -> bool (currently in alert state, for recovery detection)
+
 # Learning reminders: periodic self-learning nudges per worker
 # Two triggers: response count threshold, and idle timeout (checked by timer).
 # Anti-annoyance: after any reminder fires, all triggers suppressed until worker responds.
@@ -3818,6 +3833,149 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         print(f"Watchdog alert error: {e}")
 
 
+def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
+    """Track host SSH probe results; alert on DOWN/BACK UP transitions."""
+    now = time.time()
+    with _watchdog_lock:
+        was_down = _host_down.get(host, False)
+        if ok:
+            _host_ssh_failures[host] = 0
+            _host_last_error.pop(host, None)
+            if was_down:
+                _host_down[host] = False
+                down_since = _host_down_since.pop(host, now)
+                duration = int(now - down_since)
+                workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
+                alert_text = (f"✅ Host BACK UP: {host}\n"
+                              f"Was down for {duration // 60}m {duration % 60}s\n"
+                              f"Workers affected: {', '.join(workers_on_host) or 'none'}")
+                _do_send = True
+            else:
+                _do_send = False
+                alert_text = None
+        else:
+            failures = _host_ssh_failures.get(host, 0) + 1
+            _host_ssh_failures[host] = failures
+            _host_last_error[host] = error or "ssh probe failed"
+            if not was_down and failures >= HOST_DOWN_THRESHOLD:
+                _host_down[host] = True
+                _host_down_since[host] = now
+                workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
+                alert_text = (f"🔴 Host DOWN: {host}\n"
+                              f"After {failures} consecutive SSH failures\n"
+                              f"Error: {error or 'unknown'}\n"
+                              f"Workers affected: {', '.join(workers_on_host) or 'none'}")
+                _do_send = True
+            else:
+                _do_send = False
+                alert_text = None
+
+    if _do_send and alert_text and admin_chat_id:
+        try:
+            transport.send_text(admin_chat_id, alert_text)
+            print(f"[watchdog] Host alert: {alert_text.splitlines()[0]}")
+        except Exception as e:
+            print(f"[watchdog] Host alert error: {e}")
+
+
+def _is_host_down(host: str) -> bool:
+    with _watchdog_lock:
+        return _host_down.get(host, False)
+
+
+def _check_disk_usage(host: str | None = None) -> dict | None:
+    """Check disk usage on a host (None = local). Returns {pct, free_gb, total_gb} or None."""
+    try:
+        r = _remote_run(
+            ["df", "-BG", "--output=size,used,avail,pcent", "/"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split()
+        if len(parts) < 4:
+            return None
+        total_gb = float(parts[0].rstrip("G"))
+        free_gb = float(parts[2].rstrip("G"))
+        pct = int(parts[3].rstrip("%"))
+        return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
+    except Exception:
+        return None
+
+
+def _check_disk_usage_macos(host: str) -> dict | None:
+    """Check disk usage on macOS host (df output differs from Linux)."""
+    try:
+        r = _remote_run(
+            ["df", "-g", "/"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split()
+        if len(parts) < 6:
+            return None
+        total_gb = float(parts[1])
+        free_gb = float(parts[3])
+        pct = int(parts[4].rstrip("%"))
+        return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
+    except Exception:
+        return None
+
+
+def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
+    """Probe disk usage on local + remote hosts, alert on threshold breaches."""
+    now = time.time()
+    hosts_to_check = [None] + list(remote_hosts)  # None = local (VPS)
+
+    for host in hosts_to_check:
+        if host and _is_host_down(host):
+            continue
+
+        host_label = host or "VPS"
+        is_mac = host and "mac" in host.lower()
+        usage = _check_disk_usage_macos(host) if is_mac else _check_disk_usage(host)
+
+        if usage is None:
+            continue
+
+        with _watchdog_lock:
+            _host_disk_usage[host_label] = {**usage, "ts": now}
+
+        is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
+        was_alerted = _host_disk_alerted.get(host_label, False)
+
+        if is_critical and not was_alerted:
+            last_alert = _host_disk_alert_ts.get(host_label, 0)
+            if now - last_alert >= DISK_ALERT_COOLDOWN:
+                alert_text = (
+                    f"💾 Disk space critical: {host_label}\n"
+                    f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)"
+                )
+                _host_disk_alert_ts[host_label] = now
+                _host_disk_alerted[host_label] = True
+                if admin_chat_id:
+                    try:
+                        transport.send_text(admin_chat_id, alert_text)
+                        print(f"[watchdog] Disk alert: {alert_text.splitlines()[0]}")
+                    except Exception as e:
+                        print(f"[watchdog] Disk alert error: {e}")
+        elif not is_critical and was_alerted:
+            _host_disk_alerted[host_label] = False
+            if admin_chat_id:
+                try:
+                    transport.send_text(
+                        admin_chat_id,
+                        f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
+                    )
+                except Exception:
+                    pass
+
+
 _last_resolved_ts: dict[str, float] = {}  # Per-worker resolved alert cooldown
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
@@ -3825,7 +3983,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         return
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states:
@@ -3874,11 +4032,17 @@ def _handle_watchdog_transition(
     if now is None:
         now = time.time()
 
-    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     with _watchdog_lock:
         prev_state = _prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
+
+    # Host-level alerts are sent by _record_host_probe; suppress per-worker spam
+    if state == "HOST_OFFLINE":
+        with _watchdog_lock:
+            _prev_worker_states[name] = state
+        return
 
     # Suppress alerts for workers being teleported (teleport takes 30-60s,
     # during which the worker appears DEAD/OFFLINE but is expected)
@@ -3950,6 +4114,7 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 
 
 def watchdog_loop():
+    _disk_check_counter = 0
     while True:
         try:
             now = time.time()
@@ -3989,10 +4154,13 @@ def watchdog_loop():
                             parts = line.strip().split()
                             if len(parts) >= 2 and parts[1].isdigit():
                                 remote_pane_pids[parts[0]] = parts[1]
+                        _record_host_probe(host, ok=True)
                     else:
                         failed_hosts.add(host)
-                except Exception:
+                        _record_host_probe(host, ok=False, error=f"tmux list-panes exit {r.returncode}")
+                except Exception as e:
                     failed_hosts.add(host)
+                    _record_host_probe(host, ok=False, error=str(e)[:200])
 
             for name, session in registered.items():
                 backend_name = get_worker_backend(name, session)
@@ -4045,8 +4213,13 @@ def watchdog_loop():
                 if probe_failed and not tmux_exists and _consecutive_probe_failures.get(name, 0) < 3:
                     continue
 
-                # Skip remote workers whose host SSH probe failed this cycle
+                # Mark workers on down hosts as HOST_OFFLINE instead of silently skipping
                 host = get_worker_host(name)
+                if host and _is_host_down(host):
+                    reason = f"host {host} offline"
+                    since = _record_worker_state(name, "HOST_OFFLINE", reason, now)
+                    _handle_watchdog_transition(name, "HOST_OFFLINE", reason, since, now=now)
+                    continue
                 if host and host in failed_hosts and not tmux_exists:
                     continue
 
@@ -4208,6 +4381,15 @@ def watchdog_loop():
             for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
                     _consecutive_probe_failures.pop(name, None)
+            # Disk space check every ~5 min (every 20th cycle)
+            _disk_check_counter += 1
+            if _disk_check_counter >= 20:
+                _disk_check_counter = 0
+                try:
+                    _probe_disk_all_hosts(set(remote_workers.keys()))
+                except Exception as de:
+                    print(f"[watchdog] Disk check error: {de}")
+
         except Exception as e:
             print(f"Watchdog error: {e}")
 
@@ -4342,6 +4524,8 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
         return f"Error loop ({minutes}m)"
     if state == "DEAD":
         return "Not responding"
+    if state == "HOST_OFFLINE":
+        return "Host offline"
     if state == "OFFLINE":
         return "Offline"
     if state == "EXITED":
