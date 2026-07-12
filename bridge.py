@@ -6402,14 +6402,18 @@ def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict)
 
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
-    """Deploy an HTML file via beast serve and return the URL, or None on failure."""
+    """Deploy an HTML file via beast serve and return the public URL, or None on failure."""
     try:
         r = subprocess.run(
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
             capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             data = json.loads(r.stdout)
-            return data.get("url")
+            url = data.get("url", "")
+            if url and "localhost" in url:
+                host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
+                url = url.replace("localhost", host)
+            return url or None
     except Exception as e:
         print(f"beast serve deploy failed for {slug}: {e}")
     return None
@@ -12267,12 +12271,36 @@ a {{ color: #8be9fd; }}
 {rows_html}
 </body></html>"""
 
-    def _connector_short_summary(tag, plain_text):
-        """Create a max-4-line Telegram summary from plain text."""
-        lines = [l.strip() for l in plain_text.strip().splitlines() if l.strip()]
-        if len(lines) <= 3:
-            return "\n".join(lines)
-        return "\n".join(lines[:3]) + "\n…"
+    def _connector_short_summary(tag, plain_text, serve_url=None):
+        """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
+        import html as _html
+        icon = "🔔" if tag == "github" else "📧"
+        body = plain_text.strip()
+        # Strip verbose prefix like "manager (via GitHub issue #1234):"
+        import re as _re
+        body = _re.sub(r'^manager\s*\(via\s+\w+[^)]*\):\s*', '', body)
+        body = _re.sub(r'\[thread:[^\]]+\]\s*', '', body)
+        # Collapse to single line, trim
+        body = " ".join(body.split())
+        if len(body) > 200:
+            body = body[:197] + "…"
+        # Build: icon + tag ref on line 1, body on line 2, link on line 3
+        # Extract reference (issue/PR number, subject, thread)
+        ref_match = _re.search(r'#(\d+)', plain_text)
+        thread_match = _re.search(r'\[thread:([^\]]+)\]', plain_text)
+        if ref_match:
+            ref = f"#{ref_match.group(1)}"
+        elif thread_match:
+            ref = f"thread:{thread_match.group(1)}"
+        else:
+            ref = ""
+        header = f"{icon} <b>{tag.title()}</b>"
+        if ref:
+            header += f" {_html.escape(ref)}"
+        parts = [header, _html.escape(body)]
+        if serve_url:
+            parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
+        return "\n".join(parts)
 
     def _connector_on_message(tag):
         def handler(targets, html_text, plain_text=None, attachments=None):
@@ -12290,13 +12318,14 @@ a {{ color: #8be9fd; }}
                     serve_url = _beast_serve_deploy(tmp_path, slug)
                 except Exception as e:
                     print(f"[{tag}] beast serve failed: {e}")
-                summary = _connector_short_summary(tag, plain_text)
-                if serve_url:
-                    summary += f"\n{serve_url}"
+                summary = _connector_short_summary(tag, plain_text, serve_url)
                 try:
-                    send_telegram_message(admin_chat_id, summary)
-                except Exception as e:
-                    print(f"[{tag}] Telegram send failed: {e}")
+                    send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
+                except Exception:
+                    try:
+                        send_telegram_message(admin_chat_id, plain_text[:300])
+                    except Exception as e:
+                        print(f"[{tag}] Telegram send failed: {e}")
                 for att in (attachments or []):
                     fpath = att.get("path", "")
                     fname = att.get("filename", "")
