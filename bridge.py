@@ -12240,36 +12240,99 @@ def main():
         })
 
     def _connector_render_html(tag, current_html):
-        """Render HTML page with current message + recent history."""
+        """Render HTML page with current message + recent history (rewind style)."""
         import html as html_mod
+        esc = html_mod.escape
         msgs = list(_connector_message_log.get(tag, []))
         icon = "🔔" if tag == "github" else "📧"
-        title = f"{icon} {tag.title()} Messages"
-        rows = []
-        for m in msgs:
-            ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(m["ts"]))
-            who = ", ".join(m["targets"]) if m["targets"] else "broadcast"
+        title = f"{tag.title()} Feed"
+
+        blocks = []
+        for i, m in enumerate(msgs):
+            ts = time.strftime("%b %d, %H:%M", time.gmtime(m["ts"]))
+            who = ", ".join(m["targets"]) if m["targets"] else "all"
             content = m["html"]
-            is_current = (m == msgs[-1]) if msgs else False
-            cls = "msg current" if is_current else "msg"
-            rows.append(f'<div class="{cls}"><div class="meta">{ts} → {html_mod.escape(who)}</div><div class="body">{content}</div></div>')
-        rows_html = "\n".join(rows)
-        return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{title}</title>
+            # Auto-link URLs in content
+            content = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', content)
+            content = content.replace("\n", "<br>")
+            is_latest = (i == len(msgs) - 1)
+            cls = "chat-msg latest" if is_latest else "chat-msg"
+            label = "NEW" if is_latest else ""
+            badge = f'<span class="badge">Latest</span>' if is_latest else ""
+            av_letter = tag[0].upper()
+            av_color = "#8b5cf6" if tag == "github" else "#f59e0b"
+            blocks.append(
+                f'<div class="{cls}">'
+                f'<div class="u-av"><svg viewBox="0 0 28 28"><rect width="28" height="28" rx="14" fill="{av_color}"/>'
+                f'<text x="14" y="18" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">{av_letter}</text></svg></div>'
+                f'<div class="chat-body">'
+                f'<span class="u-name">{esc(tag.title())}</span>'
+                f'<span class="ts">{ts}</span>'
+                f'<span class="target">→ {esc(who)}</span>'
+                f'{badge}'
+                f'<div class="chat-text">{content}</div>'
+                f'</div></div>'
+            )
+
+        blocks_html = "\n".join(blocks)
+        return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{icon} {title}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <style>
-body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 2em auto; padding: 0 1em; background: #1a1a2e; color: #e0e0e0; }}
-h1 {{ font-size: 1.3em; color: #8be9fd; }}
-.msg {{ border-left: 3px solid #444; padding: 0.5em 1em; margin: 1em 0; background: #16213e; border-radius: 4px; }}
-.msg.current {{ border-left-color: #50fa7b; background: #1a2a4a; }}
-.meta {{ font-size: 0.8em; color: #888; margin-bottom: 0.3em; }}
-.body {{ line-height: 1.5; }}
-blockquote {{ border-left: 2px solid #555; padding-left: 0.8em; color: #aaa; margin: 0.5em 0; }}
-a {{ color: #8be9fd; }}
-</style></head><body>
-<h1>{title}</h1>
-<p style="color:#888;font-size:0.85em">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""}</p>
-{rows_html}
-</body></html>"""
+:root {{
+  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
+  --user-bg:rgba(255,255,255,.04); --code-bg:#1a1c1a; --link:#75dbf0; --radius:6px;
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
+  --accent:#8b5cf6;
+}}
+@media(prefers-color-scheme:light){{
+  :root{{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
+    --user-bg:rgba(0,0,0,.03);--code-bg:#f4f4f0;--link:#0969da;--accent:#7c3aed;}}
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+html{{font-size:14px}}
+body{{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
+  -webkit-font-smoothing:antialiased}}
+.wrap{{max-width:48rem;margin:0 auto;padding:24px 16px 80px}}
+header{{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}}
+h1{{font-size:1.3rem;font-weight:700}}
+.meta{{color:var(--muted);font-size:.85rem;margin-top:4px}}
+.thread{{display:flex;flex-direction:column;gap:4px}}
+.chat-msg{{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:8px 8px;
+  border-radius:8px;transition:background .2s}}
+.chat-msg:hover{{background:var(--user-bg)}}
+.chat-msg.latest{{background:rgba(117,219,240,.06);border:1px solid rgba(117,219,240,.1)}}
+.chat-body{{min-width:0}}
+.u-av{{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px}}
+.u-av svg{{width:100%;height:100%}}
+.u-name{{font-weight:600;font-size:.85rem;margin-right:6px}}
+.ts{{font-size:.75rem;color:var(--muted)}}
+.target{{font-size:.75rem;color:var(--muted);margin-left:6px}}
+.badge{{font-size:.65rem;font-weight:600;color:var(--link);background:rgba(117,219,240,.1);
+  padding:1px 6px;border-radius:3px;margin-left:8px;text-transform:uppercase}}
+.chat-text{{white-space:pre-wrap;word-break:break-word;font-size:.9rem;line-height:1.6;margin-top:2px}}
+.chat-text a{{color:var(--link)}}
+blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;color:var(--muted)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>{icon} {title}</h1>
+<div class="meta">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""} &middot; Updated {time.strftime("%b %d, %H:%M UTC", time.gmtime())}</div>
+</header>
+<div class="thread">
+{blocks_html}
+</div>
+</div>
+</body>
+</html>'''
 
     def _connector_short_summary(tag, plain_text, serve_url=None):
         """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
