@@ -6401,6 +6401,20 @@ def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict)
     print(f"gRPC worker registered: {name} ({host_label}, {version_label}, tools: {tool_names})")
 
 
+def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
+    """Deploy an HTML file via beast serve and return the URL, or None on failure."""
+    try:
+        r = subprocess.run(
+            ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            data = json.loads(r.stdout)
+            return data.get("url")
+    except Exception as e:
+        print(f"beast serve deploy failed for {slug}: {e}")
+    return None
+
+
 def handle_grpc_worker_disconnect(name: str):
     print(f"gRPC worker disconnected: {name}")
 
@@ -7070,11 +7084,32 @@ class CommandRouter:
         if name in ("team", "--team"):
             REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _time.time() + REWIND_TIMEOUT}
             url = f"{base_url}/team-chat?token={token}"
+            try:
+                html_content = _render_team_chat_html(per_page=200, token=token)
+                snap_path = "/tmp/rewind-team.html"
+                with open(snap_path, "w") as f:
+                    f.write(html_content)
+                serve_url = _beast_serve_deploy(snap_path, "rewind-team")
+                if serve_url:
+                    self.reply(chat_id, f"\U0001f4ac Team chat\n{serve_url}\n\nLive (5min): {url}")
+                    return True
+            except Exception as e:
+                print(f"Team chat snapshot deploy failed: {e}")
             self.reply(chat_id, f"\U0001f4ac Team chat (5min)\n{url}")
             return True
         REWIND_TOKENS[token] = {"name": name, "expires_at": _time.time() + REWIND_TIMEOUT}
-        # Use Tailscale IP (private network) — never route through cloudflare
         url = f"{base_url}/transcript/{name}?token={token}"
+        try:
+            html_content = _render_transcript_html(name, per_page=200, token=token)
+            snap_path = f"/tmp/rewind-{name}.html"
+            with open(snap_path, "w") as f:
+                f.write(html_content)
+            serve_url = _beast_serve_deploy(snap_path, f"rewind-{name}")
+            if serve_url:
+                self.reply(chat_id, f"⏪ Rewind for {name}\n{serve_url}\n\nLive (5min): {url}")
+                return True
+        except Exception as e:
+            print(f"Rewind snapshot deploy failed for {name}: {e}")
         self.reply(chat_id, f"⏪ Rewind for {name} (5min)\n{url}")
         return True
 
@@ -7113,13 +7148,17 @@ class CommandRouter:
             self.reply(chat_id, "PR review generation timed out (>300s).", outcome="Needs decision")
             return True
 
-        # Generate token and serve via existing transcript-like endpoint
-        import secrets, time as _time
-        token = secrets.token_urlsafe(32)
-        PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _time.time() + 300}
-        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-        url = f"{base_url}/pr-review/{pr_num}?token={token}"
-        self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
+        slug = f"pr-{pr_num}"
+        serve_url = _beast_serve_deploy(out_path, slug)
+        if serve_url:
+            self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
+        else:
+            import secrets, time as _time
+            token = secrets.token_urlsafe(32)
+            PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _time.time() + 300}
+            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+            url = f"{base_url}/pr-review/{pr_num}?token={token}"
+            self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
         return True
 
     def cmd_memory(self, query, chat_id):
