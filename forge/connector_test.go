@@ -2,8 +2,14 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -67,12 +73,12 @@ func TestBridgeConnectorIsExternalReceiver(t *testing.T) {
 	if !ok {
 		t.Fatal("bridge connector must implement ExternalReceiver")
 	}
-	ext.IsExternal() // Just verify it doesn't panic
+	ext.IsExternal()
 }
 
 func TestBridgeConnectorIsTeamAware(t *testing.T) {
 	c, _ := NewConnector("bridge")
-	if _, ok := c.(TeamAware); !ok {
+	if _, ok := any(c).(TeamAware); !ok {
 		t.Fatal("bridge connector must implement TeamAware")
 	}
 }
@@ -176,26 +182,318 @@ func TestSlackConnectorIsStreamReceiver(t *testing.T) {
 }
 
 func TestConnectorHostExternalDoesNotBlock(t *testing.T) {
-	c := &BridgeConnector{}
+	t.Parallel()
 
-	host := NewConnectorHost(c, nil, ConnectorConfig{
-		WorkerName: "test",
-		BridgeURL:  "http://localhost:8271",
-		Config:     map[string]string{"BRIDGE_URL": "http://localhost:8271"},
-	})
+	stub := &externalStub{}
+	cfg := ConnectorConfig{WorkerName: "ext-test"}
+	if err := stub.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	host := NewConnectorHost(stub, nil, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	// BridgeConnector Init will fail (no bridge running) but we can test the host logic
-	// by pre-initializing manually
-	c.bridgeURL = "http://localhost:8271"
-	c.name = "test"
+	done := make(chan error, 1)
+	go func() { done <- host.Run(ctx) }()
 
-	// Override to skip Init (since no bridge is actually running)
-	err := host.runExternal(ctx)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("host.Run() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host.Run() did not return after context cancellation")
+	}
+
+	if !stub.initCalled {
+		t.Fatal("connector Init was not called")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BridgeConnector HTTP behavior tests (using Init for setup)
+// ---------------------------------------------------------------------------
+
+func TestBridgeConnector_Init_HealthChecksAndRegisters(t *testing.T) {
+	t.Parallel()
+
+	var healthHits int
+	var registerHits int
+	var registerPayload map[string]string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			healthHits++
+		case r.Method == http.MethodPost && r.URL.Path == "/register":
+			registerHits++
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &registerPayload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	err := c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "mon",
+		BridgeURL:  server.URL,
+	})
 	if err != nil {
-		t.Fatalf("host external should return nil on context cancel: %v", err)
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	if healthHits != 1 {
+		t.Fatalf("health check hits = %d, want 1", healthHits)
+	}
+	if registerHits != 1 {
+		t.Fatalf("register hits = %d, want 1", registerHits)
+	}
+	if registerPayload["name"] != "mon" {
+		t.Fatalf("register payload name = %q, want mon", registerPayload["name"])
+	}
+}
+
+func TestBridgeConnector_Init_FallsBackToConfigBridgeURL(t *testing.T) {
+	t.Parallel()
+
+	var healthHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			healthHits++
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	err := c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "mon",
+		Config:     map[string]string{"BRIDGE_URL": server.URL},
+	})
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	if healthHits != 1 {
+		t.Fatalf("health check hits = %d, want 1 (fallback to Config BRIDGE_URL)", healthHits)
+	}
+}
+
+func TestBridgeConnector_Send_PostsToResponseEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotPayload map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/response" {
+			gotPath = r.URL.Path
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotPayload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "mon",
+		BridgeURL:  server.URL,
+	})
+
+	if err := c.Send(context.Background(), Response{Text: "done"}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if gotPath != "/response" {
+		t.Fatalf("path = %q, want /response", gotPath)
+	}
+	if gotPayload["text"] != "done" {
+		t.Fatalf("payload[text] = %q, want done", gotPayload["text"])
+	}
+	if gotPayload["source"] != "mon" {
+		t.Fatalf("payload[source] = %q, want mon", gotPayload["source"])
+	}
+	if gotPayload["session"] != "mon" {
+		t.Fatalf("payload[session] = %q, want mon", gotPayload["session"])
+	}
+}
+
+func TestBridgeConnector_Send_FailsWithNoBridgeURL(t *testing.T) {
+	t.Parallel()
+
+	c := &BridgeConnector{}
+	err := c.Send(context.Background(), Response{Text: "hello"})
+	if err == nil {
+		t.Fatal("Send() with no bridgeURL should return error")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("error = %v, want 'not configured'", err)
+	}
+}
+
+func TestBridgeConnector_Send_FailsOnNon200(t *testing.T) {
+	t.Parallel()
+
+	reqCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		if r.URL.Path == "/response" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "mon",
+		BridgeURL:  server.URL,
+	})
+
+	err := c.Send(context.Background(), Response{Text: "hello"})
+	if err == nil {
+		t.Fatal("Send() on 503 should return error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("error = %v, want to contain 'HTTP 503'", err)
+	}
+}
+
+func TestBridgeConnector_DiscoverWorkers_ParsesResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/workers" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"name":"mon","send_example":"curl -X POST ..."},{"name":"luck","send_example":"curl -X POST /luck"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "testworker",
+		BridgeURL:  server.URL,
+	})
+
+	ta := any(c).(TeamAware)
+	workers, err := ta.DiscoverWorkers(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverWorkers() error = %v", err)
+	}
+	if len(workers) != 2 {
+		t.Fatalf("len(workers) = %d, want 2", len(workers))
+	}
+	if workers[0].Name != "mon" {
+		t.Fatalf("workers[0].Name = %q, want mon", workers[0].Name)
+	}
+	if workers[1].Name != "luck" {
+		t.Fatalf("workers[1].Name = %q, want luck", workers[1].Name)
+	}
+	if workers[0].SendExample != "curl -X POST ..." {
+		t.Fatalf("workers[0].SendExample = %q, want 'curl -X POST ...'", workers[0].SendExample)
+	}
+}
+
+func TestBridgeConnector_DiscoverWorkers_IncludesFromParam(t *testing.T) {
+	t.Parallel()
+
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/workers" {
+			gotQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "testworker",
+		BridgeURL:  server.URL,
+	})
+
+	ta := any(c).(TeamAware)
+	ta.DiscoverWorkers(context.Background())
+	if !strings.Contains(gotQuery, "from=testworker") {
+		t.Fatalf("query = %q, want to contain 'from=testworker'", gotQuery)
+	}
+}
+
+func TestBridgeConnector_SendToWorker_PostsToSendEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotPayload map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/send" {
+			gotPath = r.URL.Path
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &gotPayload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "lee",
+		BridgeURL:  server.URL,
+	})
+
+	ta := any(c).(TeamAware)
+	if err := ta.SendToWorker(context.Background(), "luck", "hello luck"); err != nil {
+		t.Fatalf("SendToWorker() error = %v", err)
+	}
+
+	if gotPath != "/send" {
+		t.Fatalf("path = %q, want /send", gotPath)
+	}
+	if gotPayload["from"] != "lee" {
+		t.Fatalf("payload[from] = %q, want lee", gotPayload["from"])
+	}
+	if gotPayload["to"] != "luck" {
+		t.Fatalf("payload[to] = %q, want luck", gotPayload["to"])
+	}
+	if gotPayload["text"] != "hello luck" {
+		t.Fatalf("payload[text] = %q, want 'hello luck'", gotPayload["text"])
+	}
+}
+
+func TestBridgeConnector_SendToWorker_FailsOnNon200(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/send" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &BridgeConnector{}
+	c.Init(context.Background(), ConnectorConfig{
+		WorkerName: "lee",
+		BridgeURL:  server.URL,
+	})
+
+	ta := any(c).(TeamAware)
+	err := ta.SendToWorker(context.Background(), "unknown", "hey")
+	if err == nil {
+		t.Fatal("SendToWorker() on 404 should return error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("error = %v, want to contain 'HTTP 404'", err)
 	}
 }
 
@@ -205,15 +503,14 @@ func TestConnectorHostPollDelivers(t *testing.T) {
 	}
 
 	rt := &connStubRuntime{}
-
 	host := NewConnectorHost(stub, rt, ConnectorConfig{WorkerName: "test"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	host.runPollLoop(ctx, stub)
+	host.Run(ctx)
 
-	if len(rt.sent) == 0 {
+	if len(rt.getSent()) == 0 {
 		t.Fatal("expected at least one message delivered to runtime")
 	}
 }
@@ -229,19 +526,22 @@ func TestConnectorHostStreamDelivers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	host.runStream(ctx, stub)
+	host.Run(ctx)
 
-	if len(rt.sent) == 0 {
+	sent := rt.getSent()
+	if len(sent) == 0 {
 		t.Fatal("expected at least one message delivered to runtime")
 	}
-	if rt.sent[0] != "hello from stream" {
-		t.Errorf("got %q, want %q", rt.sent[0], "hello from stream")
+	if sent[0] != "hello from stream" {
+		t.Errorf("got %q, want %q", sent[0], "hello from stream")
 	}
 }
 
 func TestHookListenerStartStop(t *testing.T) {
+	t.Parallel()
+
 	stub := &stubSendConnector{}
-	socketPath := "/tmp/forge-test-hook.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 
 	hl := NewHookListener(socketPath, stub)
 	if err := hl.Start(); err != nil {
@@ -253,7 +553,6 @@ func TestHookListenerStartStop(t *testing.T) {
 		t.Errorf("SocketPath() = %q, want %q", hl.SocketPath(), socketPath)
 	}
 
-	// Verify the socket is reachable via a unix dialer
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
@@ -303,38 +602,50 @@ func TestFormatInbound(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper method exposed for testing
-// ---------------------------------------------------------------------------
-
-func (h *ConnectorHost) runExternal(ctx context.Context) error {
-	<-ctx.Done()
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // Test stubs
 // ---------------------------------------------------------------------------
 
+type externalStub struct {
+	initCalled bool
+}
+
+func (s *externalStub) Type() string                                    { return "external-test" }
+func (s *externalStub) Capabilities() Caps                              { return CapText }
+func (s *externalStub) Requirements() Reqs                              { return 0 }
+func (s *externalStub) Init(_ context.Context, _ ConnectorConfig) error { s.initCalled = true; return nil }
+func (s *externalStub) Send(context.Context, Response) error            { return nil }
+func (s *externalStub) Close() error                                    { return nil }
+func (s *externalStub) IsExternal()                                     {}
+
 type connStubRuntime struct {
+	mu   sync.Mutex
 	sent []string
 }
 
-func (s *connStubRuntime) Start() error              { return nil }
-func (s *connStubRuntime) Send(msg string) error     { s.sent = append(s.sent, msg); return nil }
-func (s *connStubRuntime) Health() error             { return nil }
+func (s *connStubRuntime) Start() error          { return nil }
+func (s *connStubRuntime) Send(msg string) error { s.mu.Lock(); s.sent = append(s.sent, msg); s.mu.Unlock(); return nil }
+func (s *connStubRuntime) Health() error         { return nil }
+
+func (s *connStubRuntime) getSent() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]string, len(s.sent))
+	copy(cp, s.sent)
+	return cp
+}
 
 type stubPollConnector struct {
 	msgs   []InboundMessage
 	polled bool
 }
 
-func (s *stubPollConnector) Type() string                            { return "stub-poll" }
-func (s *stubPollConnector) Capabilities() Caps                      { return CapText }
-func (s *stubPollConnector) Requirements() Reqs                      { return 0 }
-func (s *stubPollConnector) Init(context.Context, ConnectorConfig) error { return nil }
-func (s *stubPollConnector) Send(context.Context, Response) error    { return nil }
-func (s *stubPollConnector) Close() error                            { return nil }
-func (s *stubPollConnector) PollInterval() time.Duration             { return 10 * time.Millisecond }
+func (s *stubPollConnector) Type() string                                    { return "stub-poll" }
+func (s *stubPollConnector) Capabilities() Caps                              { return CapText }
+func (s *stubPollConnector) Requirements() Reqs                              { return 0 }
+func (s *stubPollConnector) Init(context.Context, ConnectorConfig) error     { return nil }
+func (s *stubPollConnector) Send(context.Context, Response) error            { return nil }
+func (s *stubPollConnector) Close() error                                    { return nil }
+func (s *stubPollConnector) PollInterval() time.Duration                     { return 10 * time.Millisecond }
 func (s *stubPollConnector) Poll(ctx context.Context) ([]InboundMessage, error) {
 	if !s.polled {
 		s.polled = true
@@ -347,12 +658,12 @@ type stubStreamConnector struct {
 	msgs []InboundMessage
 }
 
-func (s *stubStreamConnector) Type() string                            { return "stub-stream" }
-func (s *stubStreamConnector) Capabilities() Caps                      { return CapText }
-func (s *stubStreamConnector) Requirements() Reqs                      { return 0 }
-func (s *stubStreamConnector) Init(context.Context, ConnectorConfig) error { return nil }
-func (s *stubStreamConnector) Send(context.Context, Response) error    { return nil }
-func (s *stubStreamConnector) Close() error                            { return nil }
+func (s *stubStreamConnector) Type() string                                    { return "stub-stream" }
+func (s *stubStreamConnector) Capabilities() Caps                              { return CapText }
+func (s *stubStreamConnector) Requirements() Reqs                              { return 0 }
+func (s *stubStreamConnector) Init(context.Context, ConnectorConfig) error     { return nil }
+func (s *stubStreamConnector) Send(context.Context, Response) error            { return nil }
+func (s *stubStreamConnector) Close() error                                    { return nil }
 func (s *stubStreamConnector) Messages() <-chan InboundMessage {
 	ch := make(chan InboundMessage, len(s.msgs))
 	for _, msg := range s.msgs {
@@ -364,25 +675,25 @@ func (s *stubStreamConnector) Messages() <-chan InboundMessage {
 
 type stubSendConnector struct{}
 
-func (s *stubSendConnector) Type() string                            { return "stub-send" }
-func (s *stubSendConnector) Capabilities() Caps                      { return CapText }
-func (s *stubSendConnector) Requirements() Reqs                      { return 0 }
-func (s *stubSendConnector) Init(context.Context, ConnectorConfig) error { return nil }
-func (s *stubSendConnector) Send(context.Context, Response) error    { return nil }
-func (s *stubSendConnector) Close() error                            { return nil }
+func (s *stubSendConnector) Type() string                                    { return "stub-send" }
+func (s *stubSendConnector) Capabilities() Caps                              { return CapText }
+func (s *stubSendConnector) Requirements() Reqs                              { return 0 }
+func (s *stubSendConnector) Init(context.Context, ConnectorConfig) error     { return nil }
+func (s *stubSendConnector) Send(context.Context, Response) error            { return nil }
+func (s *stubSendConnector) Close() error                                    { return nil }
 
 type stubWebhookConnector struct {
 	handler http.Handler
 }
 
-func (s *stubWebhookConnector) Type() string                            { return "stub-webhook" }
-func (s *stubWebhookConnector) Capabilities() Caps                      { return CapText }
-func (s *stubWebhookConnector) Requirements() Reqs                      { return ReqHTTPListener }
-func (s *stubWebhookConnector) Init(context.Context, ConnectorConfig) error { return nil }
-func (s *stubWebhookConnector) Send(context.Context, Response) error    { return nil }
-func (s *stubWebhookConnector) Close() error                            { return nil }
-func (s *stubWebhookConnector) Handler() http.Handler                   { return s.handler }
-func (s *stubWebhookConnector) ListenAddr() string                      { return ":0" }
+func (s *stubWebhookConnector) Type() string                                    { return "stub-webhook" }
+func (s *stubWebhookConnector) Capabilities() Caps                              { return CapText }
+func (s *stubWebhookConnector) Requirements() Reqs                              { return ReqHTTPListener }
+func (s *stubWebhookConnector) Init(context.Context, ConnectorConfig) error     { return nil }
+func (s *stubWebhookConnector) Send(context.Context, Response) error            { return nil }
+func (s *stubWebhookConnector) Close() error                                    { return nil }
+func (s *stubWebhookConnector) Handler() http.Handler                           { return s.handler }
+func (s *stubWebhookConnector) ListenAddr() string                              { return ":0" }
 
 var (
 	_ PollReceiver   = (*stubPollConnector)(nil)

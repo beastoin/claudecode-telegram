@@ -84,11 +84,11 @@ func TestGenerateDockerfile(t *testing.T) {
 func TestHealthCheck_NothingRunning(t *testing.T) {
 	manifest := &Manifest{Name: "testworker", Version: "1.0.0"}
 	runner := &mockExecutor{results: map[string]RunResult{
-		"tmux has-session -t claude-prod-testworker": {ExitCode: 1},
+		"tmux has-session -t test-testworker": {ExitCode: 1},
 	}}
 
 	var buf bytes.Buffer
-	err := HealthCheck(manifest, runner, &buf)
+	err := HealthCheck(manifest, runner, &buf, "test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +101,11 @@ func TestHealthCheck_NothingRunning(t *testing.T) {
 func TestHealthCheck_TmuxRunning(t *testing.T) {
 	manifest := &Manifest{Name: "testworker", Version: "1.0.0"}
 	runner := &mockExecutor{results: map[string]RunResult{
-		"tmux has-session -t claude-prod-testworker": {ExitCode: 0},
+		"tmux has-session -t test-testworker": {ExitCode: 0},
 	}}
 
 	var buf bytes.Buffer
-	err := HealthCheck(manifest, runner, &buf)
+	err := HealthCheck(manifest, runner, &buf, "test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,17 +118,17 @@ func TestHealthCheck_TmuxRunning(t *testing.T) {
 func TestStopWorker_TmuxSession(t *testing.T) {
 	manifest := &Manifest{Name: "testworker", Version: "1.0.0"}
 	runner := &mockExecutor{results: map[string]RunResult{
-		"tmux has-session -t claude-prod-testworker":  {ExitCode: 0},
-		"tmux kill-session -t claude-prod-testworker": {ExitCode: 0},
+		"tmux has-session -t test-testworker":  {ExitCode: 0},
+		"tmux kill-session -t test-testworker": {ExitCode: 0},
 	}}
 
 	var buf bytes.Buffer
-	err := StopWorker(manifest, runner, &buf)
+	err := StopWorker(manifest, runner, &buf, "test-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "Session claude-prod-testworker stopped") {
+	if !strings.Contains(output, "Session test-testworker stopped") {
 		t.Errorf("expected session stop message, got: %s", output)
 	}
 }
@@ -136,11 +136,11 @@ func TestStopWorker_TmuxSession(t *testing.T) {
 func TestStopWorker_NothingRunning(t *testing.T) {
 	manifest := &Manifest{Name: "testworker", Version: "1.0.0"}
 	runner := &mockExecutor{results: map[string]RunResult{
-		"tmux has-session -t claude-prod-testworker": {ExitCode: 1},
+		"tmux has-session -t test-testworker": {ExitCode: 1},
 	}}
 
 	var buf bytes.Buffer
-	err := StopWorker(manifest, runner, &buf)
+	err := StopWorker(manifest, runner, &buf, "test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +163,8 @@ func TestParseCLI_IsolatedFlag(t *testing.T) {
 	}
 }
 
-func TestParseCLI_StopFlag(t *testing.T) {
-	opts, err := ParseWorkerCLI([]string{"--stop"})
+func TestParseCLI_StopSubcommand(t *testing.T) {
+	opts, err := ParseWorkerCLI([]string{"stop"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,8 +173,8 @@ func TestParseCLI_StopFlag(t *testing.T) {
 	}
 }
 
-func TestParseCLI_HealthFlag(t *testing.T) {
-	opts, err := ParseWorkerCLI([]string{"--health"})
+func TestParseCLI_HealthSubcommand(t *testing.T) {
+	opts, err := ParseWorkerCLI([]string{"health"})
 	if err != nil {
 		t.Fatal(err)
 	}

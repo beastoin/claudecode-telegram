@@ -98,6 +98,14 @@ vars:
     source: creds
     required: false
     description: "Sentry crash reporting"
+  TELEGRAM_BOT_TOKEN:
+    source: creds
+    required: false
+    description: "Telegram bot token for direct telegram-poll connector"
+  TELEGRAM_CHAT_ID:
+    source: creds
+    required: false
+    description: "Telegram chat ID for direct connector"
 
 dirs:
   # Claude config
@@ -159,12 +167,12 @@ files:
     integrity: skip
 
   # ── Skills ──
-  - source: ~/.claude/skills/mon-daily-ops-email/
-    dest: $CLAUDE_CONFIG_DIR/skills/mon-daily-ops-email/
-  - source: ~/.claude/skills/mon-weekly-cto-email/
-    dest: $CLAUDE_CONFIG_DIR/skills/mon-weekly-cto-email/
-  - source: ~/.claude/skills/concise-cto-report/
-    dest: $CLAUDE_CONFIG_DIR/skills/concise-cto-report/
+  - source: ~/.claude/skills/omi-production-ops-daily-email/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-production-ops-daily-email/
+  - source: ~/.claude/skills/omi-cto-weekly-report-email/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-cto-weekly-report-email/
+  - source: ~/.claude/skills/omi-cto-weekly-report/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-cto-weekly-report/
   - source: ~/.claude/skills/omi-monthly-report/
     dest: $CLAUDE_CONFIG_DIR/skills/omi-monthly-report/
   - source: ~/.claude/skills/omi-incident-detection/
@@ -183,6 +191,8 @@ files:
     dest: $CLAUDE_CONFIG_DIR/skills/omi-issue-analyze/
   - source: ~/.claude/skills/gws-oauth-reauth/
     dest: $CLAUDE_CONFIG_DIR/skills/gws-oauth-reauth/
+  - source: ~/.claude/skills/omi-ops-landscape/
+    dest: $CLAUDE_CONFIG_DIR/skills/omi-ops-landscape/
 
   # ── Encrypted credentials ──
   - source: ~/.config/omi/monitor/.env

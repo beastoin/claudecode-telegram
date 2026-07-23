@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,49 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+type forgeState struct {
+	Session      string `json:"session"`
+	ManifestName string `json:"manifest_name"`
+	PID          int    `json:"pid"`
+	Identity     string `json:"identity,omitempty"`
+}
+
+const forgeStateFile = ".forge-state.json"
+
+func writeForgeState(session, manifestName, identity string) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return
+	}
+	state := forgeState{Session: session, ManifestName: manifestName, PID: os.Getpid(), Identity: identity}
+	data, _ := json.Marshal(state)
+	os.WriteFile(filepath.Join(home, forgeStateFile), data, 0600)
+}
+
+func readForgeState() *forgeState {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, forgeStateFile))
+	if err != nil {
+		return nil
+	}
+	var state forgeState
+	if json.Unmarshal(data, &state) != nil {
+		return nil
+	}
+	return &state
+}
+
+func removeForgeState() {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return
+	}
+	os.Remove(filepath.Join(home, forgeStateFile))
+}
 
 type IsolationDriver interface {
 	Name() string
@@ -263,7 +307,7 @@ func RunIsolated(opts IsolatedRunOpts) error {
 	return nil
 }
 
-func StopWorker(manifest *Manifest, runner Runner, stdout io.Writer) error {
+func StopWorker(manifest *Manifest, runner Runner, stdout io.Writer, sessionPrefix string) error {
 	if stdout == nil {
 		stdout = os.Stdout
 	}
@@ -286,12 +330,22 @@ func StopWorker(manifest *Manifest, runner Runner, stdout io.Writer) error {
 
 	// Try stopping tmux session
 	if executor, ok := runner.(CommandExecutor); ok {
-		prefix := "claude-prod-"
+		prefix := sessionPrefix
+		if prefix == "" {
+			prefix = fmt.Sprintf("claude-%d-", os.Getpid())
+		}
 		session := prefix + manifest.Name
+
+		// Check saved state for the actual session name (handles --name-override)
+		if state := readForgeState(); state != nil && state.Session != "" && state.ManifestName == manifest.Name {
+			session = state.Session
+		}
+
 		result, err := executor.Execute("tmux", "has-session", "-t", session)
 		if err == nil && result.ExitCode == 0 {
 			executor.Execute("tmux", "kill-session", "-t", session)
 			fmt.Fprintf(stdout, "✓ Session %s stopped\n", session)
+			removeForgeState()
 			stopped = true
 		}
 	}
@@ -302,7 +356,7 @@ func StopWorker(manifest *Manifest, runner Runner, stdout io.Writer) error {
 	return nil
 }
 
-func HealthCheck(manifest *Manifest, runner Runner, stdout io.Writer) error {
+func HealthCheck(manifest *Manifest, runner Runner, stdout io.Writer, sessionPrefix string) error {
 	if stdout == nil {
 		stdout = os.Stdout
 	}
@@ -326,8 +380,17 @@ func HealthCheck(manifest *Manifest, runner Runner, stdout io.Writer) error {
 
 	// Check tmux session
 	if executor, ok := runner.(CommandExecutor); ok {
-		prefix := "claude-prod-"
+		prefix := sessionPrefix
+		if prefix == "" {
+			prefix = fmt.Sprintf("claude-%d-", os.Getpid())
+		}
 		session := prefix + manifest.Name
+
+		// Check saved state for the actual session name (handles --name-override)
+		if state := readForgeState(); state != nil && state.Session != "" && state.ManifestName == manifest.Name {
+			session = state.Session
+		}
+
 		result, err := executor.Execute("tmux", "has-session", "-t", session)
 		if err == nil && result.ExitCode == 0 {
 			fmt.Fprintf(stdout, "  ✓ bare metal: running (session %s)\n", session)

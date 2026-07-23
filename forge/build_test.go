@@ -445,12 +445,12 @@ dirs:
 	}
 
 	binaryPath := filepath.Join(result.OutputDir, expectedBinaryName("mon", runtime.GOOS, runtime.GOARCH))
-	cmd := exec.Command(binaryPath, "--check", "--bridge-url", "http://bridge")
+	cmd := exec.Command(binaryPath, "check", "--bridge-url", "http://bridge")
 	runtimeHome := filepath.Join(root, "runtime-home")
 	cmd.Env = append(os.Environ(), "HOME="+runtimeHome)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("worker --check error = %v\n%s", err, output)
+		t.Fatalf("worker check error = %v\n%s", err, output)
 	}
 
 	outputText := string(output)

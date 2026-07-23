@@ -1,4 +1,4 @@
-package forge
+package engine
 
 import (
 	"context"
@@ -6,13 +6,44 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/beastoin/claudecode-telegram/forge/manifest"
 )
 
+// ClaudeCodeDriver implements EngineDriver for Claude Code.
 type ClaudeCodeDriver struct{}
 
 func (d *ClaudeCodeDriver) ID() string { return "claude-code" }
+
+func (d *ClaudeCodeDriver) AuthSpec() AuthSpec {
+	return AuthSpec{
+		Required: true,
+		URLPatterns: []*regexp.Regexp{
+			regexp.MustCompile(`https://(?:claude\.ai|claude\.com|console\.anthropic\.com|platform\.claude\.com)/[^\s\x1b"'>)\]]+`),
+		},
+		SuccessMarkers: []string{
+			"What can I help you with?",
+			"claude>",
+			"Type your message",
+			"Welcome back",
+			"Try \"refactor",
+			"Try \"edit",
+		},
+		URLTimeout:  3 * time.Minute,
+		CodeTimeout: 15 * time.Minute,
+		AutoResponses: []AutoResponse{
+			{Marker: "Yes, I trust this folder", Response: "", Once: true},
+			{Marker: "Do you want to use this API key", Response: "", Once: true},
+			{Marker: "Select login method", Response: "", Once: true},
+			{Marker: "Choose the text style", Response: "", Once: false},
+			{Marker: "Not logged in", Response: "/login", Once: true},
+			{Marker: "Press Enter to retry", Response: "", Once: false},
+		},
+	}
+}
 
 func (d *ClaudeCodeDriver) Capabilities() EngineCapabilities {
 	return EngineCapabilities{
@@ -58,10 +89,7 @@ func (d *ClaudeCodeDriver) Prepare(ctx context.Context, req PrepareRequest) (*Pr
 			return nil, fmt.Errorf("api key helper: %w", err)
 		}
 
-		credsFile := filepath.Join(configDir, ".credentials.json")
-		if _, err := os.Stat(credsFile); err != nil {
-			prepared.Env["FORGE_API_KEY_HELPER"] = helperPath
-		}
+		prepared.Env["FORGE_API_KEY_HELPER"] = helperPath
 	}
 
 	prepared.Env["FORGE_WORKER_NAME"] = req.Manifest.Name
@@ -105,10 +133,10 @@ func (d *ClaudeCodeDriver) installHookScripts(req PrepareRequest, configDir stri
 
 		data, err := req.Source.ReadFile(hook.Source)
 		if err != nil {
-			data, err = req.Source.ReadFile(canonicalSource(hook.Source))
+			data, err = req.Source.ReadFile(CanonicalSource(hook.Source))
 		}
 		if err != nil {
-			data, err = req.Source.ReadFile(buildArtifactKey(hook.Source, false))
+			data, err = req.Source.ReadFile(BuildArtifactKey(hook.Source, false))
 		}
 		if err != nil {
 			return fmt.Errorf("read hook source %q: %w", hook.Source, err)
@@ -130,10 +158,10 @@ func (d *ClaudeCodeDriver) installHookScripts(req PrepareRequest, configDir stri
 	return nil
 }
 
-func (d *ClaudeCodeDriver) generateEmitHooks(manifest *Manifest, vars map[string]string, configDir string) error {
-	workerName := manifest.Name
+func (d *ClaudeCodeDriver) generateEmitHooks(m *manifest.Manifest, vars map[string]string, configDir string) error {
+	workerName := m.Name
 
-	for i, hook := range manifest.Hooks {
+	for i, hook := range m.Hooks {
 		if hook.Source != "" {
 			continue
 		}
@@ -151,12 +179,13 @@ func (d *ClaudeCodeDriver) generateEmitHooks(manifest *Manifest, vars map[string
 			return fmt.Errorf("write emit hook %q: %w", dest, err)
 		}
 
-		manifest.Hooks[i].Generated = true
+		m.Hooks[i].Generated = true
 	}
 
 	return nil
 }
 
+// GenerateEmitScript returns a shell script that posts hook output to the forge socket.
 func GenerateEmitScript(workerName string) string {
 	safeName := strings.NewReplacer("/", "-", " ", "-", "\\", "-").Replace(workerName)
 	return fmt.Sprintf(`#!/bin/bash
@@ -174,7 +203,7 @@ curl -sf --unix-socket "$SOCKET" \
 `, safeName)
 }
 
-func (d *ClaudeCodeDriver) patchSettings(manifest *Manifest, vars map[string]string, configDir string) error {
+func (d *ClaudeCodeDriver) patchSettings(m *manifest.Manifest, vars map[string]string, configDir string) error {
 	settingsPath := filepath.Join(configDir, "settings.json")
 	settings := map[string]any{}
 
@@ -208,17 +237,17 @@ func (d *ClaudeCodeDriver) patchSettings(manifest *Manifest, vars map[string]str
 		}
 	}
 
-	for _, hook := range manifest.Hooks {
+	for _, hook := range m.Hooks {
 		command, err := ExpandTemplate(hook.Command, vars)
 		if err != nil {
 			return fmt.Errorf("expand hook command %q: %w", hook.Command, err)
 		}
 
 		rawEventHooks, _ := hooksValue[hook.Event].([]any)
-		eventHooks := normalizeEventHooks(rawEventHooks)
-		group := ensureHookGroup(&eventHooks, hook.Matcher)
-		appendCommandHook(group, command)
-		hooksValue[hook.Event] = hookGroupsToAny(eventHooks)
+		eventHooks := NormalizeEventHooks(rawEventHooks)
+		group := EnsureHookGroup(&eventHooks, hook.Matcher)
+		AppendCommandHook(group, command)
+		hooksValue[hook.Event] = HookGroupsToAny(eventHooks)
 	}
 
 	settings["hooks"] = hooksValue
@@ -241,23 +270,34 @@ func (d *ClaudeCodeDriver) patchSettings(manifest *Manifest, vars map[string]str
 
 func pruneStaleForgeHooks(entries []any, hooksDir string) []any {
 	configDir := filepath.Dir(strings.TrimSuffix(hooksDir, string(filepath.Separator)))
-	return pruneStaleHooks(entries, configDir)
+	return PruneStaleHooks(entries, configDir)
 }
 
 func (d *ClaudeCodeDriver) writeOnboardingMarker(configDir string) error {
 	claudeJSON := filepath.Join(configDir, ".claude.json")
-	if _, err := os.Stat(claudeJSON); err == nil {
-		return nil
-	}
 
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	marker := []byte(`{"hasCompletedOnboarding":true,"lastOnboardingVersion":"0.0.0","firstStartTime":"` +
-		time.Now().UTC().Format(time.RFC3339) + `"}`)
+	existing := map[string]any{}
+	if data, err := os.ReadFile(claudeJSON); err == nil {
+		_ = json.Unmarshal(data, &existing)
+	}
 
-	return os.WriteFile(claudeJSON, marker, 0o600)
+	existing["hasCompletedOnboarding"] = true
+	if existing["theme"] == nil {
+		existing["theme"] = "dark"
+	}
+	if existing["firstStartTime"] == nil {
+		existing["firstStartTime"] = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(claudeJSON, data, 0o600)
 }
 
 func (d *ClaudeCodeDriver) writeAPIKeyHelper(helperPath string) error {

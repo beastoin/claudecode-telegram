@@ -16,6 +16,6 @@ dirs:
   - $CLAUDE_CONFIG_DIR/hooks
 readiness:
   - name: bridge-reachable
-    check: curl -sf $BRIDGE_URL/health
+    check: curl -sf $BRIDGE_URL/
     expect: exit 0
     required: true

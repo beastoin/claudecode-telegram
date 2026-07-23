@@ -1,0 +1,83 @@
+{
+  "commands": {
+    "auth": {
+      "description": "Authenticate Claude Code via OAuth (sends URL to connector, waits for code)",
+      "flags": {
+        "--bridge-url": "Bridge URL for worker communication",
+        "--connector": "Connector type (telegram, telegram-poll)",
+        "--connector-opt": "Connector option (key=val, repeatable)"
+      },
+      "output_json": false,
+      "dry_run": false
+    },
+    "check": {
+      "description": "Run readiness checks (tools, auth, bridge connectivity)",
+      "flags": {
+        "--output-json": "Output structured JSON to stdout"
+      },
+      "output_json": true,
+      "dry_run": false
+    },
+    "describe": {
+      "description": "Show command schema as JSON",
+      "output_json": true,
+      "dry_run": false
+    },
+    "health": {
+      "description": "Check if worker tmux session is running",
+      "output_json": false,
+      "dry_run": false
+    },
+    "onboard": {
+      "description": "Extract files and set up credentials for first-time use",
+      "flags": {
+        "--bridge-url": "Bridge URL (for var resolution)",
+        "--dry-run": "Show what would be extracted without writing",
+        "--identity": "Age decryption key (saved to state for future use)"
+      },
+      "output_json": false,
+      "dry_run": true
+    },
+    "run": {
+      "description": "Extract files, verify integrity, install hooks, launch worker with watchdog",
+      "flags": {
+        "--bridge-url": "Bridge URL (required for bridge connector)",
+        "--connector": "Connector type (telegram, bridge, etc.)",
+        "--connector-opt": "Connector option (key=val, repeatable)",
+        "--force-extract": "Overwrite conflicting files (default: skip-conflicts)",
+        "--identity": "Age decryption key (saved to state, auto-loaded on next run)",
+        "--launch-command": "Override claude launch command",
+        "--name-override": "Override worker name from manifest",
+        "--session-prefix": "Tmux session prefix (default from manifest/bridge)"
+      },
+      "output_json": false,
+      "dry_run": false
+    },
+    "stop": {
+      "description": "Stop worker tmux session",
+      "output_json": false,
+      "dry_run": false
+    },
+    "verify": {
+      "description": "Verify integrity of extracted files against embedded checksums",
+      "flags": {
+        "--output-json": "Output structured JSON to stdout"
+      },
+      "output_json": true,
+      "dry_run": false
+    },
+    "version": {
+      "description": "Print worker name and version",
+      "output_json": false,
+      "dry_run": false
+    }
+  },
+  "env_vars": {
+    "FORGE_BRIDGE_URL": "Override --bridge-url (usually not needed — manifest has default)",
+    "FORGE_CONNECTOR": "Override --connector",
+    "FORGE_IDENTITY": "Override --identity (usually not needed — state file remembers)",
+    "FORGE_OUTPUT_JSON": "Set to 1 to enable JSON output"
+  },
+  "version": "1.0.0",
+  "worker": "testmon"
+}

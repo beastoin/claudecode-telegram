@@ -1,0 +1,27 @@
+{
+  "name": "happy_path",
+  "initial_output": [
+    "Select login method",
+    "1. Browser",
+    "2. API Key"
+  ],
+  "reactions": [
+    {
+      "on_input": "",
+      "output": [
+        "Opening browser for authentication...",
+        "Visit https://claude.com/cai/oauth/authorize?code=true&client_id=test-id&code_challenge=abc123 to authenticate",
+        "Paste code here >"
+      ]
+    },
+    {
+      "on_input": "",
+      "output": [
+        "Authentication successful!",
+        "What can I help you with?"
+      ]
+    }
+  ],
+  "success_marker": "",
+  "reject_bracketed_paste": false
+}

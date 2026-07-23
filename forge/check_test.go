@@ -1,6 +1,9 @@
 package forge
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestRunCheckMode_DoesNotRequirePreviouslyExtractedFiles(t *testing.T) {
 	t.Parallel()
@@ -78,5 +81,98 @@ func TestRunCheckMode_DoesNotInstallMissingRequiredTools(t *testing.T) {
 	}
 	if got := runner.commands; len(got) != 1 || got[0] != "tmux -V" {
 		t.Fatalf("runner.commands = %#v, want only check command", got)
+	}
+}
+
+func TestFormatCheckJSON_StructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	report := CheckReport{
+		Worker:  "mon",
+		Version: "2.0.0",
+		ResolvedVars: map[string]string{
+			"HOME":       "/home/claude",
+			"BRIDGE_URL": "http://bridge:8271",
+		},
+		Tools: []ToolStatus{
+			{Name: "tmux", Installed: true, Required: true, Version: "3.4"},
+			{Name: "codex", Installed: false, Required: false},
+		},
+		Readiness: []ReadinessStatus{
+			{Name: "bridge-reachable", Passed: true, Required: true},
+			{Name: "gcloud-auth", Passed: false, Required: true, Output: "not authenticated"},
+		},
+	}
+
+	out := FormatCheckJSON(report)
+	var result CheckResultJSON
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\nraw: %s", err, out)
+	}
+
+	if result.Command != "check" {
+		t.Fatalf("result.Command = %q, want %q", result.Command, "check")
+	}
+	if result.Worker != "mon" {
+		t.Fatalf("result.Worker = %q, want %q", result.Worker, "mon")
+	}
+	if result.Status != "fail" {
+		t.Fatalf("result.Status = %q, want %q", result.Status, "fail")
+	}
+	if result.Summary.Passed != 2 {
+		t.Fatalf("result.Summary.Passed = %d, want 2", result.Summary.Passed)
+	}
+	if result.Summary.Failed != 1 {
+		t.Fatalf("result.Summary.Failed = %d, want 1", result.Summary.Failed)
+	}
+	if result.Summary.Warned != 1 {
+		t.Fatalf("result.Summary.Warned = %d, want 1", result.Summary.Warned)
+	}
+	if len(result.Checks) != 4 {
+		t.Fatalf("len(result.Checks) = %d, want 4", len(result.Checks))
+	}
+
+	// Check a specific check item
+	found := false
+	for _, c := range result.Checks {
+		if c.ID == "readiness.gcloud-auth" {
+			found = true
+			if c.Status != "fail" {
+				t.Fatalf("gcloud-auth.Status = %q, want fail", c.Status)
+			}
+			if c.Severity != "required" {
+				t.Fatalf("gcloud-auth.Severity = %q, want required", c.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing check item readiness.gcloud-auth")
+	}
+}
+
+func TestFormatCheckJSON_AllPass(t *testing.T) {
+	t.Parallel()
+
+	report := CheckReport{
+		Worker:  "mon",
+		Version: "1.0.0",
+		Tools: []ToolStatus{
+			{Name: "tmux", Installed: true, Required: true},
+		},
+		Readiness: []ReadinessStatus{
+			{Name: "bridge", Passed: true, Required: true},
+		},
+	}
+
+	out := FormatCheckJSON(report)
+	var result CheckResultJSON
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.Status != "pass" {
+		t.Fatalf("result.Status = %q, want pass", result.Status)
+	}
+	if result.Summary.Failed != 0 {
+		t.Fatalf("result.Summary.Failed = %d, want 0", result.Summary.Failed)
 	}
 }

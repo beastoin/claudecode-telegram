@@ -3,6 +3,8 @@ package forge
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
 type RunOptions struct {
@@ -10,6 +12,8 @@ type RunOptions struct {
 	Resolve       ResolveOptions
 	ForceExtract  bool
 	SkipConflicts bool
+	AuthOnly      bool
+	NoAPIKey      bool
 }
 
 type WatchdogRunner interface {
@@ -27,9 +31,12 @@ type App struct {
 	Watchdog    WatchdogRunner
 	HookManager HookManager
 	GOOS        string
-	Connector   Connector
-	ConnectorCfg ConnectorConfig
-	Engine      EngineDriver
+	Connector            Connector
+	ConnectorCfg         ConnectorConfig
+	ConnectorInitialized bool
+	Engine               EngineDriver
+	OriginalName         string
+	Identity             string
 }
 
 func (a App) Run(opts RunOptions) error {
@@ -86,7 +93,7 @@ func (a App) Run(opts RunOptions) error {
 		return err
 	}
 
-	if a.Verifier != nil {
+	if a.Verifier != nil && !opts.NoAPIKey {
 		artifacts, err := EnumerateExtractedArtifacts(a.Manifest, resolved)
 		if err != nil {
 			return err
@@ -95,6 +102,14 @@ func (a App) Run(opts RunOptions) error {
 			return artifact.SkipVerification
 		}); err != nil {
 			return err
+		}
+	}
+
+	if opts.NoAPIKey {
+		delete(resolved, "ANTHROPIC_API_KEY")
+		configDir := resolved["CLAUDE_CONFIG_DIR"]
+		if configDir != "" {
+			os.Remove(filepath.Join(configDir, ".credentials.json"))
 		}
 	}
 
@@ -124,6 +139,9 @@ func (a App) Run(opts RunOptions) error {
 		if err := a.Runtime.Start(); err != nil {
 			return err
 		}
+		if tmuxRT, ok := a.Runtime.(*TmuxRuntime); ok {
+			writeForgeState(tmuxRT.Session, a.OriginalName, a.Identity)
+		}
 	}
 
 	if a.Transport != nil {
@@ -150,7 +168,61 @@ func (a App) Run(opts RunOptions) error {
 			cfg.BridgeURL = resolved["BRIDGE_URL"]
 		}
 
+		if !a.ConnectorInitialized {
+			if err := a.Connector.Init(opts.Context, cfg); err != nil {
+				return fmt.Errorf("connector init: %w", err)
+			}
+		}
+
+		// Auth lifecycle phase: runs between connector init and host loop
+		if a.Engine != nil {
+			spec := a.Engine.AuthSpec()
+			if opts.NoAPIKey {
+				spec.SuccessMarkers = []string{
+					"What can I help you with?",
+					"claude>",
+					"Type your message",
+				}
+				spec.FailureMarkers = append(spec.FailureMarkers,
+					"OAuth error",
+					"Invalid code",
+					"invalid_grant",
+					"Authentication failed",
+					"Login failed",
+					"code has expired",
+					"Unable to exchange",
+				)
+				spec.AutoResponses = append(spec.AutoResponses,
+					AutoResponse{Marker: "run /login", Response: "/login", Once: true},
+					AutoResponse{Marker: "bypass permissions", Response: "/login", Once: true},
+					AutoResponse{Marker: "don't ask on", Response: "/login", Once: true},
+					AutoResponse{Marker: "Press Enter to continue", Response: "", Once: true},
+				)
+			}
+			if spec.Required || opts.AuthOnly {
+				if monitor, ok := a.Runtime.(RuntimeMonitor); ok {
+					auth := &AuthCoordinator{
+						Runtime:    monitor,
+						Spec:       spec,
+						WorkerName: a.Manifest.Name,
+					}
+					if err := auth.Run(opts.Context, AdaptConnectorForAuth(a.Connector)); err != nil {
+						return fmt.Errorf("auth: %w", err)
+					}
+				}
+			}
+		}
+
+		if opts.AuthOnly {
+			return nil
+		}
+
 		host := NewConnectorHost(a.Connector, a.Runtime, cfg)
+		RegisterBuiltinCommands(host, CommandServices{
+			Runtime:    a.Runtime,
+			WorkerName: a.Manifest.Name,
+		})
+
 		ch := make(chan error, 1)
 		go func() {
 			ch <- host.Run(opts.Context)

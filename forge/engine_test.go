@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,7 @@ func TestClaudeCodeDriver_Prepare_CreatesOnboardingMarker(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeDriver_Prepare_SkipsExistingMarker(t *testing.T) {
+func TestClaudeCodeDriver_Prepare_MergesOnboardingMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, ".claude")
 	os.MkdirAll(configDir, 0o755)
@@ -110,8 +111,15 @@ func TestClaudeCodeDriver_Prepare_SkipsExistingMarker(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(markerPath)
-	if string(data) != string(existing) {
-		t.Error("existing marker was overwritten")
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if merged["existing"] != true {
+		t.Error("existing field was lost")
+	}
+	if merged["hasCompletedOnboarding"] != true {
+		t.Error("hasCompletedOnboarding was not merged in")
 	}
 }
 
@@ -363,7 +371,7 @@ func TestClaudeCodeDriver_GeneratesEmitHooksForSourcelessEntries(t *testing.T) {
 	configDir := filepath.Join(root, ".claude")
 
 	driver := &ClaudeCodeDriver{}
-	manifest := &Manifest{
+	m := &Manifest{
 		Name:    "testworker",
 		Version: "1.0.0",
 		Hooks: []HookSpec{
@@ -374,11 +382,15 @@ func TestClaudeCodeDriver_GeneratesEmitHooksForSourcelessEntries(t *testing.T) {
 		},
 	}
 
-	err := driver.generateEmitHooks(manifest, map[string]string{
-		"CLAUDE_CONFIG_DIR": configDir,
-	}, configDir)
+	_, err := driver.Prepare(context.Background(), PrepareRequest{
+		Manifest: m,
+		Vars: map[string]string{
+			"CLAUDE_CONFIG_DIR": configDir,
+		},
+		GOOS: "linux",
+	})
 	if err != nil {
-		t.Fatalf("generateEmitHooks: %v", err)
+		t.Fatalf("Prepare: %v", err)
 	}
 
 	hookPath := filepath.Join(configDir, "hooks", "stop-emit.sh")
@@ -398,7 +410,7 @@ func TestClaudeCodeDriver_GeneratesEmitHooksForSourcelessEntries(t *testing.T) {
 		t.Error("generated hook not executable")
 	}
 
-	if !manifest.Hooks[0].Generated {
+	if !m.Hooks[0].Generated {
 		t.Error("hook not marked as Generated")
 	}
 }
@@ -410,7 +422,7 @@ func TestClaudeCodeDriver_SkipsEmitForHooksWithSource(t *testing.T) {
 	configDir := filepath.Join(root, ".claude")
 
 	driver := &ClaudeCodeDriver{}
-	manifest := &Manifest{
+	m := &Manifest{
 		Name:    "testworker",
 		Version: "1.0.0",
 		Hooks: []HookSpec{
@@ -422,19 +434,39 @@ func TestClaudeCodeDriver_SkipsEmitForHooksWithSource(t *testing.T) {
 		},
 	}
 
-	err := driver.generateEmitHooks(manifest, map[string]string{
-		"CLAUDE_CONFIG_DIR": configDir,
-	}, configDir)
+	// Prepare will try to install hook scripts for hooks with Source.
+	// Since we provide no source, it will fail — but that's fine because
+	// we're testing that emit hooks are NOT generated for hooks with Source.
+	// Instead, test the behavior directly with a source that has the file.
+	source := &mapFileSource{
+		files: map[string][]byte{
+			"hooks/send-to-telegram.sh": []byte("#!/bin/sh\necho real hook"),
+		},
+	}
+
+	_, err := driver.Prepare(context.Background(), PrepareRequest{
+		Manifest: m,
+		Vars: map[string]string{
+			"CLAUDE_CONFIG_DIR": configDir,
+		},
+		GOOS:   "linux",
+		Source: source,
+	})
 	if err != nil {
-		t.Fatalf("generateEmitHooks: %v", err)
+		t.Fatalf("Prepare: %v", err)
 	}
 
+	// The hook file should contain the real source content, not an emit script
 	hookPath := filepath.Join(configDir, "hooks", "send-to-telegram.sh")
-	if _, err := os.Stat(hookPath); err == nil {
-		t.Error("expected no file for hook with Source — should be skipped")
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("hook not installed: %v", err)
+	}
+	if strings.Contains(string(data), "forge-") {
+		t.Error("hook with Source should contain source content, not emit script")
 	}
 
-	if manifest.Hooks[0].Generated {
+	if m.Hooks[0].Generated {
 		t.Error("hook with Source should not be marked Generated")
 	}
 }

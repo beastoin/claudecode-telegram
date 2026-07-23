@@ -1,0 +1,35 @@
+{
+  "command": "check",
+  "worker": "testmon",
+  "version": "1.0.0",
+  "status": "pass",
+  "summary": {
+    "passed": 2,
+    "warned": 1,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "tool.tmux",
+      "label": "tmux",
+      "status": "pass",
+      "severity": "required",
+      "message": "tmux found",
+      "observed": "3.4"
+    },
+    {
+      "id": "tool.codex",
+      "label": "codex",
+      "status": "warn",
+      "severity": "optional",
+      "message": "codex not found (optional)"
+    },
+    {
+      "id": "readiness.bridge",
+      "label": "bridge",
+      "status": "pass",
+      "severity": "required",
+      "message": "bridge passed"
+    }
+  ]
+}

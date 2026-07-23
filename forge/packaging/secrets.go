@@ -1,4 +1,4 @@
-package forge
+package packaging
 
 import (
 	"bytes"
@@ -11,6 +11,24 @@ import (
 	"filippo.io/age"
 )
 
+const CredsBundleVarsPath = "creds/__vars__.json"
+
+type CredsBundlePayload struct {
+	Recipient string            `json:"recipient"`
+	Files     map[string]string `json:"files"`
+}
+
+func ParseCredsBundle(data []byte) (*CredsBundlePayload, error) {
+	var payload CredsBundlePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("parse creds bundle: %w", err)
+	}
+	if payload.Files == nil {
+		payload.Files = map[string]string{}
+	}
+	return &payload, nil
+}
+
 type AgeCredsEncryptor struct{}
 type AgeBundleDecryptor struct {
 	Identities []age.Identity
@@ -21,7 +39,7 @@ func (a AgeCredsEncryptor) Encrypt(bundle map[string][]byte, recipients ...age.R
 		return nil, fmt.Errorf("at least one age recipient is required")
 	}
 
-	payload := credsBundlePayload{
+	payload := CredsBundlePayload{
 		Files: make(map[string]string, len(bundle)),
 	}
 	for name, data := range bundle {
@@ -71,7 +89,7 @@ func (a AgeBundleDecryptor) DecryptFile(data []byte, name string) ([]byte, error
 		return nil, err
 	}
 
-	payload, err := parseCredsBundle(plaintext)
+	payload, err := ParseCredsBundle(plaintext)
 	if err != nil {
 		return nil, err
 	}

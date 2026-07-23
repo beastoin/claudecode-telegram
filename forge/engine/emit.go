@@ -1,4 +1,4 @@
-package forge
+package engine
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// EmitOptions holds the configuration for the emit command.
 type EmitOptions struct {
 	Event       string
 	PayloadFile string
@@ -20,6 +21,7 @@ type EmitOptions struct {
 	SocketPath  string
 }
 
+// ParseEmitArgs parses command-line arguments for the emit subcommand.
 func ParseEmitArgs(args []string) (EmitOptions, error) {
 	fs := flag.NewFlagSet("emit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -53,6 +55,13 @@ func ParseEmitArgs(args []string) (EmitOptions, error) {
 	return opts, nil
 }
 
+// emitPayload is the JSON payload sent to the forge socket.
+// Fields intentionally lack JSON tags to match connector.Response serialization.
+type emitPayload struct {
+	Text string
+}
+
+// RunEmit sends a hook payload to the forge socket.
 func RunEmit(opts EmitOptions, stdin io.Reader) error {
 	var payload []byte
 	var err error
@@ -74,7 +83,7 @@ func RunEmit(opts EmitOptions, stdin io.Reader) error {
 		return nil
 	}
 
-	body, err := json.Marshal(Response{Text: text})
+	body, err := json.Marshal(emitPayload{Text: text})
 	if err != nil {
 		return fmt.Errorf("marshal response: %w", err)
 	}

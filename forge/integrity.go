@@ -1,40 +1,11 @@
 package forge
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 )
-
-type ChecksumVerifier struct {
-	checksums map[string]string
-}
-
-func NewChecksumVerifier(checksums map[string]string) *ChecksumVerifier {
-	copyChecksums := make(map[string]string, len(checksums))
-	for name, checksum := range checksums {
-		copyChecksums[name] = checksum
-	}
-	return &ChecksumVerifier{checksums: copyChecksums}
-}
-
-func (v *ChecksumVerifier) Verify(name string, data []byte) error {
-	expected, ok := v.checksums[name]
-	if !ok {
-		return fmt.Errorf("no checksum for %q", name)
-	}
-
-	sum := sha256.Sum256(data)
-	actual := hex.EncodeToString(sum[:])
-	if actual != expected {
-		return fmt.Errorf("checksum mismatch for %q", name)
-	}
-
-	return nil
-}
 
 type FileIntegrityMonitor struct {
 	Manifest *Manifest
@@ -92,12 +63,12 @@ func (m *FileIntegrityMonitor) VerifyCritical() error {
 func settingsHookExists(settings map[string]any, event string, command string, matcher string) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
 	entries, _ := hooks[event].([]any)
-	for _, group := range normalizeEventHooks(entries) {
+	for _, group := range NormalizeEventHooks(entries) {
 		existingMatcher, _ := group["matcher"].(string)
 		if matcher != "" && existingMatcher != matcher {
 			continue
 		}
-		if groupHasCommand(group, command) {
+		if GroupHasCommand(group, command) {
 			return true
 		}
 	}

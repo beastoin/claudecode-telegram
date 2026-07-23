@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -524,6 +525,207 @@ func TestHTTPTransport_ReceiveMessageReturnsUnsupported(t *testing.T) {
 	}
 }
 
+func TestHTTPTransport_RegisterFailsOnNon200(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	transport := &HTTPTransport{BridgeURL: server.URL}
+	_, err := transport.Register(context.Background(), RegisterRequest{Name: "mon"})
+	if err == nil {
+		t.Fatal("Register() on 503 should fail")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Fatalf("Register() error = %v, want to contain 503", err)
+	}
+}
+
+func TestHTTPTransport_SendMessageFailsOnNon200(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	transport := &HTTPTransport{BridgeURL: server.URL}
+	err := transport.SendMessage(context.Background(), WorkerMessage{Text: "hello"})
+	if err == nil {
+		t.Fatal("SendMessage() on 502 should fail")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Fatalf("SendMessage() error = %v, want to contain 502", err)
+	}
+}
+
+func TestHTTPTransport_HeartbeatFailsOnNon200(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	transport := &HTTPTransport{BridgeURL: server.URL}
+	err := transport.Heartbeat(context.Background())
+	if err == nil {
+		t.Fatal("Heartbeat() on 500 should fail")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Fatalf("Heartbeat() error = %v, want to contain 500", err)
+	}
+}
+
+func TestHTTPTransport_ConnectFailsOnEmptyURL(t *testing.T) {
+	t.Parallel()
+
+	err := (&HTTPTransport{}).Connect(context.Background(), "")
+	if err == nil {
+		t.Fatal("Connect('') should fail")
+	}
+	if !strings.Contains(err.Error(), "bridge URL is required") {
+		t.Fatalf("Connect('') error = %v, want 'bridge URL is required'", err)
+	}
+}
+
+func TestHTTPTransport_ConnectFailsOnNon200Health(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	err := (&HTTPTransport{}).Connect(context.Background(), server.URL)
+	if err == nil {
+		t.Fatal("Connect() to unhealthy bridge should fail")
+	}
+	if !strings.Contains(err.Error(), "health check failed") {
+		t.Fatalf("Connect() error = %v, want 'health check failed'", err)
+	}
+}
+
+func TestHTTPTransport_MethodsFailWhenDisconnected(t *testing.T) {
+	t.Parallel()
+
+	transport := &HTTPTransport{}
+
+	if _, err := transport.Register(context.Background(), RegisterRequest{Name: "x"}); err == nil {
+		t.Fatal("Register() on disconnected HTTP transport should fail")
+	}
+	if err := transport.SendMessage(context.Background(), WorkerMessage{Text: "x"}); err == nil {
+		t.Fatal("SendMessage() on disconnected HTTP transport should fail")
+	}
+	if err := transport.Heartbeat(context.Background()); err == nil {
+		t.Fatal("Heartbeat() on disconnected HTTP transport should fail")
+	}
+}
+
+func TestHTTPTransport_SendMessageIncludesCustomSource(t *testing.T) {
+	t.Parallel()
+
+	var payload map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	transport := &HTTPTransport{BridgeURL: server.URL, Source: "mon"}
+	if err := transport.SendMessage(context.Background(), WorkerMessage{Text: "hello"}); err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
+	}
+
+	if payload["source"] != "mon" {
+		t.Fatalf("payload[source] = %q, want mon", payload["source"])
+	}
+}
+
+func TestHTTPTransport_UnsupportedMethods(t *testing.T) {
+	t.Parallel()
+
+	transport := &HTTPTransport{}
+
+	if err := transport.StreamJSONL(context.Background(), JSONLChunk{}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("StreamJSONL() error = %v, want ErrUnsupported", err)
+	}
+	if _, err := transport.PullKnowledge(context.Background(), "x", "memory"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("PullKnowledge() error = %v, want ErrUnsupported", err)
+	}
+	if _, _, _, _, err := transport.CheckUpgrade(context.Background(), "x", "1.0.0"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("CheckUpgrade() error = %v, want ErrUnsupported", err)
+	}
+}
+
+func TestReconnectTransport_HeartbeatReconnectsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	base := &heartbeatFailTransport{heartbeatErr: errBoom}
+	transport := &ReconnectTransport{
+		Base:        base,
+		BaseBackoff: time.Millisecond,
+		Sleep:       func(time.Duration) {},
+	}
+
+	if err := transport.Connect(context.Background(), "http://bridge"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	initialConnects := base.connectCalls
+
+	if err := transport.Heartbeat(context.Background()); err != nil {
+		t.Fatalf("Heartbeat() error = %v, want reconnect success", err)
+	}
+
+	if base.heartbeatCalls != 1 {
+		t.Fatalf("base.heartbeatCalls = %d, want 1", base.heartbeatCalls)
+	}
+	if base.connectCalls <= initialConnects {
+		t.Fatalf("base.connectCalls = %d, want > %d (reconnect)", base.connectCalls, initialConnects)
+	}
+}
+
+func TestReconnectTransport_HeartbeatFailsWithoutPriorConnect(t *testing.T) {
+	t.Parallel()
+
+	base := &heartbeatFailTransport{heartbeatErr: errBoom}
+	transport := &ReconnectTransport{
+		Base:  base,
+		Sleep: func(time.Duration) {},
+	}
+
+	err := transport.Heartbeat(context.Background())
+	if err == nil {
+		t.Fatal("Heartbeat() without prior Connect should fail")
+	}
+	if !strings.Contains(err.Error(), "before initial connect") {
+		t.Fatalf("Heartbeat() error = %v, want 'before initial connect'", err)
+	}
+}
+
+func TestReconnectTransport_ConnectRespectsContextCancel(t *testing.T) {
+	t.Parallel()
+
+	base := &failingConnectTransport{failuresRemaining: 1000}
+	transport := &ReconnectTransport{
+		Base:        base,
+		BaseBackoff: time.Millisecond,
+		Sleep:       func(time.Duration) {},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := transport.Connect(ctx, "http://bridge")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Connect() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestApp_RunWithTransport(t *testing.T) {
 	t.Parallel()
 
@@ -925,6 +1127,50 @@ func (s *testBridgeServer) CheckUpgrade(context.Context, *pb.UpgradeCheckRequest
 		Version:   "1.2.3",
 		Checksum:  "abc123",
 	}, nil
+}
+
+type heartbeatFailTransport struct {
+	connectCalls   int
+	heartbeatCalls int
+	heartbeatErr   error
+}
+
+func (h *heartbeatFailTransport) Connect(context.Context, string) error {
+	h.connectCalls++
+	return nil
+}
+
+func (h *heartbeatFailTransport) Register(context.Context, RegisterRequest) (RegisterResponse, error) {
+	return RegisterResponse{OK: true}, nil
+}
+
+func (h *heartbeatFailTransport) SendMessage(context.Context, WorkerMessage) error {
+	return nil
+}
+
+func (h *heartbeatFailTransport) ReceiveMessage(context.Context) (BridgeMessage, error) {
+	return BridgeMessage{}, nil
+}
+
+func (h *heartbeatFailTransport) StreamJSONL(context.Context, JSONLChunk) error {
+	return nil
+}
+
+func (h *heartbeatFailTransport) PullKnowledge(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (h *heartbeatFailTransport) CheckUpgrade(context.Context, string, string) (bool, string, string, string, error) {
+	return false, "", "", "", nil
+}
+
+func (h *heartbeatFailTransport) Heartbeat(context.Context) error {
+	h.heartbeatCalls++
+	return h.heartbeatErr
+}
+
+func (h *heartbeatFailTransport) Close() error {
+	return nil
 }
 
 func startTestGRPCServer(t *testing.T) (*grpc.Server, string) {

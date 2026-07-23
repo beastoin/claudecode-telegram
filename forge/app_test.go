@@ -648,3 +648,126 @@ func (r *configCapturingRuntime) ConfigureRuntime(config RuntimeConfig) error {
 	r.vars = copyStringMap(config.Vars)
 	return nil
 }
+
+func TestAppRun_NoAPIKey_SkipsVerify(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "team", "mon", "charter.md")
+	runner := &mutatingRunner{
+		t: t,
+		results: map[string]RunResult{
+			"tmux -V": {ExitCode: 0, Stdout: "tmux 3.4"},
+		},
+		mutate: func() {
+			os.WriteFile(target, []byte("tampered"), 0o644)
+		},
+	}
+	manifest := &Manifest{
+		Name:    "mon",
+		Version: "1.0.0",
+		Vars: map[string]VarSpec{
+			"HOME":              {Source: "env", Required: true},
+			"CLAUDE_CONFIG_DIR": {Source: "default", Default: "$HOME/.claude", Required: true},
+		},
+		Files: []FileSpec{
+			{Source: "knowledge/charter.md", Dest: "$HOME/team/mon/charter.md"},
+		},
+		Tools: []ToolSpec{
+			{Name: "tmux", Check: "tmux -V", Required: true},
+		},
+	}
+
+	runtime := &stubRuntime{}
+	err := (App{
+		Manifest: manifest,
+		Source: MapFileSource{
+			"knowledge/charter.md": []byte("charter"),
+		},
+		Verifier: NewChecksumVerifier(checksumMap(t, map[string][]byte{
+			"files/knowledge/charter.md": []byte("charter"),
+			"knowledge/charter.md":       []byte("charter"),
+		})),
+		Runner:      runner,
+		Runtime:     runtime,
+		HookManager: HookManager{},
+		GOOS:        "linux",
+	}).Run(RunOptions{
+		NoAPIKey: true,
+		Resolve: ResolveOptions{
+			Env: map[string]string{"HOME": root},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("app.Run() error = %v, want nil (verify skipped with NoAPIKey)", err)
+	}
+}
+
+func TestAppRun_NoAPIKey_DeletesAPIKeyFromResolved(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runtime := &configCapturingRuntime{}
+
+	err := (App{
+		Manifest: &Manifest{
+			Name:    "mon",
+			Version: "1.0.0",
+			Vars: map[string]VarSpec{
+				"HOME":              {Source: "env", Required: true},
+				"CLAUDE_CONFIG_DIR": {Source: "default", Default: "$HOME/.claude", Required: true},
+				"ANTHROPIC_API_KEY": {Source: "creds", Required: true},
+			},
+		},
+		Runtime: runtime,
+	}).Run(RunOptions{
+		NoAPIKey: true,
+		Resolve: ResolveOptions{
+			Env:   map[string]string{"HOME": root},
+			Creds: map[string]string{"ANTHROPIC_API_KEY": "sk-secret"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("app.Run() error = %v", err)
+	}
+
+	if key, exists := runtime.vars["ANTHROPIC_API_KEY"]; exists {
+		t.Fatalf("ANTHROPIC_API_KEY should be deleted, got %q", key)
+	}
+}
+
+func TestAppRun_NoAPIKey_RemovesCredentialsFile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".claude")
+	os.MkdirAll(configDir, 0o755)
+	credsFile := filepath.Join(configDir, ".credentials.json")
+	os.WriteFile(credsFile, []byte(`{"oauthToken":"old"}`), 0o600)
+
+	runtime := &configCapturingRuntime{}
+	err := (App{
+		Manifest: &Manifest{
+			Name:    "mon",
+			Version: "1.0.0",
+			Vars: map[string]VarSpec{
+				"HOME":              {Source: "env", Required: true},
+				"CLAUDE_CONFIG_DIR": {Source: "default", Default: "$HOME/.claude", Required: true},
+			},
+		},
+		Runtime: runtime,
+	}).Run(RunOptions{
+		NoAPIKey: true,
+		Resolve: ResolveOptions{
+			Env: map[string]string{"HOME": root},
+		},
+	})
+	if err != nil {
+		t.Fatalf("app.Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(credsFile); !os.IsNotExist(err) {
+		t.Fatalf(".credentials.json should be deleted, stat err = %v", err)
+	}
+}

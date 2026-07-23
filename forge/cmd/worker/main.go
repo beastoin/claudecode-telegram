@@ -57,7 +57,10 @@ func main() {
 		return
 	}
 
-	transport := forge.NewTransport(opts.BridgeURL)
+	var transport forge.Transport
+	if opts.BridgeURL != "" {
+		transport = forge.NewTransport(opts.BridgeURL)
+	}
 
 	err = forge.RunEmbeddedWorker(os.Args[1:], forge.WorkerDeps{
 		Assets: forge.EmbeddedAssets{

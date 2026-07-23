@@ -1,0 +1,20 @@
+{
+  "command": "verify",
+  "worker": "testmon",
+  "version": "1.0.0",
+  "status": "pass",
+  "summary": {
+    "verified": 1,
+    "skipped": 1
+  },
+  "files": [
+    {
+      "path": "charter.md",
+      "status": "pass"
+    },
+    {
+      "path": "kanban.md",
+      "status": "skip"
+    }
+  ]
+}

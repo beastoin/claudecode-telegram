@@ -90,9 +90,7 @@ func (d GRPCDownloader) Download(ctx context.Context, url string) ([]byte, error
 	if d.Transport == nil {
 		return nil, fmt.Errorf("grpc transport is required")
 	}
-	d.Transport.mu.Lock()
-	client := d.Transport.client
-	d.Transport.mu.Unlock()
+	client := d.Transport.Client()
 	if client == nil {
 		return nil, fmt.Errorf("grpc transport is not connected")
 	}
@@ -408,6 +406,14 @@ func (u *SelfUpgrader) Rollback(plan UpgradePlan) error {
 	}
 
 	return nil
+}
+
+func currentModuleRoot() (string, error) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", fmt.Errorf("resolve module root: runtime caller unavailable")
+	}
+	return filepath.Dir(filename), nil
 }
 
 func zeroBytes(data []byte) {

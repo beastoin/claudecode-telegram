@@ -1,4 +1,4 @@
-package forge
+package engine
 
 import (
 	"encoding/json"
@@ -6,26 +6,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/beastoin/claudecode-telegram/forge/manifest"
 )
 
+// HookManager handles hook script extraction and settings.json patching.
 type HookManager struct {
-	Source EmbeddedFileSource
+	Source FileSource
 }
 
-func (m HookManager) Install(manifest *Manifest, vars map[string]string) error {
-	if err := m.ExtractHookSources(manifest, vars); err != nil {
+func (m HookManager) Install(mf *manifest.Manifest, vars map[string]string) error {
+	if err := m.ExtractHookSources(mf, vars); err != nil {
 		return err
 	}
-	return m.InstallSettings(manifest, vars)
+	return m.InstallSettings(mf, vars)
 }
 
-func (m HookManager) ExtractHookSources(manifest *Manifest, vars map[string]string) error {
+func (m HookManager) ExtractHookSources(mf *manifest.Manifest, vars map[string]string) error {
 	configDir, ok := vars["CLAUDE_CONFIG_DIR"]
 	if !ok || configDir == "" {
 		return fmt.Errorf("CLAUDE_CONFIG_DIR is required for hook installation")
 	}
 
-	for _, hook := range manifest.Hooks {
+	for _, hook := range mf.Hooks {
 		if hook.Source == "" {
 			continue
 		}
@@ -51,6 +54,9 @@ func (m HookManager) ExtractHookSources(manifest *Manifest, vars map[string]stri
 		if err := os.WriteFile(dest, data, 0o755); err != nil {
 			return fmt.Errorf("write hook source %q: %w", dest, err)
 		}
+		if err := os.Chmod(dest, 0o755); err != nil {
+			return fmt.Errorf("chmod hook %q: %w", dest, err)
+		}
 	}
 
 	return nil
@@ -62,8 +68,8 @@ func (m HookManager) readEmbeddedHookSource(source string) ([]byte, error) {
 	}
 
 	candidates := []string{
-		canonicalSource(source),
-		buildArtifactKey(source, false),
+		CanonicalSource(source),
+		BuildArtifactKey(source, false),
 	}
 
 	var lastErr error
@@ -78,7 +84,7 @@ func (m HookManager) readEmbeddedHookSource(source string) ([]byte, error) {
 	return nil, lastErr
 }
 
-func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) error {
+func (HookManager) InstallSettings(mf *manifest.Manifest, vars map[string]string) error {
 	configDir, ok := vars["CLAUDE_CONFIG_DIR"]
 	if !ok || configDir == "" {
 		return fmt.Errorf("CLAUDE_CONFIG_DIR is required for hook installation")
@@ -108,7 +114,7 @@ func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) e
 			delete(hooksValue, event)
 			continue
 		}
-		pruned := pruneStaleHooks(entries, configDir)
+		pruned := PruneStaleHooks(entries, configDir)
 		if len(pruned) == 0 {
 			delete(hooksValue, event)
 		} else {
@@ -116,17 +122,17 @@ func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) e
 		}
 	}
 
-	for _, hook := range manifest.Hooks {
+	for _, hook := range mf.Hooks {
 		command, err := ExpandTemplate(hook.Command, vars)
 		if err != nil {
 			return fmt.Errorf("expand hook command %q: %w", hook.Command, err)
 		}
 
 		rawEventHooks, _ := hooksValue[hook.Event].([]any)
-		eventHooks := normalizeEventHooks(rawEventHooks)
-		group := ensureHookGroup(&eventHooks, hook.Matcher)
-		appendCommandHook(group, command)
-		hooksValue[hook.Event] = hookGroupsToAny(eventHooks)
+		eventHooks := NormalizeEventHooks(rawEventHooks)
+		group := EnsureHookGroup(&eventHooks, hook.Matcher)
+		AppendCommandHook(group, command)
+		hooksValue[hook.Event] = HookGroupsToAny(eventHooks)
 	}
 
 	settings["hooks"] = hooksValue
@@ -151,16 +157,18 @@ func (HookManager) InstallSettings(manifest *Manifest, vars map[string]string) e
 	return nil
 }
 
-func hookCommandExists(entries []any, command string) bool {
-	for _, group := range normalizeEventHooks(entries) {
-		if groupHasCommand(group, command) {
+// HookCommandExists checks if a command already exists in the hook entries.
+func HookCommandExists(entries []any, command string) bool {
+	for _, group := range NormalizeEventHooks(entries) {
+		if GroupHasCommand(group, command) {
 			return true
 		}
 	}
 	return false
 }
 
-func normalizeEventHooks(entries []any) []map[string]any {
+// NormalizeEventHooks converts raw JSON hook entries into a normalised group structure.
+func NormalizeEventHooks(entries []any) []map[string]any {
 	groups := []map[string]any{}
 	for _, entry := range entries {
 		entryMap, ok := entry.(map[string]any)
@@ -169,7 +177,7 @@ func normalizeEventHooks(entries []any) []map[string]any {
 		}
 
 		matcher, _ := entryMap["matcher"].(string)
-		group := ensureHookGroup(&groups, matcher)
+		group := EnsureHookGroup(&groups, matcher)
 
 		if hooks, ok := entryMap["hooks"].([]any); ok {
 			for _, hookEntry := range hooks {
@@ -177,19 +185,20 @@ func normalizeEventHooks(entries []any) []map[string]any {
 				if !ok {
 					continue
 				}
-				appendHookEntry(group, hookMap)
+				AppendHookEntry(group, hookMap)
 			}
 			continue
 		}
 
 		if command, _ := entryMap["command"].(string); command != "" {
-			appendCommandHook(group, command)
+			AppendCommandHook(group, command)
 		}
 	}
 	return groups
 }
 
-func ensureHookGroup(groups *[]map[string]any, matcher string) map[string]any {
+// EnsureHookGroup finds or creates a hook group with the given matcher.
+func EnsureHookGroup(groups *[]map[string]any, matcher string) map[string]any {
 	for _, group := range *groups {
 		if existing, _ := group["matcher"].(string); existing == matcher {
 			return group
@@ -206,17 +215,19 @@ func ensureHookGroup(groups *[]map[string]any, matcher string) map[string]any {
 	return group
 }
 
-func appendCommandHook(group map[string]any, command string) {
-	if groupHasCommand(group, command) {
+// AppendCommandHook adds a command hook entry to a group if not already present.
+func AppendCommandHook(group map[string]any, command string) {
+	if GroupHasCommand(group, command) {
 		return
 	}
-	appendHookEntry(group, map[string]any{
+	AppendHookEntry(group, map[string]any{
 		"type":    "command",
 		"command": command,
 	})
 }
 
-func appendHookEntry(group map[string]any, entry map[string]any) {
+// AppendHookEntry adds a hook entry to a group, deduplicating by command+type.
+func AppendHookEntry(group map[string]any, entry map[string]any) {
 	hooks, _ := group["hooks"].([]any)
 	command, _ := entry["command"].(string)
 	entryType, _ := entry["type"].(string)
@@ -235,7 +246,8 @@ func appendHookEntry(group map[string]any, entry map[string]any) {
 	group["hooks"] = append(hooks, entry)
 }
 
-func groupHasCommand(group map[string]any, command string) bool {
+// GroupHasCommand checks if a hook group already contains a command.
+func GroupHasCommand(group map[string]any, command string) bool {
 	hooks, _ := group["hooks"].([]any)
 	for _, existing := range hooks {
 		existingMap, ok := existing.(map[string]any)
@@ -249,7 +261,8 @@ func groupHasCommand(group map[string]any, command string) bool {
 	return false
 }
 
-func hookGroupsToAny(groups []map[string]any) []any {
+// HookGroupsToAny converts a slice of hook groups to []any for JSON serialization.
+func HookGroupsToAny(groups []map[string]any) []any {
 	entries := make([]any, 0, len(groups))
 	for _, group := range groups {
 		entries = append(entries, group)
@@ -257,7 +270,8 @@ func hookGroupsToAny(groups []map[string]any) []any {
 	return entries
 }
 
-func pruneStaleHooks(entries []any, configDir string) []any {
+// PruneStaleHooks removes hooks that reference other node's config directories.
+func PruneStaleHooks(entries []any, configDir string) []any {
 	hooksDir := filepath.Join(configDir, "hooks") + string(filepath.Separator)
 	result := []any{}
 	for _, entry := range entries {

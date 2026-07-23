@@ -1,0 +1,8 @@
+Worker: testmon v1.0.0
+Integrity Check:
+
+  ✓ team/test/charter.md         matches
+  ✓ hooks/send-to-telegram.sh    matches
+  ⊘ memory/MEMORY.md             skipped
+
+Status: VERIFIED (2 checked, 1 skipped)

@@ -414,9 +414,9 @@ func TestPruneStaleHooks_ReturnsEmptySliceNotNil(t *testing.T) {
 		},
 	}
 
-	result := pruneStaleHooks(entries, "/home/claude/.claude")
+	result := PruneStaleHooks(entries, "/home/claude/.claude")
 	if result == nil {
-		t.Fatal("pruneStaleHooks returned nil, want empty slice (would serialize as JSON null)")
+		t.Fatal("PruneStaleHooks returned nil, want empty slice (would serialize as JSON null)")
 	}
 
 	data, _ := json.Marshal(result)

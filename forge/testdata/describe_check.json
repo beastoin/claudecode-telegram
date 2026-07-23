@@ -1,0 +1,9 @@
+{
+  "command": "check",
+  "description": "Run readiness checks (tools, auth, bridge connectivity)",
+  "dry_run": false,
+  "flags": {
+    "--output-json": "Output structured JSON to stdout"
+  },
+  "output_json": true
+}

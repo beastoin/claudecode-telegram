@@ -38,17 +38,46 @@ Phase 5: WATCH
 
 ### Operational Modes
 
-| Flag | What it does | Exits? |
-|------|-------------|--------|
-| *(none)* | Run worker (bare metal, tmux) | No — runs until signal |
-| `--isolated` | Run worker in container | No — runs until `--stop` |
-| `--check` | Show resolved vars, tools, readiness | Yes |
-| `--verify` | Verify extracted files match checksums | Yes |
-| `--onboard` | First-time setup (extract + hooks + auth) | Yes |
-| `--stop` | Stop running worker (bare metal or isolated) | Yes |
-| `--health` | Is the worker running and healthy? | Yes |
+| Subcommand | What it does | Exits? |
+|------------|-------------|--------|
+| `run` *(default)* | Run worker (bare metal, tmux) | No — runs until signal |
+| `run --isolated` | Run worker in container | No — runs until `stop` |
+| `check` | Show resolved vars, tools, readiness | Yes |
+| `verify` | Verify extracted files match checksums | Yes |
+| `onboard` | First-time setup (extract + hooks + auth) | Yes |
+| `stop` | Stop running worker (bare metal or isolated) | Yes |
+| `health` | Is the worker running and healthy? | Yes |
+| `describe` | Show command schema as JSON | Yes |
+| `version` | Print worker name and version | Yes |
 
-`--onboard` is the recommended first step on a fresh host or container. It runs extraction with `--force-extract` semantics (no conflict prompts), installs hooks, writes the Claude CLI onboarding marker (`.claude.json`), and installs the API key helper script. After `--onboard` completes, the binary can be run normally.
+### Say It Once (Flag Resolution)
+
+Most flags are needed once, then remembered or derived automatically:
+
+| Setting | Resolution order | Typical usage |
+|---------|-----------------|---------------|
+| `--identity` | flag > env `FORGE_IDENTITY` > `.forge-state.json` | Pass once on first run, auto-loaded thereafter |
+| `--bridge-url` | flag > env `FORGE_BRIDGE_URL` | Required for bridge connector. Use env var to avoid repeating. |
+| `--session-prefix` | bridge `/register` > flag > manifest `TMUX_PREFIX` | Automatic |
+| `--connector` | flag > env `FORGE_CONNECTOR` | Pass on run only |
+
+**State file** (`.forge-state.json` in `$HOME`): Written after `run` starts. Stores session name, manifest name, PID, and identity path. Used by `stop`/`health` to find sessions and by all commands to auto-load identity.
+
+### Cross-Cutting Flags
+
+| Flag | Env Var | What it does |
+|------|---------|-------------|
+| `--output-json` | `FORGE_OUTPUT_JSON=1` | Emit structured JSON to stdout (check, verify) |
+| `--dry-run` | — | Show what would happen without executing (onboard) |
+| `--bridge-url` | `FORGE_BRIDGE_URL` | Bridge URL (required for bridge connector) |
+| `--identity` | `FORGE_IDENTITY` | Age decryption key path (saved after first use) |
+| `--connector` | `FORGE_CONNECTOR` | Connector type (telegram, bridge, etc.) |
+
+Flag > env var > state file > manifest default.
+
+### Conflict Handling
+
+`run` defaults to **skip-conflicts** (keep existing files, extract only new). Use `--force-extract` to overwrite. `onboard` always force-extracts (explicit setup step).
 
 ### Runtime Modes
 
@@ -72,14 +101,16 @@ The user is a manager. They think: "run mon", "run mon isolated", "stop mon", "i
 **Complete CLI (user perspective):**
 
 ```
-./mon                      Run worker (bare metal, tmux)
-./mon --isolated           Run worker isolated (in a container)
-./mon --check              Is the environment ready?
-./mon --check --isolated   Is the environment ready for isolated run?
-./mon --stop               Stop worker (bare metal or isolated — doesn't matter)
-./mon --health             Is the worker running and healthy?
-./mon --verify             Are extracted files intact?
-./mon --onboard            First-time setup
+./mon run                  Run worker (bare metal, tmux)
+./mon run --isolated       Run worker isolated (in a container)
+./mon check                Is the environment ready?
+./mon check --isolated     Is the environment ready for isolated run?
+./mon stop                 Stop worker (bare metal or isolated — doesn't matter)
+./mon health               Is the worker running and healthy?
+./mon verify               Are extracted files intact?
+./mon onboard              First-time setup
+./mon describe             Show command schema as JSON
+./mon version              Print name and version
 ```
 
 That's it. The user never needs to know what "Docker" or "podman" is.
@@ -87,21 +118,27 @@ That's it. The user never needs to know what "Docker" or "podman" is.
 **User flow:**
 
 ```bash
-# New machine: set up, check, run
-./mon --onboard --identity ~/.age/forge.key --bridge-url http://...
-./mon --check
-./mon
+# New machine: first run (pass identity once, saved to state)
+./mon run --identity ~/.age/forge.key --bridge-url http://bridge:8271
+
+# Subsequent runs (identity remembered, bridge-url via env)
+FORGE_BRIDGE_URL=http://bridge:8271 ./mon run
 
 # Same thing, but isolated
-./mon --onboard --identity ~/.age/forge.key --bridge-url http://...
-./mon --check --isolated
-./mon --isolated
+./mon run --isolated --identity ~/.age/forge.key --bridge-url http://bridge:8271
 
 # Is it alive?
-./mon --health
+./mon health
 
 # Stop it
-./mon --stop
+./mon stop
+
+# Agent automation (JSON output)
+./mon check --output-json
+./mon verify --output-json
+
+# Preview before onboarding
+./mon onboard --dry-run --bridge-url http://...
 ```
 
 **How isolation works (implementation detail — user doesn't see this):**
@@ -529,23 +566,74 @@ var CredsEncrypted []byte // encrypted files (age)
 var Checksums []byte     // SHA256 of every file, generated at build time
 ```
 
-## Binary Structure
+## Package Structure
 
 ```
-./mon
-  ├── main.go          — entry, signal handling
-  ├── manifest.go      — parse manifest, resolve vars
-  ├── prepare.go       — Phase 0: resolve vars, create dirs
-  ├── extract.go       — Phase 1: write embedded files to resolved paths
-  ├── bootstrap.go     — Phase 2: check + install tools (OS-aware)
-  ├── readiness.go     — Phase 3: pre-flight checks + auto-fix
-  ├── secrets.go       — decrypt creds.age
-  ├── runtime.go       — Runtime interface: start/stop/health/send (swappable)
-  ├── tmux.go          — tmux runtime: create/adopt session, send-keys input
-  ├── hooks.go         — hook handling
-  ├── transport.go     — gRPC client to bridge
-  ├── watchdog.go      — Phase 5: self-health monitoring
-  └── upgrade.go       — self-rebuild with manager's key
+forge/                          — app orchestration, CLI, lifecycle phases, cross-cutting
+  ├── app.go                    — App struct, Run(), wiring
+  ├── cli.go                    — CLI flag parsing
+  ├── worker_cli.go             — subcommand dispatch
+  ├── prepare.go                — Phase 0: resolve vars, create dirs
+  ├── extract.go                — Phase 1: write embedded files
+  ├── readiness.go              — Phase 3: pre-flight checks + auto-fix
+  ├── check.go                  — check command output
+  ├── verify.go                 — verify command + integrity
+  ├── secrets.go                — decrypt creds.age
+  ├── isolated.go               — container mode
+  ├── upgrade.go                — self-upgrade
+  ├── auth.go                   — AuthCoordinator (cross-cutting)
+  ├── emit.go                   — forge emit subcommand
+  ├── describe.go               — describe command
+  ├── hooks.go                  — legacy HookManager (fallback)
+  ├── transport.go              — gRPC client to bridge
+  └── deps.go                   — dependency documentation
+
+forge/manifest/                 — pure data types (no I/O)
+  └── manifest.go               — Manifest, VarSpec, FileSpec, ToolSpec, HookSpec
+
+forge/protocol/                 — wire format data types (Go↔Python)
+  └── types.go                  — RegisterRequest, RegisterResponse, WorkerMessage, JSONLChunk
+
+forge/runtime/                  — process execution, supervision
+  ├── runtime.go                — Runtime, RuntimeMonitor, LaunchCommander interfaces
+  ├── tmux.go                   — TmuxRuntime implementation
+  ├── shell_runner.go           — ShellRunner implementation
+  └── bootstrap.go              — tool check/install
+
+forge/engine/                   — AI engine abstraction
+  ├── engine.go                 — EngineDriver interface, registry, types
+  └── engine_claude.go          — ClaudeCodeDriver implementation
+
+forge/connector/                — platform I/O, message routing
+  ├── connector.go              — Connector interface, sub-interfaces, registry
+  ├── connector_host.go         — ConnectorHost orchestrator
+  ├── connector_hook.go         — HookListener (unix socket IPC)
+  ├── connector_bridge.go       — BridgeConnector
+  ├── connector_telegram.go     — TelegramConnector (webhook)
+  ├── connector_telegram_poll.go — TelegramPollConnector
+  ├── connector_slack.go        — SlackConnector (stub)
+  ├── connector_whatsapp.go     — WhatsAppConnector (stub)
+  ├── connector_local.go        — LocalConnector (testing)
+  ├── connector_web.go          — WebConnector + templates + markdown
+  └── commands.go               — RegisterBuiltinCommands
+
+forge/watchdog/                 — health monitoring
+  └── watchdog.go               — Watchdog, RestartPolicy, ExponentialBackoffPolicy
+
+forge/build/                    — worker binary construction (worker-forge only)
+  └── build.go                  — ScaffoldWorkerDir, BuildWorkerBinary, checksums
+```
+
+Dependency graph:
+```
+manifest/   → nothing
+protocol/   → nothing
+runtime/    → manifest/
+engine/     → manifest/, runtime/
+connector/  → manifest/, runtime/, protocol/
+watchdog/   → nothing (consumer-defined interfaces)
+build/      → manifest/
+root        → everything (wiring)
 ```
 
 ## Hook Installation
@@ -610,10 +698,11 @@ Flow:
 5. Phase 5: watchdog monitors runtime + Claude + bridge connectivity
 ```
 
-## Readiness Check: --check Flag
+## Readiness Check
 
 ```
-./mon --check
+./mon check                   # human-readable output
+./mon check --output-json     # structured JSON for automation
 
 Worker: mon v1.0.0
 
@@ -771,10 +860,11 @@ Files NOT checked at runtime (they're expected to change):
 
 Workers control this via `integrity: skip` flag on files that legitimately change at runtime.
 
-### `--verify` flag
+### `verify` command
 
 ```
-./mon --verify
+./mon verify                  # human-readable output
+./mon verify --output-json    # structured JSON for automation
 
 Worker: mon v1.0.0
 Integrity Check:
@@ -790,12 +880,17 @@ Integrity Check:
 Status: VERIFIED (6 checked, 20 skipped)
 ```
 
-### `--onboard` flag
+### `onboard` command
 
 First-time setup for fresh hosts or containers. Runs extract + hooks + auth state, then exits. Designed for headless/Docker environments where the Claude CLI's interactive onboarding wizard would block.
 
+Use `--dry-run` to preview what would be extracted without writing anything:
 ```
-./mon --onboard --bridge-url http://100.125.36.102:8271 --identity ~/.age/forge.key
+./mon onboard --dry-run
+```
+
+```
+./mon onboard --identity ~/.age/forge.key
 
 Onboarding mon v2.0.0
 
@@ -814,24 +909,25 @@ Onboarding mon v2.0.0
 3. **Install hooks** — writes hook scripts + patches `settings.json`
 4. **Write onboarding marker** — creates `$CLAUDE_CONFIG_DIR/.claude.json` with `hasCompletedOnboarding: true` (skips Claude CLI's interactive theme/login wizard on first launch)
 5. **Install API key helper** — writes `$CLAUDE_CONFIG_DIR/hooks/api-key-helper.sh` that reads `ANTHROPIC_API_KEY` from tmux environment (fallback auth for Claude CLI)
+6. **Save identity to state** — writes identity path to `.forge-state.json` so subsequent commands auto-load it
 
 **When to use:**
 
 | Scenario | Command |
 |----------|---------|
-| Fresh VPS, first deploy | `./mon --onboard --identity ~/.age/forge.key --bridge-url ...` |
-| Docker container setup | `docker run ... mon --onboard --identity /tmp/identity.agekey` |
-| After rebuild (re-extract) | `./mon --onboard --identity ~/.age/forge.key --bridge-url ...` |
-| Then run normally | `./mon --bridge-url ...` |
+| Fresh VPS, first deploy | `./mon onboard --identity ~/.age/forge.key` |
+| Docker container setup | `docker run ... mon onboard --identity /tmp/identity.agekey` |
+| After rebuild (re-extract) | `./mon onboard` (identity remembered) |
+| Then run normally | `./mon run` |
 
 **Differences from normal startup:**
 
-| Aspect | `--onboard` | Normal run |
+| Aspect | `onboard` | Normal `run` |
 |--------|-------------|------------|
-| Conflict handling | Always force-extract | Stop on conflict (or `--force-extract`/`--skip-conflicts`) |
+| Conflict handling | Always force-extract | Skip-conflicts (default), `--force-extract` to override |
 | Phases executed | 0 → extract → hooks → auth marker | 0 → 1 → 2 → 3 → 4 → 5 (full lifecycle) |
 | Runtime (tmux) | Not started | Started |
-| Bridge connection | Not established | Connected via gRPC |
+| Bridge connection | Not established | Connected |
 | Exit behavior | Exits after setup | Runs until signal |
 
 **Idempotent:** Safe to run multiple times. Skips onboarding marker if `.claude.json` already exists. Overwrites extracted files (force mode). Re-installs hooks.
@@ -1128,11 +1224,17 @@ WantedBy=multi-user.target
 | Worker identity | Name-based | Stable across rebuilds |
 | Transport | gRPC over Tailscale | Typed contracts, bidirectional streaming, JSONL support |
 | Isolated mode | `--isolated` flag (user intent, not implementation) | Standalone principle + user-first: "run isolated" not "docker run" |
-| Onboard built-in | `--onboard` flag in worker binary | Self-managing principle: binary sets up its own auth |
+| Onboard built-in | `onboard` command in worker binary | Self-managing principle: binary sets up its own auth |
 | Fleet external | `worker-forge deploy --all` for multi-worker | Binary manages itself, not others |
+| Subcommands | `./mon check` over `./mon --check` | Cleaner CLI, discoverable via `describe` |
+| JSON output | `--output-json` flag on check/verify | Agent automation needs structured, parseable output |
+| Dry-run | `--dry-run` flag on onboard | Safety: preview mutations before executing |
+| Env var fallbacks | `FORGE_BRIDGE_URL`, etc. | Container/CI-friendly: flags > env > defaults |
+| Describe command | `./mon describe` returns JSON schema | Self-documenting: agents discover commands at runtime |
+| SKILL.md | Embedded skill doc for forge | Agent-friendly reference alongside the binary |
 
 ## Open Questions
 
 1. Should vars support nested expansion? (e.g., `$TEAM_DIR/$WORKER_NAME/kanban.md` → multi-level)
 2. Should preparation validate dir permissions (writable?) or just create?
-3. Should `--check` output be JSON for monitoring dashboards?
+3. ~~Should `--check` output be JSON for monitoring dashboards?~~ **RESOLVED**: `check --output-json` and `verify --output-json` output structured JSON with per-check IDs, severity, and summary counts.

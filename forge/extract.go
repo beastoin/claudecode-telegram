@@ -53,9 +53,6 @@ type BundleDecryptor interface {
 	DecryptFile(ciphertext []byte, name string) ([]byte, error)
 }
 
-type IntegrityVerifier interface {
-	Verify(name string, data []byte) error
-}
 
 type BuiltLayoutSource struct {
 	Root string

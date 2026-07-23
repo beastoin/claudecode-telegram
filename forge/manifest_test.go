@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -740,7 +741,11 @@ func TestCheckMode_ReportsResolvedVarsToolsAndReadiness(t *testing.T) {
 func TestTmuxRuntime_StartNewSession(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := &stubRunner{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Runner:  runner,
 		Session: "claude-prod-mon",
@@ -751,6 +756,7 @@ func TestTmuxRuntime_StartNewSession(t *testing.T) {
 	}
 
 	want := []string{
+		"tmux has-session -t claude-prod-mon",
 		"tmux new-session -d -s claude-prod-mon",
 		`tmux send-keys -t claude-prod-mon bash Enter`,
 	}
@@ -936,8 +942,8 @@ func TestWatchdog_AlertsOnCriticalIntegrityDrift(t *testing.T) {
 		t.Fatalf("watchdog.CheckOnce() error = %v", err)
 	}
 
-	if len(bridge.alerts) != 1 {
-		t.Fatalf("bridge.alerts = %#v, want 1 alert", bridge.alerts)
+	if got := bridge.getAlerts(); len(got) != 1 {
+		t.Fatalf("bridge.alerts = %#v, want 1 alert", got)
 	}
 }
 
@@ -1121,12 +1127,25 @@ func (s *stubRuntime) Health() error {
 }
 
 type stubBridgeClient struct {
-	alerts []string
+	mu      sync.Mutex
+	alerts  []string
+	alertCh chan string
 }
 
 func (s *stubBridgeClient) Alert(message string) error {
+	s.mu.Lock()
 	s.alerts = append(s.alerts, message)
+	s.mu.Unlock()
+	if s.alertCh != nil {
+		s.alertCh <- message
+	}
 	return nil
+}
+
+func (s *stubBridgeClient) getAlerts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.alerts...)
 }
 
 type stubIntegrityMonitor struct {

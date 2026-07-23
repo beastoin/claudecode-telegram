@@ -11,7 +11,7 @@ func TestRealTmux_CommandsAreCorrect(t *testing.T) {
 
 	recorder := &commandRecorder{
 		results: map[string]RunResult{
-			"tmux has-session -t claude-prod-mon": {ExitCode: 0},
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
 		},
 	}
 	runtime := &TmuxRuntime{
@@ -25,12 +25,14 @@ func TestRealTmux_CommandsAreCorrect(t *testing.T) {
 	if err := runtime.Send("hello world"); err != nil {
 		t.Fatalf("runtime.Send() error = %v", err)
 	}
+	recorder.results["tmux has-session -t claude-prod-mon"] = RunResult{ExitCode: 0}
 	if err := runtime.Health(); err != nil {
 		t.Fatalf("runtime.Health() error = %v", err)
 	}
 
 	got := strings.Join(recorder.calls, "|")
 	want := strings.Join([]string{
+		"tmux has-session -t claude-prod-mon",
 		"tmux new-session -d -s claude-prod-mon",
 		"tmux send-keys -t claude-prod-mon bash Enter",
 		"tmux send-keys -t claude-prod-mon hello world Enter",
@@ -41,10 +43,36 @@ func TestRealTmux_CommandsAreCorrect(t *testing.T) {
 	}
 }
 
+func TestTmuxRuntime_StartRejectsDuplicateSession(t *testing.T) {
+	t.Parallel()
+
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 0},
+		},
+	}
+	runtime := &TmuxRuntime{
+		Commander: recorder,
+		Session:   "claude-prod-mon",
+	}
+
+	err := runtime.Start()
+	if err == nil {
+		t.Fatal("runtime.Start() error = nil, want duplicate session error")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("runtime.Start() error = %q, want 'already exists'", err)
+	}
+}
+
 func TestTmuxRuntime_StartNewSessionLaunchesClaudeCommand(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander:     recorder,
 		Session:       "claude-prod-mon",
@@ -57,6 +85,7 @@ func TestTmuxRuntime_StartNewSessionLaunchesClaudeCommand(t *testing.T) {
 
 	got := strings.Join(recorder.calls, "|")
 	want := strings.Join([]string{
+		"tmux has-session -t claude-prod-mon",
 		"tmux new-session -d -s claude-prod-mon",
 		"tmux send-keys -t claude-prod-mon claude Enter",
 	}, "|")
@@ -94,6 +123,9 @@ func TestTmuxRuntime_StartReturnsLaunchError(t *testing.T) {
 	t.Parallel()
 
 	recorder := &erroringCommandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
 		errs: map[string]error{
 			"tmux send-keys -t claude-prod-mon bash Enter": errors.New("send failed"),
 		},
@@ -134,7 +166,11 @@ func TestTmuxRuntime_LastOutputDetectsRecentActivity(t *testing.T) {
 func TestTmuxRuntime_SetsEnvironmentVariables(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
@@ -154,9 +190,12 @@ func TestTmuxRuntime_SetsEnvironmentVariables(t *testing.T) {
 
 	got := strings.Join(recorder.calls, "|")
 	want := strings.Join([]string{
+		"tmux has-session -t claude-prod-mon",
 		"tmux new-session -d -s claude-prod-mon",
 		"tmux set-environment -t claude-prod-mon BRIDGE_URL http://bridge",
 		"tmux set-environment -t claude-prod-mon TMUX_PREFIX claude-prod-",
+		"tmux send-keys -t claude-prod-mon export BRIDGE_URL=http://bridge Enter",
+		"tmux send-keys -t claude-prod-mon export TMUX_PREFIX=claude-prod- Enter",
 		"tmux send-keys -t claude-prod-mon bash Enter",
 	}, "|")
 	if got != want {
@@ -167,7 +206,11 @@ func TestTmuxRuntime_SetsEnvironmentVariables(t *testing.T) {
 func TestTmuxRuntime_SetsEnvironmentBeforeLaunch(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
@@ -206,7 +249,11 @@ func TestTmuxRuntime_SetsEnvironmentBeforeLaunch(t *testing.T) {
 func TestTmuxRuntime_EnvironmentEmptyMapIsNoOp(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
@@ -226,7 +273,11 @@ func TestTmuxRuntime_EnvironmentEmptyMapIsNoOp(t *testing.T) {
 func TestTmuxRuntime_DefaultLaunchCommandIsBash(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
@@ -245,7 +296,11 @@ func TestTmuxRuntime_DefaultLaunchCommandIsBash(t *testing.T) {
 func TestTmuxRuntime_SetLaunchCommandOverridesDefault(t *testing.T) {
 	t.Parallel()
 
-	recorder := &commandRecorder{}
+	recorder := &commandRecorder{
+		results: map[string]RunResult{
+			"tmux has-session -t claude-prod-mon": {ExitCode: 1},
+		},
+	}
 	runtime := &TmuxRuntime{
 		Commander: recorder,
 		Session:   "claude-prod-mon",
@@ -277,8 +332,9 @@ func (c *commandRecorder) Execute(name string, args ...string) (RunResult, error
 }
 
 type erroringCommandRecorder struct {
-	calls []string
-	errs  map[string]error
+	calls   []string
+	results map[string]RunResult
+	errs    map[string]error
 }
 
 func (c *erroringCommandRecorder) Execute(name string, args ...string) (RunResult, error) {
@@ -286,6 +342,9 @@ func (c *erroringCommandRecorder) Execute(name string, args ...string) (RunResul
 	c.calls = append(c.calls, call)
 	if err, ok := c.errs[call]; ok {
 		return RunResult{}, err
+	}
+	if result, ok := c.results[call]; ok {
+		return result, nil
 	}
 	return RunResult{}, nil
 }

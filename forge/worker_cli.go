@@ -18,7 +18,8 @@ import (
 )
 
 type WorkerCLIOptions struct {
-	BridgeURL     string
+	Command        string
+	BridgeURL      string
 	Session        string
 	LaunchCommand  string
 	Identity       string
@@ -35,6 +36,11 @@ type WorkerCLIOptions struct {
 	EmbeddedPath   string
 	ConnectorType  string
 	ConnectorConf  map[string]string
+	OutputJSON     bool
+	DryRun         bool
+	Auth           bool
+	NoAPIKey       bool
+	DescribeTarget string
 }
 
 type EmbeddedAssets struct {
@@ -61,36 +67,105 @@ type WorkerDeps struct {
 	Engine         EngineDriver
 }
 
+var subcommands = map[string]bool{
+	"run": true, "check": true, "verify": true, "onboard": true,
+	"health": true, "stop": true, "describe": true, "version": true,
+	"auth": true,
+}
+
 func ParseWorkerCLI(args []string) (WorkerCLIOptions, error) {
+	var subcmd string
+	var flagArgs []string
+
+	if len(args) > 0 && subcommands[args[0]] {
+		subcmd = args[0]
+		flagArgs = args[1:]
+	} else {
+		flagArgs = args
+	}
+
+	if subcmd == "describe" {
+		opts := WorkerCLIOptions{Command: "describe"}
+		if len(flagArgs) > 0 && !strings.HasPrefix(flagArgs[0], "-") {
+			opts.DescribeTarget = flagArgs[0]
+		}
+		return opts, nil
+	}
+	if subcmd == "version" {
+		return WorkerCLIOptions{Command: "version"}, nil
+	}
+
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	var opts WorkerCLIOptions
-	fs.StringVar(&opts.BridgeURL, "bridge-url", "", "bridge URL")
+	fs.StringVar(&opts.BridgeURL, "bridge-url", "", "bridge URL (default from manifest)")
 	fs.StringVar(&opts.Session, "session", "", "existing tmux session to adopt")
 	fs.StringVar(&opts.LaunchCommand, "launch-command", "", "command to launch inside tmux")
-	fs.StringVar(&opts.Identity, "identity", "", "age identity path or key")
-	fs.BoolVar(&opts.Check, "check", false, "run readiness checks and exit")
-	fs.BoolVar(&opts.Verify, "verify", false, "verify extracted file integrity and exit")
-	fs.BoolVar(&opts.Onboard, "onboard", false, "extract files, set up Claude CLI auth, and exit")
+	fs.StringVar(&opts.Identity, "identity", "", "age identity path (saved to state)")
 	fs.BoolVar(&opts.Isolated, "isolated", false, "run worker in an isolated container")
-	fs.BoolVar(&opts.Stop, "stop", false, "stop running worker (bare metal or isolated)")
-	fs.BoolVar(&opts.Health, "health", false, "check if worker is running and healthy")
 	fs.StringVar(&opts.NameOverride, "name-override", "", "override worker name")
-	fs.StringVar(&opts.SessionPrefix, "session-prefix", "", "tmux session name prefix (default: claude-prod-)")
-	fs.BoolVar(&opts.ForceExtract, "force-extract", false, "override all conflicting files during extract")
-	fs.BoolVar(&opts.SkipConflicts, "skip-conflicts", false, "keep existing files, extract only new ones")
+	fs.StringVar(&opts.SessionPrefix, "session-prefix", "", "tmux session prefix (default from manifest/bridge)")
+	fs.BoolVar(&opts.ForceExtract, "force-extract", false, "overwrite conflicting files (default: skip)")
+	fs.BoolVar(&opts.SkipConflicts, "skip-conflicts", false, "keep existing files, extract only new")
 	fs.StringVar(&opts.EmbeddedPath, "show-embedded", "", "print embedded file at path and exit")
-	fs.StringVar(&opts.ConnectorType, "connector", "", "connector type (bridge, telegram, telegram-poll, local, slack, whatsapp)")
+	fs.StringVar(&opts.ConnectorType, "connector", "", "connector type (bridge, telegram, telegram-poll, local)")
+	fs.BoolVar(&opts.NoAPIKey, "no-api-key", false, "skip API key, force OAuth login")
+	fs.BoolVar(&opts.OutputJSON, "output-json", false, "emit structured JSON to stdout")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "show what would happen without executing")
 
 	var connectorFlags stringSlice
 	fs.Var(&connectorFlags, "connector-opt", "connector option as key=value (repeatable)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(flagArgs); err != nil {
 		return WorkerCLIOptions{}, err
 	}
 
 	opts.ConnectorConf = parseConnectorOpts(connectorFlags)
+
+	// Map subcommand to boolean fields and Command
+	switch subcmd {
+	case "check":
+		opts.Check = true
+		opts.Command = "check"
+	case "verify":
+		opts.Verify = true
+		opts.Command = "verify"
+	case "onboard":
+		opts.Onboard = true
+		opts.Command = "onboard"
+	case "health":
+		opts.Health = true
+		opts.Command = "health"
+	case "stop":
+		opts.Stop = true
+		opts.Command = "stop"
+	case "auth":
+		opts.Auth = true
+		opts.Command = "auth"
+	default:
+		opts.Command = "run"
+	}
+
+	// Env var fallbacks (flag > env > state file > default)
+	if opts.BridgeURL == "" {
+		opts.BridgeURL = os.Getenv("FORGE_BRIDGE_URL")
+	}
+	if opts.Identity == "" {
+		opts.Identity = os.Getenv("FORGE_IDENTITY")
+	}
+	if opts.Identity == "" {
+		if state := readForgeState(); state != nil && state.Identity != "" {
+			opts.Identity = state.Identity
+		}
+	}
+	if opts.ConnectorType == "" {
+		opts.ConnectorType = os.Getenv("FORGE_CONNECTOR")
+	}
+	if !opts.OutputJSON && os.Getenv("FORGE_OUTPUT_JSON") == "1" {
+		opts.OutputJSON = true
+	}
+
 	return opts, nil
 }
 
@@ -126,6 +201,7 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 	if err != nil {
 		return fmt.Errorf("parse embedded manifest: %w", err)
 	}
+	originalName := manifest.Name
 	if opts.NameOverride != "" {
 		manifest.Name = opts.NameOverride
 	}
@@ -136,13 +212,29 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		runner = ShellRunner{}
 	}
 
+	if opts.Command == "version" {
+		return writeString(deps.Stdout, fmt.Sprintf("%s v%s\n", manifest.Name, manifest.Version))
+	}
+
+	if opts.Command == "describe" {
+		return writeString(deps.Stdout, FormatDescribe(manifest, opts.DescribeTarget))
+	}
+
+	// Resolve TMUX_PREFIX from manifest default when --session-prefix not given.
+	// Done early so stop/health can find the correct tmux session.
+	if opts.SessionPrefix == "" {
+		if v, ok := manifest.Vars["TMUX_PREFIX"]; ok && v.Default != "" {
+			opts.SessionPrefix = v.Default
+		}
+	}
+
 	// Modes that don't need creds or var resolution
 	if opts.Stop {
-		return StopWorker(manifest, runner, deps.Stdout)
+		return StopWorker(manifest, runner, deps.Stdout, opts.SessionPrefix)
 	}
 
 	if opts.Health {
-		return HealthCheck(manifest, runner, deps.Stdout)
+		return HealthCheck(manifest, runner, deps.Stdout, opts.SessionPrefix)
 	}
 
 	if opts.Isolated {
@@ -191,6 +283,9 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		if err != nil {
 			return err
 		}
+		if opts.OutputJSON {
+			return writeString(deps.Stdout, FormatCheckJSON(*report))
+		}
 		return writeString(deps.Stdout, FormatCheckReport(*report, firstNonEmptyString(deps.GOOS, runtime.GOOS)))
 	}
 
@@ -202,6 +297,9 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		if err != nil {
 			return err
 		}
+		if opts.OutputJSON {
+			return writeString(deps.Stdout, FormatVerifyJSON(*report))
+		}
 		return writeString(deps.Stdout, FormatVerifyReport(*report))
 	}
 
@@ -209,12 +307,9 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		return runOnboard(manifest, deps, opts, resolve, checksums)
 	}
 
-	runtimeFactory := deps.RuntimeFactory
-	if runtimeFactory == nil {
-		runtimeFactory = defaultWorkerRuntimeFactory
-	}
-
-	// Resolve connector
+	// Bridge connector requires a session prefix so tmux session name
+	// matches what the bridge expects for message routing.
+	// Resolve connector early so bridge can provide settings (tmux prefix)
 	connector := deps.Connector
 	var connectorCfg ConnectorConfig
 	if opts.ConnectorType != "" && connector == nil {
@@ -224,12 +319,30 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 			return fmt.Errorf("connector: %w", err)
 		}
 	}
+	connectorInitialized := false
 	if connector != nil {
+		connectorConf := mergeConnectorConfig(opts.ConnectorConf, resolve.Creds)
 		connectorCfg = ConnectorConfig{
 			WorkerName: manifest.Name,
 			BridgeURL:  opts.BridgeURL,
-			Config:     opts.ConnectorConf,
+			Config:     connectorConf,
 		}
+		if err := connector.Init(context.Background(), connectorCfg); err != nil {
+			return fmt.Errorf("connector init: %w", err)
+		}
+		connectorInitialized = true
+		if bc, ok := connector.(*BridgeConnector); ok && bc.TmuxPrefix != "" {
+			opts.SessionPrefix = bc.TmuxPrefix
+		}
+	}
+
+	if opts.SessionPrefix == "" && (opts.ConnectorType == "bridge" || os.Getenv("FORGE_CONNECTOR") == "bridge") {
+		return fmt.Errorf("bridge connector requires --session-prefix or TMUX_PREFIX in manifest")
+	}
+
+	runtimeFactory := deps.RuntimeFactory
+	if runtimeFactory == nil {
+		runtimeFactory = defaultWorkerRuntimeFactory
 	}
 
 	engine := deps.Engine
@@ -248,19 +361,29 @@ func RunEmbeddedWorker(args []string, deps WorkerDeps) error {
 		Watchdog:     deps.Watchdog,
 		HookManager:  deps.HookManager,
 		GOOS:         firstNonEmptyString(deps.GOOS, runtime.GOOS),
-		Connector:    connector,
-		ConnectorCfg: connectorCfg,
-		Engine:       engine,
+		Connector:            connector,
+		ConnectorCfg:         connectorCfg,
+		ConnectorInitialized: connectorInitialized,
+		Engine:               engine,
+		OriginalName:         originalName,
+		Identity:             opts.Identity,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	skipConflicts := opts.SkipConflicts
+	if !opts.ForceExtract && !skipConflicts {
+		skipConflicts = true
+	}
+
 	return app.Run(RunOptions{
 		Context:       ctx,
 		Resolve:       resolve,
 		ForceExtract:  opts.ForceExtract,
-		SkipConflicts: opts.SkipConflicts,
+		SkipConflicts: skipConflicts,
+		AuthOnly:      opts.Auth,
+		NoAPIKey:      opts.NoAPIKey,
 	})
 }
 
@@ -286,9 +409,11 @@ func parseChecksums(data []byte) (map[string]string, error) {
 }
 
 func defaultWorkerRuntimeFactory(manifest *Manifest, opts WorkerCLIOptions, runner Runner) Runtime {
-	prefix := "claude-prod-"
-	if opts.SessionPrefix != "" {
-		prefix = opts.SessionPrefix
+	prefix := opts.SessionPrefix
+	if prefix == "" {
+		// Safe default: PID-scoped prefix prevents accidentally targeting
+		// production tmux sessions. Use --session-prefix for production.
+		prefix = fmt.Sprintf("claude-%d-", os.Getpid())
 	}
 	tmuxRuntime := &TmuxRuntime{
 		Runner:        runner,
@@ -498,6 +623,21 @@ func runOnboard(manifest *Manifest, deps WorkerDeps, opts WorkerCLIOptions, reso
 		stdout = os.Stdout
 	}
 
+	if opts.DryRun {
+		fmt.Fprintf(stdout, "Onboarding %s v%s (dry-run)\n\n", manifest.Name, manifest.Version)
+		fmt.Fprintf(stdout, "Files that would be extracted:\n")
+		for _, f := range manifest.Files {
+			dest, _ := ExpandTemplate(f.Dest, resolved)
+			fmt.Fprintf(stdout, "  %s -> %s\n", f.Source, dest)
+		}
+		fmt.Fprintf(stdout, "\nHooks that would be installed:\n")
+		for _, h := range manifest.Hooks {
+			fmt.Fprintf(stdout, "  %s (%s)\n", h.Source, h.Event)
+		}
+		fmt.Fprintf(stdout, "\nNo changes made.\n")
+		return nil
+	}
+
 	fmt.Fprintf(stdout, "Onboarding %s v%s\n\n", manifest.Name, manifest.Version)
 
 	// Step 1: Extract files
@@ -573,6 +713,22 @@ printf '%s\n' "$key"
 		fmt.Fprintf(stdout, "✓ API key helper installed\n")
 	}
 
+	if opts.Identity != "" {
+		writeForgeState("", manifest.Name, opts.Identity)
+		fmt.Fprintf(stdout, "✓ Identity saved\n")
+	}
+
 	fmt.Fprintf(stdout, "\n✓ Onboard complete. Run without --onboard to start.\n")
 	return nil
+}
+
+func mergeConnectorConfig(explicit map[string]string, creds map[string]string) map[string]string {
+	merged := make(map[string]string, len(explicit)+len(creds))
+	for k, v := range creds {
+		merged[k] = v
+	}
+	for k, v := range explicit {
+		merged[k] = v
+	}
+	return merged
 }

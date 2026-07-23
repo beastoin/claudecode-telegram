@@ -388,55 +388,126 @@ Socket path: `/tmp/forge-{sanitized-worker-name}.sock` (slashes/spaces → hyphe
 
 ## Usage
 
+Subcommand syntax only. Flag resolution: flag > env var > state file > manifest default.
+
 ```bash
-# Bridge connector (existing behavior)
-./mon --connector bridge --bridge-url http://localhost:8271
+# First run on new host (identity saved to state file for future use)
+./mon run --identity ~/.age/forge.key --bridge-url http://bridge:8271
 
-# Direct Telegram via webhook
-./mon --connector telegram --connector-opt TELEGRAM_BOT_TOKEN=$TOKEN --connector-opt TELEGRAM_CHAT_ID=12345
+# Subsequent runs (identity auto-loaded)
+./mon run --bridge-url http://bridge:8271
 
-# Direct Telegram via polling
-./mon --connector telegram-poll --connector-opt TELEGRAM_BOT_TOKEN=$TOKEN --connector-opt TELEGRAM_CHAT_ID=12345
+# Bridge connector (explicit)
+./mon run --connector bridge --bridge-url http://bridge:8271
 
-# Slack via WebSocket (stub)
-./mon --connector slack --connector-opt SLACK_APP_TOKEN=$APP --connector-opt SLACK_BOT_TOKEN=$BOT
+# Direct Telegram via polling (token from creds bundle — zero connector-opts)
+./mon run --connector telegram-poll
 
-# WhatsApp via polling (stub)
-./mon --connector whatsapp --connector-opt WHATSAPP_TOKEN=$TOKEN --connector-opt WHATSAPP_PHONE_ID=123
+# Direct Telegram with explicit opts (override creds bundle)
+./mon run --connector telegram-poll --connector-opt TELEGRAM_BOT_TOKEN=$TOKEN --connector-opt TELEGRAM_CHAT_ID=12345
+
+# Direct Telegram via webhook (token from creds bundle)
+./mon run --connector telegram
 
 # Local testing
-./mon --connector local
+./mon run --connector local
 
-# Dry-run (no connector needed)
-./mon --check
+# Management (zero flags — state file has session info)
+./mon health
+./mon stop
+
+# Readiness check (human-readable or JSON)
+./mon check
+./mon check --output-json
+
+# Verify file integrity
+./mon verify --output-json
+
+# First-time setup (with preview)
+./mon onboard --dry-run
+./mon onboard --identity ~/.age/forge.key
+
+# Self-describe (JSON schema of all commands)
+./mon describe
+./mon describe check
+
+# Version
+./mon version
+
+# Env var fallbacks (useful in containers/CI)
+FORGE_BRIDGE_URL=http://... FORGE_OUTPUT_JSON=1 ./mon check
 ```
 
 ## Project Structure
 
 ```
-forge/
-├── engine.go                     # EngineDriver interface, registry, types
-├── engine_claude.go              # ClaudeCodeDriver implementation
-├── engine_test.go                # Driver tests
-├── emit.go                       # forge emit subcommand (ParseEmitArgs, RunEmit)
-├── emit_test.go                  # Emit tests including integration with HookListener
-├── connector.go                  # Connector interface, sub-interfaces, Caps, Reqs, registry
-├── connector_host.go             # ConnectorHost orchestrator
-├── connector_hook.go             # HookListener — Unix socket for hook IPC
-├── connector_bridge.go           # BridgeConnector (ExternalReceiver)
-├── connector_telegram.go         # TelegramConnector (PushReceiver)
-├── connector_telegram_poll.go    # TelegramPollConnector (PollReceiver)
-├── connector_whatsapp.go         # WhatsAppConnector (PollReceiver) — stub
-├── connector_slack.go            # SlackConnector (StreamReceiver) — stub
-├── connector_local.go            # LocalConnector (testing)
-├── connector_test.go             # Connector registry + interface tests
-├── runtime.go                    # Runtime interface
-├── tmux.go                       # TmuxRuntime (generic — no Claude Code specifics)
-├── app.go                        # App orchestrator
-├── manifest.go                   # Manifest types and parsing
-├── hooks.go                      # HookManager (legacy path, pre-EngineDriver)
-├── boundary_test.go              # Boundary enforcement tests
-├── ...                           # extract, prepare, build, secrets, etc.
+forge/                            # App orchestration, CLI, lifecycle, cross-cutting
+├── app.go                        # App struct, Run(), wiring
+├── cli.go                        # CLI flag parsing
+├── worker_cli.go                 # Subcommand dispatch
+├── prepare.go                    # Phase 0: resolve vars, create dirs
+├── extract.go                    # Phase 1: write embedded files
+├── readiness.go                  # Phase 3: readiness checks + auto-fix
+├── check.go                      # Check command output
+├── verify.go                     # Verify command + integrity types
+├── integrity.go                  # Integrity monitoring
+├── secrets.go                    # Age decryption
+├── isolated.go                   # Container mode
+├── upgrade.go                    # Self-upgrade
+├── auth.go                       # AuthCoordinator (cross-cutting wiring)
+├── emit.go                       # forge emit subcommand
+├── describe.go                   # Describe command — JSON schema
+├── hooks.go                      # HookManager (legacy fallback)
+├── transport.go                  # GRPCTransport (lifecycle/wiring)
+├── deps.go                       # Dependency graph documentation
+├── SKILL.md                      # Agent-friendly skill doc
+│
+├── manifest/                     # Pure data types (leaf — no forge imports)
+│   └── manifest.go               # Manifest, VarSpec, FileSpec, ToolSpec, HookSpec
+│
+├── protocol/                     # Wire format data types (leaf — no forge imports)
+│   └── types.go                  # RegisterRequest, RegisterResponse, WorkerMessage, JSONLChunk
+│
+├── runtime/                      # Process execution, supervision
+│   ├── runtime.go                # Runtime, RuntimeMonitor, LaunchCommander interfaces
+│   ├── tmux.go                   # TmuxRuntime implementation
+│   ├── shell_runner.go           # ShellRunner implementation
+│   └── bootstrap.go              # Tool check/install
+│
+├── engine/                       # AI engine abstraction
+│   ├── engine.go                 # EngineDriver interface, registry, types
+│   └── engine_claude.go          # ClaudeCodeDriver implementation
+│
+├── connector/                    # Platform I/O, message routing
+│   ├── connector.go              # Connector interface, sub-interfaces, registry
+│   ├── connector_host.go         # ConnectorHost orchestrator
+│   ├── connector_hook.go         # HookListener — Unix socket IPC
+│   ├── connector_bridge.go       # BridgeConnector (ExternalReceiver)
+│   ├── connector_telegram.go     # TelegramConnector (PushReceiver)
+│   ├── connector_telegram_poll.go # TelegramPollConnector (PollReceiver)
+│   ├── connector_slack.go        # SlackConnector (StreamReceiver) — stub
+│   ├── connector_whatsapp.go     # WhatsAppConnector (PollReceiver) — stub
+│   ├── connector_local.go        # LocalConnector (testing)
+│   ├── connector_web.go          # WebConnector + templates + markdown
+│   └── commands.go               # RegisterBuiltinCommands, CommandServices
+│
+├── watchdog/                     # Health monitoring
+│   └── watchdog.go               # Watchdog, RestartPolicy, ExponentialBackoffPolicy
+│
+└── build/                        # Worker binary construction (worker-forge only)
+    └── build.go                  # ScaffoldWorkerDir, BuildWorkerBinary, checksums
+```
+
+Dependency graph:
+```
+manifest/   → nothing
+protocol/   → nothing
+runtime/    → manifest/
+engine/     → manifest/, runtime/
+connector/  → manifest/, runtime/, protocol/
+watchdog/   → nothing (consumer-defined interfaces)
+build/      → manifest/
+root        → everything (wiring)
 ```
 
 ## Increment Plan
@@ -454,6 +525,15 @@ forge/
 11. ✅ **Nil source guard** — installHookScripts rejects hooks with Source but no embedded source
 12. ✅ **HookListener for all connectors** — including ExternalReceiver
 13. ✅ **Socket path sanitization** — worker names with slashes/spaces → hyphens
+14. ✅ **Subcommand parsing** — `./mon check` alongside legacy `./mon --check`
+15. ✅ **Structured JSON output** — `check --output-json`, `verify --output-json` with per-item IDs and severity
+16. ✅ **Describe command** — `./mon describe [cmd]` returns JSON schema of all commands/flags
+17. ✅ **Dry-run** — `onboard --dry-run` previews extraction without writing
+18. ✅ **Env var fallbacks** — `FORGE_BRIDGE_URL`, `FORGE_IDENTITY`, `FORGE_CONNECTOR`, `FORGE_OUTPUT_JSON`
+19. ✅ **Version command** — `./mon version` prints worker name and version
+20. ✅ **SKILL.md** — agent-friendly reference doc for forge commands
+21. ✅ **Auth onboarding** — connector-agnostic AuthCoordinator with Observe() pattern, AuthPrompter sub-interface, ConnectorHost integration, reply-to matching
+22. ✅ **Auth subcommand** — `./mon auth` explicit repair/reauth command using shared coordinator
 
 ## Migration Notes
 
@@ -469,6 +549,128 @@ Both paths can be active simultaneously (e.g., `--connector bridge --bridge-url 
 ### HookManager vs EngineDriver
 
 When `App.Engine` is set, EngineDriver.Prepare() handles hook installation and settings patching. When `App.Engine` is nil, the legacy `HookManager` is used as a fallback. New code should always use EngineDriver.
+
+## Auth Onboarding (Connector-Agnostic OAuth)
+
+When a forge worker launches Claude Code in an isolated environment (e.g., beast host user),
+Claude Code needs OAuth authentication on first run. The auth coordinator is integrated into
+ConnectorHost and uses the connector's native UX for auth prompts and code collection.
+
+### Architecture
+
+Auth is a **connector sub-interface** (`AuthPrompter`), not a separate system. Each connector
+translates auth into its platform's native UX:
+
+| Connector | UX Pattern | How code comes back |
+|-----------|-----------|-------------------|
+| Telegram | `force_reply` + reply-to | Manager replies to auth message |
+| Slack | Thread reply | Reply in thread |
+| Local | HTTP POST /send | POST the code |
+| Bridge | Falls back to plain Send | Any next message |
+
+### Flow
+
+```
+ConnectorHost.Run()
+  → Init connector
+  → Start auth goroutine (polls capture-pane for URL)
+  → Start receive loop (poll/stream/webhook)
+  → Auth detects URL → sends via AuthPrompter (force_reply etc.)
+  → Receive loop feeds Observe() for every inbound message
+  → Observe() matches reply-to message ID → delivers code to auth
+  → Auth submits code to runtime (tmux send-keys)
+  → Auth completes, receive loop continues normally
+```
+
+### Key Types
+
+```go
+// Optional connector sub-interface for native auth UX
+type AuthPrompter interface {
+    SendAuthPrompt(ctx context.Context, req AuthPromptRequest) (AuthPromptResult, error)
+}
+
+// AuthCoordinator integrates with ConnectorHost
+type AuthCoordinator struct {
+    Runtime     RuntimeMonitor
+    WorkerName  string
+    // Observe() called by ConnectorHost for every inbound message
+    // Returns true if consumed (auth code matched)
+}
+```
+
+### Observe Matching
+
+ConnectorHost calls `auth.Observe(msg)` before `deliverInbound(msg)`:
+
+1. **Reply-to match**: `msg.ReplyToID == promptMsgID` (primary, works with force_reply)
+2. **Fallback match**: when no prompt message ID, accept code-like text (no spaces, 4-128 chars)
+
+When a prompt message ID exists (Telegram, Slack), ONLY reply-to matching is used.
+This prevents accidental code submission from random messages.
+
+### InboundMessage Fields
+
+`MessageID` and `ReplyToID` are string fields on InboundMessage, populated by connectors:
+- Telegram: `msg.MessageID` from `message_id`, `msg.ReplyToID` from `reply_to_message.message_id`
+- Other connectors: populate as appropriate for their platform
+
+### ConnectorHost Integration
+
+```go
+type ConnectorHost struct {
+    Auth     *AuthCoordinator  // optional
+    AuthOnly bool              // stop after auth completes
+}
+```
+
+- Auth runs as a goroutine inside ConnectorHost.Run()
+- The receive loop (poll/stream/webhook) runs concurrently
+- In AuthOnly mode: receive loop runs in background, Run() returns when auth completes
+
+### Detection Strategy
+
+1. **Behavioral**: after Runtime.Start(), poll `capture-pane -p -J -S -2000` for OAuth URL pattern
+2. **Login/theme auto-handling**: detect "Select login method" / "Choose the text style" and send Enter
+3. **Already authed**: detect normal prompt ("What can I help you with?") → skip auth
+
+### Timing
+
+- Poll interval: 500ms for first 30s, then 1s
+- URL detection timeout: 3 minutes
+- Code entry timeout: 15 minutes
+
+### Security
+
+- Codes never logged
+- Only accept codes in waiting-for-code state
+- With prompt message ID, strict reply-to matching prevents accidental submission
+- Short-lived attempts with explicit timeouts
+
+### Commands
+
+```bash
+# Auto-detect during run
+./mon run --connector telegram-poll --connector-opt TELEGRAM_BOT_TOKEN=$TOKEN ...
+
+# Explicit auth command
+./mon auth --connector telegram-poll --connector-opt TELEGRAM_BOT_TOKEN=$TOKEN ...
+```
+
+### File Layout
+
+```
+forge/
+├── auth.go                     # AuthCoordinator, Observe(), state machine (cross-cutting — root)
+├── auth_test.go                # Observe matching, URL detection tests
+
+forge/connector/
+├── connector.go                # AuthPrompter interface, AuthPromptRequest/Result types
+├── connector_host.go           # Auth/AuthOnly fields, Observe wiring in deliverInbound
+├── connector_telegram_poll.go  # SendAuthPrompt with force_reply, ReplyToID parsing
+├── connector_telegram.go       # SendAuthPrompt with force_reply (webhook mode)
+├── connector_local.go          # SendAuthPrompt (plain text fallback)
+```
 
 ## Key Decisions
 
@@ -488,7 +690,7 @@ When `App.Engine` is set, EngineDriver.Prepare() handles hook installation and s
 ## Testing
 
 ```bash
-# Unit tests (246+)
+# Unit tests (269+)
 go test ./... -count=1
 
 # E2E behavioral tests — 3 connectors, 31 assertions

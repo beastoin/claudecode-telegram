@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,7 +92,7 @@ func TestRunCheckMode_HumanReadableOutput(t *testing.T) {
 		},
 	}
 
-	err := RunEmbeddedWorker([]string{"--check", "--bridge-url", "http://bridge"}, WorkerDeps{
+	err := RunEmbeddedWorker([]string{"check", "--bridge-url", "http://bridge"}, WorkerDeps{
 		Assets: EmbeddedAssets{
 			Manifest: []byte(`
 name: mon
@@ -153,7 +154,7 @@ func TestRunVerifyMode_HumanReadableOutput(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err = RunEmbeddedWorker([]string{"--verify"}, WorkerDeps{
+	err = RunEmbeddedWorker([]string{"verify"}, WorkerDeps{
 		Assets: EmbeddedAssets{
 			Manifest: []byte(`
 name: mon
@@ -260,13 +261,13 @@ vars:
 	}
 
 	binaryPath := filepath.Join(result.OutputDir, expectedBinaryName("mon", goruntime.GOOS, goruntime.GOARCH))
-	cmd := exec.Command(binaryPath, "--check", "--bridge-url", "http://bridge")
+	cmd := exec.Command(binaryPath, "check", "--bridge-url", "http://bridge")
 	runtimeHome := filepath.Join(buildRoot, "runtime-home")
 	cmd.Env = withoutEnv(os.Environ(), "ANTHROPIC_API_KEY")
 	cmd.Env = append(cmd.Env, "HOME="+runtimeHome)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("worker --check error = %v\n%s", err, output)
+		t.Fatalf("worker check error = %v\n%s", err, output)
 	}
 	if !strings.Contains(string(output), "Worker: mon v1.0.0") {
 		t.Fatalf("output = %q, want worker header", output)
@@ -326,13 +327,13 @@ vars:
 	}
 
 	binaryPath := filepath.Join(outputDir, expectedBinaryName("mon", goruntime.GOOS, goruntime.GOARCH))
-	cmd := exec.Command(binaryPath, "--check", "--bridge-url", "http://bridge", "--identity", identityPath)
+	cmd := exec.Command(binaryPath, "check", "--bridge-url", "http://bridge", "--identity", identityPath)
 	runtimeHome := filepath.Join(buildRoot, "runtime-home")
 	cmd.Env = withoutEnv(os.Environ(), "ANTHROPIC_API_KEY")
 	cmd.Env = append(cmd.Env, "HOME="+runtimeHome)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("worker --check error = %v\n%s", err, output)
+		t.Fatalf("worker check error = %v\n%s", err, output)
 	}
 	if !strings.Contains(string(output), "Worker: mon v1.0.0") {
 		t.Fatalf("output = %q, want worker header", output)
@@ -446,14 +447,23 @@ func TestWorkerCLI_SessionPrefixOverridesDefault(t *testing.T) {
 
 	defaultRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{}, runner)
 	tmux := defaultRT.(*TmuxRuntime)
-	if tmux.Session != "claude-prod-mon" {
-		t.Fatalf("default session = %q, want claude-prod-mon", tmux.Session)
+	// Default prefix is PID-scoped, not "claude-prod-"
+	wantDefault := fmt.Sprintf("claude-%d-mon", os.Getpid())
+	if tmux.Session != wantDefault {
+		t.Fatalf("default session = %q, want %q", tmux.Session, wantDefault)
 	}
 
 	customRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{SessionPrefix: "claude-test-"}, runner)
 	tmux = customRT.(*TmuxRuntime)
 	if tmux.Session != "claude-test-mon" {
 		t.Fatalf("custom session = %q, want claude-test-mon", tmux.Session)
+	}
+
+	// Explicit prod prefix still works
+	prodRT := defaultWorkerRuntimeFactory(manifest, WorkerCLIOptions{SessionPrefix: "claude-prod-"}, runner)
+	tmux = prodRT.(*TmuxRuntime)
+	if tmux.Session != "claude-prod-mon" {
+		t.Fatalf("prod session = %q, want claude-prod-mon", tmux.Session)
 	}
 }
 
@@ -638,20 +648,6 @@ func TestParseWorkerCLI_SubcommandDescribe(t *testing.T) {
 	}
 	if opts.DescribeTarget != "check" {
 		t.Fatalf("opts.DescribeTarget = %q, want %q", opts.DescribeTarget, "check")
-	}
-}
-
-func TestParseWorkerCLI_LegacyFlagsStillWork(t *testing.T) {
-	t.Parallel()
-	opts, err := ParseWorkerCLI([]string{"--check", "--bridge-url", "http://bridge"})
-	if err != nil {
-		t.Fatalf("ParseWorkerCLI() error = %v", err)
-	}
-	if !opts.Check {
-		t.Fatal("opts.Check = false, want true (legacy --check)")
-	}
-	if opts.Command != "check" {
-		t.Fatalf("opts.Command = %q, want %q (legacy flag should set command)", opts.Command, "check")
 	}
 }
 

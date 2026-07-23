@@ -1,0 +1,17 @@
+Worker: testmon v1.0.0
+
+Preparation:
+  BRIDGE_URL = http://localhost:8271
+  CLAUDE_CONFIG_DIR = /home/test/.claude
+  HOME = /home/test
+
+Tools:
+  ✓ tmux 3.4
+  ✓ claude 2.1.114
+  ✗ codex: not found
+
+Readiness:
+  ✓ bridge
+  ✗ gcloud-auth: credentials expired
+
+Status: NOT READY

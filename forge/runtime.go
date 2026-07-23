@@ -1,23 +1,9 @@
 package forge
 
-type Runtime interface {
-	Start() error
-	Send(message string) error
-	Health() error
-}
+import frt "github.com/beastoin/claudecode-telegram/forge/runtime"
 
-type RuntimeMonitor interface {
-	LastOutput() (string, error)
-}
-
-type RuntimeConfig struct {
-	Vars map[string]string
-}
-
-type RuntimeConfigurer interface {
-	ConfigureRuntime(config RuntimeConfig) error
-}
-
-type LaunchCommander interface {
-	SetLaunchCommand(command string)
-}
+type Runtime = frt.Runtime
+type RuntimeMonitor = frt.RuntimeMonitor
+type RuntimeConfig = frt.RuntimeConfig
+type RuntimeConfigurer = frt.RuntimeConfigurer
+type LaunchCommander = frt.LaunchCommander

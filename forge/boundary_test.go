@@ -10,7 +10,7 @@ import (
 func TestBoundary_EngineDoesNotReferenceConnectorTypes(t *testing.T) {
 	t.Parallel()
 
-	engineFiles := []string{"engine.go", "engine_claude.go"}
+	engineFiles := []string{"engine/engine.go", "engine/engine_claude.go"}
 	connectorTypes := []string{
 		"Connector ", "ConnectorConfig", "ConnectorHost",
 		"ExternalReceiver", "PushReceiver", "PollReceiver", "StreamReceiver",

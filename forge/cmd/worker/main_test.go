@@ -12,12 +12,11 @@ func TestParseWorkerCLI(t *testing.T) {
 	t.Parallel()
 
 	opts, err := forge.ParseWorkerCLI([]string{
+		"check",
 		"--bridge-url", "http://bridge",
 		"--session", "live-mon",
 		"--launch-command", "sh -lc 'echo booted; exec sleep 600'",
 		"--identity", "~/.age/manager.key",
-		"--check",
-		"--verify",
 		"--name-override", "mon-dev",
 		"--show-embedded", "placeholder.txt",
 	})
@@ -40,8 +39,8 @@ func TestParseWorkerCLI(t *testing.T) {
 	if !opts.Check {
 		t.Fatal("opts.Check = false, want true")
 	}
-	if !opts.Verify {
-		t.Fatal("opts.Verify = false, want true")
+	if opts.Command != "check" {
+		t.Fatalf("opts.Command = %q, want %q", opts.Command, "check")
 	}
 	if opts.NameOverride != "mon-dev" {
 		t.Fatalf("opts.NameOverride = %q, want %q", opts.NameOverride, "mon-dev")

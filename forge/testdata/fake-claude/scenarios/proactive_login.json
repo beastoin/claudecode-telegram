@@ -1,0 +1,36 @@
+{
+  "name": "proactive_login",
+  "initial_output": [
+    "Claude Code v2.1.201",
+    "Opus 4.6 with high effort",
+    "",
+    "don't ask on (shift+tab to cycle)"
+  ],
+  "reactions": [
+    {
+      "on_input": "/login",
+      "output": [
+        "Select login method",
+        "1. Browser",
+        "2. API Key"
+      ]
+    },
+    {
+      "on_input": "",
+      "output": [
+        "Opening browser for authentication...",
+        "Visit https://claude.com/cai/oauth/authorize?code=true&client_id=test-id&code_challenge=proactive123 to authenticate",
+        "Paste code here >"
+      ]
+    },
+    {
+      "on_input": "",
+      "output": [
+        "Authentication successful!",
+        "What can I help you with?"
+      ]
+    }
+  ],
+  "success_marker": "",
+  "reject_bracketed_paste": false
+}
