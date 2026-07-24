@@ -60,7 +60,7 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 225 test functions** (see inventory below)
+**Current coverage: 232 test functions** (see inventory below)
 
 | Category | Tests | Coverage |
 |----------|-------|----------|
@@ -71,16 +71,16 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | Hook Behavior | 15 | 100% |
 | Persistence Files | 14 | 100% |
 | Image/Document Handling | 20 | 100% |
-| HTTP Endpoints | 8 | 100% |
+| HTTP Endpoints | 9 | 100% |
 | Misc Behavior | 12 | 100% |
 
 **By suite/mode:**
 
 | Suite | Tests | Notes |
 |-------|-------|-------|
-| Unit (FAST) | 115 | imports, formatting, core helpers |
+| Unit (FAST) | 121 | imports, formatting, core helpers |
 | CLI (FAST) | 30 | flags, commands, webhook/hook coverage |
-| Integration | 64 | commands, security, routing, endpoints |
+| Integration | 65 | commands, security, routing, endpoints |
 | Tunnel (FULL) | 1 | cloudflare tunnel, webhook setup |
 
 **Only 2 features untested:**
@@ -257,6 +257,17 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_bridge_env_bridge_url` | BRIDGE_URL handling |
 | `test_bridge_env_sandbox` | SANDBOX_* env vars handling |
 
+### Machine Catalog Tests (FAST mode)
+
+| Test | Description |
+|------|-------------|
+| `test_machines_config_loads_valid` | machines.json v1 schema loads |
+| `test_machines_config_missing_file_fallback` | Missing machines.json returns an implicit local bridge machine |
+| `test_machines_config_malformed_rejected` | Malformed machines.json fails loudly |
+| `test_machines_config_missing_required_field` | Missing required machine fields are rejected |
+| `test_get_machines_includes_workers_and_health` | get_machines reports worker placement and host health |
+| `test_machines_from_caller_access` | get_machines access hints are caller-aware |
+
 ### Persistence File Tests (FAST mode)
 
 | Test | Description |
@@ -340,6 +351,7 @@ Track test coverage across tmux and exec backends. When adding a feature, ensure
 | `test_workers_endpoint_json_structure` | /workers JSON structure |
 | `test_workers_endpoint_shows_tmux_workers` | /workers includes tmux workers |
 | `test_workers_endpoint_empty_when_no_workers` | /workers empty when no workers |
+| `test_machines_endpoint` | GET /machines endpoint structure |
 | `test_webhook_secret_acceptance` | Webhook secret acceptance path |
 | `test_webhook_secret_validation` | Webhook secret validation |
 | `test_graceful_shutdown_notification` | Shutdown notification sent |

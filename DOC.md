@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.31.0
+> Version: 0.32.0
 
 ## Current Philosophy (Summary)
 
@@ -15,6 +15,7 @@
 | **Admin config** | Pre-set via `ADMIN_CHAT_ID` or auto-learn first user |
 | **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
 | **Decentralized worker comms** | Worker-to-worker sends stay direct; manager tooling may use bridge control-plane APIs |
+| **Machines are config** | Static host topology lives in operator-edited `machines.json`; tmux/workers remain runtime truth |
 
 ---
 
@@ -181,6 +182,33 @@ The bridge is now organized around small, explicit classes:
 - **CommandRouter**: all `/command` handlers and message routing; delegates to `WorkerManager` + `TelegramAPI`.
 
 Interactive vs non-interactive detection is backend-driven (`backend.is_interactive`), not hardcoded to a specific backend.
+
+## Machine Catalog
+
+**Status:** Read-only catalog endpoint (MachineAdapter refactor still proposed in `SDD-host-awareness.md`)
+
+Machines are static infrastructure, not runtime worker state. The bridge reads `MACHINES_CONFIG_FILE` (default `~/.config/claudecode-telegram/machines.json`) using the SDD v1 schema:
+
+```json
+{
+  "version": 1,
+  "machines": {
+    "vps": {
+      "ssh_target": null,
+      "bridge_base_url": "http://localhost:8271",
+      "home_root": "/home/claude",
+      "os_family": "linux",
+      "display_name": "VPS",
+      "tailscale_ip": "100.125.36.102",
+      "role": "bridge"
+    }
+  }
+}
+```
+
+Required fields match the SDD: `ssh_target`, `bridge_base_url`, `home_root`, `os_family`. Optional fields (`display_name`, `tailscale_ip`, `role`) are operator metadata for `/machines`.
+
+`GET /machines` returns the configured catalog plus derived worker placement, caller-aware access hints (`local` or `ssh <target>`), and current host health. A missing file falls back to one implicit local bridge machine for backward compatibility. A malformed file fails loudly.
 
 ## Inter-Worker Messaging (Decentralized Discovery)
 
@@ -375,6 +403,23 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages i
 
 ## Changelog
 
+### v0.32.0 - Machine catalog endpoint
+
+**New features:**
+- Added `GET /machines` with optional `?from=<worker>` caller-aware access hints.
+- Added `machines.json` loading using the v1 SDD schema at `~/.config/claudecode-telegram/machines.json` by default.
+- Added optional machine metadata: `display_name`, `tailscale_ip`, and `role`.
+
+**Architecture notes:**
+- `/machines` adopts the SDD's static catalog shape so the future `Machine`/`MachineAdapter` work can reuse the same source file.
+- Worker placement is derived from `workers.json` and tmux/session discovery; the endpoint does not mutate machine or worker state.
+- Unknown legacy `host` values are surfaced as `configured=false` machines so operators can see gaps instead of losing workers from the view.
+
+**Tests:**
+- Added loader validation tests for valid, missing, malformed, and incomplete machine config.
+- Added `get_machines()` tests for worker placement, health, and caller-aware access.
+- Added `/machines` endpoint integration coverage and index coverage.
+
 ### v0.31.0 - Manager MCP bridge send endpoint
 
 **New features:**
@@ -413,7 +458,7 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages i
 - `test_workers_no_from_backward_compat` — omitting `?from=` preserves legacy bridge-POV behavior
 - `test_workers_from_includes_machine_id` — each worker dict has `machine` field
 
-**Parked (out of scope for this fix):** Machine/MachineAdapter abstraction, generation fencing for the teleport race, `POST /send` centralized router, outbox for offline non-interactive workers. See `SDD-host-awareness.md` for the rejected over-engineered proposal.
+**Parked (out of scope for this fix):** Machine/MachineAdapter abstraction, generation fencing for the teleport race, `POST /send` centralized router, outbox for offline non-interactive workers. See `SDD-host-awareness.md` for the broader staged proposal.
 
 ### v0.30.0 - Self-healing session ID cache for teleported workers
 

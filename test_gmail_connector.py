@@ -74,13 +74,13 @@ class TestConstruct:
     def test_import_and_construct(self):
         gc = make_connector()
         assert gc.gws_bin == "/usr/bin/gws"
-        assert gc.from_filter == "manager@example.com"
+        assert gc.sender_filter == "manager@example.com"
         assert gc.poll_interval == 30
         assert gc._history_id is None
 
     def test_from_filter_lowered(self):
         gc = make_connector(from_filter="Manager@Example.COM")
-        assert gc.from_filter == "manager@example.com"
+        assert gc.sender_filter == "manager@example.com"
 
 
 # --- Increment 2: _run_gws subprocess wrapper ---
@@ -275,12 +275,12 @@ class TestFilters:
     def test_allowed_sender_match(self):
         gc = make_connector(from_filter="manager@example.com")
         msg = make_message(from_addr="manager@example.com")
-        assert gc.is_from_allowed_sender(msg) is True
+        assert gc.is_allowed_sender(msg) is True
 
     def test_allowed_sender_no_match(self):
         gc = make_connector(from_filter="manager@example.com")
         msg = make_message(from_addr="spam@evil.com")
-        assert gc.is_from_allowed_sender(msg) is False
+        assert gc.is_allowed_sender(msg) is False
 
     def test_inbox_unread_true(self):
         gc = make_connector()

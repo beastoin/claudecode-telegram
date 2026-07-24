@@ -18,7 +18,6 @@ def make_connector(**overrides):
         "poll_interval": 60,
         "on_message": MagicMock(),
         "get_registered_workers": lambda: {"mon", "taro", "lee"},
-        "beast_bin": "/nonexistent/beast",
     }
     defaults.update(overrides)
     return GitHubConnector(**defaults)
@@ -55,35 +54,12 @@ class TestConstruct:
     def test_import_and_construct(self):
         gc = make_connector()
         assert gc.repo == "BasedHardware/omi"
-        assert gc.from_user == "beastoin"
+        assert gc.sender_filter == "beastoin"
         assert gc.poll_interval == 60
 
     def test_from_user_lowered(self):
         gc = make_connector(from_user="Beastoin")
-        assert gc.from_user == "beastoin"
-
-
-# --- beast CLI wrapper ---
-
-class TestRunBeast:
-    def test_success(self):
-        gc = make_connector()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout='[{"id": 1}]')
-            result = gc._run_beast("github", "comments", "--json")
-        assert result == '[{"id": 1}]'
-
-    def test_failure_returns_none(self):
-        gc = make_connector()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stderr="error")
-            result = gc._run_beast("github", "comments")
-        assert result is None
-
-    def test_timeout_returns_none(self):
-        gc = make_connector()
-        with patch("subprocess.run", side_effect=Exception("timeout")):
-            assert gc._run_beast("github", "comments") is None
+        assert gc.sender_filter == "beastoin"
 
 
 # --- User filter ---
@@ -91,15 +67,15 @@ class TestRunBeast:
 class TestUserFilter:
     def test_target_user_match(self):
         gc = make_connector(from_user="beastoin")
-        assert gc.is_from_target_user(make_comment(user="beastoin")) is True
+        assert gc.is_allowed_sender(make_comment(user="beastoin")) is True
 
     def test_target_user_case_insensitive(self):
         gc = make_connector(from_user="beastoin")
-        assert gc.is_from_target_user(make_comment(user="Beastoin")) is True
+        assert gc.is_allowed_sender(make_comment(user="Beastoin")) is True
 
     def test_other_user_rejected(self):
         gc = make_connector(from_user="beastoin")
-        assert gc.is_from_target_user(make_comment(user="someone")) is False
+        assert gc.is_allowed_sender(make_comment(user="someone")) is False
 
 
 # --- Issue context extraction ---

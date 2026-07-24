@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.31.0"
+VERSION="0.32.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +146,8 @@ is_node_running() {
         if kill -0 "$pid" 2>/dev/null; then
             return 0
         fi
+        # Stale PID file — process is dead, clean up
+        rm -f "$pid_file"
     fi
     return 1
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.31.0"
+VERSION = "0.32.0"
 
+from dataclasses import dataclass
 import hashlib
 import os
 import json
@@ -24,7 +25,7 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol
 
 try:
     from bridge_grpc import BridgeGRPCServer
@@ -116,6 +117,10 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
 # Used by /workers?from= when a remote caller needs to address a bridge-local peer.
 # Default "vps" matches team convention; override per deployment if needed.
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
+MACHINES_CONFIG_FILE = Path(os.environ.get(
+    "MACHINES_CONFIG_FILE",
+    Path.home() / ".config" / "claudecode-telegram" / "machines.json"
+))
 PERSISTENCE_NOTE = "They'll stay on your team."
 
 # Voice mode: STT (speech-to-text) and TTS (text-to-speech) endpoints
@@ -132,6 +137,7 @@ TTS_CHUNKED_THRESHOLD = 200  # chars: above this, use /synthesize/chunked endpoi
 # Update this when adding new endpoints.
 API_ENDPOINTS = {
     "GET /": "API index — lists all endpoints",
+    "GET /machines": "List configured machines, access hints, workers, and health",
     "GET /workers": "List active workers with send commands",
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
     "GET /health/workers": "Watchdog state for all workers",
@@ -300,6 +306,270 @@ def get_worker_host(name: str) -> Optional[str]:
     registry = _load_registry()
     worker = registry.get("workers", {}).get(name, {})
     return worker.get("host")
+
+
+class MachineConfigError(ValueError):
+    """Invalid machines.json configuration."""
+
+
+@dataclass(frozen=True)
+class Machine:
+    """Static machine catalog entry.
+
+    This matches SDD-host-awareness.md Phase 0. Optional metadata is read-only
+    decoration for operators and does not affect worker routing yet.
+    """
+    id: str
+    ssh_target: str | None
+    bridge_base_url: str
+    home_root: str
+    os_family: str
+    display_name: str = ""
+    tailscale_ip: str = ""
+    role: str = ""
+    configured: bool = True
+
+    @property
+    def is_local(self) -> bool:
+        return self.ssh_target is None
+
+    def public_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "display_name": self.display_name or self.id,
+            "ssh_target": self.ssh_target,
+            "bridge_base_url": self.bridge_base_url,
+            "home_root": self.home_root,
+            "os_family": self.os_family,
+            "tailscale_ip": self.tailscale_ip,
+            "role": self.role,
+            "configured": self.configured,
+        }
+
+
+_machines_cache: dict[str, Machine] | None = None
+_machines_cache_path: Path | None = None
+
+
+def _detect_os_family() -> str:
+    if sys.platform == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def _validate_machine_id(machine_id: str) -> str:
+    if not isinstance(machine_id, str) or not machine_id:
+        raise MachineConfigError("machine id must be a non-empty string")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", machine_id):
+        raise MachineConfigError(f"invalid machine id: {machine_id!r}")
+    return machine_id
+
+
+def _coerce_optional_str(value: Any, field: str, machine_id: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
+    return value
+
+
+def _implicit_local_machine() -> Machine:
+    return Machine(
+        id=BRIDGE_SSH_TARGET or "vps",
+        ssh_target=None,
+        bridge_base_url=BRIDGE_URL,
+        home_root=str(Path.home()),
+        os_family=_detect_os_family(),
+        display_name=(BRIDGE_SSH_TARGET or "vps").upper(),
+        role="bridge",
+        configured=False,
+    )
+
+
+def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
+    """Load the static machine catalog.
+
+    Missing file is allowed and yields one implicit local bridge machine for
+    backward compatibility. Malformed operator config fails loudly.
+    """
+    config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
+    if not config_path.exists():
+        return {_implicit_local_machine().id: _implicit_local_machine()}
+
+    try:
+        data = json.loads(config_path.read_text())
+    except json.JSONDecodeError as e:
+        raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
+    except OSError as e:
+        raise MachineConfigError(f"{config_path}: cannot read: {e}") from e
+
+    if not isinstance(data, dict):
+        raise MachineConfigError(f"{config_path}: root must be an object")
+    if data.get("version") != 1:
+        raise MachineConfigError(f"{config_path}: version must be 1")
+    raw_machines = data.get("machines")
+    if not isinstance(raw_machines, dict) or not raw_machines:
+        raise MachineConfigError(f"{config_path}: machines must be a non-empty object")
+
+    machines: dict[str, Machine] = {}
+    ssh_targets: dict[str, str] = {}
+    local_count = 0
+    for raw_id, raw in raw_machines.items():
+        machine_id = _validate_machine_id(raw_id)
+        if not isinstance(raw, dict):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} must be an object")
+
+        missing = [k for k in ("ssh_target", "bridge_base_url", "home_root", "os_family") if k not in raw]
+        if missing:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} missing {', '.join(missing)}")
+
+        ssh_target = raw.get("ssh_target")
+        if ssh_target is not None and not isinstance(ssh_target, str):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target must be string or null")
+        if ssh_target == "":
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target cannot be empty")
+        if ssh_target is None:
+            local_count += 1
+        elif ssh_target in ssh_targets:
+            raise MachineConfigError(
+                f"{config_path}: ssh_target {ssh_target!r} used by both "
+                f"{ssh_targets[ssh_target]!r} and {machine_id!r}"
+            )
+        else:
+            ssh_targets[ssh_target] = machine_id
+
+        bridge_base_url = _coerce_optional_str(raw.get("bridge_base_url"), "bridge_base_url", machine_id).rstrip("/")
+        home_root = _coerce_optional_str(raw.get("home_root"), "home_root", machine_id).rstrip("/")
+        os_family = _coerce_optional_str(raw.get("os_family"), "os_family", machine_id)
+        if not bridge_base_url:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} bridge_base_url cannot be empty")
+        if not home_root.startswith("/"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} home_root must be absolute")
+        if os_family not in ("linux", "darwin"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} os_family must be linux or darwin")
+
+        machines[machine_id] = Machine(
+            id=machine_id,
+            ssh_target=ssh_target,
+            bridge_base_url=bridge_base_url,
+            home_root=home_root,
+            os_family=os_family,
+            display_name=_coerce_optional_str(raw.get("display_name", machine_id), "display_name", machine_id),
+            tailscale_ip=_coerce_optional_str(raw.get("tailscale_ip", ""), "tailscale_ip", machine_id),
+            role=_coerce_optional_str(raw.get("role", ""), "role", machine_id),
+        )
+
+    if local_count != 1:
+        raise MachineConfigError(f"{config_path}: exactly one local machine with ssh_target=null is required")
+    return machines
+
+
+def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
+    """Return the startup machine catalog."""
+    global _machines_cache, _machines_cache_path
+    if force_reload or _machines_cache is None or _machines_cache_path != MACHINES_CONFIG_FILE:
+        _machines_cache = load_machines_config(MACHINES_CONFIG_FILE)
+        _machines_cache_path = MACHINES_CONFIG_FILE
+    return dict(_machines_cache)
+
+
+def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
+    if host is None:
+        for machine in machines.values():
+            if machine.is_local:
+                return machine
+        return _implicit_local_machine()
+    for machine in machines.values():
+        if machine.ssh_target == host:
+            return machine
+    machine_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", host).strip("-") or "unknown"
+    return Machine(
+        id=machine_id,
+        ssh_target=host,
+        bridge_base_url=BRIDGE_PUBLIC_URL or "",
+        home_root="",
+        os_family="",
+        display_name=host,
+        role="worker-host",
+        configured=False,
+    )
+
+
+def _machine_health(machine: Machine) -> dict:
+    host_label = machine.ssh_target or "VPS"
+    health = {
+        "status": "up" if machine.is_local else "unknown",
+        "down_since": None,
+        "last_error": None,
+        "disk": _host_disk_usage.get(host_label),
+        "memory": _host_mem_usage.get(host_label),
+        "io": _host_io_usage.get(host_label),
+    }
+    if machine.ssh_target:
+        if _host_down.get(machine.ssh_target, False):
+            health["status"] = "down"
+            health["down_since"] = _host_down_since.get(machine.ssh_target)
+            health["last_error"] = _host_last_error.get(machine.ssh_target)
+        elif (
+            machine.ssh_target in _host_ssh_failures
+            or machine.ssh_target in _host_disk_usage
+            or machine.ssh_target in _host_mem_usage
+            or machine.ssh_target in _host_io_usage
+        ):
+            health["status"] = "up"
+    return health
+
+
+def _machine_access(machine: Machine, caller_host: str | None) -> str:
+    target_host = machine.ssh_target
+    if caller_host == target_host:
+        return "local"
+    if target_host is None:
+        return f"ssh {BRIDGE_SSH_TARGET}"
+    return f"ssh {target_host}"
+
+
+def get_machines(caller_from: str = None) -> dict:
+    """Return configured machines plus derived workers, access, and health."""
+    machines = get_machine_catalog()
+    registered = get_registered_sessions()
+    caller_info = registered.get(caller_from, {}) if caller_from else {}
+    caller_host = caller_info.get("host") if caller_info else (get_worker_host(caller_from) if caller_from else None)
+
+    rows: dict[str, dict] = {}
+    for machine in machines.values():
+        row = machine.public_dict()
+        row["access"] = _machine_access(machine, caller_host)
+        row["workers"] = []
+        row["worker_count"] = 0
+        row["health"] = _machine_health(machine)
+        rows[machine.id] = row
+
+    for name, info in registered.items():
+        host = info.get("host") if "host" in info else get_worker_host(name)
+        machine = _machine_for_worker_host(host, machines)
+        if machine.id not in rows:
+            row = machine.public_dict()
+            row["access"] = _machine_access(machine, caller_host)
+            row["workers"] = []
+            row["worker_count"] = 0
+            row["health"] = _machine_health(machine)
+            rows[machine.id] = row
+
+        worker_entry = {
+            "name": name,
+            "backend": info.get("backend", DEFAULT_BACKEND),
+            "status": "online" if info.get("tmux") or info.get("callback_url") else "exited",
+        }
+        rows[machine.id]["workers"].append(worker_entry)
+        rows[machine.id]["worker_count"] += 1
+
+    return {
+        "version": 1,
+        "config_path": str(MACHINES_CONFIG_FILE),
+        "caller": caller_from or None,
+        "machines": list(rows.values()),
+    }
 
 
 def _project_slug(cwd: str) -> str:
@@ -1092,6 +1362,21 @@ _host_disk_usage = {}  # host -> {pct: int, free_gb: float, total_gb: float, ts:
 _host_disk_alert_ts = {}  # host -> float (last disk alert timestamp)
 _host_disk_alerted = {}  # host -> bool (currently in alert state, for recovery detection)
 
+# Memory monitoring: alert when machines run low on RAM
+MEM_ALERT_THRESHOLD_PCT = 90  # alert when usage exceeds this percentage
+MEM_ALERT_THRESHOLD_GB = 4  # alert when available drops below this (GB)
+MEM_ALERT_COOLDOWN = 3600  # seconds between repeated mem alerts per host
+_host_mem_usage = {}  # host -> {pct, used_gb, total_gb, avail_gb, top_procs, ts}
+_host_mem_alert_ts = {}  # host -> float
+_host_mem_alerted = {}  # host -> bool
+
+# IO monitoring: alert on high IO wait or sustained IOPS
+IO_ALERT_IOWAIT_PCT = 30  # alert when iowait exceeds this
+IO_ALERT_COOLDOWN = 3600
+_host_io_usage = {}  # host -> {iowait_pct, read_iops, write_iops, util_pct, ts}
+_host_io_alert_ts = {}  # host -> float
+_host_io_alerted = {}  # host -> bool
+
 # Learning reminders: periodic self-learning nudges per worker
 # Two triggers: response count threshold, and idle timeout (checked by timer).
 # Anti-annoyance: after any reminder fires, all triggers suppressed until worker responds.
@@ -1572,6 +1857,9 @@ class MessageTransport:
     def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
         raise NotImplementedError
 
+    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
+        raise NotImplementedError
+
     def send_photo(self, chat_id, photo_path, caption=None) -> bool:
         raise NotImplementedError
 
@@ -1646,6 +1934,14 @@ class TelegramAPI:
         payload.update(kwargs)
         return self.api("sendMessage", payload)
 
+    def send_rich_message(self, chat_id: int, markdown: str, **kwargs):
+        payload = {
+            "chat_id": chat_id,
+            "rich_message": {"markdown": markdown},
+        }
+        payload.update(kwargs)
+        return self.api("sendRichMessage", payload)
+
     def send_photo(self, chat_id: int, photo, **kwargs):
         payload = {"chat_id": chat_id, "photo": photo}
         payload.update(kwargs)
@@ -1687,6 +1983,15 @@ class TelegramTransport(MessageTransport):
             payload["reply_to_message_id"] = reply_to
         # Use module-level telegram_api so tests can mock bridge.telegram_api
         return telegram_api("sendMessage", payload)
+
+    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
+        payload = {
+            "chat_id": chat_id,
+            "rich_message": {"markdown": markdown},
+        }
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        return telegram_api("sendRichMessage", payload)
 
     def send_photo(self, chat_id, photo_path, caption=None) -> bool:
         if not BOT_TOKEN:
@@ -1987,6 +2292,10 @@ class LocalTransport(MessageTransport):
 
     def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
         self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
+        return {"ok": True, "result": {"message_id": 1}}
+
+    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
+        self._log("send_rich_text", chat_id, text=markdown[:200])
         return {"ok": True, "result": {"message_id": 1}}
 
     def send_photo(self, chat_id, photo_path, caption=None) -> bool:
@@ -3048,6 +3357,83 @@ def markdown_to_telegram_html(text: str) -> str:
     return output
 
 
+def _pipe_tables_to_html(text: str) -> str:
+    """Convert GFM pipe tables to HTML <table> for sendRichMessage.
+
+    Telegram's sendRichMessage markdown parser doesn't recognize GFM pipe
+    table syntax — it collapses table rows into a single paragraph.
+    This converts pipe tables to HTML tables which sendRichMessage renders
+    natively via RichBlockTable.
+    """
+    import re
+
+    def _parse_row(line):
+        line = line.strip()
+        if line.startswith('|'):
+            line = line[1:]
+        if line.endswith('|'):
+            line = line[:-1]
+        return [cell.strip() for cell in line.split('|')]
+
+    def _esc(s):
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    lines = text.split('\n')
+    result = []
+    i = 0
+    in_code_fence = False
+    while i < len(lines):
+        # Track fenced code blocks — don't convert tables inside them
+        if re.match(r'^\s*(`{3,}|~{3,})', lines[i]):
+            in_code_fence = not in_code_fence
+            result.append(lines[i])
+            i += 1
+            continue
+
+        # Detect pipe table: header row, separator row, then data rows
+        if (not in_code_fence
+                and i + 1 < len(lines)
+                and '|' in lines[i]
+                and re.match(r'^\s*\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?\s*$', lines[i + 1])):
+            headers = _parse_row(lines[i])
+
+            # Parse alignment from separator
+            aligns = []
+            for cell in _parse_row(lines[i + 1]):
+                cell = cell.strip()
+                if cell.startswith(':') and cell.endswith(':'):
+                    aligns.append(' style="text-align:center"')
+                elif cell.endswith(':'):
+                    aligns.append(' style="text-align:right"')
+                else:
+                    aligns.append('')
+
+            html = ['<table>']
+            html.append('<tr>')
+            for j, h in enumerate(headers):
+                align = aligns[j] if j < len(aligns) else ''
+                html.append(f'<th{align}>{_esc(h)}</th>')
+            html.append('</tr>')
+
+            i += 2
+            while i < len(lines) and '|' in lines[i] and lines[i].strip().startswith('|'):
+                cells = _parse_row(lines[i])
+                html.append('<tr>')
+                for j, cell in enumerate(cells):
+                    align = aligns[j] if j < len(aligns) else ''
+                    html.append(f'<td{align}>{_esc(cell)}</td>')
+                html.append('</tr>')
+                i += 1
+
+            html.append('</table>')
+            result.append('\n'.join(html))
+        else:
+            result.append(lines[i])
+            i += 1
+
+    return '\n'.join(result)
+
+
 def format_response_text(session_name, text):
     """Format response with session prefix. No escaping - Claude Code handles safety."""
     # Strip redundant worker name prefix to avoid "lee:\nlee: message" double prefix
@@ -3063,6 +3449,7 @@ def format_response_text(session_name, text):
 # ─────────────────────────────────────────────────────────────────────────────
 
 TELEGRAM_MAX_LENGTH = 4096
+TELEGRAM_RICH_MAX_LENGTH = 32768
 
 
 def split_message(text, max_len=TELEGRAM_MAX_LENGTH):
@@ -4017,6 +4404,292 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                     pass
 
 
+def _check_mem_usage(host: str | None = None) -> dict | None:
+    """Check memory usage on a host (None = local). Returns {pct, used_gb, total_gb, avail_gb, top_procs} or None."""
+    try:
+        r = _remote_run(
+            ["free", "-b"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        mem_line = None
+        for line in lines:
+            if line.startswith("Mem:"):
+                mem_line = line
+                break
+        if not mem_line:
+            return None
+        parts = mem_line.split()
+        total = int(parts[1])
+        used = int(parts[2])
+        avail = int(parts[6]) if len(parts) >= 7 else total - used
+        total_gb = total / (1024**3)
+        used_gb = used / (1024**3)
+        avail_gb = avail / (1024**3)
+        pct = int((used / total) * 100) if total > 0 else 0
+        top_procs = _get_top_mem_procs(host)
+        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+    except Exception:
+        return None
+
+
+def _check_mem_usage_macos(host: str) -> dict | None:
+    """Check memory usage on macOS host via vm_stat."""
+    try:
+        r = _remote_run(
+            ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        total = int(lines[0])
+        page_size = 16384
+        free_pages = 0
+        inactive_pages = 0
+        speculative_pages = 0
+        for line in lines[1:]:
+            if "page size of" in line:
+                try:
+                    page_size = int(line.split("page size of")[1].strip().rstrip("."))
+                except (ValueError, IndexError):
+                    pass
+            elif "Pages free:" in line:
+                free_pages = int(line.split(":")[1].strip().rstrip("."))
+            elif "Pages inactive:" in line:
+                inactive_pages = int(line.split(":")[1].strip().rstrip("."))
+            elif "Pages speculative:" in line:
+                speculative_pages = int(line.split(":")[1].strip().rstrip("."))
+        avail = (free_pages + inactive_pages + speculative_pages) * page_size
+        used = total - avail
+        total_gb = total / (1024**3)
+        used_gb = used / (1024**3)
+        avail_gb = avail / (1024**3)
+        pct = int((used / total) * 100) if total > 0 else 0
+        top_procs = _get_top_mem_procs(host)
+        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+    except Exception:
+        return None
+
+
+def _get_top_mem_procs(host: str | None = None) -> list[dict]:
+    """Get top 5 memory-consuming processes on a host."""
+    try:
+        r = _remote_run(
+            ["ps", "aux", "--sort=-rss"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return []
+        lines = r.stdout.strip().splitlines()
+        procs = []
+        for line in lines[1:6]:
+            parts = line.split(None, 10)
+            if len(parts) >= 11:
+                rss_kb = int(parts[5])
+                procs.append({
+                    "pid": parts[1],
+                    "rss_gb": round(rss_kb / (1024 * 1024), 1),
+                    "pct": parts[3],
+                    "cmd": parts[10][:80],
+                })
+        return procs
+    except Exception:
+        return []
+
+
+def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
+    """Probe memory usage on local + remote hosts, alert on threshold breaches."""
+    now = time.time()
+    hosts_to_check = [None] + list(remote_hosts)
+
+    for host in hosts_to_check:
+        if host and _is_host_down(host):
+            continue
+
+        host_label = host or "VPS"
+        is_mac = host and "mac" in host.lower()
+        usage = _check_mem_usage_macos(host) if is_mac else _check_mem_usage(host)
+
+        if usage is None:
+            continue
+
+        with _watchdog_lock:
+            _host_mem_usage[host_label] = {**usage, "ts": now}
+
+        is_critical = usage["pct"] >= MEM_ALERT_THRESHOLD_PCT or usage["avail_gb"] < MEM_ALERT_THRESHOLD_GB
+        was_alerted = _host_mem_alerted.get(host_label, False)
+
+        if is_critical and not was_alerted:
+            last_alert = _host_mem_alert_ts.get(host_label, 0)
+            if now - last_alert >= MEM_ALERT_COOLDOWN:
+                top_lines = ""
+                for p in usage.get("top_procs", [])[:3]:
+                    top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+                alert_text = (
+                    f"🧠 Memory critical: {host_label}\n"
+                    f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)"
+                )
+                if top_lines:
+                    alert_text += f"\nTop consumers:{top_lines}"
+                _host_mem_alert_ts[host_label] = now
+                _host_mem_alerted[host_label] = True
+                if admin_chat_id:
+                    try:
+                        transport.send_text(admin_chat_id, alert_text)
+                        print(f"[watchdog] Memory alert: {alert_text.splitlines()[0]}")
+                    except Exception as e:
+                        print(f"[watchdog] Memory alert error: {e}")
+        elif not is_critical and was_alerted:
+            _host_mem_alerted[host_label] = False
+            if admin_chat_id:
+                try:
+                    transport.send_text(
+                        admin_chat_id,
+                        f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
+                    )
+                except Exception:
+                    pass
+
+
+def _check_io_usage(host: str | None = None) -> dict | None:
+    """Check IO stats on a host (None = local). Returns {iowait_pct, read_iops, write_iops, util_pct} or None."""
+    try:
+        r = _remote_run(
+            ["iostat", "-x", "-d", "1", "2", "-o", "JSON"],
+            host=host, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            import json as _json
+            data = _json.loads(r.stdout)
+            stats = data.get("sysstat", {}).get("hosts", [{}])[0].get("statistics", [])
+            if len(stats) >= 2:
+                disks = stats[-1].get("disk", [])
+                total_r_iops = sum(d.get("r/s", 0) for d in disks)
+                total_w_iops = sum(d.get("w/s", 0) for d in disks)
+                max_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0)
+                cpu_r = _remote_run(
+                    ["bash", "-c", "awk '{print $5}' /proc/stat | head -1"],
+                    host=host, capture_output=True, text=True, timeout=3)
+                iowait = 0.0
+                r2 = _remote_run(
+                    ["vmstat", "1", "2"],
+                    host=host, capture_output=True, text=True, timeout=5)
+                if r2.returncode == 0:
+                    lines = r2.stdout.strip().splitlines()
+                    if len(lines) >= 3:
+                        parts = lines[-1].split()
+                        if len(parts) >= 16:
+                            iowait = float(parts[15])
+                return {
+                    "iowait_pct": round(iowait, 1),
+                    "read_iops": round(total_r_iops),
+                    "write_iops": round(total_w_iops),
+                    "util_pct": round(max_util, 1),
+                }
+    except Exception:
+        pass
+    try:
+        r = _remote_run(
+            ["vmstat", "1", "2"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 3:
+            return None
+        parts = lines[-1].split()
+        if len(parts) < 16:
+            return None
+        iowait = float(parts[15])
+        bi = int(parts[8])
+        bo = int(parts[9])
+        return {
+            "iowait_pct": round(iowait, 1),
+            "read_iops": bi,
+            "write_iops": bo,
+            "util_pct": 0,
+        }
+    except Exception:
+        return None
+
+
+def _check_io_usage_macos(host: str) -> dict | None:
+    """Check IO stats on macOS host via iostat."""
+    try:
+        r = _remote_run(
+            ["iostat", "-c", "2", "-w", "1"],
+            host=host, capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 3:
+            return None
+        parts = lines[-1].split()
+        if len(parts) < 6:
+            return None
+        return {
+            "iowait_pct": 0,
+            "read_iops": int(float(parts[0])),
+            "write_iops": int(float(parts[1])),
+            "util_pct": 0,
+        }
+    except Exception:
+        return None
+
+
+def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
+    """Probe IO usage on local + remote hosts, alert on high IO wait."""
+    now = time.time()
+    hosts_to_check = [None] + list(remote_hosts)
+
+    for host in hosts_to_check:
+        if host and _is_host_down(host):
+            continue
+
+        host_label = host or "VPS"
+        is_mac = host and "mac" in host.lower()
+        usage = _check_io_usage_macos(host) if is_mac else _check_io_usage(host)
+
+        if usage is None:
+            continue
+
+        with _watchdog_lock:
+            _host_io_usage[host_label] = {**usage, "ts": now}
+
+        is_critical = usage["iowait_pct"] >= IO_ALERT_IOWAIT_PCT
+        was_alerted = _host_io_alerted.get(host_label, False)
+
+        if is_critical and not was_alerted:
+            last_alert = _host_io_alert_ts.get(host_label, 0)
+            if now - last_alert >= IO_ALERT_COOLDOWN:
+                alert_text = (
+                    f"⚡ IO critical: {host_label}\n"
+                    f"IO wait: {usage['iowait_pct']}%\n"
+                    f"IOPS: {usage['read_iops']}r + {usage['write_iops']}w"
+                )
+                if usage["util_pct"]:
+                    alert_text += f" | disk util: {usage['util_pct']}%"
+                _host_io_alert_ts[host_label] = now
+                _host_io_alerted[host_label] = True
+                if admin_chat_id:
+                    try:
+                        transport.send_text(admin_chat_id, alert_text)
+                        print(f"[watchdog] IO alert: {alert_text.splitlines()[0]}")
+                    except Exception as e:
+                        print(f"[watchdog] IO alert error: {e}")
+        elif not is_critical and was_alerted:
+            _host_io_alerted[host_label] = False
+            if admin_chat_id:
+                try:
+                    transport.send_text(
+                        admin_chat_id,
+                        f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
+                    )
+                except Exception:
+                    pass
+
+
 _last_resolved_ts: dict[str, float] = {}  # Per-worker resolved alert cooldown
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
@@ -4422,7 +5095,7 @@ def watchdog_loop():
             for name in list(_consecutive_probe_failures.keys()):
                 if name not in registered_names:
                     _consecutive_probe_failures.pop(name, None)
-            # Disk space check every ~5 min (every 20th cycle)
+            # Disk + memory check every ~5 min (every 20th cycle)
             _disk_check_counter += 1
             if _disk_check_counter >= 20:
                 _disk_check_counter = 0
@@ -4430,6 +5103,14 @@ def watchdog_loop():
                     _probe_disk_all_hosts(set(remote_workers.keys()))
                 except Exception as de:
                     print(f"[watchdog] Disk check error: {de}")
+                try:
+                    _probe_mem_all_hosts(set(remote_workers.keys()))
+                except Exception as me:
+                    print(f"[watchdog] Memory check error: {me}")
+                try:
+                    _probe_io_all_hosts(set(remote_workers.keys()))
+                except Exception as ie:
+                    print(f"[watchdog] IO check error: {ie}")
 
         except Exception as e:
             print(f"Watchdog error: {e}")
@@ -6244,8 +6925,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
     if speak_text is None and TTS_ENDPOINT and state.get("tts_enabled", True):
         speak_text = clean_text  # raw text before HTML conversion
 
-    clean_text = markdown_to_telegram_html(clean_text)
-
     # Debug: log when sending very short text (helps trace empty "name:" messages)
     if clean_text and len(clean_text.strip()) <= 5:
         print(f"{log_prefix} DEBUG short msg: {name}, text={repr(clean_text)}, "
@@ -6253,54 +6932,85 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     # Send text message if there's text content
     if clean_text:
-        prefix_reserve = len(name) + 30
-        chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
-        formatted_parts = format_multipart_messages(name, chunks)
+        # Try sendRichMessage first (Bot API 10.1+: native headings, tables, 32K limit)
+        rich_sent = False
+        if hasattr(transport, 'send_rich_text'):
+            # Strip redundant worker name prefix
+            rich_text = clean_text.lstrip()
+            prefix_lower = f"{name}:".lower()
+            if rich_text.lower().startswith(prefix_lower):
+                rich_text = rich_text[len(prefix_lower):].lstrip()
+            rich_text = _pipe_tables_to_html(rich_text)
+            rich_md = f"**{name}:**\n{rich_text}"
 
-        prev_msg_id = None
-        for i, part in enumerate(formatted_parts):
-            msg_data = {
-                "chat_id": chat_id,
-                "text": part,
-                "parse_mode": "HTML"
-            }
-            if prev_msg_id:
-                msg_data["reply_to_message_id"] = prev_msg_id
+            prefix_reserve = len(name) + 30
+            rich_chunks = split_message(rich_md, TELEGRAM_RICH_MAX_LENGTH - prefix_reserve)
 
-            result = transport.send_text(
-                chat_id, part, parse_mode="HTML",
-                reply_to=prev_msg_id if prev_msg_id else None
-            )
-            if result and result.get("ok"):
-                prev_msg_id = result.get("result", {}).get("message_id")
-                if len(formatted_parts) > 1:
-                    print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
-                else:
-                    print(f"{log_prefix} sent: {name} -> Telegram OK")
-            else:
-                # Fallback: retry as plain text on HTTP 400 (HTML parse error)
-                desc = (result or {}).get("description", "")
-                error_code = (result or {}).get("error_code", 0)
-                is_400 = error_code == 400
-                if is_400:
-                    print(f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
-                    # Strip HTML tags and decode entities for readable plain text
-                    plain_text = re.sub(r'<[^>]+>', '', part)
-                    plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                    result = transport.send_text(
-                        chat_id, plain_text,
-                        reply_to=prev_msg_id if prev_msg_id else None
-                    )
-                    if result and result.get("ok"):
-                        prev_msg_id = result.get("result", {}).get("message_id")
-                        print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
+            prev_msg_id = None
+            rich_sent = True
+            for i, chunk in enumerate(rich_chunks):
+                if i > 0:
+                    chunk = f"**{name}:** _(continued)_\n{chunk}"
+                result = transport.send_rich_text(
+                    chat_id, chunk,
+                    reply_to=prev_msg_id if prev_msg_id else None
+                )
+                if result and result.get("ok"):
+                    prev_msg_id = result.get("result", {}).get("message_id")
+                    if len(rich_chunks) > 1:
+                        print(f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
                     else:
-                        print(f"{log_prefix} failed (plain): {name} -> {result}")
+                        print(f"{log_prefix} sent (rich): {name} -> Telegram OK")
                 else:
-                    print(f"{log_prefix} failed: {name} -> {result}")
+                    error_code = (result or {}).get("error_code", 0)
+                    desc = (result or {}).get("description", "")
+                    print(f"{log_prefix} sendRichMessage failed ({error_code}: {desc}), falling back to HTML")
+                    rich_sent = False
+                    break
+                if i < len(rich_chunks) - 1:
+                    time.sleep(0.05)
 
-            if i < len(formatted_parts) - 1:
-                time.sleep(0.05)
+        # Fallback: sendMessage with HTML parse_mode (Bot API <10.1 or rich failed)
+        if not rich_sent:
+            clean_text = markdown_to_telegram_html(clean_text)
+            prefix_reserve = len(name) + 30
+            chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
+            formatted_parts = format_multipart_messages(name, chunks)
+
+            prev_msg_id = None
+            for i, part in enumerate(formatted_parts):
+                result = transport.send_text(
+                    chat_id, part, parse_mode="HTML",
+                    reply_to=prev_msg_id if prev_msg_id else None
+                )
+                if result and result.get("ok"):
+                    prev_msg_id = result.get("result", {}).get("message_id")
+                    if len(formatted_parts) > 1:
+                        print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
+                    else:
+                        print(f"{log_prefix} sent: {name} -> Telegram OK")
+                else:
+                    desc = (result or {}).get("description", "")
+                    error_code = (result or {}).get("error_code", 0)
+                    is_400 = error_code == 400
+                    if is_400:
+                        print(f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
+                        plain_text = re.sub(r'<[^>]+>', '', part)
+                        plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+                        result = transport.send_text(
+                            chat_id, plain_text,
+                            reply_to=prev_msg_id if prev_msg_id else None
+                        )
+                        if result and result.get("ok"):
+                            prev_msg_id = result.get("result", {}).get("message_id")
+                            print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
+                        else:
+                            print(f"{log_prefix} failed (plain): {name} -> {result}")
+                    else:
+                        print(f"{log_prefix} failed: {name} -> {result}")
+
+                if i < len(formatted_parts) - 1:
+                    time.sleep(0.05)
 
     # Send images
     for img_path, img_caption in images:
@@ -11206,6 +11916,11 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_workers_endpoint(parsed)
             return
 
+        # Handle /machines endpoint for host/machine discovery
+        if parsed.path == "/machines":
+            self.handle_machines_endpoint(parsed)
+            return
+
         # Handle /checkin endpoint for worker instruction refresh
         if parsed.path == "/checkin":
             self.handle_checkin_endpoint(parsed)
@@ -11279,6 +11994,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def handle_machines_endpoint(self, parsed=None):
+        """Return configured machines with derived workers, access, and health.
+
+        GET /machines             — bridge-POV access hints
+        GET /machines?from=<name> — caller-POV access hints
+        """
+        try:
+            caller_from = None
+            if parsed is not None:
+                caller_from = parse_qs(parsed.query).get("from", [None])[0]
+            self._send_json(200, get_machines(caller_from=caller_from))
+        except MachineConfigError as e:
+            print(f"Machines endpoint config error: {e}")
+            self._send_json(500, {"error": str(e)})
+        except Exception as e:
+            print(f"Machines endpoint error: {e}")
+            self._send_json(500, {"error": str(e)})
 
     def handle_checkin_endpoint(self, parsed):
         """Return worker instructions as plain text.
@@ -12105,6 +12838,13 @@ def main():
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     SESSIONS_DIR.chmod(0o700)
 
+    try:
+        machines = get_machine_catalog(force_reload=True)
+        print(f"Machine catalog: {list(machines.keys())} ({MACHINES_CONFIG_FILE})")
+    except MachineConfigError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
     # Discover existing sessions
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
@@ -12334,32 +13074,27 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 </body>
 </html>'''
 
-    def _connector_short_summary(tag, plain_text, serve_url=None):
+    def _connector_short_summary(tag, plain_text, serve_url=None, metadata=None):
         """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
         import html as _html
+        import re as _re
         icon = "🔔" if tag == "github" else "📧"
         body = plain_text.strip()
-        # Strip verbose prefix like "manager (via GitHub issue #1234):"
-        import re as _re
         body = _re.sub(r'^manager\s*\(via\s+\w+[^)]*\):\s*', '', body)
         body = _re.sub(r'\[thread:[^\]]+\]\s*', '', body)
-        # Collapse to single line, trim
         body = " ".join(body.split())
         if len(body) > 200:
             body = body[:197] + "…"
-        # Build: icon + tag ref on line 1, body on line 2, link on line 3
-        # Extract reference (issue/PR number, subject, thread)
         ref_match = _re.search(r'#(\d+)', plain_text)
         thread_match = _re.search(r'\[thread:([^\]]+)\]', plain_text)
-        if ref_match:
-            ref = f"#{ref_match.group(1)}"
-        elif thread_match:
-            ref = f"thread:{thread_match.group(1)}"
-        else:
-            ref = ""
         header = f"{icon} <b>{tag.title()}</b>"
-        if ref:
-            header += f" {_html.escape(ref)}"
+        if ref_match:
+            num = ref_match.group(1)
+            repo = (metadata or {}).get("repo", "BasedHardware/omi")
+            gh_url = f"https://github.com/{repo}/issues/{num}"
+            header += f' <a href="{gh_url}">#{num}</a>'
+        elif thread_match:
+            header += f" {_html.escape('thread:' + thread_match.group(1))}"
         parts = [header, _html.escape(body)]
         if serve_url:
             parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
@@ -12409,7 +13144,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
                         serve_url = _beast_serve_deploy(tmp_path, slug)
                     except Exception as e:
                         print(f"[{tag}] beast serve failed: {e}")
-                summary = _connector_short_summary(tag, plain_text, serve_url)
+                summary = _connector_short_summary(tag, plain_text, serve_url, metadata)
                 try:
                     send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
                 except Exception:

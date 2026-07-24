@@ -991,6 +991,13 @@ test_cli_webhook_commands() {
         return
     fi
 
+    # Save current webhook URL so we can restore it after the test.
+    # This prevents tests from clobbering the prod webhook when TEST_BOT_TOKEN
+    # is the same as the production bot token.
+    local saved_webhook_url=""
+    saved_webhook_url=$(curl -s "https://api.telegram.org/bot${TEST_BOT_TOKEN}/getWebhookInfo" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('url',''))" 2>/dev/null || true)
+
     # webhook set URL
     local test_url="https://example.com/test-webhook-${RANDOM}"
     local result
@@ -1017,8 +1024,24 @@ test_cli_webhook_commands() {
         success "CLI webhook delete handled (non-interactive)"
     fi
 
-    # Clean up
-    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook delete --force 2>/dev/null || true
+    # Restore the original webhook URL (critical: prevents prod outage)
+    if [[ -n "$saved_webhook_url" ]]; then
+        sleep 2  # avoid Telegram rate limit on rapid setWebhook calls
+        local restore_ok=false
+        for attempt in 1 2 3; do
+            if curl -s -X POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/setWebhook" \
+                -d "url=${saved_webhook_url}" 2>/dev/null | grep -q '"ok":true'; then
+                restore_ok=true
+                break
+            fi
+            sleep 2
+        done
+        if ! $restore_ok; then
+            echo "WARNING: failed to restore webhook URL after test — manual restart may be needed" >&2
+        fi
+    else
+        TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook delete --force 2>/dev/null || true
+    fi
 }
 
 test_send_to_worker_missing() {
@@ -7444,10 +7467,12 @@ test_send_response_html_formatting() {
     if python3 -c "
 import bridge
 
-# Track API calls
+# Track API calls — sendRichMessage must fail so code falls to HTML path
 calls = []
 def fake_api(method, data):
     calls.append((method, data))
+    if method == 'sendRichMessage':
+        return {'ok': False, 'error_code': 400, 'description': 'method not found'}
     return {'ok': True, 'result': {'message_id': 123}}
 
 orig_api = bridge.telegram_api
@@ -7456,9 +7481,9 @@ bridge.telegram_api = fake_api
 # Send a response with markdown bold
 bridge.send_response_to_telegram('testworker', '**hello world**', 12345)
 
-assert len(calls) >= 1, f'Expected at least 1 API call, got {len(calls)}'
-method, data = calls[0]
-assert method == 'sendMessage', f'Expected sendMessage, got {method}'
+html_calls = [c for c in calls if c[0] == 'sendMessage']
+assert len(html_calls) >= 1, f'Expected sendMessage call, got methods: {[c[0] for c in calls]}'
+method, data = html_calls[0]
 assert data['parse_mode'] == 'HTML', f'Expected HTML parse_mode, got {data.get(\"parse_mode\")}'
 # markdown_to_telegram_html should convert **bold** to <b>bold</b>
 assert '<b>' in data['text'] or 'hello world' in data['text'], \
@@ -7467,8 +7492,9 @@ assert '<b>' in data['text'] or 'hello world' in data['text'], \
 # Test with code block
 calls.clear()
 bridge.send_response_to_telegram('testworker', '\`\`\`python\nprint(1)\n\`\`\`', 12345)
-assert len(calls) >= 1, f'Expected at least 1 API call for code block'
-method, data = calls[0]
+html_calls = [c for c in calls if c[0] == 'sendMessage']
+assert len(html_calls) >= 1, f'Expected sendMessage call for code block, got methods: {[c[0] for c in calls]}'
+method, data = html_calls[0]
 assert '<pre>' in data['text'] or '<code>' in data['text'] or 'print(1)' in data['text'], \
     f'Expected code HTML in text, got: {data[\"text\"]}'
 
@@ -10781,6 +10807,241 @@ print('OK')
     fi
 }
 
+test_machines_config_loads_valid() {
+    info "Testing machines.json valid config loads..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'machines.json'
+path.write_text(json.dumps({
+    'version': 1,
+    'machines': {
+        'vps': {
+            'ssh_target': None,
+            'bridge_base_url': 'http://localhost:8271',
+            'home_root': '/home/claude',
+            'os_family': 'linux',
+            'display_name': 'VPS',
+            'tailscale_ip': '100.125.36.102',
+            'role': 'bridge'
+        },
+        'macmini': {
+            'ssh_target': 'beastoin-agents-f1-mac-mini',
+            'bridge_base_url': 'http://100.125.36.102:8271',
+            'home_root': '/Users/beastoinagents',
+            'os_family': 'darwin',
+            'display_name': 'Mac Mini',
+            'tailscale_ip': '100.126.187.125',
+            'role': 'worker-host'
+        }
+    }
+}))
+machines = bridge.load_machines_config(path)
+assert machines['vps'].is_local
+assert machines['macmini'].ssh_target == 'beastoin-agents-f1-mac-mini'
+assert machines['macmini'].os_family == 'darwin'
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "machines.json valid config loads"
+    else
+        fail "machines.json valid config failed"
+    fi
+}
+
+test_machines_config_missing_file_fallback() {
+    info "Testing missing machines.json falls back to local bridge machine..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'missing.json'
+machines = bridge.load_machines_config(path)
+assert len(machines) == 1, machines
+machine = next(iter(machines.values()))
+assert machine.is_local
+assert machine.configured is False
+assert machine.bridge_base_url == bridge.BRIDGE_URL
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "missing machines.json fallback works"
+    else
+        fail "missing machines.json fallback failed"
+    fi
+}
+
+test_machines_config_malformed_rejected() {
+    info "Testing malformed machines.json is rejected..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'machines.json'
+path.write_text('{bad json')
+try:
+    bridge.load_machines_config(path)
+    raise AssertionError('malformed config should raise')
+except bridge.MachineConfigError:
+    pass
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "malformed machines.json rejected"
+    else
+        fail "malformed machines.json should be rejected"
+    fi
+}
+
+test_machines_config_missing_required_field() {
+    info "Testing machines.json missing required field is rejected..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'machines.json'
+path.write_text(json.dumps({
+    'version': 1,
+    'machines': {
+        'vps': {
+            'ssh_target': None,
+            'bridge_base_url': 'http://localhost:8271',
+            'os_family': 'linux'
+        }
+    }
+}))
+try:
+    bridge.load_machines_config(path)
+    raise AssertionError('missing home_root should raise')
+except bridge.MachineConfigError as e:
+    assert 'home_root' in str(e), e
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "machines.json missing required field rejected"
+    else
+        fail "machines.json missing required field should be rejected"
+    fi
+}
+
+test_get_machines_includes_workers_and_health() {
+    info "Testing get_machines includes worker placement and health..."
+
+    if python3 -c "
+import json, tempfile, shutil, time
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'machines.json'
+path.write_text(json.dumps({
+    'version': 1,
+    'machines': {
+        'vps': {'ssh_target': None, 'bridge_base_url': 'http://localhost:8271', 'home_root': '/home/claude', 'os_family': 'linux'},
+        'macmini': {'ssh_target': 'beastoin-agents-f1-mac-mini', 'bridge_base_url': 'http://100.125.36.102:8271', 'home_root': '/Users/beastoinagents', 'os_family': 'darwin'}
+    }
+}))
+old_path = bridge.MACHINES_CONFIG_FILE
+old_cache = bridge._machines_cache
+old_cache_path = bridge._machines_cache_path
+old_get = bridge.get_registered_sessions
+bridge.MACHINES_CONFIG_FILE = path
+bridge._machines_cache = None
+bridge._machines_cache_path = None
+bridge.get_registered_sessions = lambda registered=None: {
+    'mon': {'tmux': 'claude-test-mon', 'backend': 'claude'},
+    'kai': {'tmux': 'claude-test-kai', 'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}
+}
+bridge._host_down['beastoin-agents-f1-mac-mini'] = True
+bridge._host_down_since['beastoin-agents-f1-mac-mini'] = 123.0
+bridge._host_last_error['beastoin-agents-f1-mac-mini'] = 'timeout'
+
+data = bridge.get_machines()
+machines = {m['id']: m for m in data['machines']}
+assert machines['vps']['worker_count'] == 1, machines
+assert machines['macmini']['worker_count'] == 1, machines
+assert machines['macmini']['workers'][0]['name'] == 'kai'
+assert machines['macmini']['health']['status'] == 'down'
+assert machines['macmini']['health']['last_error'] == 'timeout'
+
+bridge.MACHINES_CONFIG_FILE = old_path
+bridge._machines_cache = old_cache
+bridge._machines_cache_path = old_cache_path
+bridge.get_registered_sessions = old_get
+bridge._host_down.pop('beastoin-agents-f1-mac-mini', None)
+bridge._host_down_since.pop('beastoin-agents-f1-mac-mini', None)
+bridge._host_last_error.pop('beastoin-agents-f1-mac-mini', None)
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "get_machines includes workers and health"
+    else
+        fail "get_machines workers/health test failed"
+    fi
+}
+
+test_machines_from_caller_access() {
+    info "Testing /machines caller-aware access hints..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmp = Path(tempfile.mkdtemp())
+path = tmp / 'machines.json'
+path.write_text(json.dumps({
+    'version': 1,
+    'machines': {
+        'vps': {'ssh_target': None, 'bridge_base_url': 'http://localhost:8271', 'home_root': '/home/claude', 'os_family': 'linux'},
+        'macmini': {'ssh_target': 'beastoin-agents-f1-mac-mini', 'bridge_base_url': 'http://100.125.36.102:8271', 'home_root': '/Users/beastoinagents', 'os_family': 'darwin'}
+    }
+}))
+old_path = bridge.MACHINES_CONFIG_FILE
+old_cache = bridge._machines_cache
+old_cache_path = bridge._machines_cache_path
+old_get = bridge.get_registered_sessions
+old_target = bridge.BRIDGE_SSH_TARGET
+bridge.MACHINES_CONFIG_FILE = path
+bridge._machines_cache = None
+bridge._machines_cache_path = None
+bridge.BRIDGE_SSH_TARGET = 'vps'
+bridge.get_registered_sessions = lambda registered=None: {
+    'kai': {'tmux': 'claude-test-kai', 'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}
+}
+
+data = bridge.get_machines(caller_from='kai')
+machines = {m['id']: m for m in data['machines']}
+assert machines['macmini']['access'] == 'local', machines['macmini']
+assert machines['vps']['access'] == 'ssh vps', machines['vps']
+
+bridge.MACHINES_CONFIG_FILE = old_path
+bridge._machines_cache = old_cache
+bridge._machines_cache_path = old_cache_path
+bridge.get_registered_sessions = old_get
+bridge.BRIDGE_SSH_TARGET = old_target
+shutil.rmtree(tmp)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/machines caller-aware access works"
+    else
+        fail "/machines caller-aware access test failed"
+    fi
+}
+
 test_git_push_state_remote_host() {
     info "Testing _git_push_state dispatches git commands via SSH for remote host..."
 
@@ -11302,8 +11563,8 @@ bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
 workers = bridge.worker_manager.get_workers(caller_from='mon')
 mon = next((w for w in workers if w['name'] == 'mon'), None)
 kai = next((w for w in workers if w['name'] == 'kai'), None)
-assert mon.get('machine') in (None, '', 'bridge'), \
-    f'bridge-local worker should have empty/bridge machine, got: {mon.get(\"machine\")}'
+assert mon.get('machine') == bridge.BRIDGE_SSH_TARGET, \
+    f'bridge-local worker should use BRIDGE_SSH_TARGET as machine label, got: {mon.get(\"machine\")}'
 assert kai.get('machine') == 'beastoin-agents-f1-mac-mini', \
     f'remote worker should have host as machine, got: {kai.get(\"machine\")}'
 
@@ -12257,6 +12518,7 @@ remote_calls = []
 start_worker_calls = []
 stop_calls = []
 send_calls = []
+claude_started = [False]
 
 def mock_remote_run(cmd, **kwargs):
     remote_calls.append((' '.join(str(c) for c in cmd), kwargs.get('host')))
@@ -12266,7 +12528,7 @@ def mock_remote_run(cmd, **kwargs):
     if 'display-message' in str(cmd):
         r.stdout = '12345'
     if 'pgrep' in str(cmd):
-        r.returncode = 1  # claude not running (already exited)
+        r.returncode = 0 if claude_started[0] else 1
     if 'echo' in str(cmd) and 'HOME' in str(cmd):
         r.stdout = '/Users/beastoinagents'
         r = MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
@@ -12279,6 +12541,7 @@ def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_n
         'session_id': session_id, 'backend': backend_name,
         'skip_session_sync': skip_session_sync
     })
+    claude_started[0] = True
     return True
 
 orig_stop = bridge.CommandRouter._stop_worker_for_teleport
@@ -13027,6 +13290,267 @@ print('OK')
         success "_scan_latest_session_id returns latest JSONL stem"
     else
         fail "_scan_latest_session_id local scan test failed"
+    fi
+}
+
+test_log_session_event_appends_jsonl() {
+    info "Testing _log_session_event creates and appends to session_history.jsonl..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+sessions = tmpdir / 'sessions'
+sessions.mkdir()
+(sessions / 'testworker').mkdir()
+
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions
+try:
+    # First event creates the file
+    bridge._log_session_event('testworker', 'sid-aaa', '/home/claude/beast', 'hook')
+    history_file = sessions / 'testworker' / 'session_history.jsonl'
+    assert history_file.exists(), 'session_history.jsonl not created'
+
+    lines = history_file.read_text().strip().splitlines()
+    assert len(lines) == 1, f'Expected 1 line, got {len(lines)}'
+    entry = json.loads(lines[0])
+    assert entry['session_id'] == 'sid-aaa', f'Wrong session_id: {entry}'
+    assert entry['cwd'] == '/home/claude/beast', f'Wrong cwd: {entry}'
+    assert entry['event'] == 'hook', f'Wrong event: {entry}'
+    assert 'ts' in entry, 'Missing ts'
+
+    # Second event appends (does not overwrite)
+    bridge._log_session_event('testworker', 'sid-bbb', '/home/claude/omi', 'checkin_cwd_change')
+    lines = history_file.read_text().strip().splitlines()
+    assert len(lines) == 2, f'Expected 2 lines, got {len(lines)}'
+    entry2 = json.loads(lines[1])
+    assert entry2['session_id'] == 'sid-bbb'
+    assert entry2['event'] == 'checkin_cwd_change'
+
+    # File permissions are 0o600
+    import stat
+    mode = history_file.stat().st_mode & 0o777
+    assert mode == 0o600, f'Expected 0o600 perms, got {oct(mode)}'
+
+    print('OK')
+finally:
+    bridge.SESSIONS_DIR = orig
+    shutil.rmtree(tmpdir, ignore_errors=True)
+" 2>/dev/null | grep -q "OK"; then
+        success "_log_session_event creates and appends JSONL entries"
+    else
+        fail "_log_session_event should create and append JSONL entries"
+    fi
+}
+
+test_cache_session_id_logs_event() {
+    info "Testing _cache_session_id logs to session_history.jsonl on change..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+sessions = tmpdir / 'sessions'
+sessions.mkdir()
+(sessions / 'logworker').mkdir()
+
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions
+try:
+    # Write CWD so _cache_session_id can read it
+    (sessions / 'logworker' / 'claude_session_cwd').write_text('/home/claude/beast')
+
+    # First cache writes to history
+    bridge._cache_session_id('logworker', 'sid-111')
+    history = sessions / 'logworker' / 'session_history.jsonl'
+    assert history.exists(), 'No history after first cache'
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 1, f'Expected 1 entry, got {len(lines)}'
+    e = json.loads(lines[0])
+    assert e['session_id'] == 'sid-111'
+    assert e['event'] == 'cache'
+
+    # Same session_id again should NOT add a duplicate
+    bridge._cache_session_id('logworker', 'sid-111')
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 1, f'Expected still 1 entry (no dupe), got {len(lines)}'
+
+    # Different session_id adds new entry
+    bridge._cache_session_id('logworker', 'sid-222')
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 2, f'Expected 2 entries, got {len(lines)}'
+    e2 = json.loads(lines[1])
+    assert e2['session_id'] == 'sid-222'
+
+    print('OK')
+finally:
+    bridge.SESSIONS_DIR = orig
+    shutil.rmtree(tmpdir, ignore_errors=True)
+" 2>/dev/null | grep -q "OK"; then
+        success "_cache_session_id logs session changes to history"
+    else
+        fail "_cache_session_id should log session changes to history"
+    fi
+}
+
+test_hook_response_logs_session_id() {
+    info "Testing /response hook logs session_id to session_history.jsonl..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+sessions = tmpdir / 'sessions'
+sessions.mkdir()
+worker_dir = sessions / 'hooktest'
+worker_dir.mkdir()
+(worker_dir / 'chat_id').write_text('12345')
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/beast')
+
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions
+try:
+    # Simulate what the hook response handler does: write sid + log
+    hook_sid = 'hook-sid-aaa'
+    sid_file = worker_dir / 'claude_session_id'
+    old_sid = sid_file.read_text().strip() if sid_file.exists() else ''
+    if old_sid != hook_sid:
+        bridge._log_session_event('hooktest', hook_sid, '/home/claude/beast', 'hook')
+        sid_file.write_text(hook_sid)
+        sid_file.chmod(0o600)
+
+    history = worker_dir / 'session_history.jsonl'
+    assert history.exists(), 'No history after hook'
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 1
+    e = json.loads(lines[0])
+    assert e['session_id'] == 'hook-sid-aaa'
+    assert e['event'] == 'hook'
+    assert e['cwd'] == '/home/claude/beast'
+
+    # Same sid again: no duplicate
+    old_sid2 = sid_file.read_text().strip()
+    if old_sid2 != hook_sid:
+        bridge._log_session_event('hooktest', hook_sid, '/home/claude/beast', 'hook')
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 1, f'Duplicate logged: {len(lines)}'
+
+    print('OK')
+finally:
+    bridge.SESSIONS_DIR = orig
+    shutil.rmtree(tmpdir, ignore_errors=True)
+" 2>/dev/null | grep -q "OK"; then
+        success "Hook response logs session_id to history"
+    else
+        fail "Hook response should log session_id to history"
+    fi
+}
+
+test_checkin_cwd_change_logs_event() {
+    info "Testing checkin CWD change logs cwd_change event to session_history.jsonl..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+sessions = tmpdir / 'sessions'
+sessions.mkdir()
+worker_dir = sessions / 'cwdworker'
+worker_dir.mkdir()
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/old-project')
+(worker_dir / 'claude_session_id').write_text('old-sid-123')
+
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions
+try:
+    # Simulate the checkin CWD change logic from the handler
+    old_cwd = bridge.get_claude_session_cwd('cwdworker')
+    new_cwd = '/home/claude/new-project'
+    bridge.save_claude_session_cwd('cwdworker', new_cwd)
+    if old_cwd and old_cwd.rstrip('/') != new_cwd.rstrip('/'):
+        bridge._log_session_event('cwdworker', 'old-sid-123', new_cwd, 'cwd_change')
+        bridge.clear_claude_session_id('cwdworker')
+
+    history = worker_dir / 'session_history.jsonl'
+    assert history.exists(), 'No history after CWD change'
+    lines = history.read_text().strip().splitlines()
+    assert len(lines) == 1
+    e = json.loads(lines[0])
+    assert e['event'] == 'cwd_change', f'Wrong event: {e[\"event\"]}'
+    assert e['cwd'] == '/home/claude/new-project'
+    assert e['session_id'] == 'old-sid-123'
+
+    # session_id should be cleared
+    sid_file = worker_dir / 'claude_session_id'
+    assert not sid_file.exists(), 'session_id should be cleared after CWD change'
+
+    print('OK')
+finally:
+    bridge.SESSIONS_DIR = orig
+    shutil.rmtree(tmpdir, ignore_errors=True)
+" 2>/dev/null | grep -q "OK"; then
+        success "Checkin CWD change logs event to history"
+    else
+        fail "Checkin CWD change should log event to history"
+    fi
+}
+
+test_get_session_history() {
+    info "Testing get_session_history returns parsed entries with optional filters..."
+
+    if python3 -c "
+import json, tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+sessions = tmpdir / 'sessions'
+sessions.mkdir()
+worker_dir = sessions / 'histworker'
+worker_dir.mkdir()
+
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions
+try:
+    # No history yet — returns empty list
+    assert bridge.get_session_history('histworker') == []
+
+    # Add entries
+    bridge._log_session_event('histworker', 'sid-1', '/home/claude/beast', 'hook')
+    bridge._log_session_event('histworker', 'sid-2', '/home/claude/omi', 'cwd_change')
+    bridge._log_session_event('histworker', 'sid-3', '/home/claude/omi', 'cache')
+
+    # All entries
+    history = bridge.get_session_history('histworker')
+    assert len(history) == 3, f'Expected 3, got {len(history)}'
+    assert history[0]['session_id'] == 'sid-1'
+    assert history[2]['session_id'] == 'sid-3'
+
+    # Filter by event
+    hooks = bridge.get_session_history('histworker', event='hook')
+    assert len(hooks) == 1
+    assert hooks[0]['session_id'] == 'sid-1'
+
+    # Nonexistent worker returns empty
+    assert bridge.get_session_history('nobody') == []
+
+    print('OK')
+finally:
+    bridge.SESSIONS_DIR = orig
+    shutil.rmtree(tmpdir, ignore_errors=True)
+" 2>/dev/null | grep -q "OK"; then
+        success "get_session_history returns parsed entries with filters"
+    else
+        fail "get_session_history should return parsed entries with filters"
     fi
 }
 
@@ -18060,6 +18584,36 @@ test_health_workers_endpoint() {
     fi
 }
 
+test_machines_endpoint() {
+    info "Testing /machines endpoint..."
+
+    local result
+    result=$(curl -s "http://localhost:$PORT/machines")
+
+    if [[ $? -eq 0 ]] && echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('version') == 1
+assert 'machines' in d
+assert isinstance(d['machines'], list)
+assert len(d['machines']) >= 1
+for machine in d['machines']:
+    assert 'id' in machine
+    assert 'ssh_target' in machine
+    assert 'bridge_base_url' in machine
+    assert 'home_root' in machine
+    assert 'os_family' in machine
+    assert 'access' in machine
+    assert 'workers' in machine
+    assert 'health' in machine
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/machines returns machine catalog JSON"
+    else
+        fail "/machines endpoint failed: $result"
+    fi
+}
+
 test_api_index_returns_json() {
     info "Testing GET / returns JSON API index..."
 
@@ -18074,6 +18628,7 @@ assert 'endpoints' in d, 'missing endpoints'
 assert 'name' in d, 'missing name'
 assert 'claudecode-telegram' in d['name'], 'wrong name'
 assert 'note' in d, 'missing note'
+assert 'GET /machines' in d['endpoints'], 'missing /machines endpoint'
 assert 'polling' in d['note'].lower(), 'note should mention polling'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -18168,6 +18723,14 @@ test_known_endpoints_unchanged() {
         success "GET /workers still returns 200"
     else
         fail "GET /workers should return 200, got $http_code"
+    fi
+
+    # GET /machines
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/machines")
+    if [[ "$http_code" == "200" ]]; then
+        success "GET /machines still returns 200"
+    else
+        fail "GET /machines should return 200, got $http_code"
     fi
 
     # GET /checkin
@@ -19406,6 +19969,32 @@ test_pilot_usage_no_args() {
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+run_forge_go_tests() {
+    local mode="${1:-default}"
+    log ""
+    log "── Forge Go Tests ──────────────────────────────────────────────────────"
+
+    if ! command -v go &>/dev/null; then
+        info "Go not installed, skipping forge tests"
+        return 0
+    fi
+
+    local go_test_flags="-timeout 180s"
+    if [[ "$mode" == "fast" ]]; then
+        go_test_flags="$go_test_flags -short"
+        export FAST=1
+    fi
+
+    ((tests_run++)) || true
+    info "Running: cd forge && go test $go_test_flags ./..."
+    if (cd "$SCRIPT_DIR/forge" && go test $go_test_flags ./... 2>&1); then
+        success "Forge Go tests passed"
+    else
+        fail "Forge Go tests failed"
+    fi
+    unset FAST
+}
+
 run_unit_tests() {
     # Unit tests (no bridge needed)
     log "── Unit Tests ──────────────────────────────────────────────────────────"
@@ -19512,6 +20101,12 @@ run_unit_tests() {
     run_test test_bridge_url_ignores_stale_localhost
     run_test test_bridge_url_ignores_stale_127
     run_test test_bridge_url_honors_remote
+    run_test test_machines_config_loads_valid
+    run_test test_machines_config_missing_file_fallback
+    run_test test_machines_config_malformed_rejected
+    run_test test_machines_config_missing_required_field
+    run_test test_get_machines_includes_workers_and_health
+    run_test test_machines_from_caller_access
     # Unit tests - Git-Based Teleport Sync
     log ""
     log "── Git Sync Tests (Unit) ───────────────────────────────────────────────"
@@ -19573,6 +20168,11 @@ run_unit_tests() {
     run_test test_is_online_teleported_checks_claude_process
     run_test test_session_helpers_read_remote_files
     run_test test_scan_latest_session_id_local
+    run_test test_log_session_event_appends_jsonl
+    run_test test_cache_session_id_logs_event
+    run_test test_hook_response_logs_session_id
+    run_test test_checkin_cwd_change_logs_event
+    run_test test_get_session_history
     run_test test_get_claude_session_id_authoritative_overrides_stale
     run_test test_get_claude_session_id_authoritative_remote
     run_test test_hook_failures_teleported_use_remote_files
@@ -19847,6 +20447,7 @@ run_integration_tests() {
     run_test test_checkin_endpoint
     run_test test_checkin_note
     run_test test_health_workers_endpoint
+    run_test test_machines_endpoint
     run_test test_api_index_returns_json
     run_test test_unknown_get_returns_404
     run_test test_unknown_post_returns_404
@@ -19996,6 +20597,9 @@ main() {
     # Always run unit and CLI tests
     run_unit_tests
     run_cli_tests
+
+    # Forge Go tests (no bridge needed, uses own test infrastructure)
+    run_forge_go_tests "$mode"
 
     # Skip integration tests in FAST mode
     if [[ "$mode" != "fast" ]]; then

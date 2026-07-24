@@ -157,6 +157,7 @@
 - MUST accept `SANDBOX_MOUNTS` (comma-separated, supports `ro:` prefix).
 - MUST accept `CLAUDE_DIR` (default `~/.claude`).
 - MUST accept `CLAUDE_SETTINGS_FILE` (default `~/.claude/settings.json`).
+- MUST accept `MACHINES_CONFIG_FILE` (default `~/.config/claudecode-telegram/machines.json`).
 - MUST accept `MCP_INVENTORY_ENABLED` (`1`/`0`, default `1`).
 - MUST accept `MCP_CONFIG_PATHS` (comma-separated override list of MCP config files).
 - MUST accept `MCP_PROJECT_FILES` (comma-separated, default `.mcp.json,.mcp.jsonc`).
@@ -247,6 +248,16 @@
 - MUST return JSON `{ "workers": [ ... ] }`.
 - MUST include entries with `name`, `protocol`, `address`, and `send_example`.
 - MUST return an empty list when no workers exist.
+
+### `GET /machines`
+- MUST load machine configuration from `MACHINES_CONFIG_FILE`.
+- MUST allow a missing config file and return one implicit local bridge machine.
+- MUST reject malformed config with a loud server error instead of silently guessing.
+- MUST use schema version `1` with machine fields `ssh_target`, `bridge_base_url`, `home_root`, and `os_family`.
+- MUST support optional metadata fields `display_name`, `tailscale_ip`, and `role`.
+- MUST return JSON with `machines`, `config_path`, and `version`.
+- MUST include each machine's worker list, worker count, caller-aware `access` hint, and host health summary.
+- MUST accept optional `?from=<worker>` and render `access` from that worker's machine perspective.
 
 ### `GET /checkin`
 - MUST accept optional `?name=<worker>` query parameter (default: `"worker"`).
