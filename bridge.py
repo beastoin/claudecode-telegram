@@ -6522,22 +6522,34 @@ class WorkerManager:
                     started = True
                     break
             if not started and resume_id:
-                print(f"[restart] {name}: resume failed (stale session {resume_id[:8]}), alerting admin")
-                session_id_path = os.path.join(
-                    os.path.expanduser("~"), ".claude", "telegram", "nodes",
-                    _node_name(), "sessions", name, "claude_session_id"
-                )
-                try:
-                    os.remove(session_id_path)
-                    print(f"[restart] {name}: cleared stale session_id file")
-                except FileNotFoundError:
-                    pass
-                if admin_chat_id:
-                    alert = (
-                        f"⚠️ {name}: resume failed (stale session ID {resume_id[:8]}…)\n"
-                        f"Session ID cleared. Use /restart --clean {name} to start fresh."
-                    )
-                    send_telegram_message(admin_chat_id, alert)
+                print(f"[restart] {name}: resume failed (stale session {resume_id[:8]}), auto-retrying fresh")
+                clear_claude_session_id(name)
+                _clear_hook_failures(name)
+                start_cmd = backend.start_cmd("")
+                start_cmd = f'unset CLAUDECODE && {start_cmd}'
+                if startup_cwd:
+                    start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+                for _ in range(10):
+                    time.sleep(1.0)
+                    if is_claude_running(tmux_name):
+                        started = True
+                        break
+                if started:
+                    print(f"[restart] {name}: fresh start succeeded after stale resume")
+                    if admin_chat_id:
+                        send_telegram_message(
+                            admin_chat_id,
+                            f"⚠️ {name}: stale session ID {resume_id[:8]}… — auto-restarted fresh ✓"
+                        )
+                else:
+                    print(f"[restart] {name}: fresh start also failed after stale resume")
+                    if admin_chat_id:
+                        send_telegram_message(
+                            admin_chat_id,
+                            f"🔴 {name}: resume failed (stale {resume_id[:8]}…) AND fresh start failed.\n"
+                            f"/restart --clean {name} to try manually."
+                        )
             if started:
                 self.send(name, welcome)
             else:
@@ -6610,8 +6622,36 @@ class WorkerManager:
 
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
-            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
-            self.send(name, welcome)
+            started = False
+            for _ in range(10):
+                time.sleep(1.0)
+                if is_claude_running(tmux_name):
+                    started = True
+                    break
+            if not started and resume_id:
+                print(f"[restart] {name}: dead worker resume failed (stale session {resume_id[:8]}), auto-retrying fresh")
+                clear_claude_session_id(name)
+                start_cmd = backend.start_cmd("")
+                start_cmd = f'unset CLAUDECODE && {start_cmd}'
+                if startup_cwd:
+                    start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+                for _ in range(10):
+                    time.sleep(1.0)
+                    if is_claude_running(tmux_name):
+                        started = True
+                        break
+                if started:
+                    print(f"[restart] {name}: dead worker fresh start succeeded after stale resume")
+                    if admin_chat_id:
+                        send_telegram_message(
+                            admin_chat_id,
+                            f"⚠️ {name}: stale session ID {resume_id[:8]}… — auto-restarted fresh ✓"
+                        )
+            if started:
+                self.send(name, welcome)
+            else:
+                print(f"[restart] {name}: dead worker did not start within 10s, skipping welcome")
         else:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 

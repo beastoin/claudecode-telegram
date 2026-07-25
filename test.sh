@@ -5408,6 +5408,48 @@ print('OK')
     fi
 }
 
+test_restart_stale_session_auto_recovery() {
+    info "Testing restart auto-recovers from stale session ID..."
+
+    if python3 -c "
+import bridge
+import os
+import tempfile
+
+# Create a temp session dir with a stale session ID
+with tempfile.TemporaryDirectory() as tmpdir:
+    sessions_dir = os.path.join(tmpdir, 'sessions')
+    os.makedirs(os.path.join(sessions_dir, 'testbot'), exist_ok=True)
+
+    # Write a stale session ID
+    with open(os.path.join(sessions_dir, 'testbot', 'claude_session_id'), 'w') as f:
+        f.write('stale-id-00000000-0000-0000-0000-000000000000')
+
+    # Verify get_claude_session_id reads the stale ID
+    orig_sessions_dir = bridge.SESSIONS_DIR
+    bridge.SESSIONS_DIR = type(bridge.SESSIONS_DIR)(sessions_dir)
+
+    sid = bridge.get_claude_session_id('testbot')
+    assert sid == 'stale-id-00000000-0000-0000-0000-000000000000', f'Expected stale ID, got {sid}'
+
+    # clear_claude_session_id should remove it
+    bridge.clear_claude_session_id('testbot')
+    sid_after = bridge.get_claude_session_id('testbot')
+    assert not sid_after, f'Expected empty after clear, got {sid_after}'
+
+    # Verify the file is gone
+    assert not os.path.exists(os.path.join(sessions_dir, 'testbot', 'claude_session_id'))
+
+    bridge.SESSIONS_DIR = orig_sessions_dir
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "restart stale session auto-recovery clears session ID"
+    else
+        fail "restart stale session auto-recovery test failed"
+    fi
+}
+
 test_restart_all_rejects_duplicate() {
     info "Testing /restart all rejects when already running..."
 
@@ -20038,6 +20080,7 @@ run_unit_tests() {
     run_test test_restart_skips_running_worker
     run_test test_restart_inflight_dedupe
     run_test test_restart_all_no_workers
+    run_test test_restart_stale_session_auto_recovery
     run_test test_restart_all_rejects_duplicate
     run_test test_codex_pause_clears_pending
     run_test test_adapter_pid_tracking
