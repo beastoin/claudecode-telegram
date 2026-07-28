@@ -17305,6 +17305,48 @@ print('OK')
     fi
 }
 
+test_pipe_tables_inline_markdown() {
+    info "Testing _pipe_tables_to_html converts inline markdown in cells..."
+
+    if python3 -c "
+from bridge import _pipe_tables_to_html
+
+# Bold in table cells
+text = '''| Day | DAU |
+|-----|-----|
+| Jul 22 | **902** |
+| Jul 23 | **1,096** |'''
+
+result = _pipe_tables_to_html(text)
+assert '<b>902</b>' in result, f'Expected bold 902, got: {result}'
+assert '<b>1,096</b>' in result, f'Expected bold 1,096, got: {result}'
+assert '**' not in result, f'Raw ** markers should not appear: {result}'
+
+# Inline code in cells
+text2 = '''| Key | Value |
+|-----|-------|
+| name | \`foo\` |'''
+
+result2 = _pipe_tables_to_html(text2)
+assert '<code>foo</code>' in result2, f'Expected code foo, got: {result2}'
+
+# Plain cells (no markdown) still work
+text3 = '''| A | B |
+|---|---|
+| hello | 42 |'''
+
+result3 = _pipe_tables_to_html(text3)
+assert '<td>hello</td>' in result3, f'Expected plain hello, got: {result3}'
+assert '<td>42</td>' in result3, f'Expected plain 42, got: {result3}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_pipe_tables_to_html converts inline markdown in cells"
+    else
+        fail "pipe_tables inline markdown test failed"
+    fi
+}
+
 # Test forward-to-bridge.py sends escape:True (bridge converts markdown)
 test_forward_to_bridge_escape_flag() {
     info "Testing forward-to-bridge sends escape:True in payload..."
@@ -20048,6 +20090,7 @@ run_unit_tests() {
     log ""
     log "── Markdown Conversion Tests (Unit) ────────────────────────────────────"
     run_test test_markdown_to_telegram_html
+    run_test test_pipe_tables_inline_markdown
     run_test test_forward_to_bridge_escape_flag
     # test_forward_self_heal_on_403 removed (HOOK_SECRET removed)
     # test_forward_no_self_heal_on_other_errors removed (HOOK_SECRET removed)

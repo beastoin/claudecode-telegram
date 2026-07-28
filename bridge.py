@@ -3378,6 +3378,15 @@ def _pipe_tables_to_html(text: str) -> str:
     def _esc(s):
         return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
+    def _cell_md(s):
+        """Escape HTML then convert inline markdown in a table cell."""
+        s = _esc(s)
+        s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
+        s = re.sub(r'__(.+?)__', r'<b>\1</b>', s)
+        s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', s)
+        s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+        return s
+
     lines = text.split('\n')
     result = []
     i = 0
@@ -3412,7 +3421,7 @@ def _pipe_tables_to_html(text: str) -> str:
             html.append('<tr>')
             for j, h in enumerate(headers):
                 align = aligns[j] if j < len(aligns) else ''
-                html.append(f'<th{align}>{_esc(h)}</th>')
+                html.append(f'<th{align}>{_cell_md(h)}</th>')
             html.append('</tr>')
 
             i += 2
@@ -3421,7 +3430,7 @@ def _pipe_tables_to_html(text: str) -> str:
                 html.append('<tr>')
                 for j, cell in enumerate(cells):
                     align = aligns[j] if j < len(aligns) else ''
-                    html.append(f'<td{align}>{_esc(cell)}</td>')
+                    html.append(f'<td{align}>{_cell_md(cell)}</td>')
                 html.append('</tr>')
                 i += 1
 
