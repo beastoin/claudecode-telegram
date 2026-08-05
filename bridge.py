@@ -2001,6 +2001,7 @@ class TelegramTransport(MessageTransport):
             print(validated)
             return False
         photo_path = validated
+        photo_data, filename = _prepare_photo_for_telegram(photo_path)
         boundary = uuid.uuid4().hex
         content_type = mimetypes.guess_type(str(photo_path))[0] or "image/jpeg"
         body_parts = []
@@ -2009,10 +2010,10 @@ class TelegramTransport(MessageTransport):
         body_parts.append(b"")
         body_parts.append(str(chat_id).encode())
         body_parts.append(f"--{boundary}".encode())
-        body_parts.append(f'Content-Disposition: form-data; name="photo"; filename="{photo_path.name}"'.encode())
+        body_parts.append(f'Content-Disposition: form-data; name="photo"; filename="{filename}"'.encode())
         body_parts.append(f"Content-Type: {content_type}".encode())
         body_parts.append(b"")
-        body_parts.append(photo_path.read_bytes())
+        body_parts.append(photo_data)
         if caption:
             body_parts.append(f"--{boundary}".encode())
             body_parts.append(b'Content-Disposition: form-data; name="caption"')
@@ -2030,7 +2031,7 @@ class TelegramTransport(MessageTransport):
             with urllib.request.urlopen(req, timeout=60) as r:
                 result = json.loads(r.read())
                 if result.get("ok"):
-                    print(f"Photo sent: {photo_path.name}")
+                    print(f"Photo sent: {filename}")
                     return True
                 else:
                     print(f"sendPhoto failed: {result}")
@@ -2808,6 +2809,52 @@ def synthesize_speech(text: str, voice: str = None, language: str = "en") -> Opt
     except Exception as e:
         print(f"TTS error (fail-open): {e}")
         return None
+
+
+TELEGRAM_PHOTO_MAX_SUM = 10000  # width + height must not exceed this
+TELEGRAM_PHOTO_MAX_DIM = 5000   # neither dimension may exceed this
+
+
+def _prepare_photo_for_telegram(photo_path):
+    """Auto-resize a photo if it exceeds Telegram's sendPhoto limits.
+
+    Telegram returns 400 Bad Request when width+height > 10000 or either
+    dimension > 5000.  This function scales down proportionally when needed
+    and returns (bytes, filename).  If no resize is needed, returns the
+    original file bytes unchanged.
+    """
+    try:
+        from PIL import Image
+        img = Image.open(photo_path)
+        w, h = img.size
+        needs_resize = (
+            w + h > TELEGRAM_PHOTO_MAX_SUM or
+            w > TELEGRAM_PHOTO_MAX_DIM or
+            h > TELEGRAM_PHOTO_MAX_DIM
+        )
+        if needs_resize:
+            # Scale proportionally so both constraints are satisfied
+            scale = min(
+                TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
+                TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
+                TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1),
+            )
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            import io
+            buf = io.BytesIO()
+            fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
+            if fmt == "PNG" and img.mode not in ("RGBA", "P", "L", "LA"):
+                img = img.convert("RGBA")
+            elif fmt == "JPEG" and img.mode != "RGB":
+                img = img.convert("RGB")
+            img.save(buf, format=fmt)
+            print(f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
+            return buf.getvalue(), photo_path.name
+        return photo_path.read_bytes(), photo_path.name
+    except ImportError:
+        return photo_path.read_bytes(), photo_path.name
 
 
 def validate_photo_path(photo_path):
