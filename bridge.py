@@ -3337,7 +3337,12 @@ def markdown_to_telegram_html(text: str) -> str:
                         while run and run[-1].strip() == '':
                             j -= 1
                             run.pop()
-                        content = escape_html('\n'.join(run))
+                        raw = []
+                        for rl in run:
+                            plain = re.sub(r'<[^>]+>', '', rl)
+                            plain = plain.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+                            raw.append(plain)
+                        content = escape_html('\n'.join(raw))
                         out.append(f'<pre>{content}</pre>')
                         i = j
                     else:
@@ -3384,7 +3389,9 @@ def _pipe_tables_to_html(text: str) -> str:
         s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
         s = re.sub(r'__(.+?)__', r'<b>\1</b>', s)
         s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', s)
+        s = re.sub(r'~~(.+?)~~', r'<s>\1</s>', s)
         s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+        s = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', s)
         return s
 
     lines = text.split('\n')
@@ -6997,6 +7004,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
             prev_msg_id = None
             rich_sent = True
+            rich_failed_at = -1
             for i, chunk in enumerate(rich_chunks):
                 if i > 0:
                     chunk = f"**{name}:** _(continued)_\n{chunk}"
@@ -7015,11 +7023,35 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                     desc = (result or {}).get("description", "")
                     print(f"{log_prefix} sendRichMessage failed ({error_code}: {desc}), falling back to HTML")
                     rich_sent = False
+                    rich_failed_at = i
                     break
                 if i < len(rich_chunks) - 1:
                     time.sleep(0.05)
 
         # Fallback: sendMessage with HTML parse_mode (Bot API <10.1 or rich failed)
+        if not rich_sent and rich_failed_at > 0:
+            # Partial failure: some rich chunks already sent. Only send remaining as HTML.
+            remaining_md = '\n'.join(rich_chunks[rich_failed_at:])
+            remaining_html = markdown_to_telegram_html(remaining_md)
+            prefix_reserve = len(name) + 30
+            chunks = split_message(remaining_html, TELEGRAM_MAX_LENGTH - prefix_reserve)
+            formatted_parts = format_multipart_messages(name, chunks)
+            for i, part in enumerate(formatted_parts):
+                result = transport.send_text(
+                    chat_id, part, parse_mode="HTML",
+                    reply_to=prev_msg_id if prev_msg_id else None
+                )
+                if result and result.get("ok"):
+                    prev_msg_id = result.get("result", {}).get("message_id")
+                    print(f"{log_prefix} sent (html fallback): {name} part {rich_failed_at + i + 1}/{len(rich_chunks)} -> Telegram OK")
+                else:
+                    plain_text = re.sub(r'<[^>]+>', '', part)
+                    plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+                    transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
+                if i < len(formatted_parts) - 1:
+                    time.sleep(0.05)
+            rich_sent = True  # handled
+
         if not rich_sent:
             clean_text = markdown_to_telegram_html(clean_text)
             prefix_reserve = len(name) + 30
@@ -8986,11 +9018,19 @@ class CommandRouter:
 
             # On teleport out: push team configs + install hooks on target
             # On teleback: skip — VPS is source of truth for team-scope config
+            # Best-effort: these methods never raise — failures produce warnings
+            # but must not abort the teleport.
             if not is_teleback:
                 self._teleport_notify(chat_id, "Syncing team config and hooks...")
-                self._sync_shared_repos(target_host, chat_id)
-                self._install_hooks_on_target(target_host)
-                print(f"[teleport] {name}: team config + hooks synced")
+                sync_warnings = self._sync_shared_repos(target_host, chat_id)
+                hook_warnings = self._install_hooks_on_target(target_host)
+                all_warnings = sync_warnings + hook_warnings
+                if all_warnings:
+                    self._teleport_notify(
+                        chat_id,
+                        f"Config sync completed with warnings:\n" +
+                        "\n".join(f"- {w}" for w in all_warnings))
+                print(f"[teleport] {name}: team config + hooks synced ({len(all_warnings)} warnings)")
 
             # ── PHASE 2: Commit ──
 
@@ -9228,71 +9268,94 @@ class CommandRouter:
     def _sync_shared_repos(self, target_host, chat_id=None):
         """Sync team and agent-config git repos between VPS and target.
 
+        Best-effort: never raises.  Returns a list of warning strings
+        for any operations that failed.  The caller can report them but
+        a failure here must never abort the teleport.
+
         VPS hosts bare repos at ~/git/{team,agent-config}.git.
         Both VPS working copies and target clones use these as origin.
         Push from source, pull on target.
         """
         if not target_host:
-            return  # Local — already in sync
+            return []
 
-        home = os.path.expanduser("~")
-        git_repos = {
-            "team": os.path.join(home, "team"),
-            "agent-config": os.path.join(home, "agent-config"),
-        }
+        warnings = []
+        try:
+            home = os.path.expanduser("~")
+            git_repos = {
+                "team": os.path.join(home, "team"),
+                "agent-config": os.path.join(home, "agent-config"),
+            }
 
-        # Push local changes to bare repo (VPS side)
-        for repo_name, repo_path in git_repos.items():
-            if os.path.isdir(os.path.join(repo_path, ".git")):
+            # Push local changes to bare repo (VPS side)
+            for repo_name, repo_path in git_repos.items():
+                if os.path.isdir(os.path.join(repo_path, ".git")):
+                    try:
+                        subprocess.run(
+                            ["git", "-C", repo_path, "add", "-A"],
+                            capture_output=True, timeout=10)
+                        subprocess.run(
+                            ["git", "-C", repo_path, "commit", "-m",
+                             f"teleport sync: {repo_name}"],
+                            capture_output=True, timeout=10)
+                        subprocess.run(
+                            ["git", "-C", repo_path, "push", "origin", "master"],
+                            capture_output=True, timeout=60)
+                        print(f"[teleport] git sync succeeded for {repo_name}")
+                    except Exception as e:
+                        w = f"git push {repo_name}: {e}"
+                        warnings.append(w)
+                        print(f"[teleport] {w}")
+
+            # Pull on target
+            for repo_name in git_repos:
                 try:
+                    _remote_run(
+                        ["bash", "-c",
+                         f"cd ~/{repo_name} 2>/dev/null && git pull origin master 2>/dev/null || true"],
+                        host=target_host, capture_output=True, timeout=60)
+                except Exception as e:
+                    w = f"git pull {repo_name} on {target_host}: {e}"
+                    warnings.append(w)
+                    print(f"[teleport] {w}")
+
+            # Deploy agent-config to ~/.claude/ on target (skills, hooks, scripts)
+            for subdir in ["skills", "hooks", "scripts"]:
+                try:
+                    _remote_run(
+                        ["bash", "-c",
+                         f"[ -d ~/agent-config/.claude/{subdir} ] && "
+                         f"rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/"],
+                        host=target_host, capture_output=True, timeout=60)
+                except Exception as e:
+                    w = f"agent-config deploy {subdir}: {e}"
+                    warnings.append(w)
+                    print(f"[teleport] {w}")
+
+            # Adapt settings.json paths for target $HOME
+            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
+                                  capture_output=True, text=True, timeout=5)
+            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            local_home = home
+            if remote_home and remote_home != local_home:
+                settings_src = os.path.expanduser("~/.claude/settings.json")
+                if os.path.exists(settings_src):
+                    with open(settings_src) as f:
+                        settings_text = f.read()
+                    settings_text = settings_text.replace(local_home, remote_home)
+                    fd, tmp = tempfile.mkstemp(suffix=".json")
+                    os.write(fd, settings_text.encode())
+                    os.close(fd)
                     subprocess.run(
-                        ["git", "-C", repo_path, "add", "-A"],
+                        ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
                         capture_output=True, timeout=10)
-                    subprocess.run(
-                        ["git", "-C", repo_path, "commit", "-m",
-                         f"teleport sync: {repo_name}"],
-                        capture_output=True, timeout=10)
-                    subprocess.run(
-                        ["git", "-C", repo_path, "push", "origin", "master"],
-                        capture_output=True, timeout=60)
-                    print(f"[teleport] git sync succeeded for {repo_name}")
-                except subprocess.TimeoutExpired:
-                    print(f"[teleport] git sync timed out for {repo_name}, continuing")
+                    os.unlink(tmp)
+        except Exception as e:
+            w = f"shared repo sync: {e}"
+            warnings.append(w)
+            print(f"[teleport] {w}")
 
-        # Pull on target
-        for repo_name in git_repos:
-            _remote_run(
-                ["bash", "-c",
-                 f"cd ~/{repo_name} 2>/dev/null && git pull origin master 2>/dev/null || true"],
-                host=target_host, capture_output=True, timeout=30)
-
-        # Deploy agent-config to ~/.claude/ on target (skills, hooks, scripts)
-        # This replaces the old symlink approach which broke macOS find.
-        for subdir in ["skills", "hooks", "scripts"]:
-            _remote_run(
-                ["bash", "-c",
-                 f"[ -d ~/agent-config/.claude/{subdir} ] && "
-                 f"rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/"],
-                host=target_host, capture_output=True, timeout=30)
-
-        # Adapt settings.json paths for target $HOME
-        r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
-                              capture_output=True, text=True, timeout=5)
-        remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
-        local_home = home
-        if remote_home and remote_home != local_home:
-            settings_src = os.path.expanduser("~/.claude/settings.json")
-            if os.path.exists(settings_src):
-                with open(settings_src) as f:
-                    settings_text = f.read()
-                settings_text = settings_text.replace(local_home, remote_home)
-                fd, tmp = tempfile.mkstemp(suffix=".json")
-                os.write(fd, settings_text.encode())
-                os.close(fd)
-                subprocess.run(
-                    ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
-                    capture_output=True, timeout=10)
-                os.unlink(tmp)
+        return warnings
 
     def _sync_worker_data_back(self, name, source_host):
         """Sync worker-scoped data back from remote after teleback.
@@ -9393,34 +9456,44 @@ class CommandRouter:
     def _install_hooks_on_target(self, target_host):
         """Install Claude Code hooks and settings on target machine.
 
+        Best-effort: never raises.  Returns a list of warning strings.
+
         With git-synced agent-config, this is a lightweight fallback
         for any files not covered by the repo (e.g., .claude.json).
         Hooks/skills/settings are synced via _sync_shared_repos.
         """
         if not target_host:
-            return  # Local — hooks already installed
+            return []
 
-        # Ensure hooks dir has correct permissions
-        _remote_run(["chmod", "-R", "700", ".claude/hooks"],
-                     host=target_host, capture_output=True)
+        warnings = []
+        try:
+            # Ensure hooks dir has correct permissions
+            _remote_run(["chmod", "-R", "700", ".claude/hooks"],
+                         host=target_host, capture_output=True)
 
-        # Sync .claude.json (onboarding, trust dialogs, project config)
-        claude_json = os.path.expanduser("~/.claude.json")
-        if os.path.exists(claude_json):
-            subprocess.run(
-                ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
-                capture_output=True, timeout=10)
-        else:
-            # Create minimal .claude.json to skip first-time prompts
-            _remote_run(
-                ["python3", "-c",
-                 'import json,os,pathlib;'
-                 'p=pathlib.Path(os.path.expanduser("~/.claude.json"));'
-                 'd=json.loads(p.read_text()) if p.exists() else {};'
-                 'd["hasCompletedOnboarding"]=True;'
-                 'd.setdefault("numStartups",1);'
-                 'p.write_text(json.dumps(d))'],
-                host=target_host, capture_output=True, timeout=10)
+            # Sync .claude.json (onboarding, trust dialogs, project config)
+            claude_json = os.path.expanduser("~/.claude.json")
+            if os.path.exists(claude_json):
+                subprocess.run(
+                    ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
+                    capture_output=True, timeout=10)
+            else:
+                # Create minimal .claude.json to skip first-time prompts
+                _remote_run(
+                    ["python3", "-c",
+                     'import json,os,pathlib;'
+                     'p=pathlib.Path(os.path.expanduser("~/.claude.json"));'
+                     'd=json.loads(p.read_text()) if p.exists() else {};'
+                     'd["hasCompletedOnboarding"]=True;'
+                     'd.setdefault("numStartups",1);'
+                     'p.write_text(json.dumps(d))'],
+                    host=target_host, capture_output=True, timeout=10)
+        except Exception as e:
+            w = f"hook install: {e}"
+            warnings.append(w)
+            print(f"[teleport] {w}")
+
+        return warnings
 
     def _sync_session_files_to_target(self, name, target_sessions_dir, target_host):
         """Copy session files (chat_id, session_id, cwd) to target machine.
