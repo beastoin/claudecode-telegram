@@ -271,7 +271,8 @@ def _remote_run(cmd: list, host: str = None, **kwargs) -> subprocess.CompletedPr
         # SSH concatenates args and runs them through the remote shell,
         # so we must shell-quote each arg to preserve special characters.
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
-        cmd = ["ssh", host, remote_cmd]
+        timeout_val = kwargs.get("timeout", 10)
+        cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     return subprocess.run(cmd, **kwargs)
 
 
