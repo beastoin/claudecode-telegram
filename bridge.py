@@ -1377,6 +1377,11 @@ _host_io_usage = {}  # host -> {iowait_pct, read_iops, write_iops, util_pct, ts}
 _host_io_alert_ts = {}  # host -> float
 _host_io_alerted = {}  # host -> bool
 
+# Infra monitoring: Tailscale connectivity
+INFRA_ALERT_COOLDOWN = 300  # seconds between repeated infra alerts
+_infra_tailscale_down = False
+_infra_tailscale_alert_ts = 0.0
+
 # Learning reminders: periodic self-learning nudges per worker
 # Two triggers: response count threshold, and idle timeout (checked by timer).
 # Anti-annoyance: after any reminder fires, all triggers suppressed until worker responds.
@@ -4753,6 +4758,50 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                     pass
 
 
+def _probe_tailscale() -> None:
+    """Check Tailscale connectivity, alert on disconnect/recovery."""
+    global _infra_tailscale_down, _infra_tailscale_alert_ts
+    now = time.time()
+    try:
+        r = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            import json as _json
+            data = _json.loads(r.stdout)
+            is_up = data.get("BackendState") == "Running"
+        else:
+            is_up = False
+    except Exception:
+        is_up = False
+
+    if not is_up and not _infra_tailscale_down:
+        if now - _infra_tailscale_alert_ts >= INFRA_ALERT_COOLDOWN:
+            _infra_tailscale_down = True
+            _infra_tailscale_alert_ts = now
+            if admin_chat_id:
+                try:
+                    transport.send_text(
+                        admin_chat_id,
+                        "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\n"
+                        "Run: sudo tailscale up"
+                    )
+                    print("[watchdog] Tailscale DOWN alert sent")
+                except Exception as e:
+                    print(f"[watchdog] Tailscale alert error: {e}")
+    elif is_up and _infra_tailscale_down:
+        _infra_tailscale_down = False
+        if admin_chat_id:
+            try:
+                transport.send_text(
+                    admin_chat_id,
+                    "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
+                )
+                print("[watchdog] Tailscale recovery alert sent")
+            except Exception:
+                pass
+
+
 _last_resolved_ts: dict[str, float] = {}  # Per-worker resolved alert cooldown
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
@@ -5174,6 +5223,10 @@ def watchdog_loop():
                     _probe_io_all_hosts(set(remote_workers.keys()))
                 except Exception as ie:
                     print(f"[watchdog] IO check error: {ie}")
+                try:
+                    _probe_tailscale()
+                except Exception as te:
+                    print(f"[watchdog] Tailscale check error: {te}")
 
         except Exception as e:
             print(f"Watchdog error: {e}")
