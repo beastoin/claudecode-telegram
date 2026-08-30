@@ -223,6 +223,360 @@ ALERT_COOLDOWN = 180
 
 
 # ============================================================
+# GUEST SYSTEM: temporary external agent sessions
+# ============================================================
+
+_guests: dict = {}          # token_hash -> guest dict
+_guest_inboxes: dict = {}   # guest_name -> [msg dict]
+_guest_lock = threading.Lock()
+GUEST_TTL = 86400           # 24 hours
+GUEST_INBOX_CAP = 200
+
+
+def guest_create_token() -> tuple[str, str]:
+    """Create a guest token and its hash. Returns (token, token_hash)."""
+    token = f"gt_{secrets.token_urlsafe(32)}"
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash
+
+
+def guest_generate_name(existing_names: set | None = None) -> str:
+    """Generate a short random guest name (3-6 chars), unique vs existing."""
+    if existing_names is None:
+        existing_names = set()
+    for _ in range(100):
+        name = secrets.token_urlsafe(3).rstrip("=").lower()[:5]
+        if len(name) >= 3 and name not in existing_names:
+            return name
+    return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
+
+
+def guest_validate_name(name: str, team_workers: set, existing_guests: set) -> tuple[bool, str]:
+    """Validate a guest name. Returns (ok, error_message)."""
+    if not name or not name.strip():
+        return False, "name is required"
+    name = name.strip().lower()
+    if len(name) > 20:
+        return False, "name too long (max 20 chars)"
+    if name in team_workers:
+        return False, f"name '{name}' conflicts with a team worker"
+    if name in existing_guests:
+        return False, f"name '{name}' already taken by another guest"
+    return True, ""
+
+
+def guest_is_expired(expires_at_unix: float) -> bool:
+    """Check if a guest session has expired."""
+    return time.time() >= expires_at_unix
+
+
+def guest_inbox_filter(messages: list, after: str | None = None) -> list:
+    """Filter messages, returning only those after the given message ID."""
+    if not after:
+        return list(messages)
+    found = False
+    result = []
+    for m in messages:
+        if found:
+            result.append(m)
+        elif m.get("id") == after:
+            found = True
+    if not found:
+        return list(messages)
+    return result
+
+
+def guest_inbox_append(inbox: list, msg: dict) -> list:
+    """Append a message to inbox, capping at GUEST_INBOX_CAP."""
+    inbox.append(msg)
+    if len(inbox) > GUEST_INBOX_CAP:
+        inbox = inbox[-GUEST_INBOX_CAP:]
+    return inbox
+
+
+# ============================================================
+# GROUP CHANNELS: data + pure functions
+# ============================================================
+
+_channels: dict = {}          # channel_id -> channel dict
+_channel_lock = threading.Lock()
+CHANNEL_TTL = 86400           # 24 hours
+CHANNEL_MSG_CAP = 200
+
+
+def channel_create_id(label: str = "") -> str:
+    """Generate a stable channel ID: ch_<6-char random>."""
+    short = secrets.token_urlsafe(4).rstrip("=").lower()[:6]
+    return f"ch_{short}"
+
+
+def channel_new(channel_id: str, label: str, created_by: str,
+                members: list[str], ttl: int = CHANNEL_TTL) -> dict:
+    """Create a channel dict. Members are typed strings like 'worker:geni', 'guest:alice', 'manager'."""
+    now = time.time()
+    member_dict = {}
+    for m in members:
+        if m == "manager":
+            member_dict["manager"] = {"type": "manager"}
+        elif m.startswith("worker:"):
+            name = m.split(":", 1)[1]
+            member_dict[m] = {"type": "worker", "name": name}
+        elif m.startswith("guest:"):
+            name = m.split(":", 1)[1]
+            member_dict[m] = {"type": "guest", "name": name}
+    return {
+        "id": channel_id,
+        "label": label,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "expires_at_unix": now + ttl,
+        "seq": 0,
+        "created_by": created_by,
+        "members": member_dict,
+        "messages": [],
+    }
+
+
+def channel_add_members(channel: dict, members: list[str]) -> list[str]:
+    """Add members to channel. Returns list of actually added members."""
+    added = []
+    for m in members:
+        if m in channel["members"]:
+            continue
+        if m == "manager":
+            channel["members"]["manager"] = {"type": "manager"}
+        elif m.startswith("worker:"):
+            channel["members"][m] = {"type": "worker", "name": m.split(":", 1)[1]}
+        elif m.startswith("guest:"):
+            channel["members"][m] = {"type": "guest", "name": m.split(":", 1)[1]}
+        else:
+            continue
+        added.append(m)
+    return added
+
+
+def channel_remove_members(channel: dict, members: list[str]) -> list[str]:
+    """Remove members from channel. Returns list of actually removed members."""
+    removed = []
+    for m in members:
+        if m in channel["members"]:
+            del channel["members"][m]
+            removed.append(m)
+    return removed
+
+
+def channel_append_message(channel: dict, from_member: str, text: str) -> dict:
+    """Append a message to the channel. Returns the message dict."""
+    channel["seq"] += 1
+    msg = {
+        "id": f"cm_{channel['seq']:06d}",
+        "seq": channel["seq"],
+        "from": from_member,
+        "text": text,
+        "ts": int(time.time()),
+    }
+    channel["messages"].append(msg)
+    if len(channel["messages"]) > CHANNEL_MSG_CAP:
+        channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
+    return msg
+
+
+def channel_get_messages(channel: dict, after: str | None = None) -> tuple[list, bool]:
+    """Get channel messages, optionally after a given message ID. Returns (messages, truncated)."""
+    if not after:
+        return list(channel["messages"]), False
+    found_idx = -1
+    for i, m in enumerate(channel["messages"]):
+        if m["id"] == after:
+            found_idx = i
+            break
+    if found_idx == -1:
+        return list(channel["messages"]), True
+    return channel["messages"][found_idx + 1:], False
+
+
+def channel_is_expired(channel: dict) -> bool:
+    """Check if a channel has expired."""
+    return time.time() > channel["expires_at_unix"]
+
+
+def channel_get_member_names(channel: dict, member_type: str) -> list[str]:
+    """Get names of members of a specific type (worker, guest, manager)."""
+    return [info["name"] for info in channel["members"].values()
+            if info["type"] == member_type and "name" in info]
+
+
+# ============================================================
+# RELAY GUIDELINE LINK
+# ============================================================
+
+_relay_channels = {}
+_relay_lock = threading.Lock()
+
+RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
+
+
+def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple:
+    """Create a relay channel with guest and reply tokens. Returns (channel, guest_token, reply_token)."""
+    channel_id = channel_create_id(label)
+    guest_token = f"gt_{secrets.token_urlsafe(32)}"
+    reply_token = f"rt_{secrets.token_urlsafe(32)}"
+    now = time.time()
+    ch = {
+        "id": channel_id,
+        "label": label,
+        "worker": worker,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + ttl)),
+        "expires_at_unix": now + ttl,
+        "guest_token_hash": hashlib.sha256(guest_token.encode()).hexdigest(),
+        "reply_token_hash": hashlib.sha256(reply_token.encode()).hexdigest(),
+        "reply_token": reply_token,
+        "messages": [],
+    }
+    return ch, guest_token, reply_token
+
+
+def relay_guide_url(channel_id: str, guest_token: str) -> str:
+    """Generate the guideline link URL for a relay channel."""
+    return f"http://{RELAY_PUBLIC_HOST}:{PORT}/v1/{channel_id}?token={guest_token}"
+
+
+def relay_guide_text(ch: dict, guest_token: str) -> str:
+    """Generate markdown guide for a relay channel."""
+    base = f"http://{RELAY_PUBLIC_HOST}:{PORT}/v1/{ch['id']}"
+    w = ch["worker"]
+    return f"""# Chat Channel to {w}
+
+Direct chat channel to **{w}** (a Claude Code agent).
+
+## Setup
+
+```bash
+export RELAY_TOKEN="{guest_token}"
+export RELAY="{base}"
+```
+
+## Send a message
+
+```bash
+curl -fsS $RELAY/send -H "Authorization: Bearer $RELAY_TOKEN" -H "Content-Type: application/json" -d '{{"text":"your message here"}}'
+```
+
+## Poll for replies
+
+```bash
+curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
+```
+
+## How to use
+
+1. Send a message using the curl command above
+2. Poll `/messages` to see replies (add `?after=<message_id>` for new messages only)
+3. The channel expires at `{ch['expires_at']}`
+"""
+
+
+def relay_auth_guest(channel_id: str, token: str):
+    """Authenticate a guest token for a relay channel. Returns channel or None."""
+    with _relay_lock:
+        ch = _relay_channels.get(channel_id)
+    if not ch:
+        return None
+    if time.time() > ch.get("expires_at_unix", 0):
+        return None
+    if hashlib.sha256(token.encode()).hexdigest() != ch.get("guest_token_hash"):
+        return None
+    return ch
+
+
+def relay_auth_reply(channel_id: str, token: str):
+    """Authenticate a reply token for a relay channel. Returns channel or None."""
+    with _relay_lock:
+        ch = _relay_channels.get(channel_id)
+    if not ch:
+        return None
+    if time.time() > ch.get("expires_at_unix", 0):
+        return None
+    if hashlib.sha256(token.encode()).hexdigest() != ch.get("reply_token_hash"):
+        return None
+    return ch
+
+
+def relay_guest_send(channel_id: str, text: str) -> tuple:
+    """Guest sends a message to the worker. Returns (envelope_text, message_dict)."""
+    with _relay_lock:
+        ch = _relay_channels.get(channel_id)
+    if not ch:
+        return None, None
+
+    msg_id = f"msg_{secrets.token_urlsafe(4)}"
+    base = f"http://{RELAY_PUBLIC_HOST}:{PORT}/v1/{channel_id}"
+    reply_token = ch["reply_token"]
+
+    envelope = (
+        f"[RELAY from {ch['label']}]\n"
+        f"channel: {channel_id}\n"
+        f"message_id: {msg_id}\n"
+        f"reply: curl -fsS {base}/reply "
+        f"-H 'Authorization: Bearer {reply_token}' "
+        f"-H 'Content-Type: application/json' "
+        f"-d '{{\"text\":\"YOUR_REPLY\"}}'\n"
+        f"\n"
+        f"{text}\n"
+        f"[/RELAY]"
+    )
+
+    msg = {
+        "message_id": msg_id,
+        "direction": "guest_to_worker",
+        "from": ch["label"],
+        "to": ch["worker"],
+        "text": text,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    with _relay_lock:
+        ch["messages"].append(msg)
+
+    return envelope, msg
+
+
+def relay_worker_reply(channel_id: str, text: str) -> dict | None:
+    """Worker replies to the guest. Returns message dict."""
+    with _relay_lock:
+        ch = _relay_channels.get(channel_id)
+    if not ch:
+        return None
+
+    msg_id = f"msg_{secrets.token_urlsafe(4)}"
+    msg = {
+        "message_id": msg_id,
+        "direction": "worker_to_guest",
+        "from": ch["worker"],
+        "to": ch["label"],
+        "text": text,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    with _relay_lock:
+        ch["messages"].append(msg)
+    return msg
+
+
+def relay_get_messages(channel_id: str, after: str | None = None) -> list:
+    """Get messages for a relay channel, optionally after a message ID."""
+    with _relay_lock:
+        ch = _relay_channels.get(channel_id)
+    if not ch:
+        return []
+    msgs = ch["messages"]
+    if not after:
+        return list(msgs)
+    for i, m in enumerate(msgs):
+        if m["message_id"] == after:
+            return list(msgs[i + 1:])
+    return list(msgs)
+
+
+# ============================================================
 # CORE: Backend Protocol + implementations
 # ============================================================
 
@@ -258,6 +612,34 @@ class Backend(Protocol):
 # SSH Teleport helpers (remote worker support)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_remote_tool_cache: dict = {}  # host:tool -> absolute path
+
+
+def _resolve_remote_tool(tool: str, host: str) -> str:
+    """Discover absolute path of a tool on a remote host. Cached per host."""
+    key = f"{host}:{tool}"
+    cached = _remote_tool_cache.get(key)
+    if cached:
+        return cached
+    probe = (
+        f'command -v {shlex.quote(tool)} 2>/dev/null || '
+        f'for p in /opt/homebrew/bin/{tool} /usr/local/bin/{tool} /usr/bin/{tool} /bin/{tool}; '
+        f'do [ -x "$p" ] && echo "$p" && break; done'
+    )
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=3", host, probe],
+            capture_output=True, text=True, timeout=5,
+        )
+        found = r.stdout.strip()
+        if found:
+            _remote_tool_cache[key] = found
+            print(f"[bridge] discovered {tool} on {host}: {found}")
+            return found
+    except Exception:
+        pass
+    return tool  # fallback to bare name
+
 
 def _remote_run(cmd: list, host: str = None, **kwargs) -> subprocess.CompletedProcess:
     """Run a command, optionally on a remote host via SSH.
@@ -265,11 +647,14 @@ def _remote_run(cmd: list, host: str = None, **kwargs) -> subprocess.CompletedPr
     When host is None, runs locally. When set, builds a single shell command
     string with proper quoting so the remote shell doesn't eat special chars
     like # (which starts a comment in bash).
+    Resolves tool paths automatically on remote hosts (e.g. tmux -> /opt/homebrew/bin/tmux).
     SSH ControlMaster keeps overhead to ~10ms per call.
     """
     if host:
-        # SSH concatenates args and runs them through the remote shell,
-        # so we must shell-quote each arg to preserve special characters.
+        cmd = list(cmd)
+        tool = str(cmd[0])
+        if tool in ("tmux", "claude"):
+            cmd[0] = _resolve_remote_tool(tool, host)
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
         timeout_val = kwargs.get("timeout", 10)
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
@@ -289,6 +674,28 @@ def _remote_copy(src: str, dst: str, host: str = None, direction: str = "push"):
         subprocess.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True)
     else:  # pull
         subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True)
+
+
+def _extract_msg_text(msg: dict) -> str:
+    """Extract plain text from a Telegram message, including rich_message blocks."""
+    text = msg.get("text") or msg.get("caption") or ""
+    if not text:
+        rich = msg.get("rich_message")
+        if rich and isinstance(rich.get("blocks"), list):
+            parts = []
+            for b in rich["blocks"]:
+                bt = b.get("text")
+                if not bt:
+                    continue
+                if isinstance(bt, str):
+                    parts.append(bt)
+                elif isinstance(bt, list):
+                    parts.append("".join(
+                        chunk if isinstance(chunk, str) else chunk.get("text", "")
+                        for chunk in bt
+                    ))
+            text = "\n".join(parts)
+    return text
 
 
 def parse_worker_target(target: str) -> tuple:
@@ -1235,11 +1642,9 @@ _adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
 def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
                    bridge_url: str, sessions_dir: Path) -> bool:
     """Spawn an adapter process with stderr logged to per-worker file."""
-    # Teleported workers can't run adapters locally
     host = get_worker_host(worker_name)
     if host:
-        print(f"Cannot spawn adapter for teleported worker '{worker_name}' on {host} (not supported yet)")
-        return False
+        return _spawn_adapter_remote(adapter_path, worker_name, text, bridge_url, sessions_dir, host)
     if not adapter_path.exists():
         print(f"Adapter not found: {adapter_path}")
         return False
@@ -1257,6 +1662,44 @@ def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
     )
     _adapter_pids[worker_name] = (proc, stderr_fh)
+    return True
+
+
+def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
+                          bridge_url: str, sessions_dir: Path, host: str) -> bool:
+    """Spawn an adapter on a remote host via SSH for teleported workers."""
+    remote_home = _get_remote_home(host)
+    if not remote_home:
+        print(f"Cannot determine remote $HOME for {host}, adapter spawn failed")
+        return False
+
+    local_home = os.path.expanduser("~")
+    remote_adapter = str(adapter_path)
+    if remote_adapter.startswith(local_home):
+        remote_adapter = remote_home + remote_adapter[len(local_home):]
+
+    remote_sessions = _remap_sessions_dir(host)
+    remote_bridge_url = BRIDGE_PUBLIC_URL or bridge_url
+
+    remote_cmd = (
+        f"python3 {shlex.quote(remote_adapter)} "
+        f"{shlex.quote(worker_name)} {shlex.quote(text)} "
+        f"{shlex.quote(remote_bridge_url)} {shlex.quote(remote_sessions)}"
+    )
+
+    log_file = sessions_dir / worker_name / "adapter.log"
+    try:
+        stderr_fh = open(log_file, "a")
+    except OSError:
+        stderr_fh = None
+
+    proc = subprocess.Popen(
+        ["ssh", "-o", "ConnectTimeout=5", host, remote_cmd],
+        stdout=subprocess.DEVNULL,
+        stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
+    )
+    _adapter_pids[worker_name] = (proc, stderr_fh)
+    print(f"Spawned remote adapter for '{worker_name}' on {host}")
     return True
 
 
@@ -1278,6 +1721,138 @@ def kill_adapter(name: str):
             stderr_fh.close()
         except OSError:
             pass
+
+
+def _find_codex_transcript(worker_name: str, host: str = None) -> str | None:
+    """Find the codex native JSONL transcript file for a worker.
+
+    Uses codex_session_id to locate the file under ~/.codex/sessions/.
+    Returns the file path or None if not found.
+    """
+    sid_file = SESSIONS_DIR / worker_name / "codex_session_id"
+    if not sid_file.exists():
+        return None
+    session_id = sid_file.read_text().strip()
+    if not session_id:
+        return None
+
+    home = os.path.expanduser("~")
+    if host:
+        home = _get_remote_home(host) or home
+    codex_dir = os.path.join(home, ".codex", "sessions")
+
+    if host:
+        try:
+            r = _remote_run(
+                ["find", codex_dir, "-name", f"*{session_id}*", "-name", "*.jsonl"],
+                host=host, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip().split("\n")[0]
+        except Exception:
+            pass
+        return None
+
+    import glob
+    matches = glob.glob(os.path.join(codex_dir, "**", f"*{session_id}*"), recursive=True)
+    jsonl_matches = [m for m in matches if m.endswith(".jsonl")]
+    if jsonl_matches:
+        return max(jsonl_matches, key=os.path.getmtime)
+    return None
+
+
+def _parse_codex_transcript(path: str, host: str = None) -> list[dict]:
+    """Parse a codex native JSONL file into a list of messages.
+
+    Reads the same format beast hours ParseCodexFile() handles:
+    event types: session_meta, turn_context, response_item (message/function_call/function_call_output).
+    """
+    try:
+        if host:
+            r = _remote_run(["cat", path], host=host, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return []
+            content = r.stdout
+        else:
+            content = Path(path).read_text()
+    except Exception:
+        return []
+
+    messages = []
+    for line in content.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        ev_type = ev.get("type", "")
+        payload = ev.get("payload", {})
+        ts = ev.get("timestamp", "")
+
+        if ev_type == "response_item":
+            item_type = payload.get("type", "")
+            if item_type == "message":
+                role = payload.get("role", "assistant")
+                text_parts = []
+                for c in payload.get("content", []):
+                    if c.get("type") in ("output_text", "input_text") and c.get("text"):
+                        text_parts.append(c["text"])
+                text = "\n".join(text_parts).strip()
+                if text and role != "developer":
+                    messages.append({"role": role, "text": text, "timestamp": ts})
+            elif item_type == "function_call":
+                name = payload.get("name", "")
+                messages.append({"role": "tool_use", "text": f"[{name}]", "timestamp": ts})
+            elif item_type == "function_call_output":
+                output = payload.get("output", "")
+                if output:
+                    messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
+    return messages
+
+
+def _read_codex_transcript(worker_name: str) -> list[dict]:
+    """Read the codex native transcript for a worker."""
+    host = get_worker_host(worker_name)
+    path = _find_codex_transcript(worker_name, host=host)
+    if not path:
+        return []
+    return _parse_codex_transcript(path, host=host)
+
+
+def _read_noninteractive_activity(worker_name: str) -> str:
+    """Return human-readable activity string for a non-interactive worker."""
+    entry = _adapter_pids.get(worker_name)
+    if entry:
+        proc, _ = entry
+        if proc.poll() is None:
+            return "adapter running"
+
+    host = get_worker_host(worker_name)
+    path = _find_codex_transcript(worker_name, host=host)
+    if path:
+        try:
+            if host:
+                r = _remote_run(["stat", "-c", "%Y", path], host=host,
+                                capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    mtime = float(r.stdout.strip())
+                    age = int(time.time() - mtime)
+                else:
+                    age = -1
+            else:
+                mtime = os.path.getmtime(path)
+                age = int(time.time() - mtime)
+            if age >= 0:
+                if age < 60:
+                    return f"idle (last response {age}s ago)"
+                elif age < 3600:
+                    return f"idle (last response {age // 60}m ago)"
+                else:
+                    return f"idle (last response {age // 3600}h ago)"
+        except Exception:
+            pass
+    return "idle"
 
 
 def get_backend(name: str) -> Backend:
@@ -1624,6 +2199,7 @@ BOT_COMMANDS = [
     {"command": "voice", "description": "Toggle voice replies: /voice on|off"},
     {"command": "settings", "description": "Show settings"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
+    {"command": "relay", "description": "Open public channel: /relay <worker>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
     {"command": "memory", "description": "Search team chat memory: /memory <query>"},
@@ -1740,16 +2316,19 @@ def _save_registry(data: dict):
 
 
 def _registry_add(name: str, backend: str, chat_id: int = None, host: str = None):
-    """Add a worker to the persistent registry."""
+    """Add a worker to the persistent registry (merge with existing entry)."""
     with _watchdog_lock:
         data = _load_registry()
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
-        entry = {
+        existing = data.get("workers", {}).get(name, {})
+        preserved_keys = {"host", "home_host", "home_cwd"}
+        entry = {k: v for k, v in existing.items() if k in preserved_keys}
+        entry.update({
             "backend": backend,
             "chat_id": chat_id,
             "hire_time": int(time.time()),
-        }
+        })
         if host:
             entry["host"] = host
         data["workers"][name] = entry
@@ -2268,9 +2847,11 @@ class TelegramTransport(MessageTransport):
                 remote_inbox = str(inbox)
                 _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True)
                 _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True)
-                subprocess.run(
+                r = subprocess.run(
                     ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
                     capture_output=True, timeout=15)
+                if r.returncode != 0:
+                    print(f"rsync inbound failed (exit {r.returncode}): {host}:{remote_inbox}/ -> {r.stderr.decode(errors='replace').strip()}")
             return str(local_path)
         except Exception as e:
             print(f"Download error: {e}")
@@ -3945,6 +4526,18 @@ def get_any_session_id(name):
     return "", ""
 
 
+_pending_locks = {}
+_pending_locks_guard = threading.Lock()
+
+
+def _get_pending_lock(name):
+    """Get or create a per-worker lock for atomic pending check+set."""
+    with _pending_locks_guard:
+        if name not in _pending_locks:
+            _pending_locks[name] = threading.Lock()
+        return _pending_locks[name]
+
+
 def set_pending(name, chat_id):
     """Mark session as having a pending request with secure permissions (0o600)."""
     d = ensure_session_dir(name)
@@ -4011,8 +4604,10 @@ def clear_pending(name):
     """Clear pending status for session."""
     d = get_session_dir(name)
     pending = d / "pending"
-    if pending.exists():
+    try:
         pending.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def is_pending(name):
@@ -4032,6 +4627,15 @@ def is_pending(name):
         return True
     except:
         return False
+
+
+def try_set_pending(name, chat_id):
+    """Atomic check+set: returns True if pending was set, False if already pending."""
+    with _get_pending_lock(name):
+        if is_pending(name):
+            return False
+        set_pending(name, chat_id)
+        return True
 
 
 def _pending_timestamp(name: str) -> Optional[int]:
@@ -5763,7 +6367,7 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
     """Wait until restarted worker is actually back at the prompt."""
     backend = get_backend(backend_name)
     if not backend.is_interactive:
-        return True
+        return tmux_exists(tmux_name, host=host)
 
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -6093,29 +6697,61 @@ class WorkerManager:
         time.sleep(0.2)
 
     def scan_tmux_sessions(self):
-        """Scan tmux for claude-* sessions (registered)."""
+        """Scan tmux for claude-* sessions (local + remote machines)."""
         self._sync_paths()
         registered = {}
 
+        # Scan local tmux
         try:
             result = subprocess.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
                 capture_output=True, text=True
             )
-            if result.returncode != 0:
-                return registered
-
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                session_name = line.strip()
-
-                if session_name.startswith(self.tmux_prefix):
-                    name = session_name[len(self.tmux_prefix):]
-                    backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
-                    registered[name] = {"tmux": session_name, "backend": backend}
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    session_name = line.strip()
+                    if session_name.startswith(self.tmux_prefix):
+                        name = session_name[len(self.tmux_prefix):]
+                        backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
+                        registered[name] = {"tmux": session_name, "backend": backend}
         except Exception as e:
-            print(f"Error scanning tmux: {e}")
+            print(f"Error scanning local tmux: {e}")
+
+        # Scan remote machines for tmux sessions
+        try:
+            machines = get_machine_catalog()
+        except Exception:
+            machines = {}
+        for machine in machines.values():
+            if machine.is_local or not machine.ssh_target:
+                continue
+            if machine.role not in ("worker-host", ""):
+                continue
+            try:
+                r = _remote_run(
+                    ["tmux", "list-sessions", "-F", "#{session_name}"],
+                    host=machine.ssh_target,
+                    capture_output=True, text=True, timeout=10
+                )
+                if r.returncode != 0:
+                    continue
+                for line in r.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    session_name = line.strip()
+                    if session_name.startswith(self.tmux_prefix):
+                        name = session_name[len(self.tmux_prefix):]
+                        if name not in registered:
+                            registered[name] = {
+                                "tmux": session_name,
+                                "backend": DEFAULT_BACKEND,
+                                "host": machine.ssh_target,
+                            }
+                            _registry_add(name, DEFAULT_BACKEND, host=machine.ssh_target)
+            except Exception as e:
+                print(f"Error scanning tmux on {machine.ssh_target}: {e}")
 
         return registered
 
@@ -6279,13 +6915,14 @@ class WorkerManager:
 
             if not backend.is_interactive:
                 if peer_host:
-                    # Non-interactive remote workers can't use local pipes
+                    # Non-interactive remote workers use SSH-based adapter spawning
+                    # Worker-to-worker pipes don't work remotely, but bridge send does
                     workers.append({
                         "name": name,
                         "machine": peer_host,
-                        "protocol": "none",
+                        "protocol": "adapter",
                         "address": f"{peer_host}:{info.get('tmux', '')}",
-                        "note": f"Non-interactive ({backend_name}) on {peer_host}. Remote pipe not supported yet.",
+                        "note": f"Non-interactive ({backend_name}) on {peer_host}. Use @{name} from Telegram or bridge API.",
                     })
                 else:
                     pipe_path = ensure_worker_pipe(name)
@@ -6426,6 +7063,10 @@ class WorkerManager:
         time.sleep(0.3)
 
         ensure_session_dir(name)
+        if chat_id:
+            chat_id_file = get_chat_id_file(name)
+            chat_id_file.write_text(str(chat_id))
+            chat_id_file.chmod(0o600)
         if not backend_obj.is_interactive:
             ensure_worker_pipe(name)
 
@@ -6550,7 +7191,8 @@ class WorkerManager:
         resume_cwd = ""
         session_dir = self.sessions_dir / name
         if mode == "resume":
-            resume_id = get_claude_session_id(name, authoritative=True)
+            resume_id = (get_claude_session_id(name, authoritative=False) or
+                         get_claude_session_id(name, authoritative=True))
             resume_cwd = get_claude_session_cwd(name)
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -6711,7 +7353,8 @@ class WorkerManager:
         resume_id = ""
         resume_cwd = ""
         if mode == "resume":
-            resume_id = get_claude_session_id(name, authoritative=True)
+            resume_id = (get_claude_session_id(name, authoritative=False) or
+                         get_claude_session_id(name, authoritative=True))
             resume_cwd = get_claude_session_cwd(name)
         else:
             session_dir = self.sessions_dir / name
@@ -7016,6 +7659,8 @@ def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
             capture_output=True, timeout=120)
         if r.returncode == 0 and os.path.getsize(local_path) > 0:
             return local_path
+        if r.returncode != 0:
+            print(f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.decode(errors='replace').strip()}")
     except Exception as e:
         print(f"Remote file fetch failed: {host}:{remote_path} -> {e}")
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -7039,6 +7684,7 @@ def _localize_media(name: str, media_list: list) -> list:
             result.append((local, caption))
         else:
             print(f"Cannot fetch remote file {host}:{file_path} for {name}")
+            result.append((None, f"[Fetch failed: {file_path}]"))
     return result
 
 
@@ -7196,6 +7842,9 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     # Send images
     for img_path, img_caption in images:
+        if img_path is None:
+            transport.send_text(chat_id, f"{name}: {img_caption}")
+            continue
         full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
         # Use sendAnimation for GIFs and MP4s to preserve animation
         if Path(img_path).suffix.lower() in (".gif", ".mp4"):
@@ -7209,6 +7858,9 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     # Send files — route to specialized API method by extension
     for file_path, file_caption in files:
+        if file_path is None:
+            transport.send_text(chat_id, f"{name}: {file_caption}")
+            continue
         full_caption = f"{name}: {file_caption}" if file_caption else f"{name}:"
         ext = Path(file_path).suffix.lower()
         if ext in VIDEO_EXTENSIONS:
@@ -7715,9 +8367,10 @@ class CommandRouter:
 
         # Extract reply context (quote-reply = context only, never routing)
         reply_context = ""
+        reply_context_ts = None
         reply_to = msg.get("reply_to_message")
         if reply_to:
-            reply_context = self.get_reply_context(reply_to)
+            reply_context, reply_context_ts = self.get_reply_context(reply_to)
 
         # Parse @mentions anywhere in text
         targets, clean_text = self.parse_at_mentions(text)
@@ -7725,7 +8378,7 @@ class CommandRouter:
         if targets:
             message = clean_text or text
             if reply_context:
-                message = self.format_reply_context(message, reply_context)
+                message = self.format_reply_context(message, reply_context, reply_context_ts)
             # If reply-to message contains media, download and forward it to targets
             if reply_to:
                 reply_media = self._extract_reply_media(reply_to, targets[0])
@@ -7734,13 +8387,13 @@ class CommandRouter:
                     if message:
                         media_text = f"{message}\n\n{reply_media}"
                     for name in targets:
-                        self.route_message(name, media_text, chat_id, msg_id, one_off=True)
+                        self._route_mention(name, media_text, chat_id, msg_id)
                 else:
                     for name in targets:
-                        self.route_message(name, message, chat_id, msg_id, one_off=True)
+                        self._route_mention(name, message, chat_id, msg_id)
             else:
                 for name in targets:
-                    self.route_message(name, message, chat_id, msg_id, one_off=True)
+                    self._route_mention(name, message, chat_id, msg_id)
 
             # Auto-focus: if same single worker mentioned 2+ consecutive times, switch focus
             if len(targets) == 1:
@@ -7765,18 +8418,22 @@ class CommandRouter:
         _last_mention["count"] = 0
         routed_text = text
         if reply_context:
-            routed_text = self.format_reply_context(text, reply_context)
+            routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
 
     def parse_at_mentions(self, text):
-        """Extract all @mentions from anywhere in text. Returns (targets, cleaned_text)."""
+        """Extract all @mentions from anywhere in text. Returns (targets, cleaned_text).
+        Matches both registered workers and active guests."""
         if not text:
             return [], ""
         registered = self.workers.get_registered_sessions()
+        with _guest_lock:
+            guest_names = {g["name"] for g in _guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        known = set(registered.keys()) | guest_names
         found = []
         for match in re.finditer(r'@([a-zA-Z0-9-]+)', text):
             name = match.group(1).lower()
-            if name in registered and name not in found:
+            if name in known and name not in found:
                 found.append(name)
         if not found:
             return [], text
@@ -7784,6 +8441,23 @@ class CommandRouter:
         cleaned = re.sub(r'@([a-zA-Z0-9-]+)', lambda m: '' if m.group(1).lower() in found else m.group(0), text)
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         return found, cleaned
+
+    def _route_mention(self, name, message, chat_id, msg_id):
+        """Route a @mention to either a guest inbox or a worker."""
+        with _guest_lock:
+            guest_names = {g["name"] for g in _guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        if name in guest_names:
+            msg_obj = {
+                "id": f"gm_{secrets.token_hex(4)}",
+                "from": "manager",
+                "text": message,
+                "ts": int(time.time()),
+            }
+            with _guest_lock:
+                inbox = _guest_inboxes.get(name, [])
+                _guest_inboxes[name] = guest_inbox_append(inbox, msg_obj)
+        else:
+            self.route_message(name, message, chat_id, msg_id, one_off=True)
 
     def parse_worker_prefix(self, text):
         """Parse 'name: message' prefix from bot-sent messages."""
@@ -7800,19 +8474,24 @@ class CommandRouter:
         return name, message
 
     def get_reply_context(self, reply_msg):
-        """Extract text from a replied-to message (context only, no routing)."""
+        """Extract text and timestamp from a replied-to message."""
         if not reply_msg:
-            return ""
-        return reply_msg.get("text") or reply_msg.get("caption") or ""
+            return "", None
+        text = _extract_msg_text(reply_msg)
+        ts = reply_msg.get("date")
+        return text, ts
 
-    def format_reply_context(self, reply_text, context_text):
+    def format_reply_context(self, reply_text, context_text, context_ts=None):
         reply_text = (reply_text or "").strip()
         context_text = (context_text or "").strip()
         if context_text:
+            ts_str = ""
+            if context_ts:
+                ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
             return (
                 "Manager reply:\n"
                 f"{reply_text}\n\n"
-                "Context (your previous message):\n"
+                f"Context (your previous message{ts_str}):\n"
                 f"{context_text}"
             )
         return f"Manager reply:\n{reply_text}"
@@ -7844,6 +8523,8 @@ class CommandRouter:
             return self.cmd_voice(arg, chat_id)
         elif cmd == "/pilot":
             return self.cmd_pilot(arg, chat_id)
+        elif cmd == "/relay":
+            return self.cmd_relay(arg, chat_id)
         elif cmd == "/rewind":
             return self.cmd_rewind(arg, chat_id)
         elif cmd == "/pr":
@@ -7856,6 +8537,8 @@ class CommandRouter:
             return self.cmd_teleport(arg, chat_id, check_only=True)
         elif cmd == "/teleback":
             return self.cmd_teleback(arg, chat_id)
+        elif cmd in ("/ch", "/channel"):
+            return self.cmd_channel(arg, chat_id)
         elif cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
@@ -7966,6 +8649,228 @@ class CommandRouter:
         if errors:
             msg += f"\n⚠️ Failed: {'; '.join(errors)}"
         self.reply(chat_id, msg)
+        return True
+
+    def cmd_relay(self, arg, chat_id):
+        """Relay: connect an external agent to a worker via guideline link.
+
+        /relay lee — open relay to lee, returns a single URL to paste into any agent
+        /relay list — list active relay channels
+        /relay stop <name> — close a relay channel
+        """
+        if not arg:
+            with _relay_lock:
+                active = [ch for ch in _relay_channels.values()
+                          if time.time() <= ch["expires_at_unix"]]
+            lines = ["\U0001f4e1 Relay — connect any agent to the team\n"]
+            lines.append("/relay <worker> — create relay, get a guideline link")
+            lines.append("/relay list — active relays")
+            lines.append("/relay stop <name> — close relay")
+            if active:
+                lines.append(f"\nActive: {', '.join(ch['label'] for ch in active)}")
+            self.reply(chat_id, "\n".join(lines))
+            return True
+
+        parts = arg.strip().split()
+        sub = parts[0].lower()
+
+        if sub == "list":
+            with _relay_lock:
+                active = [(cid, ch) for cid, ch in _relay_channels.items()
+                          if time.time() <= ch["expires_at_unix"]]
+            if active:
+                lines = []
+                for cid, ch in active:
+                    lines.append(f"• {ch['label']} → {ch['worker']} (expires {ch['expires_at']})")
+                self.reply(chat_id, "\U0001f4e1 Active relays:\n" + "\n".join(lines))
+            else:
+                self.reply(chat_id, "No active relays.")
+            return True
+
+        if sub == "stop":
+            if len(parts) < 2:
+                self.reply(chat_id, "Usage: /relay stop <label>")
+                return True
+            target_label = parts[1].lower()
+            removed = False
+            with _relay_lock:
+                to_remove = None
+                for cid, ch in _relay_channels.items():
+                    if ch["label"] == target_label or ch["worker"] == target_label:
+                        to_remove = cid
+                        break
+                if to_remove:
+                    del _relay_channels[to_remove]
+                    removed = True
+            if removed:
+                self.reply(chat_id, f"\U0001f4e1 Relay \"{target_label}\" closed.")
+            else:
+                self.reply(chat_id, f"Relay \"{target_label}\" not found.")
+            return True
+
+        # /relay <worker> — main flow
+        worker = sub
+        registered = get_registered_sessions()
+        if worker not in registered:
+            self.reply(chat_id, f"Worker \"{worker}\" not found.")
+            return True
+
+        label = f"relay-{worker}"
+        ch, guest_token, reply_token = relay_channel_create(worker, label)
+        with _relay_lock:
+            _relay_channels[ch["id"]] = ch
+
+        url = relay_guide_url(ch["id"], guest_token)
+        lines = [f"\U0001f4e1 Relay to {worker} (24h)"]
+        lines.append(f"\nSend this link to your agent:\n{url}")
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def cmd_channel(self, arg, chat_id):
+        """Handle /ch and /channel commands.
+
+        /ch create <label> <member1> <member2> ...
+        /ch <id> <message>
+        /ch <id> add <member1> ...
+        /ch <id> remove <member1> ...
+        /ch <id> members
+        /ch list
+        /ch <id> close
+        """
+        if not arg:
+            self.reply(chat_id,
+                "Usage:\n"
+                "/ch create <label> <members...>\n"
+                "/ch <id> <message>\n"
+                "/ch <id> add <member...>\n"
+                "/ch <id> remove <member...>\n"
+                "/ch <id> members\n"
+                "/ch <id> close\n"
+                "/ch list",
+                outcome="Needs decision")
+            return True
+
+        parts = arg.strip().split()
+        subcmd = parts[0].lower()
+
+        if subcmd == "create":
+            if len(parts) < 2:
+                self.reply(chat_id, "Usage: /ch create <label> [member1 member2 ...]", outcome="Needs decision")
+                return True
+            label = parts[1]
+            members = parts[2:] if len(parts) > 2 else []
+            members.append("manager")
+            channel_id = channel_create_id(label)
+            ch = channel_new(channel_id, label, "manager", members)
+            with _channel_lock:
+                _channels[channel_id] = ch
+            member_str = ", ".join(ch["members"].keys())
+            self.reply(chat_id,
+                f"\U0001f4e2 Channel {channel_id} ({label})\nMembers: {member_str}")
+            return True
+
+        if subcmd == "list":
+            with _channel_lock:
+                active = [(cid, ch) for cid, ch in _channels.items()
+                          if not channel_is_expired(ch)]
+            if not active:
+                self.reply(chat_id, "No active channels.")
+            else:
+                lines = []
+                for cid, ch in active:
+                    members = ", ".join(ch["members"].keys())
+                    lines.append(f"{cid} ({ch['label']}) — {members}")
+                self.reply(chat_id, "\n".join(lines))
+            return True
+
+        # Remaining commands: /ch <channel_id> <action>
+        channel_id = subcmd
+        with _channel_lock:
+            ch = _channels.get(channel_id)
+        if not ch or channel_is_expired(ch):
+            self.reply(chat_id, f"Channel {channel_id} not found.", outcome="Needs decision")
+            return True
+
+        if len(parts) < 2:
+            # Just show channel info
+            members = ", ".join(ch["members"].keys())
+            self.reply(chat_id, f"{channel_id} ({ch['label']})\nMembers: {members}\nMessages: {len(ch['messages'])}")
+            return True
+
+        action = parts[1].lower()
+
+        if action == "close":
+            with _channel_lock:
+                _channels.pop(channel_id, None)
+            self.reply(chat_id, f"\U0001f4e2 Channel {channel_id} closed.")
+            return True
+
+        if action == "members":
+            members = ", ".join(ch["members"].keys())
+            self.reply(chat_id, f"{channel_id} members: {members}")
+            return True
+
+        if action == "add":
+            to_add = parts[2:]
+            if not to_add:
+                self.reply(chat_id, "Usage: /ch <id> add <member...>", outcome="Needs decision")
+                return True
+            with _channel_lock:
+                added = channel_add_members(ch, to_add)
+            if added:
+                self.reply(chat_id, f"{channel_id}: added {', '.join(added)}")
+            else:
+                self.reply(chat_id, f"No new members to add.")
+            return True
+
+        if action == "remove":
+            to_remove = parts[2:]
+            if not to_remove:
+                self.reply(chat_id, "Usage: /ch <id> remove <member...>", outcome="Needs decision")
+                return True
+            with _channel_lock:
+                removed = channel_remove_members(ch, to_remove)
+            if removed:
+                self.reply(chat_id, f"{channel_id}: removed {', '.join(removed)}")
+            else:
+                self.reply(chat_id, f"No members to remove.")
+            return True
+
+        # Default: send message to channel
+        message_text = " ".join(parts[1:])
+        with _channel_lock:
+            msg = channel_append_message(ch, "manager", message_text)
+            members_snapshot = dict(ch["members"])
+
+        # Fan-out to non-manager members
+        tagged = f"[{channel_id} from manager] {message_text}"
+        for member_key, info in members_snapshot.items():
+            if member_key == "manager":
+                continue
+            if info["type"] == "worker":
+                worker_name = info["name"]
+                registered = get_registered_sessions()
+                if worker_name in registered:
+                    worker_info = registered[worker_name]
+                    backend_name = get_worker_backend(worker_name, worker_info)
+                    backend = get_backend(backend_name)
+                    tmux_name = f"{TMUX_PREFIX}{worker_name}"
+                    try:
+                        backend.send(worker_name, tmux_name, tagged,
+                                     f"http://localhost:{PORT}", SESSIONS_DIR)
+                    except Exception as e:
+                        print(f"Channel fan-out to {worker_name} failed: {e}")
+            elif info["type"] == "guest":
+                guest_name = info["name"]
+                with _guest_lock:
+                    inbox = _guest_inboxes.get(guest_name, [])
+                    _guest_inboxes[guest_name] = guest_inbox_append(inbox, {
+                        "id": msg["id"], "from": "manager",
+                        "channel": channel_id, "text": message_text,
+                        "ts": msg["ts"],
+                    })
+
+        self.reply(chat_id, f"[{channel_id}] Sent.")
         return True
 
     def cmd_rewind(self, name, chat_id):
@@ -8269,7 +9174,7 @@ class CommandRouter:
                     else:
                         activity = "worker app not running"
                 else:
-                    activity = "handling async requests"
+                    activity = _read_noninteractive_activity(name)
 
             worker_live[name] = {
                 "backend": backend_name,
@@ -8354,12 +9259,15 @@ class CommandRouter:
             else:
                 resume_line = "Resume: not available"
 
-        # Read live activity from tmux pane
+        # Read live activity from tmux pane (or adapter status for non-interactive)
         activity = None
         context_pct = None
         raw_lines = None
         if is_tmux_alive and ready:
-            activity, context_pct, raw_lines = _read_tmux_activity(tmux_name, host=host)
+            if backend.is_interactive:
+                activity, context_pct, raw_lines = _read_tmux_activity(tmux_name, host=host)
+            else:
+                activity = _read_noninteractive_activity(name)
 
         # Extract question details if at interactive prompt
         question_details = None
@@ -8506,7 +9414,8 @@ class CommandRouter:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
-            resume_id = get_claude_session_id(name, authoritative=True) if mode == "resume" else ""
+            resume_id = (get_claude_session_id(name, authoritative=False) or
+                         get_claude_session_id(name, authoritative=True)) if mode == "resume" else ""
             target_cwd = get_claude_session_cwd(name)
             print(f"[cmd_restart] {name}: remote restart mode={mode}, resume_id={resume_id}, cwd={target_cwd}")
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
@@ -8598,7 +9507,11 @@ class CommandRouter:
 
         print(f"[_restart_remote] {name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
         if mode == "resume":
-            resume_id = get_claude_session_id(name, authoritative=True)
+            # Respect cached session ID first (may have been set explicitly).
+            # Only fall back to authoritative scan if cache is empty.
+            resume_id = get_claude_session_id(name, authoritative=False)
+            if not resume_id:
+                resume_id = get_claude_session_id(name, authoritative=True)
             print(f"[_restart_remote] {name}: resume_id={resume_id}")
         else:
             # Clear session IDs for relaunch
@@ -8622,8 +9535,13 @@ class CommandRouter:
             print(f"[_restart_remote] {name}: tmux {tmux_name} not found on {host}")
 
         # Re-read session_id (hook may have updated during /exit)
+        # Prefer cached value — only scan if cache was cleared by the stop hook
         if mode == "resume":
-            resume_id = get_claude_session_id(name, authoritative=True) or resume_id
+            cached = get_claude_session_id(name, authoritative=False)
+            if cached:
+                resume_id = cached
+            else:
+                resume_id = get_claude_session_id(name, authoritative=True) or resume_id
             print(f"[_restart_remote] {name}: post-stop resume_id={resume_id}")
 
         # Validate session is resumable on target before attempting --resume
@@ -8792,6 +9710,13 @@ class CommandRouter:
             target_host = target_spec
             target_cwd = ""
 
+        # Resolve machine catalog name to ssh_target
+        machines = get_machine_catalog()
+        if target_host in machines:
+            machine = machines[target_host]
+            if machine.ssh_target:
+                target_host = machine.ssh_target
+
         # 1. Worker exists?
         registry = _load_registry()
         worker_entry = registry.get("workers", {}).get(worker_name)
@@ -8823,17 +9748,16 @@ class CommandRouter:
             self.reply(chat_id, f"Cannot reach {target_host} via SSH.")
             return True
 
-        # 5. Claude Code on target?
-        r = _remote_run(["which", "claude"], host=target_host,
-                        capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
+        # 5. Claude Code on target? Use _resolve_remote_tool which probes
+        # /opt/homebrew/bin etc. — bare `which` misses them on macOS SSH.
+        claude_path = _resolve_remote_tool("claude", target_host)
+        if claude_path == "claude":
             self.reply(chat_id, f"claude not found on {target_host}. Install it first.")
             return True
 
         # 6. tmux on target?
-        r = _remote_run(["which", "tmux"], host=target_host,
-                        capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
+        tmux_path = _resolve_remote_tool("tmux", target_host)
+        if tmux_path == "tmux":
             self.reply(chat_id, f"tmux not found on {target_host}. Install it first.")
             return True
 
@@ -8848,7 +9772,7 @@ class CommandRouter:
 
         # 8. Bridge must be reachable from target
         r = _remote_run(["curl", "-sf", "--connect-timeout", "5",
-                         f"{target_bridge_url}/health"],
+                         f"{target_bridge_url}/"],
                         host=target_host, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             self.reply(chat_id,
@@ -9940,7 +10864,7 @@ class CommandRouter:
         reply_to = msg.get("reply_to_message") if msg else None
         if not reply_to:
             return None
-        reply_text = reply_to.get("text") or reply_to.get("caption") or ""
+        reply_text = _extract_msg_text(reply_to)
         if not reply_text:
             return None
         # Worker messages are formatted as "name:\n..." — extract the name
@@ -10032,11 +10956,6 @@ class CommandRouter:
         backend_name = get_worker_backend(session_name, session)
         backend = get_backend(backend_name)
 
-        # Non-interactive backpressure: reject if already processing
-        if not backend.is_interactive and is_pending(session_name):
-            self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
-            return
-
         # Interactive prompt shortcut: if worker is at a selection prompt and
         # manager sends a single digit or "skip", translate to keystrokes
         shortcut = text.strip().lower()
@@ -10054,6 +10973,11 @@ class CommandRouter:
                         self.reply(chat_id, f"{action}.")
                         return
 
+        # Non-interactive backpressure: atomic check+set to prevent races
+        if not backend.is_interactive and not try_set_pending(session_name, chat_id):
+            self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
+            return
+
         # Prefix manager messages so workers can distinguish from inter-worker messages.
         # Skip if text already has a "Manager sent ..." prefix (media messages).
         if not text.startswith("Manager sent "):
@@ -10061,7 +10985,8 @@ class CommandRouter:
 
         print(f"[{chat_id}] -> {session_name}: {text[:50]}...")
 
-        worker_set_pending(session_name, chat_id)
+        if backend.is_interactive:
+            worker_set_pending(session_name, chat_id)
         threading.Thread(
             target=send_typing_loop,
             args=(chat_id, session_name),
@@ -11863,6 +12788,53 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_forge_register(body)
             return
 
+        if self.path == "/guest":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_guest_register(body)
+            return
+
+        if self.path.startswith("/guest/send"):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_guest_send(body)
+            return
+
+        if self.path.startswith("/guest/reply"):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_guest_reply(body)
+            return
+
+        # Channel endpoints
+        parsed_post = urlparse(self.path)
+        if parsed_post.path == "/channels":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_channel_create(body)
+            return
+
+        ch_members_match = re.match(r'^/channels/([^/]+)/members$', parsed_post.path)
+        if ch_members_match:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_channel_members(ch_members_match.group(1), body)
+            return
+
+        ch_send_match = re.match(r'^/channels/([^/]+)/send$', parsed_post.path)
+        if ch_send_match:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_channel_send(ch_send_match.group(1), body)
+            return
+
+        # Relay v1 endpoints: /v1/<channel_id>/send, /v1/<channel_id>/reply
+        relay_send_match = re.match(r'^/v1/([^/]+)/send$', self.path)
+        if relay_send_match:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_relay_send(relay_send_match.group(1), body)
+            return
+
+        relay_reply_match = re.match(r'^/v1/([^/]+)/reply$', self.path)
+        if relay_reply_match:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.handle_relay_reply(relay_reply_match.group(1), body)
+            return
+
         if self.path == "/health-alert":
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             self.handle_health_alert(body)
@@ -11913,11 +12885,16 @@ class Handler(BaseHTTPRequestHandler):
 
         SECURITY: This endpoint allows the shell script to trigger
         notifications without having access to the bot token.
-        Used for tunnel watchdog alerts.
+        Used for tunnel watchdog alerts and worker notifications.
+
+        Supports [[image:/path|caption]] and [[file:/path|caption]] tags.
+        Pass optional "name" field to enable remote file fetching for
+        teleported workers.
         """
         try:
             data = json.loads(body)
             text = data.get("text", "")
+            name = data.get("name", "")
 
             if not text:
                 self.send_response(400)
@@ -11925,15 +12902,56 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"Missing text")
                 return
 
+            # Parse media tags (support [[image:]] and [[file:]] in notifications)
+            host = get_worker_host(name) if name else None
+            if host:
+                _accept_all = lambda p: (True, Path(p))
+                clean_text, images = _parse_media_tags(text, "image", _accept_all)
+                clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
+            else:
+                clean_text, images = parse_image_tags(text)
+                clean_text, files = parse_file_tags(clean_text)
+
+            if name and (images or files):
+                images = _localize_media(name, images)
+                files = _localize_media(name, files)
+
             # Send to all known chat_ids
             chat_ids = get_all_chat_ids()
             sent = 0
+            label = name or "notify"
             for chat_id in chat_ids:
-                result = transport.send_text(chat_id, text)
-                if result and result.get("ok"):
-                    sent += 1
+                if clean_text:
+                    result = transport.send_text(chat_id, clean_text)
+                    if result and result.get("ok"):
+                        sent += 1
+                for img_path, caption in images:
+                    if img_path is None:
+                        transport.send_text(chat_id, f"{label}: {caption}")
+                        continue
+                    full_caption = f"{label}: {caption}" if caption else f"{label}:"
+                    if Path(img_path).suffix.lower() in (".gif", ".mp4"):
+                        send_animation(chat_id, img_path, full_caption)
+                    else:
+                        send_photo(chat_id, img_path, full_caption)
+                for fpath, caption in files:
+                    if fpath is None:
+                        transport.send_text(chat_id, f"{label}: {caption}")
+                        continue
+                    full_caption = f"{label}: {caption}" if caption else f"{label}:"
+                    ext = Path(fpath).suffix.lower()
+                    if ext in VIDEO_EXTENSIONS:
+                        send_video(chat_id, fpath, full_caption)
+                    elif ext in AUDIO_EXTENSIONS:
+                        send_audio(chat_id, fpath, full_caption)
+                    elif ext in VOICE_EXTENSIONS:
+                        send_voice(chat_id, fpath, full_caption)
+                    else:
+                        send_document(chat_id, fpath, full_caption)
 
-            print(f"Notify: sent to {sent}/{len(chat_ids)} chats: {text[:50]}...")
+            has_media = len(images) + len(files)
+            print(f"Notify: sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
+                  f"{f' ({has_media} media)' if has_media else ''}")
 
             self.send_response(200)
             self.end_headers()
@@ -11992,6 +13010,17 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     _registry_add(name, DEFAULT_BACKEND, host=host)
                     print(f"Forge worker registered: {name} (host={host}, version={version})")
+                backend_name = get_worker_backend(name, {"host": host})
+                tmux_name = f"{TMUX_PREFIX}{name}"
+                reg_host = host or None
+                if tmux_exists(tmux_name, host=reg_host):
+                    export_hook_env(tmux_name, backend_name, host=reg_host)
+                ensure_session_dir(name)
+                if admin_chat_id is not None:
+                    cid_file = get_chat_id_file(name)
+                    if not cid_file.exists():
+                        cid_file.write_text(str(admin_chat_id))
+                        cid_file.chmod(0o600)
             tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
             import subprocess as _sp
             conflict = False
@@ -12073,16 +13102,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"Missing session or text")
                 return
 
-            # Get chat_id from session's file
+            # Get chat_id from session's file, fall back to admin_chat_id
             chat_id_file = get_chat_id_file(session_name)
-            if not chat_id_file.exists():
+            if chat_id_file.exists():
+                chat_id = chat_id_file.read_text().strip()
+            elif admin_chat_id is not None:
+                chat_id = str(admin_chat_id)
+                ensure_session_dir(session_name)
+                chat_id_file.write_text(chat_id)
+                chat_id_file.chmod(0o600)
+                print(f"Hook response: auto-created chat_id for session '{session_name}' from admin_chat_id")
+            else:
                 print(f"Hook response: no chat_id for session '{session_name}'")
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"No chat_id for session")
                 return
-
-            chat_id = chat_id_file.read_text().strip()
 
             # Debug: log short messages to trace source of empty "name:" messages
             if len(text.strip()) <= 5:
@@ -12130,9 +13165,848 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode())
 
+    # ── Guest System Handlers ──────────────────────────────────────────────
+
+    def _guest_auth(self, parsed=None) -> dict | None:
+        """Authenticate guest from token query param. Returns guest dict or None (sends 403)."""
+        qs = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
+        token = qs.get("token", [""])[0]
+        if not token:
+            self._send_json(403, {"ok": False, "error": "token required"})
+            return None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        with _guest_lock:
+            guest = _guests.get(token_hash)
+        if not guest or guest_is_expired(guest["expires_at_unix"]):
+            if guest:
+                with _guest_lock:
+                    _guests.pop(token_hash, None)
+            self._send_json(403, {"ok": False, "error": "invalid or expired guest session"})
+            return None
+        return guest
+
+    def handle_guest_register(self, body: bytes = b""):
+        """POST /guest — register as a temporary guest agent."""
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+
+        requested_name = data.get("name", "").strip().lower()
+        team_workers = set(get_registered_sessions().keys())
+
+        with _guest_lock:
+            existing_guests = {g["name"] for g in _guests.values()}
+
+        if requested_name:
+            ok, err = guest_validate_name(requested_name, team_workers, existing_guests)
+            if not ok:
+                status = 409 if "conflicts" in err or "already taken" in err else 400
+                self._send_json(status, {"ok": False, "error": err})
+                return
+            name = requested_name
+        else:
+            name = guest_generate_name(existing_names=team_workers | existing_guests)
+
+        token, token_hash = guest_create_token()
+        now = time.time()
+        expires_at_unix = now + GUEST_TTL
+        expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_unix))
+
+        guest = {
+            "name": name,
+            "token_hash": token_hash,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "expires_at": expires_at,
+            "expires_at_unix": expires_at_unix,
+            "notified_workers": set(),
+        }
+
+        with _guest_lock:
+            _guests[token_hash] = guest
+            _guest_inboxes[name] = []
+
+        relay_host = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
+        base_url = f"http://{relay_host}:{PORT}"
+
+        inbox_url = f"/guest/inbox?token={token}"
+        send_url = f"/guest/send?token={token}"
+
+        listen_script = (
+            f'python3 -c "\n'
+            f"import json,time,urllib.request as u,sys\n"
+            f"TOKEN,URL='{token}','{base_url}'\n"
+            f"last=''\n"
+            f"print('[listener] connected — waiting for messages',flush=True)\n"
+            f"while True:\n"
+            f"    try:\n"
+            f"        q=URL+'/guest/inbox?token='+TOKEN+('&after='+last if last else '')\n"
+            f"        d=json.loads(u.urlopen(u.Request(q),timeout=10).read())\n"
+            f"        for m in d.get('messages',[]):\n"
+            f"            print(m.get('from','?')+': '+m['text'],flush=True)\n"
+            f"            last=m['id']\n"
+            f"    except Exception as e:\n"
+            f"        if '403' in str(e) or '404' in str(e):\n"
+            f"            print('[listener] session expired — closing',flush=True);break\n"
+            f"    time.sleep(3)\n"
+            f'"'
+        )
+
+        # Telegram notification
+        try:
+            if admin_chat_id:
+                send_telegram_message(admin_chat_id,
+                    f"\U0001f514 Guest \"{name}\" connected")
+        except Exception:
+            pass
+
+        print(f"Guest registered: {name} (expires {expires_at})")
+        self._send_json(200, {
+            "ok": True,
+            "name": name,
+            "token": token,
+            "expires": expires_at,
+            "inbox_url": inbox_url,
+            "send_url": send_url,
+            "channels_url": f"/channels?token={token}",
+            "channel_create_url": f"/channels?token={token}",
+            "listen_script": listen_script,
+        })
+
+    def handle_guest_send(self, body: bytes = b""):
+        """POST /guest/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
+
+        Body: {"to": "lee" | ["lee","kai","#ops"], "text": "..."}
+        Legacy: {"worker": "lee", "text": "..."} still supported.
+        Targets: bare name = worker, "guest:name" = guest, "#label" or "ch_xxx" = channel.
+        """
+        parsed = urlparse(self.path)
+        guest = self._guest_auth(parsed)
+        if not guest:
+            return
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_json(400, {"ok": False, "error": "text required"})
+            return
+
+        # Normalize targets: support "to" (string or list) or legacy "worker"
+        raw_to = data.get("to", data.get("worker", ""))
+        if isinstance(raw_to, str):
+            targets = [raw_to.strip()] if raw_to.strip() else []
+        elif isinstance(raw_to, list):
+            targets = [t.strip() for t in raw_to if isinstance(t, str) and t.strip()]
+        else:
+            targets = []
+        if not targets:
+            self._send_json(400, {"ok": False, "error": "to (or worker) required"})
+            return
+
+        guest_name = guest["name"]
+        from_member = f"guest:{guest_name}"
+        tagged_text = f"[guest:{guest_name}] {text}"
+        registered = get_registered_sessions()
+        results = []
+
+        for target in targets:
+            if target.startswith("#"):
+                # Channel by label — find channel ID
+                ch_id = None
+                with _channel_lock:
+                    for cid, ch in _channels.items():
+                        if ch["label"] == target[1:] and not channel_is_expired(ch):
+                            ch_id = cid
+                            break
+                if not ch_id:
+                    results.append({"target": target, "ok": False, "error": "channel not found"})
+                    continue
+                with _channel_lock:
+                    ch = _channels.get(ch_id)
+                    if from_member not in ch["members"]:
+                        results.append({"target": target, "ok": False, "error": "not a member"})
+                        continue
+                    msg = channel_append_message(ch, from_member, text)
+                    members_snapshot = dict(ch["members"])
+                # Fan-out to other channel members
+                ch_tagged = f"[{ch_id} from {from_member}] {text}"
+                for member_key, minfo in members_snapshot.items():
+                    if member_key == from_member:
+                        continue
+                    if minfo["type"] == "worker":
+                        wname = minfo["name"]
+                        if wname in registered:
+                            winfo = registered[wname]
+                            bn = get_worker_backend(wname, winfo)
+                            be = get_backend(bn)
+                            try:
+                                be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
+                                        f"http://localhost:{PORT}", SESSIONS_DIR)
+                            except Exception as e:
+                                print(f"Channel fan-out to {wname} failed: {e}")
+                    elif minfo["type"] == "guest":
+                        gname = minfo["name"]
+                        with _guest_lock:
+                            ginbox = _guest_inboxes.get(gname, [])
+                            _guest_inboxes[gname] = guest_inbox_append(ginbox, {
+                                "id": msg["id"], "from": from_member,
+                                "channel": ch_id, "text": text, "ts": msg["ts"],
+                            })
+                    elif minfo["type"] == "manager":
+                        try:
+                            if admin_chat_id:
+                                send_telegram_message(admin_chat_id,
+                                    f"[{ch_id}] {from_member}: {text}")
+                        except Exception:
+                            pass
+                results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
+
+            elif target.startswith("ch_"):
+                # Channel by ID
+                with _channel_lock:
+                    ch = _channels.get(target)
+                    if not ch or channel_is_expired(ch):
+                        results.append({"target": target, "ok": False, "error": "channel not found"})
+                        continue
+                    if from_member not in ch["members"]:
+                        results.append({"target": target, "ok": False, "error": "not a member"})
+                        continue
+                    msg = channel_append_message(ch, from_member, text)
+                    members_snapshot = dict(ch["members"])
+                ch_tagged = f"[{target} from {from_member}] {text}"
+                for member_key, minfo in members_snapshot.items():
+                    if member_key == from_member:
+                        continue
+                    if minfo["type"] == "worker":
+                        wname = minfo["name"]
+                        if wname in registered:
+                            winfo = registered[wname]
+                            bn = get_worker_backend(wname, winfo)
+                            be = get_backend(bn)
+                            try:
+                                be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
+                                        f"http://localhost:{PORT}", SESSIONS_DIR)
+                            except Exception as e:
+                                print(f"Channel fan-out to {wname} failed: {e}")
+                    elif minfo["type"] == "guest":
+                        gname = minfo["name"]
+                        with _guest_lock:
+                            ginbox = _guest_inboxes.get(gname, [])
+                            _guest_inboxes[gname] = guest_inbox_append(ginbox, {
+                                "id": msg["id"], "from": from_member,
+                                "channel": target, "text": text, "ts": msg["ts"],
+                            })
+                    elif minfo["type"] == "manager":
+                        try:
+                            if admin_chat_id:
+                                send_telegram_message(admin_chat_id,
+                                    f"[{target}] {from_member}: {text}")
+                        except Exception:
+                            pass
+                results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
+
+            elif target.startswith("guest:"):
+                # Send to another guest's inbox
+                target_guest = target.split(":", 1)[1]
+                msg_id = f"gm_{secrets.token_hex(4)}"
+                with _guest_lock:
+                    ginbox = _guest_inboxes.get(target_guest, [])
+                    _guest_inboxes[target_guest] = guest_inbox_append(ginbox, {
+                        "id": msg_id, "from": from_member,
+                        "text": text, "ts": int(time.time()),
+                    })
+                results.append({"target": target, "ok": True, "message_id": msg_id})
+
+            else:
+                # Bare name = worker
+                worker = target
+                if worker not in registered:
+                    results.append({"target": worker, "ok": False, "error": f"worker '{worker}' not found"})
+                    continue
+                info = registered[worker]
+                backend_name = get_worker_backend(worker, info)
+                backend = get_backend(backend_name)
+                tmux_name = f"{TMUX_PREFIX}{worker}"
+                delivered = backend.send(worker, tmux_name, tagged_text,
+                                        f"http://localhost:{PORT}", SESSIONS_DIR)
+                msg_id = f"gm_{secrets.token_hex(4)}"
+                with _guest_lock:
+                    inbox = _guest_inboxes.get(guest_name, [])
+                    _guest_inboxes[guest_name] = guest_inbox_append(inbox, {
+                        "id": msg_id, "from": guest_name, "to": worker,
+                        "text": text, "ts": int(time.time()),
+                    })
+                    if worker not in guest.get("notified_workers", set()):
+                        guest.setdefault("notified_workers", set()).add(worker)
+                        try:
+                            if admin_chat_id:
+                                send_telegram_message(admin_chat_id,
+                                    f"\U0001f514 Guest \"{guest_name}\" → {worker}")
+                        except Exception:
+                            pass
+                results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
+
+        # Single target: flat response for backwards compat
+        if len(results) == 1:
+            self._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
+        else:
+            self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
+
+    def handle_guest_reply(self, body: bytes = b""):
+        """POST /guest/reply — worker sends reply to a guest's inbox."""
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            return
+
+        guest_name = data.get("guest", "").strip()
+        from_worker = data.get("from", "").strip()
+        text = data.get("text", "").strip()
+        if not guest_name or not text:
+            self._send_json(400, {"ok": False, "error": "guest and text required"})
+            return
+
+        msg_id = f"gm_{secrets.token_hex(4)}"
+        with _guest_lock:
+            if guest_name not in _guest_inboxes:
+                _guest_inboxes[guest_name] = []
+            _guest_inboxes[guest_name] = guest_inbox_append(
+                _guest_inboxes[guest_name],
+                {"id": msg_id, "from": from_worker or "worker",
+                 "text": text, "ts": int(time.time())},
+            )
+
+        self._send_json(200, {"ok": True, "message_id": msg_id})
+
+    def handle_guest_inbox(self, parsed):
+        """GET /guest/inbox?token=xxx[&after=gm_xxx] — poll for messages."""
+        guest = self._guest_auth(parsed)
+        if not guest:
+            return
+        qs = parse_qs(parsed.query)
+        after = qs.get("after", [None])[0]
+        guest_name = guest["name"]
+        with _guest_lock:
+            msgs = list(_guest_inboxes.get(guest_name, []))
+        filtered = guest_inbox_filter(msgs, after=after)
+        self._send_json(200, {
+            "ok": True, "name": guest_name, "messages": filtered,
+        })
+
+    def handle_guest_status(self, parsed):
+        """GET /guest/status?token=xxx — check session validity."""
+        guest = self._guest_auth(parsed)
+        if not guest:
+            return
+        with _guest_lock:
+            workers = list(guest.get("notified_workers", set()))
+        self._send_json(200, {
+            "ok": True, "name": guest["name"],
+            "expires": guest["expires_at"],
+            "connected_workers": workers,
+        })
+
+    def handle_guests_list(self):
+        """GET /guests — list active guests (admin only)."""
+        with _guest_lock:
+            guests_list = []
+            expired = []
+            for token_hash, g in _guests.items():
+                if guest_is_expired(g["expires_at_unix"]):
+                    expired.append(token_hash)
+                else:
+                    guests_list.append({
+                        "name": g["name"],
+                        "expires": g["expires_at"],
+                        "connected_workers": list(g.get("notified_workers", set())),
+                    })
+            for th in expired:
+                name = _guests[th]["name"]
+                _guests.pop(th, None)
+                _guest_inboxes.pop(name, None)
+        self._send_json(200, {"ok": True, "guests": guests_list})
+
+    def handle_guest_disconnect(self, parsed):
+        """DELETE /guest?token=xxx — disconnect guest session."""
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [""])[0]
+        if not token:
+            self._send_json(403, {"ok": False, "error": "token required"})
+            return
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        with _guest_lock:
+            guest = _guests.pop(token_hash, None)
+            if guest:
+                _guest_inboxes.pop(guest["name"], None)
+        if not guest:
+            self._send_json(403, {"ok": False, "error": "invalid token"})
+            return
+
+        try:
+            if admin_chat_id:
+                send_telegram_message(admin_chat_id,
+                    f"\U0001f514 Guest \"{guest['name']}\" disconnected")
+        except Exception:
+            pass
+
+        print(f"Guest disconnected: {guest['name']}")
+        self._send_json(200, {"ok": True, "name": guest["name"]})
+
+    # ─────────────────────────────────────────────────────────────
+    # GROUP CHANNEL endpoints
+    # ─────────────────────────────────────────────────────────────
+
+    def _channel_auth_guest(self, parsed) -> dict | None:
+        """Authenticate a guest from query token for channel access. Returns guest or sends error."""
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [None])[0]
+        if not token:
+            self._send_json(403, {"ok": False, "error": "token required"})
+            return None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        with _guest_lock:
+            guest = _guests.get(token_hash)
+        if not guest or guest_is_expired(guest["expires_at_unix"]):
+            self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+            return None
+        return guest
+
+    def handle_channel_create(self, body: bytes = b""):
+        """POST /channels — create a group channel."""
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            return
+
+        label = data.get("label", "").strip()
+        members = data.get("members", [])
+        include_manager = data.get("include_manager", True)
+        ttl = min(data.get("ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
+
+        if not isinstance(members, list):
+            self._send_json(400, {"ok": False, "error": "members must be a list"})
+            return
+
+        # Validate member format
+        valid_members = []
+        for m in members:
+            if isinstance(m, str) and (m == "manager" or ":" in m):
+                valid_members.append(m)
+        if include_manager and "manager" not in valid_members:
+            valid_members.append("manager")
+
+        # Check from query token (guest-created) or admin
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [None])[0]
+        if token:
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            with _guest_lock:
+                guest = _guests.get(token_hash)
+            if not guest or guest_is_expired(guest["expires_at_unix"]):
+                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                return
+            created_by = f"guest:{guest['name']}"
+            if created_by not in valid_members:
+                valid_members.append(created_by)
+        else:
+            created_by = "manager"
+
+        channel_id = channel_create_id(label)
+        ch = channel_new(channel_id, label, created_by, valid_members, ttl)
+
+        with _channel_lock:
+            _channels[channel_id] = ch
+
+        # Telegram notification
+        member_str = ", ".join(valid_members)
+        try:
+            if admin_chat_id:
+                send_telegram_message(admin_chat_id,
+                    f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
+        except Exception:
+            pass
+
+        print(f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
+        self._send_json(200, {
+            "ok": True,
+            "channel": channel_id,
+            "label": label,
+            "members": valid_members,
+            "send_url": f"/channels/{channel_id}/send",
+            "messages_url": f"/channels/{channel_id}/messages",
+        })
+
+    def handle_channel_members(self, channel_id: str, body: bytes = b""):
+        """POST /channels/{id}/members — add/remove members."""
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            return
+
+        with _channel_lock:
+            ch = _channels.get(channel_id)
+            if not ch or channel_is_expired(ch):
+                self._send_json(404, {"ok": False, "error": "channel not found"})
+                return
+
+            added = channel_add_members(ch, data.get("add", []))
+            removed = channel_remove_members(ch, data.get("remove", []))
+            current = list(ch["members"].keys())
+
+        if added or removed:
+            try:
+                if admin_chat_id:
+                    parts = []
+                    if added:
+                        parts.append(f"added {', '.join(added)}")
+                    if removed:
+                        parts.append(f"removed {', '.join(removed)}")
+                    send_telegram_message(admin_chat_id,
+                        f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
+            except Exception:
+                pass
+
+        self._send_json(200, {
+            "ok": True,
+            "channel": channel_id,
+            "added": added,
+            "removed": removed,
+            "members": current,
+        })
+
+    def handle_channel_send(self, channel_id: str, body: bytes = b""):
+        """POST /channels/{id}/send — send message to channel (fan-out)."""
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_json(400, {"ok": False, "error": "text required"})
+            return
+
+        # Determine sender: from token (guest), from field (worker), or manager
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [None])[0]
+        from_member = data.get("from", "")
+
+        if token:
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            with _guest_lock:
+                guest = _guests.get(token_hash)
+            if not guest or guest_is_expired(guest["expires_at_unix"]):
+                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                return
+            from_member = f"guest:{guest['name']}"
+        elif not from_member:
+            from_member = "manager"
+
+        with _channel_lock:
+            ch = _channels.get(channel_id)
+            if not ch or channel_is_expired(ch):
+                self._send_json(404, {"ok": False, "error": "channel not found"})
+                return
+            if from_member not in ch["members"] and from_member != "manager":
+                self._send_json(403, {"ok": False, "error": f"{from_member} not a member"})
+                return
+            msg = channel_append_message(ch, from_member, text)
+            members_snapshot = dict(ch["members"])
+
+        # Fan-out to all members except sender
+        tagged = f"[{channel_id} from {from_member}] {text}"
+        for member_key, info in members_snapshot.items():
+            if member_key == from_member:
+                continue
+            if info["type"] == "worker":
+                worker_name = info["name"]
+                registered = get_registered_sessions()
+                if worker_name in registered:
+                    worker_info = registered[worker_name]
+                    backend_name = get_worker_backend(worker_name, worker_info)
+                    backend = get_backend(backend_name)
+                    tmux_name = f"{TMUX_PREFIX}{worker_name}"
+                    try:
+                        backend.send(worker_name, tmux_name, tagged,
+                                     f"http://localhost:{PORT}", SESSIONS_DIR)
+                    except Exception as e:
+                        print(f"Channel fan-out to {worker_name} failed: {e}")
+            elif info["type"] == "guest":
+                guest_name = info["name"]
+                with _guest_lock:
+                    inbox = _guest_inboxes.get(guest_name, [])
+                    _guest_inboxes[guest_name] = guest_inbox_append(inbox, {
+                        "id": msg["id"], "from": from_member,
+                        "channel": channel_id, "text": text,
+                        "ts": msg["ts"],
+                    })
+            elif info["type"] == "manager":
+                try:
+                    if admin_chat_id:
+                        send_telegram_message(admin_chat_id,
+                            f"[{channel_id}] {from_member}: {text}")
+                except Exception:
+                    pass
+
+        self._send_json(200, {
+            "ok": True,
+            "channel": channel_id,
+            "message_id": msg["id"],
+            "seq": msg["seq"],
+        })
+
+    def handle_channel_messages(self, channel_id: str, parsed):
+        """GET /channels/{id}/messages — poll channel messages. Guests must provide ?token=."""
+        qs = parse_qs(parsed.query)
+        after = qs.get("after", [None])[0]
+        token = qs.get("token", [None])[0]
+
+        # If token provided, verify guest is a member
+        if token:
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            with _guest_lock:
+                guest = _guests.get(token_hash)
+            if not guest or guest_is_expired(guest["expires_at_unix"]):
+                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                return
+            from_member = f"guest:{guest['name']}"
+            with _channel_lock:
+                ch = _channels.get(channel_id)
+                if not ch or channel_is_expired(ch):
+                    self._send_json(404, {"ok": False, "error": "channel not found"})
+                    return
+                if from_member not in ch["members"]:
+                    self._send_json(403, {"ok": False, "error": "not a member of this channel"})
+                    return
+                msgs, truncated = channel_get_messages(ch, after)
+        else:
+            with _channel_lock:
+                ch = _channels.get(channel_id)
+                if not ch or channel_is_expired(ch):
+                    self._send_json(404, {"ok": False, "error": "channel not found"})
+                    return
+                msgs, truncated = channel_get_messages(ch, after)
+
+        resp = {
+            "ok": True,
+            "channel": channel_id,
+            "messages": msgs,
+        }
+        if truncated:
+            resp["truncated"] = True
+        self._send_json(200, resp)
+
+    def handle_channels_list(self, parsed=None):
+        """GET /channels — list active channels. With ?token=, filter to guest's channels."""
+        qs = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
+        token = qs.get("token", [None])[0]
+        filter_member = None
+        if token:
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            with _guest_lock:
+                guest = _guests.get(token_hash)
+            if not guest or guest_is_expired(guest["expires_at_unix"]):
+                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                return
+            filter_member = f"guest:{guest['name']}"
+
+        with _channel_lock:
+            active = []
+            expired_ids = []
+            for cid, ch in _channels.items():
+                if channel_is_expired(ch):
+                    expired_ids.append(cid)
+                else:
+                    if filter_member and filter_member not in ch["members"]:
+                        continue
+                    active.append({
+                        "id": ch["id"],
+                        "label": ch["label"],
+                        "members": list(ch["members"].keys()),
+                        "message_count": len(ch["messages"]),
+                        "created_by": ch["created_by"],
+                        "send_url": f"/channels/{ch['id']}/send",
+                        "messages_url": f"/channels/{ch['id']}/messages",
+                    })
+            for cid in expired_ids:
+                del _channels[cid]
+        self._send_json(200, {"ok": True, "channels": active})
+
+    def handle_channel_delete(self, channel_id: str):
+        """DELETE /channels/{id} — delete a channel."""
+        with _channel_lock:
+            ch = _channels.pop(channel_id, None)
+        if not ch:
+            self._send_json(404, {"ok": False, "error": "channel not found"})
+            return
+        try:
+            if admin_chat_id:
+                send_telegram_message(admin_chat_id,
+                    f"\U0001f4e2 Channel {channel_id} closed")
+        except Exception:
+            pass
+        print(f"Channel deleted: {channel_id}")
+        self._send_json(200, {"ok": True, "channel": channel_id})
+
+    # ── Relay v1 endpoint handlers ──────────────────────────────────────
+
+    def _relay_get_token(self):
+        """Extract Bearer token from Authorization header or query param."""
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return auth[7:].strip()
+        parsed = urlparse(self.path)
+        params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+        return params.get("token", "")
+
+    def handle_relay_get(self, channel_id: str, action: str | None, parsed):
+        """Handle GET /v1/<channel_id>[/action]."""
+        token = self._relay_get_token()
+        if not token:
+            self._send_json(401, {"error": "missing token"})
+            return
+
+        ch = relay_auth_guest(channel_id, token)
+        if not ch:
+            self._send_json(403, {"error": "invalid or expired channel/token"})
+            return
+
+        if action is None:
+            guide = relay_guide_text(ch, token)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(guide.encode())
+            return
+
+        if action == "messages":
+            params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+            after = params.get("after")
+            msgs = relay_get_messages(channel_id, after=after)
+            self._send_json(200, {"messages": msgs})
+            return
+
+        if action == "status":
+            self._send_json(200, {
+                "channel_id": channel_id,
+                "worker": ch["worker"],
+                "label": ch["label"],
+                "expires_at": ch["expires_at"],
+                "message_count": len(ch["messages"]),
+            })
+            return
+
+        self._send_json(404, {"error": f"unknown action: {action}"})
+
+    def handle_relay_send(self, channel_id: str, body: bytes = b""):
+        """Handle POST /v1/<channel_id>/send — guest sends message to worker."""
+        token = self._relay_get_token()
+        if not token:
+            self._send_json(401, {"error": "missing token"})
+            return
+
+        ch = relay_auth_guest(channel_id, token)
+        if not ch:
+            self._send_json(403, {"error": "invalid or expired channel/token"})
+            return
+
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"error": "invalid JSON"})
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_json(400, {"error": "missing text"})
+            return
+
+        envelope, msg = relay_guest_send(channel_id, text)
+        if not envelope:
+            self._send_json(500, {"error": "channel not found"})
+            return
+
+        worker = ch["worker"]
+        ok = send_to_worker(worker, envelope)
+        self._send_json(200, {
+            "message_id": msg["message_id"],
+            "delivered": ok,
+            "worker": worker,
+        })
+
+    def handle_relay_reply(self, channel_id: str, body: bytes = b""):
+        """Handle POST /v1/<channel_id>/reply — worker replies to guest."""
+        token = self._relay_get_token()
+        if not token:
+            self._send_json(401, {"error": "missing token"})
+            return
+
+        ch = relay_auth_reply(channel_id, token)
+        if not ch:
+            self._send_json(403, {"error": "invalid or expired channel/token"})
+            return
+
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"error": "invalid JSON"})
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_json(400, {"error": "missing text"})
+            return
+
+        msg = relay_worker_reply(channel_id, text)
+        if not msg:
+            self._send_json(500, {"error": "channel not found"})
+            return
+
+        self._send_json(200, {
+            "message_id": msg["message_id"],
+            "delivered": True,
+        })
 
     def do_GET(self):
         parsed = urlparse(self.path)
+
+        # Guest system endpoints
+        if parsed.path.startswith("/guest/inbox"):
+            self.handle_guest_inbox(parsed)
+            return
+        if parsed.path.startswith("/guest/status"):
+            self.handle_guest_status(parsed)
+            return
+        if parsed.path == "/guests":
+            self.handle_guests_list()
+            return
+
+        # Relay v1 endpoints: /v1/<channel_id>, /v1/<channel_id>/messages
+        relay_match = re.match(r'^/v1/([^/]+)(?:/(.+))?$', parsed.path)
+        if relay_match:
+            channel_id = relay_match.group(1)
+            action = relay_match.group(2)
+            self.handle_relay_get(channel_id, action, parsed)
+            return
+
+        # Channel endpoints
+        ch_msgs_match = re.match(r'^/channels/([^/]+)/messages$', parsed.path)
+        if ch_msgs_match:
+            self.handle_channel_messages(ch_msgs_match.group(1), parsed)
+            return
+        if parsed.path == "/channels":
+            self.handle_channels_list(parsed)
+            return
 
         # Handle /workers endpoint for inter-worker discovery
         if parsed.path == "/workers":
@@ -12193,6 +14067,17 @@ class Handler(BaseHTTPRequestHandler):
 
         # Unknown GET endpoint
         self._send_unknown_endpoint("GET", parsed.path)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/guest":
+            self.handle_guest_disconnect(parsed)
+            return
+        ch_del_match = re.match(r'^/channels/([^/]+)$', parsed.path)
+        if ch_del_match:
+            self.handle_channel_delete(ch_del_match.group(1))
+            return
+        self._send_unknown_endpoint("DELETE", parsed.path)
 
     def handle_workers_endpoint(self, parsed=None):
         """Return list of active workers with communication details.
@@ -13085,7 +14970,7 @@ def main():
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
             # Re-export hook env so workers get the current BRIDGE_URL
-            host = get_worker_host(name)
+            host = info.get("host") or get_worker_host(name)
             if tmux_exists(tmux_name, host=host):
                 export_hook_env(tmux_name, backend_name, host=host)
 
