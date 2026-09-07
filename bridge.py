@@ -142,6 +142,7 @@ API_ENDPOINTS = {
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
     "GET /health/workers": "Watchdog state for all workers",
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
+    "GET /transcript/<name>/updates": "Poll for new transcript entries (returns {total, new})",
     "GET /team-chat": "Team Telegram chat viewer (requires rewind token)",
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
     "POST /send": "Send a prompt to a worker: {worker, message, from (default: system)}",
@@ -13265,6 +13266,12 @@ details[open] .chev{{transform:rotate(90deg)}}
 .jump a:hover{{border-color:var(--link);color:var(--link)}}
 a{{color:var(--link);text-decoration:none}}
 a:hover{{text-decoration:underline}}
+/* Live updates banner */
+.live-banner{{position:sticky;top:0;z-index:40;padding:10px 16px;
+  background:var(--link);color:#fff;text-align:center;cursor:pointer;
+  font-size:.85rem;font-weight:500;border-radius:0 0 var(--radius) var(--radius);
+  box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .2s}}
+.live-banner:hover{{opacity:.9}}
 </style>
 </head>
 <body>
@@ -13292,7 +13299,8 @@ a:hover{{text-decoration:underline}}
 {filter_banner}
 {search_result}
 {nav_html}
-<div class="thread" id="thread"{' data-search="' + esc(search_query) + '"' if search_query else ''}>
+<div id="live-banner" class="live-banner" style="display:none"></div>
+<div class="thread" id="thread"{' data-search="' + esc(search_query) + '"' if search_query else ''} data-total="{total}" data-name="{esc(name)}" data-token="{esc(token)}" data-updates-url="{esc(live_base_url) + '/updates' if live_base_url else '/transcript/' + esc(name) + '/updates'}" data-page-url="{esc(live_base_url) if live_base_url else '/transcript/' + esc(name)}" data-per-page="{per_page}" data-page="{page}" data-total-pages="{total_pages}">
 {"".join(blocks)}
 </div>
 {nav_html}
@@ -13428,6 +13436,44 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
     }}
   }} catch(e) {{}}
 }});
+// Live updates: poll for new entries, show banner when available
+(function() {{
+  var thread = document.getElementById('thread');
+  if (!thread) return;
+  var total = parseInt(thread.getAttribute('data-total')) || 0;
+  var updatesUrl = thread.getAttribute('data-updates-url');
+  var pageUrl = thread.getAttribute('data-page-url');
+  var token = thread.getAttribute('data-token');
+  var perPage = thread.getAttribute('data-per-page') || '50';
+  var curPage = parseInt(thread.getAttribute('data-page')) || 1;
+  var totalPages = parseInt(thread.getAttribute('data-total-pages')) || 1;
+  if (!updatesUrl || !token) return;
+  // Only poll when viewing the last page (most recent entries)
+  if (curPage < totalPages) return;
+  var banner = document.getElementById('live-banner');
+  var polling = true;
+  var pollUrl = updatesUrl + '?token=' + encodeURIComponent(token) + '&since=' + total;
+  function poll() {{
+    if (!polling) return;
+    fetch(pollUrl).then(function(r) {{ return r.json(); }}).then(function(d) {{
+      if (d.new > 0) {{
+        banner.textContent = d.new + ' new entr' + (d.new === 1 ? 'y' : 'ies') + ' — click to load';
+        banner.style.display = 'block';
+        polling = false;  // Stop polling once banner is shown
+      }} else {{
+        setTimeout(poll, 5000);
+      }}
+    }}).catch(function() {{
+      setTimeout(poll, 10000);  // Retry slower on error
+    }});
+  }}
+  banner.addEventListener('click', function() {{
+    // Navigate to last page of transcript (fresh render with new entries)
+    var url = pageUrl + '?token=' + encodeURIComponent(token) + '&per_page=' + perPage;
+    window.location.href = url;
+  }});
+  setTimeout(poll, 5000);  // Start polling after 5s
+}})();
 </script>
 </body>
 </html>'''
@@ -15440,6 +15486,45 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 self._send_json(400, {"error": "Usage: /transcript/<worker_name>"})
                 return
             name = parts[2]
+
+            # /transcript/<name>/updates — lightweight poll for new entry count
+            if len(parts) >= 4 and parts[3] == "updates":
+                qs = parse_qs(parsed.query)
+                since = int(qs.get("since", [0])[0])
+                session_id = qs.get("sid", [None])[0]
+                host = get_worker_host(name)
+                if host:
+                    cwd = get_claude_session_cwd(name) or ""
+                    sid = session_id or get_claude_session_id(name)
+                    if not sid:
+                        self._send_json(200, {"total": 0, "new": 0})
+                        return
+                    remote_home = _get_remote_home(host) or ""
+                    remote_cwd = cwd
+                    local_home = os.path.expanduser("~")
+                    if remote_cwd.startswith(local_home) and remote_home != local_home:
+                        remote_cwd = remote_home + remote_cwd[len(local_home):]
+                    remote_slug = _project_slug(remote_cwd)
+                    jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+                else:
+                    _tp, sid, _cwd = _resolve_transcript_path(name, session_id)
+                    if not _tp or not sid:
+                        self._send_json(200, {"total": 0, "new": 0})
+                        return
+                    jsonl_path = str(_tp)
+                result = _run_transcript_query(jsonl_path, sid, "stats", host=host)
+                total = 0
+                if result:
+                    total = result.get("n_user", 0) + result.get("n_tool", 0)
+                    # Use a more accurate total from entries query
+                    count_result = _run_transcript_query(
+                        jsonl_path, sid, "entries", host=host, page=1, per_page=1)
+                    if count_result:
+                        total = count_result.get("total", total)
+                new_count = max(0, total - since)
+                self._send_json(200, {"total": total, "new": new_count})
+                return
+
             qs = parse_qs(parsed.query)
             session_id = qs.get("sid", [None])[0]
             page_raw = qs.get("page", [None])[0]
