@@ -7433,6 +7433,31 @@ print('OK')
     fi
 }
 
+test_stuck_duration_uses_reason_age_not_since() {
+    info "Testing STUCK duration uses age from reason, not since timestamp..."
+
+    if python3 -c "
+import time
+import bridge
+
+now = time.time()
+# since = 2 min ago, but reason says age=4140s (69 min)
+# After a bridge restart, since resets but reason still has the real age
+since = now - 120  # 2 minutes ago (simulates bridge restart)
+snapshot = {
+    'mio': ('STUCK', 'age=4140s cpu=0.5 streak=3/3', since),
+}
+result = bridge._format_watchdog_status('mio', lambda n: True, state_snapshot=snapshot)
+# Should show 69m (from age=4140s), NOT 2m (from since)
+assert result == 'No progress (69m)', f'Expected No progress (69m), got {result}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "STUCK duration uses age from reason (survives bridge restart)"
+    else
+        fail "STUCK duration should use age from reason, not since"
+    fi
+}
+
 test_switch_session() {
     info "Testing switch_session changes active and saves to file..."
 
@@ -22791,6 +22816,7 @@ run_unit_tests() {
     run_test test_parse_at_mentions
     run_test test_auto_focus_on_consecutive_mentions
     run_test test_format_watchdog_status
+    run_test test_stuck_duration_uses_reason_age_not_since
     run_test test_switch_session
     run_test test_send_response_html_formatting
     run_test test_format_response_strips_name_prefix

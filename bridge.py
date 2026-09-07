@@ -6333,7 +6333,13 @@ def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Opti
         minutes = max(0, int((now - since) / 60)) if since else 0
         return f"Needs reply ({minutes}m)"
     if state == "STUCK":
-        minutes = max(0, int((now - since) / 60)) if since else 0
+        # Use age from reason (derived from pending file timestamp on disk,
+        # survives bridge restarts) rather than since (resets on restart).
+        age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
+        if age_match:
+            minutes = int(age_match.group(1)) // 60
+        else:
+            minutes = max(0, int((now - since) / 60)) if since else 0
         return f"No progress ({minutes}m)"
     if state == "POISONED":
         minutes = max(0, int((now - since) / 60)) if since else 0
@@ -9001,7 +9007,7 @@ class CommandRouter:
         elif cmd == "/end":
             return self.cmd_end(arg, chat_id)
         elif cmd == "/progress":
-            return self.cmd_progress(chat_id)
+            return self.cmd_progress(chat_id, arg)
         elif cmd == "/pause":
             return self.cmd_pause(chat_id)
         elif cmd == "/restart":
@@ -9811,12 +9817,20 @@ class CommandRouter:
             self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_progress(self, chat_id):
-        if not state["active"]:
+    def cmd_progress(self, chat_id, arg=""):
+        # If a name is given, show that worker's progress
+        if arg:
+            target = arg.strip().lower().lstrip("@")
+            registered = self.workers.get_registered_sessions()
+            if target not in registered:
+                self.reply(chat_id, f"Unknown worker: {target}. Check /team for who's available.")
+                return True
+            name = target
+        elif not state["active"]:
             self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
             return True
-
-        name = state["active"]
+        else:
+            name = state["active"]
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if not session:
