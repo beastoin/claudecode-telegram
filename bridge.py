@@ -6112,6 +6112,22 @@ def watchdog_loop():
                     if streak < IDLE_STREAK_STUCK:
                         state = "WAITING"
                     else:
+                        # Auto-clear stale pending: if worker is at idle prompt,
+                        # the response was already sent but pending file wasn't
+                        # cleared (e.g., bridge restarted before hook callback).
+                        if is_interactive and pending:
+                            pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
+                            if pane_text:
+                                activity = _extract_activity(pane_text.splitlines())
+                                if activity == "Idle at prompt":
+                                    print(f"[watchdog] Auto-clearing stale pending for {name} (idle at prompt, age={int(pending_age)}s)")
+                                    clear_pending(name)
+                                    _idle_streak[name] = 0
+                                    state = "READY"
+                                    reason = "idle (auto-cleared stale pending)"
+                                    since = _record_worker_state(name, state, reason, now)
+                                    _handle_watchdog_transition(name, state, reason, since, now=now)
+                                    continue
                         poisoned_reason = _detect_poisoned(name, tmux_name)
                         state, reason = compute_state(
                             **state_args,
