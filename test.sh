@@ -2106,9 +2106,9 @@ with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
 assert len(replies) == 1, f'Expected 1 reply, got {len(replies)}'
 reply = replies[0]
 assert 'alice' in reply, f'Reply should mention alice: {reply}'
-assert 'http://100.125.36.102:8271/transcript/alice' in reply, f'Should use Tailscale IP: {reply}'
+# Reply contains either a beast serve snapshot URL or the bridge transcript URL
+assert 'rewind-alice' in reply or 'transcript/alice' in reply, f'Should contain rewind URL: {reply}'
 assert 'trycloudflare' not in reply, f'Should NOT use cloudflare: {reply}'
-assert 'token=' in reply, f'Should contain token param: {reply}'
 # Token should be in REWIND_TOKENS
 assert len(bridge.REWIND_TOKENS) > 0, 'Should have stored a rewind token'
 token = list(bridge.REWIND_TOKENS.keys())[0]
@@ -3092,8 +3092,8 @@ with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
 
 assert len(replies) == 1
 reply = replies[0]
-assert '/team-chat?' in reply, f'Should contain /team-chat URL: {reply}'
-assert 'token=' in reply
+# Reply contains either a beast serve snapshot URL or the bridge team-chat URL
+assert 'rewind-team' in reply or '/team-chat?' in reply, f'Should contain team rewind URL: {reply}'
 assert 'Team chat' in reply
 
 # Verify token stored with __team__ name
@@ -3107,7 +3107,7 @@ bridge.REWIND_TOKENS.clear()
 replies.clear()
 with patch.object(bridge, 'BRIDGE_PUBLIC_URL', 'http://100.125.36.102:8271'):
     router.cmd_rewind('--team', 12345)
-assert '/team-chat?' in replies[0]
+assert 'rewind-team' in replies[0] or '/team-chat?' in replies[0]
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "/rewind team generates team chat token"
@@ -7910,6 +7910,124 @@ PYEOF
         success "Media reply-to routes to replied worker"
     else
         fail "Media reply-to routing test failed"
+    fi
+    rm -f "$tmpscript" "$tmpout"
+}
+
+test_media_group_routes_all_photos_to_mentioned_worker() {
+    info "Testing media group (multiple photos) routes all to @mentioned worker..."
+
+    local tmpscript tmpout
+    tmpscript=$(mktemp /tmp/test_media_group_XXXXX.py)
+    tmpout=$(mktemp)
+    cat > "$tmpscript" << 'PYEOF'
+import os, sys, tempfile, time, threading
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import bridge
+
+tmpdir = tempfile.mkdtemp()
+sessions_dir = Path(tmpdir) / 'sessions'
+sessions_dir.mkdir()
+orig_sessions_dir = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = sessions_dir
+
+# Create two workers: alice (active) and bob (mentioned)
+for name in ['alice', 'bob']:
+    d = sessions_dir / name
+    d.mkdir()
+    (d / 'chat_id').write_text('12345')
+    (d / 'backend').write_text('claude')
+
+bridge.state['active'] = 'alice'
+orig_admin = bridge.admin_chat_id
+bridge.admin_chat_id = 12345
+
+router = bridge.command_router
+orig_workers = router.workers
+
+mock_workers = MagicMock()
+mock_workers.get_registered_sessions.return_value = {
+    'alice': {'tmux': f'{bridge.TMUX_PREFIX}alice'},
+    'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob'},
+}
+mock_workers.is_online.return_value = True
+mock_workers.tmux_prefix = bridge.TMUX_PREFIX
+mock_workers.send.return_value = True
+router.workers = mock_workers
+router.telegram = MagicMock()
+
+# Clear any leftover media group state
+bridge._media_group_buffer.clear()
+
+# Use a short wait for testing
+orig_wait = bridge._MEDIA_GROUP_WAIT
+bridge._MEDIA_GROUP_WAIT = 0.3
+
+downloaded_targets = []
+def mock_download(file_id, target):
+    downloaded_targets.append(target)
+    return f'/tmp/fake_{file_id}.jpg'
+
+with patch('bridge.download_telegram_file', side_effect=mock_download):
+    # Photo 1: NO caption (would normally route to active worker alice)
+    update1 = {
+        'message': {
+            'chat': {'id': 12345},
+            'message_id': 1,
+            'media_group_id': 'mg_test_123',
+            'photo': [{'file_id': 'photo1', 'file_size': 1000}],
+        }
+    }
+    router.handle_message(update1)
+
+    # Photo 2: HAS caption with @bob mention
+    update2 = {
+        'message': {
+            'chat': {'id': 12345},
+            'message_id': 2,
+            'media_group_id': 'mg_test_123',
+            'caption': '@bob check these icons',
+            'photo': [{'file_id': 'photo2', 'file_size': 2000}],
+        }
+    }
+    router.handle_message(update2)
+
+    # Wait for the media group flush timer
+    time.sleep(0.8)
+
+# Both photos should be downloaded to bob's inbox (not alice)
+assert len(downloaded_targets) == 2, f'Expected 2 downloads, got {len(downloaded_targets)}: {downloaded_targets}'
+for t in downloaded_targets:
+    assert t == 'bob', f'Expected download target bob, got: {t}'
+
+# Bob should have received the combined message
+send_calls = mock_workers.send.call_args_list
+assert len(send_calls) >= 1, f'expected at least 1 send call, got {len(send_calls)}'
+recipients = [c[0][0] for c in send_calls]
+assert 'bob' in recipients, f'expected bob in recipients, got: {recipients}'
+assert 'alice' not in recipients, f'alice should NOT have received it, recipients: {recipients}'
+
+# Message should contain both image paths and the caption
+sent_text = send_calls[0][0][1]
+assert 'photo1' in sent_text, f'expected photo1 path in message, got: {sent_text!r}'
+assert 'photo2' in sent_text, f'expected photo2 path in message, got: {sent_text!r}'
+assert '@bob check these icons' in sent_text, f'expected caption in message, got: {sent_text!r}'
+
+bridge._MEDIA_GROUP_WAIT = orig_wait
+router.workers = orig_workers
+bridge.SESSIONS_DIR = orig_sessions_dir
+bridge.admin_chat_id = orig_admin
+sys.stdout.write('OK\n')
+sys.stdout.flush()
+os._exit(0)
+PYEOF
+    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    if grep -q "OK" "$tmpout"; then
+        success "Media group routes all photos to @mentioned worker"
+    else
+        cat "$tmpout" >&2
+        fail "Media group routing test failed"
     fi
     rm -f "$tmpscript" "$tmpout"
 }
@@ -13715,19 +13833,25 @@ real_uuid = 'real-uuid-abc123-def456-7890-111213141516'
 
 bridge._registry_add('worker1', 'claude', 123)
 
-# Non-authoritative: returns stale cache (fast path)
+# Non-authoritative: returns cached value (fast path)
 sid_stale = bridge.get_claude_session_id('worker1')
 assert sid_stale == 'stale-uuid-does-not-exist', f'non-auth should trust cache, got {sid_stale!r}'
 
-# Authoritative: scans, overrides cache
+# Authoritative: ALSO returns cached value (per-worker cache preferred over
+# CWD-based scan to prevent cross-worker contamination when workers share a CWD)
 sid = bridge.get_claude_session_id('worker1', authoritative=True)
-assert sid == real_uuid, f'expected {real_uuid!r}, got {sid!r}'
+assert sid == 'stale-uuid-does-not-exist', f'authoritative should prefer cache, got {sid!r}'
 
+# Cache still has the per-worker value (NOT overwritten by scan)
 cached = (session_dir / 'claude_session_id').read_text().strip()
-assert cached == real_uuid, f'cache not refreshed: got {cached!r}'
+assert cached == 'stale-uuid-does-not-exist', f'cache should not be overwritten by scan: got {cached!r}'
 
-# Next non-authoritative read picks up refreshed cache
-assert bridge.get_claude_session_id('worker1') == real_uuid
+# When cache is EMPTY, scan kicks in as fallback (self-heal)
+(session_dir / 'claude_session_id').write_text('')
+sid_healed = bridge.get_claude_session_id('worker1', authoritative=True)
+assert sid_healed == real_uuid, f'empty cache should trigger scan fallback, got {sid_healed!r}'
+cached_healed = (session_dir / 'claude_session_id').read_text().strip()
+assert cached_healed == real_uuid, f'scan result should be cached after self-heal: got {cached_healed!r}'
 
 bridge.SESSIONS_DIR = orig_sessions
 bridge.CLAUDE_PROJECTS_DIR = orig_projects
@@ -13737,9 +13861,9 @@ shutil.rmtree(tmpdir, ignore_errors=True)
 shutil.rmtree(projects_dir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "get_claude_session_id authoritative overrides stale cache"
+        success "get_claude_session_id authoritative prefers cache over scan"
     else
-        fail "authoritative scan override test failed"
+        fail "authoritative cache preference test failed"
     fi
 }
 
@@ -13764,7 +13888,6 @@ bridge.SESSIONS_DIR.mkdir()
 
 session_dir = bridge.SESSIONS_DIR / 'ren'
 session_dir.mkdir()
-(session_dir / 'claude_session_id').write_text('stale-vps-cache')
 (session_dir / 'claude_session_cwd').write_text('/Users/beastoinagents/omi/omi-ren')
 bridge._registry_add('ren', 'claude', 123, host='mac-mini')
 
@@ -13776,12 +13899,19 @@ def mock_remote(cmd, host=None, **kwargs):
                          stderr='')
     return MagicMock(returncode=1, stdout='', stderr='unexpected')
 
+# With non-empty cache, authoritative returns cached value (not scan)
+(session_dir / 'claude_session_id').write_text('stale-vps-cache')
 with patch('bridge._remote_run', side_effect=mock_remote):
     sid = bridge.get_claude_session_id('ren', authoritative=True)
+assert sid == 'stale-vps-cache', f'authoritative should prefer cache over remote scan, got {sid!r}'
 
-assert sid == 'fresh-mac-uuid', f'expected fresh-mac-uuid, got {sid!r}'
+# With EMPTY cache, authoritative scans remote as fallback (self-heal)
+(session_dir / 'claude_session_id').write_text('')
+with patch('bridge._remote_run', side_effect=mock_remote):
+    sid = bridge.get_claude_session_id('ren', authoritative=True)
+assert sid == 'fresh-mac-uuid', f'empty cache should trigger remote scan, got {sid!r}'
 cached = (session_dir / 'claude_session_id').read_text().strip()
-assert cached == 'fresh-mac-uuid', f'cache should be refreshed: {cached!r}'
+assert cached == 'fresh-mac-uuid', f'scan result should be cached: {cached!r}'
 
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -13789,9 +13919,9 @@ bridge.SESSIONS_DIR = orig_sessions
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "authoritative scan works for remote teleported workers"
+        success "authoritative prefers cache over remote scan, self-heals when empty"
     else
-        fail "remote authoritative scan test failed"
+        fail "remote authoritative cache preference test failed"
     fi
 }
 
@@ -22668,6 +22798,7 @@ run_unit_tests() {
     run_test test_media_at_mention_routes_to_mentioned_worker
     run_test test_media_downloads_to_mentioned_worker_inbox
     run_test test_media_reply_to_routes_to_replied_worker
+    run_test test_media_group_routes_all_photos_to_mentioned_worker
     run_test test_reply_with_mention_forwards_replied_media
     run_test test_get_any_session_id
     run_test test_progress_continuity_for_noninteractive
