@@ -2,55 +2,58 @@
 
 ## Test Modes
 
-The test suite supports three modes:
+The test suite has three modes. Each mode runs more tests than the one before it.
 
-| Mode | Command | Time |
-|------|---------|------|
-| **FAST** | `FAST=1 ./test.sh` | ~10-15s |
-| **Default** | `./test.sh` | ~2-3 min |
-| **FULL** | `FULL=1 ./test.sh` | ~5 min |
+| Mode | Command | Time | What it runs |
+|------|---------|------|--------------|
+| **FAST** | `FAST=1 ./test.sh` | ~10-15s | Unit + CLI tests only |
+| **Default** | `./test.sh` | ~2-3 min | FAST + integration tests |
+| **FULL** | `FULL=1 ./test.sh` | ~5 min | Default + tunnel tests |
 
-For workflow rules (when to run which mode), see `CLAUDE.md`.
+See `AGENTS.md` for workflow rules on when to run each mode.
 
-### What Each Mode Tests
+### FAST Mode (No Bridge, No Network)
 
-**FAST mode** (no bridge, no network):
-- Python imports and functions
+FAST mode tests run without a bridge process. They test:
+- Python imports and function behavior
 - Message formatting and splitting
-- CLI flags (--help, --version, --node, --port)
-- Constants and configuration validation
-- Concurrency helpers (locks)
-- Hook install/uninstall
+- CLI flags (`--help`, `--version`, `--node`, `--port`)
+- Constants and configuration values
+- Concurrency helpers (locks, paste buffer)
+- Hook install and uninstall
+- Forge Go tests (with `-short` flag)
 
-**Default mode** (bridge running locally):
-- Everything in FAST mode, plus:
+### Default Mode (Bridge Running Locally)
+
+Default mode starts a bridge on port 8295. It runs all FAST tests plus:
 - Bridge startup and health check
-- All Telegram commands (/hire, /team, /focus, etc.)
+- All Telegram commands (`/hire`, `/team`, `/focus`, etc.)
 - Admin authorization
-- Worker routing (@mention, @all, reply-to)
+- Worker routing (`@mention`, `@all`, reply-to)
 - Security (webhook secret, token isolation, file permissions)
-- Image/document handling
-- /response and /notify endpoints
+- Image and document handling
+- `/response` and `/notify` endpoints
 - Persistence files
+- Guest system endpoints
+- Pilot grid endpoints
 
-**FULL mode**:
-- Everything in Default mode, plus:
+### FULL Mode
+
+FULL mode runs all Default tests plus:
 - Cloudflare tunnel startup
-- Webhook configuration with real Telegram API
+- Webhook configuration with the real Telegram API
 
 ## Test Pyramid
 
 ```
         /\
-       /  \  FULL: Tunnel + Webhook
+       /  \  FULL: Tunnel + Webhook (1 test)
       /----\
-     /      \ Default: Bridge + Commands
+     /      \ Default: Bridge + Commands (~92 tests)
     /--------\
-   /          \ FAST: Unit + CLI
-  /-----------\
+   /          \ FAST: Unit + CLI (~392 tests)
+  /------------\
 ```
-
-Workflow guidance lives in `CLAUDE.md`.
 
 ## Quick Start
 
@@ -60,358 +63,378 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: 232 test functions** (see inventory below)
+**Current coverage: ~485 test functions across all modes**
 
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Telegram Bot Commands | 19 | 100% |
-| CLI Commands & Flags | 37 | 97% |
-| Message Routing | 14 | 100% |
-| Security | 11 | 100% |
-| Hook Behavior | 15 | 100% |
-| Persistence Files | 14 | 100% |
-| Image/Document Handling | 20 | 100% |
-| HTTP Endpoints | 9 | 100% |
-| Misc Behavior | 12 | 100% |
+### By Mode
 
-**By suite/mode:**
+| Mode | Tests | Notes |
+|------|-------|-------|
+| Unit (FAST) | ~381 | Imports, formatting, helpers, all subsystems |
+| CLI (FAST) | ~10 | Flags, commands, webhook, hook coverage |
+| Forge Go (FAST) | 1 aggregate | Runs Go test suite internally |
+| Integration (Default) | ~92 | Commands, security, routing, endpoints |
+| Tunnel (FULL) | 1 | Cloudflare tunnel + webhook setup |
 
-| Suite | Tests | Notes |
-|-------|-------|-------|
-| Unit (FAST) | 121 | imports, formatting, core helpers |
-| CLI (FAST) | 30 | flags, commands, webhook/hook coverage |
-| Integration | 65 | commands, security, routing, endpoints |
-| Tunnel (FULL) | 1 | cloudflare tunnel, webhook setup |
+### By Subsystem
 
-**Only 2 features untested:**
-- `-f`, `--force` flag (tested implicitly in other tests)
-- Interactive prompt for multiple nodes (requires TTY input)
+| Subsystem | Scope |
+|-----------|-------|
+| Message formatting | Splitting, HTML, markdown conversion, tables |
+| Backend registry | Claude, Codex, Gemini, OpenCode backends |
+| Worker lifecycle | Hire, end, restart, pause, naming, state |
+| Teleport | SSH foundation, remote dispatch, host propagation |
+| Git sync | Repo detection, push/pull state, rsync fallback |
+| Media | Image/file tags, validation, size limits |
+| Persistence | Registry, pending, session files |
+| Concurrency | Locks, paste buffer, bracketed paste, flock |
+| Voice | STT transcription, TTS synthesis, auto-TTS |
+| Transcript | HTML viewer, search (BM25), pagination, edit diffs |
+| Team chat | Indexing, FTS5 search, rewind, reply context |
+| Memory | Status, wake-up, recall, failure isolation |
+| Transport | Interface, local transport, log file |
+| Gmail connector | Import, poll cycle |
+| GitHub connector | Import, poll, dedup, sender filtering |
+| Guest system | Token, expiry, inbox, send/reply |
+| Channels | Create, members, send, cap, expiry, fan-out |
+| Relay | Tokens, URL format, auth, send/reply/poll |
 
 ## Feature Test Matrix (Backend Coverage)
 
-Track test coverage across tmux and exec backends. When adding a feature, ensure it works for both backend types (or document exceptions).
+Each feature must work for both tmux and exec backends. This table tracks coverage.
 
 | Feature | Test | Backend Coverage |
 |---------|------|------------------|
-| Session/worker creation | `test_hire_command` | tmux e2e; exec parsing via `test_hire_backend_parsing` |
-| Session/worker survival | `test_tmux_mode_session_stays_alive` | tmux e2e; exec lifecycle via backend unit tests |
-| Message delivery verified | `test_tmux_mode_message_delivery` | tmux e2e; exec forwarding via `test_pipe_forwarding_to_codex` |
-| HTML escaping | `test_forward_to_bridge_html_escape` | exec responses (codex/gemini/opencode) |
-| Focus switching | `test_focus_command` | all backends |
-| @mention routing | `test_at_mention` | all backends |
-| End/kill session | `test_end_command` | all backends |
-| Inter-worker messaging | `test_worker_to_worker_pipe` | all backends |
-| Image/document handling | `test_incoming_document_e2e` | all backends |
+| Worker creation | `test_hire_command` | tmux e2e; exec via `test_hire_backend_parsing` |
+| Worker survival | `test_tmux_mode_session_stays_alive` | tmux e2e; exec via backend unit tests |
+| Message delivery | `test_tmux_mode_message_delivery` | tmux e2e; exec via `test_pipe_forwarding_to_codex` |
+| Escape flag | `test_forward_to_bridge_escape_flag` | exec responses (codex/gemini/opencode) |
+| @mention routing | `test_mention_routing` | All backends |
+| End/kill session | `test_end_command` | All backends |
+| Inter-worker messaging | `test_worker_to_worker_pipe` | All backends |
+| Image/document handling | `test_incoming_document_e2e` | All backends |
 
 ## Complete Test Inventory
 
-> **Total: 225 test functions**
+> **Total: ~485 test functions**
 >
-> Keep this list updated when adding new tests.
+> Update this list when you add new tests.
 
-### Unit Tests (FAST mode, no bridge)
+### Unit Tests (FAST Mode)
 
-| Test | Description |
-|------|-------------|
-| `test_imports` | Verify bridge.py imports without errors |
-| `test_version` | Verify CLI version command works |
-| `test_message_splitting_short` | Messages under 4096 chars unchanged |
-| `test_message_splitting_newlines` | Split at newline boundaries |
-| `test_message_splitting_hard` | Hard split when no boundaries |
-| `test_message_split_safe_boundaries` | Verify safe split boundary detection |
-| `test_multipart_formatting` | Session prefix on multi-part messages |
-| `test_multipart_chained_reply_to` | Reply chain for multipart messages |
-| `test_telegram_max_length` | TELEGRAM_MAX_LENGTH constant = 4096 |
-| `test_image_tag_parsing` | `[[image:/path\|caption]]` extraction |
-| `test_file_tag_parsing` | `[[file:/path\|caption]]` extraction |
-| `test_image_path_validation` | Allowlisted image extensions |
-| `test_file_extension_validation` | Allowlisted/blocked document extensions |
-| `test_code_fence_protection` | Tags inside code fences not parsed |
-| `test_escape_tag_preservation` | Escaped `\[[image:...]]` preserved |
-| `test_response_prefix_formatting` | Response prefix formatting |
-| `test_response_with_image_tags` | Response with image tags |
-| `test_animation_message_no_focused` | GIF/animation requires focused worker |
-| `test_animation_inbound_routing` | GIF/animation inbound routing |
-| `test_gif_outbound_uses_send_animation` | Outbound .gif uses sendAnimation |
-| `test_persistence_file_functions` | save/load last_chat_id and last_active |
-| `test_pending_set_and_clear` | set_pending and clear_pending functions |
-| `test_pending_auto_timeout` | 10 minute pending auto-cleanup |
-| `test_worker_name_sanitization` | Names sanitized to a-z, 0-9, hyphen |
-| `test_hire_backend_parsing` | /hire backend parsing (--codex, codex- prefix) |
-| `test_team_output_includes_backend` | /team output includes backend metadata |
-| `test_progress_output_includes_backend` | /progress output includes backend metadata |
-| `test_worker_send_uses_backend` | worker_send routes to backend handler |
-| `test_backend_registry_exists` | Backend registry exists |
-| `test_get_registered_sessions_includes_exec_workers` | exec workers included in session scans |
-| `test_backend_env_metadata` | WORKER_BACKEND exported via tmux env |
-| `test_codex_end_cleans_session` | /end cleans codex session metadata + pipe |
-| `test_codex_relaunch_clears_session_id` | /restart --clean clears codex session id |
-| `test_restart_with_name` | /restart defaults to resume with explicit worker name |
-| `test_restart_clean_with_name` | /restart --clean does fresh relaunch with explicit worker name |
-| `test_codex_pause_clears_pending` | /pause clears pending for codex workers |
-| `test_adapter_pid_tracking` | Adapter PID tracking and kill_adapter |
-| `test_pause_kills_adapter` | /pause kills inflight adapter |
-| `test_end_kills_adapter` | /end kills inflight adapter |
-| `test_adapter_stderr_logging` | Adapter stderr logged to per-worker adapter.log |
-| `test_poisoned_detection` | Poisoned detection via adapter.log |
-| `test_compute_state_non_interactive` | compute_state handles non-interactive backends |
-| `test_watchdog_alert_on_stuck` | Watchdog alert fires on stuck transition |
-| `test_get_workers_includes_codex` | /workers includes codex exec workers |
-| `test_pipe_forwarding_to_codex` | Inter-worker pipe forwards to codex |
-| `test_worker_pipe_path_constant` | Worker pipe path root constant |
-| `test_get_worker_pipe_path_function` | Worker pipe path helper |
-| `test_get_workers_function` | get_workers() returns worker metadata |
-| `test_worker_pipe_creation_on_startup` | Worker pipe created on startup |
-| `test_worker_pipe_cleanup_on_end` | Worker pipe cleaned on /end |
-| `test_codex_response_requires_escape` | codex responses flagged for escape |
-| `test_update_bot_commands_includes_codex` | Bot commands include codex worker shortcuts |
-| `test_broadcast_includes_codex` | @all broadcast includes codex workers |
-| `test_send_to_worker_function_exists` | send_to_worker helper exists |
-| `test_send_to_worker_not_found` | send_to_worker handles missing worker |
-| `test_send_to_worker_uses_backend_registry` | send_to_worker routes via backend registry |
-| `test_send_to_worker_tmux_mode` | send_to_worker uses tmux for tmux backends |
-| `test_reserved_names_rejection` | Reserved names (commands, aliases) rejected |
-| `test_bot_commands_structure` | BOT_COMMANDS list structure |
-| `test_blocked_commands_list` | All blocked commands configured |
-| `test_max_file_size` | MAX_FILE_SIZE = 20MB |
-| `test_sandbox_config` | Sandbox config constants |
-| `test_sandbox_docker_cmd` | Docker command generation |
-| `test_extra_mounts_docker_cmd` | Extra mounts in Docker command |
-| `test_tmux_send_locks` | Per-session lock mechanism |
-| `test_graceful_shutdown` | graceful_shutdown function exists |
-| `test_startup_notification_flag` | startup_notified flag exists |
-| `test_typing_indicator_function` | Typing indicator function exists |
-| `test_welcome_message_new_worker` | Welcome message constant exists |
-| `test_file_tag_welcome_instructions` | File tag parsers available |
-| `test_reply_context_formatting` | Reply context format |
-| `test_document_message_format` | Document message format |
+These tests run without a bridge. They test Python functions and constants directly.
 
-### CLI Tests (FAST mode, no bridge)
+**Core formatting and splitting:**
+- Response prefix and multipart formatting
+- Message splitting (short, newlines, hard, HTML-aware)
+- Sandbox Docker command generation
+- Hook transcript extraction (single, multiple, skip, failure)
 
-| Test | Description |
-|------|-------------|
-| `test_cli_help` | --help shows usage |
-| `test_cli_version` | --version shows version |
-| `test_cli_node_flag` | --node=value and --node value syntax |
-| `test_cli_port_flag` | -p=value and --port value syntax |
-| `test_cli_all_flag` | --all flag syntax |
-| `test_cli_no_tunnel_flag` | --no-tunnel flag syntax |
-| `test_cli_tunnel_url_flag` | --tunnel-url flag syntax |
-| `test_cli_headless_flag` | --headless flag syntax |
-| `test_cli_quiet_flag` | --quiet flag syntax |
-| `test_cli_verbose_flag` | --verbose flag syntax |
-| `test_cli_no_color_flag` | --no-color flag syntax |
-| `test_cli_env_file_flag` | --env-file flag syntax |
-| `test_cli_sandbox_image_flag` | --sandbox-image flag syntax |
-| `test_cli_mount_flag` | --mount flag syntax |
-| `test_cli_mount_ro_flag` | --mount-ro flag syntax |
-| `test_cli_default_ports` | Default ports by node name |
-| `test_cli_unknown_command` | Unknown command rejection |
-| `test_cli_missing_token_error` | Missing token error message |
-| `test_cli_hook_install_uninstall` | Hook install command |
-| `test_cli_hook_uninstall` | Hook uninstall command |
-| `test_cli_hook_test_no_chat` | Hook test reports missing chat ID |
-| `test_cli_stop_command` | stop command syntax |
-| `test_cli_restart_command` | restart command syntax |
-| `test_cli_clean_command` | clean command syntax |
-| `test_cli_status_command` | status command execution |
-| `test_cli_status_json_output` | --json flag produces valid JSON |
-| `test_cli_webhook_info` | webhook info subcommand |
-| `test_cli_webhook_set_url` | webhook URL setting |
-| `test_cli_webhook_set_requires_https` | webhook rejects non-HTTPS |
-| `test_cli_webhook_delete_requires_confirm` | webhook delete confirmation |
-| `test_node_resolution_priority` | --node > NODE_NAME > auto-detect |
-| `test_node_name_sanitization_cli` | Node name sanitization |
-| `test_default_node_when_none_running` | Default node = prod |
-| `test_equals_syntax` | --flag=value syntax |
+**Markdown conversion:**
+- `markdown_to_telegram_html` conversion
+- `_pipe_tables_to_html` inline markdown and links
+- `_wrap_plain_tables` no double-escaping
+- Partial `sendRichMessage` failure deduplication
+- Forward-to-bridge raw markdown payload
 
-### Hook Tests (FAST mode, no bridge)
+**Backend registry:**
+- Registry exists with expected backends
+- `get_registered_sessions` includes non-interactive workers
 
-| Test | Description |
-|------|-------------|
-| `test_hook_env_validation` | Hook exits on missing env vars |
-| `test_hook_session_filtering` | Only processes matching TMUX_PREFIX |
-| `test_hook_bridge_url_precedence` | BRIDGE_URL over PORT |
-| `test_hook_bridge_url_env` | BRIDGE_URL env var usage |
-| `test_hook_port_fallback` | PORT fallback when no BRIDGE_URL |
-| `test_hook_tmux_prefix_usage` | TMUX_PREFIX usage |
-| `test_hook_sessions_dir_usage` | SESSIONS_DIR usage |
-| `test_hook_tmux_fallback_flag` | TMUX_FALLBACK=0 disables fallback |
-| `test_hook_fails_closed` | Silent exit on missing config |
-| `test_hook_pending_cleanup` | Pending file removed after hook |
-| `test_hook_reads_tmux_env_first` | Tmux env takes precedence |
-| `test_hook_transcript_extraction_retry` | Transcript extraction retry logic |
-| `test_hook_tmux_fallback_warning` | Fallback warning message |
-| `test_hook_async_forward_timeout` | Async forward with timeout |
-| `test_hook_helper_script_exists` | Helper script exists |
+**Worker naming and lifecycle:**
+- `/hire` backend parsing (`--codex`, `codex-` prefix)
+- `/hire` rejects missing backend binary
+- `/restart` rejects missing backend binary
+- `/restart` defaults to resume, `--clean` does relaunch
+- `/pause` clears pending for codex workers
+- `/end` cleans codex session metadata and pipe
+- Adapter PID tracking, pause kills adapter, end kills adapter
+- Adapter stderr logging
+- Poisoned detection via adapter.log
+- `compute_state` for non-interactive backends
+- Watchdog alert on stuck transition
+- `/workers` includes codex exec workers
+- `@mention` parsing
+- Reserved names rejection
+- Bot commands structure and blocked commands list
 
-### Bridge Environment Tests (FAST mode)
+**Teleport SSH foundation:**
+- `_remote_run` and `_remote_copy` helpers
+- Host fields in worker registry
+- `BRIDGE_URL` auto-detection
+- Machines config loading
 
-| Test | Description |
-|------|-------------|
-| `test_bridge_env_bot_token` | TELEGRAM_BOT_TOKEN handling |
-| `test_bridge_env_port` | PORT env var handling |
-| `test_bridge_env_webhook_secret` | TELEGRAM_WEBHOOK_SECRET handling |
-| `test_bridge_env_sessions_dir` | SESSIONS_DIR handling |
-| `test_bridge_env_tmux_prefix` | TMUX_PREFIX handling |
-| `test_bridge_env_bridge_url` | BRIDGE_URL handling |
-| `test_bridge_env_sandbox` | SANDBOX_* env vars handling |
+**Git sync:**
+- Git repo detection and project naming
+- Bare repos, push/pull state
+- rsync fallback
 
-### Machine Catalog Tests (FAST mode)
+**Remote dispatch (Phase 1):**
+- Pane command execution
+- Process running checks
+- tmux operations on remote hosts
 
-| Test | Description |
-|------|-------------|
-| `test_machines_config_loads_valid` | machines.json v1 schema loads |
-| `test_machines_config_missing_file_fallback` | Missing machines.json returns an implicit local bridge machine |
-| `test_machines_config_malformed_rejected` | Malformed machines.json fails loudly |
-| `test_machines_config_missing_required_field` | Missing required machine fields are rejected |
-| `test_get_machines_includes_workers_and_health` | get_machines reports worker placement and host health |
-| `test_machines_from_caller_access` | get_machines access hints are caller-aware |
+**Call site host propagation (Phase 2):**
+- `/team`, `/pause`, `/progress` pass host
+- Interactive reply, checkin, watchdog pass host
 
-### Persistence File Tests (FAST mode)
+**Node-derived config:**
+- tmux prefix, sessions dir, port, bridge URL by node name
 
-| Test | Description |
-|------|-------------|
-| `test_pid_file_creation` | pid file creation code |
-| `test_bridge_pid_file_creation` | bridge.pid file creation code |
-| `test_tunnel_pid_file_creation` | tunnel.pid file creation code |
-| `test_tunnel_log_file_creation` | tunnel.log file creation code |
-| `test_tunnel_url_file_creation` | tunnel_url file creation code |
-| `test_port_file_creation` | port file creation code |
-| `test_bot_id_cached` | bot_id caching code |
-| `test_bot_username_cached` | bot_username caching code |
-| `test_bridge_log_file_creation` | bridge.log file creation code |
-| `test_pending_file_timestamp` | pending file timestamp format |
-| `test_chat_id_file_content` | chat_id file content format |
+**Media tags:**
+- Image and file tag parsing
+- `/notify` image tags
+- Remote worker image tags (no local validation)
 
-### Status Diagnostics Tests (FAST mode)
+**Persistence functions:**
+- File functions, pending set/clear/timeout
+- Backend file operations
 
-| Test | Description |
-|------|-------------|
-| `test_orphan_process_detection` | Orphan process detection code |
-| `test_webhook_conflict_warning` | Webhook conflict warning code |
-| `test_tmux_env_mismatch_detection` | Tmux env mismatch detection code |
-| `test_stale_hooks_detection` | Stale hooks detection code |
+**Worker registry:**
+- Add, remove, bootstrap, corrupt recovery
+- Host preservation, registry operations
 
-### Run/Tunnel Behavior Tests (FAST mode)
+**Copy improvement:**
+- Activity normalization
+- Team header formatting
+- Watchdog alert copy
 
-| Test | Description |
-|------|-------------|
-| `test_run_auto_installs_hook` | run auto-installs hook code |
-| `test_webhook_failure_cleanup` | Cleanup on webhook failure code |
-| `test_tunnel_watchdog_behavior` | Tunnel watchdog behavior code |
+**Concurrency:**
+- tmux send locks, paste buffer
+- Bracketed paste, flock
 
-### Integration Tests (Default mode, bridge required)
+**Misc behavior:**
+- Watchdog alert, extra mounts, checkin note
 
-| Test | Description |
-|------|-------------|
-| `test_bridge_starts` | Bridge starts and responds |
-| `test_health_endpoint` | GET / health check |
-| `test_admin_registration` | First user becomes admin |
-| `test_admin_auto_learn_first_user` | Auto-learn admin behavior |
-| `test_admin_chat_id_preset` | ADMIN_CHAT_ID preset behavior |
-| `test_admin_restored_from_last_chat_id` | Admin restored on restart |
-| `test_non_admin_rejection` | Non-admin silently rejected |
-| `test_hire_command` | /hire creates worker |
-| `test_team_command` | /team lists workers |
-| `test_focus_command` | /focus switches worker |
-| `test_progress_command` | /progress shows status |
-| `test_pause_command` | /pause sends Escape |
-| `test_relaunch_command` | /restart restarts worker |
-| `test_settings_command` | /settings shows config |
-| `test_end_command` | /end offboards worker |
-| `test_dynamic_bot_command_list_update` | Bot command list updates on /hire and /end |
-| `test_additional_commands` | Additional command tests |
-| `test_worker_shortcut_focus_only` | /<worker> switches focus |
-| `test_worker_shortcut_with_message` | /<worker> msg routes + focuses |
-| `test_command_with_botname_suffix` | Command @botname suffix stripped |
-| `test_blocked_commands` | Blocked commands rejected |
-| `test_blocked_commands_integration` | Blocked commands via webhook |
-| `test_unknown_command_passthrough` | Unknown /cmd passed to worker |
-| `test_unknown_commands_passthrough` | Multiple unknown commands |
-| `test_at_mention` | @name routing |
-| `test_at_all_broadcast` | @all broadcast |
-| `test_reply_routing` | Reply to worker message |
-| `test_reply_context` | Reply context payload |
-| `test_reply_with_explicit_context` | Explicit context format |
-| `test_send_to_worker_integration` | send_to_worker integration path |
-| `test_send_endpoint_delivers_to_worker` | POST /send delivers through bridge routing |
-| `test_session_files` | Session file permissions |
-| `test_secure_directory_permissions` | Directory permissions 0700 |
-| `test_inbox_directory` | Inbox directory creation |
-| `test_last_chat_id_persistence` | last_chat_id persistence |
-| `test_last_active_persistence` | last_active persistence |
-| `test_response_endpoint` | POST /response endpoint |
-| `test_response_endpoint_missing_fields` | /response rejects missing fields |
-| `test_response_endpoint_no_chat_id` | /response 404 for unknown session |
-| `test_response_without_pending` | /response works without pending |
-| `test_notify_endpoint` | POST /notify endpoint |
-| `test_notify_endpoint_missing_text` | /notify rejects missing text |
-| `test_workers_endpoint_exists` | GET /workers endpoint exists |
-| `test_workers_endpoint_json_structure` | /workers JSON structure |
-| `test_workers_endpoint_shows_tmux_workers` | /workers includes tmux workers |
-| `test_workers_endpoint_empty_when_no_workers` | /workers empty when no workers |
-| `test_machines_endpoint` | GET /machines endpoint structure |
-| `test_webhook_secret_acceptance` | Webhook secret acceptance path |
-| `test_webhook_secret_validation` | Webhook secret validation |
-| `test_graceful_shutdown_notification` | Shutdown notification sent |
-| `test_typing_indicator_loop` | Typing indicator loop runs |
-| `test_token_isolation` | Token not exposed to tmux |
-| `test_photo_message_no_focused` | Photo without focused worker |
-| `test_document_message_no_focused` | Document without focused worker |
-| `test_document_message_routing` | Document routing |
-| `test_status_shows_workers` | Status shows workers |
+**File validation:**
+- Size limit (50MB maximum)
+- Incoming media types and extensions
 
-### Image/Document E2E Tests (requires TEST_CHAT_ID)
+**Worker discovery:**
+- Pipe creation and cleanup
+- Liveness check
 
-| Test | Description |
-|------|-------------|
-| `test_incoming_document_e2e` | Document upload → webhook → download |
-| `test_incoming_image_e2e` | Image upload → webhook → download |
-| `test_caption_prepended_to_message` | Caption prepended to message |
-| `test_download_failure_notification` | Download failure notification |
-| `test_inbox_path_under_tmp` | Inbox under /tmp |
-| `test_inbox_cleanup_on_offboard` | Inbox cleanup on /end |
-| `test_image_path_restriction` | Image path restriction |
-| `test_document_no_path_restriction` | Document path flexibility |
-| `test_blocked_filenames_list` | Blocked filenames |
-| `test_send_failure_notification` | Send failure notification |
-| `test_20mb_size_limit` | 20MB size limit |
+**send_to_worker abstraction:**
+- Backend registry usage
+- Missing worker handling
+- tmux mode routing
 
-### Misc Behavior Tests (Integration)
+**Voice mode:**
+- STT transcription and TTS synthesis
+- Voice toggle and auto-TTS
 
-| Test | Description |
-|------|-------------|
-| `test_eye_reaction_on_acceptance` | Eyes reaction on acceptance |
-| `test_typing_indicator_sent_while_pending` | Typing indicator while pending |
-| `test_new_worker_welcome_message` | New worker welcome message |
-| `test_test_env_vars_documented` | Test env vars documented |
+**Transcript viewer:**
+- HTML rendering, search (BM25), pagination
+- Edit diffs, turn grouping, rewind tokens
 
-### Tunnel Tests (FULL mode only)
+**Transcript index:**
+- Missing/empty file handling
+- Indexing, noise skipping
+- FTS5 search, pagination, stats
 
-| Test | Description |
-|------|-------------|
-| `test_with_tunnel` | Cloudflare tunnel + webhook config |
+**Team chat index:**
+- Indexing, sender resolution
+- FTS5 search, page-for-msg
+
+**Team chat bridge:**
+- Rewind team token, rendering
+- Search, anchor, reply context
+
+**Memory subcommand:**
+- Status, wake-up, recall, failure isolation
+
+**Transport abstraction:**
+- Interface, local transport, log file, init selection
+
+**Gmail connector:**
+- Import, poll cycle
+
+**Rich message / reply context:**
+- Text extraction, reply context formatting
+
+**GitHub connector:**
+- Import, gh API usage, dedup
+- Poll cycle, sender filtering
+
+**Guest system:**
+- Token generation, name generation/validation
+- Expiry, inbox operations
+
+**Group channels:**
+- Create, members, messages
+- Cap, expiry
+
+**Relay guideline links:**
+- Tokens, URL format, markdown
+- Auth, send/reply/poll
+
+### CLI Tests (FAST Mode)
+
+These tests run `claudecode-telegram.sh` directly. They do not start a bridge.
+
+- `--help` shows usage
+- `--version` shows version
+- `--node`, `--port`, `--all` flag syntax
+- `--no-tunnel`, `--tunnel-url`, `--headless`, `--quiet`, `--verbose` flags
+- `--no-color`, `--env-file`, `--sandbox-image`, `--mount`, `--mount-ro` flags
+- Default ports by node name
+- Unknown command rejection
+- Missing token error message
+- Hook install and uninstall
+- `stop`, `restart`, `clean`, `status` commands
+- `--json` flag produces valid JSON
+- `webhook info`, `webhook set`, `webhook delete` subcommands
+- Node resolution priority (`--node` > `NODE_NAME` > auto-detect)
+- Node name sanitization
+- Default node = prod when none running
+- `--flag=value` syntax
+
+### Integration Tests (Default Mode)
+
+These tests start a bridge on port 8295. They test real HTTP endpoints and Telegram command processing.
+
+**HTTP endpoints:**
+- `GET /` health check
+- `POST /response` endpoint (valid, missing fields, no chat_id, without pending)
+- `POST /notify` endpoint (valid, missing text)
+- `GET /workers` endpoint (exists, JSON structure, shows tmux workers, empty state)
+- `GET /machines` endpoint structure
+- API index returns curated endpoint list (not all routed endpoints)
+- 404 for unknown endpoints
+- `POST /register` forge registration
+
+**Admin:**
+- First user becomes admin
+- Auto-learn admin behavior
+- `ADMIN_CHAT_ID` preset
+- Admin restored from `last_chat_id`
+- Non-admin silently rejected
+
+**Bot commands:**
+- `/hire` creates worker
+- `/team` lists workers
+- `/focus` switches worker
+- `/progress` shows status
+- `/pause` sends Escape
+- `/restart` restarts worker
+- `/settings` shows config
+- `/end` offboards worker
+- Dynamic bot command list updates on `/hire` and `/end`
+
+**Worker naming (integration):**
+- Reserved names rejected via webhook
+- Worker shortcuts and unknown commands
+
+**Routing:**
+- `@name` mention routing
+- `@all` broadcast
+- Reply routing and context
+- Explicit context format
+
+**Tmux mode behavior:**
+- Session stays alive after creation
+- Message delivery to tmux session
+
+**Security:**
+- Webhook secret acceptance and validation
+- Graceful shutdown notification
+- Typing indicator loop
+- Token isolation (token not exposed to tmux)
+- Directory permissions (0700)
+- Session file permissions
+
+**Image/document handling:**
+- Inbox directory creation
+- Document routing
+- Incoming document and image e2e (requires `TEST_CHAT_ID`)
+- Response with image tags
+- Photo and document without focused worker
+- Caption prepended to message
+- Download failure notification
+- Inbox under `/tmp`
+- Inbox cleanup on `/end`
+- Document path flexibility
+- Blocked filenames
+- Send failure notification
+- 50MB size limit
+
+**Persistence (integration):**
+- `last_chat_id` persistence
+- `last_active` persistence
+
+**Hook behavior (integration):**
+- Hook env validation
+- Checkin hook validation and calls
+
+**Worker discovery (integration):**
+- Workers endpoint existence and structure
+- tmux workers shown, empty state
+
+**send_to_worker integration:**
+- `POST /send` delivers through bridge routing
+
+**Worker-to-worker pipe:**
+- Pipe message delivery
+
+**Tmux/process inspection:**
+- Process state checks
+
+**export_hook_env guard:**
+- Guard conditions
+
+**Pilot grid:**
+- Usage, grid endpoint
+- Single, multi, all enable
+- Nonexistent error
+
+**Guest system (integration):**
+- Register, send, inbox
+- Status, disconnect, expiry
+- Listing, mention routing
+- Telegram notification
+
+**Group channel (integration):**
+- Create, add members, send, messages
+- Nonmember rejection, delete, list
+- Telegram `/ch` command
+- Guest fan-out
+
+**Relay guideline link (integration):**
+- Guide endpoint, auth
+- Send, reply, messages
+- Guest relay multi-target
+- Channel send, filtered list
+- Legacy compat
+
+### Tunnel Tests (FULL Mode)
+
+- `test_with_tunnel` — Cloudflare tunnel startup + webhook configuration
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TEST_BOT_TOKEN` | Yes | Bot token from @BotFather |
-| `TEST_PORT` | No | Bridge port (default: 8295) |
-| `TEST_CHAT_ID` | No | Your chat ID for e2e tests (default: mock 123456789) |
-| `FAST` | No | Set to `1` for unit + CLI tests only |
-| `FULL` | No | Set to `1` to include tunnel tests |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TEST_BOT_TOKEN` | Yes | — | Bot token from @BotFather |
+| `TEST_CHAT_ID` | No | `123456789` | Your chat ID for e2e tests |
+| `TEST_PORT` | No | `8295` | Bridge port |
+| `TEST_PILOT_PORT` | No | `10175` | Pilot server port |
+| `TEST_NODE_DIR` | No | `~/.claude/telegram/nodes/test` | Node directory |
+| `TEST_FILTER` | No | — | Run only tests that match this string |
+| `FAST` | No | — | Set to `1` for unit + CLI tests only |
+| `FULL` | No | — | Set to `1` to include tunnel tests |
 
 ## Manual Testing
 
-### Simulate Telegram Webhook
+### Simulate a Telegram Webhook
+
+Start the bridge manually:
 
 ```bash
-# Start bridge
 TELEGRAM_BOT_TOKEN='...' PORT=8295 python3 bridge.py &
+```
 
-# Send simulated message
+Send a simulated message:
+
+```bash
 curl -X POST http://localhost:8295 \
   -H "Content-Type: application/json" \
   -d '{
@@ -428,17 +451,21 @@ curl -X POST http://localhost:8295 \
 
 ### Test with Real Telegram
 
-```bash
-# Quick tunnel (random URL each time)
-./claudecode-telegram.sh run
+Start a quick tunnel (random URL each time):
 
-# Or with persistent URL
+```bash
+./claudecode-telegram.sh run
+```
+
+Or use a persistent URL:
+
+```bash
 ./claudecode-telegram.sh run --tunnel-url https://your.domain.com
 ```
 
 ## Test Isolation
 
-Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/`:
+Tests run in isolation under `--node test`. This keeps test state separate from production.
 
 | Resource | Test | Production |
 |----------|------|------------|
@@ -450,20 +477,20 @@ Tests run isolated using `--node test` under `~/.claude/telegram/nodes/test/`:
 | Logs | `.../nodes/test/*.log` | `.../nodes/prod/*.log` |
 | Bot token | Separate test bot | Production bot |
 
-This allows running tests while production is active.
+You can run tests while production is active. The two nodes do not share state.
 
 ## Full E2E Test
 
-To test the complete response flow (hook -> bridge -> Telegram):
+To test the complete response flow (hook → bridge → Telegram):
 
 ```bash
 TEST_BOT_TOKEN='...' TEST_CHAT_ID='your-chat-id' ./test.sh
 ```
 
-With `TEST_CHAT_ID` set:
-- Bridge pre-locks to your chat ID (no auto-learn)
-- Test messages use your real chat ID
-- Response test sends actual message to your Telegram
+When you set `TEST_CHAT_ID`:
+- The bridge pre-locks to your chat ID (no auto-learn).
+- Test messages use your real chat ID.
+- The response test sends an actual message to your Telegram.
 
 ## CI Integration
 
@@ -494,48 +521,37 @@ test_my_feature() {
 }
 ```
 
-Then add to the appropriate runner function:
-- `run_unit_tests()` for tests that don't need the bridge
-- `run_cli_tests()` for CLI-only tests
-- `run_integration_tests()` for tests that need the bridge running
-- `run_tunnel_tests()` for tests that need the tunnel
+Add the function call to the correct runner:
+- `run_unit_tests()` — tests that do not need the bridge
+- `run_cli_tests()` — CLI-only tests
+- `run_integration_tests()` — tests that need the bridge running
+- `run_full_tests()` — tests that need the tunnel
 
-Also update:
-- The **Complete Test Inventory** list above
-- The **Test Coverage** tables if new tests expand coverage
+Then update this file:
+- Add the test to the **Complete Test Inventory** section above.
+- Update the **Test Coverage** counts if they changed.
 
-Call from the runner function:
-
-```bash
-run_unit_tests() {
-    # ... existing tests ...
-    test_my_feature
-}
-```
-
-## Missing Tests (To Be Implemented)
-
-This section tracks tests that should be added to ensure mode parity and complete coverage.
+## Missing Tests
 
 ### Critical (Mode Parity)
 
-All critical mode parity tests are now implemented. ✅
+All critical mode parity tests are implemented. ✅
 
 ### Important (No Test)
 
-These features have no tests in either mode and should be tested:
+These features have no test coverage:
 
 | Feature | Description |
 |---------|-------------|
-| Multipart response chaining behavior | Reply chain for multipart messages (reply_to_message_id) |
+| Multipart response chaining | Reply chain for multipart messages (`reply_to_message_id`) |
 
 ### Nice to Have
 
-Lower priority tests for edge cases and robustness:
+Lower priority tests for edge cases:
 
 | Feature | Description |
 |---------|-------------|
-| Direct worker crash recovery | Worker process crash detection and cleanup |
-| Concurrent pipe writes | Multiple workers writing to same pipe simultaneously |
+| Worker crash recovery | Process crash detection and cleanup |
+| Concurrent pipe writes | Multiple workers writing to the same pipe |
 | Pipe permissions | Named pipe has correct permissions (0o600) |
 | Path traversal protection | Prevent `../` in worker names for inbox paths |
