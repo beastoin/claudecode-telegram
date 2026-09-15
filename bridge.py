@@ -8577,11 +8577,13 @@ class CommandRouter:
 
     def handle_message(self, update):
         global admin_chat_id
+        print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
 
         msg = update.get("message", {})
         text = msg.get("text", "") or msg.get("caption", "")
         chat_id = msg.get("chat", {}).get("id")
         msg_id = msg.get("message_id")
+        print(f"[handle_message] chat_id={chat_id} admin={admin_chat_id} text={repr(text[:40])}", flush=True)
 
         photo = msg.get("photo")
         document = msg.get("document")
@@ -13665,13 +13667,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
         try:
             update = json.loads(body)
-            # Debug: show what update type we received
             update_types = [k for k in update.keys() if k != "update_id"]
-            if update_types and update_types[0] != "message":
-                print(f"Received update type: {update_types}")
+            msg = update.get("message", {})
+            text = msg.get("text", "") or msg.get("caption", "")
+            print(f"[webhook] update_id={update.get('update_id')}, types={update_types}, text={repr(text[:50]) if text else '(none)'}")
             if "message" in update:
+                def _safe_handle(upd):
+                    try:
+                        command_router.handle_message(upd)
+                    except Exception as exc:
+                        print(f"[webhook] handle_message CRASH: {exc}")
+                        import traceback
+                        traceback.print_exc()
                 threading.Thread(
-                    target=command_router.handle_message,
+                    target=_safe_handle,
                     args=(update,),
                     daemon=True,
                 ).start()
