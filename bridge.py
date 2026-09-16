@@ -8899,6 +8899,10 @@ class CommandRouter:
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
 
+    # @mention regex: negative lookbehind skips @ inside email addresses
+    # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)
+    _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
+
     def parse_at_mentions(self, text):
         """Extract known @mentions from anywhere in text. Returns (targets, original_text).
         Matches registered workers first, then active guests. Full message preserved."""
@@ -8909,7 +8913,7 @@ class CommandRouter:
             guest_names = {g["name"] for g in _guests.values() if not guest_is_expired(g["expires_at_unix"])}
         known = set(registered.keys()) | guest_names
         found = []
-        for match in re.finditer(r'@([a-zA-Z0-9-]+)', text):
+        for match in self._mention_re.finditer(text):
             name = match.group(1).lower()
             if name in known and name not in found:
                 found.append(name)
@@ -8924,7 +8928,7 @@ class CommandRouter:
             guest_names = {g["name"] for g in _guests.values() if not guest_is_expired(g["expires_at_unix"])}
         known = set(registered.keys()) | guest_names | {"all"}
         unknown = []
-        for match in re.finditer(r'@([a-zA-Z0-9-]+)', text):
+        for match in self._mention_re.finditer(text):
             name = match.group(1).lower()
             if name not in known and name not in unknown:
                 unknown.append(name)
