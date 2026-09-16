@@ -7150,10 +7150,35 @@ class WorkerManager:
 
         return registered
 
+    # TTL cache for get_registered_sessions: avoids SSH calls on every message.
+    # When a remote host is down, each scan_tmux_sessions() blocks for 10s per
+    # host on SSH timeout.  With 4+ calls per message routing path, this delays
+    # routing by 40+ seconds and effectively drops messages.
+    _sessions_cache = None
+    _sessions_cache_ts = 0
+    _sessions_cache_lock = threading.Lock()
+    _SESSIONS_CACHE_TTL = 15  # seconds
+
+    def invalidate_sessions_cache(self):
+        """Force next get_registered_sessions() to re-scan.  Call after hire/fire/restart."""
+        with self._sessions_cache_lock:
+            self._sessions_cache = None
+            self._sessions_cache_ts = 0
+
     def get_registered_sessions(self, registered=None):
-        """Get registered sessions from tmux (all backends have tmux now)."""
+        """Get registered sessions from tmux (all backends have tmux now).
+
+        Results are cached for _SESSIONS_CACHE_TTL seconds to avoid blocking
+        on SSH timeouts to remote hosts during message routing.
+        """
         self._sync_paths()
         if registered is None:
+            now = time.time()
+            with self._sessions_cache_lock:
+                if self._sessions_cache is not None and (now - self._sessions_cache_ts) < self._SESSIONS_CACHE_TTL:
+                    # Return a shallow copy so callers can mutate without poisoning cache
+                    return dict(self._sessions_cache)
+            # Cache miss or expired — do the full scan (outside the lock)
             registered = self.scan_tmux_sessions()
 
         # Fallback: pick up non-interactive workers with backend file but orphaned tmux
@@ -7191,6 +7216,11 @@ class WorkerManager:
             state["active"] = None
         if registered and not state["active"]:
             state["active"] = list(registered.keys())[0]
+
+        # Update cache
+        with self._sessions_cache_lock:
+            self._sessions_cache = dict(registered)
+            self._sessions_cache_ts = time.time()
 
         return registered
 
@@ -7505,6 +7535,7 @@ class WorkerManager:
         if not backend_obj.is_interactive:
             print(f"Created {backend} worker '{name}' (non-interactive mode)")
 
+        self.invalidate_sessions_cache()
         return True, None
 
     def end(self, name: str):
@@ -7543,6 +7574,7 @@ class WorkerManager:
         cleanup_inbox(name)
         cleanup_worker_pipe(name)
         _registry_remove(name)
+        self.invalidate_sessions_cache()
 
         if state["active"] == name:
             state["active"] = None
@@ -7712,6 +7744,7 @@ class WorkerManager:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 
         _reset_learning_reminder(name)
+        self.invalidate_sessions_cache()
         return True, None
 
     def _restart_dead_worker(self, name: str, backend_name: str, backend, tmux_name: str, mode: str):
@@ -7811,6 +7844,7 @@ class WorkerManager:
             subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
 
         print(f"Dead worker '{name}' recovered from registry (mode={mode})")
+        self.invalidate_sessions_cache()
         return True, None
 
 
@@ -13848,6 +13882,7 @@ class Handler(BaseHTTPRequestHandler):
                     conflict = name in active_workers if name else False
             except Exception:
                 pass
+            worker_manager.invalidate_sessions_cache()
             self._send_json(200, {
                 "ok": True,
                 "settings": {
