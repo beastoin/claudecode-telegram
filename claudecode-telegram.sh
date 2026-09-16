@@ -589,13 +589,27 @@ cmd_run() {
         echo "$port" > "$node_dir/port"
     fi
 
+    # Wait for bridge to bind to port before setting webhook.
+    # Without this, the tunnel forwards traffic to a port that isn't listening yet,
+    # Telegram gets 502, stops retrying, and messages go dark.
+    log "Waiting for bridge to bind to port $port..."
+    local _bwait=0
+    while ! ss -tlnp 2>/dev/null | grep -q ":$port "; do
+        sleep 1
+        _bwait=$((_bwait + 1))
+        if [[ $_bwait -ge 30 ]]; then
+            warn "Bridge did not bind to port $port within 30s"
+            break
+        fi
+    done
+    [[ $_bwait -lt 30 ]] && log "$(dim "Bridge ready on port $port (${_bwait}s)")"
+
     # Save bot info for status command
     local bot_info; bot_info=$(telegram_api "$token" "getMe" "{}")
     if echo "$bot_info" | grep -q '"ok":true'; then
         echo "$bot_info" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 > "$node_dir/bot_id"
         echo "$bot_info" | grep -o '"username":"[^"]*"' | head -1 | cut -d'"' -f4 > "$node_dir/bot_username"
     fi
-    sleep 1
 
     # Set webhook (skip if in poll fallback mode — no tunnel)
     if [[ -n "$tunnel_url" ]]; then
