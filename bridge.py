@@ -1083,6 +1083,62 @@ class WorkerRecord:
         )
 
 
+@dataclass
+class WorkerRegistryEntry:
+    """Typed representation of a single entry in the worker registry JSON.
+
+    Maps to the shape ``{"backend": ..., "protocol": ..., "callback_url": ..., ...}``
+    stored under ``registry["workers"][name]``.
+    """
+    backend: str = "claude"
+    protocol: str = ""
+    callback_url: str = ""
+    host: Optional[str] = None
+    version: str = ""
+    chat_id: Optional[int] = None
+    hire_time: int = 0
+    tools: Optional[Dict[str, Any]] = None
+    home_host: str = ""
+    home_cwd: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"backend": self.backend}
+        if self.protocol:
+            d["protocol"] = self.protocol
+        if self.callback_url:
+            d["callback_url"] = self.callback_url
+        if self.host:
+            d["host"] = self.host
+        if self.version:
+            d["version"] = self.version
+        if self.chat_id is not None:
+            d["chat_id"] = self.chat_id
+        if self.hire_time:
+            d["hire_time"] = self.hire_time
+        if self.tools:
+            d["tools"] = self.tools
+        if self.home_host:
+            d["home_host"] = self.home_host
+        if self.home_cwd:
+            d["home_cwd"] = self.home_cwd
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WorkerRegistryEntry":
+        return cls(
+            backend=d.get("backend", "claude"),
+            protocol=d.get("protocol", ""),
+            callback_url=d.get("callback_url", ""),
+            host=d.get("host"),
+            version=d.get("version", ""),
+            chat_id=d.get("chat_id"),
+            hire_time=d.get("hire_time", 0),
+            tools=d.get("tools"),
+            home_host=d.get("home_host", ""),
+            home_cwd=d.get("home_cwd", ""),
+        )
+
+
 # ============================================================
 # SOLID #5: WorkerDelivery — single send path for all worker types
 #
@@ -2853,36 +2909,144 @@ state = BridgeRuntimeState()
 # Backward-compat alias for code reading _last_mention directly
 _last_mention = state.mention
 
+
+# ── Typed dataclasses for health/resource probes ─────────────
+
+@dataclass
+class DiskUsage:
+    """Result of a disk usage probe."""
+    pct: float          # usage percentage (0-100)
+    free_gb: float      # free space in GB
+    total_gb: float     # total space in GB
+    ts: float = 0.0     # timestamp of probe
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "DiskUsage":
+        return cls(
+            pct=d.get("pct", 0.0),
+            free_gb=d.get("free_gb", 0.0),
+            total_gb=d.get("total_gb", 0.0),
+            ts=d.get("ts", 0.0),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"pct": self.pct, "free_gb": self.free_gb,
+                "total_gb": self.total_gb, "ts": self.ts}
+
+
+@dataclass
+class MemoryUsage:
+    """Result of a memory usage probe."""
+    pct: float          # usage percentage (0-100)
+    used_gb: float      # used memory in GB
+    total_gb: float     # total memory in GB
+    available_gb: float = 0.0
+    ts: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "MemoryUsage":
+        return cls(
+            pct=d.get("pct", 0.0),
+            used_gb=d.get("used_gb", 0.0),
+            total_gb=d.get("total_gb", 0.0),
+            available_gb=d.get("available_gb", 0.0),
+            ts=d.get("ts", 0.0),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"pct": self.pct, "used_gb": self.used_gb,
+                "total_gb": self.total_gb, "available_gb": self.available_gb,
+                "ts": self.ts}
+
+
+@dataclass
+class IoUsage:
+    """Result of an I/O usage probe."""
+    read_mb_s: float = 0.0
+    write_mb_s: float = 0.0
+    iops: int = 0
+    util_pct: float = 0.0
+    ts: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "IoUsage":
+        return cls(
+            read_mb_s=d.get("read_mb_s", 0.0),
+            write_mb_s=d.get("write_mb_s", 0.0),
+            iops=d.get("iops", 0),
+            util_pct=d.get("util_pct", 0.0),
+            ts=d.get("ts", 0.0),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"read_mb_s": self.read_mb_s, "write_mb_s": self.write_mb_s,
+                "iops": self.iops, "util_pct": self.util_pct, "ts": self.ts}
+
+
+@dataclass
+class CpuHog:
+    """A process consuming high CPU."""
+    pid: int
+    cpu_pct: float
+    command: str
+    user: str = ""
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CpuHog":
+        return cls(
+            pid=d.get("pid", 0),
+            cpu_pct=d.get("cpu_pct", d.get("cpu", 0.0)),
+            command=d.get("command", d.get("cmd", "")),
+            user=d.get("user", ""),
+        )
+
+
+@dataclass
+class WorktreeItem:
+    """A git worktree and its disk usage."""
+    path: str
+    size_mb: float
+    worker: str = ""
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WorktreeItem":
+        return cls(
+            path=d.get("path", ""),
+            size_mb=d.get("size_mb", 0.0),
+            worker=d.get("worker", ""),
+        )
+
+
 # Watchdog state
-_worker_states = {}  # name -> (state, reason, since)
-_last_child_ts = {}
-_last_seen_claude = {}
-_last_hook_ts = {}
-_last_alert_ts = {}
-_alert_msg_ids = {}  # name -> message_id of last bad-state alert (for edit on recovery)
-_idle_streak = {}
-_prev_worker_states = {}
-_consecutive_probe_failures = {}
-_consecutive_good_probes = {}  # name -> int (consecutive good states after bad)
-_consecutive_bad_probes = {}  # name -> int (consecutive bad states for remote workers)
-_idle_child_baseline = {}  # name -> int (MCP server child count at idle)
-_prev_children = {}  # name -> int (previous active children count, for activity detection)
-_last_activity_ts = {}  # name -> float (last time children count changed)
-_worker_cwds = {}  # name -> cwd (RAM-only startup cwd hints)
-_recent_restarts = {}  # name -> timestamp (suppress watchdog resolved alert after restart)
-RESTART_COOLDOWN = 60  # seconds: reject checkin-triggered restarts within this window
-_restart_in_progress = {}  # name -> timestamp: set BEFORE restart, cleared after completion
-_restart_lock = threading.Lock()  # protects _restart_in_progress
-_force_restart_pending_cwd = {}  # name -> True: force restart completed, allow one post-restart CWD fix
-_waiting_input_details = {}  # name -> dict (question details for WAITING_INPUT alert)
+_worker_states: Dict[str, tuple] = {}  # name -> (state, reason, since)
+_last_child_ts: Dict[str, float] = {}
+_last_seen_claude: Dict[str, float] = {}
+_last_hook_ts: Dict[str, float] = {}
+_last_alert_ts: Dict[str, float] = {}
+_alert_msg_ids: Dict[str, int] = {}  # name -> message_id of last bad-state alert
+_idle_streak: Dict[str, int] = {}
+_prev_worker_states: Dict[str, str] = {}
+_consecutive_probe_failures: Dict[str, int] = {}
+_consecutive_good_probes: Dict[str, int] = {}
+_consecutive_bad_probes: Dict[str, int] = {}
+_idle_child_baseline: Dict[str, int] = {}
+_prev_children: Dict[str, int] = {}
+_last_activity_ts: Dict[str, float] = {}
+_worker_cwds: Dict[str, str] = {}
+_recent_restarts: Dict[str, float] = {}
+RESTART_COOLDOWN: int = 60
+_restart_in_progress: Dict[str, float] = {}
+_restart_lock = threading.Lock()
+_force_restart_pending_cwd: Dict[str, bool] = {}
+_waiting_input_details: Dict[str, Dict[str, Any]] = {}
 _watchdog_lock = threading.Lock()
 
 # Host-level health tracking: detect when machines (Mac Mini, etc.) go offline
-HOST_DOWN_THRESHOLD = 3  # consecutive SSH failures before declaring host DOWN
-_host_ssh_failures = {}  # host -> int (consecutive SSH probe failures)
-_host_down = {}  # host -> bool (True = host is DOWN)
-_host_down_since = {}  # host -> float (timestamp when host went DOWN)
-_host_last_error = {}  # host -> str (last SSH error message)
+HOST_DOWN_THRESHOLD: int = 3
+_host_ssh_failures: Dict[str, int] = {}
+_host_down: Dict[str, bool] = {}
+_host_down_since: Dict[str, float] = {}
+_host_last_error: Dict[str, str] = {}
 
 # Disk space monitoring: two-tier alerts (warning + critical)
 DISK_WARN_THRESHOLD_PCT = 85   # ⚠️ warning when usage exceeds this
@@ -3251,7 +3415,7 @@ def load_last_active():
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 
 
-def _load_registry() -> dict:
+def _load_registry() -> Dict[str, Any]:
     """Load worker registry from disk. Returns {} on missing/corrupt."""
     try:
         if not WORKER_REGISTRY_FILE.exists():
@@ -3272,7 +3436,7 @@ def _load_registry() -> dict:
         return {}
 
 
-def _save_registry(data: dict):
+def _save_registry(data: Dict[str, Any]) -> None:
     """Atomic write of registry to disk."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3292,7 +3456,8 @@ def _save_registry(data: dict):
         print(f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: int = None, host: str = None):
+def _registry_add(name: str, backend: str, chat_id: Optional[int] = None,
+                   host: Optional[str] = None) -> None:
     """Add a worker to the persistent registry (merge with existing entry)."""
     with _watchdog_lock:
         data = _load_registry()
@@ -3312,7 +3477,8 @@ def _registry_add(name: str, backend: str, chat_id: int = None, host: str = None
         _save_registry(data)
 
 
-def _registry_add_callback(name: str, callback_url: str, host: str = "", version: str = "", tools: dict = None):
+def _registry_add_callback(name: str, callback_url: str, host: str = "",
+                           version: str = "", tools: Optional[Dict[str, Any]] = None) -> None:
     """Add an HTTP callback worker to the persistent registry."""
     with _watchdog_lock:
         data = _load_registry()
@@ -3335,7 +3501,7 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "", version
         _save_registry(data)
 
 
-def _registry_remove(name: str):
+def _registry_remove(name: str) -> None:
     """Remove a worker from the persistent registry."""
     with _watchdog_lock:
         data = _load_registry()
@@ -3362,7 +3528,7 @@ def _get_worker_cwd(name: str) -> str:
     return cwd if isinstance(cwd, str) else ""
 
 
-def _registry_bootstrap(registered: dict):
+def _registry_bootstrap(registered: Dict[str, Dict[str, Any]]) -> None:
     """First-run: create registry from currently running tmux sessions."""
     if WORKER_REGISTRY_FILE.exists():
         return
@@ -5998,7 +6164,7 @@ def _is_host_down(host: str) -> bool:
         return _host_down.get(host, False)
 
 
-def _check_disk_usage(host: str | None = None) -> dict | None:
+def _check_disk_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Check disk usage on a host (None = local). Returns {pct, free_gb, total_gb} or None."""
     try:
         r = _remote_run(
@@ -6020,7 +6186,7 @@ def _check_disk_usage(host: str | None = None) -> dict | None:
         return None
 
 
-def _check_disk_usage_macos(host: str) -> dict | None:
+def _check_disk_usage_macos(host: str) -> Optional[Dict[str, Any]]:
     """Check disk usage on macOS host (df output differs from Linux)."""
     try:
         r = _remote_run(
@@ -6113,7 +6279,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                     pass
 
 
-def _check_mem_usage(host: str | None = None) -> dict | None:
+def _check_mem_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Check memory usage on a host (None = local). Returns {pct, used_gb, total_gb, avail_gb, top_procs} or None."""
     try:
         r = _remote_run(
@@ -6143,7 +6309,7 @@ def _check_mem_usage(host: str | None = None) -> dict | None:
         return None
 
 
-def _check_mem_usage_macos(host: str) -> dict | None:
+def _check_mem_usage_macos(host: str) -> Optional[Dict[str, Any]]:
     """Check memory usage on macOS host via vm_stat."""
     try:
         r = _remote_run(
@@ -6262,7 +6428,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                     pass
 
 
-def _check_io_usage(host: str | None = None) -> dict | None:
+def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Check IO stats on a host (None = local). Returns {iowait_pct, read_iops, write_iops, util_pct} or None."""
     try:
         r = _remote_run(
@@ -6323,7 +6489,7 @@ def _check_io_usage(host: str | None = None) -> dict | None:
         return None
 
 
-def _check_io_usage_macos(host: str) -> dict | None:
+def _check_io_usage_macos(host: str) -> Optional[Dict[str, Any]]:
     """Check IO stats on macOS host via iostat."""
     try:
         r = _remote_run(
@@ -6399,7 +6565,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                     pass
 
 
-def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict]:
+def _get_cpu_hogs(host: Optional[str] = None, is_mac: bool = False) -> List[Dict[str, Any]]:
     """Get processes using >CPU_HOG_THRESHOLD_PCT CPU on a host. Returns [{pid, cpu, etime_min, cmd}]."""
     try:
         if is_mac:
@@ -6492,7 +6658,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                         print(f"[watchdog] CPU hog alert error: {e}")
 
 
-def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
+def _probe_worktree_sizes(remote_hosts: set) -> None:
     """Check worktree directories and alert when total exceeds threshold."""
     now = time.time()
     hosts_to_check = [None] + list(remote_hosts)
@@ -6845,7 +7011,7 @@ class WatchdogAlertManager:
                 _alert_msg_ids[name] = msg_id
 
 
-def watchdog_loop():
+def watchdog_loop() -> None:
     _disk_check_counter = 0
     while True:
         try:
@@ -7258,7 +7424,9 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
     return name, backend
 
 
-def _format_watchdog_status(name: str, pending_lookup=None, state_snapshot: Optional[dict] = None) -> str:
+def _format_watchdog_status(name: str,
+                            pending_lookup: Optional[Dict[str, Any]] = None,
+                            state_snapshot: Optional[Dict[str, Any]] = None) -> str:
     if pending_lookup is None:
         pending_lookup = is_pending
 
@@ -9793,23 +9961,28 @@ class _LegacyTransportAdapter(MessageTransport):
 # logic never changes).
 # ============================================================
 
+# Type alias for command handler functions
+CommandFn = Callable[[str, ChatId, MessageId], bool]
+
+
 class CommandRouter:
-    def __init__(self, transport, workers: WorkerManager):
+    def __init__(self, transport: Optional[MessageTransport],
+                 workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
-        self.transport = transport
-        self.workers = workers
+        self.transport: Optional[MessageTransport] = transport
+        self.workers: "WorkerManager" = workers
         # Restart-all state
-        self._restart_all_lock = threading.Lock()
-        self._restart_all_running = False
-        self._restart_all_abort = threading.Event()
-        self._restart_all_thread = None
+        self._restart_all_lock: threading.Lock = threading.Lock()
+        self._restart_all_running: bool = False
+        self._restart_all_abort: threading.Event = threading.Event()
+        self._restart_all_thread: Optional[threading.Thread] = None
 
         # SOLID #3: Command registry — maps command name to handler.
-        # Each handler takes (arg, chat_id) and returns True if handled.
+        # Each handler takes (arg, chat_id, message_id) and returns True if handled.
         # To add a new command, add one line here. No dispatch changes needed.
-        self._commands: dict[str, callable] = {
+        self._commands: Dict[str, CommandFn] = {
             "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),
             "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),
             "/team": lambda arg, cid, mid: self.cmd_team(cid),
@@ -9831,11 +10004,11 @@ class CommandRouter:
             "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
         }
 
-    def reply(self, chat_id, text, outcome=None):
+    def reply(self, chat_id: ChatId, text: str, outcome: Optional[str] = None) -> None:
         if self.transport is not None:
             self.transport.send_text(chat_id, text)
 
-    def send_startup_message(self, chat_id):
+    def send_startup_message(self, chat_id: ChatId) -> None:
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
         active = state["active"]
@@ -9853,7 +10026,7 @@ class CommandRouter:
 
         self.reply(chat_id, "\n".join(lines))
 
-    def handle_message(self, update):
+    def handle_message(self, update: Dict[str, Any]) -> None:
         global admin_chat_id
         print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
 
@@ -10323,7 +10496,7 @@ class CommandRouter:
 
         return False
 
-    def cmd_hire(self, name, chat_id):
+    def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
@@ -10352,7 +10525,7 @@ class CommandRouter:
             self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_pilot(self, name, chat_id):
+    def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
             return True
@@ -10415,7 +10588,7 @@ class CommandRouter:
         self.reply(chat_id, msg)
         return True
 
-    def cmd_relay(self, arg, chat_id):
+    def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
         """Relay: connect an external agent to a worker via guideline link.
 
         /relay lee — open relay to lee, returns a single URL to paste into any agent
@@ -10605,7 +10778,7 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_channel(self, arg, chat_id):
+    def cmd_channel(self, arg: str, chat_id: ChatId) -> bool:
         """Handle /ch and /channel commands.
 
         /ch create <label> <member1> <member2> ...
@@ -10754,7 +10927,7 @@ class CommandRouter:
         self.reply(chat_id, f"[{channel_id}] Sent.")
         return True
 
-    def cmd_rewind(self, name, chat_id):
+    def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "Usage: /rewind <name>\n/rewind team — view team chat", outcome="Needs decision")
             return True
@@ -10801,7 +10974,7 @@ class CommandRouter:
         self.reply(chat_id, f"⏪ Rewind for {name}\n{url}")
         return True
 
-    def cmd_pr_review(self, arg, chat_id):
+    def cmd_pr_review(self, arg: str, chat_id: ChatId) -> bool:
         if not arg:
             self.reply(chat_id, "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
             return True
@@ -10849,7 +11022,7 @@ class CommandRouter:
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
         return True
 
-    def cmd_memory(self, query, chat_id):
+    def cmd_memory(self, query: str, chat_id: ChatId) -> bool:
         """Search team chat memory. /memory <query> [--agent X] [--days N] [--from X]"""
         if not query:
             self.reply(chat_id,
@@ -11023,7 +11196,7 @@ class CommandRouter:
             self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
         return True
 
-    def cmd_focus(self, name, chat_id):
+    def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
             return True
@@ -11036,7 +11209,7 @@ class CommandRouter:
             self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_team(self, chat_id):
+    def cmd_team(self, chat_id: ChatId) -> bool:
         registered = self.workers.scan_tmux_sessions()
         registered = self.workers.get_registered_sessions(registered)
 
@@ -11073,7 +11246,7 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_end(self, name, chat_id):
+    def cmd_end(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
             return True
@@ -11087,7 +11260,7 @@ class CommandRouter:
             self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_progress(self, chat_id, arg=""):
+    def cmd_progress(self, chat_id: ChatId, arg: str = "") -> bool:
         # If a name is given, show that worker's progress
         if arg:
             target = arg.strip().lower().lstrip("@")
@@ -11187,7 +11360,7 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(status))
         return True
 
-    def cmd_pause(self, chat_id):
+    def cmd_pause(self, chat_id: ChatId) -> bool:
         if not state["active"]:
             self.reply(chat_id, "No one assigned.")
             return True
@@ -11210,7 +11383,7 @@ class CommandRouter:
         self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
         return True
 
-    def cmd_restart(self, chat_id, args=""):
+    def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
         args = (args or "").strip()
 
         # Parse flags
@@ -11302,7 +11475,7 @@ class CommandRouter:
             with _restart_lock:
                 _restart_in_progress.pop(name, None)
 
-    def _do_restart(self, name, session, chat_id, host, tmux_name, force, clean):
+    def _do_restart(self, name: str, session: Dict[str, Any], chat_id: ChatId, host: Optional[str], tmux_name: str, force: bool, clean: bool) -> bool:
         """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
@@ -11379,7 +11552,7 @@ class CommandRouter:
 
     # ── Remote Restart ──────────────────────────────────────────────
 
-    def _restart_remote_worker(self, name, backend_name, backend, tmux_name, host, mode):
+    def _restart_remote_worker(self, name: str, backend_name: str, backend: Any, tmux_name: str, host: str, mode: str) -> bool:
         """Restart a teleported worker on its remote host.
 
         Reuses _stop_worker_for_teleport + _start_worker_on_target which
@@ -11580,7 +11753,7 @@ class CommandRouter:
 
     # ── Teleport commands ──────────────────────────────────────────────────
 
-    def cmd_teleport(self, arg, chat_id, check_only=False):
+    def cmd_teleport(self, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
         """Teleport a worker to a remote machine."""
         if not arg:
             cmd_name = "/teleport-check" if check_only else "/teleport"
@@ -11725,7 +11898,7 @@ class CommandRouter:
         ).start()
         return True
 
-    def cmd_teleback(self, arg, chat_id):
+    def cmd_teleback(self, arg: str, chat_id: ChatId) -> bool:
         """Bring a teleported worker back to its previous machine."""
         parts = arg.split()
         worker_name = parts[0].lower() if parts else ""
@@ -12643,7 +12816,7 @@ class CommandRouter:
         except Exception:
             pass
 
-    def cmd_voice(self, arg, chat_id):
+    def cmd_voice(self, arg: str, chat_id: ChatId) -> bool:
         """Toggle auto-TTS for worker responses. /voice on|off or /voice to show status."""
         arg = arg.strip().lower()
         if arg == "on":
@@ -12657,7 +12830,7 @@ class CommandRouter:
             self.reply(chat_id, f"Voice mode: {status}\n/voice on — responses include voice\n/voice off — text only")
         return True
 
-    def cmd_settings(self, chat_id):
+    def cmd_settings(self, chat_id: ChatId) -> bool:
         def redact(s):
             if not s:
                 return "(not set)"
