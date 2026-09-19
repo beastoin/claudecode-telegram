@@ -25,7 +25,13 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runtime_checkable, Union
+
+# ── Type aliases for clarity ────────────────────────────────────────────
+ChatId = int
+MessageId = int
+ParseMode = Optional[Literal["HTML", "MarkdownV2"]]
+TelegramApiResponse = Optional[Dict[str, Any]]
 
 try:
     from bridge_grpc import BridgeGRPCServer
@@ -396,8 +402,119 @@ class IncomingMessage:
 # GUEST SYSTEM: temporary external agent sessions
 # ============================================================
 
-_guests: dict = {}          # token_hash -> guest dict
-_guest_inboxes: dict = {}   # guest_name -> [msg dict]
+# ── Typed dataclasses for conversation state ─────────────────
+#
+# These provide typed access to the guest, channel, and relay
+# structures. The underlying storage is still dict-based for
+# JSON serialization compat, but new code should prefer these.
+
+@dataclass
+class GuestSession:
+    """A temporary external agent session."""
+    name: str
+    token_hash: str
+    created_at: str
+    expires_at_unix: float
+    notified_workers: set
+
+    @classmethod
+    def from_dict(cls, token_hash: str, d: Dict[str, Any]) -> "GuestSession":
+        nw = d.get("notified_workers", set())
+        if isinstance(nw, list):
+            nw = set(nw)
+        return cls(
+            name=d["name"],
+            token_hash=token_hash,
+            created_at=d.get("created_at", ""),
+            expires_at_unix=d["expires_at_unix"],
+            notified_workers=nw,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "created_at": self.created_at,
+            "expires_at_unix": self.expires_at_unix,
+            "notified_workers": self.notified_workers,
+        }
+
+    @property
+    def is_expired(self) -> bool:
+        return time.time() >= self.expires_at_unix
+
+
+@dataclass
+class GuestInboxMessage:
+    """A message in a guest's inbox."""
+    id: str
+    sender: str
+    text: str
+    ts: int
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "GuestInboxMessage":
+        return cls(
+            id=d.get("id", ""),
+            sender=d.get("from", d.get("sender", "")),
+            text=d.get("text", ""),
+            ts=d.get("ts", 0),
+        )
+
+
+@dataclass
+class ChannelMember:
+    """A member of a group channel."""
+    key: str          # "manager", "worker:name", "guest:name"
+    type: str         # "manager", "worker", "guest"
+    name: str = ""    # display name (empty for manager)
+
+    @classmethod
+    def from_dict(cls, key: str, d: Dict[str, Any]) -> "ChannelMember":
+        return cls(key=key, type=d["type"], name=d.get("name", ""))
+
+
+@dataclass
+class ChannelMessage:
+    """A message in a group channel."""
+    id: str
+    seq: int
+    sender: str  # member key
+    text: str
+    ts: int
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ChannelMessage":
+        return cls(
+            id=d["id"],
+            seq=d["seq"],
+            sender=d["from"],
+            text=d["text"],
+            ts=d["ts"],
+        )
+
+
+@dataclass
+class RelayMessage:
+    """A message in a relay channel."""
+    id: str
+    sender: str       # "guest" or "worker"
+    text: str
+    ts: int
+    sender_name: str = ""
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "RelayMessage":
+        return cls(
+            id=d.get("id", ""),
+            sender=d.get("from", d.get("sender", "")),
+            text=d.get("text", ""),
+            ts=d.get("ts", 0),
+            sender_name=d.get("sender_name", ""),
+        )
+
+
+_guests: Dict[str, Dict[str, Any]] = {}          # token_hash -> guest dict
+_guest_inboxes: Dict[str, List[Dict[str, Any]]] = {}   # guest_name -> [msg dict]
 _guest_lock = threading.Lock()
 GUEST_TTL = 86400           # 24 hours
 GUEST_INBOX_CAP = 200
@@ -522,7 +639,7 @@ def guest_inbox_append(inbox: list, msg: dict) -> list:
 # GROUP CHANNELS: data + pure functions
 # ============================================================
 
-_channels: dict = {}          # channel_id -> channel dict
+_channels: Dict[str, Dict[str, Any]] = {}          # channel_id -> channel dict
 _channel_lock = threading.Lock()
 CHANNEL_TTL = 86400           # 24 hours
 CHANNEL_MSG_CAP = 200
@@ -673,7 +790,7 @@ def channel_get_member_names(channel: dict, member_type: str) -> list[str]:
 # RELAY GUIDELINE LINK
 # ============================================================
 
-_relay_channels = {}
+_relay_channels: Dict[str, Dict[str, Any]] = {}
 _relay_lock = threading.Lock()
 
 RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
@@ -1048,7 +1165,7 @@ class ConversationService:
     but accessed through this service's methods.
     """
 
-    def guest_create(self, name: str = "", team_workers: set = None,
+    def guest_create(self, name: str = "", team_workers: Optional[set] = None,
                      ttl: int = GUEST_TTL) -> tuple:
         """Create a guest session. Returns (token, guest_dict) or raises."""
         if team_workers is None:
@@ -2643,15 +2760,98 @@ def is_claude_running(tmux_name: str, host: str = None) -> bool:
     return is_process_running(tmux_name, "claude", host=host)
 
 
-# In-memory state (RAM only, no persistence - tmux IS the persistence)
-state = {
-    "active": None,  # Currently active session name
-    "startup_notified": False,  # Whether we've sent the startup message
-    "tts_enabled": False,  # Auto-TTS for worker responses (toggle with /voice)
-}
+# ── SOLID #4: BridgeRuntimeState — typed in-memory state ────────────────
+#
+# Replaces the raw `state` dict and `_last_mention` dict with a typed
+# class. All runtime state reads/writes go through this object.
+# The `state` dict alias remains for backward compatibility during migration.
 
-# Consecutive @mention tracking (auto-focus after 2 in a row to same worker within 60s)
-_last_mention = {"target": None, "count": 0, "ts": 0}
+class MentionTracker:
+    """Tracks consecutive @mentions for auto-focus.
+
+    Supports dict-style access for backward compatibility with code that
+    does ``_last_mention["target"]``, ``_last_mention["count"] += 1``, etc.
+    """
+    _KEYS = ("target", "count", "ts")
+
+    def __init__(self) -> None:
+        self.target: Optional[str] = None
+        self.count: int = 0
+        self.ts: float = 0.0
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def keys(self) -> tuple:
+        return self._KEYS
+
+    def __iter__(self):
+        return iter(self._KEYS)
+
+    def update(self, other: dict) -> None:
+        for k, v in other.items():
+            if k in self._KEYS:
+                setattr(self, k, v)
+
+
+class BridgeRuntimeState:
+    """Typed in-memory state (RAM only — tmux IS persistence).
+
+    Replaces the raw ``state`` dict with typed attributes.
+    Provides ``__getitem__``/``__setitem__`` for backward compatibility
+    so existing ``state["active"]`` syntax keeps working.
+    """
+    def __init__(self) -> None:
+        self.active: Optional[str] = None
+        self.startup_notified: bool = False
+        self.tts_enabled: bool = False
+        self.mention: MentionTracker = MentionTracker()
+
+    # ── dict-compat layer (for state["active"] etc.) ──
+    _KEY_MAP = {"active": "active", "startup_notified": "startup_notified",
+                "tts_enabled": "tts_enabled"}
+
+    def __getitem__(self, key: str) -> Any:
+        attr = self._KEY_MAP.get(key)
+        if attr:
+            return getattr(self, attr)
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        attr = self._KEY_MAP.get(key)
+        if attr:
+            setattr(self, attr, value)
+        else:
+            raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self) -> list:
+        return list(self._KEY_MAP.keys())
+
+    def __iter__(self):
+        return iter(self._KEY_MAP)
+
+    def update(self, other: dict) -> None:
+        for k, v in other.items():
+            if k in self._KEY_MAP:
+                setattr(self, self._KEY_MAP[k], v)
+
+
+state = BridgeRuntimeState()
+
+# Backward-compat alias for code reading _last_mention directly
+_last_mention = state.mention
 
 # Watchdog state
 _worker_states = {}  # name -> (state, reason, since)
@@ -3210,52 +3410,67 @@ TRANSPORT_MODE = os.environ.get("TRANSPORT", "telegram")
 
 
 class MessageTransport:
-    """Interface for all outbound messaging from bridge to manager."""
+    """Interface for all outbound messaging from bridge to manager.
+
+    All methods are fully type-annotated so static checkers can verify
+    that transports and callers agree on argument/return types.
+    """
 
     @property
     def name(self) -> str:
         raise NotImplementedError
 
-    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+    def send_text(self, chat_id: ChatId, text: str,
+                  parse_mode: ParseMode = None,
+                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         raise NotImplementedError
 
-    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
+    def send_rich_text(self, chat_id: ChatId, markdown: str,
+                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         raise NotImplementedError
 
-    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
+                      caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
+                       caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_video(self, chat_id, video_path, caption=None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         raise NotImplementedError
 
-    def send_sticker(self, chat_id, sticker_path) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
         raise NotImplementedError
 
-    def send_chat_action(self, chat_id, action) -> None:
+    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         raise NotImplementedError
 
-    def set_reaction(self, chat_id, message_id, reaction) -> None:
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
+                     reaction: List[Dict[str, str]]) -> None:
         raise NotImplementedError
 
-    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+    def edit_message(self, chat_id: ChatId, message_id: MessageId,
+                     text: str, parse_mode: ParseMode = None) -> TelegramApiResponse:
         raise NotImplementedError
 
-    def setup_commands(self, commands) -> None:
+    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
         raise NotImplementedError
 
-    def download_file(self, file_id, session_name) -> str | None:
+    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
         raise NotImplementedError
 
 
@@ -3264,10 +3479,12 @@ class MessageTransport:
 # ============================================================
 
 class TelegramAPI:
-    def __init__(self, token: str):
-        self.token = token
+    """Low-level Telegram Bot API caller. Fully type-annotated."""
 
-    def api(self, method: str, data: dict):
+    def __init__(self, token: str) -> None:
+        self.token: str = token
+
+    def api(self, method: str, data: Dict[str, Any]) -> TelegramApiResponse:
         if not self.token:
             return None
         req = urllib.request.Request(
@@ -3291,53 +3508,56 @@ class TelegramAPI:
             print(f"Telegram API error: {e}")
             return None
 
-    def send_message(self, chat_id: int, text: str, **kwargs):
-        payload = {"chat_id": chat_id, "text": text}
+    def send_message(self, chat_id: ChatId, text: str, **kwargs: Any) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
         payload.update(kwargs)
         return self.api("sendMessage", payload)
 
-    def send_rich_message(self, chat_id: int, markdown: str, **kwargs):
-        payload = {
+    def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: Any) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
         payload.update(kwargs)
         return self.api("sendRichMessage", payload)
 
-    def send_photo(self, chat_id: int, photo, **kwargs):
-        payload = {"chat_id": chat_id, "photo": photo}
+    def send_photo(self, chat_id: ChatId, photo: str, **kwargs: Any) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo}
         payload.update(kwargs)
         return self.api("sendPhoto", payload)
 
-    def send_document(self, chat_id: int, document, **kwargs):
-        payload = {"chat_id": chat_id, "document": document}
+    def send_document(self, chat_id: ChatId, document: str, **kwargs: Any) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "document": document}
         payload.update(kwargs)
         return self.api("sendDocument", payload)
 
-    def send_animation(self, chat_id: int, animation, **kwargs):
-        payload = {"chat_id": chat_id, "animation": animation}
+    def send_animation(self, chat_id: ChatId, animation: str, **kwargs: Any) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "animation": animation}
         payload.update(kwargs)
         return self.api("sendAnimation", payload)
 
-    def set_reaction(self, chat_id: int, message_id: int, reaction: list[dict]):
-        payload = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
+                     reaction: List[Dict[str, str]]) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
         return self.api("setMessageReaction", payload)
 
-    def send_chat_action(self, chat_id: int, action: str):
+    def send_chat_action(self, chat_id: ChatId, action: str) -> TelegramApiResponse:
         return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
 class TelegramTransport(MessageTransport):
     """Transport that sends messages via Telegram Bot API."""
 
-    def __init__(self, token: str):
-        self._api = TelegramAPI(token)
+    def __init__(self, token: str) -> None:
+        self._api: TelegramAPI = TelegramAPI(token)
 
     @property
     def name(self) -> str:
         return "telegram"
 
-    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+    def send_text(self, chat_id: ChatId, text: str,
+                  parse_mode: ParseMode = None,
+                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -3346,8 +3566,9 @@ class TelegramTransport(MessageTransport):
         # Use module-level telegram_api so tests can mock bridge.telegram_api
         return telegram_api("sendMessage", payload)
 
-    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
-        payload = {
+    def send_rich_text(self, chat_id: ChatId, markdown: str,
+                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
@@ -3355,7 +3576,8 @@ class TelegramTransport(MessageTransport):
             payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
-    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         if not BOT_TOKEN:
             return False
         ok, validated = validate_photo_path(photo_path)
@@ -3402,7 +3624,8 @@ class TelegramTransport(MessageTransport):
             print(f"sendPhoto error: {e}")
             return False
 
-    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
+                       caption: Optional[str] = None) -> bool:
         if not BOT_TOKEN:
             return False
         ok, validated = validate_photo_path(animation_path)
@@ -3448,7 +3671,8 @@ class TelegramTransport(MessageTransport):
             print(f"sendAnimation error: {e}")
             return False
 
-    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
+                      caption: Optional[str] = None) -> bool:
         if not BOT_TOKEN:
             return False
         ok, validated = validate_document_path(doc_path)
@@ -3494,7 +3718,9 @@ class TelegramTransport(MessageTransport):
             print(f"sendDocument error: {e}")
             return False
 
-    def _send_media_multipart(self, chat_id, file_path, field_name, api_method, caption=None) -> bool:
+    def _send_media_multipart(self, chat_id: ChatId, file_path: Path,
+                              field_name: str, api_method: str,
+                              caption: Optional[str] = None) -> bool:
         if not BOT_TOKEN:
             return False
         boundary = uuid.uuid4().hex
@@ -3535,50 +3761,55 @@ class TelegramTransport(MessageTransport):
             print(f"{api_method} error: {e}")
             return False
 
-    def send_video(self, chat_id, video_path, caption=None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         ok, validated = validate_document_path(video_path)
         if not ok:
             print(validated)
             return False
         return self._send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
 
-    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         ok, validated = validate_document_path(audio_path)
         if not ok:
             print(validated)
             return False
         return self._send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
 
-    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         ok, validated = validate_document_path(voice_path)
         if not ok:
             print(validated)
             return False
         return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
 
-    def send_sticker(self, chat_id, sticker_path) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
         sticker_path = Path(sticker_path)
         if not sticker_path.exists() or not sticker_path.is_file():
             print(f"Sticker not found: {sticker_path}")
             return False
         return self._send_media_multipart(chat_id, sticker_path, "sticker", "sendSticker")
 
-    def send_chat_action(self, chat_id, action) -> None:
+    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
-    def set_reaction(self, chat_id, message_id, reaction) -> None:
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
+                     reaction: List[Dict[str, str]]) -> None:
         telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": reaction})
 
-    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+    def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
         return telegram_api("editMessageText", payload)
 
-    def setup_commands(self, commands) -> None:
+    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
         telegram_api("setMyCommands", {"commands": commands})
 
-    def download_file(self, file_id, session_name) -> str | None:
+    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
         if not BOT_TOKEN:
             return None
         try:
@@ -3638,14 +3869,14 @@ class TelegramTransport(MessageTransport):
 class LocalTransport(MessageTransport):
     """Transport that logs messages to stdout. For testing without Telegram."""
 
-    def __init__(self):
-        self._log_file = os.environ.get("TRANSPORT_LOG", "")
+    def __init__(self) -> None:
+        self._log_file: str = os.environ.get("TRANSPORT_LOG", "")
 
     @property
     def name(self) -> str:
         return "local"
 
-    def _log(self, method, chat_id, **kwargs):
+    def _log(self, method: str, chat_id: ChatId, **kwargs: Any) -> None:
         msg = f"[local-transport] {method} chat_id={chat_id}"
         for k, v in kwargs.items():
             if v is not None:
@@ -3655,56 +3886,67 @@ class LocalTransport(MessageTransport):
             with open(self._log_file, "a") as f:
                 f.write(msg + "\n")
 
-    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+    def send_text(self, chat_id: ChatId, text: str,
+                  parse_mode: ParseMode = None,
+                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
         return {"ok": True, "result": {"message_id": 1}}
 
-    def send_rich_text(self, chat_id, markdown, reply_to=None) -> dict | None:
+    def send_rich_text(self, chat_id: ChatId, markdown: str,
+                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         self._log("send_rich_text", chat_id, text=markdown[:200])
         return {"ok": True, "result": {"message_id": 1}}
 
-    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         self._log("send_photo", chat_id, path=photo_path, caption=caption)
         return True
 
-    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
+                      caption: Optional[str] = None) -> bool:
         self._log("send_document", chat_id, path=doc_path, caption=caption)
         return True
 
-    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
+                       caption: Optional[str] = None) -> bool:
         self._log("send_animation", chat_id, path=animation_path, caption=caption)
         return True
 
-    def send_video(self, chat_id, video_path, caption=None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         self._log("send_video", chat_id, path=video_path, caption=caption)
         return True
 
-    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         self._log("send_audio", chat_id, path=audio_path, caption=caption)
         return True
 
-    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         self._log("send_voice", chat_id, path=voice_path, caption=caption)
         return True
 
-    def send_sticker(self, chat_id, sticker_path) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
         self._log("send_sticker", chat_id, path=sticker_path)
         return True
 
-    def send_chat_action(self, chat_id, action) -> None:
+    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         self._log("send_chat_action", chat_id, action=action)
 
-    def set_reaction(self, chat_id, message_id, reaction) -> None:
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
+                     reaction: List[Dict[str, str]]) -> None:
         self._log("set_reaction", chat_id, message_id=message_id)
 
-    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+    def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
         return {"ok": True, "result": {"message_id": message_id}}
 
-    def setup_commands(self, commands) -> None:
+    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
         self._log("setup_commands", 0, count=len(commands))
 
-    def download_file(self, file_id, session_name) -> str | None:
+    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
         self._log("download_file", 0, file_id=file_id, session=session_name)
         return None
 
@@ -3718,7 +3960,7 @@ def _init_transport() -> MessageTransport:
 transport = _init_transport()
 
 
-def telegram_api(method, data):
+def telegram_api(method: str, data: Dict[str, Any]) -> TelegramApiResponse:
     """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
     if TRANSPORT_MODE == "local":
         print(f"[local-transport] telegram_api {method} {str(data)[:100]}")
@@ -3728,12 +3970,13 @@ def telegram_api(method, data):
     return None
 
 
-def send_telegram_message(chat_id: int, text: str, parse_mode=None):
+def send_telegram_message(chat_id: ChatId, text: str,
+                          parse_mode: ParseMode = None) -> TelegramApiResponse:
     """Send a Telegram message, optionally with parse_mode (HTML or MarkdownV2)."""
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
 
-def download_telegram_file(file_id, session_name):
+def download_telegram_file(file_id: str, session_name: str) -> Optional[str]:
     """Download a Telegram file to the session inbox.
     Tests can patch bridge.download_telegram_file to intercept file downloads.
     Delegates to transport.download_file() internally.
@@ -7906,10 +8149,10 @@ class WorkerRepository:
         """Get the host for a worker (None = local)."""
         return get_worker_host(name)
 
-    def list_all(self) -> list[WorkerRecord]:
+    def list_all(self) -> List[WorkerRecord]:
         """List all workers from the registry."""
         registry = _load_registry()
-        workers = registry.get("workers", {})
+        workers: Dict[str, Any] = registry.get("workers", {})
         return [
             WorkerRecord(
                 name=name,
@@ -7923,6 +8166,19 @@ class WorkerRepository:
             )
             for name, info in workers.items()
         ]
+
+    def list_active(self) -> Dict[str, WorkerRecord]:
+        """List active workers as a name→WorkerRecord dict.
+
+        Delegates to WorkerManager.get_registered_sessions() for the raw scan,
+        then wraps each entry in a typed WorkerRecord.
+        """
+        # Import at call-time to avoid circular dependency at module-load.
+        sessions: Dict[str, Dict[str, Any]] = get_registered_sessions()
+        return {
+            name: WorkerRecord.from_session_dict(name, info, self.tmux_prefix)
+            for name, info in sessions.items()
+        }
 
 
 # ============================================================
@@ -8100,8 +8356,12 @@ class WorkerManager:
             self._sessions_cache = None
             self._sessions_cache_ts = 0
 
-    def get_registered_sessions(self, registered=None):
+    def get_registered_sessions(self, registered: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
         """Get registered sessions from tmux (all backends have tmux now).
+
+        Returns a dict mapping worker name → session info dict.
+        For typed access, prefer WorkerRepository.list_active() which
+        returns Dict[str, WorkerRecord].
 
         Results are cached for _SESSIONS_CACHE_TTL seconds to avoid blocking
         on SSH timeouts to remote hosts during message routing.
@@ -8851,7 +9111,7 @@ def scan_tmux_sessions():
     return worker_manager.scan_tmux_sessions()
 
 
-def get_registered_sessions(registered=None):
+def get_registered_sessions(registered: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
     """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
     return worker_manager.get_registered_sessions(registered)
@@ -9464,52 +9724,62 @@ class _LegacyTransportAdapter(MessageTransport):
     """Wraps legacy TelegramAPI-style objects (with send_message/set_reaction)
     for backward compat with tests that pass FakeTelegram to CommandRouter."""
 
-    def __init__(self, legacy):
-        self._legacy = legacy
+    def __init__(self, legacy: Any) -> None:
+        self._legacy: Any = legacy
 
     @property
     def name(self) -> str:
         return "legacy-adapter"
 
-    def send_text(self, chat_id, text, parse_mode=None, reply_to=None) -> dict | None:
+    def send_text(self, chat_id: ChatId, text: str,
+                  parse_mode: ParseMode = None,
+                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
         result = self._legacy.send_message(chat_id, text)
         return result if result else {"ok": True, "result": {"message_id": 1}}
 
-    def send_photo(self, chat_id, photo_path, caption=None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         return False
 
-    def send_document(self, chat_id, doc_path, caption=None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
+                      caption: Optional[str] = None) -> bool:
         return False
 
-    def send_animation(self, chat_id, animation_path, caption=None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
+                       caption: Optional[str] = None) -> bool:
         return False
 
-    def send_video(self, chat_id, video_path, caption=None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         return False
 
-    def send_audio(self, chat_id, audio_path, caption=None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         return False
 
-    def send_voice(self, chat_id, voice_path, caption=None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
+                   caption: Optional[str] = None) -> bool:
         return False
 
-    def send_sticker(self, chat_id, sticker_path) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
         return False
 
-    def send_chat_action(self, chat_id, action) -> None:
+    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         pass
 
-    def set_reaction(self, chat_id, message_id, reaction) -> None:
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
+                     reaction: List[Dict[str, str]]) -> None:
         if hasattr(self._legacy, 'set_reaction'):
             self._legacy.set_reaction(chat_id, message_id, reaction)
 
-    def edit_message(self, chat_id, message_id, text, parse_mode=None) -> dict | None:
+    def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         return {"ok": True, "result": {"message_id": message_id}}
 
-    def setup_commands(self, commands) -> None:
+    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
         pass
 
-    def download_file(self, file_id, session_name) -> str | None:
+    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
         return None
 
 
