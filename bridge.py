@@ -831,7 +831,7 @@ class GuestStore:
     """Thread-safe store for guest sessions and inboxes."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize guest sessions store with thread-safe locks."""
         self.guests: dict[str, dict[str, Any]] = {}
         self.inboxes: dict[str, list[dict[str, Any]]] = {}
         self.lock: threading.Lock = threading.Lock()
@@ -964,7 +964,7 @@ class ChannelStore:
     """Thread-safe store for group channels."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize channel store with thread-safe locks."""
         self.channels: dict[str, dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -1122,7 +1122,7 @@ class RelayStore:
     """Thread-safe store for relay channels."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize relay channel store with thread-safe locks."""
         self.channels: dict[str, dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -1575,7 +1575,7 @@ class RemoteCache:
     """Caches for remote host operations (tools, machines, home dirs)."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize caches for SSH host resolution and machine config."""
         self.tools: dict[str, str] = {}     # host:tool -> absolute path
         self.machines: dict[str, "Machine"] | None = None
         self.machines_path: Path | None = None
@@ -2253,7 +2253,7 @@ class TmuxSendState:
     """Thread locks and file descriptors for serialized tmux send operations."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize per-session send locks and flock file descriptors."""
         self.locks: dict[str, threading.Lock] = {}
         self.locks_guard: threading.Lock = threading.Lock()
         self.flock_fds: dict[str, int] = {}
@@ -2642,7 +2642,7 @@ class ProcessRegistry:
     """Tracks background process PIDs, pipe reader threads, and pending locks."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize adapter process tracking and bridge PID references."""
         self.adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
         self.pipe_readers: dict[str, tuple] = {}
         self.pending_locks: dict[str, threading.Lock] = {}
@@ -2918,7 +2918,7 @@ class MentionTracker:
     _KEYS = ("target", "count", "ts")
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize mention streak tracking (count and last timestamp)."""
         self.target: str | None = None
         self.count: int = 0
         self.ts: float = 0.0
@@ -2953,7 +2953,7 @@ class MentionTracker:
 class BridgeRuntimeState:
     """Typed in-memory state (RAM only — tmux IS persistence)."""
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize bridge runtime state (focus, TTS, admin, notifications)."""
         self.active: str | None = None
         self.startup_notified: bool = False
         self.tts_enabled: bool = False
@@ -3154,7 +3154,7 @@ class WorkerWatchdogState:
 
     def __init__(self) -> None:
         # Worker probe state
-        """Initialize internal state and locks."""
+        """Initialize worker watchdog counters, locks, and health maps."""
         self.worker_states: dict[str, tuple] = {}
         self.last_child_ts: dict[str, float] = {}
         self.last_seen_claude: dict[str, float] = {}
@@ -3208,7 +3208,7 @@ class HostHealthState:
     """Tracks health metrics for all remote hosts (SSH, disk, CPU, memory, IO, worktrees, Tailscale)."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize per-host health metrics (SSH, disk, memory, IO, CPU, Tailscale)."""
         # SSH connectivity
         self.ssh_failures: dict[str, int] = {}
         self.down: dict[str, bool] = {}
@@ -3266,7 +3266,7 @@ class LearningReminderState:
     """Tracks per-worker learning reminder counters, timers, and persistence."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize per-worker reminder counters, lock, and idle timer."""
         self.state: dict[str, ReminderState] = {}
         self.lock: threading.Lock = threading.Lock()
         self.idle_scan_timer: threading.Timer | None = None
@@ -3494,7 +3494,7 @@ class MediaGroupState:
     """Buffer for Telegram media groups — collects items before routing."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize media group buffer and collection lock."""
         self.buffer: dict[str, MediaGroupEntry] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -3888,7 +3888,7 @@ class TelegramAPI:
     """Low-level Telegram Bot API caller. Fully type-annotated."""
 
     def __init__(self, token: str) -> None:
-        """Initialize internal state and locks."""
+        """Initialize Telegram Bot API client with the given token."""
         self.token: str = token
 
     def api(self, method: str, data: dict[str, Any]) -> TelegramApiResponse:
@@ -3964,7 +3964,7 @@ class TelegramTransport(MessageTransport):
     """Transport that sends messages via Telegram Bot API."""
 
     def __init__(self, token: str) -> None:
-        """Initialize internal state and locks."""
+        """Initialize Telegram transport wrapping a TelegramAPI instance."""
         self._api: TelegramAPI = TelegramAPI(token)
 
     @property
@@ -4227,7 +4227,7 @@ class LocalTransport(MessageTransport):
     """Transport that logs messages to stdout. For testing without Telegram."""
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
+        """Initialize local (in-process) transport with a message log."""
         self._log_file: str = os.environ.get("TRANSPORT_LOG", "")
 
     @property
@@ -4550,7 +4550,7 @@ def cleanup_worker_pipe(name: str) -> None:
         try:
             pipe_dir.rmdir()
         except OSError:
-            pass  # Directory not empty, that's OK
+            pass  # intentional no-op: directory not empty is expected (other workers' pipes)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4673,7 +4673,7 @@ def stop_pipe_reader(name: str) -> None:
             os.write(fd, b"\n")
             os.close(fd)
         except OSError:
-            pass  # Pipe may already be closed
+            pass  # intentional no-op: pipe may already be closed by reader
 
     # Wait for thread to finish (with timeout)
     thread.join(timeout=1.0)
@@ -7073,7 +7073,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
             print(f"[watchdog] Edited alert for {name} -> resolved")
             return
         except (urllib.error.URLError, OSError, TimeoutError):
-            pass  # Fall through to send new message
+            pass  # intentional no-op: edit failed, fall through to send new message
 
     text = f"✅ {name} is back to normal."
     try:
@@ -8363,7 +8363,7 @@ class WorkerManager:
     """
 
     def __init__(self, sessions_dir: Path, tmux_prefix: str) -> None:
-        """Initialize internal state and locks."""
+        """Initialize worker manager with tmux prefix, session paths, and internal state."""
         self.sessions_dir = sessions_dir
         self.tmux_prefix = tmux_prefix
 
@@ -8758,7 +8758,7 @@ class WorkerManager:
 
         return welcome
 
-    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> tuple[bool, str]:
+    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> tuple[bool, str | None]:
         """Create a new worker instance."""
         self._sync_paths()
         if not is_valid_backend(backend):
@@ -8854,7 +8854,7 @@ class WorkerManager:
         self.invalidate_sessions_cache()
         return True, None
 
-    def end(self, name: str) -> tuple[bool, str]:
+    def end(self, name: str) -> tuple[bool, str | None]:
         """Kill a worker instance."""
         self._sync_paths()
         registered = self.get_registered_sessions()
@@ -8898,7 +8898,7 @@ class WorkerManager:
 
         return True, None
 
-    def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str]:
+    def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
         """Restart a worker in its existing tmux session.
 
         If tmux session is gone but worker is in the persistent registry,
@@ -9063,7 +9063,7 @@ class WorkerManager:
         self.invalidate_sessions_cache()
         return True, None
 
-    def _restart_dead_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str) -> tuple[bool, str]:
+    def _restart_dead_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str) -> tuple[bool, str | None]:
         """Re-create a dead worker (tmux gone) from registry.
 
         Creates a new tmux session, exports env, starts backend, sends welcome.
@@ -9281,7 +9281,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             print(f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
             return
     except (urllib.error.URLError, OSError, TimeoutError):
-        pass  # other bridge dead or unreachable — safe to claim
+        pass  # intentional no-op: other bridge dead or unreachable — safe to claim port
 
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host, timeout=3)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host, timeout=3)
@@ -10850,7 +10850,7 @@ class TeleportCommandsMixin:
                     print(f"[creds] Target {target_host} has independent valid credentials, skipping sync")
                     return
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
-            pass  # Can't check — fall through to sync
+            pass  # intentional no-op: can't verify remote — fall through to sync anyway
 
         _remote_run(["mkdir", "-p", ".claude"],
                      host=target_host, capture_output=True)
@@ -11269,7 +11269,7 @@ class WorkerLifecycleCommandsMixin:
             self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def _restart_remote_worker(self, name: str, backend_name: str, backend: BackendLifecycle, tmux_name: str, host: str, mode: str) -> bool:
+    def _restart_remote_worker(self, name: str, backend_name: str, backend: BackendLifecycle, tmux_name: str, host: str, mode: str) -> tuple[bool, str | None]:
         """Restart a teleported worker on its remote host.
 
         Reuses _stop_worker_for_teleport + _start_worker_on_target which
@@ -12034,7 +12034,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
     def __init__(self, transport: MessageTransport | None,
                  workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
-        """Initialize internal state and locks."""
+        """Initialize command router with worker manager, transport, and dispatch table."""
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
