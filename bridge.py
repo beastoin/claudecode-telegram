@@ -4282,7 +4282,7 @@ def stop_pipe_reader(name: str) -> None:
         print(f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
 
-def get_workers(caller_from: str | None = None) -> str:
+def get_workers(caller_from: str | None = None) -> list[dict[str, Any]]:
     """Get all active workers with their communication details.
 
     If ``caller_from`` is set to a worker name, ``send_example`` for each peer
@@ -8107,7 +8107,7 @@ class WorkerManager:
 
         return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
 
-    def get_workers(self, caller_from: str | None = None) -> str:
+    def get_workers(self, caller_from: str | None = None) -> list[dict[str, Any]]:
         """Get all active workers with their communication details.
 
         If ``caller_from`` is the name of a registered worker, each ``send_example``
@@ -9636,7 +9636,7 @@ class TeleportCommandsMixin:
         ).start()
         return True
 
-    def _check_teleback_conflicts(self, name: str, remote_host: str, local_cwd: str) -> str | None:
+    def _check_teleback_conflicts(self, name: str, remote_host: str, local_cwd: str) -> list[str]:
         """Check for working directory conflicts before teleback.
 
         Compares git status on both remote (where worker is) and local
@@ -11866,7 +11866,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
     # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)
     _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
 
-    def parse_at_mentions(self, text: str) -> tuple[str, list[str]]:
+    def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
         """Extract known @mentions from anywhere in text. Returns (targets, original_text).
         Matches registered workers first, then active guests. Full message preserved."""
         if not text:
@@ -11953,7 +11953,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             return None, ""
         return name, message
 
-    def get_reply_context(self, reply_msg: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    def get_reply_context(self, reply_msg: dict[str, Any]) -> tuple[str, int | None]:
         """Extract text and timestamp from a replied-to message."""
         if not reply_msg:
             return "", None
