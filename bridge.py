@@ -115,7 +115,7 @@ if not BRIDGE_PUBLIC_URL:
             text=True, timeout=3).stdout.strip()
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
@@ -515,7 +515,7 @@ def _guest_save() -> None:
             json.dump({"guests": active_guests, "inboxes": active_inboxes}, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
-    except Exception as e:
+    except OSError as e:
         print(f"[guest] Failed to save state: {e}", flush=True)
 
 
@@ -631,7 +631,7 @@ def _channel_save() -> None:
             json.dump(active, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
-    except Exception as e:
+    except OSError as e:
         print(f"[channel] Failed to save state: {e}", flush=True)
 
 
@@ -651,7 +651,7 @@ def _channel_load() -> None:
                 restored += 1
         if restored:
             print(f"[channel] Restored {restored} active channel(s) from disk", flush=True)
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         print(f"[channel] Failed to load state: {e}", flush=True)
 
 
@@ -784,7 +784,7 @@ def _relay_save() -> None:
             json.dump(active, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
-    except Exception as e:
+    except OSError as e:
         print(f"[relay] Failed to save state: {e}", flush=True)
 
 
@@ -805,7 +805,7 @@ def _relay_load() -> None:
                 restored += 1
         if restored:
             print(f"[relay] Restored {restored} active relay(s) from disk", flush=True)
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         print(f"[relay] Failed to load state: {e}", flush=True)
 
 
@@ -1180,7 +1180,7 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
             _remote_tool_cache[key] = found
             print(f"[bridge] discovered {tool} on {host}: {found}")
             return found
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
     return tool  # fallback to bare name
 
@@ -1672,7 +1672,7 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
             r = _remote_run(["git", "-C", target_cwd, "rev-parse", "--git-dir"],
                             host=host, capture_output=True, text=True, timeout=10)
             is_existing = r.returncode == 0
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
 
         if not is_existing:
@@ -1743,7 +1743,7 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                             host=host, capture_output=True, text=True, timeout=15)
 
         return True
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[git-sync] pull state error: {e}")
         return False
 
@@ -1755,7 +1755,7 @@ def _is_git_repo(cwd: str, host: str | None = None) -> bool:
             ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
             host=host, capture_output=True, text=True, timeout=10)
         return r.returncode == 0
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return False
 
 
@@ -1992,7 +1992,7 @@ def _tmux_pane_pids(host: str | None = None) -> dict:
             ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
             host=host, capture_output=True, text=True, timeout=5
         )
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return {}
 
     if result.returncode != 0:
@@ -2016,7 +2016,7 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> Optional[str]:
             ["pgrep", "-P", str(pane_pid), "-f", "claude"],
             host=host, capture_output=True, text=True, timeout=5
         )
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return None
 
     if result.returncode != 0:
@@ -2037,7 +2037,7 @@ def _child_count(pid: str, host: str | None = None) -> int:
             ["pgrep", "-P", str(pid)],
             host=host, capture_output=True, text=True, timeout=5
         )
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return 0
 
     if result.returncode != 0:
@@ -2057,7 +2057,7 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, dict[str, A
             ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
             host=host, capture_output=True, text=True, timeout=5
         )
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return {}
 
     if result.returncode != 0:
@@ -2099,7 +2099,7 @@ class ClaudeBackend:
         try:
             if not tmux_exists(tmux_name, host=host, timeout=3):
                 return False
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             if not host:
                 return False
             # Remote probe failure — don't block send, attempt delivery anyway
@@ -2113,7 +2113,7 @@ class ClaudeBackend:
             )
             if r.returncode == 0 and "Paste code here" in r.stdout:
                 literal = True
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
         return tmux_send_message(tmux_name, text, host=host, literal=literal)
 
@@ -2300,7 +2300,7 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
                 host=host, capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip().split("\n")[0]
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
         return None
 
@@ -2326,7 +2326,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict]:
             content = r.stdout
         else:
             content = Path(path).read_text()
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return []
 
     messages = []
@@ -2402,7 +2402,7 @@ def _read_noninteractive_activity(worker_name: str) -> str:
                     return f"idle (last response {age // 60}m ago)"
                 else:
                     return f"idle (last response {age // 3600}h ago)"
-        except Exception:
+        except (subprocess.SubprocessError, OSError, ValueError):
             pass
     return "idle"
 
@@ -2765,7 +2765,7 @@ def _read_learning_reminder(name: str) -> str:
             text = open(_LEARNING_REMINDER_PATH).read().strip()
             if text:
                 return text.replace("{name}", name)
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
 
@@ -2798,7 +2798,7 @@ def _save_learning_reminder_state() -> None:
         with open(tmp, "w") as f:
             json.dump(_learning_reminder_state, f)
         os.replace(tmp, path)
-    except Exception as e:
+    except OSError as e:
         print(f"Learning reminder state save error: {e}")
 
 
@@ -2816,7 +2816,7 @@ def _load_learning_reminder_state() -> None:
                     if isinstance(st, dict) and "response_count" in st:
                         _learning_reminder_state[name] = st
             print(f"Learning reminder state loaded: {len(data)} workers")
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         print(f"Learning reminder state load error: {e}")
 
 
@@ -3031,7 +3031,7 @@ def save_last_chat_id(chat_id: int | str) -> None:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         LAST_CHAT_ID_FILE.write_text(str(chat_id))
         LAST_CHAT_ID_FILE.chmod(0o600)
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to save last_chat_id: {e}")
 
 
@@ -3042,7 +3042,7 @@ def load_last_chat_id() -> Optional[int]:
             chat_id = LAST_CHAT_ID_FILE.read_text().strip()
             if chat_id:
                 return int(chat_id)
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to load last_chat_id: {e}")
     return None
 
@@ -3053,7 +3053,7 @@ def save_last_active(name: str) -> None:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         LAST_ACTIVE_FILE.write_text(name)
         LAST_ACTIVE_FILE.chmod(0o600)
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to save last_active: {e}")
 
 
@@ -3064,7 +3064,7 @@ def load_last_active() -> Optional[str]:
             name = LAST_ACTIVE_FILE.read_text().strip()
             if name:
                 return name
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to load last_active: {e}")
     return None
 
@@ -3086,13 +3086,13 @@ def _load_registry() -> Dict[str, Any]:
         if not isinstance(data, dict) or "workers" not in data:
             raise ValueError("invalid registry format")
         return data
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         if WORKER_REGISTRY_FILE.exists():
             corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(time.time())}")
             print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
             try:
                 WORKER_REGISTRY_FILE.rename(corrupt_path)
-            except Exception:
+            except OSError:
                 pass
         return {}
 
@@ -3107,13 +3107,13 @@ def _save_registry(data: Dict[str, Any]) -> None:
                 json.dump(data, f)
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, str(WORKER_REGISTRY_FILE))
-        except Exception:
+        except OSError:
             try:
                 os.unlink(tmp_path)
-            except Exception:
+            except OSError:
                 pass
             raise
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to save worker registry: {e}")
 
 
@@ -3215,7 +3215,7 @@ def read_checkin_note() -> str:
             text = open(path).read().strip()
             if text:
                 return text
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}")
     return ""
 
@@ -3328,10 +3328,10 @@ class TelegramAPI:
                 raw = e.read()
                 body = json.loads(raw)
                 return body  # Return error response so callers can inspect description
-            except Exception:
+            except (urllib.error.URLError, OSError, TimeoutError):
                 # Non-JSON error body (proxy, middlebox, empty) — return structured error
                 return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code} (non-JSON body)"}
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             print(f"Telegram API error: {e}")
             return None
 
@@ -3447,7 +3447,7 @@ class TelegramTransport(MessageTransport):
                 else:
                     print(f"sendPhoto failed: {result}")
                     return False
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"sendPhoto error: {e}")
             return False
 
@@ -3494,7 +3494,7 @@ class TelegramTransport(MessageTransport):
                 else:
                     print(f"sendAnimation failed: {result}")
                     return False
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"sendAnimation error: {e}")
             return False
 
@@ -3541,7 +3541,7 @@ class TelegramTransport(MessageTransport):
                 else:
                     print(f"sendDocument failed: {result}")
                     return False
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"sendDocument error: {e}")
             return False
 
@@ -3584,7 +3584,7 @@ class TelegramTransport(MessageTransport):
                 else:
                     print(f"{api_method} failed: {result}")
                     return False
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"{api_method} error: {e}")
             return False
 
@@ -3651,7 +3651,7 @@ class TelegramTransport(MessageTransport):
                     print(f"getFile failed: {result}")
                     return None
                 file_info = result.get("result", {})
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"getFile error: {e}")
             return None
         file_path = file_info.get("file_path")
@@ -3688,7 +3688,7 @@ class TelegramTransport(MessageTransport):
                 if r.returncode != 0:
                     print(f"rsync inbound failed (exit {r.returncode}): {host}:{remote_inbox}/ -> {r.stderr.decode(errors='replace').strip()}")
             return str(local_path)
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             print(f"Download error: {e}")
             return None
 
@@ -3931,7 +3931,7 @@ def cleanup_inbox(session_name: str) -> None:
         for f in inbox.iterdir():
             try:
                 f.unlink()
-            except Exception as e:
+            except OSError as e:
                 print(f"Failed to delete {f}: {e}")
 
 
@@ -3986,7 +3986,7 @@ def cleanup_worker_pipe(name: str) -> None:
         try:
             pipe_path.unlink()
             print(f"Removed worker pipe: {pipe_path}")
-        except Exception as e:
+        except OSError as e:
             print(f"Failed to remove worker pipe {pipe_path}: {e}")
 
     # Also try to remove parent directory if empty
@@ -4180,7 +4180,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> Optional[str
                 print(f"STT transcribed: {len(text)} chars from {duration}s audio")
                 return text
             return None
-    except Exception as e:
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
         print(f"STT error (fail-open): {e}")
         return None
 
@@ -5144,7 +5144,7 @@ def get_manager_chat_id(name: str) -> Optional[int]:
     try:
         value = chat_id_file.read_text().strip()
         return int(value) if value else None
-    except Exception as e:
+    except OSError as e:
         print(f"Failed to read chat_id for {name}: {e}")
         return None
 
@@ -5179,10 +5179,10 @@ def _read_session_file(name: str, filename: str) -> Optional[str]:
                     ensure_session_dir(name)
                     f.write_text(val)
                     f.chmod(0o600)
-                except Exception:
+                except OSError:
                     pass
                 return val
-        except Exception:
+        except (OSError, ValueError):
             pass
     return ""
 
@@ -5211,7 +5211,7 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
             if not path:
                 return ""
             return os.path.basename(path).removesuffix(".jsonl")
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return ""
     # Local scan
     slug_dir = CLAUDE_PROJECTS_DIR / slug
@@ -5244,7 +5244,7 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         with open(f, "a") as fh:
             fh.write(entry + "\n")
         f.chmod(0o600)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -5280,7 +5280,7 @@ def _cache_session_id(name: str, sid: str) -> None:
             _log_session_event(name, sid, cwd, "cache")
         f.write_text(sid)
         f.chmod(0o600)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -5404,7 +5404,7 @@ def _get_remote_home(host: str | None) -> str:
         r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                         capture_output=True, text=True, timeout=5)
         home = r.stdout.strip() if r.returncode == 0 else ""
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         home = ""
     _remote_home_cache[host] = home
     return home
@@ -5437,7 +5437,7 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
                      host=host, capture_output=True, timeout=3)
         _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id",
                       host=host, direction="push")
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[set_pending] Failed to sync chat_id to {host} for {name}: {e}")
 
 
@@ -5466,7 +5466,7 @@ def is_pending(name: str) -> bool:
         if (time.time() - ts) > PENDING_TIMEOUT:
             return False
         return True
-    except:
+    except (OSError, ValueError):
         return False
 
 
@@ -5485,7 +5485,7 @@ def _pending_timestamp(name: str) -> Optional[int]:
         return None
     try:
         return int(pending.read_text().strip())
-    except Exception:
+    except OSError:
         return None
 
 
@@ -5580,7 +5580,7 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None)
             ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
             host=host, capture_output=True, text=True, timeout=5
         )
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return ""
     if result.returncode != 0:
         return ""
@@ -5607,7 +5607,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
             r = _remote_run(["tail", "-n", str(tail_lines), remote_log], host=host,
                             capture_output=True, text=True, timeout=5)
             return r.stdout if r.returncode == 0 else ""
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return ""
     log_path = get_session_dir(name) / "adapter.log"
     if not log_path.exists():
@@ -5616,7 +5616,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         with log_path.open("r", errors="ignore") as fh:
             lines = fh.readlines()
         return "".join(lines[-tail_lines:])
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -5641,7 +5641,7 @@ def _check_hook_failure_signal(name: str) -> Optional[str]:
             if r.returncode != 0:
                 return None
             raw = r.stdout.strip()
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return None
     else:
         signal_file = Path(signal_path)
@@ -5649,7 +5649,7 @@ def _check_hook_failure_signal(name: str) -> Optional[str]:
             return None
         try:
             raw = signal_file.read_text().strip()
-        except Exception:
+        except OSError:
             return None
 
     if not raw:
@@ -5684,12 +5684,12 @@ def _clear_hook_failures(name: str) -> None:
         try:
             _remote_run(["rm", "-f", signal_path], host=host,
                         capture_output=True, timeout=5)
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
     else:
         try:
             Path(signal_path).unlink(missing_ok=True)
-        except Exception:
+        except OSError:
             pass
 
 
@@ -5816,7 +5816,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
         try:
             transport.send_text(admin_chat_id, alert_text)
             print(f"[watchdog] Host alert: {alert_text.splitlines()[0]}")
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"[watchdog] Host alert error: {e}")
 
 
@@ -5923,7 +5923,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                         try:
                             transport.send_text(admin_chat_id, alert_text)
                             print(f"[watchdog] Disk alert: {alert_text.splitlines()[0]}")
-                        except Exception as e:
+                        except (urllib.error.URLError, OSError, TimeoutError) as e:
                             print(f"[watchdog] Disk alert error: {e}")
             else:
                 # Downgrade from critical to warning — just update state
@@ -5936,7 +5936,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
                     )
-                except Exception:
+                except (urllib.error.URLError, OSError, TimeoutError):
                     pass
 
 
@@ -6075,7 +6075,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                     try:
                         transport.send_text(admin_chat_id, alert_text)
                         print(f"[watchdog] Memory alert: {alert_text.splitlines()[0]}")
-                    except Exception as e:
+                    except (urllib.error.URLError, OSError, TimeoutError) as e:
                         print(f"[watchdog] Memory alert error: {e}")
         elif not is_critical and was_alerted:
             _host_mem_alerted[host_label] = False
@@ -6085,7 +6085,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
                     )
-                except Exception:
+                except (urllib.error.URLError, OSError, TimeoutError):
                     pass
 
 
@@ -6123,7 +6123,7 @@ def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
                     "write_iops": round(total_w_iops),
                     "util_pct": round(max_util, 1),
                 }
-    except Exception:
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
         pass
     try:
         r = _remote_run(
@@ -6212,7 +6212,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                     try:
                         transport.send_text(admin_chat_id, alert_text)
                         print(f"[watchdog] IO alert: {alert_text.splitlines()[0]}")
-                    except Exception as e:
+                    except (urllib.error.URLError, OSError, TimeoutError) as e:
                         print(f"[watchdog] IO alert error: {e}")
         elif not is_critical and was_alerted:
             _host_io_alerted[host_label] = False
@@ -6222,7 +6222,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
                     )
-                except Exception:
+                except (urllib.error.URLError, OSError, TimeoutError):
                     pass
 
 
@@ -6315,7 +6315,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                     try:
                         transport.send_text(admin_chat_id, alert_text)
                         print(f"[watchdog] CPU hog alert: {host_label} ({len(real_hogs)} process{'es' if len(real_hogs) > 1 else ''})")
-                    except Exception as e:
+                    except (urllib.error.URLError, OSError, TimeoutError) as e:
                         print(f"[watchdog] CPU hog alert error: {e}")
 
 
@@ -6388,7 +6388,7 @@ def _probe_worktree_sizes(remote_hosts: set) -> None:
                         try:
                             transport.send_text(admin_chat_id, alert_text)
                             print(f"[watchdog] Worktree alert: {host_label} {total_gb:.1f}GB")
-                        except Exception as e:
+                        except (urllib.error.URLError, OSError, TimeoutError) as e:
                             print(f"[watchdog] Worktree alert error: {e}")
             elif total_gb < WORKTREE_ALERT_THRESHOLD_GB and was_alerted:
                 _host_worktree_alerted[host_label] = False
@@ -6398,9 +6398,9 @@ def _probe_worktree_sizes(remote_hosts: set) -> None:
                             admin_chat_id,
                             f"✅ Worktree size recovered: {host_label} — {total_gb:.1f}GB (below {WORKTREE_ALERT_THRESHOLD_GB}GB)"
                         )
-                    except Exception:
+                    except (urllib.error.URLError, OSError, TimeoutError):
                         pass
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"[watchdog] Worktree check error for {host_label}: {e}")
 
 
@@ -6418,7 +6418,7 @@ def _probe_tailscale() -> None:
             is_up = data.get("BackendState") == "Running"
         else:
             is_up = False
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         is_up = False
 
     if not is_up and not _infra_tailscale_down:
@@ -6433,7 +6433,7 @@ def _probe_tailscale() -> None:
                         "Run: sudo tailscale up"
                     )
                     print("[watchdog] Tailscale DOWN alert sent")
-                except Exception as e:
+                except (urllib.error.URLError, OSError, TimeoutError) as e:
                     print(f"[watchdog] Tailscale alert error: {e}")
     elif is_up and _infra_tailscale_down:
         _infra_tailscale_down = False
@@ -6444,7 +6444,7 @@ def _probe_tailscale() -> None:
                     "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
                 )
                 print("[watchdog] Tailscale recovery alert sent")
-            except Exception:
+            except (urllib.error.URLError, OSError, TimeoutError):
                 pass
 
 
@@ -6484,13 +6484,13 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
             transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
             print(f"[watchdog] Edited alert for {name} -> resolved")
             return
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass  # Fall through to send new message
 
     text = f"✅ {name} is back to normal."
     try:
         transport.send_text(admin_chat_id, text)
-    except Exception as e:
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
         print(f"Watchdog resolved alert error: {e}")
 
 
@@ -6938,7 +6938,7 @@ def validate_cwd(cwd: Optional[str], host: str | None = None) -> tuple[str, str]
                             capture_output=True, timeout=10)
             if r.returncode != 0:
                 return "", f"cwd does not exist on {host}: {normalized}"
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             return "", f"cwd check failed on {host}: {e}"
     else:
         if not os.path.exists(normalized):
@@ -7432,7 +7432,7 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> tuple:
         lines = result.stdout.split("\n")
         tail = lines[-40:]
         return _extract_activity(tail), _extract_context_pct(tail), tail
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return "Unknown", None, None
 
 
@@ -7715,7 +7715,7 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
-    except Exception as e:
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
         print(f"Callback send failed for '{name}' at {msg_url}: {e}")
         return False
 
@@ -7928,7 +7928,7 @@ class WorkerManager:
                         return True  # Probe failure on interactive check — assume online
                 return True
             except Exception:
-                return True  # SSH failure — assume still online
+                return True  # SSH failure — assume still online (broad catch intentional)
 
         return backend.is_online(tmux_name)
 
@@ -8237,7 +8237,7 @@ class WorkerManager:
                     backend_file.unlink()
                 for session_id_file in session_dir.glob("*_session_id"):
                     session_id_file.unlink()
-            except Exception as e:
+            except OSError as e:
                 return False, f"Failed to clean non-interactive metadata: {e}"
 
         if SANDBOX_ENABLED and backend.is_interactive:
@@ -8640,7 +8640,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             urllib.request.urlopen(existing, timeout=1).read()
             print(f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
             return
-    except Exception:
+    except (urllib.error.URLError, OSError, TimeoutError):
         pass  # other bridge dead or unreachable — safe to claim
 
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host, timeout=3)
@@ -8655,7 +8655,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             local_home = str(Path.home())
             if remote_home and remote_home != local_home and sessions_dir_val.startswith(local_home):
                 sessions_dir_val = remote_home + sessions_dir_val[len(local_home):]
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host, timeout=3)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host, timeout=3)
@@ -8768,7 +8768,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
             return local_path
         if r.returncode != 0:
             print(f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.decode(errors='replace').strip()}")
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"Remote file fetch failed: {host}:{remote_path} -> {e}")
     shutil.rmtree(tmp_dir, ignore_errors=True)
     return None
@@ -9003,7 +9003,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                             os.unlink(voice_path)
                         except OSError:
                             pass
-            except Exception as e:
+            except OSError as e:
                 print(f"TTS thread error: {e}")
         # Run TTS in background thread to not block /response return
         threading.Thread(target=_tts_and_send, daemon=True).start()
@@ -9034,14 +9034,14 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> N
                     if old_sid != session_id:
                         sid_file.write_text(session_id)
                         sid_file.chmod(0o600)
-            except Exception as e:
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
                 print(f"gRPC response payload ignored for '{name}': {e}")
 
         send_response_to_telegram(name, text, int(chat_id), log_prefix="gRPC response")
         _check_learning_reminder(name)
         clear_pending(name)
         mark_hook_event(name)
-    except Exception as e:
+    except OSError as e:
         print(f"gRPC response error for '{name}': {e}")
 
 
@@ -9065,7 +9065,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
                 host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
                 url = url.replace("localhost", host)
             return url or None
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         print(f"beast serve deploy failed for {slug}: {e}")
     return None
 
@@ -9172,7 +9172,7 @@ def get_all_chat_ids() -> List[int]:
                         chat_id = chat_id_file.read_text().strip()
                         if chat_id:
                             chat_ids.add(chat_id)
-                    except Exception:
+                    except (OSError, ValueError):
                         pass
     # Also include current admin if known
     if admin_chat_id:
@@ -9860,7 +9860,7 @@ class CommandRouter:
                     _json.loads(resp.read())
                 enabled.append(n)
                 session_names.append(session_name)
-            except Exception as e:
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
                 errors.append(f"{n}: {e}")
         if not enabled:
             self.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
@@ -9878,7 +9878,7 @@ class CommandRouter:
                 headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 _json.loads(resp.read())
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
         pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
@@ -10251,7 +10251,7 @@ class CommandRouter:
                 if serve_url:
                     self.reply(chat_id, f"\U0001f4ac Team chat\n{serve_url}")
                     return True
-            except Exception as e:
+            except OSError as e:
                 print(f"Team chat snapshot deploy failed: {e}")
             self.reply(chat_id, f"\U0001f4ac Team chat\n{url}")
             return True
@@ -10270,7 +10270,7 @@ class CommandRouter:
             if serve_url:
                 self.reply(chat_id, f"⏪ Rewind for {name}\n{serve_url}")
                 return True
-        except Exception as e:
+        except OSError as e:
             print(f"Rewind snapshot deploy failed for {name}: {e}")
         self.reply(chat_id, f"⏪ Rewind for {name}\n{url}")
         return True
@@ -11507,7 +11507,7 @@ class CommandRouter:
             try:
                 state_file = SESSIONS_DIR / name / "teleport_state"
                 state_file.unlink(missing_ok=True)
-            except Exception:
+            except OSError:
                 pass
 
     def _stop_worker_for_teleport(self, name: str, tmux_name: str, host: str | None=None) -> str | None:
@@ -11696,7 +11696,7 @@ class CommandRouter:
                             ["git", "-C", repo_path, "push", "origin", "master"],
                             capture_output=True, timeout=60)
                         print(f"[teleport] git sync succeeded for {repo_name}")
-                    except Exception as e:
+                    except (subprocess.SubprocessError, OSError) as e:
                         w = f"git push {repo_name}: {e}"
                         warnings.append(w)
                         print(f"[teleport] {w}")
@@ -11708,7 +11708,7 @@ class CommandRouter:
                         ["bash", "-c",
                          f"cd ~/{repo_name} 2>/dev/null && git pull origin master 2>/dev/null || true"],
                         host=target_host, capture_output=True, timeout=60)
-                except Exception as e:
+                except (subprocess.SubprocessError, OSError) as e:
                     w = f"git pull {repo_name} on {target_host}: {e}"
                     warnings.append(w)
                     print(f"[teleport] {w}")
@@ -11721,7 +11721,7 @@ class CommandRouter:
                          f"[ -d ~/agent-config/.claude/{subdir} ] && "
                          f"rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/"],
                         host=target_host, capture_output=True, timeout=60)
-                except Exception as e:
+                except (subprocess.SubprocessError, OSError) as e:
                     w = f"agent-config deploy {subdir}: {e}"
                     warnings.append(w)
                     print(f"[teleport] {w}")
@@ -11744,7 +11744,7 @@ class CommandRouter:
                         ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
                         capture_output=True, timeout=10)
                     os.unlink(tmp)
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             w = f"shared repo sync: {e}"
             warnings.append(w)
             print(f"[teleport] {w}")
@@ -11842,7 +11842,7 @@ class CommandRouter:
                         fails.append(reason)
                 except subprocess.TimeoutExpired:
                     fails.append(f"{script} timed out")
-                except Exception as e:
+                except (subprocess.SubprocessError, OSError) as e:
                     fails.append(f"{script} error: {e}")
 
         return fails
@@ -11882,7 +11882,7 @@ class CommandRouter:
                      'd.setdefault("numStartups",1);'
                      'p.write_text(json.dumps(d))'],
                     host=target_host, capture_output=True, timeout=10)
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             w = f"hook install: {e}"
             warnings.append(w)
             print(f"[teleport] {w}")
@@ -11939,7 +11939,7 @@ class CommandRouter:
                 if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
                     print(f"[creds] Target {target_host} has independent valid credentials, skipping sync")
                     return
-        except Exception:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
             pass  # Can't check — fall through to sync
 
         _remote_run(["mkdir", "-p", ".claude"],
@@ -12101,20 +12101,20 @@ class CommandRouter:
                 host=source_host, capture_output=True)
 
             self._teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             self._teleport_notify(chat_id, f"Rollback also failed: {e}")
 
         try:
             state_file = SESSIONS_DIR / name / "teleport_state"
             state_file.unlink(missing_ok=True)
-        except Exception:
+        except OSError:
             pass
 
     def _teleport_notify(self, chat_id: int | str, text: str) -> None:
         """Send progress notification during teleport."""
         try:
             transport.send_text(chat_id, text)
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
     def cmd_voice(self, arg: str, chat_id: ChatId) -> bool:
@@ -12573,7 +12573,7 @@ def _run_team_chat_query(query_type: str, **kwargs: Any) -> Optional[str]:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
             return json.loads(r.stdout)
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"Team chat query error: {e}")
     return None
 
@@ -12607,7 +12607,7 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | Non
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
             return json.loads(r.stdout)
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"Transcript query error: {e}")
     return None
 
@@ -12649,7 +12649,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                     with _TRANSCRIPT_SYNC_LOCK:
                         _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)"
                         _TRANSCRIPT_SYNC[key]["pct"] = pct
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
         if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
@@ -12719,7 +12719,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                                              daemon=True)
                         t.start()
                         return "syncing", sid, cwd
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 pass
 
     if transcript_path.exists():
@@ -13087,7 +13087,7 @@ def _transcript_stats(entries: list) -> dict:
                 duration_str = f"{hours}h {mins}m"
             else:
                 duration_str = f"{mins}m"
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             pass
     return {"n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
             "lines_add": lines_add, "lines_del": lines_del,
@@ -13304,7 +13304,7 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
                 try:
                     with open(_file_full, "r", encoding="utf-8", errors="replace") as _ff:
                         _file_content = _ff.read(64_000)  # cap at 64KB
-                except Exception:
+                except OSError:
                     pass
                 if ext == ".md":
                     # Render markdown to HTML
@@ -14374,7 +14374,7 @@ class Handler(BaseHTTPRequestHandler):
                 def _safe_handle(upd: dict[str, Any]) -> None:
                     try:
                         command_router.handle_message(upd)
-                    except Exception as exc:
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                         print(f"[webhook] handle_message CRASH: {exc}")
                         import traceback
                         traceback.print_exc()
@@ -14464,7 +14464,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(f"Sent to {sent} chats".encode())
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"Notify error: {e}")
             self.send_response(500)
             self.end_headers()
@@ -14492,7 +14492,7 @@ class Handler(BaseHTTPRequestHandler):
                 transport.send_text(chat_id, alert_text)
 
             self._send_json(200, {"ok": True})
-        except Exception as e:
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"Health alert error: {e}")
             self._send_json(500, {"ok": False, "error": str(e)})
 
@@ -14541,7 +14541,7 @@ class Handler(BaseHTTPRequestHandler):
                                       for s in r.stdout.strip().split("\n")
                                       if s.startswith(TMUX_PREFIX)]
                     conflict = name in active_workers if name else False
-            except Exception:
+            except (subprocess.SubprocessError, OSError):
                 pass
             worker_manager.invalidate_sessions_cache()
             self._send_json(200, {
@@ -14652,7 +14652,7 @@ class Handler(BaseHTTPRequestHandler):
                         _log_session_event(session_name, hook_sid, cwd, "hook")
                         sid_file.write_text(hook_sid)
                         sid_file.chmod(0o600)
-                except Exception:
+                except OSError:
                     pass
 
             # Send response using shared helper
@@ -14767,7 +14767,7 @@ class Handler(BaseHTTPRequestHandler):
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f514 Guest \"{name}\" connected")
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         print(f"Guest registered: {name} (expires {expires_at})")
@@ -14871,7 +14871,7 @@ class Handler(BaseHTTPRequestHandler):
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"[{ch_id}] {from_member}: {text}")
-                        except Exception:
+                        except (urllib.error.URLError, OSError, TimeoutError):
                             pass
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
@@ -14915,7 +14915,7 @@ class Handler(BaseHTTPRequestHandler):
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"[{target}] {from_member}: {text}")
-                        except Exception:
+                        except (urllib.error.URLError, OSError, TimeoutError):
                             pass
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
@@ -14956,7 +14956,7 @@ class Handler(BaseHTTPRequestHandler):
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"\U0001f514 Guest \"{guest_name}\" → {worker}")
-                        except Exception:
+                        except (urllib.error.URLError, OSError, TimeoutError):
                             pass
                 results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
 
@@ -15064,7 +15064,7 @@ class Handler(BaseHTTPRequestHandler):
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f514 Guest \"{guest['name']}\" disconnected")
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         print(f"Guest disconnected: {guest['name']}")
@@ -15144,7 +15144,7 @@ class Handler(BaseHTTPRequestHandler):
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         print(f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
@@ -15185,7 +15185,7 @@ class Handler(BaseHTTPRequestHandler):
                         parts.append(f"removed {', '.join(removed)}")
                     send_telegram_message(admin_chat_id,
                         f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
-            except Exception:
+            except (urllib.error.URLError, OSError, TimeoutError):
                 pass
 
         self._send_json(200, {
@@ -15269,7 +15269,7 @@ class Handler(BaseHTTPRequestHandler):
                     if admin_chat_id:
                         send_telegram_message(admin_chat_id,
                             f"[{channel_id}] {from_member}: {text}")
-                except Exception:
+                except (urllib.error.URLError, OSError, TimeoutError):
                     pass
 
         self._send_json(200, {
@@ -15371,7 +15371,7 @@ class Handler(BaseHTTPRequestHandler):
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f4e2 Channel {channel_id} closed")
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
         print(f"Channel deleted: {channel_id}")
         self._send_json(200, {"ok": True, "channel": channel_id})
@@ -15617,7 +15617,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(response).encode())
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             print(f"Workers endpoint error: {e}")
             self.send_response(500)
             self.end_headers()
@@ -15838,7 +15838,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(response).encode())
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             print(f"Health workers endpoint error: {e}")
             self.send_response(500)
             self.end_headers()
@@ -15889,7 +15889,7 @@ class Handler(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             self.send_response(504)
             self.end_headers()
-        except Exception:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             self.send_response(500)
             self.end_headers()
 
@@ -15962,7 +15962,7 @@ class Handler(BaseHTTPRequestHandler):
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         # Route to workers via @mentions
@@ -16039,7 +16039,7 @@ class Handler(BaseHTTPRequestHandler):
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
-        except Exception:
+        except (urllib.error.URLError, OSError, TimeoutError):
             pass
 
         self.send_response(200)
@@ -16438,7 +16438,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
             self.wfile.write(data)
-        except Exception:
+        except OSError:
             self.send_response(500)
             self.end_headers()
 
@@ -16507,7 +16507,7 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
         with open(f"/proc/{ppid}/cmdline", "rb") as f:
             cmdline = f.read().decode().replace("\x00", " ").strip()
             parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         pass
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
@@ -16523,14 +16523,14 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
         try:
             gmail_connector_instance.stop()
             print("Gmail connector stopped")
-        except Exception:
+        except (RuntimeError, OSError):
             pass
 
     if github_connector_instance is not None:
         try:
             github_connector_instance.stop()
             print("GitHub connector stopped")
-        except Exception:
+        except (RuntimeError, OSError):
             pass
 
     send_shutdown_message()
@@ -16861,15 +16861,15 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
                         with open(tmp_path, "w") as f:
                             f.write(page_html)
                         serve_url = _beast_serve_deploy(tmp_path, slug)
-                    except Exception as e:
+                    except OSError as e:
                         print(f"[{tag}] beast serve failed: {e}")
                 summary = _connector_short_summary(tag, plain_text, serve_url, metadata)
                 try:
                     send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
-                except Exception:
+                except OSError:
                     try:
                         send_telegram_message(admin_chat_id, plain_text[:300])
-                    except Exception as e:
+                    except (urllib.error.URLError, OSError, TimeoutError) as e:
                         print(f"[{tag}] Telegram send failed: {e}")
                 for att in (attachments or []):
                     fpath = att.get("path", "")
@@ -16901,7 +16901,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
             if admin_chat_id:
                 try:
                     send_telegram_message(admin_chat_id, text)
-                except Exception as e:
+                except (urllib.error.URLError, OSError, TimeoutError) as e:
                     print(f"[{tag}] Failed to send Telegram alert: {e}")
         return handler
 
