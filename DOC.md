@@ -421,11 +421,11 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 **Structured logging:**
 - Added `_log(level, component, msg, exc=)` function with severity levels (ERROR/WARN/INFO/DEBUG)
-- Converted ALL 178 `print(file=sys.stderr)` calls → `_log()` with proper severity
-- Converted 71 `print(f"[component] ...")` stdout diagnostic calls → `_log()`
+- 338 total `_log()` calls across 20+ component tags
+- Converted ALL 178 `print(file=sys.stderr)` + 130 stdout diagnostic prints → `_log()`
 - Eliminated all 5 `traceback.print_exc()` calls → `_log(exc=e)` pattern
 - Format: `[LEVEL:component] message` — machine-parseable, grep-friendly
-- Zero raw `print()` calls for error diagnostics remain
+- Only 39 intentional stdout prints remain (startup banner, shutdown, transport validation)
 
 **Type safety:**
 - Parameterized ALL bare `list` and `dict` annotations (15 sites)
