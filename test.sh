@@ -1093,7 +1093,7 @@ mock_response.__enter__ = lambda s: s
 mock_response.__exit__ = MagicMock(return_value=False)
 
 try:
-    with patch('urllib.request.urlopen', return_value=mock_response):
+    with patch('bridge._urlopen', return_value=mock_response):
         result = bridge.transcribe_voice(tmp.name)
     assert result == 'hello world', f'Expected \"hello world\", got {result!r}'
     print('OK')
@@ -1116,7 +1116,7 @@ import urllib.error
 import bridge
 
 # Simulate timeout
-with patch('urllib.request.urlopen', side_effect=TimeoutError('timeout')):
+with patch('bridge._urlopen', side_effect=TimeoutError('timeout')):
     result = bridge.transcribe_voice('/tmp/test.ogg')
 
 assert result is None, f'Expected None, got {result!r}'
@@ -1141,7 +1141,7 @@ mock_response.read.return_value = b'not json'
 mock_response.__enter__ = lambda s: s
 mock_response.__exit__ = MagicMock(return_value=False)
 
-with patch('urllib.request.urlopen', return_value=mock_response):
+with patch('bridge._urlopen', return_value=mock_response):
     result = bridge.transcribe_voice('/tmp/test.ogg')
 
 assert result is None, f'Expected None, got {result!r}'
@@ -1282,7 +1282,7 @@ mock_response.headers = {'X-Audio-Duration': '3.5', 'X-Processing-Time': '2.1'}
 mock_response.__enter__ = lambda s: s
 mock_response.__exit__ = MagicMock(return_value=False)
 
-with patch('urllib.request.urlopen', return_value=mock_response):
+with patch('bridge._urlopen', return_value=mock_response):
     result = bridge.synthesize_speech('Hello world')
 
 assert result is not None, 'Expected file path, got None'
@@ -1311,7 +1311,7 @@ sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
 import bridge
 
-with patch('urllib.request.urlopen', side_effect=TimeoutError('timeout')):
+with patch('bridge._urlopen', side_effect=TimeoutError('timeout')):
     result = bridge.synthesize_speech('Hello world')
 
 assert result is None, f'Expected None, got {result!r}'
@@ -1343,7 +1343,7 @@ mock_response.__exit__ = MagicMock(return_value=False)
 
 # Short text: should use base /synthesize endpoint
 bridge.TTS_CHUNKED_THRESHOLD = 200
-with patch('urllib.request.urlopen', return_value=mock_response) as mock_url:
+with patch('bridge._urlopen', return_value=mock_response) as mock_url:
     result = bridge.synthesize_speech('Short text')
     called_url = mock_url.call_args[0][0].full_url
     assert '/synthesize/chunked' not in called_url, f'Short text used chunked: {called_url}'
@@ -1351,7 +1351,7 @@ with patch('urllib.request.urlopen', return_value=mock_response) as mock_url:
 
 # Long text: should use /synthesize/chunked endpoint
 long_text = 'This is a test sentence. ' * 20  # ~500 chars
-with patch('urllib.request.urlopen', return_value=mock_response) as mock_url:
+with patch('bridge._urlopen', return_value=mock_response) as mock_url:
     result = bridge.synthesize_speech(long_text)
     called_url = mock_url.call_args[0][0].full_url
     assert '/synthesize/chunked' in called_url, f'Long text did not use chunked: {called_url}'
@@ -14091,7 +14091,7 @@ def mock_run(cmd, **kwargs):
     sync_calls.append(cmd)
     return MagicMock(returncode=0, stdout='', stderr='')
 
-with patch('urllib.request.urlopen', side_effect=mock_urlopen), \
+with patch('bridge._urlopen', side_effect=mock_urlopen), \
      patch('bridge._remote_run', side_effect=mock_remote), \
      patch('subprocess.run', side_effect=mock_run):
     remote_path = bridge.download_telegram_file('file-1', 'ren')
@@ -14105,7 +14105,7 @@ assert any(cmd[0] == 'rsync' and 'mac-mini:' in cmd[-1] for cmd in sync_calls), 
 bridge.WORKER_REGISTRY_FILE.write_text(json.dumps({'version': 1, 'workers': {}}))
 sync_calls.clear()
 remote_calls.clear()
-with patch('urllib.request.urlopen', side_effect=mock_urlopen), \
+with patch('bridge._urlopen', side_effect=mock_urlopen), \
      patch('bridge._remote_run', side_effect=mock_remote), \
      patch('subprocess.run', side_effect=mock_run):
     local_path = bridge.download_telegram_file('file-2', 'lee')

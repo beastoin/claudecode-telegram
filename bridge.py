@@ -1677,6 +1677,7 @@ class _RealClock:
 # Module-level defaults (overridable in tests by replacing these singletons)
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
+_urlopen: Callable[..., Any] = urllib.request.urlopen  # Injectable for testing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4038,7 +4039,7 @@ class TelegramAPI:
             headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with _urlopen(req, timeout=10) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
@@ -4234,7 +4235,7 @@ class TelegramTransport(MessageTransport):
                 data=body,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
             )
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with _urlopen(req, timeout=60) as r:
                 result = json.loads(r.read())
                 if result.get("ok"):
                     _log(_LOG_INFO, "telegram", f"{api_method} sent: {fname}")
@@ -4312,7 +4313,7 @@ class TelegramTransport(MessageTransport):
                 data=json.dumps({"file_id": file_id}).encode(),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _urlopen(req, timeout=30) as r:
                 result = json.loads(r.read())
                 if not result.get("ok"):
                     _log(_LOG_WARN, "bridge", f"getFile failed: {result}")
@@ -4336,7 +4337,7 @@ class TelegramTransport(MessageTransport):
         local_path = inbox / local_filename
         try:
             req = urllib.request.Request(download_url)
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with _urlopen(req, timeout=60) as r:
                 content = r.read()
                 if len(content) > MAX_FILE_SIZE:
                     _log(_LOG_WARN, "telegram", f"Downloaded file too large: {len(content)}")
@@ -4864,7 +4865,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _urlopen(req, timeout=timeout) as r:
             result = json.loads(r.read())
             text = result.get("text", "").strip()
             if text:
@@ -4917,7 +4918,7 @@ def synthesize_speech(text: str, voice: str | None = None, language: str = "en")
             data=payload,
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=TTS_TIMEOUT) as r:
+        with _urlopen(req, timeout=TTS_TIMEOUT) as r:
             audio_data = r.read()
             if not audio_data:
                 return None
@@ -8522,7 +8523,7 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_WARN, "bridge", f"Callback send failed for '{name}' at {msg_url}: {e}")
@@ -9511,7 +9512,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
         existing = r.stdout.strip().split("=", 1)[-1] if r.returncode == 0 else ""
         if existing and existing != our_url:
             import urllib.request
-            urllib.request.urlopen(existing, timeout=1).read()
+            _urlopen(existing, timeout=1).read()
             _log(_LOG_DEBUG, "worker", f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
             return
     except (urllib.error.URLError, OSError, TimeoutError):
@@ -12850,7 +12851,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 if worker_host:
                     url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with _urlopen(req, timeout=5) as resp:
                     _json.loads(resp.read())
                 enabled.append(n)
                 session_names.append(session_name)
@@ -12870,7 +12871,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 f"http://localhost:{pilot_port}/api/grid-session",
                 data=payload, method="POST",
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with _urlopen(req, timeout=5) as resp:
                 _json.loads(resp.read())
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
@@ -16334,7 +16335,7 @@ class PrEndpointsMixin:
                 f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=5)
+            _urlopen(req, timeout=5)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_WARN, "pr-comment", f"Telegram notification failed (best-effort): {exc}")
 
@@ -16410,7 +16411,7 @@ class PrEndpointsMixin:
                 f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=5)
+            _urlopen(req, timeout=5)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
