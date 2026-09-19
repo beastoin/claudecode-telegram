@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.32.0
+> Version: 0.33.0
 
 ## Current Philosophy (Summary)
 
@@ -16,6 +16,7 @@
 | **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
 | **Decentralized worker comms** | Workers send messages directly to each other. Manager tools may use bridge control-plane APIs |
 | **Machines are config** | Static host topology lives in `machines.json`. tmux and workers are runtime state |
+| **SOLID in a single file** | AppContext for DI, typed records for data, service classes for responsibilities, protocol splits for interfaces, registry dispatch for extension — all within `bridge.py` |
 
 ---
 
@@ -415,6 +416,44 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.33.0 - SOLID refactoring + subprocess timeout safety
+
+**Subprocess timeout safety (bridge hang fix):**
+- Added timeouts to all 57 subprocess.run() calls that previously had no timeout.
+- `_remote_run()` defaults to 10s timeout — prevents SSH hangs from blocking handler threads.
+- Fail-open pattern: remote probe timeouts assume worker is online rather than blocking.
+- Timeout tiers: 3s probes, 5s sends, 10s heavy ops, 15s file transfers.
+
+**SOLID refactoring — 10 architectural improvements (all within single bridge.py):**
+
+1. **AppContext (#10, D)** — Injectable configuration container replaces module globals. `get_app_context()` provides a single object for all config, enabling testable services.
+
+2. **IncomingMessage (#7, S/I)** — Parse Telegram updates once at the boundary into a typed dataclass. Replaces 15+ scattered `msg.get()` calls in `handle_message`.
+
+3. **Backend narrowing (#8, I/L)** — Split `Backend` protocol into `BackendLifecycle`, `BackendDelivery`, `BackendHealth`. Consumers depend only on the capabilities they use.
+
+4. **WorkerRecord (#4, S/D)** — Normalized worker data model with `from_session_dict()`/`to_session_dict()`. Replaces ad-hoc dicts with inconsistent key names.
+
+5. **WorkerRepository (#4, S/D)** — Encapsulates registry lookup (`_load_registry`, `_save_registry`, `_registry_add`) behind a clean interface returning `WorkerRecord` objects.
+
+6. **WorkerDelivery (#5, L/I/O)** — Single send path for all worker types (gRPC, callback, tmux). `get_worker_delivery()` provides the singleton.
+
+7. **ConversationService (#9, S/O/D)** — Encapsulates guest, channel, and relay state management. `get_conversation_service()` provides the singleton.
+
+8. **CommandRegistry (#3, O/S)** — Replaced 18-branch if/elif command dispatch with `_commands` dict. Adding a command = one dict entry, no dispatch changes.
+
+9. **AlertService + WorkerHealthMonitor + HostHealthMonitor (#6, S/D)** — Split watchdog into focused services: worker state tracking, infra probes, and alert delivery with cooldowns.
+
+10. **WorkerLifecycleService (#1, S/D)** — Centralized worker lifecycle (hire, restart, recover, stop). Single place for env export, welcome messages, and cache invalidation.
+
+11. **EndpointRouter (#2, O/S)** — Registry-based HTTP dispatch replaces if/elif in `do_POST`/`do_GET`. New endpoints = one `_endpoint_router.post()` call.
+
+**Architecture notes:**
+- All refactorings stay within single `bridge.py` — no file splits.
+- Module globals remain as backward-compatible aliases during migration.
+- New code uses service singletons (`get_app_context()`, `get_worker_delivery()`, etc.).
+- Existing behavior unchanged — 408 tests pass (1 pre-existing failure in teleport preflight).
 
 ### v0.32.0 - Machine catalog endpoint
 

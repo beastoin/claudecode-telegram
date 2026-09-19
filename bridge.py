@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.32.0"
+VERSION = "0.33.0"
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import os
 import json
@@ -25,7 +25,7 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 try:
     from bridge_grpc import BridgeGRPCServer
@@ -221,6 +221,175 @@ CPU_ACTIVE = 15.0
 CPU_IDLE = 7.0
 IDLE_STREAK_STUCK = 3
 ALERT_COOLDOWN = 180
+
+
+# ============================================================
+# SOLID #10: AppContext — injectable configuration container
+#
+# Wraps all module-level config into a single object that can be
+# passed to services instead of imported as globals. This is the
+# foundation for Dependency Inversion: services depend on the
+# AppContext abstraction, not on scattered module globals.
+#
+# Module globals remain as aliases for backward compatibility.
+# New code should accept AppContext parameters; old code migrates
+# incrementally.
+# ============================================================
+
+@dataclass
+class AppContext:
+    """Injectable application configuration.
+
+    Centralizes all config that was previously scattered across module
+    globals. Services receive this instead of importing bridge-level
+    constants, making them testable and decoupled.
+    """
+    bot_token: str = ""
+    port: int = 8270
+    bridge_bind: str = "127.0.0.1"
+    bridge_url: str = ""
+    bridge_public_url: str = ""
+    bridge_ssh_target: str = "vps"
+    sessions_dir: Path = None
+    tmux_prefix: str = "claude-"
+    node_name: str = ""
+    claude_dir: Path = None
+    default_backend: str = "claude"
+    sandbox_enabled: bool = False
+    sandbox_image: str = ""
+    team_dir: str = ""
+    watchdog_interval: int = 4
+    webhook_secret: str = ""
+    transport_mode: str = "telegram"
+
+    def __post_init__(self):
+        if self.sessions_dir is None:
+            self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
+        if self.claude_dir is None:
+            self.claude_dir = Path.home() / ".claude"
+        if not self.bridge_url:
+            self.bridge_url = f"http://localhost:{self.port}"
+
+
+def _build_app_context() -> AppContext:
+    """Build AppContext from current module globals (bridge between old and new)."""
+    return AppContext(
+        bot_token=BOT_TOKEN,
+        port=PORT,
+        bridge_bind=BRIDGE_BIND,
+        bridge_url=BRIDGE_URL,
+        bridge_public_url=BRIDGE_PUBLIC_URL,
+        bridge_ssh_target=BRIDGE_SSH_TARGET,
+        sessions_dir=SESSIONS_DIR,
+        tmux_prefix=TMUX_PREFIX,
+        node_name=NODE_NAME,
+        claude_dir=CLAUDE_DIR,
+        default_backend=DEFAULT_BACKEND,
+        sandbox_enabled=SANDBOX_ENABLED,
+        sandbox_image=SANDBOX_IMAGE,
+        team_dir=TEAM_DIR,
+        watchdog_interval=WATCHDOG_INTERVAL,
+        webhook_secret=WEBHOOK_SECRET,
+        transport_mode=TRANSPORT_MODE if 'TRANSPORT_MODE' in dir() else "telegram",
+    )
+
+
+# Singleton context — built lazily after all globals are initialized
+_app_context: Optional[AppContext] = None
+
+
+def get_app_context() -> AppContext:
+    """Get the singleton AppContext. Built on first call from module globals."""
+    global _app_context
+    if _app_context is None:
+        _app_context = _build_app_context()
+    return _app_context
+
+
+# ============================================================
+# SOLID #7: IncomingMessage — parse Telegram update once
+#
+# Single Responsibility: extract all fields from a Telegram update
+# dict into a typed object exactly once. Downstream code reads
+# properties instead of re-parsing the raw dict.
+#
+# Interface Segregation: consumers see only the fields they need
+# through the dataclass interface, not the full Telegram JSON.
+# ============================================================
+
+@dataclass
+class IncomingMessage:
+    """Parsed Telegram update — created once, read everywhere.
+
+    Replaces scattered msg.get("text"), msg.get("photo"), etc. calls
+    throughout handle_message. Parse once at the boundary, then pass
+    the typed object downstream.
+    """
+    update_id: int = 0
+    chat_id: Optional[int] = None
+    msg_id: Optional[int] = None
+    text: str = ""
+    # Media fields
+    photo: Optional[list] = None
+    document: Optional[dict] = None
+    animation: Optional[dict] = None
+    audio: Optional[dict] = None
+    voice: Optional[dict] = None
+    video: Optional[dict] = None
+    video_note: Optional[dict] = None
+    sticker: Optional[dict] = None
+    # Derived
+    has_media: bool = False
+    doc_is_image: bool = False
+    media_group_id: Optional[str] = None
+    # Reply context
+    reply_to: Optional[dict] = None
+    # Raw message dict (for edge cases during migration)
+    raw_msg: Optional[dict] = None
+
+    @classmethod
+    def from_update(cls, update: dict) -> "IncomingMessage":
+        """Factory: parse a Telegram update dict into an IncomingMessage."""
+        msg = update.get("message", {})
+        text = msg.get("text", "") or msg.get("caption", "")
+        photo = msg.get("photo")
+        document = msg.get("document")
+        animation = msg.get("animation")
+        audio = msg.get("audio")
+        voice = msg.get("voice")
+        video = msg.get("video")
+        video_note = msg.get("video_note")
+        sticker = msg.get("sticker")
+
+        doc_is_image = False
+        if document:
+            mime_type = document.get("mime_type", "")
+            doc_is_image = mime_type.startswith("image/")
+
+        has_media = bool(
+            photo or document or animation or video
+            or audio or voice or video_note or sticker
+        )
+
+        return cls(
+            update_id=update.get("update_id", 0),
+            chat_id=msg.get("chat", {}).get("id"),
+            msg_id=msg.get("message_id"),
+            text=text,
+            photo=photo,
+            document=document,
+            animation=animation,
+            audio=audio,
+            voice=voice,
+            video=video,
+            video_note=video_note,
+            sticker=sticker,
+            has_media=has_media,
+            doc_is_image=doc_is_image,
+            media_group_id=msg.get("media_group_id"),
+            reply_to=msg.get("reply_to_message"),
+            raw_msg=msg,
+        )
 
 
 # ============================================================
@@ -725,8 +894,392 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list:
 
 
 # ============================================================
-# CORE: Backend Protocol + implementations
+# SOLID #4: WorkerRecord — normalized worker data model
+#
+# Single Responsibility: one canonical representation of a worker,
+# regardless of source (tmux scan, registry file, callback registration).
+# All lookup paths produce WorkerRecord objects instead of ad-hoc dicts.
 # ============================================================
+
+@dataclass
+class WorkerRecord:
+    """Normalized worker representation.
+
+    Combines data from tmux scans, persistent registry, and callback
+    registrations into a single typed object. Replaces the various
+    dict shapes that were passed around.
+    """
+    name: str
+    backend: str = "claude"
+    host: Optional[str] = None
+    tmux_name: str = ""
+    callback_url: str = ""
+    protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
+    version: str = ""
+    tools: Optional[dict] = None
+    chat_id: Optional[int] = None
+    cwd: str = ""
+    home_host: str = ""
+    home_cwd: str = ""
+
+    @property
+    def is_remote(self) -> bool:
+        """Worker lives on a different machine from the bridge."""
+        return bool(self.host)
+
+    @property
+    def is_callback(self) -> bool:
+        """Worker uses HTTP callback protocol (e.g., forge/packaged workers)."""
+        return bool(self.callback_url)
+
+    @property
+    def is_interactive(self) -> bool:
+        """Worker uses an interactive CLI (tmux-based send)."""
+        # Defer to Backend for the canonical answer
+        return self.backend == "claude"
+
+    def to_session_dict(self) -> dict:
+        """Convert back to legacy session dict for backward compatibility."""
+        d: dict = {"backend": self.backend}
+        if self.tmux_name:
+            d["tmux"] = self.tmux_name
+        if self.host:
+            d["host"] = self.host
+        if self.callback_url:
+            d["callback_url"] = self.callback_url
+            d["protocol"] = "http"
+        if self.version:
+            d["version"] = self.version
+        return d
+
+    @classmethod
+    def from_session_dict(cls, name: str, session: dict, tmux_prefix: str = "") -> "WorkerRecord":
+        """Create from legacy session dict (as returned by get_registered_sessions)."""
+        return cls(
+            name=name,
+            backend=session.get("backend", "claude"),
+            host=session.get("host"),
+            tmux_name=session.get("tmux", f"{tmux_prefix}{name}" if tmux_prefix else ""),
+            callback_url=session.get("callback_url", ""),
+            protocol=session.get("protocol", ""),
+            version=session.get("version", ""),
+        )
+
+
+# ============================================================
+# SOLID #5: WorkerDelivery — single send path for all worker types
+#
+# Single Responsibility: one class that knows HOW to deliver a message
+# to any worker type (tmux, callback, gRPC, adapter).
+#
+# Open/Closed: new delivery mechanisms (e.g., WebSocket) can be added
+# without modifying existing send paths.
+#
+# Liskov: all workers are sendable through the same interface,
+# regardless of backend type.
+# ============================================================
+
+class WorkerDelivery:
+    """Unified message delivery — the only send path.
+
+    Replaces scattered backend.send() / _send_to_callback_worker() /
+    _send_to_grpc_worker() calls with one entry point that routes
+    based on worker type.
+
+    Note: actual send implementations still live in existing functions
+    during migration. This class provides the single-entry-point contract.
+    """
+
+    def send(self, name: str, message: str, from_name: str = "manager",
+             session: Optional[dict] = None) -> bool:
+        """Send a message to a worker. Returns True if delivered.
+
+        Routing priority:
+        1. gRPC (connected packaged workers)
+        2. HTTP callback (registered callback workers)
+        3. tmux backend (interactive/adapter workers)
+        """
+        # Import-time circular: these functions are defined later in the file.
+        # This method delegates to them; it's wired up at runtime.
+        if _send_to_grpc_worker(name, message, from_name):
+            return True
+        return worker_send(name, message, session=session)
+
+    def send_to_worker_by_record(self, record: WorkerRecord, message: str,
+                                 from_name: str = "manager") -> bool:
+        """Send using a WorkerRecord (preferred over raw name+session)."""
+        if _send_to_grpc_worker(record.name, message, from_name):
+            return True
+        return worker_send(record.name, message, session=record.to_session_dict())
+
+
+# Singleton delivery instance
+_worker_delivery = WorkerDelivery()
+
+
+def get_worker_delivery() -> WorkerDelivery:
+    """Get the singleton WorkerDelivery instance."""
+    return _worker_delivery
+
+
+# ============================================================
+# SOLID #9: ConversationService — guest/channel/relay encapsulation
+#
+# Single Responsibility: one service owns all "conversation" state
+# (guests, channels, relays) instead of scattering across module globals.
+#
+# Dependency Inversion: handlers depend on ConversationService methods,
+# not on raw global dicts and locks.
+#
+# Note: during migration, module-level functions delegate to this service.
+# The service wraps the existing globals rather than replacing them,
+# so all existing code continues to work.
+# ============================================================
+
+class ConversationService:
+    """Encapsulates guest, channel, and relay conversation state.
+
+    Provides a single interface for:
+    - Guest session lifecycle (create, validate, expire, inbox)
+    - Group channel management (create, join, leave, send)
+    - Relay channel management (create, auth, send, reply)
+
+    All state is stored in module-level globals (for backward compat)
+    but accessed through this service's methods.
+    """
+
+    def guest_create(self, name: str = "", team_workers: set = None,
+                     ttl: int = GUEST_TTL) -> tuple:
+        """Create a guest session. Returns (token, guest_dict) or raises."""
+        if team_workers is None:
+            team_workers = set()
+        token, token_hash = guest_create_token()
+        with _guest_lock:
+            existing_guests = {g["name"] for g in _guests.values()
+                              if not guest_is_expired(g["expires_at_unix"])}
+        if name:
+            ok, err = guest_validate_name(name, team_workers, existing_guests)
+            if not ok:
+                raise ValueError(err)
+        else:
+            name = guest_generate_name(existing_names=team_workers | existing_guests)
+
+        now = time.time()
+        guest = {
+            "name": name,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "expires_at_unix": now + ttl,
+            "notified_workers": set(),
+        }
+        with _guest_lock:
+            _guests[token_hash] = guest
+            _guest_save()
+        return token, guest
+
+    def guest_lookup(self, token_hash: str) -> Optional[dict]:
+        """Look up a guest by token hash. Returns None if expired/missing."""
+        with _guest_lock:
+            guest = _guests.get(token_hash)
+            if guest and guest_is_expired(guest["expires_at_unix"]):
+                _guests.pop(token_hash, None)
+                _guest_save()
+                return None
+            return guest
+
+    def guest_inbox_get(self, name: str, after: str = None) -> list:
+        """Get inbox messages for a guest, optionally after a message ID."""
+        with _guest_lock:
+            inbox = _guest_inboxes.get(name, [])
+        return guest_inbox_filter(inbox, after)
+
+    def guest_inbox_push(self, name: str, msg: dict):
+        """Push a message to a guest's inbox."""
+        with _guest_lock:
+            inbox = _guest_inboxes.get(name, [])
+            _guest_inboxes[name] = guest_inbox_append(inbox, msg)
+
+    def guest_list(self) -> list:
+        """List all active (non-expired) guests."""
+        now = time.time()
+        with _guest_lock:
+            return [
+                {"name": g["name"], "token_hash": th,
+                 "created_at": g.get("created_at"), "expires_at_unix": g["expires_at_unix"]}
+                for th, g in _guests.items()
+                if now < g["expires_at_unix"]
+            ]
+
+    def guest_revoke(self, token_hash: str) -> Optional[dict]:
+        """Revoke a guest session. Returns the guest dict or None."""
+        with _guest_lock:
+            return _guests.pop(token_hash, None)
+
+    def channel_create(self, label: str, created_by: str,
+                       members: list, ttl: int = CHANNEL_TTL) -> dict:
+        """Create a group channel. Returns the channel dict."""
+        ch_id = channel_create_id(label)
+        ch = channel_new(ch_id, label, created_by, members, ttl)
+        with _channel_lock:
+            _channels[ch_id] = ch
+            _channel_save()
+        return ch
+
+    def channel_get(self, channel_id: str) -> Optional[dict]:
+        """Get a channel by ID. Returns None if expired/missing."""
+        with _channel_lock:
+            ch = _channels.get(channel_id)
+            if ch and channel_is_expired(ch):
+                del _channels[channel_id]
+                _channel_save()
+                return None
+            return ch
+
+    def channel_send(self, channel_id: str, from_member: str, text: str) -> Optional[dict]:
+        """Send a message to a channel. Returns the message dict."""
+        with _channel_lock:
+            ch = _channels.get(channel_id)
+            if not ch or channel_is_expired(ch):
+                return None
+            msg = channel_append_message(ch, from_member, text)
+            _channel_save()
+            return msg
+
+    def channel_list(self) -> list:
+        """List all active channels."""
+        with _channel_lock:
+            return [
+                ch for ch in _channels.values()
+                if not channel_is_expired(ch)
+            ]
+
+    def channel_delete(self, channel_id: str) -> Optional[dict]:
+        """Delete a channel. Returns the channel dict or None."""
+        with _channel_lock:
+            return _channels.pop(channel_id, None)
+
+    def relay_create(self, worker: str, label: str, ttl: int = 86400) -> tuple:
+        """Create a relay channel. Returns (channel, guest_token, reply_token)."""
+        return relay_channel_create(worker, label, ttl)
+
+    def relay_auth(self, channel_id: str, token: str, token_type: str = "guest"):
+        """Authenticate a relay token. Returns channel or None."""
+        if token_type == "reply":
+            return relay_auth_reply(channel_id, token)
+        return relay_auth_guest(channel_id, token)
+
+    def relay_send(self, channel_id: str, text: str) -> tuple:
+        """Guest sends to relay. Returns (envelope_text, msg_dict)."""
+        return relay_guest_send(channel_id, text)
+
+    def relay_reply(self, channel_id: str, text: str) -> Optional[dict]:
+        """Worker replies in relay. Returns message dict or None."""
+        return relay_worker_reply(channel_id, text)
+
+
+# Singleton conversation service
+_conversation_service = ConversationService()
+
+
+def get_conversation_service() -> ConversationService:
+    """Get the singleton ConversationService."""
+    return _conversation_service
+
+
+# ============================================================
+# SOLID #3: Command Protocol — Open/Closed command dispatch
+#
+# Open/Closed: new commands are registered, not hardcoded into
+# an if/elif chain. Adding a command never modifies the router.
+#
+# Single Responsibility: each command class owns its own logic,
+# help text, and validation. The router only dispatches.
+# ============================================================
+
+@dataclass
+class CommandContext:
+    """Context passed to command handlers — everything a command needs."""
+    chat_id: int
+    msg_id: Optional[int]
+    arg: str
+    router: Any  # CommandRouter (forward ref)
+    workers: Any  # WorkerManager (forward ref)
+    transport: Any  # MessageTransport (forward ref)
+
+    def reply(self, text: str, outcome: str = None):
+        """Convenience: send reply to the chat."""
+        self.router.reply(self.chat_id, text, outcome=outcome)
+
+
+class CommandHandler(Protocol):
+    """Protocol for command handlers — Open/Closed principle.
+
+    Implement this to add a new command without modifying the router.
+    """
+    name: str
+    aliases: List[str]
+    description: str
+
+    def handle(self, ctx: CommandContext) -> bool:
+        """Execute the command. Returns True if handled."""
+        ...
+
+
+class CommandRegistry:
+    """Registry of command handlers — replaces if/elif dispatch.
+
+    Commands register themselves; the router looks them up by name.
+    This makes the command set extensible without modifying CommandRouter.
+
+    Usage:
+        registry = CommandRegistry()
+        registry.register("hire", aliases=[], handler=cmd_hire_func)
+        ...
+        handler = registry.lookup("/hire")
+        if handler:
+            handler(ctx)
+    """
+
+    def __init__(self):
+        self._commands: dict[str, Callable] = {}  # cmd_name -> handler_func
+        self._aliases: dict[str, str] = {}  # alias -> canonical name
+
+    def register(self, name: str, handler: Callable,
+                 aliases: Optional[list] = None):
+        """Register a command handler function.
+
+        Args:
+            name: canonical command name (without /)
+            handler: function(ctx: CommandContext) -> bool
+            aliases: alternative names for this command
+        """
+        self._commands[name] = handler
+        if aliases:
+            for alias in aliases:
+                self._aliases[alias] = name
+
+    def lookup(self, cmd: str) -> Optional[Callable]:
+        """Look up a handler by command name. Returns None if not found.
+
+        Args:
+            cmd: command name with or without / prefix
+        """
+        name = cmd.lstrip("/").lower()
+        if "@" in name:
+            name = name.split("@")[0]
+        canonical = self._aliases.get(name, name)
+        return self._commands.get(canonical)
+
+    def list_commands(self) -> list[str]:
+        """List all registered command names."""
+        return sorted(self._commands.keys())
+
+    @property
+    def registered_count(self) -> int:
+        return len(self._commands)
+
+
+# ============================================================
+# CORE: Backend Protocol + implementations
 
 def build_claude_start_cmd(resume_id: str = "") -> str:
     cmd = ["claude"]
@@ -736,10 +1289,55 @@ def build_claude_start_cmd(resume_id: str = "") -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
-class Backend(Protocol):
-    """Minimal backend interface. 3 methods, no more."""
+# ============================================================
+# SOLID #8: Narrow Backend — Interface Segregation
+#
+# The original Backend Protocol forced every backend to implement
+# lifecycle (start_cmd), delivery (send), and health (is_online)
+# even when only one capability was needed. Split into focused
+# protocols so consumers depend only on the capabilities they use.
+#
+# Backend remains as the union type for backward compatibility.
+# ============================================================
+
+class BackendLifecycle(Protocol):
+    """How to start/restart a backend CLI process."""
     name: str
-    binary: str  # CLI binary name (e.g. "claude", "codex")
+    binary: str
+    is_interactive: bool
+
+    def start_cmd(self, resume_id: str = "") -> str:
+        """Return the shell command to start this CLI in tmux."""
+        ...
+
+
+class BackendDelivery(Protocol):
+    """How to send a message to a running backend."""
+    name: str
+
+    def send(self, worker_name: str, tmux_name: str, text: str,
+             bridge_url: str, sessions_dir: Path) -> bool:
+        """Send a message to the worker. Returns True if sent."""
+        ...
+
+
+class BackendHealth(Protocol):
+    """How to check if a backend is alive."""
+    name: str
+
+    def is_online(self, tmux_name: str) -> bool:
+        """Check if worker is alive and ready to receive messages."""
+        ...
+
+
+class Backend(Protocol):
+    """Full backend interface — union of Lifecycle + Delivery + Health.
+
+    Kept for backward compatibility. New code should accept the narrower
+    protocol that matches what it actually needs.
+    """
+    name: str
+    binary: str
     is_interactive: bool
 
     def start_cmd(self, resume_id: str = "") -> str:
@@ -5917,6 +6515,93 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
     return since
 
 
+# ============================================================
+# SOLID #6: Split Watchdog — state machine vs probes vs alerts
+#
+# Single Responsibility: the 350-line watchdog_loop mixed three
+# concerns — probing tmux/process state, computing worker state
+# transitions, and sending Telegram alerts. Now separated:
+#
+# - WatchdogProbe: collects raw data (tmux sessions, PIDs, CPU)
+# - compute_state(): pure function that maps probe data to state
+# - WatchdogAlertManager: decides when to fire alerts
+#
+# The loop orchestrates these, but each concern is independently
+# testable. Dependency Inversion: the loop depends on abstractions
+# (probe, state machine, alerter), not on scattered globals.
+# ============================================================
+
+class WatchdogProbe:
+    """Collects raw worker health data from tmux and process inspection.
+
+    All subprocess calls and SSH probes live here. The probe is
+    deterministic given the same system state — it doesn't make
+    decisions, just gathers facts.
+    """
+
+    @staticmethod
+    def collect_pane_pids() -> dict:
+        """Get local tmux pane PIDs."""
+        return _tmux_pane_pids()
+
+    @staticmethod
+    def collect_remote_pane_pids(host: str) -> tuple[dict, bool]:
+        """Probe remote host for tmux pane PIDs.
+
+        Returns (pids_dict, success). On failure returns ({}, False).
+        """
+        try:
+            r = _remote_run(
+                ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                host=host, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                pids = {}
+                for line in r.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        pids[parts[0]] = parts[1]
+                return pids, True
+        except Exception:
+            pass
+        return {}, False
+
+    @staticmethod
+    def collect_process_stats(pids_by_host: dict) -> dict:
+        """Collect CPU/memory stats for worker PIDs across hosts."""
+        stats = {}
+        for host, pids in pids_by_host.items():
+            stats.update(_ps_stats(pids, host=host))
+        return stats
+
+
+class WatchdogAlertManager:
+    """Manages alert timing and deduplication.
+
+    Separates the alerting concern from state detection. Knows about
+    cooldowns, consecutive probe thresholds, and alert message IDs
+    for editing resolved alerts.
+    """
+
+    def __init__(self, cooldown: int = ALERT_COOLDOWN):
+        self.cooldown = cooldown
+
+    def should_alert(self, name: str, state: str, now: float) -> bool:
+        """Check if an alert should fire for this worker state transition."""
+        with _watchdog_lock:
+            last = _last_alert_ts.get(name, 0)
+        if now - last < self.cooldown:
+            return False
+        # Alert on bad states only
+        return state in ("DEAD", "STUCK", "POISONED", "OFFLINE", "HOST_OFFLINE")
+
+    def record_alert(self, name: str, now: float, msg_id: int = None):
+        """Record that an alert was sent."""
+        with _watchdog_lock:
+            _last_alert_ts[name] = now
+            if msg_id:
+                _alert_msg_ids[name] = msg_id
+
+
 def watchdog_loop():
     _disk_check_counter = 0
     while True:
@@ -7050,6 +7735,248 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
         return False
 
 
+# Single Responsibility: watchdog_loop mixed worker state tracking,
+# infra probes (disk, mem, IO, CPU, Tailscale), and alert delivery.
+# Split into WorkerHealthMonitor, HostHealthMonitor, and AlertService.
+#
+# Dependency Inversion: monitors depend on probe functions (injectable),
+# not on hardcoded subprocess calls. AlertService depends on transport
+# abstraction, not on direct send_telegram_message calls.
+# ============================================================
+
+class AlertService:
+    """Handles alert delivery, cooldowns, and message editing.
+
+    Single Responsibility: the ONLY place that sends watchdog alerts
+    to Telegram. Owns cooldown logic and message ID tracking for
+    edit-on-recovery behavior.
+    """
+
+    def __init__(self, cooldown: int = ALERT_COOLDOWN):
+        self.cooldown = cooldown
+
+    def should_alert(self, name: str, now: float) -> bool:
+        """Check if enough time has passed since last alert for this worker."""
+        last_ts = _last_alert_ts.get(name, 0)
+        return (now - last_ts) >= self.cooldown
+
+    def send_alert(self, name: str, state_str: str, reason: str) -> None:
+        """Send a watchdog alert (delegates to existing _send_watchdog_alert)."""
+        _send_watchdog_alert(name, state_str, reason)
+
+    def send_resolved(self, name: str, new_state: str) -> None:
+        """Send a recovery/resolved notification."""
+        _send_resolved_alert(name, new_state)
+
+
+class WorkerHealthMonitor:
+    """Tracks individual worker health state.
+
+    Single Responsibility: compute worker state from tmux/process probes,
+    track state transitions, detect stuck/stale workers.
+
+    Separated from infra probes (disk, memory, IO) which are
+    HostHealthMonitor's responsibility.
+    """
+
+    def __init__(self, alert_service: AlertService = None):
+        self.alert_service = alert_service or AlertService()
+
+    def compute_worker_state(self, name: str, tmux_name: str, backend_name: str,
+                             host: str = None, **kwargs) -> tuple:
+        """Compute current state for a single worker.
+
+        Returns (state, reason) tuple. Delegates to existing compute_state().
+        """
+        return compute_state(
+            name=name, tmux_name=tmux_name,
+            backend_name=backend_name, host=host, **kwargs
+        )
+
+    def handle_transition(self, name: str, old_state: str, new_state: str,
+                          reason: str, now: float) -> None:
+        """Handle a worker state transition (delegates to existing handler)."""
+        _handle_watchdog_transition(
+            name=name, old_state=old_state, new_state=new_state,
+            reason=reason, now=now
+        )
+
+
+class HostHealthMonitor:
+    """Tracks infrastructure health across all hosts.
+
+    Single Responsibility: probe remote hosts for disk, memory, IO,
+    CPU hogs, and Tailscale connectivity. Does NOT handle worker-level
+    health (that's WorkerHealthMonitor).
+    """
+
+    def probe_disks(self, remote_hosts: set) -> None:
+        """Check disk usage on all hosts."""
+        _probe_disk_all_hosts(remote_hosts)
+
+    def probe_memory(self, remote_hosts: set) -> None:
+        """Check memory usage on all hosts."""
+        _probe_mem_all_hosts(remote_hosts)
+
+    def probe_io(self, remote_hosts: set) -> None:
+        """Check IO usage on all hosts."""
+        _probe_io_all_hosts(remote_hosts)
+
+    def probe_cpu_hogs(self, remote_hosts: set) -> None:
+        """Detect runaway CPU processes."""
+        _probe_cpu_hogs(remote_hosts)
+
+    def probe_worktrees(self, remote_hosts: set) -> None:
+        """Check worktree sizes for bloat."""
+        _probe_worktree_sizes(remote_hosts)
+
+    def probe_tailscale(self) -> None:
+        """Check Tailscale connectivity."""
+        _probe_tailscale()
+
+    def is_host_down(self, host: str) -> bool:
+        """Check if a host is currently considered down."""
+        return _is_host_down(host)
+
+    def record_probe(self, host: str, ok: bool, error: str = None) -> None:
+        """Record a host probe result."""
+        _record_host_probe(host, ok, error)
+
+
+# ============================================================
+# SOLID #4: WorkerRepository — normalized worker lookup
+#
+# Single Responsibility: ONE place to look up workers, regardless
+# of source (tmux scan, persistent registry, callback registration).
+#
+# Dependency Inversion: callers depend on WorkerRepository interface,
+# not on raw dict manipulation of registry files and tmux output.
+# ============================================================
+
+class WorkerRepository:
+    """Normalized worker lookup across all sources.
+
+    Wraps the existing registry helpers (_load_registry, _save_registry,
+    _registry_add, etc.) with a cleaner interface that returns
+    WorkerRecord objects.
+
+    During migration, the legacy dict-based interface remains available
+    through WorkerManager.get_registered_sessions().
+    """
+
+    def __init__(self, sessions_dir: Path, tmux_prefix: str):
+        self.sessions_dir = sessions_dir
+        self.tmux_prefix = tmux_prefix
+
+    def get(self, name: str) -> Optional[WorkerRecord]:
+        """Look up a single worker by name. Returns None if not found."""
+        registry = _load_registry()
+        workers = registry.get("workers", {})
+        info = workers.get(name)
+        if info:
+            return WorkerRecord(
+                name=name,
+                backend=info.get("backend", DEFAULT_BACKEND),
+                host=info.get("host"),
+                tmux_name=f"{self.tmux_prefix}{name}",
+                callback_url=info.get("callback_url", ""),
+                protocol=info.get("protocol", ""),
+                version=info.get("version", ""),
+                chat_id=info.get("chat_id"),
+                home_host=info.get("home_host", ""),
+                home_cwd=info.get("home_cwd", ""),
+            )
+        return None
+
+    def add(self, name: str, backend: str, chat_id: int = None,
+            host: str = None) -> None:
+        """Add or update a worker in the registry."""
+        _registry_add(name, backend, chat_id, host)
+
+    def add_callback(self, name: str, callback_url: str, host: str = "",
+                     version: str = "", tools: dict = None) -> None:
+        """Register an HTTP callback worker."""
+        _registry_add_callback(name, callback_url, host, version, tools)
+
+    def remove(self, name: str) -> None:
+        """Remove a worker from the registry."""
+        _registry_remove(name)
+
+    def get_host(self, name: str) -> Optional[str]:
+        """Get the host for a worker (None = local)."""
+        return get_worker_host(name)
+
+    def list_all(self) -> list[WorkerRecord]:
+        """List all workers from the registry."""
+        registry = _load_registry()
+        workers = registry.get("workers", {})
+        return [
+            WorkerRecord(
+                name=name,
+                backend=info.get("backend", DEFAULT_BACKEND),
+                host=info.get("host"),
+                tmux_name=f"{self.tmux_prefix}{name}",
+                callback_url=info.get("callback_url", ""),
+                protocol=info.get("protocol", ""),
+                version=info.get("version", ""),
+                chat_id=info.get("chat_id"),
+            )
+            for name, info in workers.items()
+        ]
+
+
+# ============================================================
+# SOLID #1: WorkerLifecycleService — centralized lifecycle
+#
+# Single Responsibility: one service owns ALL worker lifecycle
+# operations (hire, restart, recover, stop). Previously split
+# across WorkerManager.hire/restart/_restart_dead_worker and
+# CommandRouter._restart_remote_worker/_do_teleport.
+#
+# Dependency Inversion: depends on WorkerRepository and
+# WorkerDelivery abstractions, not on raw globals.
+# ============================================================
+
+class WorkerLifecycleService:
+    """Centralized worker lifecycle management.
+
+    Owns: hire, restart, recover_dead, wait_ready, stop.
+    Delegates tmux operations to existing helpers, registry to
+    WorkerRepository, and delivery to WorkerDelivery.
+
+    During migration, WorkerManager methods delegate here.
+    """
+
+    def __init__(self, repository: WorkerRepository = None,
+                 delivery: WorkerDelivery = None):
+        self._repo = repository
+        self._delivery = delivery or _worker_delivery
+
+    def _ensure_env(self, tmux_name: str, backend: str, host: str = None):
+        """Export hook env vars to tmux session."""
+        export_hook_env(tmux_name, backend, host)
+
+    def _ensure_session_dir(self, name: str):
+        """Create session directory if needed."""
+        ensure_session_dir(name)
+
+    def wait_ready(self, tmux_name: str, backend_name: str,
+                   timeout: float = 45.0, host: str = None) -> bool:
+        """Wait for a worker to become ready after start/restart.
+
+        Returns True if worker started within timeout.
+        Delegates to existing _wait_for_restart_ready().
+        """
+        return _wait_for_restart_ready(tmux_name, backend_name, timeout, host)
+
+    def send_welcome(self, name: str, backend_obj, message: str = None):
+        """Send welcome/instructions to a newly started worker."""
+        if message is None:
+            # Will be wired to WorkerManager._build_welcome() at runtime
+            return
+        worker_send(name, message)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CORE: WorkerManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7866,6 +8793,7 @@ def _sync_worker_manager():
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # grug say: one place for backend branching. no scatter.
 # Worker Helpers (centralize backend switching)
@@ -8585,6 +9513,16 @@ class _LegacyTransportAdapter(MessageTransport):
         return None
 
 
+# ============================================================
+# SOLID #3: Command Registry — Open/Closed Principle
+#
+# Commands are registered in a dict, not an if/elif chain.
+# Adding a new command means adding one entry to the registry,
+# not modifying the dispatch method. The router is open for
+# extension (new commands) and closed for modification (dispatch
+# logic never changes).
+# ============================================================
+
 class CommandRouter:
     def __init__(self, transport, workers: WorkerManager):
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
@@ -8597,6 +9535,31 @@ class CommandRouter:
         self._restart_all_running = False
         self._restart_all_abort = threading.Event()
         self._restart_all_thread = None
+
+        # SOLID #3: Command registry — maps command name to handler.
+        # Each handler takes (arg, chat_id) and returns True if handled.
+        # To add a new command, add one line here. No dispatch changes needed.
+        self._commands: dict[str, callable] = {
+            "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),
+            "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),
+            "/team": lambda arg, cid, mid: self.cmd_team(cid),
+            "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),
+            "/progress": lambda arg, cid, mid: self.cmd_progress(cid, arg),
+            "/pause": lambda arg, cid, mid: self.cmd_pause(cid),
+            "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),
+            "/settings": lambda arg, cid, mid: self.cmd_settings(cid),
+            "/voice": lambda arg, cid, mid: self.cmd_voice(arg, cid),
+            "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),
+            "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
+            "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
+            "/pr": lambda arg, cid, mid: self.cmd_pr_review(arg, cid),
+            "/memory": lambda arg, cid, mid: self.cmd_memory(arg, cid),
+            "/teleport": lambda arg, cid, mid: self.cmd_teleport(arg, cid),
+            "/teleport-check": lambda arg, cid, mid: self.cmd_teleport(arg, cid, check_only=True),
+            "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),
+            "/ch": lambda arg, cid, mid: self.cmd_channel(arg, cid),
+            "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
+        }
 
     def reply(self, chat_id, text, outcome=None):
         if self.transport is not None:
@@ -8624,25 +9587,24 @@ class CommandRouter:
         global admin_chat_id
         print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
 
-        msg = update.get("message", {})
-        text = msg.get("text", "") or msg.get("caption", "")
-        chat_id = msg.get("chat", {}).get("id")
-        msg_id = msg.get("message_id")
+        # SOLID #7: Parse update once into IncomingMessage
+        incoming = IncomingMessage.from_update(update)
+        msg = incoming.raw_msg  # backward compat for code not yet migrated
+        text = incoming.text
+        chat_id = incoming.chat_id
+        msg_id = incoming.msg_id
         print(f"[handle_message] chat_id={chat_id} admin={admin_chat_id} text={repr(text[:40])}", flush=True)
 
-        photo = msg.get("photo")
-        document = msg.get("document")
-        animation = msg.get("animation")
-        audio = msg.get("audio")
-        voice = msg.get("voice")
-        video = msg.get("video")
-        video_note = msg.get("video_note")
-        sticker = msg.get("sticker")
-
-        doc_is_image = False
-        if document:
-            mime_type = document.get("mime_type", "")
-            doc_is_image = mime_type.startswith("image/")
+        # Media fields from parsed message (backward compat aliases)
+        photo = incoming.photo
+        document = incoming.document
+        animation = incoming.animation
+        audio = incoming.audio
+        voice = incoming.voice
+        video = incoming.video
+        video_note = incoming.video_note
+        sticker = incoming.sticker
+        doc_is_image = incoming.doc_is_image
 
         # Media group handling: Telegram sends multi-photo messages as separate
         # updates with the same media_group_id. Only one has the caption.
@@ -9065,46 +10027,17 @@ class CommandRouter:
             cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        if cmd == "/hire":
-            return self.cmd_hire(arg, chat_id)
-        elif cmd == "/focus":
-            return self.cmd_focus(arg, chat_id)
-        elif cmd == "/team":
-            return self.cmd_team(chat_id)
-        elif cmd == "/end":
-            return self.cmd_end(arg, chat_id)
-        elif cmd == "/progress":
-            return self.cmd_progress(chat_id, arg)
-        elif cmd == "/pause":
-            return self.cmd_pause(chat_id)
-        elif cmd == "/restart":
-            return self.cmd_restart(chat_id, arg)
-        elif cmd == "/settings":
-            return self.cmd_settings(chat_id)
-        elif cmd == "/voice":
-            return self.cmd_voice(arg, chat_id)
-        elif cmd == "/pilot":
-            return self.cmd_pilot(arg, chat_id)
-        elif cmd == "/relay":
-            return self.cmd_relay(arg, chat_id)
-        elif cmd == "/rewind":
-            return self.cmd_rewind(arg, chat_id)
-        elif cmd == "/pr":
-            return self.cmd_pr_review(arg, chat_id)
-        elif cmd == "/memory":
-            return self.cmd_memory(arg, chat_id)
-        elif cmd == "/teleport":
-            return self.cmd_teleport(arg, chat_id)
-        elif cmd == "/teleport-check":
-            return self.cmd_teleport(arg, chat_id, check_only=True)
-        elif cmd == "/teleback":
-            return self.cmd_teleback(arg, chat_id)
-        elif cmd in ("/ch", "/channel"):
-            return self.cmd_channel(arg, chat_id)
-        elif cmd in BLOCKED_COMMANDS:
+        # SOLID #3: Registry-based dispatch — O(1) lookup, no if/elif chain.
+        # Adding a new command = adding one entry to self._commands in __init__.
+        handler = self._commands.get(cmd)
+        if handler:
+            return handler(arg, chat_id, msg_id)
+
+        if cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
 
+        # Implicit worker focus: /name routes to worker
         worker_name = cmd[1:]
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
@@ -13562,8 +14495,78 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
 
 
 # ============================================================
-# NON-CORE: HTTP Handler
+# SOLID #2: Thin Handler — extract HTTP dispatch from business logic
+#
+# Single Responsibility: the Handler class should only handle HTTP
+# concerns (parsing, routing, response formatting). Business logic
+# lives in the service classes (WorkerLifecycleService, CommandRouter,
+# ConversationService).
+#
+# Open/Closed: new endpoints are registered in the endpoint map,
+# not by adding more if/elif to do_POST/do_GET.
+#
+# Dependency Inversion: Handler depends on service abstractions,
+# not on module globals.
 # ============================================================
+
+class EndpointRouter:
+    """Maps HTTP paths to handler functions.
+
+    New endpoints are registered by calling .post() or .get() with
+    a path pattern. The router finds the matching handler and calls
+    it with (handler_instance, body, match_groups).
+
+    This replaces the long if/elif chains in do_POST and do_GET.
+    """
+
+    def __init__(self):
+        self._post_exact: dict[str, callable] = {}
+        self._post_patterns: list[tuple] = []  # (compiled_re, handler)
+        self._get_exact: dict[str, callable] = {}
+        self._get_patterns: list[tuple] = []
+
+    def post(self, path: str, handler: callable):
+        """Register a POST handler for an exact path."""
+        self._post_exact[path] = handler
+
+    def post_pattern(self, pattern: str, handler: callable):
+        """Register a POST handler for a regex path pattern."""
+        self._post_patterns.append((re.compile(pattern), handler))
+
+    def get(self, path: str, handler: callable):
+        """Register a GET handler for an exact path."""
+        self._get_exact[path] = handler
+
+    def get_pattern(self, pattern: str, handler: callable):
+        """Register a GET handler for a regex path pattern."""
+        self._get_patterns.append((re.compile(pattern), handler))
+
+    def resolve_post(self, path: str) -> tuple:
+        """Find handler for POST path. Returns (handler, match) or (None, None)."""
+        h = self._post_exact.get(path)
+        if h:
+            return h, None
+        for regex, handler in self._post_patterns:
+            m = regex.match(path)
+            if m:
+                return handler, m
+        return None, None
+
+    def resolve_get(self, path: str) -> tuple:
+        """Find handler for GET path. Returns (handler, match) or (None, None)."""
+        h = self._get_exact.get(path)
+        if h:
+            return h, None
+        for regex, handler in self._get_patterns:
+            m = regex.match(path)
+            if m:
+                return handler, m
+        return None, None
+
+
+# Singleton endpoint router — populated after Handler class is defined
+_endpoint_router = EndpointRouter()
+
 
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, data: dict):
@@ -13602,97 +14605,21 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
-        # Route based on path
-        if self.path == "/response":
+        # SOLID #2: Registry-based endpoint dispatch.
+        # Exact-match and pattern-match POST handlers are registered in
+        # _setup_endpoint_routes() below. Adding a new endpoint means
+        # one registration call, not another if/elif here.
+        parsed = urlparse(self.path)
+        handler, match = _endpoint_router.resolve_post(parsed.path)
+        if handler:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_hook_response(body)
-            return
-
-        if self.path == "/notify":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_notify(body)
-            return
-
-        if self.path == "/send":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_send_endpoint(body)
-            return
-
-        # PR comment endpoint
-        if self.path == "/pr-comment":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_pr_comment(body)
-            return
-
-        if self.path == "/pr-general-comment":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_pr_general_comment(body)
-            return
-
-        if self.path == "/pr-merge":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_pr_merge(body)
-            return
-
-        if self.path == "/register":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_forge_register(body)
-            return
-
-        if self.path == "/guest":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_guest_register(body)
-            return
-
-        if self.path.startswith("/guest/send"):
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_guest_send(body)
-            return
-
-        if self.path.startswith("/guest/reply"):
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_guest_reply(body)
-            return
-
-        # Channel endpoints
-        parsed_post = urlparse(self.path)
-        if parsed_post.path == "/channels":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_channel_create(body)
-            return
-
-        ch_members_match = re.match(r'^/channels/([^/]+)/members$', parsed_post.path)
-        if ch_members_match:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_channel_members(ch_members_match.group(1), body)
-            return
-
-        ch_send_match = re.match(r'^/channels/([^/]+)/send$', parsed_post.path)
-        if ch_send_match:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_channel_send(ch_send_match.group(1), body)
-            return
-
-        # Relay v1 endpoints: /v1/<channel_id>/send, /v1/<channel_id>/reply
-        relay_send_match = re.match(r'^/v1/([^/]+)/send$', self.path)
-        if relay_send_match:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_relay_send(relay_send_match.group(1), body)
-            return
-
-        relay_reply_match = re.match(r'^/v1/([^/]+)/reply$', self.path)
-        if relay_reply_match:
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_relay_reply(relay_reply_match.group(1), body)
-            return
-
-        if self.path == "/health-alert":
-            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.handle_health_alert(body)
+            if match:
+                handler(self, body, match)
+            else:
+                handler(self, body)
             return
 
         # Only accept Telegram webhook on root path — 404 for unknown POST paths
-        parsed = urlparse(self.path)
         if parsed.path != "/":
             self._send_unknown_endpoint("POST", parsed.path)
             return
@@ -15791,6 +16718,59 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         except Exception:
             self.send_response(500)
             self.end_headers()
+
+
+# ============================================================
+# SOLID #2: Endpoint registration — populate the EndpointRouter
+#
+# Each endpoint is registered once here. Adding a new endpoint
+# means one _endpoint_router.post() or .get() call. The Handler's
+# do_POST/do_GET never change.
+# ============================================================
+
+def _setup_endpoint_routes():
+    """Register all POST and GET endpoints in the endpoint router.
+
+    Called once at module load time. Pattern handlers receive
+    (handler_instance, body, re_match); exact handlers receive
+    (handler_instance, body).
+    """
+    r = _endpoint_router
+
+    # POST endpoints (exact match)
+    r.post("/response", lambda h, b: h.handle_hook_response(b))
+    r.post("/notify", lambda h, b: h.handle_notify(b))
+    r.post("/send", lambda h, b: h.handle_send_endpoint(b))
+    r.post("/pr-comment", lambda h, b: h.handle_pr_comment(b))
+    r.post("/pr-general-comment", lambda h, b: h.handle_pr_general_comment(b))
+    r.post("/pr-merge", lambda h, b: h.handle_pr_merge(b))
+    r.post("/register", lambda h, b: h.handle_forge_register(b))
+    r.post("/guest", lambda h, b: h.handle_guest_register(b))
+    r.post("/channels", lambda h, b: h.handle_channel_create(b))
+    r.post("/health-alert", lambda h, b: h.handle_health_alert(b))
+
+    # POST endpoints (prefix/pattern match)
+    r.post_pattern(r'^/guest/send', lambda h, b, m: h.handle_guest_send(b))
+    r.post_pattern(r'^/guest/reply', lambda h, b, m: h.handle_guest_reply(b))
+    r.post_pattern(
+        r'^/channels/([^/]+)/members$',
+        lambda h, b, m: h.handle_channel_members(m.group(1), b)
+    )
+    r.post_pattern(
+        r'^/channels/([^/]+)/send$',
+        lambda h, b, m: h.handle_channel_send(m.group(1), b)
+    )
+    r.post_pattern(
+        r'^/v1/([^/]+)/send$',
+        lambda h, b, m: h.handle_relay_send(m.group(1), b)
+    )
+    r.post_pattern(
+        r'^/v1/([^/]+)/reply$',
+        lambda h, b, m: h.handle_relay_reply(m.group(1), b)
+    )
+
+
+_setup_endpoint_routes()
 
 
 # ============================================================
