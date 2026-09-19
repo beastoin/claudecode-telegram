@@ -486,7 +486,7 @@ if not BRIDGE_PUBLIC_URL:
     try:
         _ts_ip = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True,
-            text=True, timeout=3).stdout.strip()
+            text=True, timeout=3).stdout.strip()  # noqa: direct call — runs before _subprocess_runner init
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
     except (subprocess.SubprocessError, OSError) as exc:
@@ -851,7 +851,7 @@ class GuestSession:
     @property
     def is_expired(self) -> bool:
         """Check whether this entry has passed its expiration time."""
-        return time.time() >= self.expires_at_unix
+        return _clock.time() >= self.expires_at_unix
 
 
 @dataclass
@@ -952,7 +952,7 @@ def _guest_save() -> None:
     """Persist guest state to disk. Call with guest_store.lock held."""
     try:
         path = _guest_state_path()
-        now = time.time()
+        now = _clock.time()
         active_guests = {}
         for k, v in guest_store.guests.items():
             if now <= v.get("expires_at_unix", 0):
@@ -980,7 +980,7 @@ def _guest_load() -> None:
     try:
         with open(path) as f:
             data = json.load(f)
-        now = time.time()
+        now = _clock.time()
         restored = 0
         for k, v in data.get("guests", {}).items():
             if now <= v.get("expires_at_unix", 0):
@@ -1030,7 +1030,7 @@ def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[
 
 def guest_is_expired(expires_at_unix: float) -> bool:
     """Check if a guest session has expired."""
-    return time.time() >= expires_at_unix
+    return _clock.time() >= expires_at_unix
 
 
 def guest_inbox_filter(messages: list, after: str | None = None) -> list:
@@ -1123,7 +1123,7 @@ def channel_create_id(label: str = "") -> str:
 def channel_new(channel_id: str, label: str, created_by: str,
                 members: list[str], ttl: int = CHANNEL_TTL) -> ChannelDict:
     """Create a channel dict. Members are typed strings like 'worker:geni', 'guest:alice', 'manager'."""
-    now = time.time()
+    now = _clock.time()
     member_dict = {}
     for m in members:
         if m == "manager":
@@ -1182,7 +1182,7 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
         "seq": channel["seq"],
         "from": from_member,
         "text": text,
-        "ts": int(time.time()),
+        "ts": int(_clock.time()),
     }
     channel["messages"].append(msg)
     if len(channel["messages"]) > CHANNEL_MSG_CAP:
@@ -1206,7 +1206,7 @@ def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tupl
 
 def channel_is_expired(channel: ChannelDict) -> bool:
     """Check if a channel has expired."""
-    return time.time() > channel["expires_at_unix"]
+    return _clock.time() > channel["expires_at_unix"]
 
 
 def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
@@ -1243,7 +1243,7 @@ def _relay_save() -> None:
     try:
         path = _relay_state_path()
         # Only save non-expired channels
-        now = time.time()
+        now = _clock.time()
         active = {cid: ch for cid, ch in relay_store.channels.items()
                   if now <= ch["expires_at_unix"]}
         tmp = path.with_suffix(".tmp")
@@ -1263,7 +1263,7 @@ def _relay_load() -> None:
     try:
         with open(path) as f:
             data = json.load(f)
-        now = time.time()
+        now = _clock.time()
         restored = 0
         for cid, ch in data.items():
             if now <= ch.get("expires_at_unix", 0):
@@ -1280,7 +1280,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
     channel_id = channel_create_id(label)
     guest_token = f"gt_{secrets.token_urlsafe(32)}"
     reply_token = f"rt_{secrets.token_urlsafe(32)}"
-    now = time.time()
+    now = _clock.time()
     ch = {
         "id": channel_id,
         "label": label,
@@ -1350,7 +1350,7 @@ def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
         ch = relay_store.channels.get(channel_id)
     if not ch:
         return None
-    if time.time() > ch.get("expires_at_unix", 0):
+    if _clock.time() > ch.get("expires_at_unix", 0):
         return None
     if hashlib.sha256(token.encode()).hexdigest() != ch.get("guest_token_hash"):
         return None
@@ -1363,7 +1363,7 @@ def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
         ch = relay_store.channels.get(channel_id)
     if not ch:
         return None
-    if time.time() > ch.get("expires_at_unix", 0):
+    if _clock.time() > ch.get("expires_at_unix", 0):
         return None
     if hashlib.sha256(token.encode()).hexdigest() != ch.get("reply_token_hash"):
         return None
@@ -1698,7 +1698,7 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
         f'do [ -x "$p" ] && echo "$p" && break; done'
     )
     try:
-        r = subprocess.run(
+        r = _subprocess_runner.run(
             ["ssh", "-o", "ConnectTimeout=3", host, probe],
             capture_output=True, text=True, timeout=5,
         )
@@ -1732,7 +1732,7 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: Any) -> subpr
     # Default timeout: prevent unbounded subprocess hangs that block bridge threads.
     # Hot-path callers should pass explicit shorter timeouts (3s probes, 5s sends).
     kwargs.setdefault("timeout", 10)
-    return subprocess.run(cmd, **kwargs)
+    return _subprocess_runner.run(cmd, **kwargs)
 
 
 def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
@@ -1745,9 +1745,9 @@ def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "
     if not host:
         shutil.copy2(src, dst)
     elif direction == "push":
-        subprocess.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=15)
+        _subprocess_runner.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=15)
     else:  # pull
-        subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=15)
+        _subprocess_runner.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=15)
 
 
 def _extract_msg_text(msg: TelegramMessageDict) -> str:
@@ -2104,7 +2104,7 @@ def _ensure_bare_repo(project_name: str) -> str:
     bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
     if not os.path.isdir(bare_path):
         os.makedirs(GIT_SERVER_DIR, exist_ok=True)
-        subprocess.run(
+        _subprocess_runner.run(
             ["git", "init", "--bare", bare_path],
             capture_output=True, text=True, check=True, timeout=10)
     return bare_path
@@ -2430,7 +2430,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 )
                 if r.returncode != 0:
                     return False
-                time.sleep(0.5)
+                _clock.sleep(0.5)
                 r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=5)
                 return r.returncode == 0
 
@@ -2448,7 +2448,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 try:
                     os.write(fd, text.encode())
                     os.close(fd)
-                    r = subprocess.run(
+                    r = _subprocess_runner.run(
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile],
                         capture_output=True, timeout=5,
                     )
@@ -2480,7 +2480,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             # completes hits an empty prompt and the message is silently lost.
             # 50ms → 150ms → 1s: increased after observing silent message
             # loss on prod sessions with heavy context load.
-            time.sleep(1.0)
+            _clock.sleep(1.0)
             # Send Enter to submit the pasted text
             r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=5)
             return r.returncode == 0
@@ -2622,7 +2622,7 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
 def mark_hook_event(session_name: str) -> None:
     """Record timestamp of last hook response for a session."""
     with watchdog.lock:
-        watchdog.last_hook_ts[session_name] = time.time()
+        watchdog.last_hook_ts[session_name] = _clock.time()
 
 
 class ClaudeBackend:
@@ -2951,12 +2951,12 @@ def _read_noninteractive_activity(worker_name: str) -> str:
                                 capture_output=True, text=True, timeout=5)
                 if r.returncode == 0:
                     mtime = float(r.stdout.strip())
-                    age = int(time.time() - mtime)
+                    age = int(_clock.time() - mtime)
                 else:
                     age = -1
             else:
                 mtime = os.path.getmtime(path)
-                age = int(time.time() - mtime)
+                age = int(_clock.time() - mtime)
             if age >= 0:
                 if age < 60:
                     return f"idle (last response {age}s ago)"
@@ -3426,7 +3426,7 @@ def _read_learning_reminder(name: str) -> str:
 
 def _new_reminder_state() -> ReminderState:
     """Create a fresh learning-reminder state dict with zero counters."""
-    now = time.time()
+    now = _clock.time()
     return {
         "response_count": 0,
         "last_reminder_ts": now,
@@ -3485,7 +3485,7 @@ def _reset_learning_reminder(name: str) -> None:
 def _fire_reminder(name: str, st: ReminderState) -> None:
     """Mark state as fired and send reminder in background. Caller holds learning_reminders.lock."""
     st["response_count"] = 0
-    st["last_reminder_ts"] = time.time()
+    st["last_reminder_ts"] = _clock.time()
     st["reminder_pending"] = True
     _save_learning_reminder_state()
     reminder = _read_learning_reminder(name)
@@ -3504,7 +3504,7 @@ def _check_learning_reminder(name: str) -> None:
             st = _new_reminder_state()
             learning_reminders.state[name] = st
 
-        st["last_response_ts"] = time.time()
+        st["last_response_ts"] = _clock.time()
 
         if st.get("reminder_pending"):
             st["reminder_pending"] = False
@@ -3523,7 +3523,7 @@ def _check_learning_reminder(name: str) -> None:
 def _scan_idle_workers() -> None:
     """Check all tracked workers for idle timeout. Called periodically by timer."""
     try:
-        now = time.time()
+        now = _clock.time()
         idle_threshold = LEARNING_REMINDER_IDLE_HOURS * 3600
         to_fire = []
 
@@ -3568,7 +3568,7 @@ def _schedule_idle_scan() -> None:
 def _send_learning_reminder(name: str, text: str) -> None:
     """Send learning reminder to worker (runs in background thread)."""
     try:
-        time.sleep(2)  # brief delay so it doesn't collide with the response
+        _clock.sleep(2)  # brief delay so it doesn't collide with the response
         if send_to_worker(name, text):
             print(f"Learning reminder sent to {name}")
         else:
@@ -3613,7 +3613,7 @@ class RewindToken:
 
     def is_expired(self) -> bool:
         """Check whether this entry has passed its expiration time."""
-        return time.time() >= self.expires_at
+        return _clock.time() >= self.expires_at
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
@@ -3635,7 +3635,7 @@ class PrReviewToken:
 
     def is_expired(self) -> bool:
         """Check whether this entry has passed its expiration time."""
-        return time.time() >= self.expires_at
+        return _clock.time() >= self.expires_at
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
@@ -3753,7 +3753,7 @@ def _load_registry() -> RegistryFileDict:
         return data
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         if WORKER_REGISTRY_FILE.exists():
-            corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(time.time())}")
+            corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(_clock.time())}")
             print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}", file=sys.stderr, flush=True)
             try:
                 WORKER_REGISTRY_FILE.rename(corrupt_path)
@@ -3795,7 +3795,7 @@ def _registry_add(name: str, backend: str, chat_id: int | None = None,
         entry.update({
             "backend": backend,
             "chat_id": chat_id,
-            "hire_time": int(time.time()),
+            "hire_time": int(_clock.time()),
         })
         if host:
             entry["host"] = host
@@ -3815,7 +3815,7 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
             "protocol": "http",
             "callback_url": callback_url.rstrip("/"),
             "chat_id": None,
-            "hire_time": int(time.time()),
+            "hire_time": int(_clock.time()),
         }
         if host:
             entry["host"] = host
@@ -3866,7 +3866,7 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
         data["workers"][name] = {
             "backend": backend,
             "chat_id": None,
-            "hire_time": int(time.time()),
+            "hire_time": int(_clock.time()),
         }
     _save_registry(data)
     print(f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
@@ -4313,7 +4313,7 @@ class TelegramTransport(MessageTransport):
                 remote_inbox = str(inbox)
                 _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True, timeout=3)
                 _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True, timeout=3)
-                r = subprocess.run(
+                r = _subprocess_runner.run(
                     ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
                     capture_output=True, timeout=15)
                 if r.returncode != 0:
@@ -6068,7 +6068,7 @@ def set_pending(name: str, chat_id: int | str) -> None:
     d = ensure_session_dir(name)
     pending = d / "pending"
     chat_id_file = d / "chat_id"
-    pending.write_text(str(int(time.time())))
+    pending.write_text(str(int(_clock.time())))
     pending.chmod(0o600)
     chat_id_file.write_text(str(chat_id))
     chat_id_file.chmod(0o600)
@@ -6147,7 +6147,7 @@ def is_pending(name: str) -> bool:
         return False
     try:
         ts = int(pending.read_text().strip())
-        if (time.time() - ts) > PENDING_TIMEOUT:
+        if (_clock.time() - ts) > PENDING_TIMEOUT:
             return False
         return True
     except (OSError, ValueError):
@@ -6342,7 +6342,7 @@ def _check_hook_failure_signal(name: str) -> str | None:
         return None
     lines = raw.splitlines()
 
-    cutoff = int(time.time()) - HOOK_FAILURE_WINDOW
+    cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW
     recent = 0
     for line in lines:
         parts = line.split(None, 1)
@@ -6409,7 +6409,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     if admin_chat_id is None:
         return
 
-    now = time.time()
+    now = _clock.time()
     with watchdog.lock:
         last = watchdog.last_alert_ts.get(name)
     if last and (now - last) < ALERT_COOLDOWN:
@@ -6465,7 +6465,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
 
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
     """Track host SSH probe results; alert on DOWN/BACK UP transitions."""
-    now = time.time()
+    now = _clock.time()
     with watchdog.lock:
         was_down = host_health.down.get(host, False)
         if ok:
@@ -6560,7 +6560,7 @@ def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
     """Probe disk usage on local + remote hosts, alert on threshold breaches."""
-    now = time.time()
+    now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)  # None = local (VPS)
 
     for host in hosts_to_check:
@@ -6726,7 +6726,7 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict]:
 
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
     """Probe memory usage on local + remote hosts, alert on threshold breaches."""
-    now = time.time()
+    now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
@@ -6865,7 +6865,7 @@ def _check_io_usage_macos(host: str) -> IoUsageDict | None:
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     """Probe IO usage on local + remote hosts, alert on high IO wait."""
-    now = time.time()
+    now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
@@ -6971,7 +6971,7 @@ def _parse_etime(etime: str) -> int | None:
 
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
     """Detect runaway processes: >90% CPU for >1 hour. Alert admin."""
-    now = time.time()
+    now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
@@ -7010,7 +7010,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
 
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     """Check worktree directories and alert when total exceeds threshold."""
-    now = time.time()
+    now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
@@ -7095,9 +7095,9 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
 
 def _probe_tailscale() -> None:
     """Check Tailscale connectivity, alert on disconnect/recovery."""
-    now = time.time()
+    now = _clock.time()
     try:
-        r = subprocess.run(
+        r = _subprocess_runner.run(
             ["tailscale", "status", "--json"],
             capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
@@ -7152,11 +7152,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     # Suppress if worker was recently restarted (cmd_restart sends its own confirmation)
     restart_ts = watchdog.recent_restarts.get(name)
-    if restart_ts and time.time() - restart_ts < 30:
+    if restart_ts and _clock.time() - restart_ts < 30:
         return
 
     # Cooldown: don't spam "back to normal" for flapping workers
-    now = time.time()
+    now = _clock.time()
     last_resolved = watchdog.last_resolved_ts.get(name, 0)
     if now - last_resolved < 180:
         return
@@ -7192,7 +7192,7 @@ def _handle_watchdog_transition(
 ) -> None:
     """Process a watchdog state transition: alert on bad states, clear on recovery."""
     if now is None:
-        now = time.time()
+        now = _clock.time()
 
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
@@ -7281,7 +7281,7 @@ def watchdog_loop() -> None:
     _disk_check_counter = 0
     while True:
         try:
-            now = time.time()
+            now = _clock.time()
             registered = get_registered_sessions()
             pane_pids = _tmux_pane_pids()
             registered_names = set(registered.keys())
@@ -7307,7 +7307,7 @@ def watchdog_loop() -> None:
         except (subprocess.SubprocessError, ValueError, KeyError) as e:
             print(f"Watchdog error: {e}")
 
-        time.sleep(WATCHDOG_INTERVAL)
+        _clock.sleep(WATCHDOG_INTERVAL)
 
 
 def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
@@ -7741,7 +7741,7 @@ def _format_watchdog_status(name: str,
         return "Working" if pending_lookup(name) else "Ready"
 
     state, _reason, since = entry
-    now = time.time()
+    now = _clock.time()
 
     if state == "READY":
         return "Ready"
@@ -8152,7 +8152,7 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
                 host=host, capture_output=True, text=True, timeout=5
             )
         else:
-            proc = subprocess.run(
+            proc = _subprocess_runner.run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 capture_output=True, text=True, timeout=3
             )
@@ -8171,14 +8171,14 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
     if not backend.is_interactive:
         return tmux_exists(tmux_name, host=host)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = _clock.time() + timeout
+    while _clock.time() < deadline:
         if not tmux_exists(tmux_name, host=host):
             return False
         activity, _, _ = _read_tmux_activity(tmux_name, host=host)
         if activity == "Idle at prompt":
             return True
-        time.sleep(0.5)
+        _clock.sleep(0.5)
     return False
 
 
@@ -8332,7 +8332,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 
         for key in keys:
             _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host, timeout=5)
-            time.sleep(0.05)
+            _clock.sleep(0.05)
         return True
 
     return False
@@ -9324,7 +9324,7 @@ def worker_send(name: str, message: str, chat_id: int | None = None, session: Tm
 
 def get_tmux_env_value(tmux_name: str, key: str) -> str:
     """Get a tmux session environment variable value."""
-    result = subprocess.run(
+    result = _subprocess_runner.run(
         ["tmux", "show-environment", "-t", tmux_name, key],
         capture_output=True, text=True, timeout=3
     )
@@ -9357,8 +9357,8 @@ def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = Non
     Returns True if prompt is empty within timeout, False otherwise.
     """
     import re
-    start = time.time()
-    while time.time() - start < timeout:
+    start = _clock.time()
+    while _clock.time() - start < timeout:
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p"],
             host=host, capture_output=True, text=True, timeout=3
@@ -9367,7 +9367,7 @@ def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = Non
             # Check for empty prompt: line starting with ❯ followed by only whitespace
             if re.search(r'^❯\s*$', result.stdout, re.MULTILINE):
                 return True
-        time.sleep(0.1)
+        _clock.sleep(0.1)
     return False
 
 
@@ -9491,8 +9491,8 @@ def get_docker_run_cmd(name: str, resume_id: str = "") -> list[str]:
 def stop_docker_container(name: str) -> None:
     """Stop and remove a docker container."""
     container_name = f"claude-worker-{name}"
-    subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=10)
-    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
+    _subprocess_runner.run(["docker", "stop", container_name], capture_output=True, timeout=10)
+    _subprocess_runner.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
 
 
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
@@ -9513,7 +9513,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     tmp_dir = tempfile.mkdtemp(prefix="remote-file-")
     local_path = os.path.join(tmp_dir, original_name)
     try:
-        r = subprocess.run(
+        r = _subprocess_runner.run(
             ["rsync", "-az", f"{host}:{remote_path}", local_path],
             capture_output=True, timeout=120)
         if r.returncode == 0 and os.path.getsize(local_path) > 0:
@@ -9621,7 +9621,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 rich_failed_at = i
                 break
             if i < len(rich_chunks) - 1:
-                time.sleep(0.05)
+                _clock.sleep(0.05)
 
     # Partial rich failure: send remaining chunks as HTML
     if not rich_sent and rich_failed_at > 0:
@@ -9659,7 +9659,7 @@ def _send_html_fallback_chunks(
             plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
             transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
         if i < len(formatted_parts) - 1:
-            time.sleep(0.05)
+            _clock.sleep(0.05)
     return prev_msg_id
 
 
@@ -9702,7 +9702,7 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
                 print(f"{log_prefix} failed: {name} -> {result}")
 
         if i < len(formatted_parts) - 1:
-            time.sleep(0.05)
+            _clock.sleep(0.05)
 
 
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
@@ -9843,7 +9843,7 @@ def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict[
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     """Deploy an HTML file via beast serve and return the public URL, or None on failure."""
     try:
-        r = subprocess.run(
+        r = _subprocess_runner.run(
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
             capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
@@ -9947,7 +9947,7 @@ def send_typing_loop(chat_id: int | str, session_name: str) -> None:
     """Send typing indicator while request is pending."""
     while is_pending(session_name):
         transport.send_chat_action(chat_id, "typing")
-        time.sleep(4)
+        _clock.sleep(4)
 
 
 def get_all_chat_ids() -> list[int]:
@@ -10180,7 +10180,7 @@ class TeleportCommandsMixin:
             if os.path.exists(local_creds):
                 _remote_run(["mkdir", "-p", ".claude"],
                              host=target_host, capture_output=True)
-                subprocess.run(
+                _subprocess_runner.run(
                     ["rsync", "-az", local_creds,
                      f"{target_host}:.claude/.credentials.json"],
                     capture_output=True, timeout=10)
@@ -10305,12 +10305,12 @@ class TeleportCommandsMixin:
             return conflicts  # Not a git repo — rsync is the only option
 
         # Get local (VPS) git status — uncommitted changes + recent commits
-        local_status = subprocess.run(
+        local_status = _subprocess_runner.run(
             ["git", "-C", local_cwd, "status", "--porcelain"],
             capture_output=True, text=True, timeout=10)
         local_changed = bool(local_status.stdout.strip()) if local_status.returncode == 0 else False
 
-        local_head = subprocess.run(
+        local_head = _subprocess_runner.run(
             ["git", "-C", local_cwd, "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=5)
         local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
@@ -10405,7 +10405,7 @@ class TeleportCommandsMixin:
             state_file.write_text(json.dumps({
                 "phase": 1, "source_host": source_host,
                 "target_host": target_host, "target_cwd": target_cwd,
-                "started_at": int(time.time()),
+                "started_at": int(_clock.time()),
             }))
 
             # ── PHASE 1: Stop and sync (reversible) ──
@@ -10453,7 +10453,7 @@ class TeleportCommandsMixin:
             state_file.write_text(json.dumps({
                 "phase": 2, "source_host": source_host,
                 "target_host": target_host, "target_cwd": target_cwd,
-                "started_at": int(time.time()),
+                "started_at": int(_clock.time()),
             }))
 
             # Save remapped CWD BEFORE _start_worker_on_target so that
@@ -10506,7 +10506,7 @@ class TeleportCommandsMixin:
                 try:
                     backend_obj = get_backend(backend_name)
                     welcome = self.workers._build_welcome(name, backend_obj)
-                    time.sleep(3)  # Let Claude finish loading
+                    _clock.sleep(3)  # Let Claude finish loading
                     self.workers.send(name, welcome)
                 except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
                     print(f"[teleport] Warning: failed to send welcome to {name}: {e}")
@@ -10542,7 +10542,7 @@ class TeleportCommandsMixin:
 
         # Wait for process to exit (up to 10s)
         for _ in range(20):
-            time.sleep(0.5)
+            _clock.sleep(0.5)
             r = _remote_run(
                 ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
                 host=host, capture_output=True, text=True)
@@ -10557,7 +10557,7 @@ class TeleportCommandsMixin:
             # Force stop
             _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""],
                          host=host, capture_output=True)
-            time.sleep(1)
+            _clock.sleep(1)
 
         # Re-read session ID (hook may have updated it during /exit)
         return get_claude_session_id(name, authoritative=True) or session_id
@@ -10632,7 +10632,7 @@ class TeleportCommandsMixin:
             cmd.extend([src, dst])
 
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 print(f"[teleport] rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
             return r.returncode == 0
@@ -10677,7 +10677,7 @@ class TeleportCommandsMixin:
                 local_src = os.path.expanduser(f"~/{source_dir}/{item}")
                 local_dst = os.path.expanduser(f"~/{target_dir}/")
                 cmd = ["rsync", "-az", local_src, local_dst]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 print(f"[teleport] transcript sync failed for {item}: {r.stderr[:200]}")
 
@@ -10707,14 +10707,14 @@ class TeleportCommandsMixin:
             for repo_name, repo_path in git_repos.items():
                 if os.path.isdir(os.path.join(repo_path, ".git")):
                     try:
-                        subprocess.run(
+                        _subprocess_runner.run(
                             ["git", "-C", repo_path, "add", "-A"],
                             capture_output=True, timeout=10)
-                        subprocess.run(
+                        _subprocess_runner.run(
                             ["git", "-C", repo_path, "commit", "-m",
                              f"teleport sync: {repo_name}"],
                             capture_output=True, timeout=10)
-                        subprocess.run(
+                        _subprocess_runner.run(
                             ["git", "-C", repo_path, "push", "origin", "master"],
                             capture_output=True, timeout=60)
                         print(f"[teleport] git sync succeeded for {repo_name}")
@@ -10762,7 +10762,7 @@ class TeleportCommandsMixin:
                     fd, tmp = tempfile.mkstemp(suffix=".json")
                     os.write(fd, settings_text.encode())
                     os.close(fd)
-                    subprocess.run(
+                    _subprocess_runner.run(
                         ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
                         capture_output=True, timeout=10)
                     os.unlink(tmp)
@@ -10793,7 +10793,7 @@ class TeleportCommandsMixin:
         # 1. Sync worker's team dir (~/team/<name>/)
         worker_team_dir = os.path.join(home, "team", name)
         if os.path.isdir(worker_team_dir):
-            subprocess.run(
+            _subprocess_runner.run(
                 ["rsync", "-az",
                  f"{source_host}:team/{name}/",
                  f"{worker_team_dir}/"],
@@ -10816,7 +10816,7 @@ class TeleportCommandsMixin:
                     local_file = home + remote_file[len(remote_home):]
                     local_dir = os.path.dirname(local_file)
                     os.makedirs(local_dir, exist_ok=True)
-                    subprocess.run(
+                    _subprocess_runner.run(
                         ["rsync", "-az",
                          f"{source_host}:{remote_file}", local_file],
                         capture_output=True, timeout=10)
@@ -10856,7 +10856,7 @@ class TeleportCommandsMixin:
                     continue
                 seen_scripts.add(real_path)
                 try:
-                    r = subprocess.run(
+                    r = _subprocess_runner.run(
                         [script_path], env=env,
                         capture_output=True, text=True, timeout=10)
                     if r.returncode != 0:
@@ -10890,7 +10890,7 @@ class TeleportCommandsMixin:
             # Sync .claude.json (onboarding, trust dialogs, project config)
             claude_json = os.path.expanduser("~/.claude.json")
             if os.path.exists(claude_json):
-                subprocess.run(
+                _subprocess_runner.run(
                     ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
                     capture_output=True, timeout=10)
             else:
@@ -10927,7 +10927,7 @@ class TeleportCommandsMixin:
         for fname in ["chat_id", "claude_session_id", "claude_session_cwd"]:
             local_file = local_session_dir / fname
             if local_file.exists():
-                subprocess.run(
+                _subprocess_runner.run(
                     ["rsync", "-az", str(local_file),
                      f"{target_host}:{remote_session_dir}/{fname}"],
                     capture_output=True, timeout=10)
@@ -10956,7 +10956,7 @@ class TeleportCommandsMixin:
                 remote_refresh = remote_oauth.get("refreshToken", "")
                 local_refresh = local_oauth.get("refreshToken", "")
                 remote_exp = remote_oauth.get("expiresAt", 0)
-                now_ms = int(time.time() * 1000)
+                now_ms = int(_clock.time() * 1000)
                 # Skip if target has a DIFFERENT refresh token that hasn't expired
                 if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
                     print(f"[creds] Target {target_host} has independent valid credentials, skipping sync")
@@ -10967,7 +10967,7 @@ class TeleportCommandsMixin:
         _remote_run(["mkdir", "-p", ".claude"],
                      host=target_host, capture_output=True)
         # Atomic: rsync to tmp, then mv (avoids truncated file on crash)
-        subprocess.run(
+        _subprocess_runner.run(
             ["rsync", "-az", local_creds,
              f"{target_host}:.claude/.credentials.json.tmp"],
             capture_output=True, timeout=10)
@@ -10986,7 +10986,7 @@ class TeleportCommandsMixin:
         # Clean up any leftover session
         _remote_run(["tmux", "kill-session", "-t", tmux_name],
                      host=target_host, capture_output=True)
-        time.sleep(0.3)
+        _clock.sleep(0.3)
 
         # Create new session
         r = _remote_run(
@@ -10998,7 +10998,7 @@ class TeleportCommandsMixin:
         _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
                     host=target_host, capture_output=True)
 
-        time.sleep(0.5)
+        _clock.sleep(0.5)
 
         # Remap SESSIONS_DIR for target $HOME (e.g. /home/claude → /Users/user)
         target_sessions_dir = str(SESSIONS_DIR)
@@ -11031,14 +11031,14 @@ class TeleportCommandsMixin:
             _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value],
                          host=target_host, capture_output=True)
 
-        time.sleep(0.3)
+        _clock.sleep(0.3)
 
         # Source env and unset CLAUDECODE
         _remote_run(
             ["tmux", "send-keys", "-t", tmux_name,
              'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
             host=target_host, capture_output=True)
-        time.sleep(0.3)
+        _clock.sleep(0.3)
 
         # Build and send start command
         backend = get_backend(backend_name)
@@ -11066,13 +11066,13 @@ class TeleportCommandsMixin:
             # auto-accept permission mode. Multiple Enter presses are safe.
             for delay, key in [(3.0, "Enter"), (2.0, "Enter"),
                                (1.0, "Enter"), (1.0, "Enter")]:
-                time.sleep(delay)
+                _clock.sleep(delay)
                 _remote_run(["tmux", "send-keys", "-t", tmux_name, key],
                              host=target_host, capture_output=True)
 
         # Verify Claude is running (retry up to 30s for startup)
         for attempt in range(30):
-            time.sleep(1)
+            _clock.sleep(1)
             r = _remote_run(
                 ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
                 host=target_host, capture_output=True, text=True)
@@ -11291,11 +11291,11 @@ class WorkerLifecycleCommandsMixin:
         # In-flight dedupe: block if a restart is already in progress (even with --force)
         with watchdog.restart_lock:
             inflight_ts = watchdog.restart_in_progress.get(name)
-            if inflight_ts and time.time() - inflight_ts < 120:
-                print(f"[cmd_restart] {name}: BLOCKED (restart in progress since {time.time() - inflight_ts:.0f}s ago)")
+            if inflight_ts and _clock.time() - inflight_ts < 120:
+                print(f"[cmd_restart] {name}: BLOCKED (restart in progress since {_clock.time() - inflight_ts:.0f}s ago)")
                 self.reply(chat_id, f"{name.capitalize()} restart already in progress. Wait for it to finish.")
                 return True
-            watchdog.restart_in_progress[name] = time.time()
+            watchdog.restart_in_progress[name] = _clock.time()
 
         try:
             result = self._do_restart(name, session, chat_id, host, tmux_name, force, clean)
@@ -11320,7 +11320,7 @@ class WorkerLifecycleCommandsMixin:
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
             ok, err = self._restart_remote_worker(
                 name, backend_name, backend_obj, tmux_name, host, mode)
-            watchdog.recent_restarts[name] = time.time()
+            watchdog.recent_restarts[name] = _clock.time()
             print(f"[cmd_restart] {name}: remote restart result ok={ok}, err={err}")
             if ok:
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
@@ -11333,7 +11333,7 @@ class WorkerLifecycleCommandsMixin:
         if clean:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
-                watchdog.recent_restarts[name] = time.time()
+                watchdog.recent_restarts[name] = _clock.time()
                 self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
@@ -11365,7 +11365,7 @@ class WorkerLifecycleCommandsMixin:
         if not has_session_id:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
-                watchdog.recent_restarts[name] = time.time()
+                watchdog.recent_restarts[name] = _clock.time()
                 self.reply(chat_id, f"Restarting {name.capitalize()} fresh...")
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
@@ -11374,7 +11374,7 @@ class WorkerLifecycleCommandsMixin:
 
         ok, err = restart_claude(name, mode="resume")
         if ok:
-            watchdog.recent_restarts[name] = time.time()
+            watchdog.recent_restarts[name] = _clock.time()
             self.reply(chat_id, f"Resuming {name.capitalize()}...")
             self.reply(chat_id, f"{name.capitalize()} is back and ready.")
         else:
@@ -11427,7 +11427,7 @@ class WorkerLifecycleCommandsMixin:
             # Kill tmux — _start_worker_on_target creates a fresh one
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                          host=host, capture_output=True)
-            time.sleep(0.5)
+            _clock.sleep(0.5)
         else:
             print(f"[_restart_remote] {name}: tmux {tmux_name} not found on {host}")
 
@@ -11480,7 +11480,7 @@ class WorkerLifecycleCommandsMixin:
         if backend.is_interactive:
             started = False
             for _ in range(10):
-                time.sleep(1.0)
+                _clock.sleep(1.0)
                 if is_claude_running(tmux_name, host=host):
                     started = True
                     break
@@ -11558,7 +11558,7 @@ class WorkerLifecycleCommandsMixin:
                     for _ in range(5):
                         if self._restart_all_abort.is_set():
                             break
-                        time.sleep(delay_s / 5)
+                        _clock.sleep(delay_s / 5)
 
             if failed:
                 summary = ", ".join(n for n, _ in failed)
@@ -11632,7 +11632,7 @@ class ChannelRelayCommandsMixin:
         """Handle /relay list — show active relay channels."""
         with relay_store.lock:
             active = [(cid, ch) for cid, ch in relay_store.channels.items()
-                      if time.time() <= ch["expires_at_unix"]]
+                      if _clock.time() <= ch["expires_at_unix"]]
         if active:
             lines = []
             for cid, ch in active:
@@ -11658,7 +11658,7 @@ class ChannelRelayCommandsMixin:
             return True
         with relay_store.lock:
             found = relay_store.channels.get(channel_id)
-            if not found or time.time() > found["expires_at_unix"]:
+            if not found or _clock.time() > found["expires_at_unix"]:
                 found = None
         if not found:
             self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
@@ -11682,7 +11682,7 @@ class ChannelRelayCommandsMixin:
         rm_worker = parts[2].lower()
         with relay_store.lock:
             found = relay_store.channels.get(channel_id)
-            if not found or time.time() > found["expires_at_unix"]:
+            if not found or _clock.time() > found["expires_at_unix"]:
                 found = None
         if not found:
             self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
@@ -11702,7 +11702,7 @@ class ChannelRelayCommandsMixin:
 
     def _cmd_relay_status(self, chat_id: ChatId) -> bool:
         """Handle /relay status — counts for relays, channels, guests."""
-        now = time.time()
+        now = _clock.time()
         with relay_store.lock:
             relay_active = [(cid, ch) for cid, ch in relay_store.channels.items()
                             if now <= ch["expires_at_unix"]]
@@ -11768,7 +11768,7 @@ class ChannelRelayCommandsMixin:
         if not arg:
             with relay_store.lock:
                 active = [ch for ch in relay_store.channels.values()
-                          if time.time() <= ch["expires_at_unix"]]
+                          if _clock.time() <= ch["expires_at_unix"]]
             lines = ["\U0001f4e1 Relay — connect any agent to the team\n"]
             lines.append("/relay <worker> — create relay, get a guideline link")
             lines.append("/relay add <channel_id> <worker> — add worker to relay")
@@ -12532,7 +12532,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
         # Auto-focus: same single registered worker mentioned 2+ times within 60s
         registered = self.workers.get_registered_sessions()
-        now = time.time()
+        now = _clock.time()
         if len(targets) == 1 and targets[0] in registered:
             target = targets[0]
             if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
@@ -12617,7 +12617,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 "id": f"gm_{secrets.token_hex(4)}",
                 "from": "manager",
                 "text": message,
-                "ts": int(time.time()),
+                "ts": int(_clock.time()),
             }
             with guest_store.lock:
                 inbox = guest_store.inboxes.get(name, [])
@@ -12706,7 +12706,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         names = name.lower().strip().split()
         prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
         pilot_port = os.environ.get("PILOT_PORT", "10170")
-        import urllib.request, json as _json, time as _time
+        import urllib.request, json as _json
         from urllib.parse import urlparse, quote as _urlquote
         if "all" in names:
             registered = worker_manager.scan_tmux_sessions()
@@ -12738,7 +12738,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if not enabled:
             self.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
             return True
-        ts = _time.strftime("%m%d-%H%M")
+        ts = time.strftime("%m%d-%H%M")
         if len(enabled) <= 3:
             slug = "-".join(enabled) + "-" + ts
         else:
@@ -12770,12 +12770,12 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             self.reply(chat_id, "Usage: /rewind <name>\n/rewind team — view team chat", outcome="Needs decision")
             return True
         name = name.lower().strip()
-        import secrets, time as _time
+        import secrets
         token = secrets.token_urlsafe(32)
         base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
         # Team chat viewer
         if name in ("team", "--team"):
-            REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _time.time() + REWIND_TIMEOUT}
+            REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
             url = f"{base_url}/team-chat?token={token}"
             try:
                 html_content = _render_team_chat_html(
@@ -12792,7 +12792,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 print(f"Team chat snapshot deploy failed: {e}")
             self.reply(chat_id, f"\U0001f4ac Team chat\n{url}")
             return True
-        REWIND_TOKENS[token] = {"name": name, "expires_at": _time.time() + REWIND_TIMEOUT}
+        REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + REWIND_TIMEOUT}
         url = f"{base_url}/transcript/{name}?token={token}"
         try:
             # Pass live_base_url so pagination/search links point to the bridge
@@ -12838,7 +12838,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         script_path = Path(__file__).parent / "pr-review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 [sys.executable, str(script_path), arg, "--no-serve"],
                 capture_output=True, text=True, timeout=300)
             if r.returncode != 0 or not os.path.exists(out_path):
@@ -12853,9 +12853,9 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if serve_url:
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
         else:
-            import secrets, time as _time
+            import secrets
             token = secrets.token_urlsafe(32)
-            PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _time.time() + 300}
+            PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _clock.time() + 300}
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
             url = f"{base_url}/pr-review/{pr_num}?token={token}"
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
@@ -12962,9 +12962,9 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if sources:
             lines.append("")
             # Generate a single rewind token for all source links
-            import secrets, time as _time
+            import secrets
             tc_token = secrets.token_urlsafe(32)
-            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _time.time() + REWIND_TIMEOUT}
+            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
 
             lines.append("\U0001f4ce Sources:")
@@ -13008,7 +13008,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             # Parse
             parse_script = str(Path(__file__).parent / "team_memory" / "parse.py")
             parsed_path = "/tmp/team-memory-parsed-full.jsonl"
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 [sys.executable, parse_script, "--zip", latest, "--out", parsed_path],
                 capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
@@ -13017,7 +13017,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
             # Ingest (incremental)
             ingest_script = str(Path(__file__).parent / "team_memory" / "ingest.py")
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 [sys.executable, ingest_script, parsed_path, "--incremental"],
                 capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
@@ -13479,7 +13479,7 @@ def _run_team_chat_query(query_type: str, **kwargs: Any) -> str | None:
     if kwargs.get("msg_id") is not None:
         cmd.extend(["--msg-id", str(kwargs["msg_id"])])
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
             return json.loads(r.stdout)
     except (subprocess.SubprocessError, OSError) as e:
@@ -13513,7 +13513,7 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | Non
             # For remote workers, use the script on the remote host
             r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=60)
         else:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
             return json.loads(r.stdout)
     except (subprocess.SubprocessError, OSError) as e:
@@ -13523,13 +13523,12 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | Non
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
     """Background thread: rsync transcript from remote host with progress tracking."""
-    import time as _time
     try:
         with _TRANSCRIPT_SYNC_LOCK:
             _TRANSCRIPT_SYNC[key] = {"status": "syncing", "progress": "Connecting to remote host...",
-                                     "started": _time.time(), "path": None, "error": None}
+                                     "started": _clock.time(), "path": None, "error": None}
         # First get remote file size for progress
-        r = subprocess.run(["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
+        r = _subprocess_runner.run(["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
                            capture_output=True, text=True, timeout=10)
         remote_size = 0
         if r.returncode == 0 and r.stdout.strip().isdigit():
@@ -13550,7 +13549,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
 
         # Poll local file size while rsync runs
         while proc.poll() is None:
-            _time.sleep(1)
+            _clock.sleep(1)
             try:
                 if local_tmp.exists() and remote_size > 0:
                     local_size = local_tmp.stat().st_size
@@ -14009,14 +14008,14 @@ def _transcript_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _render_transcript_loading(name: str, sid: str, token: str, sync_key: str) -> str:
     """Render a loading page while transcript syncs from remote host."""
-    import html as html_mod, time as _time
+    import html as html_mod
     esc = html_mod.escape
     with _TRANSCRIPT_SYNC_LOCK:
         info = _TRANSCRIPT_SYNC.get(sync_key, {})
     status = info.get("status", "syncing")
     progress = esc(info.get("progress", "Starting sync..."))
     pct = info.get("pct", 0)
-    elapsed = int(_time.time() - info.get("started", _time.time()))
+    elapsed = int(_clock.time() - info.get("started", _clock.time()))
     error = info.get("error")
 
     if status == "error":
@@ -15364,7 +15363,7 @@ class GuestEndpointsMixin:
             name = guest_generate_name(existing_names=team_workers | existing_guests)
 
         token, token_hash = guest_create_token()
-        now = time.time()
+        now = _clock.time()
         expires_at_unix = now + GUEST_TTL
         expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_unix))
 
@@ -15513,7 +15512,7 @@ class GuestEndpointsMixin:
                     ginbox = guest_store.inboxes.get(target_guest, [])
                     guest_store.inboxes[target_guest] = guest_inbox_append(ginbox, {
                         "id": msg_id, "from": from_member,
-                        "text": text, "ts": int(time.time()),
+                        "text": text, "ts": int(_clock.time()),
                     })
                 results.append({"target": target, "ok": True, "message_id": msg_id})
 
@@ -15534,7 +15533,7 @@ class GuestEndpointsMixin:
                     inbox = guest_store.inboxes.get(guest_name, [])
                     guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {
                         "id": msg_id, "from": guest_name, "to": worker,
-                        "text": text, "ts": int(time.time()),
+                        "text": text, "ts": int(_clock.time()),
                     })
                     if worker not in guest.get("notified_workers", set()):
                         guest.setdefault("notified_workers", set()).add(worker)
@@ -15574,7 +15573,7 @@ class GuestEndpointsMixin:
             guest_store.inboxes[guest_name] = guest_inbox_append(
                 guest_store.inboxes[guest_name],
                 {"id": msg_id, "from": from_worker or "worker",
-                 "text": text, "ts": int(time.time())},
+                 "text": text, "ts": int(_clock.time())},
             )
 
         self._send_json(200, {"ok": True, "message_id": msg_id})
@@ -16094,12 +16093,11 @@ class PrEndpointsMixin:
 
     def handle_pr_file_content(self, parsed: dict[str, Any]) -> None:
         """Fetch file content from GitHub for diff context expansion."""
-        import time as _time
         import base64 as _b64
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
-        now = _time.time()
+        now = _clock.time()
         if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
             self.send_response(403)
             self.end_headers()
@@ -16118,7 +16116,7 @@ class PrEndpointsMixin:
             return
 
         try:
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 ["gh", "api", f"repos/{owner}/{repo}/contents/{path}?ref={ref}",
                  "--jq", ".content"],
                 capture_output=True, text=True, timeout=15)
@@ -16143,10 +16141,9 @@ class PrEndpointsMixin:
 
     def handle_pr_keepalive(self, parsed: dict[str, Any]) -> None:
         """Extend PR review token expiry on client activity."""
-        import time as _time
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
-        now = _time.time()
+        now = _clock.time()
         if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
             self.send_response(403)
             self.end_headers()
@@ -16157,7 +16154,6 @@ class PrEndpointsMixin:
 
     def handle_pr_general_comment(self, body: bytes) -> None:
         """Post a general (non-inline) comment on a PR via GitHub API."""
-        import time as _time
         try:
             data = json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -16167,7 +16163,7 @@ class PrEndpointsMixin:
             return
 
         token = data.get("token", "")
-        now = _time.time()
+        now = _clock.time()
         if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
             self.send_response(403)
             self.end_headers()
@@ -16186,7 +16182,7 @@ class PrEndpointsMixin:
             return
 
         try:
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 ["gh", "api", f"repos/{owner}/{repo}/issues/{pr_num}/comments",
                  "--method", "POST", "-f", f"body={comment_body}"],
                 capture_output=True, text=True, timeout=15)
@@ -16230,7 +16226,6 @@ class PrEndpointsMixin:
 
     def handle_pr_merge(self, body: bytes) -> None:
         """Merge a PR via GitHub API."""
-        import time as _time
         try:
             data = json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -16240,7 +16235,7 @@ class PrEndpointsMixin:
             return
 
         token = data.get("token", "")
-        now = _time.time()
+        now = _clock.time()
         if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
             self.send_response(403)
             self.end_headers()
@@ -16262,7 +16257,7 @@ class PrEndpointsMixin:
             return
 
         try:
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}/merge",
                  "--method", "PUT", "-f", f"merge_method={merge_method}"],
                 capture_output=True, text=True, timeout=30)
@@ -16301,12 +16296,11 @@ class PrEndpointsMixin:
         Requires a valid token (?token=...) generated by /pr command.
         Token expires after 5 minutes (same as rewind).
         """
-        import time as _time
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
         # Cleanup expired tokens
-        now = _time.time()
+        now = _clock.time()
         expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
         for k in expired:
             del PR_REVIEW_TOKENS[k]
@@ -16334,7 +16328,6 @@ class PrEndpointsMixin:
 
     def handle_pr_comment(self, body: bytes) -> None:
         """Post an inline comment on a PR via GitHub API + notify Telegram."""
-        import time as _time
         try:
             data = json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -16344,7 +16337,7 @@ class PrEndpointsMixin:
             return
 
         token = data.get("token", "")
-        now = _time.time()
+        now = _clock.time()
         expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
         for k in expired:
             del PR_REVIEW_TOKENS[k]
@@ -16381,7 +16374,7 @@ class PrEndpointsMixin:
                 "line": line,
                 "side": side,
             })
-            r = subprocess.run(
+            r = _subprocess_runner.run(
                 ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
                  "--method", "POST", "--input", "-"],
                 input=gh_payload, capture_output=True, text=True, timeout=15)
@@ -16438,10 +16431,9 @@ class TranscriptEndpointsMixin:
         GET /transcript/<name>?token=...&q=search+term  — full-text search
         """
         try:
-            import time as _time
             qs = parse_qs(parsed.query)
             # Token auth — clean up expired tokens first
-            now = _time.time()
+            now = _clock.time()
             expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
             for k in expired:
                 del REWIND_TOKENS[k]
@@ -16569,10 +16561,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         GET /team-chat?token=...&q=search+term
         """
         try:
-            import time as _time
             qs = parse_qs(parsed.query)
             # Token auth — same as transcript endpoint
-            now = _time.time()
+            now = _clock.time()
             expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
             for k in expired:
                 del REWIND_TOKENS[k]
@@ -16634,11 +16625,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Requires valid rewind token (same as /team-chat).
         Only serves files under TEAM_CHAT_MEDIA_DIR (no path traversal).
         """
-        import time as _time
         qs = parse_qs(parsed.query)
 
         # Token auth
-        now = _time.time()
+        now = _clock.time()
         token = qs.get("token", [None])[0]
         if not token or token not in REWIND_TOKENS or REWIND_TOKENS[token]["expires_at"] <= now:
             self.send_response(403)
@@ -16707,7 +16697,7 @@ def _checkin_can_restart(name: str, tmux_name: str,
     """
     # Cooldown: prevent restart loops from repeated checkins
     last_restart = watchdog.recent_restarts.get(name, 0)
-    elapsed = time.time() - last_restart
+    elapsed = _clock.time() - last_restart
     if elapsed < RESTART_COOLDOWN:
         # Narrow exemption: allow one CWD repair after force restart
         if watchdog.force_restart_pending_cwd.pop(name, False):
@@ -16726,10 +16716,10 @@ def _checkin_can_restart(name: str, tmux_name: str,
     # In-flight dedupe: skip if restart already in progress
     with watchdog.restart_lock:
         inflight_ts = watchdog.restart_in_progress.get(name)
-        if inflight_ts and time.time() - inflight_ts < 120:
-            print(f"[checkin] {name}: BLOCKED restart (in-flight since {time.time() - inflight_ts:.0f}s ago)")
-            return False, f"Checkin restart blocked: {name} restart already in progress ({time.time() - inflight_ts:.0f}s)."
-        watchdog.restart_in_progress[name] = time.time()
+        if inflight_ts and _clock.time() - inflight_ts < 120:
+            print(f"[checkin] {name}: BLOCKED restart (in-flight since {_clock.time() - inflight_ts:.0f}s ago)")
+            return False, f"Checkin restart blocked: {name} restart already in progress ({_clock.time() - inflight_ts:.0f}s)."
+        watchdog.restart_in_progress[name] = _clock.time()
 
     return True, ""
 
@@ -16757,7 +16747,7 @@ def _checkin_do_restart(name: str, backend_name: str,
         else:
             ok, err = worker_manager.restart(name, mode="relaunch")
 
-        watchdog.recent_restarts[name] = time.time()
+        watchdog.recent_restarts[name] = _clock.time()
         print(f"[checkin] {name}: restart result ok={ok}, err={err}")
 
         if not ok:
@@ -17389,7 +17379,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
     def handle_health_workers_endpoint(self) -> None:
         """Return watchdog worker states as JSON (debug endpoint)."""
         try:
-            now = time.time()
+            now = _clock.time()
             registered = get_registered_sessions()
             with watchdog.lock:
                 state_snapshot = dict(watchdog.worker_states)
@@ -17678,7 +17668,7 @@ def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: l
     if tag not in _connector_message_log:
         _connector_message_log[tag] = deque(maxlen=20)
     _connector_message_log[tag].append({
-        "ts": time.time(),
+        "ts": _clock.time(),
         "html": html_text,
         "plain": plain_text,
         "targets": targets or [],
@@ -17808,7 +17798,7 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
 def _connector_export_github(number: int, repo: str) -> str | None:
     """Export a GitHub issue/PR via beast github export --serve, return public URL."""
     try:
-        r = subprocess.run(
+        r = _subprocess_runner.run(
             ["beast", "github", "export", str(number), "--format", "print",
              "--serve", "--repo", repo, "--fresh"],
             capture_output=True, text=True, timeout=30)
