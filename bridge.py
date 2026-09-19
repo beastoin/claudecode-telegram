@@ -260,25 +260,23 @@ class GuestSessionDict(TypedDict):
     notified_workers: set[str]
 
 
-class GuestInboxMessage(TypedDict):
-    """Shape of a message in a guest's inbox."""
-    id: str
-    from_: str   # JSON key is "from"; Python field avoids keyword
-    text: str
-    ts: int
-
-
-class ChannelMemberDict(TypedDict):
+class ChannelMemberDict(TypedDict, total=False):
     """Shape of a member entry inside a channel's members dict."""
     type: str         # "worker", "guest", or "manager"
-    name: str
+    name: str         # omitted for manager members
 
+
+# Note: channel messages and relay messages use the JSON key "from" (a Python keyword).
+# TypedDict cannot express reserved-word keys directly, so these types document the
+# shape without that field.  The runtime dicts include "from" as a string key.
 
 class ChannelMessageDict(TypedDict):
-    """Shape of a message inside a channel's messages list."""
+    """Shape of a message inside a channel's messages list.
+
+    Also contains "from" (str) — the member key of the sender.
+    """
     id: str
     seq: int
-    from_: str        # JSON key is "from"
     text: str
     ts: int
 
@@ -296,11 +294,12 @@ class ChannelDict(TypedDict):
 
 
 class RelayMessageDict(TypedDict):
-    """Shape of a message in a relay channel."""
+    """Shape of a message in a relay channel.
+
+    Also contains "from" (str) and "to" (str) — sender/recipient names.
+    """
     message_id: str
     direction: str    # "guest_to_worker" or "worker_to_guest"
-    from_: str        # JSON key is "from"
-    to: str
     text: str
     ts: str
 
@@ -327,8 +326,11 @@ class TmuxSessionDict(TypedDict, total=False):
     host: str           # optional — present only for remote sessions
 
 
-class WorkerRegistryEntry(TypedDict, total=False):
-    """Shape of a single worker entry in workers.json."""
+class RegistryWorkerDict(TypedDict, total=False):
+    """Raw dict shape of a single worker entry in workers.json.
+
+    The dataclass WorkerRegistryEntry (below) is the rich model equivalent.
+    """
     backend: str
     chat_id: int | None
     hire_time: int
@@ -341,10 +343,10 @@ class WorkerRegistryEntry(TypedDict, total=False):
     tools: dict[str, Any]  # optional — for callback workers
 
 
-class WorkerRegistryData(TypedDict, total=False):
-    """Shape of the top-level workers.json file."""
+class RegistryFileDict(TypedDict, total=False):
+    """Raw dict shape of the top-level workers.json file."""
     version: int
-    workers: dict[str, WorkerRegistryEntry]
+    workers: dict[str, RegistryWorkerDict]
 
 
 # ── NamedTuple models for structured returns ──────────────────────────
@@ -405,27 +407,27 @@ except ImportError as e:
 
 # ── File map ───────────────────────────────────────────────────────────
 #
-#   L1-216      Imports, type aliases, TypedDict/NamedTuple models
-#   L~244       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
+#   L1-380      Imports, type aliases, 33 TypedDict/5 NamedTuple models
+#   L~433       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
 #               ResourceAlertConfig, MediaConfig), AppContext
-#   L~628       Guest/channel/relay subsystem (GuestSession, RelayStore)
-#   L~1378      Backend Protocols + registry (BackendLifecycle, BackendDelivery,
-#               BackendHealth, Backend, get_backend, etc.)
-#   L~1599      OS detection, worker health: _detect_os_family, _machine_health,
+#   L~830       Guest/channel/relay subsystem (GuestSession, RelayStore)
+#   L~1570      Backend Protocols + registry (BackendLifecycle, BackendDelivery,
+#               BackendHealth, Backend, SubprocessRunner, Clock, get_backend)
+#   L~1838      OS detection, worker health: _detect_os_family, _machine_health,
 #               normalize_cwd, validate_cwd, parse_hire_args
-#   L~2157      Tmux interaction: tmux_exists, tmux_send_message,
+#   L~2396      Tmux interaction: tmux_exists, tmux_send_message,
 #               _read_tmux_activity, _wait_for_restart_ready
-#   L~3665      Transport + Telegram API: MessageTransport, TelegramAPI,
+#   L~3904      Transport + Telegram API: MessageTransport, TelegramAPI,
 #               send_message, send_photo, send_document, split_message
-#   L~4936      Text/media processing: parse_image_tags, escape_html,
+#   L~5100      Text/media processing: parse_image_tags, escape_html,
 #               _TelegramHTMLSanitizer, markdown_to_telegram_html
-#   L~8294      WorkerManager class (~1600 lines): hire, fire, restart, status
-#   L~9901      TeleportCommandsMixin (~2000 lines)
-#   L~11963     CommandRouter class (~2200 lines)
-#   L~14208     Team chat HTML rendering
-#   L~14839     Transcript HTML rendering
-#   L~15053     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
-#   L~17820     main() function, signal handlers, startup
+#   L~8458      WorkerManager class (~1600 lines): hire, fire, restart, status
+#               (DI: accepts SubprocessRunner/Clock for testability)
+#   L~10076     TeleportCommandsMixin (~2000 lines)
+#   L~12139     CommandRouter class (~2200 lines)
+#   L~14490     Transcript HTML rendering
+#   L~15232     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
+#   L~17977     main() function, signal handlers, startup
 #
 # ======================================================================
 # CONFIGURATION
@@ -932,7 +934,7 @@ class GuestStore:
     def __init__(self) -> None:
         """Initialize guest sessions store with thread-safe locks."""
         self.guests: dict[str, GuestSessionDict] = {}
-        self.inboxes: dict[str, list[GuestInboxMessage]] = {}
+        self.inboxes: dict[str, list[dict[str, Any]]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -1047,7 +1049,7 @@ def guest_inbox_filter(messages: list, after: str | None = None) -> list:
     return result
 
 
-def guest_inbox_append(inbox: list[GuestInboxMessage], msg: GuestInboxMessage) -> list[GuestInboxMessage]:
+def guest_inbox_append(inbox: list[dict[str, Any]], msg: dict[str, Any]) -> list[dict[str, Any]]:
     """Append a message to inbox, capping at GUEST_INBOX_CAP."""
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
@@ -1119,7 +1121,7 @@ def channel_create_id(label: str = "") -> str:
 
 
 def channel_new(channel_id: str, label: str, created_by: str,
-                members: list[str], ttl: int = CHANNEL_TTL) -> dict:
+                members: list[str], ttl: int = CHANNEL_TTL) -> ChannelDict:
     """Create a channel dict. Members are typed strings like 'worker:geni', 'guest:alice', 'manager'."""
     now = time.time()
     member_dict = {}
@@ -1144,7 +1146,7 @@ def channel_new(channel_id: str, label: str, created_by: str,
     }
 
 
-def channel_add_members(channel: dict, members: list[str]) -> list[str]:
+def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
     """Add members to channel. Returns list of actually added members."""
     added = []
     for m in members:
@@ -1162,7 +1164,7 @@ def channel_add_members(channel: dict, members: list[str]) -> list[str]:
     return added
 
 
-def channel_remove_members(channel: dict, members: list[str]) -> list[str]:
+def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str]:
     """Remove members from channel. Returns list of actually removed members."""
     removed = []
     for m in members:
@@ -1172,7 +1174,7 @@ def channel_remove_members(channel: dict, members: list[str]) -> list[str]:
     return removed
 
 
-def channel_append_message(channel: dict, from_member: str, text: str) -> dict:
+def channel_append_message(channel: ChannelDict, from_member: str, text: str) -> ChannelMessageDict:
     """Append a message to the channel. Returns the message dict."""
     channel["seq"] += 1
     msg = {
@@ -1188,7 +1190,7 @@ def channel_append_message(channel: dict, from_member: str, text: str) -> dict:
     return msg
 
 
-def channel_get_messages(channel: dict, after: str | None = None) -> tuple[list, bool]:
+def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
     """Get channel messages, optionally after a given message ID. Returns (messages, truncated)."""
     if not after:
         return list(channel["messages"]), False
@@ -1207,7 +1209,7 @@ def channel_is_expired(channel: ChannelDict) -> bool:
     return time.time() > channel["expires_at_unix"]
 
 
-def channel_get_member_names(channel: dict, member_type: str) -> list[str]:
+def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
     """Get names of members of a specific type (worker, guest, manager)."""
     return [info["name"] for info in channel["members"].values()
             if info["type"] == member_type and "name" in info]
@@ -1407,7 +1409,7 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
     return envelope, msg
 
 
-def relay_worker_reply(channel_id: str, text: str) -> dict | None:
+def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     """Worker replies to the guest. Returns message dict."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -3739,7 +3741,7 @@ def load_last_active() -> str | None:
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 
 
-def _load_registry() -> WorkerRegistryData:
+def _load_registry() -> RegistryFileDict:
     """Load worker registry from disk. Returns {} on missing/corrupt."""
     try:
         if not WORKER_REGISTRY_FILE.exists():
@@ -3760,7 +3762,7 @@ def _load_registry() -> WorkerRegistryData:
         return {}
 
 
-def _save_registry(data: WorkerRegistryData) -> None:
+def _save_registry(data: RegistryFileDict) -> None:
     """Atomic write of registry to disk."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
