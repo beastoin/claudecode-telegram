@@ -11583,6 +11583,48 @@ class WorkerLifecycleCommandsMixin:
 
 
 
+def _fanout_channel_message(channel_id: str, from_member: str,
+                            text: str, msg: ChannelMessageDict,
+                            members_snapshot: dict[str, ChannelMemberDict],
+                            registered: dict[str, TmuxSessionDict]) -> None:
+    """Deliver a channel message to all members except the sender.
+
+    Used by both CommandRouter (manager sends via /ch) and GuestEndpointsMixin
+    (guest sends via POST /guest/send).
+    """
+    tagged = f"[{channel_id} from {from_member}] {text}"
+    for member_key, minfo in members_snapshot.items():
+        if member_key == from_member:
+            continue
+        if minfo["type"] == "worker":
+            wname = minfo.get("name", "")
+            if wname and wname in registered:
+                winfo = registered[wname]
+                backend_name = get_worker_backend(wname, winfo)
+                backend = get_backend(backend_name)
+                try:
+                    backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged,
+                                 f"http://localhost:{PORT}", SESSIONS_DIR)
+                except (ConnectionError, TimeoutError) as e:
+                    print(f"Channel fan-out to {wname} failed: {e}", file=sys.stderr, flush=True)
+        elif minfo["type"] == "guest":
+            gname = minfo.get("name", "")
+            if gname:
+                with guest_store.lock:
+                    ginbox = guest_store.inboxes.get(gname, [])
+                    guest_store.inboxes[gname] = guest_inbox_append(ginbox, {
+                        "id": msg["id"], "from": from_member,
+                        "channel": channel_id, "text": text, "ts": msg["ts"],
+                    })
+        elif minfo["type"] == "manager":
+            try:
+                if admin_chat_id:
+                    send_telegram_message(admin_chat_id,
+                        f"[{channel_id}] {from_member}: {text}")
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                print(f"[best-effort:notify:unknown] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
 class ChannelRelayCommandsMixin:
     """Channel and relay command handlers for multi-party communication."""
 
@@ -11894,35 +11936,9 @@ class ChannelRelayCommandsMixin:
         with channel_store.lock:
             msg = channel_append_message(ch, "manager", message_text)
             members_snapshot = dict(ch["members"])
-
-        # Fan-out to non-manager members
-        tagged = f"[{channel_id} from manager] {message_text}"
-        for member_key, info in members_snapshot.items():
-            if member_key == "manager":
-                continue
-            if info["type"] == "worker":
-                worker_name = info["name"]
-                registered = get_registered_sessions()
-                if worker_name in registered:
-                    worker_info = registered[worker_name]
-                    backend_name = get_worker_backend(worker_name, worker_info)
-                    backend = get_backend(backend_name)
-                    tmux_name = f"{TMUX_PREFIX}{worker_name}"
-                    try:
-                        backend.send(worker_name, tmux_name, tagged,
-                                     f"http://localhost:{PORT}", SESSIONS_DIR)
-                    except (subprocess.SubprocessError, ConnectionError, TimeoutError) as e:
-                        print(f"Channel fan-out to {worker_name} failed: {e}")
-            elif info["type"] == "guest":
-                guest_name = info["name"]
-                with guest_store.lock:
-                    inbox = guest_store.inboxes.get(guest_name, [])
-                    guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {
-                        "id": msg["id"], "from": "manager",
-                        "channel": channel_id, "text": message_text,
-                        "ts": msg["ts"],
-                    })
-
+        registered = get_registered_sessions()
+        _fanout_channel_message(channel_id, "manager", message_text, msg,
+                                     members_snapshot, registered)
         self.reply(chat_id, f"[{channel_id}] Sent.")
         return True
 
@@ -15412,42 +15428,6 @@ class GuestEndpointsMixin:
             "listen_script": listen_script,
         })
 
-    def _fanout_channel_message(self, channel_id: str, from_member: str,
-                                text: str, msg: ChannelMessageDict,
-                                members_snapshot: dict[str, ChannelMemberDict],
-                                registered: dict[str, TmuxSessionDict]) -> None:
-        """Deliver a channel message to all members except the sender."""
-        tagged = f"[{channel_id} from {from_member}] {text}"
-        for member_key, minfo in members_snapshot.items():
-            if member_key == from_member:
-                continue
-            if minfo["type"] == "worker":
-                wname = minfo["name"]
-                if wname in registered:
-                    winfo = registered[wname]
-                    backend_name = get_worker_backend(wname, winfo)
-                    backend = get_backend(backend_name)
-                    try:
-                        backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged,
-                                     f"http://localhost:{PORT}", SESSIONS_DIR)
-                    except (ConnectionError, TimeoutError) as e:
-                        print(f"Channel fan-out to {wname} failed: {e}")
-            elif minfo["type"] == "guest":
-                gname = minfo["name"]
-                with guest_store.lock:
-                    ginbox = guest_store.inboxes.get(gname, [])
-                    guest_store.inboxes[gname] = guest_inbox_append(ginbox, {
-                        "id": msg["id"], "from": from_member,
-                        "channel": channel_id, "text": text, "ts": msg["ts"],
-                    })
-            elif minfo["type"] == "manager":
-                try:
-                    if admin_chat_id:
-                        send_telegram_message(admin_chat_id,
-                            f"[{channel_id}] {from_member}: {text}")
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    print(f"[best-effort:notify:unknown] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-
     def handle_guest_send(self, body: bytes = b"") -> None:
         """POST /guest/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
 
@@ -15507,7 +15487,7 @@ class GuestEndpointsMixin:
                         continue
                     msg = channel_append_message(ch, from_member, text)
                     members_snapshot = dict(ch["members"])
-                self._fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
+                _fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
             elif target.startswith("ch_"):
@@ -15522,7 +15502,7 @@ class GuestEndpointsMixin:
                         continue
                     msg = channel_append_message(ch, from_member, text)
                     members_snapshot = dict(ch["members"])
-                self._fanout_channel_message(target, from_member, text, msg, members_snapshot, registered)
+                _fanout_channel_message(target, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
             elif target.startswith("guest:"):
