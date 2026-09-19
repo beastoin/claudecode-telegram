@@ -378,8 +378,8 @@ class AuthorDetection(NamedTuple):
 
 class RouteResolution(NamedTuple):
     """Result of resolving an HTTP route to its handler."""
-    handler: Callable | None
-    match: re.Match | None  # type: ignore[type-arg]
+    handler: Callable[..., None] | None
+    match: re.Match[str] | None
 
 
 try:
@@ -688,7 +688,7 @@ class AppContext:
             self.bridge_url = f"http://localhost:{self.port}"
 
 
-def _log_best_effort(label: str, func: Callable, *args: Any, **kwargs: Any) -> Any:
+def _log_best_effort(label: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Call func(*args, **kwargs) and log on failure instead of crashing.
 
     Use for fire-and-forget operations where failure is acceptable but
@@ -826,20 +826,20 @@ class GuestSession:
     token_hash: str
     created_at: str
     expires_at_unix: float
-    notified_workers: set
+    notified_workers: set[str]
 
     @classmethod
-    def from_dict(cls: type["GuestSession"], token_hash: str, d: dict[str, Any]) -> "GuestSession":
+    def from_dict(cls: type["GuestSession"], token_hash: str, data: dict[str, Any]) -> "GuestSession":
         """Construct an instance from a plain dictionary."""
-        nw = d.get("notified_workers", set())
-        if isinstance(nw, list):
-            nw = set(nw)
+        notified = data.get("notified_workers", set())
+        if isinstance(notified, list):
+            notified = set(notified)
         return cls(
-            name=d["name"],
+            name=data["name"],
             token_hash=token_hash,
-            created_at=d.get("created_at", ""),
-            expires_at_unix=d["expires_at_unix"],
-            notified_workers=nw,
+            created_at=data.get("created_at", ""),
+            expires_at_unix=data["expires_at_unix"],
+            notified_workers=notified,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -866,13 +866,13 @@ class GuestInboxMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["GuestInboxMessage"], d: dict[str, Any]) -> "GuestInboxMessage":
+    def from_dict(cls: type["GuestInboxMessage"], data: dict[str, Any]) -> "GuestInboxMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
-            id=d.get("id", ""),
-            sender=d.get("from", d.get("sender", "")),
-            text=d.get("text", ""),
-            ts=d.get("ts", 0),
+            id=data.get("id", ""),
+            sender=data.get("from", data.get("sender", "")),
+            text=data.get("text", ""),
+            ts=data.get("ts", 0),
         )
 
 
@@ -884,9 +884,9 @@ class ChannelMember:
     name: str = ""    # display name (empty for manager)
 
     @classmethod
-    def from_dict(cls: type["ChannelMember"], key: str, d: dict[str, Any]) -> "ChannelMember":
+    def from_dict(cls: type["ChannelMember"], key: str, data: dict[str, Any]) -> "ChannelMember":
         """Construct an instance from a plain dictionary."""
-        return cls(key=key, type=d["type"], name=d.get("name", ""))
+        return cls(key=key, type=data["type"], name=data.get("name", ""))
 
 
 @dataclass
@@ -899,14 +899,14 @@ class ChannelMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["ChannelMessage"], d: dict[str, Any]) -> "ChannelMessage":
+    def from_dict(cls: type["ChannelMessage"], data: dict[str, Any]) -> "ChannelMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
-            id=d["id"],
-            seq=d["seq"],
-            sender=d["from"],
-            text=d["text"],
-            ts=d["ts"],
+            id=data["id"],
+            seq=data["seq"],
+            sender=data["from"],
+            text=data["text"],
+            ts=data["ts"],
         )
 
 
@@ -1006,7 +1006,7 @@ def guest_create_token() -> tuple[str, str]:
     return token, token_hash
 
 
-def guest_generate_name(existing_names: set | None = None) -> str:
+def guest_generate_name(existing_names: set[str] | None = None) -> str:
     """Generate a short random guest name (3-6 chars), unique vs existing."""
     if existing_names is None:
         existing_names = set()
@@ -2139,7 +2139,7 @@ def _ensure_bare_repo(project_name: str) -> str:
 
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
-                    host: str | None = None) -> dict | None:
+                    host: str | None = None) -> dict[str, Any] | None:
     """Push working state to bare repo without mutating source.
 
     Approach: temporarily `git add -A` to capture untracked files in the index,
@@ -2902,7 +2902,7 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
     return None
 
 
-def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict]:
+def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict[str, Any]]:
     """Parse a codex native JSONL file into a list of messages.
 
     Reads the same format beast hours ParseCodexFile() handles:
@@ -2953,7 +2953,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict]:
     return messages
 
 
-def _read_codex_transcript(worker_name: str) -> list[dict]:
+def _read_codex_transcript(worker_name: str) -> list[dict[str, Any]]:
     """Read the codex native transcript for a worker."""
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
@@ -5084,7 +5084,7 @@ def _collapse_excess_newlines(text: str) -> str:
     return "".join(output)
 
 
-def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], str | None]) -> tuple[str, list[tuple[str, str]]]:
+def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], FileValidation]) -> tuple[str, list[tuple[str, str]]]:
     """Parse media tags, skipping escaped tags and code spans.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -5125,18 +5125,18 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], s
     return clean_text, items
 
 
-def parse_image_tags(text: str) -> list[tuple]:
+def parse_image_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
     """Parse [[image:/path|caption]] tags from text.
 
-    Returns (clean_text, [(path, caption), ...])
+    Returns (clean_text, [(path, caption), ...]).
     """
     return _parse_media_tags(text, "image", validate_photo_path)
 
 
-def parse_file_tags(text: str) -> list[tuple]:
+def parse_file_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
     """Parse [[file:/path|caption]] tags from text.
 
-    Returns (clean_text, [(path, caption), ...])
+    Returns (clean_text, [(path, caption), ...]).
     """
     return _parse_media_tags(text, "file", validate_document_path)
 
@@ -6727,7 +6727,7 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
         return None
 
 
-def _get_top_mem_procs(host: str | None = None) -> list[dict]:
+def _get_top_mem_procs(host: str | None = None) -> list[dict[str, Any]]:
     """Get top 5 memory-consuming processes on a host."""
     try:
         r = _remote_run(
@@ -14865,7 +14865,7 @@ def _transcript_html_nav(name: str, stats: dict[str, Any],
 
 
 def _transcript_html_entries(page_entries: list[dict[str, Any]],
-                             tool_results: dict[str, dict],
+                             tool_results: dict[str, dict[str, Any]],
                              search_val: str,
                              filter_banner: str, search_result: str,
                              nav_html: str, live_base_url: str,
@@ -15382,27 +15382,27 @@ class EndpointRouter:
         self._delete_exact: dict[str, Callable[..., None]] = {}
         self._delete_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
 
-    def post(self, path: str, handler: Callable) -> None:
+    def post(self, path: str, handler: Callable[..., None]) -> None:
         """Register a POST handler for an exact path."""
         self._post_exact[path] = handler
 
-    def post_pattern(self, pattern: str, handler: Callable) -> None:
+    def post_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
         """Register a POST handler for a regex path pattern."""
         self._post_patterns.append((re.compile(pattern), handler))
 
-    def get(self, path: str, handler: Callable) -> None:
+    def get(self, path: str, handler: Callable[..., None]) -> None:
         """Register a GET handler for an exact path."""
         self._get_exact[path] = handler
 
-    def get_pattern(self, pattern: str, handler: Callable) -> None:
+    def get_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
         """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
-    def delete(self, path: str, handler: Callable) -> None:
+    def delete(self, path: str, handler: Callable[..., None]) -> None:
         """Register a DELETE handler for an exact path."""
         self._delete_exact[path] = handler
 
-    def delete_pattern(self, pattern: str, handler: Callable) -> None:
+    def delete_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
         """Register a DELETE handler for a regex path pattern."""
         self._delete_patterns.append((re.compile(pattern), handler))
 
