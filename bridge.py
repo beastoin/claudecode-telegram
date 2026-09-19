@@ -2841,7 +2841,7 @@ def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
     )
     processes.adapter_pids[worker_name] = (proc, stderr_fh)
-    print(f"Spawned remote adapter for '{worker_name}' on {host}")
+    _log(_LOG_INFO, "adapter", f"Spawned remote adapter for '{worker_name}' on {host}")
     return True
 
 
@@ -3498,7 +3498,7 @@ def _load_learning_reminder_state() -> None:
                 for name, st in data.items():
                     if isinstance(st, dict) and "response_count" in st:
                         learning_reminders.state[name] = st
-            print(f"Learning reminder state loaded: {len(data)} workers")
+            _log(_LOG_INFO, "worker", f"Learning reminder state loaded: {len(data)} workers")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state load error: {e}")
 
@@ -3598,7 +3598,7 @@ def _send_learning_reminder(name: str, text: str) -> None:
     try:
         _clock.sleep(2)  # brief delay so it doesn't collide with the response
         if send_to_worker(name, text):
-            print(f"Learning reminder sent to {name}")
+            _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
         else:
             _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
     except (ConnectionError, OSError, TimeoutError) as e:
@@ -3897,7 +3897,7 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
             "hire_time": int(_clock.time()),
         }
     _save_registry(data)
-    print(f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
+    _log(_LOG_INFO, "registry", f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
 
 
 def read_checkin_note() -> str:
@@ -4229,7 +4229,7 @@ class TelegramTransport(MessageTransport):
             with urllib.request.urlopen(req, timeout=60) as r:
                 result = json.loads(r.read())
                 if result.get("ok"):
-                    print(f"{api_method} sent: {fname}")
+                    _log(_LOG_INFO, "telegram", f"{api_method} sent: {fname}")
                     return True
                 else:
                     _log(_LOG_WARN, "bridge", f"{api_method} failed: {result}")
@@ -4335,7 +4335,7 @@ class TelegramTransport(MessageTransport):
                     return None
                 local_path.write_bytes(content)
                 local_path.chmod(0o600)
-            print(f"Downloaded file: {local_path}")
+            _log(_LOG_INFO, "telegram", f"Downloaded file: {local_path}")
             host = get_worker_host(session_name)
             if host:
                 remote_inbox = str(inbox)
@@ -4651,7 +4651,7 @@ def ensure_worker_pipe(name: str) -> Path:
     # Create FIFO (named pipe) if it doesn't exist
     if not pipe_path.exists():
         os.mkfifo(str(pipe_path), mode=0o600)
-        print(f"Created worker pipe: {pipe_path}")
+        _log(_LOG_INFO, "pipe", f"Created worker pipe: {pipe_path}")
 
     # Start the pipe reader thread to forward messages to worker
     start_pipe_reader(name)
@@ -4669,7 +4669,7 @@ def cleanup_worker_pipe(name: str) -> None:
     if pipe_path.exists():
         try:
             pipe_path.unlink()
-            print(f"Removed worker pipe: {pipe_path}")
+            _log(_LOG_INFO, "pipe", f"Removed worker pipe: {pipe_path}")
         except OSError as e:
             _log(_LOG_WARN, "worker", f"Failed to remove worker pipe {pipe_path}: {e}")
 
@@ -4704,7 +4704,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     next writer.
     """
     pipe_path = get_worker_pipe_path(name)
-    print(f"Pipe reader started for worker '{name}' at {pipe_path}")
+    _log(_LOG_INFO, "pipe", f"Pipe reader started for worker '{name}' at {pipe_path}")
 
     while not stop_event.is_set():
         try:
@@ -4724,7 +4724,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
 
                     message = line.strip()
                     if message:
-                        print(f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}")
+                        _log(_LOG_INFO, "pipe", f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}")
                         # Forward to worker using backend routing
                         try:
                             _forward_pipe_message(name, message)
@@ -4733,7 +4733,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
 
         except FileNotFoundError:
             # Pipe was removed, stop the reader
-            print(f"Pipe for '{name}' no longer exists, stopping reader")
+            _log(_LOG_WARN, "pipe", f"Pipe for '{name}' no longer exists, stopping reader")
             break
         except OSError as e:
             if stop_event.is_set():
@@ -4745,7 +4745,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     # Clean up registry so start_pipe_reader can restart if needed
     if name in processes.pipe_readers:
         processes.pipe_readers.pop(name, None)
-    print(f"Pipe reader stopped for worker '{name}'")
+    _log(_LOG_INFO, "pipe", f"Pipe reader stopped for worker '{name}'")
 
 
 def _forward_pipe_message(name: str, message: str) -> None:
@@ -4765,7 +4765,7 @@ def start_pipe_reader(name: str) -> None:
             # Already running
             return
         # Thread crashed or exited — clean up stale entry and restart
-        print(f"Pipe reader thread for '{name}' is dead, restarting")
+        _log(_LOG_WARN, "pipe", f"Pipe reader thread for '{name}' is dead, restarting")
         processes.pipe_readers.pop(name, None)
 
     pipe_path = get_worker_pipe_path(name)
@@ -4782,7 +4782,7 @@ def start_pipe_reader(name: str) -> None:
     )
     processes.pipe_readers[name] = (thread, stop_event)
     thread.start()
-    print(f"Started pipe reader thread for '{name}'")
+    _log(_LOG_INFO, "pipe", f"Started pipe reader thread for '{name}'")
 
 
 def stop_pipe_reader(name: str) -> None:
@@ -4861,7 +4861,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             text = result.get("text", "").strip()
             if text:
                 duration = result.get("audio_duration_s", "?")
-                print(f"STT transcribed: {len(text)} chars from {duration}s audio")
+                _log(_LOG_INFO, "stt", f"STT transcribed: {len(text)} chars from {duration}s audio")
                 return text
             return None
     except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -4922,7 +4922,7 @@ def synthesize_speech(text: str, voice: str | None = None, language: str = "en")
             duration = r.headers.get("X-Audio-Duration", "?")
             proc_time = r.headers.get("X-Processing-Time", "?")
             mode = "chunked" if endpoint != TTS_ENDPOINT else "single"
-            print(f"TTS synthesized ({mode}): {len(clean)} chars -> {duration}s audio in {proc_time}s")
+            _log(_LOG_INFO, "tts", f"TTS synthesized ({mode}): {len(clean)} chars -> {duration}s audio in {proc_time}s")
             return str(tmp_path)
     except (urllib.error.URLError, TimeoutError, TypeError, OSError, KeyError) as e:
         _log(_LOG_ERROR, "bridge", f"TTS error (fail-open): {e}")
@@ -4968,7 +4968,7 @@ def _prepare_photo_for_telegram(photo_path: str) -> tuple[bytes, str]:
             elif fmt == "JPEG" and img.mode != "RGB":
                 img = img.convert("RGB")
             img.save(buf, format=fmt)
-            print(f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
+            _log(_LOG_INFO, "telegram", f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
             return buf.getvalue(), photo_path.name
         return photo_path.read_bytes(), photo_path.name
     except ImportError:
@@ -5795,7 +5795,7 @@ def update_bot_commands() -> None:
 
     transport.setup_commands(commands)
     worker_count = len(registered)
-    print(f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
+    _log(_LOG_INFO, "telegram", f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
 
 
 # ============================================================
@@ -7148,7 +7148,7 @@ def _probe_tailscale() -> None:
                         "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\n"
                         "Run: sudo tailscale up"
                     )
-                    print("[watchdog] Tailscale DOWN alert sent")
+                    _log(_LOG_INFO, "watchdog", "[watchdog] Tailscale DOWN alert sent")
                 except (urllib.error.URLError, OSError, TimeoutError) as e:
                     _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
     elif is_up and host_health.tailscale_down:
@@ -7159,7 +7159,7 @@ def _probe_tailscale() -> None:
                     admin_chat_id,
                     "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
                 )
-                print("[watchdog] Tailscale recovery alert sent")
+                _log(_LOG_INFO, "watchdog", "[watchdog] Tailscale recovery alert sent")
             except (urllib.error.URLError, OSError, TimeoutError) as exc:
                 _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
@@ -8894,7 +8894,7 @@ class WorkerManager:
                 machine = "VPS (100.125.36.102)"
             rendered = rendered.replace("{machine}", machine)
             welcome += f"\n\nMANAGER NOTE:\n{rendered}"
-            print(f"Checkin note included for {name}")
+            _log(_LOG_INFO, "checkin", f"Checkin note included for {name}")
 
         return welcome
 
@@ -8960,7 +8960,7 @@ class WorkerManager:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name)
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
-            print(f"Started worker '{name}' in sandbox mode")
+            _log(_LOG_INFO, "worker", f"Started worker '{name}' in sandbox mode")
         else:
             start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
             if startup_cwd:
@@ -8989,7 +8989,7 @@ class WorkerManager:
         _reset_learning_reminder(name)
 
         if not backend_obj.is_interactive:
-            print(f"Created {backend} worker '{name}' (non-interactive mode)")
+            _log(_LOG_INFO, "worker", f"Created {backend} worker '{name}' (non-interactive mode)")
 
         self.invalidate_sessions_cache()
         return True, None
@@ -9343,7 +9343,7 @@ class WorkerManager:
         else:
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
 
-        print(f"Dead worker '{name}' recovered from registry (mode={mode})")
+        _log(_LOG_INFO, "worker", f"Dead worker '{name}' recovered from registry (mode={mode})")
         self.invalidate_sessions_cache()
         return True, None
 
@@ -9462,7 +9462,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
         if existing and existing != our_url:
             import urllib.request
             urllib.request.urlopen(existing, timeout=1).read()
-            print(f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
+            _log(_LOG_DEBUG, "worker", f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
             return
     except (urllib.error.URLError, OSError, TimeoutError):
         pass  # intentional no-op: other bridge dead or unreachable — safe to claim port
@@ -9682,9 +9682,9 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
             if result and result.get("ok"):
                 prev_msg_id = result.get("result", {}).get("message_id")
                 if len(rich_chunks) > 1:
-                    print(f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
+                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
                 else:
-                    print(f"{log_prefix} sent (rich): {name} -> Telegram OK")
+                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
             else:
                 error_code = (result or {}).get("error_code", 0)
                 desc = (result or {}).get("description", "")
@@ -9725,7 +9725,7 @@ def _send_html_fallback_chunks(
         )
         if result and result.get("ok"):
             prev_msg_id = result.get("result", {}).get("message_id")
-            print(f"{log_prefix} sent (html fallback): {name} part {start_index + i + 1}/{total_chunks} -> Telegram OK")
+            _log(_LOG_INFO, "telegram", f"{log_prefix} sent (html fallback): {name} part {start_index + i + 1}/{total_chunks} -> Telegram OK")
         else:
             plain_text = re.sub(r'<[^>]+>', '', part)
             plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
@@ -9751,9 +9751,9 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
         if result and result.get("ok"):
             prev_msg_id = result.get("result", {}).get("message_id")
             if len(formatted_parts) > 1:
-                print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
+                _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
             else:
-                print(f"{log_prefix} sent: {name} -> Telegram OK")
+                _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
             desc = (result or {}).get("description", "")
             error_code = (result or {}).get("error_code", 0)
@@ -9767,7 +9767,7 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
                 )
                 if result and result.get("ok"):
                     prev_msg_id = result.get("result", {}).get("message_id")
-                    print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
+                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (plain): {name} -> Telegram OK")
                 else:
                     _log(_LOG_WARN, "bridge", f"{log_prefix} failed (plain): {name} -> {result}")
             else:
@@ -9790,7 +9790,7 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
         else:
             sent = send_photo(chat_id, img_path, full_caption)
         if sent:
-            print(f"Image sent: {name} -> {img_path}")
+            _log(_LOG_INFO, "telegram", f"Image sent: {name} -> {img_path}")
         else:
             transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
 
@@ -9812,7 +9812,7 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
         else:
             sent = send_document(chat_id, file_path, full_caption)
         if sent:
-            print(f"File sent: {name} -> {file_path}")
+            _log(_LOG_INFO, "telegram", f"File sent: {name} -> {file_path}")
         else:
             transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
@@ -9827,7 +9827,7 @@ def _send_response_tts(name: str, speak_text: str, chat_id: int) -> None:
         """Synthesize and send TTS voice messages for each paragraph."""
         try:
             for i, para in enumerate(paragraphs):
-                print(f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
+                _log(_LOG_INFO, "tts", f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
                 voice_path = synthesize_speech(para)
                 if voice_path:
                     send_voice(chat_id, voice_path, caption=f"{name}:")
@@ -9855,8 +9855,8 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     # Debug: log very short text (helps trace empty "name:" messages)
     if clean_text and len(clean_text.strip()) <= 5:
-        print(f"{log_prefix} DEBUG short msg: {name}, text={repr(clean_text)}, "
-              f"images={len(images)}, files={len(files)}")
+        _log(_LOG_DEBUG, "telegram", f"{log_prefix} short msg: {name}, text={repr(clean_text)}, "
+             f"images={len(images)}, files={len(files)}")
 
     if clean_text:
         _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
@@ -9872,16 +9872,16 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> N
     """Route a gRPC worker response through the same Telegram path as hooks."""
     try:
         if not name or not text:
-            print(f"gRPC response ignored: missing worker name or text")
+            _log(_LOG_WARN, "grpc", f"gRPC response ignored: missing worker name or text")
             return
 
         chat_id_file = get_chat_id_file(name)
         if not chat_id_file.exists():
-            print(f"gRPC response: no chat_id for session '{name}'")
+            _log(_LOG_INFO, "grpc", f"gRPC response: no chat_id for session '{name}'")
             return
 
         chat_id = chat_id_file.read_text().strip()
-        print(f"gRPC response: {name} -> chat {chat_id} ({len(text)} chars)")
+        _log(_LOG_INFO, "grpc", f"gRPC response: {name} -> chat {chat_id} ({len(text)} chars)")
 
         if payload:
             try:
@@ -9894,7 +9894,7 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> N
                         sid_file.write_text(session_id)
                         sid_file.chmod(0o600)
             except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-                print(f"gRPC response payload ignored for '{name}': {e}")
+                _log(_LOG_WARN, "grpc", f"gRPC response payload ignored for '{name}': {e}")
 
         send_response_to_telegram(name, text, int(chat_id), log_prefix="gRPC response")
         _check_learning_reminder(name)
@@ -9909,7 +9909,7 @@ def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict[
     tool_names = ", ".join(sorted(tools.keys())) if tools else "none"
     host_label = host or "unknown-host"
     version_label = version or "unknown-version"
-    print(f"gRPC worker registered: {name} ({host_label}, {version_label}, tools: {tool_names})")
+    _log(_LOG_INFO, "grpc", f"gRPC worker registered: {name} ({host_label}, {version_label}, tools: {tool_names})")
 
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
@@ -9932,7 +9932,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
 
 def handle_grpc_worker_disconnect(name: str) -> None:
     """Handle a gRPC worker disconnection event."""
-    print(f"gRPC worker disconnected: {name}")
+    _log(_LOG_INFO, "grpc", f"gRPC worker disconnected: {name}")
 
 
 def handle_grpc_jsonl_received(stream_id: str, data: bytes) -> None:
@@ -9944,7 +9944,7 @@ def handle_grpc_jsonl_received(stream_id: str, data: bytes) -> None:
     path = jsonl_dir / f"{safe_id}.jsonl"
     path.write_bytes(data)
     path.chmod(0o600)
-    print(f"gRPC JSONL received: {stream_id or safe_id} -> {path} ({len(data)} bytes)")
+    _log(_LOG_INFO, "grpc", f"gRPC JSONL received: {stream_id or safe_id} -> {path} ({len(data)} bytes)")
 
 
 def _merge_grpc_workers(workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -9955,7 +9955,7 @@ def _merge_grpc_workers(workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     try:
         connected = grpc_server.get_connected_workers()
     except (ConnectionError, OSError, TimeoutError) as e:
-        print(f"gRPC worker list unavailable: {e}")
+        _log(_LOG_WARN, "grpc", f"gRPC worker list unavailable: {e}")
         return workers
 
     existing = {worker.get("name") for worker in workers}
@@ -10046,13 +10046,13 @@ def send_shutdown_message() -> None:
     """Send shutdown notification to all known chat_ids."""
     chat_ids = get_all_chat_ids()
     if not chat_ids:
-        print("No chat_ids to notify")
+        _log(_LOG_WARN, "notify", "No chat_ids to notify")
         return
 
-    print(f"Sending shutdown to {len(chat_ids)} chat(s)...")
+    _log(_LOG_INFO, "notify", f"Sending shutdown to {len(chat_ids)} chat(s)...")
     for chat_id in chat_ids:
         transport.send_text(chat_id, "Going offline briefly. Your team stays the same.")
-    print("Shutdown notifications sent")
+    _log(_LOG_INFO, "notify", "Shutdown notifications sent")
 
 
 # ============================================================
@@ -12490,7 +12490,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if admin_chat_id is None:
             admin_chat_id = chat_id
             save_last_chat_id(chat_id)
-            print(f"Admin registered: {chat_id}")
+            _log(_LOG_INFO, "admin", f"Admin registered: {chat_id}")
 
         if not state["startup_notified"]:
             state["startup_notified"] = True
@@ -15487,7 +15487,7 @@ class GuestEndpointsMixin:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
-        print(f"Guest registered: {name} (expires {expires_at})")
+        _log(_LOG_INFO, "guest", f"Guest registered: {name} (expires {expires_at})")
         self._send_json(200, {
             "ok": True,
             "name": name,
@@ -15725,7 +15725,7 @@ class GuestEndpointsMixin:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:handle_guest_disconnect", f"{type(exc).__name__}: {exc}")
 
-        print(f"Guest disconnected: {guest['name']}")
+        _log(_LOG_INFO, "guest", f"Guest disconnected: {guest['name']}")
         self._send_json(200, {"ok": True, "name": guest["name"]})
 
 
@@ -15806,7 +15806,7 @@ class ChannelEndpointsMixin:
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
-        print(f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
+        _log(_LOG_INFO, "channel", f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
         self._send_json(200, {
             "ok": True,
             "channel": channel_id,
@@ -16032,7 +16032,7 @@ class ChannelEndpointsMixin:
                     f"\U0001f4e2 Channel {channel_id} closed")
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:handle_channel_delete", f"{type(exc).__name__}: {exc}")
-        print(f"Channel deleted: {channel_id}")
+        _log(_LOG_INFO, "channel", f"Channel deleted: {channel_id}")
         self._send_json(200, {"ok": True, "channel": channel_id})
 
 
@@ -17027,8 +17027,8 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                         send_document(chat_id, fpath, full_caption)
 
             has_media = len(images) + len(files)
-            print(f"Notify: sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
-                  f"{f' ({has_media} media)' if has_media else ''}")
+            _log(_LOG_INFO, "notify", f"sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
+                 f"{f' ({has_media} media)' if has_media else ''}")
 
             self.send_response(200)
             self.end_headers()
@@ -17054,7 +17054,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
 
             age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
             alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
-            print(f"Health alert: {worker} — {issue} (age={age}s)")
+            _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
 
             chat_ids = get_all_chat_ids()
             for chat_id in chat_ids:
@@ -17083,10 +17083,10 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             if name:
                 if callback_url:
                     _registry_add_callback(name, callback_url, host=host, version=version, tools=tools)
-                    print(f"Callback worker registered: {name} (host={host}, url={callback_url}, version={version})")
+                    _log(_LOG_INFO, "worker", f"Callback worker registered: {name} (host={host}, url={callback_url}, version={version})")
                 else:
                     _registry_add(name, DEFAULT_BACKEND, host=host)
-                    print(f"Forge worker registered: {name} (host={host}, version={version})")
+                    _log(_LOG_INFO, "worker", f"Forge worker registered: {name} (host={host}, version={version})")
                 backend_name = get_worker_backend(name, {"host": host})
                 tmux_name = f"{TMUX_PREFIX}{name}"
                 reg_host = host or None
@@ -17188,9 +17188,9 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                 ensure_session_dir(session_name)
                 chat_id_file.write_text(chat_id)
                 chat_id_file.chmod(0o600)
-                print(f"Hook response: auto-created chat_id for session '{session_name}' from admin_chat_id")
+                _log(_LOG_INFO, "hook", f"Hook response: auto-created chat_id for session '{session_name}' from admin_chat_id")
             else:
-                print(f"Hook response: no chat_id for session '{session_name}'")
+                _log(_LOG_WARN, "hook", f"Hook response: no chat_id for session '{session_name}'")
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"No chat_id for session")
@@ -17201,13 +17201,13 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                 source_ip = self.client_address[0] if self.client_address else "unknown"
                 hook_sid = data.get("session_id", "")
                 escape_flag = data.get("escape", False)
-                print(f"Hook response DEBUG: {session_name} -> chat {chat_id}, "
-                      f"text={repr(text)}, len={len(text)}, "
-                      f"source={data.get('source', 'hook')}, "
-                      f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
-                      f"escape={escape_flag}, ip={source_ip}")
+                _log(_LOG_DEBUG, "hook", f"Hook response DEBUG: {session_name} -> chat {chat_id}, "
+                     f"text={repr(text)}, len={len(text)}, "
+                     f"source={data.get('source', 'hook')}, "
+                     f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
+                     f"escape={escape_flag}, ip={source_ip}")
 
-            print(f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
+            _log(_LOG_INFO, "hook", f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
             # Update session ID cache if provided (keeps VPS in sync with remote workers)
             hook_sid = data.get("session_id", "")
