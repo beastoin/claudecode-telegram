@@ -12863,7 +12863,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return True
 
     def cmd_memory(self, query: str, chat_id: ChatId) -> bool:
-        """Search team chat memory. /memory <query> [--agent X] [--days N] [--from X]"""
+        """Dispatch /memory subcommands. /memory <query|subcommand>"""
         if not query:
             self.reply(chat_id,
                        "Usage: /memory <query>\n"
@@ -12878,65 +12878,75 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                        outcome="Needs decision")
             return True
 
-        # Subcommand: /memory update — trigger incremental ingest
-        if query.strip().lower() == "update":
-            return self._memory_update(chat_id)
+        subcmd = query.strip().lower().split()[0]
+        dispatch: dict[str, Callable[[str, ChatId], bool]] = {
+            "update": lambda q, c: self._memory_update(c),
+            "status": lambda q, c: self._memory_status(c),
+            "wake-up": self._memory_wakeup,
+            "recall": self._memory_recall,
+        }
+        handler = dispatch.get(subcmd)
+        if handler:
+            return handler(query, chat_id)
+        return self._memory_search(query, chat_id)
 
-        # Subcommand: /memory status — memory stack health
-        if query.strip().lower() == "status":
-            try:
-                from team_memory.memory_stack import MemoryStack
-                stack = MemoryStack()
-                info = stack.status()
-                wings = info.get("wing_distribution", {})
-                wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
-                lines = [
-                    "Memory Stack Status:",
-                    f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
-                    f"  Messages: {info.get('total_messages', 0)}",
-                    f"  Summaries: {info.get('total_summaries', 0)}",
-                    f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
-                    f"  L1 essential: last 7 days, top 15 items",
-                ]
-                self.reply(chat_id, "\n".join(lines))
-            except (KeyError, RuntimeError, OSError, ImportError) as e:
-                self.reply(chat_id, f"Memory status failed: {e}")
-            return True
+    def _memory_status(self, chat_id: ChatId) -> bool:
+        """Show memory stack health summary."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            info = stack.status()
+            wings = info.get("wing_distribution", {})
+            wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
+            lines = [
+                "Memory Stack Status:",
+                f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
+                f"  Messages: {info.get('total_messages', 0)}",
+                f"  Summaries: {info.get('total_summaries', 0)}",
+                f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
+                f"  L1 essential: last 7 days, top 15 items",
+            ]
+            self.reply(chat_id, "\n".join(lines))
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory status failed: {e}")
+        return True
 
-        # Subcommand: /memory wake-up [wing] — L0+L1 wake-up text
-        if query.strip().lower().startswith("wake-up"):
-            try:
-                from team_memory.memory_stack import MemoryStack
-                stack = MemoryStack()
-                parts = query.strip().split()
-                wing = parts[1] if len(parts) > 1 else None
-                text = stack.wake_up(wing=wing)
-                if len(text) > 4000:
-                    text = text[:3997] + "..."
-                self.reply(chat_id, text)
-            except (KeyError, RuntimeError, OSError, ImportError) as e:
-                self.reply(chat_id, f"Memory wake-up failed: {e}")
-            return True
+    def _memory_wakeup(self, query: str, chat_id: ChatId) -> bool:
+        """Generate L0+L1 wake-up context for a wing."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            parts = query.strip().split()
+            wing = parts[1] if len(parts) > 1 else None
+            text = stack.wake_up(wing=wing)
+            if len(text) > 4000:
+                text = text[:3997] + "..."
+            self.reply(chat_id, text)
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory wake-up failed: {e}")
+        return True
 
-        # Subcommand: /memory recall --wing=X --room=Y — L2 on-demand
-        if query.strip().lower().startswith("recall"):
-            try:
-                from team_memory.memory_stack import MemoryStack
-                stack = MemoryStack()
-                wing = room = None
-                for part in query.split():
-                    if part.startswith("--wing="):
-                        wing = part.split("=", 1)[1]
-                    elif part.startswith("--room="):
-                        room = part.split("=", 1)[1]
-                text = stack.recall(wing=wing, room=room)
-                if len(text) > 4000:
-                    text = text[:3997] + "..."
-                self.reply(chat_id, text)
-            except (KeyError, RuntimeError, OSError, ImportError) as e:
-                self.reply(chat_id, f"Memory recall failed: {e}")
-            return True
+    def _memory_recall(self, query: str, chat_id: ChatId) -> bool:
+        """On-demand L2 recall with optional --wing and --room filters."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            wing = room = None
+            for part in query.split():
+                if part.startswith("--wing="):
+                    wing = part.split("=", 1)[1]
+                elif part.startswith("--room="):
+                    room = part.split("=", 1)[1]
+            text = stack.recall(wing=wing, room=room)
+            if len(text) > 4000:
+                text = text[:3997] + "..."
+            self.reply(chat_id, text)
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory recall failed: {e}")
+        return True
 
+    def _memory_search(self, query: str, chat_id: ChatId) -> bool:
+        """Full-text search across team chat memory with source links."""
         self.reply(chat_id, "Searching memory...")
 
         try:
@@ -12953,16 +12963,10 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             self.reply(chat_id, "No results found.")
             return True
 
-        # Format response per spec
-        lines = []
-        if answer:
-            lines.append(f"\U0001f9e0 {answer}")
-        else:
-            lines.append("\U0001f9e0 No direct answer found.")
+        lines = [f"\U0001f9e0 {answer}" if answer else "\U0001f9e0 No direct answer found."]
 
         if sources:
             lines.append("")
-            # Generate a single rewind token for all source links
             import secrets
             tc_token = secrets.token_urlsafe(32)
             REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
@@ -12970,12 +12974,10 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
             lines.append("\U0001f4ce Sources:")
             for i, r in enumerate(sources[:3], 1):
-                # Show first 2 lines of chunk, truncated
                 chunk_lines = r.get("text", "").split("\n")
                 preview = "\n".join(chunk_lines[:2])
                 if len(preview) > 200:
                     preview = preview[:197] + "..."
-                # Deep link to team chat page
                 source_link = ""
                 chunk_id = r.get("_id", "")
                 if chunk_id.startswith("tg_"):
