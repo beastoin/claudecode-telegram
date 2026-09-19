@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.38.0"
+VERSION = "0.38.1"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -217,25 +217,27 @@ except ImportError as e:
 
 # ── File map ───────────────────────────────────────────────────────────
 #
-#   L1-215      Imports, type aliases, TypedDict/NamedTuple models
-#   L~220       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
+#   L1-216      Imports, type aliases, TypedDict/NamedTuple models
+#   L~244       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
 #               ResourceAlertConfig, MediaConfig), AppContext
-#   L~700       Guest/channel/relay subsystem (pure functions + RelayStore)
-#   L~1200      Backend Protocol + registry (BackendProtocol, get_backend, etc.)
-#   L~1500      Text processing: markdown→HTML, Telegram formatting, sanitizers
-#   L~4600      Media handling: photo/document validation, media tag parsing
-#   L~5600      Telegram API layer: send_message, send_photo, send_document,
-#               sendRichMessage, split_message
-#   L~7000      Worker status/health: _detect_os_family, _machine_health,
+#   L~628       Guest/channel/relay subsystem (GuestSession, RelayStore)
+#   L~1378      Backend Protocols + registry (BackendLifecycle, BackendDelivery,
+#               BackendHealth, Backend, get_backend, etc.)
+#   L~1599      OS detection, worker health: _detect_os_family, _machine_health,
 #               normalize_cwd, validate_cwd, parse_hire_args
-#   L~7800      Tmux interaction: tmux_exists, tmux_send_message,
+#   L~2157      Tmux interaction: tmux_exists, tmux_send_message,
 #               _read_tmux_activity, _wait_for_restart_ready
-#   L~8500      WorkerManager class (~1000 lines): hire, fire, restart, status
-#   L~9700      Transport layer: MessageTransport, LocalTransport
-#   L~10000     CommandRouter mixins + CommandRouter class (~3200 lines)
-#   L~13300     Transcript rendering: HTML conversation view
-#   L~14800     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
-#   L~17300     main() function, signal handlers, startup
+#   L~3665      Transport + Telegram API: MessageTransport, TelegramAPI,
+#               send_message, send_photo, send_document, split_message
+#   L~4936      Text/media processing: parse_image_tags, escape_html,
+#               _TelegramHTMLSanitizer, markdown_to_telegram_html
+#   L~8294      WorkerManager class (~1600 lines): hire, fire, restart, status
+#   L~9901      TeleportCommandsMixin (~2000 lines)
+#   L~11963     CommandRouter class (~2200 lines)
+#   L~14208     Team chat HTML rendering
+#   L~14839     Transcript HTML rendering
+#   L~15053     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
+#   L~17820     main() function, signal handlers, startup
 #
 # ======================================================================
 # CONFIGURATION
@@ -1427,6 +1429,53 @@ class Backend(Protocol):
     def is_online(self, tmux_name: str) -> bool:
         """Check if worker is alive and ready to receive messages."""
         ...
+
+
+# ── Injectable testing seams ──
+
+class SubprocessRunner(Protocol):
+    """Abstraction over subprocess.run for test injection."""
+
+    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Execute a subprocess command."""
+        ...
+
+
+class Clock(Protocol):
+    """Abstraction over time for deterministic testing."""
+
+    def time(self) -> float:
+        """Return the current time in seconds since epoch."""
+        ...
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep for the given number of seconds."""
+        ...
+
+
+class _RealSubprocessRunner:
+    """Production subprocess runner — delegates to subprocess.run."""
+
+    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Execute a subprocess command via the real subprocess module."""
+        return subprocess.run(args, **kwargs)
+
+
+class _RealClock:
+    """Production clock — delegates to the time module."""
+
+    def time(self) -> float:
+        """Return current wall-clock time."""
+        return time.time()
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep for real wall-clock duration."""
+        time.sleep(seconds)
+
+
+# Module-level defaults (overridable in tests via AppContext)
+_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
+_clock: Clock = _RealClock()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3771,7 +3820,7 @@ class TelegramAPI:
                 raw = e.read()
                 body = json.loads(raw)
                 return body  # Return error response so callers can inspect description
-            except (urllib.error.URLError, OSError, TimeoutError):
+            except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, ValueError):
                 # Non-JSON error body (proxy, middlebox, empty) — return structured error
                 return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code} (non-JSON body)"}
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
@@ -9000,7 +9049,7 @@ class WorkerManager:
         self.invalidate_sessions_cache()
         return True, None
 
-    def _restart_dead_worker(self, name: str, backend_name: str, backend: str, tmux_name: str, mode: str) -> tuple[bool, str]:
+    def _restart_dead_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str) -> tuple[bool, str]:
         """Re-create a dead worker (tmux gone) from registry.
 
         Creates a new tmux session, exports env, starts backend, sends welcome.
@@ -14960,6 +15009,9 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                         _tool_results[tuid] = {"content": str(rt), "is_error": bool(item.get("is_error"))}
 
 
+    # When live_base_url is set (static snapshot), links point to bridge endpoint
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+
     # Build query string for pagination links (token first to preserve auth)
     qs_parts = []
     if token:
@@ -15051,14 +15103,21 @@ def _render_transcript_html(name: str, session_id: str | None = None,
 # ── EndpointRouter + Handler: thin HTTP dispatch ──
 
 class EndpointRouter:
-    """Maps HTTP paths to handler functions via dispatch table."""
+    """Maps HTTP paths to handler functions via dispatch table.
+
+    Supports POST, GET, and DELETE methods. Exact paths are checked first,
+    then regex patterns in registration order (important for prefix collisions
+    like /team-chat-media/ vs /team-chat).
+    """
 
     def __init__(self) -> None:
-        """Initialize internal state and locks."""
-        self._post_exact: dict[str, callable] = {}
-        self._post_patterns: list[tuple] = []  # (compiled_re, handler)
-        self._get_exact: dict[str, callable] = {}
-        self._get_patterns: list[tuple] = []
+        """Initialize per-method route tables."""
+        self._post_exact: dict[str, Callable[..., None]] = {}
+        self._post_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
+        self._get_exact: dict[str, Callable[..., None]] = {}
+        self._get_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
+        self._delete_exact: dict[str, Callable[..., None]] = {}
+        self._delete_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
 
     def post(self, path: str, handler: Callable) -> None:
         """Register a POST handler for an exact path."""
@@ -15076,27 +15135,38 @@ class EndpointRouter:
         """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
-    def resolve_post(self, path: str) -> RouteResolution:
-        """Find handler for POST path. Returns RouteResolution(handler, match)."""
-        handler = self._post_exact.get(path)
+    def delete(self, path: str, handler: Callable) -> None:
+        """Register a DELETE handler for an exact path."""
+        self._delete_exact[path] = handler
+
+    def delete_pattern(self, pattern: str, handler: Callable) -> None:
+        """Register a DELETE handler for a regex path pattern."""
+        self._delete_patterns.append((re.compile(pattern), handler))
+
+    def _resolve(self, exact: dict[str, Callable[..., None]],
+                 patterns: list[tuple[re.Pattern[str], Callable[..., None]]],
+                 path: str) -> RouteResolution:
+        """Resolve a path against exact then pattern tables."""
+        handler = exact.get(path)
         if handler:
             return RouteResolution(handler, None)
-        for regex, handler in self._post_patterns:
+        for regex, pat_handler in patterns:
             match = regex.match(path)
             if match:
-                return RouteResolution(handler, match)
+                return RouteResolution(pat_handler, match)
         return RouteResolution(None, None)
+
+    def resolve_post(self, path: str) -> RouteResolution:
+        """Find handler for POST path. Returns RouteResolution(handler, match)."""
+        return self._resolve(self._post_exact, self._post_patterns, path)
 
     def resolve_get(self, path: str) -> RouteResolution:
         """Find handler for GET path. Returns RouteResolution(handler, match)."""
-        handler = self._get_exact.get(path)
-        if handler:
-            return RouteResolution(handler, None)
-        for regex, handler in self._get_patterns:
-            match = regex.match(path)
-            if match:
-                return RouteResolution(handler, match)
-        return RouteResolution(None, None)
+        return self._resolve(self._get_exact, self._get_patterns, path)
+
+    def resolve_delete(self, path: str) -> RouteResolution:
+        """Find handler for DELETE path. Returns RouteResolution(handler, match)."""
+        return self._resolve(self._delete_exact, self._delete_patterns, path)
 
 
 # Singleton endpoint router — populated after Handler class is defined
@@ -16057,7 +16127,7 @@ class PrEndpointsMixin:
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            pass  # best-effort notify: unknown
+            print(f"[pr-comment] Telegram notification failed (best-effort): {exc}")
 
         # Route to workers via @mentions
         targets, _ = command_router.parse_at_mentions(comment_body)
@@ -16543,6 +16613,94 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
 
 
+def _checkin_can_restart(name: str, tmux_name: str,
+                         host: str | None, pane_cwd: str,
+                         requested_cwd: str) -> tuple[bool, str]:
+    """Check restart guards for a CWD-triggered checkin restart.
+
+    Returns (allowed, block_reason). If allowed=False, block_reason
+    explains why (cooldown, inflight, Claude running).
+    """
+    # Cooldown: prevent restart loops from repeated checkins
+    last_restart = watchdog.recent_restarts.get(name, 0)
+    elapsed = time.time() - last_restart
+    if elapsed < RESTART_COOLDOWN:
+        # Narrow exemption: allow one CWD repair after force restart
+        if watchdog.force_restart_pending_cwd.pop(name, False):
+            print(f"[checkin] {name}: cooldown bypassed (post-force CWD repair)")
+        else:
+            print(f"[checkin] {name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
+            return False, (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
+                           f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+
+    # Guard: skip if worker is already running Claude
+    if is_claude_running(tmux_name, host=host):
+        print(f"[checkin] {name}: BLOCKED restart (Claude already running in tmux)")
+        return False, (f"Checkin restart skipped: {name} has Claude running. "
+                       f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+
+    # In-flight dedupe: skip if restart already in progress
+    with watchdog.restart_lock:
+        inflight_ts = watchdog.restart_in_progress.get(name)
+        if inflight_ts and time.time() - inflight_ts < 120:
+            print(f"[checkin] {name}: BLOCKED restart (in-flight since {time.time() - inflight_ts:.0f}s ago)")
+            return False, f"Checkin restart blocked: {name} restart already in progress ({time.time() - inflight_ts:.0f}s)."
+        watchdog.restart_in_progress[name] = time.time()
+
+    return True, ""
+
+
+def _checkin_do_restart(name: str, backend_name: str,
+                        tmux_name: str, host: str | None,
+                        requested_cwd: str) -> tuple[bool, str]:
+    """Execute a CWD-triggered restart and notify the manager.
+
+    Returns (ok, error_msg). Cleans up inflight tracking on completion.
+    """
+    notify_chat_id = get_manager_chat_id(name)
+    try:
+        if notify_chat_id is not None:
+            send_telegram_message(
+                notify_chat_id,
+                f"{name} is restarting in a new directory. "
+                "Messages during restart may be lost.",
+            )
+
+        if host:
+            restart_backend = get_backend(backend_name)
+            ok, err = command_router._restart_remote_worker(
+                name, backend_name, restart_backend, tmux_name, host, "relaunch")
+        else:
+            ok, err = worker_manager.restart(name, mode="relaunch")
+
+        watchdog.recent_restarts[name] = time.time()
+        print(f"[checkin] {name}: restart result ok={ok}, err={err}")
+
+        if not ok:
+            if notify_chat_id is not None:
+                send_telegram_message(
+                    notify_chat_id,
+                    f"{name} could not restart. "
+                    f"Run /restart {name} before sending new messages.",
+                )
+            return False, err or "restart failed"
+
+        if notify_chat_id is not None:
+            if _wait_for_restart_ready(tmux_name, backend_name, host=host):
+                send_telegram_message(notify_chat_id, f"{name} is ready. Safe to send messages now.")
+            else:
+                send_telegram_message(
+                    notify_chat_id,
+                    f"{name} restarted but is not ready yet. "
+                    f"Hold messages for now. If this continues, run /restart {name}.",
+                )
+
+        return True, ""
+    finally:
+        with watchdog.restart_lock:
+            watchdog.restart_in_progress.pop(name, None)
+
+
 class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin, RelayEndpointsMixin, PrEndpointsMixin, TranscriptEndpointsMixin):
     """HTTP request handler for the Telegram webhook and worker API endpoints.
 
@@ -16581,6 +16739,14 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+    def _send_text(self, status_code: int, text: str) -> None:
+        """Send a plain text response with proper Content-Type."""
+        body = text.encode()
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_unknown_endpoint(self, method: str, path: str) -> None:
         """Return 404 JSON for unrecognized endpoints with available alternatives."""
@@ -16966,83 +17132,14 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
 
 
     def do_GET(self) -> None:
-        """Handle all incoming HTTP GET requests."""
+        """Handle all incoming HTTP GET requests via EndpointRouter dispatch."""
         parsed = urlparse(self.path)
-
-        # Guest system endpoints
-        if parsed.path.startswith("/guest/inbox"):
-            self.handle_guest_inbox(parsed)
-            return
-        if parsed.path.startswith("/guest/status"):
-            self.handle_guest_status(parsed)
-            return
-        if parsed.path == "/guests":
-            self.handle_guests_list()
-            return
-
-        # Relay v1 endpoints: /v1/<channel_id>, /v1/<channel_id>/messages
-        relay_match = re.match(r'^/v1/([^/]+)(?:/(.+))?$', parsed.path)
-        if relay_match:
-            channel_id = relay_match.group(1)
-            action = relay_match.group(2)
-            self.handle_relay_get(channel_id, action, parsed)
-            return
-
-        # Channel endpoints
-        ch_msgs_match = re.match(r'^/channels/([^/]+)/messages$', parsed.path)
-        if ch_msgs_match:
-            self.handle_channel_messages(ch_msgs_match.group(1), parsed)
-            return
-        if parsed.path == "/channels":
-            self.handle_channels_list(parsed)
-            return
-
-        # Handle /workers endpoint for inter-worker discovery
-        if parsed.path == "/workers":
-            self.handle_workers_endpoint(parsed)
-            return
-
-        # Handle /machines endpoint for host/machine discovery
-        if parsed.path == "/machines":
-            self.handle_machines_endpoint(parsed)
-            return
-
-        # Handle /checkin endpoint for worker instruction refresh
-        if parsed.path == "/checkin":
-            self.handle_checkin_endpoint(parsed)
-            return
-        if parsed.path == "/health/workers":
-            self.handle_health_workers_endpoint()
-            return
-
-        # Handle /transcript/<name> endpoint
-        if parsed.path.startswith("/transcript/"):
-            self.handle_transcript_endpoint(parsed)
-            return
-
-        # Handle /team-chat-media/<path> endpoint (photos/files from chat export)
-        # Must be checked BEFORE /team-chat to avoid prefix collision
-        if parsed.path.startswith("/team-chat-media/"):
-            self.handle_team_chat_media(parsed)
-            return
-
-        # Handle /team-chat endpoint
-        if parsed.path.startswith("/team-chat"):
-            self.handle_team_chat_endpoint(parsed)
-            return
-
-        # Handle /pr-file-content (lazy fetch for expand context)
-        if parsed.path == "/pr-file-content":
-            self.handle_pr_file_content(parsed)
-            return
-
-        if parsed.path == "/pr-keepalive":
-            self.handle_pr_keepalive(parsed)
-            return
-
-        # Handle /pr-review/<pr_num> endpoint
-        if parsed.path.startswith("/pr-review/"):
-            self.handle_pr_review_endpoint(parsed)
+        handler, match = _endpoint_router.resolve_get(parsed.path)
+        if handler:
+            if match:
+                handler(self, parsed, match)
+            else:
+                handler(self, parsed)
             return
 
         # API index (also serves as health check — returns 200)
@@ -17054,18 +17151,17 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             })
             return
 
-        # Unknown GET endpoint
         self._send_unknown_endpoint("GET", parsed.path)
 
     def do_DELETE(self) -> None:
-        """Handle all incoming HTTP DELETE requests."""
+        """Handle all incoming HTTP DELETE requests via EndpointRouter dispatch."""
         parsed = urlparse(self.path)
-        if parsed.path == "/guest":
-            self.handle_guest_disconnect(parsed)
-            return
-        ch_del_match = re.match(r'^/channels/([^/]+)$', parsed.path)
-        if ch_del_match:
-            self.handle_channel_delete(ch_del_match.group(1))
+        handler, match = _endpoint_router.resolve_delete(parsed.path)
+        if handler:
+            if match:
+                handler(self, parsed, match)
+            else:
+                handler(self, parsed)
             return
         self._send_unknown_endpoint("DELETE", parsed.path)
 
@@ -17124,7 +17220,6 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             raw_cwd = params.get("cwd", [None])[0]
             requested_cwd = ""
             if raw_cwd is not None:
-                # Teleported workers have remote cwds — validate on their host
                 worker_host = get_worker_host(name)
                 requested_cwd, cwd_err = validate_cwd(raw_cwd, host=worker_host)
                 if cwd_err:
@@ -17134,13 +17229,13 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                     self.wfile.write(f"Invalid cwd: {cwd_err}".encode())
                     return
 
-            # If worker exists, use their actual backend; otherwise default
+            # Resolve backend: use worker's actual backend if registered, else default
             _sync_worker_manager()
             registered = worker_manager.get_registered_sessions()
             tmux_name = ""
+            host: str | None = None
             if name in registered:
                 backend_name = get_worker_backend(name, registered[name])
-                # Re-export hook env on checkin (refreshes BRIDGE_URL after restart)
                 tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
                 host = get_worker_host(name)
                 if tmux_exists(tmux_name, host=host):
@@ -17149,6 +17244,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                 backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
 
+            # Handle CWD change: update saved cwd, restart if pane cwd differs
             if requested_cwd:
                 _set_worker_cwd(name, requested_cwd)
                 old_cwd = get_claude_session_cwd(name)
@@ -17159,128 +17255,52 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                     clear_claude_session_id(name)
                     print(f"[checkin] {name}: CWD changed ({old_cwd} -> {requested_cwd}), cleared stale session_id")
                 print(f"[checkin] {name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
+
                 if tmux_name and tmux_exists(tmux_name, host=host):
                     pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
-                    # Compare normalized paths (don't use os.path.realpath — it resolves on VPS, not remote)
                     same_cwd = pane_cwd and pane_cwd.rstrip("/") == requested_cwd.rstrip("/")
                     print(f"[checkin] {name}: pane_cwd={pane_cwd}, same_cwd={same_cwd}")
+
                     if not same_cwd:
-                        notify_chat_id = get_manager_chat_id(name)
-
-                        # Cooldown: prevent restart loops from repeated checkins
-                        last_restart = watchdog.recent_restarts.get(name, 0)
-                        elapsed = time.time() - last_restart
-                        if elapsed < RESTART_COOLDOWN:
-                            # Narrow exemption: allow one CWD repair after force restart
-                            if watchdog.force_restart_pending_cwd.pop(name, False):
-                                print(f"[checkin] {name}: cooldown bypassed (post-force CWD repair)")
-                            else:
-                                print(f"[checkin] {name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
-                                msg = (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
-                                       f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
-                                if notify_chat_id is not None:
-                                    send_telegram_message(notify_chat_id, msg)
-                                self.send_response(200)
-                                self.send_header("Content-Type", "text/plain")
-                                self.end_headers()
-                                self.wfile.write(msg.encode())
-                                return
-
-                        # Guard: skip if worker is already running Claude
-                        if is_claude_running(tmux_name, host=host):
-                            print(f"[checkin] {name}: BLOCKED restart (Claude already running in tmux)")
-                            msg = (f"Checkin restart skipped: {name} has Claude running. "
-                                   f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
+                        # Check restart guards (cooldown, inflight, Claude running)
+                        allowed, block_msg = _checkin_can_restart(
+                            name, tmux_name, host, pane_cwd or "", requested_cwd)
+                        if not allowed:
+                            notify_chat_id = get_manager_chat_id(name)
                             if notify_chat_id is not None:
-                                send_telegram_message(notify_chat_id, msg)
+                                send_telegram_message(notify_chat_id, block_msg)
                             self.send_response(200)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
-                            self.wfile.write(msg.encode())
+                            self.wfile.write(block_msg.encode())
                             return
 
-                        # In-flight dedupe: skip if restart already in progress
-                        with watchdog.restart_lock:
-                            inflight_ts = watchdog.restart_in_progress.get(name)
-                            if inflight_ts and time.time() - inflight_ts < 120:
-                                print(f"[checkin] {name}: BLOCKED restart (in-flight since {time.time() - inflight_ts:.0f}s ago)")
-                                msg = f"Checkin restart blocked: {name} restart already in progress ({time.time() - inflight_ts:.0f}s)."
-                                if notify_chat_id is not None:
-                                    send_telegram_message(notify_chat_id, msg)
-                                self.send_response(200)
-                                self.send_header("Content-Type", "text/plain")
-                                self.end_headers()
-                                self.wfile.write(msg.encode())
-                                return
-                            watchdog.restart_in_progress[name] = time.time()
-
+                        # Execute the restart
                         print(f"[checkin] {name}: triggering restart (cwd mismatch: pane={pane_cwd} vs requested={requested_cwd})")
-                        try:
-                            notify_chat_id = get_manager_chat_id(name)
-                            if notify_chat_id is not None:
-                                send_telegram_message(
-                                    notify_chat_id,
-                                    f"{name} is restarting in a new directory. "
-                                    "Messages during restart may be lost.",
-                                )
-
-                            if host:
-                                # Teleported worker: use remote restart
-                                backend_obj_r = get_backend(backend_name)
-                                ok, err = command_router._restart_remote_worker(
-                                    name, backend_name, backend_obj_r, tmux_name, host, "relaunch")
-                            else:
-                                ok, err = worker_manager.restart(name, mode="relaunch")
-
-                            watchdog.recent_restarts[name] = time.time()
-                            print(f"[checkin] {name}: restart result ok={ok}, err={err}")
-
-                            if not ok:
-                                if notify_chat_id is not None:
-                                    send_telegram_message(
-                                        notify_chat_id,
-                                        f"{name} could not restart. "
-                                        f"Run /restart {name} before sending new messages.",
-                                    )
-                                self.send_response(500)
-                                self.send_header("Content-Type", "text/plain")
-                                self.end_headers()
-                                self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
-                                return
-
-                            if notify_chat_id is not None:
-                                if _wait_for_restart_ready(tmux_name, backend_name, host=host):
-                                    send_telegram_message(
-                                        notify_chat_id,
-                                        f"{name} is ready. Safe to send messages now.",
-                                    )
-                                else:
-                                    send_telegram_message(
-                                        notify_chat_id,
-                                        f"{name} restarted but is not ready yet. "
-                                        f"Hold messages for now. If this continues, run /restart {name}.",
-                                    )
-
+                        ok, err = _checkin_do_restart(
+                            name, backend_name, tmux_name, host, requested_cwd)
+                        if not ok:
+                            self.send_response(500)
+                            self.send_header("Content-Type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write(f"Failed to restart in {requested_cwd}: {err}".encode())
+                        else:
                             self.send_response(200)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
                             self.wfile.write(f"Restarting in {requested_cwd}...".encode())
-                            return
-                        finally:
-                            with watchdog.restart_lock:
-                                watchdog.restart_in_progress.pop(name, None)
+                        return
 
             welcome = worker_manager._build_welcome(name, backend_obj)
-
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(welcome.encode())
-        except (subprocess.SubprocessError, OSError, KeyError) as e:
-            print(f"Checkin endpoint error: {e}")
+        except (subprocess.SubprocessError, OSError, KeyError) as exc:
+            print(f"Checkin endpoint error: {exc}")
             self.send_response(500)
             self.end_headers()
-            self.wfile.write(str(e).encode())
+            self.wfile.write(str(exc).encode())
 
     def handle_health_workers_endpoint(self) -> None:
         """Return watchdog worker states as JSON (debug endpoint)."""
@@ -17365,6 +17385,39 @@ def _setup_endpoint_routes() -> None:
     r.post_pattern(
         r'^/v1/([^/]+)/reply$',
         lambda h, b, m: h.handle_relay_reply(m.group(1), b)
+    )
+
+    # GET endpoints (exact match) — handler signature: (handler_instance, parsed)
+    r.get("/guests", lambda h, p: h.handle_guests_list())
+    r.get("/workers", lambda h, p: h.handle_workers_endpoint(p))
+    r.get("/machines", lambda h, p: h.handle_machines_endpoint(p))
+    r.get("/checkin", lambda h, p: h.handle_checkin_endpoint(p))
+    r.get("/health/workers", lambda h, p: h.handle_health_workers_endpoint())
+    r.get("/channels", lambda h, p: h.handle_channels_list(p))
+    r.get("/pr-file-content", lambda h, p: h.handle_pr_file_content(p))
+    r.get("/pr-keepalive", lambda h, p: h.handle_pr_keepalive(p))
+
+    # GET endpoints (pattern match) — order matters for prefix collisions
+    r.get_pattern(r'^/guest/inbox', lambda h, p, m: h.handle_guest_inbox(p))
+    r.get_pattern(r'^/guest/status', lambda h, p, m: h.handle_guest_status(p))
+    r.get_pattern(
+        r'^/v1/([^/]+)(?:/(.+))?$',
+        lambda h, p, m: h.handle_relay_get(m.group(1), m.group(2), p)
+    )
+    r.get_pattern(
+        r'^/channels/([^/]+)/messages$',
+        lambda h, p, m: h.handle_channel_messages(m.group(1), p)
+    )
+    r.get_pattern(r'^/team-chat-media/', lambda h, p, m: h.handle_team_chat_media(p))
+    r.get_pattern(r'^/team-chat', lambda h, p, m: h.handle_team_chat_endpoint(p))
+    r.get_pattern(r'^/transcript/', lambda h, p, m: h.handle_transcript_endpoint(p))
+    r.get_pattern(r'^/pr-review/', lambda h, p, m: h.handle_pr_review_endpoint(p))
+
+    # DELETE endpoints
+    r.delete("/guest", lambda h, p: h.handle_guest_disconnect(p))
+    r.delete_pattern(
+        r'^/channels/([^/]+)$',
+        lambda h, p, m: h.handle_channel_delete(m.group(1))
     )
 
 

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.38.0
+> Version: 0.38.1
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,33 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.38.1 - Quality audit fixes: router migration, type safety, testability protocols
+
+**Code Organization:**
+- Migrated `do_GET` and `do_DELETE` from manual if-chains to `EndpointRouter` dispatch
+  (same pattern as `do_POST`). New endpoints need one registration call, not another if/elif.
+- Added DELETE support to `EndpointRouter` (`delete()`, `delete_pattern()`, `resolve_delete()`)
+- DRYed `EndpointRouter.resolve_*` into shared `_resolve()` method
+- Decomposed `handle_checkin_endpoint` (171→75 lines) into `_checkin_can_restart()` and
+  `_checkin_do_restart()` module-level helpers
+- Added `_send_text()` helper to Handler for plain text responses
+
+**Type Safety:**
+- Fixed `EndpointRouter.__init__`: `callable` → `Callable[..., None]`, `list[tuple]` →
+  `list[tuple[re.Pattern[str], Callable[..., None]]]`
+- Fixed `_restart_dead_worker` parameter: `backend: str` → `backend: Backend`
+- Fixed `TelegramAPI.api()` HTTP error body parsing: added `json.JSONDecodeError, ValueError`
+
+**Testability:**
+- Added `SubprocessRunner` and `Clock` protocols with real and injectable implementations
+- Module-level `_subprocess_runner` and `_clock` instances for test injection
+
+**Error Handling:**
+- PR notification failures now log instead of silent pass
+
+**Documentation:**
+- Updated file map with accurate line numbers for all sections
 
 ### v0.38.0 - Function decomposition: largest functions split into focused helpers
 
