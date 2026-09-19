@@ -3420,7 +3420,7 @@ def _read_learning_reminder(name: str) -> str:
             if text:
                 return text.replace("{name}", name)
     except OSError as e:
-        print(f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
+        print(f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}", file=sys.stderr, flush=True)
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
 
 
@@ -3697,7 +3697,7 @@ def save_last_chat_id(chat_id: int | str) -> None:
         LAST_CHAT_ID_FILE.write_text(str(chat_id))
         LAST_CHAT_ID_FILE.chmod(0o600)
     except OSError as e:
-        print(f"Failed to save last_chat_id: {e}")
+        print(f"Failed to save last_chat_id: {e}", file=sys.stderr, flush=True)
 
 
 def load_last_chat_id() -> int | None:
@@ -3708,7 +3708,7 @@ def load_last_chat_id() -> int | None:
             if chat_id:
                 return int(chat_id)
     except OSError as e:
-        print(f"Failed to load last_chat_id: {e}")
+        print(f"Failed to load last_chat_id: {e}", file=sys.stderr, flush=True)
     return None
 
 
@@ -3719,7 +3719,7 @@ def save_last_active(name: str) -> None:
         LAST_ACTIVE_FILE.write_text(name)
         LAST_ACTIVE_FILE.chmod(0o600)
     except OSError as e:
-        print(f"Failed to save last_active: {e}")
+        print(f"Failed to save last_active: {e}", file=sys.stderr, flush=True)
 
 
 def load_last_active() -> str | None:
@@ -3730,7 +3730,7 @@ def load_last_active() -> str | None:
             if name:
                 return name
     except OSError as e:
-        print(f"Failed to load last_active: {e}")
+        print(f"Failed to load last_active: {e}", file=sys.stderr, flush=True)
     return None
 
 
@@ -3754,7 +3754,7 @@ def _load_registry() -> RegistryFileDict:
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         if WORKER_REGISTRY_FILE.exists():
             corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(time.time())}")
-            print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
+            print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}", file=sys.stderr, flush=True)
             try:
                 WORKER_REGISTRY_FILE.rename(corrupt_path)
             except OSError as exc:
@@ -3779,7 +3779,7 @@ def _save_registry(data: RegistryFileDict) -> None:
                 print(f"[best-effort:io:_save_registry] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             raise
     except OSError as e:
-        print(f"Failed to save worker registry: {e}")
+        print(f"Failed to save worker registry: {e}", file=sys.stderr, flush=True)
 
 
 def _registry_add(name: str, backend: str, chat_id: int | None = None,
@@ -3881,7 +3881,7 @@ def read_checkin_note() -> str:
             if text:
                 return text
     except OSError as e:
-        print(f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}")
+        print(f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}", file=sys.stderr, flush=True)
     return ""
 
 
@@ -4588,7 +4588,7 @@ def cleanup_inbox(session_name: str) -> None:
             try:
                 f.unlink()
             except OSError as e:
-                print(f"Failed to delete {f}: {e}")
+                print(f"Failed to delete {f}: {e}", file=sys.stderr, flush=True)
 
 
 # ============================================================
@@ -4643,7 +4643,7 @@ def cleanup_worker_pipe(name: str) -> None:
             pipe_path.unlink()
             print(f"Removed worker pipe: {pipe_path}")
         except OSError as e:
-            print(f"Failed to remove worker pipe {pipe_path}: {e}")
+            print(f"Failed to remove worker pipe {pipe_path}: {e}", file=sys.stderr, flush=True)
 
     # Also try to remove parent directory if empty
     pipe_dir = pipe_path.parent
@@ -4701,7 +4701,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
                         try:
                             _forward_pipe_message(name, message)
                         except (OSError, ValueError) as e:
-                            print(f"Error forwarding pipe message to '{name}': {e}")
+                            print(f"Error forwarding pipe message to '{name}': {e}", file=sys.stderr, flush=True)
 
         except FileNotFoundError:
             # Pipe was removed, stop the reader
@@ -5821,7 +5821,7 @@ def get_manager_chat_id(name: str) -> int | None:
         value = chat_id_file.read_text().strip()
         return int(value) if value else None
     except OSError as e:
-        print(f"Failed to read chat_id for {name}: {e}")
+        print(f"Failed to read chat_id for {name}: {e}", file=sys.stderr, flush=True)
         return None
 
 
@@ -8541,7 +8541,7 @@ class WorkerManager:
                         backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
                         registered[name] = {"tmux": session_name, "backend": backend}
         except (subprocess.SubprocessError, KeyError) as e:
-            print(f"Error scanning local tmux: {e}")
+            print(f"Error scanning local tmux: {e}", file=sys.stderr, flush=True)
 
         # Scan remote machines for tmux sessions
         try:
@@ -8575,7 +8575,7 @@ class WorkerManager:
                             }
                             _registry_add(name, DEFAULT_BACKEND, host=machine.ssh_target)
             except (subprocess.SubprocessError, KeyError) as e:
-                print(f"Error scanning tmux on {machine.ssh_target}: {e}")
+                print(f"Error scanning tmux on {machine.ssh_target}: {e}", file=sys.stderr, flush=True)
 
         return registered
 
@@ -17684,7 +17684,7 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
     if result and result.get("ok"):
         print(f"Sent startup notification to chat {last_chat_id}")
     else:
-        print(f"Failed to send startup notification: {result}")
+        print(f"Failed to send startup notification: {result}", file=sys.stderr, flush=True)
 
 
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
