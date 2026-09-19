@@ -457,21 +457,30 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 - `r_id` → `id_result` in teleport subprocess results (1 site)
 - `h` → `html_out` in `_render_md_to_html()` (24 sites)
 - `h` → `name_hash`, `entry_html` in transcript rendering (6 sites)
-- `d` → `session_dir` in session file functions (6 sites)
-- `d`/`k`/`v` → `result`/`field_name`/`value` in dataclass serialization (2 sites)
+- `d` → `session_dir` in session file functions (6 sites), `data` in from_dict methods (4 sites)
+- `k`/`v` → `field_name`/`value` in dataclass serialization
 - `fp` → `file_path`, `file_path_esc`, `file_path_html` in transcript HTML (4 sites)
 - `av` → `avatar` in team chat HTML (3 sites)
-- `g` → `guest` in guest store (1 site)
+- `g` → `guest`, `nw` → `notified` in guest store (2 sites)
 - Zero non-common single-letter variable names remaining
+
+**Type safety (continued):**
+- Fixed wrong annotation: `_parse_media_tags()` validate_func `str | None` → `FileValidation`
+- Fixed wrong annotations: `parse_image_tags()`, `parse_file_tags()` `list[tuple]` → `tuple[str, list[tuple[str, str]]]`
+- Parameterized 5 remaining bare generics: `dict | None`, `list[dict]` (×3), `dict[str, dict]`
+- Parameterized bare `Callable` → `Callable[..., Any/None]` in 7 sites
+- Parameterized bare `set` → `set[str]` in 2 sites
+- Fixed `re.Match | None` → `re.Match[str] | None` (removed `type: ignore`)
+- SVG constants extracted to module level with `dict[str, str]` annotation
 
 **Architecture summary — All 669 functions:**
 - 669/669 fully annotated (100%) with return types and parameter types
 - 669/669 have docstrings (100%)
 - 33 TypedDicts (2 functional-syntax for reserved-word keys)
 - 5 NamedTuples, 6 Protocols, 1 type alias (_ActivityCheck)
-- All `list`/`dict` annotations parameterized (zero bare `list`, zero bare `dict`)
-- All error diagnostics via `_log()` (zero raw `print(stderr)`)
-- ~100 remaining stdout prints are intentional operational status messages
+- Zero bare `list`, `dict`, `set`, `tuple`, `Callable` — all parameterized
+- 345 `_log()` calls — all error diagnostics via structured logging
+- 34 remaining stdout prints are intentional startup/shutdown messages
 - Complete DI threading: 68 subprocess + 136 time calls use injectable seams
 - Structured logging via `_log()` with severity levels (ERROR/WARN/INFO/DEBUG)
 - 19 `Any` remain at genuine boundaries (`**kwargs`, `__getitem__`, conditionally imported types)
