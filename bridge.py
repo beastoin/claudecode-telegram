@@ -6896,316 +6896,351 @@ def watchdog_loop() -> None:
             now = time.time()
             registered = get_registered_sessions()
             pane_pids = _tmux_pane_pids()
-
             registered_names = set(registered.keys())
+
             probe_failed = bool(registered_names) and not pane_pids
-            if probe_failed:
-                for name in registered_names:
-                    watchdog.consecutive_probe_failures[name] = watchdog.consecutive_probe_failures.get(name, 0) + 1
-            else:
-                for name in registered_names:
-                    watchdog.consecutive_probe_failures[name] = 0
+            _watchdog_update_probe_failures(registered_names, probe_failed)
 
-            claude_pids = {}
-            tmux_present = {}
-            backend_info = {}
+            remote_workers, remote_pane_pids, failed_hosts = _watchdog_probe_remote_hosts(registered)
+            claude_pids, tmux_present, backend_info = _watchdog_collect_worker_pids(
+                registered, pane_pids, remote_pane_pids, now)
+            stats = _watchdog_gather_cpu_stats(claude_pids)
 
-            # Collect remote hosts and probe their tmux sessions in bulk
-            remote_workers = {}  # host -> [(name, tmux_name)]
-            for name, session in registered.items():
-                host = get_worker_host(name)
-                if host:
-                    tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
-                    remote_workers.setdefault(host, []).append((name, tmux_name))
+            _watchdog_evaluate_workers(
+                registered, tmux_present, claude_pids, backend_info, stats,
+                probe_failed, failed_hosts, now)
+            _watchdog_cleanup_stale(registered_names)
 
-            remote_pane_pids = {}  # tmux_name -> pane_pid (across all hosts)
-            failed_hosts = set()  # hosts where SSH probe failed this cycle
-            for host, workers in remote_workers.items():
-                try:
-                    r = _remote_run(
-                        ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-                        host=host, capture_output=True, text=True, timeout=5)
-                    if r.returncode == 0:
-                        for line in r.stdout.splitlines():
-                            parts = line.strip().split()
-                            if len(parts) >= 2 and parts[1].isdigit():
-                                remote_pane_pids[parts[0]] = parts[1]
-                        _record_host_probe(host, ok=True)
-                    else:
-                        failed_hosts.add(host)
-                        _record_host_probe(host, ok=False, error=f"tmux list-panes exit {r.returncode}")
-                except (subprocess.SubprocessError, KeyError) as e:
-                    failed_hosts.add(host)
-                    _record_host_probe(host, ok=False, error=str(e)[:200])
-
-            for name, session in registered.items():
-                backend_name = get_worker_backend(name, session)
-                backend = get_backend(backend_name)
-                backend_info[name] = backend
-                tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
-                host = get_worker_host(name)
-                if host:
-                    pane_pid = remote_pane_pids.get(tmux_name)
-                else:
-                    pane_pid = pane_pids.get(tmux_name)
-                tmux_exists = bool(pane_pid)
-                tmux_present[name] = tmux_exists
-
-                if not tmux_exists:
-                    continue
-
-                if backend.is_interactive:
-                    claude_pid = _get_claude_pid(pane_pid, host=host)
-                    if claude_pid:
-                        claude_pids[name] = claude_pid
-                        with watchdog.lock:
-                            watchdog.last_seen_claude[name] = now
-                    else:
-                        with watchdog.lock:
-                            if name not in watchdog.last_seen_claude:
-                                watchdog.last_seen_claude[name] = now
-
-            # Group PIDs by host for remote ps stats
-            pids_by_host = {}  # host (None=local) -> [pid, ...]
-            pid_to_host = {}   # pid -> host
-            for name, pid in claude_pids.items():
-                host = get_worker_host(name)
-                pids_by_host.setdefault(host, []).append(pid)
-                pid_to_host[pid] = host
-            stats = {}
-            for host, pids in pids_by_host.items():
-                stats.update(_ps_stats(pids, host=host))
-
-            for name, session in registered.items():
-                tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
-                tmux_exists = tmux_present.get(name, False)
-
-                # Registry-only worker (tmux gone): mark EXITED directly
-                if not tmux_exists and "tmux" not in session:
-                    since = _record_worker_state(name, "EXITED", "session gone", now)
-                    _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
-                    continue
-
-                if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3:
-                    continue
-
-                # Mark workers on down hosts as HOST_OFFLINE instead of silently skipping
-                host = get_worker_host(name)
-                if host and _is_host_down(host):
-                    reason = f"host {host} offline"
-                    since = _record_worker_state(name, "HOST_OFFLINE", reason, now)
-                    _handle_watchdog_transition(name, "HOST_OFFLINE", reason, since, now=now)
-                    continue
-                if host and host in failed_hosts and not tmux_exists:
-                    continue
-
-                backend = backend_info.get(name)
-                if backend is None:
-                    backend_name = get_worker_backend(name, session)
-                    backend = get_backend(backend_name)
-                is_interactive = backend.is_interactive
-
-                adapter_alive = False
-                if not is_interactive:
-                    entry = processes.adapter_pids.get(name)
-                    if entry:
-                        proc, _stderr = entry
-                        adapter_alive = proc.poll() is None
-
-                host = get_worker_host(name)
-                claude_pid = claude_pids.get(name) if is_interactive else None
-                cpu = 0.0
-                if claude_pid and claude_pid in stats:
-                    cpu = stats[claude_pid].get("cpu", 0.0)
-
-                children_total = _child_count(claude_pid, host=host) if claude_pid else 0
-
-                # Dynamic baseline: MCP servers are persistent children.
-                # Track idle child count so only EXTRA children count as work.
-                pending_ts = _pending_timestamp(name)
-                pending = pending_ts is not None
-                if is_interactive and claude_pid:
-                    with watchdog.lock:
-                        baseline = watchdog.idle_child_baseline.get(name)
-                        if baseline is None:
-                            # First observation — assume current count is baseline
-                            watchdog.idle_child_baseline[name] = children_total
-                            baseline = children_total
-                        elif not pending:
-                            # When idle, learn the true floor (MCP servers may start late)
-                            baseline = min(baseline, children_total)
-                            watchdog.idle_child_baseline[name] = baseline
-                    children = max(0, children_total - baseline)
-                else:
-                    children = children_total
-
-                if children > 0:
-                    with watchdog.lock:
-                        watchdog.last_child_ts[name] = now
-
-                # Activity detection: if children count increased or CPU is active,
-                # worker is doing something. Reset the stale-pending timer so
-                # long autonomous work doesn't trigger false STUCK alerts.
-                # Only increases count — background sleep cycling (exit+restart)
-                # causes ±1 flicker that shouldn't reset the timer.
-                with watchdog.lock:
-                    prev_children = watchdog.prev_children.get(name)
-                    activity_increased = (prev_children is not None and children > prev_children)
-                    if activity_increased or cpu >= CPU_ACTIVE:
-                        watchdog.last_activity_ts[name] = now
-                    watchdog.prev_children[name] = children
-                    last_activity = watchdog.last_activity_ts.get(name, 0.0)
-
-                # pending_age counts from the LATER of: message arrival or last activity
-                if pending_ts:
-                    effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
-                    pending_age = now - effective_start
-                else:
-                    pending_age = 0.0
-                with watchdog.lock:
-                    last_child_ts = watchdog.last_child_ts.get(name, 0.0)
-                    last_hook_ts = watchdog.last_hook_ts.get(name)
-                    last_seen_claude = watchdog.last_seen_claude.get(name)
-                if not is_interactive:
-                    last_seen_claude = None
-
-                state_args = dict(
-                    tmux_exists=tmux_exists,
-                    claude_pid=claude_pid,
-                    pending=pending,
-                    pending_ts=pending_ts,
-                    pending_age=pending_age,
-                    children=children,
-                    last_child_ts=last_child_ts,
-                    cpu=cpu,
-                    last_hook_ts=last_hook_ts,
-                    last_seen_claude=last_seen_claude,
-                    now=now,
-                    is_interactive=is_interactive,
-                    adapter_alive=adapter_alive,
-                )
-                state, reason = compute_state(**state_args)
-
-                if state == "STUCK":
-                    watchdog.idle_streak[name] = watchdog.idle_streak.get(name, 0) + 1
-                    streak = watchdog.idle_streak[name]
-                    if streak < IDLE_STREAK_STUCK:
-                        state = "WAITING"
-                    else:
-                        # Auto-clear stale pending: if worker is at idle prompt,
-                        # the response was already sent but pending file wasn't
-                        # cleared (e.g., bridge restarted before hook callback).
-                        if is_interactive and pending:
-                            pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
-                            if pane_text:
-                                activity = _extract_activity(pane_text.splitlines())
-                                if activity == "Idle at prompt":
-                                    print(f"[watchdog] Auto-clearing stale pending for {name} (idle at prompt, age={int(pending_age)}s)")
-                                    clear_pending(name)
-                                    watchdog.idle_streak[name] = 0
-                                    state = "READY"
-                                    reason = "idle (auto-cleared stale pending)"
-                                    since = _record_worker_state(name, state, reason, now)
-                                    _handle_watchdog_transition(name, state, reason, since, now=now)
-                                    continue
-                        poisoned_reason = _detect_poisoned(name, tmux_name)
-                        state, reason = compute_state(
-                            **state_args,
-                            poisoned_reason=poisoned_reason
-                        )
-                    reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
-                elif state == "POISONED":
-                    streak = watchdog.idle_streak.get(name, 0)
-                    if streak:
-                        reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
-                else:
-                    watchdog.idle_streak[name] = 0
-
-                # Detect interactive prompt (WAITING_INPUT): worker is READY
-                # but TUI is at a selection/question prompt needing manager action
-                if state == "READY" and is_interactive:
-                    pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
-                    if pane_text:
-                        pane_lines = pane_text.splitlines()
-                        details = _extract_question_details(pane_lines)
-                        if details:
-                            # Store details for the alert message
-                            with watchdog.lock:
-                                watchdog.waiting_input_details[name] = details
-                            state = "WAITING_INPUT"
-                            header = details.get("header", "")
-                            reason = f"question={header}" if header else "interactive prompt"
-
-                since = _record_worker_state(name, state, reason, now)
-                _handle_watchdog_transition(name, state, reason, since, now=now)
-
-            with watchdog.lock:
-                for name in list(watchdog.worker_states.keys()):
-                    if name not in registered_names:
-                        watchdog.worker_states.pop(name, None)
-                for name in list(watchdog.last_child_ts.keys()):
-                    if name not in registered_names:
-                        watchdog.last_child_ts.pop(name, None)
-                for name in list(watchdog.last_seen_claude.keys()):
-                    if name not in registered_names:
-                        watchdog.last_seen_claude.pop(name, None)
-                for name in list(watchdog.last_hook_ts.keys()):
-                    if name not in registered_names:
-                        watchdog.last_hook_ts.pop(name, None)
-                for name in list(watchdog.prev_worker_states.keys()):
-                    if name not in registered_names:
-                        watchdog.prev_worker_states.pop(name, None)
-                for name in list(watchdog.last_alert_ts.keys()):
-                    if name not in registered_names:
-                        watchdog.last_alert_ts.pop(name, None)
-                for name in list(watchdog.idle_streak.keys()):
-                    if name not in registered_names:
-                        watchdog.idle_streak.pop(name, None)
-                for name in list(watchdog.idle_child_baseline.keys()):
-                    if name not in registered_names:
-                        watchdog.idle_child_baseline.pop(name, None)
-                for name in list(watchdog.prev_children.keys()):
-                    if name not in registered_names:
-                        watchdog.prev_children.pop(name, None)
-                for name in list(watchdog.last_activity_ts.keys()):
-                    if name not in registered_names:
-                        watchdog.last_activity_ts.pop(name, None)
-            for name in list(watchdog.consecutive_probe_failures.keys()):
-                if name not in registered_names:
-                    watchdog.consecutive_probe_failures.pop(name, None)
-            # Disk + memory check every ~5 min (every 20th cycle)
             _disk_check_counter += 1
             if _disk_check_counter >= 20:
                 _disk_check_counter = 0
-                try:
-                    _probe_disk_all_hosts(set(remote_workers.keys()))
-                except (subprocess.SubprocessError, OSError) as de:
-                    print(f"[watchdog] Disk check error: {de}")
-                try:
-                    _probe_mem_all_hosts(set(remote_workers.keys()))
-                except (subprocess.SubprocessError, OSError) as me:
-                    print(f"[watchdog] Memory check error: {me}")
-                try:
-                    _probe_io_all_hosts(set(remote_workers.keys()))
-                except (subprocess.SubprocessError, OSError) as ie:
-                    print(f"[watchdog] IO check error: {ie}")
-                try:
-                    _probe_cpu_hogs(set(remote_workers.keys()))
-                except (subprocess.SubprocessError, OSError) as ce:
-                    print(f"[watchdog] CPU hog check error: {ce}")
-                try:
-                    _probe_worktree_sizes(set(remote_workers.keys()))
-                except (subprocess.SubprocessError, OSError) as we:
-                    print(f"[watchdog] Worktree check error: {we}")
-                try:
-                    _probe_tailscale()
-                except (subprocess.SubprocessError, OSError) as te:
-                    print(f"[watchdog] Tailscale check error: {te}")
+                _watchdog_resource_checks(set(remote_workers.keys()))
 
         except (subprocess.SubprocessError, ValueError, KeyError) as e:
             print(f"Watchdog error: {e}")
 
         time.sleep(WATCHDOG_INTERVAL)
+
+
+def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
+    """Update consecutive probe failure counters for all registered workers."""
+    if probe_failed:
+        for name in registered_names:
+            watchdog.consecutive_probe_failures[name] = watchdog.consecutive_probe_failures.get(name, 0) + 1
+    else:
+        for name in registered_names:
+            watchdog.consecutive_probe_failures[name] = 0
+
+
+def _watchdog_probe_remote_hosts(
+    registered: dict[str, Any]
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
+    """Probe remote hosts for tmux sessions in bulk.
+
+    Returns (remote_workers, remote_pane_pids, failed_hosts).
+    """
+    remote_workers: dict[str, list[tuple[str, str]]] = {}
+    for name, session in registered.items():
+        host = get_worker_host(name)
+        if host:
+            tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+            remote_workers.setdefault(host, []).append((name, tmux_name))
+
+    remote_pane_pids: dict[str, str] = {}
+    failed_hosts: set[str] = set()
+    for host, workers in remote_workers.items():
+        try:
+            r = _remote_run(
+                ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                host=host, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        remote_pane_pids[parts[0]] = parts[1]
+                _record_host_probe(host, ok=True)
+            else:
+                failed_hosts.add(host)
+                _record_host_probe(host, ok=False, error=f"tmux list-panes exit {r.returncode}")
+        except (subprocess.SubprocessError, KeyError) as e:
+            failed_hosts.add(host)
+            _record_host_probe(host, ok=False, error=str(e)[:200])
+
+    return remote_workers, remote_pane_pids, failed_hosts
+
+
+def _watchdog_collect_worker_pids(
+    registered: dict[str, Any],
+    pane_pids: dict[str, str],
+    remote_pane_pids: dict[str, str],
+    now: float
+) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
+    """Collect claude PIDs, tmux presence, and backend info for all workers.
+
+    Returns (claude_pids, tmux_present, backend_info).
+    """
+    claude_pids: dict[str, str] = {}
+    tmux_present: dict[str, bool] = {}
+    backend_info: dict[str, Any] = {}
+
+    for name, session in registered.items():
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+        backend_info[name] = backend
+        tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+        host = get_worker_host(name)
+        pane_pid = remote_pane_pids.get(tmux_name) if host else pane_pids.get(tmux_name)
+        tmux_exists = bool(pane_pid)
+        tmux_present[name] = tmux_exists
+
+        if not tmux_exists:
+            continue
+
+        if backend.is_interactive:
+            claude_pid = _get_claude_pid(pane_pid, host=host)
+            if claude_pid:
+                claude_pids[name] = claude_pid
+                with watchdog.lock:
+                    watchdog.last_seen_claude[name] = now
+            else:
+                with watchdog.lock:
+                    if name not in watchdog.last_seen_claude:
+                        watchdog.last_seen_claude[name] = now
+
+    return claude_pids, tmux_present, backend_info
+
+
+def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, dict[str, float]]:
+    """Gather CPU stats for all claude PIDs, grouped by host."""
+    pids_by_host: dict[str | None, list[str]] = {}
+    for name, pid in claude_pids.items():
+        host = get_worker_host(name)
+        pids_by_host.setdefault(host, []).append(pid)
+    stats: dict[str, dict[str, float]] = {}
+    for host, pids in pids_by_host.items():
+        stats.update(_ps_stats(pids, host=host))
+    return stats
+
+
+def _watchdog_evaluate_workers(
+    registered: dict[str, Any],
+    tmux_present: dict[str, bool],
+    claude_pids: dict[str, str],
+    backend_info: dict[str, Any],
+    stats: dict[str, dict[str, float]],
+    probe_failed: bool,
+    failed_hosts: set[str],
+    now: float
+) -> None:
+    """Evaluate state for each registered worker and handle transitions."""
+    for name, session in registered.items():
+        tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+        tmux_exists = tmux_present.get(name, False)
+
+        # Registry-only worker (tmux gone): mark EXITED directly
+        if not tmux_exists and "tmux" not in session:
+            since = _record_worker_state(name, "EXITED", "session gone", now)
+            _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
+            continue
+
+        if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3:
+            continue
+
+        # Mark workers on down hosts as HOST_OFFLINE
+        host = get_worker_host(name)
+        if host and _is_host_down(host):
+            reason = f"host {host} offline"
+            since = _record_worker_state(name, "HOST_OFFLINE", reason, now)
+            _handle_watchdog_transition(name, "HOST_OFFLINE", reason, since, now=now)
+            continue
+        if host and host in failed_hosts and not tmux_exists:
+            continue
+
+        backend = backend_info.get(name)
+        if backend is None:
+            backend_name = get_worker_backend(name, session)
+            backend = get_backend(backend_name)
+        is_interactive = backend.is_interactive
+
+        adapter_alive = False
+        if not is_interactive:
+            entry = processes.adapter_pids.get(name)
+            if entry:
+                proc, _stderr = entry
+                adapter_alive = proc.poll() is None
+
+        host = get_worker_host(name)
+        claude_pid = claude_pids.get(name) if is_interactive else None
+        cpu = 0.0
+        if claude_pid and claude_pid in stats:
+            cpu = stats[claude_pid].get("cpu", 0.0)
+
+        children_total = _child_count(claude_pid, host=host) if claude_pid else 0
+        children = _watchdog_compute_children(name, children_total, is_interactive, claude_pid, now)
+
+        if children > 0:
+            with watchdog.lock:
+                watchdog.last_child_ts[name] = now
+
+        _watchdog_track_activity(name, children, cpu, now)
+
+        pending_ts = _pending_timestamp(name)
+        pending = pending_ts is not None
+        with watchdog.lock:
+            last_activity = watchdog.last_activity_ts.get(name, 0.0)
+
+        if pending_ts:
+            effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
+            pending_age = now - effective_start
+        else:
+            pending_age = 0.0
+        with watchdog.lock:
+            last_child_ts = watchdog.last_child_ts.get(name, 0.0)
+            last_hook_ts = watchdog.last_hook_ts.get(name)
+            last_seen_claude = watchdog.last_seen_claude.get(name)
+        if not is_interactive:
+            last_seen_claude = None
+
+        state_args = dict(
+            tmux_exists=tmux_exists,
+            claude_pid=claude_pid,
+            pending=pending,
+            pending_ts=pending_ts,
+            pending_age=pending_age,
+            children=children,
+            last_child_ts=last_child_ts,
+            cpu=cpu,
+            last_hook_ts=last_hook_ts,
+            last_seen_claude=last_seen_claude,
+            now=now,
+            is_interactive=is_interactive,
+            adapter_alive=adapter_alive,
+        )
+        worker_state, reason = compute_state(**state_args)
+
+        worker_state, reason = _watchdog_refine_state(
+            name, tmux_name, worker_state, reason, state_args,
+            is_interactive, pending, pending_age, host, now)
+
+        since = _record_worker_state(name, worker_state, reason, now)
+        _handle_watchdog_transition(name, worker_state, reason, since, now=now)
+
+
+def _watchdog_compute_children(name: str, children_total: int,
+                                is_interactive: bool, claude_pid: str | None,
+                                now: float) -> int:
+    """Apply dynamic baseline to child count (MCP servers are persistent)."""
+    pending_ts = _pending_timestamp(name)
+    pending = pending_ts is not None
+    if is_interactive and claude_pid:
+        with watchdog.lock:
+            baseline = watchdog.idle_child_baseline.get(name)
+            if baseline is None:
+                watchdog.idle_child_baseline[name] = children_total
+                baseline = children_total
+            elif not pending:
+                baseline = min(baseline, children_total)
+                watchdog.idle_child_baseline[name] = baseline
+        return max(0, children_total - baseline)
+    return children_total
+
+
+def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -> None:
+    """Track activity based on child count increases and CPU usage."""
+    with watchdog.lock:
+        prev_children = watchdog.prev_children.get(name)
+        activity_increased = (prev_children is not None and children > prev_children)
+        if activity_increased or cpu >= CPU_ACTIVE:
+            watchdog.last_activity_ts[name] = now
+        watchdog.prev_children[name] = children
+
+
+def _watchdog_refine_state(
+    name: str, tmux_name: str,
+    worker_state: str, reason: str,
+    state_args: dict[str, Any],
+    is_interactive: bool, pending: bool, pending_age: float,
+    host: str | None, now: float
+) -> tuple[str, str]:
+    """Refine STUCK/READY states with streak tracking and interactive prompt detection."""
+    if worker_state == "STUCK":
+        watchdog.idle_streak[name] = watchdog.idle_streak.get(name, 0) + 1
+        streak = watchdog.idle_streak[name]
+        if streak < IDLE_STREAK_STUCK:
+            worker_state = "WAITING"
+        else:
+            # Auto-clear stale pending if worker is at idle prompt
+            if is_interactive and pending:
+                pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
+                if pane_text:
+                    activity = _extract_activity(pane_text.splitlines())
+                    if activity == "Idle at prompt":
+                        print(f"[watchdog] Auto-clearing stale pending for {name} (idle at prompt, age={int(pending_age)}s)")
+                        clear_pending(name)
+                        watchdog.idle_streak[name] = 0
+                        since = _record_worker_state(name, "READY", "idle (auto-cleared stale pending)", now)
+                        _handle_watchdog_transition(name, "READY", "idle (auto-cleared stale pending)", since, now=now)
+                        return "READY", "idle (auto-cleared stale pending)"
+            poisoned_reason = _detect_poisoned(name, tmux_name)
+            worker_state, reason = compute_state(**state_args, poisoned_reason=poisoned_reason)
+        reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+    elif worker_state == "POISONED":
+        streak = watchdog.idle_streak.get(name, 0)
+        if streak:
+            reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+    else:
+        watchdog.idle_streak[name] = 0
+
+    # Detect WAITING_INPUT: worker is READY but at interactive prompt
+    if worker_state == "READY" and is_interactive:
+        pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
+        if pane_text:
+            pane_lines = pane_text.splitlines()
+            details = _extract_question_details(pane_lines)
+            if details:
+                with watchdog.lock:
+                    watchdog.waiting_input_details[name] = details
+                worker_state = "WAITING_INPUT"
+                header = details.get("header", "")
+                reason = f"question={header}" if header else "interactive prompt"
+
+    return worker_state, reason
+
+
+def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
+    """Remove watchdog state for workers no longer in the registry."""
+    with watchdog.lock:
+        stale_dicts = [
+            watchdog.worker_states, watchdog.last_child_ts,
+            watchdog.last_seen_claude, watchdog.last_hook_ts,
+            watchdog.prev_worker_states, watchdog.last_alert_ts,
+            watchdog.idle_streak, watchdog.idle_child_baseline,
+            watchdog.prev_children, watchdog.last_activity_ts,
+        ]
+        for d in stale_dicts:
+            for name in list(d.keys()):
+                if name not in registered_names:
+                    d.pop(name, None)
+    for name in list(watchdog.consecutive_probe_failures.keys()):
+        if name not in registered_names:
+            watchdog.consecutive_probe_failures.pop(name, None)
+
+
+def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
+    """Run periodic resource checks (disk, memory, IO, CPU, worktrees, Tailscale)."""
+    checks = [
+        ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
+        ("Memory", lambda: _probe_mem_all_hosts(remote_hosts)),
+        ("IO", lambda: _probe_io_all_hosts(remote_hosts)),
+        ("CPU hog", lambda: _probe_cpu_hogs(remote_hosts)),
+        ("Worktree", lambda: _probe_worktree_sizes(remote_hosts)),
+        ("Tailscale", lambda: _probe_tailscale()),
+    ]
+    for label, check_fn in checks:
+        try:
+            check_fn()
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"[watchdog] {label} check error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11719,190 +11754,194 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         global admin_chat_id
         print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
 
-        # SOLID #7: Parse update once into IncomingMessage
+        # Parse update once into IncomingMessage
         incoming = IncomingMessage.from_update(update)
-        msg = incoming.raw_msg  # backward compat for code not yet migrated
+        msg = incoming.raw_msg
         text = incoming.text
         chat_id = incoming.chat_id
         msg_id = incoming.msg_id
         print(f"[handle_message] chat_id={chat_id} admin={admin_chat_id} text={repr(text[:40])}", flush=True)
 
-        # Media fields from parsed message (backward compat aliases)
-        photo = incoming.photo
-        document = incoming.document
-        animation = incoming.animation
-        audio = incoming.audio
-        voice = incoming.voice
-        video = incoming.video
-        video_note = incoming.video_note
-        sticker = incoming.sticker
-        doc_is_image = incoming.doc_is_image
-
-        # Media group handling: Telegram sends multi-photo messages as separate
-        # updates with the same media_group_id. Only one has the caption.
-        # Buffer all items and route them together when the group is complete.
+        # Media group handling: buffer multi-photo messages
         media_group_id = msg.get("media_group_id")
-        has_media = photo or document or animation or video or audio or voice or video_note or sticker
+        has_media = (incoming.photo or incoming.document or incoming.animation
+                     or incoming.video or incoming.audio or incoming.voice
+                     or incoming.video_note or incoming.sticker)
         if media_group_id and has_media and chat_id:
-            if admin_chat_id is None:
-                admin_chat_id = chat_id
-            elif chat_id != admin_chat_id:
+            if not self._check_admin(chat_id):
                 return
-            with media_groups.lock:
-                if media_group_id not in media_groups.buffer:
-                    media_groups.buffer[media_group_id] = {
-                        "items": [],
-                        "caption": "",
-                        "timer": None,
-                    }
-                group = media_groups.buffer[media_group_id]
-                group["items"].append(msg)
-                if text:
-                    group["caption"] = text
-                # Reset timer on each new item (extends the wait window)
-                if group["timer"]:
-                    group["timer"].cancel()
-                t = threading.Timer(_MEDIA_GROUP_WAIT,
-                                    self._handle_media_group_flush, args=[media_group_id])
-                t.daemon = True
-                group["timer"] = t
-                t.start()
+            self._buffer_media_group(media_group_id, msg, text)
             return
 
-        # Handle GIF/animation (Telegram sends these separately from photos)
-        if animation and chat_id:
-            file_id = animation.get("file_id")
-            if file_id:
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return
-
-                if not state["active"] and not self.parse_at_mentions(text)[0]:
-                    self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
-                    return
-
-                download_target = self._resolve_media_target(text, msg)
-                local_path = download_telegram_file(file_id, download_target)
-                if local_path:
-                    gif_text = f"Manager sent GIF: `{local_path}`"
-                    if text:
-                        gif_text = f"{text}\n\n{gif_text}"
-                    self._route_media_message(gif_text, text, chat_id, msg_id, msg=msg)
-                else:
-                    self.reply(chat_id, "Could not download GIF. Try again.")
+        # Single media message
+        if has_media and chat_id:
+            if self._handle_single_media(incoming):
                 return
 
-        if (photo or doc_is_image) and chat_id:
-            if photo:
-                largest = max(photo, key=lambda p: p.get("file_size", 0))
+        # Text-only message routing
+        if text and chat_id:
+            self._route_text_message(incoming)
+
+    def _check_admin(self, chat_id: int) -> bool:
+        """Verify chat_id is admin, auto-learning if first contact. Returns True if allowed."""
+        global admin_chat_id
+        if admin_chat_id is None:
+            admin_chat_id = chat_id
+            return True
+        return chat_id == admin_chat_id
+
+    def _buffer_media_group(self, media_group_id: str, msg: Dict[str, Any], text: str) -> None:
+        """Buffer a media group item and schedule flush when group is complete."""
+        with media_groups.lock:
+            if media_group_id not in media_groups.buffer:
+                media_groups.buffer[media_group_id] = {
+                    "items": [],
+                    "caption": "",
+                    "timer": None,
+                }
+            group = media_groups.buffer[media_group_id]
+            group["items"].append(msg)
+            if text:
+                group["caption"] = text
+            if group["timer"]:
+                group["timer"].cancel()
+            t = threading.Timer(_MEDIA_GROUP_WAIT,
+                                self._handle_media_group_flush, args=[media_group_id])
+            t.daemon = True
+            group["timer"] = t
+            t.start()
+
+    def _handle_single_media(self, incoming: 'IncomingMessage') -> bool:
+        """Handle a single media message (animation, photo, document, audio, etc.).
+
+        Returns True if the message was handled, False otherwise.
+        """
+        global admin_chat_id
+        msg = incoming.raw_msg
+        text = incoming.text
+        chat_id = incoming.chat_id
+        msg_id = incoming.msg_id
+
+        # Determine media type and file_id
+        file_id: str | None = None
+        media_label = "media"
+
+        if incoming.animation:
+            file_id = incoming.animation.get("file_id")
+            media_label = "GIF"
+        elif incoming.photo or incoming.doc_is_image:
+            if incoming.photo:
+                largest = max(incoming.photo, key=lambda p: p.get("file_size", 0))
                 file_id = largest.get("file_id")
             else:
-                file_id = document.get("file_id")
+                file_id = incoming.document.get("file_id") if incoming.document else None
+            media_label = "image"
+        elif incoming.document and not incoming.doc_is_image:
+            file_id = incoming.document.get("file_id")
+            media_label = "file"
+        elif incoming.audio or incoming.voice or incoming.video or incoming.video_note or incoming.sticker:
+            media_item = (incoming.audio or incoming.voice or incoming.video
+                          or incoming.video_note or incoming.sticker)
+            file_id = media_item.get("file_id") if media_item else None
+            if incoming.audio:
+                media_label = "audio"
+            elif incoming.voice:
+                media_label = "voice"
+            elif incoming.video:
+                media_label = "video"
+            elif incoming.video_note:
+                media_label = "video note"
+            elif incoming.sticker:
+                media_label = "sticker"
 
-            if file_id:
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return
+        if not file_id:
+            return False
 
-                if not state["active"] and not self.parse_at_mentions(text)[0]:
-                    self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
-                    return
+        if not self._check_admin(chat_id):
+            return True
 
-                download_target = self._resolve_media_target(text, msg)
-                local_path = download_telegram_file(file_id, download_target)
-                if local_path:
-                    image_text = f"Manager sent image: `{local_path}`"
-                    if text:
-                        image_text = f"{text}\n\n{image_text}"
-                    self._route_media_message(image_text, text, chat_id, msg_id, msg=msg)
-                else:
-                    self.reply(chat_id, "Could not download image. Try again or send as file.")
-                return
+        if not state["active"] and not self.parse_at_mentions(text)[0]:
+            self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
+            return True
 
-        if document and not doc_is_image and chat_id:
-            file_id = document.get("file_id")
-            if file_id:
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return
+        download_target = self._resolve_media_target(text, msg)
+        local_path = download_telegram_file(file_id, download_target)
+        if not local_path:
+            self.reply(chat_id, f"Could not download {media_label}. Try again.")
+            return True
 
-                if not state["active"] and not self.parse_at_mentions(text)[0]:
-                    self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
-                    return
+        # Build the media text based on type
+        media_text = self._format_media_text(incoming, local_path, media_label)
+        if media_text is None:
+            return True  # Voice with transcript was already handled
 
-                download_target = self._resolve_media_target(text, msg)
-                local_path = download_telegram_file(file_id, download_target)
-                if local_path:
-                    file_name = document.get("file_name", "unknown")
-                    file_size = document.get("file_size", 0)
-                    mime_type = document.get("mime_type", "unknown")
-                    size_str = format_file_size(file_size)
-                    file_text = f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: `{local_path}`"
-                    if text:
-                        file_text = f"{text}\n\n{file_text}"
-                    self._route_media_message(file_text, text, chat_id, msg_id, msg=msg)
-                else:
-                    self.reply(chat_id, "Could not download file. Try again.")
-                return
+        if text:
+            media_text = f"{text}\n\n{media_text}"
+        self._route_media_message(media_text, text, chat_id, msg_id, msg=msg)
+        return True
 
-        # Handle audio, voice, video, video_note, sticker — all have file_id
-        media_item = audio or voice or video or video_note or sticker
-        if media_item and chat_id:
-            file_id = media_item.get("file_id")
-            if file_id:
-                if admin_chat_id is None:
-                    admin_chat_id = chat_id
-                elif chat_id != admin_chat_id:
-                    return
+    def _format_media_text(self, incoming: 'IncomingMessage',
+                           local_path: str, media_label: str) -> str | None:
+        """Format the text description for a downloaded media file.
 
-                if not state["active"] and not self.parse_at_mentions(text)[0]:
-                    self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
-                    return
+        Returns the formatted text, or None if the message was already handled
+        (e.g., voice with successful transcription).
+        """
+        text = incoming.text
+        chat_id = incoming.chat_id
+        msg_id = incoming.msg_id
+        msg = incoming.raw_msg
 
-                download_target = self._resolve_media_target(text, msg)
-                local_path = download_telegram_file(file_id, download_target)
-                if local_path:
-                    if audio:
-                        title = audio.get("title", audio.get("file_name", "audio"))
-                        duration = audio.get("duration", 0)
-                        media_text = f"Manager sent audio: {title} ({duration}s)\nPath: `{local_path}`"
-                    elif voice:
-                        duration = voice.get("duration", 0)
-                        transcript = transcribe_voice(local_path)
-                        if transcript:
-                            self.reply(chat_id, f"🎤 _{transcript}_", msg_id)
-                            if text:
-                                self._route_media_message(f"{text}\n\n{transcript}", text, chat_id, msg_id, msg=msg)
-                            else:
-                                self._route_media_message(transcript, transcript, chat_id, msg_id, msg=msg)
-                            return
-                        else:
-                            media_text = f"Manager sent voice message: ({duration}s)\nPath: `{local_path}`"
-                    elif video:
-                        duration = video.get("duration", 0)
-                        file_name = video.get("file_name", "video")
-                        media_text = f"Manager sent video: {file_name} ({duration}s)\nPath: `{local_path}`"
-                    elif video_note:
-                        duration = video_note.get("duration", 0)
-                        media_text = f"Manager sent video note: ({duration}s)\nPath: `{local_path}`"
-                    elif sticker:
-                        emoji = sticker.get("emoji", "")
-                        media_text = f"Manager sent sticker: {emoji}\nPath: {local_path}"
-                    else:
-                        media_text = f"Manager sent media: {local_path}"
-                    if text:
-                        media_text = f"{text}\n\n{media_text}"
-                    self._route_media_message(media_text, text, chat_id, msg_id, msg=msg)
-                else:
-                    media_type = "audio" if audio else "voice" if voice else "video" if video else "media"
-                    self.reply(chat_id, f"Could not download {media_type}. Try again.")
-                return
+        if media_label == "GIF":
+            return f"Manager sent GIF: `{local_path}`"
 
-        if not text or not chat_id:
-            return
+        if media_label == "image":
+            return f"Manager sent image: `{local_path}`"
+
+        if media_label == "file" and incoming.document:
+            file_name = incoming.document.get("file_name", "unknown")
+            file_size = incoming.document.get("file_size", 0)
+            mime_type = incoming.document.get("mime_type", "unknown")
+            size_str = format_file_size(file_size)
+            return f"Manager sent file: {file_name} ({size_str}, {mime_type})\nPath: `{local_path}`"
+
+        if incoming.audio:
+            title = incoming.audio.get("title", incoming.audio.get("file_name", "audio"))
+            duration = incoming.audio.get("duration", 0)
+            return f"Manager sent audio: {title} ({duration}s)\nPath: `{local_path}`"
+
+        if incoming.voice:
+            duration = incoming.voice.get("duration", 0)
+            transcript = transcribe_voice(local_path)
+            if transcript:
+                self.reply(chat_id, f"🎤 _{transcript}_", msg_id)
+                routed = f"{text}\n\n{transcript}" if text else transcript
+                self._route_media_message(routed, text or transcript, chat_id, msg_id, msg=msg)
+                return None  # Already handled
+            return f"Manager sent voice message: ({duration}s)\nPath: `{local_path}`"
+
+        if incoming.video:
+            duration = incoming.video.get("duration", 0)
+            file_name = incoming.video.get("file_name", "video")
+            return f"Manager sent video: {file_name} ({duration}s)\nPath: `{local_path}`"
+
+        if incoming.video_note:
+            duration = incoming.video_note.get("duration", 0)
+            return f"Manager sent video note: ({duration}s)\nPath: `{local_path}`"
+
+        if incoming.sticker:
+            emoji = incoming.sticker.get("emoji", "")
+            return f"Manager sent sticker: {emoji}\nPath: {local_path}"
+
+        return f"Manager sent media: {local_path}"
+
+    def _route_text_message(self, incoming: 'IncomingMessage') -> None:
+        """Route a text-only message: commands, @mentions, reply-to, or active worker."""
+        global admin_chat_id
+        text = incoming.text
+        chat_id = incoming.chat_id
+        msg_id = incoming.msg_id
+        msg = incoming.raw_msg
 
         if admin_chat_id is None:
             admin_chat_id = chat_id
@@ -11927,12 +11966,10 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
         if re.match(r'^\s*@all(?:\s|[:,]|$)', text, re.IGNORECASE):
             self.route_to_all(text, chat_id, msg_id)
-            _last_mention["target"] = None
-            _last_mention["count"] = 0
-            _last_mention["ts"] = 0
+            self._reset_mention_streak()
             return
 
-        # Extract reply context (quote-reply = context only, never routing unless it is a worker reply without @mention)
+        # Extract reply context
         reply_context = ""
         reply_context_ts = None
         reply_to = msg.get("reply_to_message")
@@ -11942,79 +11979,14 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         unknown_mentions = self.unknown_at_mentions(text)
         if unknown_mentions:
             self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
-            _last_mention["target"] = None
-            _last_mention["count"] = 0
-            _last_mention["ts"] = 0
+            self._reset_mention_streak()
             return
 
-        # Parse @mentions anywhere in text
         targets, message = self.parse_at_mentions(text)
 
         if targets:
-            # Bare @mention means focus switch only (silent on success).
-            if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
-                target = targets[0]
-                registered = self.workers.get_registered_sessions()
-                if target in registered:
-                    state["active"] = target
-                    save_last_active(target)
-                else:
-                    self.reply(chat_id, f"Can't focus guest {target}.")
-                _last_mention["target"] = None
-                _last_mention["count"] = 0
-                _last_mention["ts"] = 0
-                return
-
-            if reply_context:
-                message = self.format_reply_context(message, reply_context, reply_context_ts)
-
-            statuses = []
-            # If reply-to message contains media, download and forward it to targets
-            if reply_to:
-                reply_media = self._extract_reply_media(reply_to, targets[0])
-                if reply_media:
-                    media_text = reply_media
-                    if message:
-                        media_text = f"{message}\n\n{reply_media}"
-                    for name in targets:
-                        statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
-                else:
-                    for name in targets:
-                        statuses.append(self._route_mention(name, message, chat_id, msg_id))
-            else:
-                for name in targets:
-                    statuses.append(self._route_mention(name, message, chat_id, msg_id))
-
-            sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
-            offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
-            # Only reply on failure — success is silent (manager already knows who they mentioned)
-            if offline:
-                parts = []
-                parts.append(f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline.")
-                if sent_to:
-                    parts.append(f"Delivered to {', '.join(sent_to)}.")
-                self.reply(chat_id, " ".join(parts))
-
-            # Auto-focus: if same single registered worker mentioned 2+ times within 60s, switch focus
-            registered = self.workers.get_registered_sessions()
-            now = time.time()
-            if len(targets) == 1 and targets[0] in registered:
-                target = targets[0]
-                if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
-                    _last_mention["count"] += 1
-                else:
-                    _last_mention["target"] = target
-                    _last_mention["count"] = 1
-                _last_mention["ts"] = now
-                if _last_mention["count"] >= 2 and state["active"] != target:
-                    state["active"] = target
-                    save_last_active(target)
-                    self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
-            else:
-                # Multi-mention or guest mention resets streak
-                _last_mention["target"] = None
-                _last_mention["count"] = 0
-                _last_mention["ts"] = 0
+            self._handle_mention_routing(targets, message, text, chat_id, msg_id,
+                                         reply_to, reply_context, reply_context_ts)
             return
 
         # Reply-to worker message without @mention routes to that worker
@@ -12024,19 +11996,84 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             if reply_context:
                 routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
-            _last_mention["target"] = None
-            _last_mention["count"] = 0
-            _last_mention["ts"] = 0
+            self._reset_mention_streak()
             return
 
-        # No @mentions → route to focused worker (resets mention streak)
-        _last_mention["target"] = None
-        _last_mention["count"] = 0
-        _last_mention["ts"] = 0
+        # No @mentions → route to focused worker
+        self._reset_mention_streak()
         routed_text = text
         if reply_context:
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
+
+    def _reset_mention_streak(self) -> None:
+        """Reset the @mention auto-focus streak tracker."""
+        _last_mention["target"] = None
+        _last_mention["count"] = 0
+        _last_mention["ts"] = 0
+
+    def _handle_mention_routing(self, targets: list[str], message: str,
+                                text: str, chat_id: int, msg_id: int,
+                                reply_to: Dict[str, Any] | None,
+                                reply_context: str,
+                                reply_context_ts: int | None) -> None:
+        """Route a message with @mentions to the targeted workers."""
+        # Bare @mention means focus switch only (silent on success)
+        if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
+            target = targets[0]
+            registered = self.workers.get_registered_sessions()
+            if target in registered:
+                state["active"] = target
+                save_last_active(target)
+            else:
+                self.reply(chat_id, f"Can't focus guest {target}.")
+            self._reset_mention_streak()
+            return
+
+        if reply_context:
+            message = self.format_reply_context(message, reply_context, reply_context_ts)
+
+        statuses = []
+        if reply_to:
+            reply_media = self._extract_reply_media(reply_to, targets[0])
+            if reply_media:
+                media_text = reply_media
+                if message:
+                    media_text = f"{message}\n\n{reply_media}"
+                for name in targets:
+                    statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
+            else:
+                for name in targets:
+                    statuses.append(self._route_mention(name, message, chat_id, msg_id))
+        else:
+            for name in targets:
+                statuses.append(self._route_mention(name, message, chat_id, msg_id))
+
+        sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
+        offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
+        if offline:
+            parts = [f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline."]
+            if sent_to:
+                parts.append(f"Delivered to {', '.join(sent_to)}.")
+            self.reply(chat_id, " ".join(parts))
+
+        # Auto-focus: same single registered worker mentioned 2+ times within 60s
+        registered = self.workers.get_registered_sessions()
+        now = time.time()
+        if len(targets) == 1 and targets[0] in registered:
+            target = targets[0]
+            if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
+                _last_mention["count"] += 1
+            else:
+                _last_mention["target"] = target
+                _last_mention["count"] = 1
+            _last_mention["ts"] = now
+            if _last_mention["count"] >= 2 and state["active"] != target:
+                state["active"] = target
+                save_last_active(target)
+                self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
+        else:
+            self._reset_mention_streak()
 
     # @mention regex: negative lookbehind skips @ inside email addresses
     # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)

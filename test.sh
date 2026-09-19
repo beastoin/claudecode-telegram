@@ -1168,7 +1168,7 @@ bridge.state['active'] = 'testworker'
 # Track what gets routed
 routed_messages = []
 
-class FakeRouter:
+class FakeRouter(bridge.CommandRouter):
     def __init__(self):
         self.workers = MagicMock()
         self.workers.get_registered_sessions.return_value = {'testworker': {'tmux': 'claude-test-testworker'}}
@@ -1195,7 +1195,7 @@ update = {
 
 with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/test.ogg'), \
      patch.object(bridge, 'transcribe_voice', return_value='hello this is a test') as mock_stt:
-    bridge.CommandRouter.handle_message(router, update)
+    router.handle_message(update)
 
 # Transparent: worker just gets the text, no mention of voice/audio
 assert len(routed_messages) == 1, f'Expected 1 routed message, got {len(routed_messages)}'
@@ -1224,7 +1224,7 @@ bridge.state['active'] = 'testworker'
 
 routed_messages = []
 
-class FakeRouter:
+class FakeRouter(bridge.CommandRouter):
     def __init__(self):
         self.workers = MagicMock()
         self.workers.get_registered_sessions.return_value = {'testworker': {'tmux': 'claude-test-testworker'}}
@@ -1252,7 +1252,7 @@ update = {
 # STT fails (returns None)
 with patch.object(bridge, 'download_telegram_file', return_value='/tmp/inbox/test2.ogg'), \
      patch.object(bridge, 'transcribe_voice', return_value=None):
-    bridge.CommandRouter.handle_message(router, update)
+    router.handle_message(update)
 
 assert len(routed_messages) == 1, f'Expected 1 routed message, got {len(routed_messages)}'
 msg = routed_messages[0]
