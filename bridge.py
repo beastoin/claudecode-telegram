@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.36.0"
+VERSION = "0.37.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -25,7 +25,7 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
 
 # ── Type aliases for clarity ────────────────────────────────────────────
 ChatId = int
@@ -53,22 +53,85 @@ class TelegramChat(TypedDict, total=False):
     username: str
 
 
+class TelegramPhotoSize(TypedDict, total=False):
+    """Telegram PhotoSize object fields."""
+    file_id: str
+    file_unique_id: str
+    width: int
+    height: int
+    file_size: int
+
+
+class TelegramDocument(TypedDict, total=False):
+    """Telegram Document object fields."""
+    file_id: str
+    file_unique_id: str
+    file_name: str
+    mime_type: str
+    file_size: int
+
+
+class TelegramVoice(TypedDict, total=False):
+    """Telegram Voice object fields."""
+    file_id: str
+    file_unique_id: str
+    duration: int
+    mime_type: str
+    file_size: int
+
+
+class TelegramVideo(TypedDict, total=False):
+    """Telegram Video object fields."""
+    file_id: str
+    file_unique_id: str
+    width: int
+    height: int
+    duration: int
+    file_size: int
+
+
+class TelegramAudio(TypedDict, total=False):
+    """Telegram Audio object fields."""
+    file_id: str
+    file_unique_id: str
+    duration: int
+    performer: str
+    title: str
+    file_size: int
+
+
+class TelegramSticker(TypedDict, total=False):
+    """Telegram Sticker object fields."""
+    file_id: str
+    file_unique_id: str
+    width: int
+    height: int
+
+
 class TelegramMessageDict(TypedDict, total=False):
     """Telegram Message object fields (raw JSON from API)."""
     message_id: int
     chat: TelegramChat
     date: int
     text: str
-    photo: list[dict[str, Any]]
-    document: dict[str, Any]
-    voice: dict[str, Any]
-    video: dict[str, Any]
-    animation: dict[str, Any]
-    audio: dict[str, Any]
-    sticker: dict[str, Any]
+    photo: list[TelegramPhotoSize]
+    document: TelegramDocument
+    voice: TelegramVoice
+    video: TelegramVideo
+    animation: TelegramDocument
+    audio: TelegramAudio
+    sticker: TelegramSticker
     reply_to_message: dict[str, Any]
     caption: str
     media_group_id: str
+
+
+class TelegramCallbackQuery(TypedDict, total=False):
+    """Telegram CallbackQuery object fields."""
+    id: str
+    from_user: TelegramUser
+    message: TelegramMessageDict
+    data: str
 
 
 class TelegramUpdate(TypedDict, total=False):
@@ -76,7 +139,7 @@ class TelegramUpdate(TypedDict, total=False):
     update_id: int
     message: TelegramMessageDict
     edited_message: TelegramMessageDict
-    callback_query: dict[str, Any]
+    callback_query: TelegramCallbackQuery
 
 
 class RegistryData(TypedDict):
@@ -94,6 +157,40 @@ class WorkerEndpointInfo(TypedDict, total=False):
     tmux: str
     protocol: str
     send_example: str
+
+
+# ── NamedTuple models for structured returns ──────────────────────────
+
+class ParsedWorkerTarget(NamedTuple):
+    """Result of parsing 'name@host' or 'name' worker target."""
+    name: str
+    host: str | None
+
+
+class FileValidation(NamedTuple):
+    """Result of validating a file path (photo or document)."""
+    ok: bool
+    detail: Path | str  # Path on success, error message on failure
+
+
+class TmuxActivityResult(NamedTuple):
+    """Result of reading tmux pane activity."""
+    activity: str
+    context_pct: str | None
+    raw_lines: list[str] | None
+
+
+class AuthorDetection(NamedTuple):
+    """Result of detecting message author from text prefix."""
+    author: str
+    avatar_html: str
+    display_text: str
+
+
+class RouteResolution(NamedTuple):
+    """Result of resolving an HTTP route to its handler."""
+    handler: Callable | None
+    match: re.Match | None  # type: ignore[type-arg]
 
 
 try:
@@ -118,9 +215,31 @@ except ImportError as e:
     GITHUB_IMPORT_ERROR = e
 
 
-# ============================================================
+# ── File map ───────────────────────────────────────────────────────────
+#
+#   L1-215      Imports, type aliases, TypedDict/NamedTuple models
+#   L~220       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
+#               ResourceAlertConfig, MediaConfig), AppContext
+#   L~700       Guest/channel/relay subsystem (pure functions + RelayStore)
+#   L~1200      Backend Protocol + registry (BackendProtocol, get_backend, etc.)
+#   L~1500      Text processing: markdown→HTML, Telegram formatting, sanitizers
+#   L~4600      Media handling: photo/document validation, media tag parsing
+#   L~5600      Telegram API layer: send_message, send_photo, send_document,
+#               sendRichMessage, split_message
+#   L~7000      Worker status/health: _detect_os_family, _machine_health,
+#               normalize_cwd, validate_cwd, parse_hire_args
+#   L~7800      Tmux interaction: tmux_exists, tmux_send_message,
+#               _read_tmux_activity, _wait_for_restart_ready
+#   L~8500      WorkerManager class (~1000 lines): hire, fire, restart, status
+#   L~9700      Transport layer: MessageTransport, LocalTransport
+#   L~10000     CommandRouter mixins + CommandRouter class (~3200 lines)
+#   L~13300     Transcript rendering: HTML conversation view
+#   L~14800     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
+#   L~17300     main() function, signal handlers, startup
+#
+# ======================================================================
 # CONFIGURATION
-# ============================================================
+# ======================================================================
 
 class ReuseAddrServer(ThreadingHTTPServer):
     """HTTP server with SO_REUSEADDR to avoid 'Address already in use' on restart."""
@@ -374,6 +493,20 @@ class AppContext:
             self.bridge_url = f"http://localhost:{self.port}"
 
 
+def _log_best_effort(label: str, func: Callable, *args: Any, **kwargs: Any) -> Any:
+    """Call func(*args, **kwargs) and log on failure instead of crashing.
+
+    Use for fire-and-forget operations where failure is acceptable but
+    should not be silent (aligns with 'fail loudly' philosophy).
+    Returns the function result on success, None on failure.
+    """
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:
+        print(f"[best-effort:{label}] {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
 def _build_app_context() -> AppContext:
     """Build AppContext from current module globals (bridge between old and new)."""
     return AppContext(
@@ -437,7 +570,7 @@ class IncomingMessage:
     raw_msg: dict | None = None
 
     @classmethod
-    def from_update(cls: type["IncomingMessage"], update: dict) -> "IncomingMessage":
+    def from_update(cls: type["IncomingMessage"], update: dict[str, Any]) -> "IncomingMessage":
         """Factory: parse a Telegram update dict into an IncomingMessage."""
         msg = update.get("message", {})
         text = msg.get("text", "") or msg.get("caption", "")
@@ -689,7 +822,7 @@ def guest_generate_name(existing_names: set | None = None) -> str:
     return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
 
 
-def guest_validate_name(name: str, team_workers: set, existing_guests: set) -> tuple[bool, str]:
+def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
     """Validate a guest name. Returns (ok, error_message)."""
     if not name or not name.strip():
         return False, "name is required"
@@ -724,7 +857,7 @@ def guest_inbox_filter(messages: list, after: str | None = None) -> list:
     return result
 
 
-def guest_inbox_append(inbox: list, msg: dict) -> list:
+def guest_inbox_append(inbox: list[dict[str, Any]], msg: dict[str, Any]) -> list[dict[str, Any]]:
     """Append a message to inbox, capping at GUEST_INBOX_CAP."""
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
@@ -879,7 +1012,7 @@ def channel_get_messages(channel: dict, after: str | None = None) -> tuple[list,
     return channel["messages"][found_idx + 1:], False
 
 
-def channel_is_expired(channel: dict) -> bool:
+def channel_is_expired(channel: dict[str, Any]) -> bool:
     """Check if a channel has expired."""
     return time.time() > channel["expires_at_unix"]
 
@@ -950,7 +1083,7 @@ def _relay_load() -> None:
         print(f"[relay] Failed to load state: {e}", flush=True)
 
 
-def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple:
+def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[dict[str, Any], str, str]:
     """Create a relay channel with guest and reply tokens. Returns (channel, guest_token, reply_token)."""
     channel_id = channel_create_id(label)
     guest_token = f"gt_{secrets.token_urlsafe(32)}"
@@ -1045,7 +1178,7 @@ def relay_auth_reply(channel_id: str, token: str) -> dict[str, Any] | None:
     return ch
 
 
-def relay_guest_send(channel_id: str, text: str) -> tuple:
+def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, dict[str, Any] | None]:
     """Guest sends a message to the worker. Returns (envelope_text, message_dict)."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -1378,7 +1511,7 @@ def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "
         subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=15)
 
 
-def _extract_msg_text(msg: dict) -> str:
+def _extract_msg_text(msg: dict[str, Any]) -> str:
     """Extract plain text from a Telegram message, including rich_message blocks."""
     text = msg.get("text") or msg.get("caption") or ""
     if not text:
@@ -1400,15 +1533,16 @@ def _extract_msg_text(msg: dict) -> str:
     return text
 
 
-def parse_worker_target(target: str) -> tuple:
-    """Parse 'name@host' or 'name' into (name, host).
+def parse_worker_target(target: str) -> ParsedWorkerTarget:
+    """Parse 'name@host' or 'name' into a ParsedWorkerTarget.
 
-    Returns (name, None) for local workers, (name, host) for remote.
+    Returns ParsedWorkerTarget(name, None) for local workers,
+    ParsedWorkerTarget(name, host) for remote.
     """
     if "@" in target:
         name, host = target.rsplit("@", 1)
-        return name, host
-    return target, None
+        return ParsedWorkerTarget(name, host)
+    return ParsedWorkerTarget(target, None)
 
 
 def get_worker_host(name: str) -> str | None:
@@ -1463,12 +1597,14 @@ class Machine:
 
 
 def _detect_os_family() -> str:
+    """Detect the OS family: 'darwin' on macOS, 'linux' everywhere else."""
     if sys.platform == "darwin":
         return "darwin"
     return "linux"
 
 
 def _validate_machine_id(machine_id: str) -> str:
+    """Validate and return a machine id (alphanumeric + dash/underscore)."""
     if not isinstance(machine_id, str) or not machine_id:
         raise MachineConfigError("machine id must be a non-empty string")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", machine_id):
@@ -1477,6 +1613,7 @@ def _validate_machine_id(machine_id: str) -> str:
 
 
 def _coerce_optional_str(value: Any, field: str, machine_id: str) -> str:
+    """Coerce a config value to str, allowing None (→ empty string)."""
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -1485,6 +1622,7 @@ def _coerce_optional_str(value: Any, field: str, machine_id: str) -> str:
 
 
 def _implicit_local_machine() -> Machine:
+    """Create a Machine for the local host when no machines.json exists."""
     return Machine(
         id=BRIDGE_SSH_TARGET or "vps",
         ssh_target=None,
@@ -1584,6 +1722,7 @@ def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
 
 
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
+    """Look up the Machine for a worker's ssh_target, creating an ad-hoc entry if needed."""
     if host is None:
         for machine in machines.values():
             if machine.is_local:
@@ -1605,7 +1744,8 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
     )
 
 
-def _machine_health(machine: Machine) -> dict:
+def _machine_health(machine: Machine) -> dict[str, Any]:
+    """Build a health status dict for a machine (disk, memory, IO, up/down)."""
     host_label = machine.ssh_target or "VPS"
     health = {
         "status": "up" if machine.is_local else "unknown",
@@ -1631,6 +1771,7 @@ def _machine_health(machine: Machine) -> dict:
 
 
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
+    """Return the access command for reaching a machine ('local' or 'ssh <host>')."""
     target_host = machine.ssh_target
     if caller_host == target_host:
         return "local"
@@ -2656,7 +2797,7 @@ class MentionTracker:
         """Get a value with optional default (dict-like access)."""
         return getattr(self, key, default)
 
-    def keys(self) -> tuple:
+    def keys(self) -> tuple[str, ...]:
         """Return all keys (dict-like access)."""
         return self._KEYS
 
@@ -3045,6 +3186,7 @@ def _read_learning_reminder(name: str) -> str:
 
 
 def _new_reminder_state() -> dict[str, Any]:
+    """Create a fresh learning-reminder state dict with zero counters."""
     now = time.time()
     return {
         "response_count": 0,
@@ -3101,7 +3243,7 @@ def _reset_learning_reminder(name: str) -> None:
         _save_learning_reminder_state()
 
 
-def _fire_reminder(name: str, st: dict) -> None:
+def _fire_reminder(name: str, st: dict[str, Any]) -> None:
     """Mark state as fired and send reminder in background. Caller holds learning_reminders.lock."""
     st["response_count"] = 0
     st["last_reminder_ts"] = time.time()
@@ -3863,6 +4005,7 @@ class TelegramTransport(MessageTransport):
     def _send_media_multipart(self, chat_id: ChatId, file_path: Path,
                               field_name: str, api_method: str,
                               caption: str | None = None) -> bool:
+        """Send a file to Telegram using multipart/form-data. Returns True on success."""
         if not BOT_TOKEN:
             return False
         boundary = uuid.uuid4().hex
@@ -4030,6 +4173,7 @@ class LocalTransport(MessageTransport):
         return "local"
 
     def _log(self, method: str, chat_id: ChatId, **kwargs: Any) -> None:
+        """Log a transport method call with optional kwargs for debugging."""
         msg = f"[local-transport] {method} chat_id={chat_id}"
         for k, v in kwargs.items():
             if v is not None:
@@ -4119,6 +4263,7 @@ class LocalTransport(MessageTransport):
 
 
 def _init_transport() -> MessageTransport:
+    """Create the appropriate MessageTransport based on TRANSPORT_MODE."""
     if TRANSPORT_MODE == "local":
         return LocalTransport()
     return TelegramTransport(BOT_TOKEN)
@@ -4596,7 +4741,7 @@ TELEGRAM_PHOTO_MAX_SUM = 10000  # width + height must not exceed this
 TELEGRAM_PHOTO_MAX_DIM = 5000   # neither dimension may exceed this
 
 
-def _prepare_photo_for_telegram(photo_path: str) -> tuple:
+def _prepare_photo_for_telegram(photo_path: str) -> tuple[bytes, str]:
     """Auto-resize a photo if it exceeds Telegram's sendPhoto limits.
 
     Telegram returns 400 Bad Request when width+height > 10000 or either
@@ -4638,26 +4783,26 @@ def _prepare_photo_for_telegram(photo_path: str) -> tuple:
         return photo_path.read_bytes(), photo_path.name
 
 
-def validate_photo_path(photo_path: str) -> tuple:
-    """Validate a photo path. Returns (ok, Path or error string)."""
+def validate_photo_path(photo_path: str) -> FileValidation:
+    """Validate a photo path. Returns FileValidation(ok, Path_or_error_str)."""
     photo_path = Path(photo_path)
 
     if not photo_path.exists():
-        return False, f"Photo not found: {photo_path}"
+        return FileValidation(False, f"Photo not found: {photo_path}")
 
     if not photo_path.is_file():
-        return False, f"Not a file: {photo_path}"
+        return FileValidation(False, f"Not a file: {photo_path}")
 
     # Check extension
     if photo_path.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
-        return False, f"Invalid image extension: {photo_path.suffix}"
+        return FileValidation(False, f"Invalid image extension: {photo_path.suffix}")
 
     # Check size
     file_size = photo_path.stat().st_size
     if file_size > MAX_FILE_SIZE:
-        return False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}"
+        return FileValidation(False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}")
 
-    return True, photo_path
+    return FileValidation(True, photo_path)
 
 
 def is_blocked_filename(filename: str) -> bool:
@@ -4672,35 +4817,35 @@ def is_blocked_filename(filename: str) -> bool:
     return False
 
 
-def validate_document_path(doc_path: str) -> tuple:
-    """Validate a document path. Returns (ok, Path or error string)."""
+def validate_document_path(doc_path: str) -> FileValidation:
+    """Validate a document path. Returns FileValidation(ok, Path_or_error_str)."""
     doc_path = Path(doc_path)
 
     # Security: validate path exists and is regular file
     if not doc_path.exists():
-        return False, f"Document not found: {doc_path}"
+        return FileValidation(False, f"Document not found: {doc_path}")
 
     if not doc_path.is_file():
-        return False, f"Not a file: {doc_path}"
+        return FileValidation(False, f"Not a file: {doc_path}")
 
     # Security: check for blocked extensions (sensitive)
     ext_lower = doc_path.suffix.lower()
     if ext_lower in BLOCKED_DOC_EXTENSIONS:
-        return False, f"Blocked extension (sensitive): {doc_path.suffix}"
+        return FileValidation(False, f"Blocked extension (sensitive): {doc_path.suffix}")
 
     # Security: check for blocked filenames
     if is_blocked_filename(doc_path.name):
-        return False, f"Blocked filename (sensitive): {doc_path.name}"
+        return FileValidation(False, f"Blocked filename (sensitive): {doc_path.name}")
 
     # Check size
     file_size = doc_path.stat().st_size
     if file_size > MAX_FILE_SIZE:
-        return False, f"Document too large: {file_size} > {MAX_FILE_SIZE}"
+        return FileValidation(False, f"Document too large: {file_size} > {MAX_FILE_SIZE}")
 
     # Note: No path restriction - workers can send from anywhere
     # Security is enforced via extension allowlist and filename blocklist
 
-    return True, doc_path
+    return FileValidation(True, doc_path)
 
 
 # Media extensions routed to specialized Telegram API methods
@@ -4747,7 +4892,7 @@ def _collapse_excess_newlines(text: str) -> str:
     return "".join(output)
 
 
-def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], str | None]) -> tuple:
+def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], str | None]) -> tuple[str, list[tuple[str, str]]]:
     """Parse media tags, skipping escaped tags and code spans.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -4855,9 +5000,11 @@ def markdown_to_telegram_html(text: str) -> str:
             self._rejected_open_tags = rejected_open_tags
 
         def _escape_attr(self, value: str) -> str:
+            """Escape an HTML attribute value (entities + quotes)."""
             return escape_html(value).replace('"', "&quot;")
 
         def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+            """Check if all attributes on a tag are in the allowed set."""
             allowed = self.SAFE_ATTRS.get(tag, frozenset())
             seen = set()
             for name, value in attrs:
@@ -4882,6 +5029,7 @@ def markdown_to_telegram_html(text: str) -> str:
             return True
 
         def _render_start_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+            """Render a safe opening tag with escaped attributes."""
             if not attrs:
                 return f"<{tag}>"
             rendered = []
@@ -4945,6 +5093,7 @@ def markdown_to_telegram_html(text: str) -> str:
             return "".join(self._out)
 
     def _sanitize_html(raw: str) -> str:
+        """Sanitize HTML to only allow Telegram-safe tags and attributes."""
         if not raw:
             return ""
         sanitizer = _TelegramHTMLSanitizer(_rejected_open_tags)
@@ -5211,6 +5360,7 @@ def _pipe_tables_to_html(text: str) -> str:
     import re
 
     def _parse_row(line: str) -> list[str] | None:
+        """Parse a pipe-delimited table row into cells, or None if not a table row."""
         line = line.strip()
         if line.startswith('|'):
             line = line[1:]
@@ -5219,6 +5369,7 @@ def _pipe_tables_to_html(text: str) -> str:
         return [cell.strip() for cell in line.split('|')]
 
     def _esc(s: str) -> str:
+        """Escape HTML special characters in table cell text."""
         return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
     def _cell_md(s: str) -> str:
@@ -5666,6 +5817,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     cache_file = get_session_dir(name) / "claude_session_id"
 
     def _read_cache() -> str:
+        """Read cached session ID from disk, or empty string if absent."""
         if cache_file.exists():
             val = cache_file.read_text().strip()
             if val:
@@ -5846,6 +5998,7 @@ def try_set_pending(name: str, chat_id: int | str) -> bool:
 
 
 def _pending_timestamp(name: str) -> int | None:
+    """Read the mtime of a worker's pending-response file, or None if absent."""
     pending = get_pending_file(name)
     if not pending.exists():
         return None
@@ -6061,6 +6214,7 @@ def _clear_hook_failures(name: str) -> None:
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
+    """Check if a worker session is poisoned (crashed/stuck). Returns reason or None."""
     # Primary: check hook-written failure signal file
     hook_reason = _check_hook_failure_signal(name)
     if hook_reason:
@@ -6085,6 +6239,7 @@ def _detect_poisoned(name: str, tmux_name: str) -> str | None:
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
+    """Send a watchdog alert to Telegram admin when a worker changes state."""
     if admin_chat_id is None:
         return
 
@@ -6188,6 +6343,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
 
 
 def _is_host_down(host: str) -> bool:
+    """Check if a remote host is marked as down by the watchdog."""
     with watchdog.lock:
         return host_health.down.get(host, False)
 
@@ -6686,7 +6842,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                         print(f"[watchdog] CPU hog alert error: {e}")
 
 
-def _probe_worktree_sizes(remote_hosts: set) -> None:
+def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     """Check worktree directories and alert when total exceeds threshold."""
     now = time.time()
     hosts_to_check = [None] + list(remote_hosts)
@@ -6817,6 +6973,7 @@ def _probe_tailscale() -> None:
 # (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
+    """Send a 'resolved' alert to admin when a worker recovers from a problem state."""
     if admin_chat_id is None:
         return
 
@@ -6867,6 +7024,7 @@ def _handle_watchdog_transition(
     since: float,
     now: float | None = None,
 ) -> None:
+    """Process a watchdog state transition: alert on bad states, clear on recovery."""
     if now is None:
         now = time.time()
 
@@ -7404,6 +7562,7 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 def _format_watchdog_status(name: str,
                             pending_lookup: dict[str, Any] | None = None,
                             state_snapshot: dict[str, Any] | None = None) -> str:
+    """Format a human-readable watchdog status line for one worker."""
     if pending_lookup is None:
         pending_lookup = is_pending
 
@@ -7761,6 +7920,7 @@ def _extract_activity(lines: list[str]) -> str:
 
     # 9. Last non-tool ● output block
     def _is_block_end(text: str) -> bool:
+        """Detect if a tmux line signals the end of a Claude output block."""
         t = text.lstrip()
         if t.startswith("Context left until auto-compact:"):
             return True
@@ -7813,30 +7973,30 @@ def _extract_context_pct(lines: list[str]) -> str | None:
     return None
 
 
-def _read_tmux_activity(tmux_name: str, host: str | None = None) -> tuple:
+def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
     """Read tmux pane and extract activity summary + context% + raw lines.
 
-    Returns (activity_str, context_pct_str_or_None, raw_lines_or_None).
+    Returns TmuxActivityResult(activity, context_pct, raw_lines).
     When host is set, reads from a remote tmux session via SSH.
     """
     try:
         if host:
-            result = _remote_run(
+            proc = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 host=host, capture_output=True, text=True, timeout=5
             )
         else:
-            result = subprocess.run(
+            proc = subprocess.run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 capture_output=True, text=True, timeout=3
             )
-        if result.returncode != 0:
-            return "Unknown", None, None
-        lines = result.stdout.split("\n")
+        if proc.returncode != 0:
+            return TmuxActivityResult("Unknown", None, None)
+        lines = proc.stdout.split("\n")
         tail = lines[-40:]
-        return _extract_activity(tail), _extract_context_pct(tail), tail
+        return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
     except (subprocess.SubprocessError, OSError):
-        return "Unknown", None, None
+        return TmuxActivityResult("Unknown", None, None)
 
 
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
@@ -8085,6 +8245,7 @@ def get_worker_backend(name: str, session: dict | None = None) -> str:
 
 
 def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") -> bool:
+    """Send a message to a gRPC-connected worker. Returns True on success."""
     if grpc_server is None:
         return False
 
@@ -8100,6 +8261,7 @@ def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") ->
 
 
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: dict[str, Any] | None = None) -> bool:
+    """Send a message to a callback-URL worker (HTTP POST). Returns True on success."""
     callback_url = (session or {}).get("callback_url", "")
     if not callback_url:
         callback_url = _load_registry().get("workers", {}).get(name, {}).get("callback_url", "")
@@ -8141,6 +8303,7 @@ class WorkerManager:
         self.tmux_prefix = tmux_prefix
 
     def _sync_paths(self) -> None:
+        """Sync instance paths with current module globals (for runtime reconfiguration)."""
         if self.sessions_dir != SESSIONS_DIR:
             self.sessions_dir = SESSIONS_DIR
         if self.tmux_prefix != TMUX_PREFIX:
@@ -8940,6 +9103,7 @@ worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)
 
 
 def _sync_worker_manager() -> None:
+    """Sync the global worker_manager instance with current module globals."""
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
 
@@ -9185,7 +9349,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     return None
 
 
-def _localize_media(name: str, media_list: list) -> list:
+def _localize_media(name: str, media_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """For teleported workers, fetch remote files to local temp paths.
 
     Always fetches from remote for teleported workers, even if a local file
@@ -9404,6 +9568,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         if not paragraphs:
             paragraphs = [speak_text]
         def _tts_and_send() -> None:
+            """Synthesize TTS audio and send voice messages for each paragraph."""
             try:
                 for i, para in enumerate(paragraphs):
                     print(f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
@@ -9456,7 +9621,7 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> N
         print(f"gRPC response error for '{name}': {e}")
 
 
-def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict) -> None:
+def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict[str, Any]) -> None:
     """Handle a gRPC worker registration event."""
     tool_names = ", ".join(sorted(tools.keys())) if tools else "none"
     host_label = host or "unknown-host"
@@ -9499,7 +9664,7 @@ def handle_grpc_jsonl_received(stream_id: str, data: bytes) -> None:
     print(f"gRPC JSONL received: {stream_id or safe_id} -> {path} ({len(data)} bytes)")
 
 
-def _merge_grpc_workers(workers: list) -> list:
+def _merge_grpc_workers(workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Include connected gRPC workers in /workers without changing tmux entries."""
     if grpc_server is None:
         return workers
@@ -11117,6 +11282,7 @@ class WorkerLifecycleCommandsMixin:
         return True, None
 
     def _cmd_restart_all(self, chat_id: int | str, clean: bool) -> bool:
+        """Handle /restart-all command — sequentially restart all workers."""
         registered = self.workers.get_registered_sessions()
         if not registered:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
@@ -11148,6 +11314,7 @@ class WorkerLifecycleCommandsMixin:
         return True
 
     def _run_restart_all_sequence(self, chat_id: int | str, names: list[str], mode: str) -> None:
+        """Background thread: restart workers one at a time with delay between."""
         delay_s = 7
         failed = []
         try:
@@ -11194,6 +11361,7 @@ class WorkerLifecycleCommandsMixin:
                 self._restart_all_thread = None
 
     def _cmd_restart_cancel(self, chat_id: int | str) -> bool:
+        """Cancel a running restart-all sequence."""
         with self._restart_all_lock:
             if not self._restart_all_running:
                 self.reply(chat_id, "No restart-all sequence is running.")
@@ -13314,10 +13482,10 @@ _TEAM_MEMBERS = {
 _MANAGER_AV = '<div class="u-av"><img src="https://avatars.githubusercontent.com/u/4256921" alt="manager"></div>'
 
 
-def _detect_message_author(text: str) -> tuple:
+def _detect_message_author(text: str) -> AuthorDetection:
     """Detect author from message prefix like 'ryo: message'.
 
-    Returns (author_name, avatar_html, display_text).
+    Returns AuthorDetection(author, avatar_html, display_text).
     - Team member prefix → generated avatar, text without prefix
     - 'manager:' prefix → GitHub avatar, text without prefix
     - No prefix → GitHub avatar (default = manager), original text
@@ -13329,11 +13497,11 @@ def _detect_message_author(text: str) -> tuple:
         prefix = stripped[:colon_pos].lower().strip()
         rest = stripped[colon_pos + 1:].strip()
         if prefix == "manager":
-            return "manager", _MANAGER_AV, rest or stripped
+            return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
         if prefix in _TEAM_MEMBERS:
-            return prefix, _generate_member_avatar(prefix), rest or stripped
+            return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
     # Default: manager avatar, full text
-    return "manager", _MANAGER_AV, stripped
+    return AuthorDetection("manager", _MANAGER_AV, stripped)
 
 
 def _transcript_entry_to_html(entry: dict[str, Any], esc: Callable[[str], str], tool_results: dict[str, Any] | None = None) -> str:
@@ -13523,7 +13691,7 @@ def _format_model_name(model_name: str) -> str:
     return s
 
 
-def _transcript_stats(entries: list) -> dict:
+def _transcript_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Extract metadata stats from transcript entries."""
     n_user = sum(1 for e in entries if e.get("type") == "user"
                  and e.get("message", {}).get("role") == "user"
@@ -14199,6 +14367,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
 
     # Build context URL for search mode (click message → jump to full transcript)
     def _ctx_url(entry: dict[str, Any]) -> str:
+        """Build a context URL for search results — links to full transcript."""
         if not search_query:
             return ""
         idx = entry.get("_idx", -1)
@@ -14764,43 +14933,43 @@ class EndpointRouter:
         self._get_exact: dict[str, callable] = {}
         self._get_patterns: list[tuple] = []
 
-    def post(self, path: str, handler: callable) -> None:
+    def post(self, path: str, handler: Callable) -> None:
         """Register a POST handler for an exact path."""
         self._post_exact[path] = handler
 
-    def post_pattern(self, pattern: str, handler: callable) -> None:
+    def post_pattern(self, pattern: str, handler: Callable) -> None:
         """Register a POST handler for a regex path pattern."""
         self._post_patterns.append((re.compile(pattern), handler))
 
-    def get(self, path: str, handler: callable) -> None:
+    def get(self, path: str, handler: Callable) -> None:
         """Register a GET handler for an exact path."""
         self._get_exact[path] = handler
 
-    def get_pattern(self, pattern: str, handler: callable) -> None:
+    def get_pattern(self, pattern: str, handler: Callable) -> None:
         """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
-    def resolve_post(self, path: str) -> tuple:
-        """Find handler for POST path. Returns (handler, match) or (None, None)."""
-        h = self._post_exact.get(path)
-        if h:
-            return h, None
+    def resolve_post(self, path: str) -> RouteResolution:
+        """Find handler for POST path. Returns RouteResolution(handler, match)."""
+        handler = self._post_exact.get(path)
+        if handler:
+            return RouteResolution(handler, None)
         for regex, handler in self._post_patterns:
-            m = regex.match(path)
-            if m:
-                return handler, m
-        return None, None
+            match = regex.match(path)
+            if match:
+                return RouteResolution(handler, match)
+        return RouteResolution(None, None)
 
-    def resolve_get(self, path: str) -> tuple:
-        """Find handler for GET path. Returns (handler, match) or (None, None)."""
-        h = self._get_exact.get(path)
-        if h:
-            return h, None
+    def resolve_get(self, path: str) -> RouteResolution:
+        """Find handler for GET path. Returns RouteResolution(handler, match)."""
+        handler = self._get_exact.get(path)
+        if handler:
+            return RouteResolution(handler, None)
         for regex, handler in self._get_patterns:
-            m = regex.match(path)
-            if m:
-                return handler, m
-        return None, None
+            match = regex.match(path)
+            if match:
+                return RouteResolution(handler, match)
+        return RouteResolution(None, None)
 
 
 # Singleton endpoint router — populated after Handler class is defined
@@ -16255,13 +16424,17 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
     /checkin, /health, etc.). Delegates specialized endpoints to mixins.
     """
 
-    def _send_json(self, status_code: int, data: dict) -> None:
+    def _send_json(self, status_code: int, data: dict[str, Any]) -> None:
         """Send a JSON response with proper Content-Type."""
         body = json.dumps(data).encode()
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_error_json(self, status_code: int, message: str) -> None:
+        """Send a JSON error response with status code and message."""
+        self._send_json(status_code, {"error": message})
 
     def _send_html(self, body: bytes, status: int = 200) -> None:
         """Send HTML response, gzip-compressed if client supports it."""
@@ -16335,6 +16508,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             print(f"[webhook] update_id={update.get('update_id')}, types={update_types}, text={repr(text[:50]) if text else '(none)'}")
             if "message" in update:
                 def _safe_handle(upd: dict[str, Any]) -> None:
+                    """Handle a Telegram update in a thread, logging errors instead of crashing."""
                     try:
                         command_router.handle_message(upd)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
@@ -17269,6 +17443,7 @@ def main() -> None:
     _connector_message_log = {}  # tag -> deque of {ts, html, plain, targets}
 
     def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
+        """Log a connector message for debugging (capped at 20 per tag)."""
         from collections import deque
         if tag not in _connector_message_log:
             _connector_message_log[tag] = deque(maxlen=20)
@@ -17420,6 +17595,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
         return None
 
     def _connector_on_message(tag: str) -> Callable[..., None]:
+        """Create a message handler for a connector tag (Gmail/GitHub)."""
         def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: dict[str, Any] | None = None) -> None:
             """Create an HTTP request handler bound to the current bridge state."""
             if plain_text is None:
@@ -17476,9 +17652,11 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
         return handler
 
     def _connector_get_workers() -> set[str]:
+        """Return the set of registered worker names for connector routing."""
         return set(get_registered_sessions().keys())
 
     def _connector_on_alert(tag: str) -> Callable[[str], None]:
+        """Create an alert handler for a connector tag (sends to admin chat)."""
         def handler(text: str) -> None:
             """Create an HTTP request handler bound to the current bridge state."""
             if admin_chat_id:

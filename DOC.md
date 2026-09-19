@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.34.0
+> Version: 0.37.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,59 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.37.0 - TypedDicts, NamedTuples, 100% annotations & docstrings
+
+**Telegram API TypedDicts (7 new):**
+- Added `TelegramPhotoSize`, `TelegramDocument`, `TelegramVoice`, `TelegramVideo`, `TelegramAudio`, `TelegramSticker`, `TelegramCallbackQuery`.
+- Updated `TelegramMessageDict` to use typed media fields instead of `dict[str, Any]`.
+- Updated `TelegramUpdate.callback_query` to use `TelegramCallbackQuery`.
+
+**NamedTuples for structured returns (5 new):**
+- `ParsedWorkerTarget(name, host)` — replaces bare tuple in `parse_worker_target()`.
+- `FileValidation(ok, detail)` — replaces bare tuples in `validate_photo_path()` / `validate_document_path()`.
+- `TmuxActivityResult(activity, context_pct, raw_lines)` — replaces bare tuple in `_read_tmux_activity()`.
+- `AuthorDetection(author, avatar_html, display_text)` — replaces bare tuple in `_detect_message_author()`.
+- `RouteResolution(handler, match)` — replaces bare tuples in `EndpointRouter.resolve_post/get()`.
+
+**Type precision:**
+- Parameterized all bare `tuple` return annotations (12 functions).
+- Parameterized all bare `dict`, `list`, `set` annotations (12 functions).
+- Fixed `callable` → `Callable` in 4 `EndpointRouter` methods.
+- 606/606 functions fully annotated (100%).
+
+**Documentation:**
+- 606/606 functions now have docstrings (100%, was 96.7%).
+- Added file map comment after imports showing class layout by line range.
+
+**Error handling:**
+- Added `_log_best_effort(label, func, *args)` helper for fire-and-forget ops.
+- Added `_send_error_json(status_code, message)` to Handler for consistent error responses.
+
+**All 409 tests pass (0 failures).**
+
+### v0.36.0 - Documentation, exception precision, function decomposition
+
+**Documentation (199 public function docstrings):**
+- Added one-line docstrings to all 199 public functions/methods that were missing them.
+- Every public API entry point now has a docstring describing its purpose.
+
+**Exception precision (57 → 0 broad catches):**
+- Narrowed all 57 `except Exception` catches to specific exception types (subprocess.SubprocessError, OSError, ConnectionError, TimeoutError, json.JSONDecodeError, KeyError, ValueError, etc.).
+- Only 1 `except Exception` remains — in a string template, not actual code.
+- Fixed 3 test assertions that were using bare `Exception` instead of specific types.
+
+**Function decomposition:**
+- `handle_message` (322 lines → 40 lines): Split into 7 focused methods — `_check_admin`, `_buffer_media_group`, `_handle_single_media`, `_format_media_text`, `_route_text_message`, `_handle_mention_routing`, `_reset_mention_streak`.
+- `watchdog_loop` (317 lines → 30 lines): Split into 10 focused functions — `_watchdog_update_probe_failures`, `_watchdog_probe_remote_hosts`, `_watchdog_collect_worker_pids`, `_watchdog_gather_cpu_stats`, `_watchdog_evaluate_workers`, `_watchdog_compute_children`, `_watchdog_track_activity`, `_watchdog_refine_state`, `_watchdog_cleanup_stale`, `_watchdog_resource_checks`.
+- Deduplicated cleanup logic (10 separate dict iterations → 1 loop over list).
+- Deduplicated resource checks (6 try/except blocks → 1 loop with label table).
+
+**Test fixes:**
+- Fixed pre-existing `test_is_online_ssh_failure` (missing `**kwargs` on mock).
+- Fixed `test_teleport_preflight` assertion (was checking `/health` but code uses `/`).
+- Updated `FakeRouter` in voice tests to inherit from `CommandRouter`.
+- All 409 tests pass (0 failures).
 
 ### v0.35.0 - OOP mixin extraction + complete type annotations + exception narrowing
 
