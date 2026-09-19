@@ -25,13 +25,13 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Protocol, TypedDict, runtime_checkable, Union
+from typing import Any, Callable, Iterator, Literal, Protocol, TypedDict, runtime_checkable
 
 # ── Type aliases for clarity ────────────────────────────────────────────
 ChatId = int
 MessageId = int
-ParseMode = Optional[Literal["HTML", "MarkdownV2"]]
-TelegramApiResponse = Optional[Dict[str, Any]]
+ParseMode = Literal["HTML", "MarkdownV2"] | None
+TelegramApiResponse = dict[str, Any] | None
 
 # ── TypedDict models for raw JSON shapes ────────────────────────────────
 
@@ -398,7 +398,7 @@ def _build_app_context() -> AppContext:
 
 
 # Singleton context — built lazily after all globals are initialized
-_app_context: Optional[AppContext] = None
+_app_context: AppContext | None = None
 
 
 def get_app_context() -> AppContext:
@@ -415,26 +415,26 @@ def get_app_context() -> AppContext:
 class IncomingMessage:
     """Parsed Telegram update — created once, read everywhere."""
     update_id: int = 0
-    chat_id: Optional[int] = None
-    msg_id: Optional[int] = None
+    chat_id: int | None = None
+    msg_id: int | None = None
     text: str = ""
     # Media fields
-    photo: Optional[list] = None
-    document: Optional[dict] = None
-    animation: Optional[dict] = None
-    audio: Optional[dict] = None
-    voice: Optional[dict] = None
-    video: Optional[dict] = None
-    video_note: Optional[dict] = None
-    sticker: Optional[dict] = None
+    photo: list | None = None
+    document: dict | None = None
+    animation: dict | None = None
+    audio: dict | None = None
+    voice: dict | None = None
+    video: dict | None = None
+    video_note: dict | None = None
+    sticker: dict | None = None
     # Derived
     has_media: bool = False
     doc_is_image: bool = False
-    media_group_id: Optional[str] = None
+    media_group_id: str | None = None
     # Reply context
-    reply_to: Optional[dict] = None
+    reply_to: dict | None = None
     # Raw message dict (for edge cases during migration)
-    raw_msg: Optional[dict] = None
+    raw_msg: dict | None = None
 
     @classmethod
     def from_update(cls: type["IncomingMessage"], update: dict) -> "IncomingMessage":
@@ -501,7 +501,7 @@ class GuestSession:
     notified_workers: set
 
     @classmethod
-    def from_dict(cls: type["GuestSession"], token_hash: str, d: Dict[str, Any]) -> "GuestSession":
+    def from_dict(cls: type["GuestSession"], token_hash: str, d: dict[str, Any]) -> "GuestSession":
         """Construct an instance from a plain dictionary."""
         nw = d.get("notified_workers", set())
         if isinstance(nw, list):
@@ -514,7 +514,7 @@ class GuestSession:
             notified_workers=nw,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {
             "name": self.name,
@@ -538,7 +538,7 @@ class GuestInboxMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["GuestInboxMessage"], d: Dict[str, Any]) -> "GuestInboxMessage":
+    def from_dict(cls: type["GuestInboxMessage"], d: dict[str, Any]) -> "GuestInboxMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
@@ -556,7 +556,7 @@ class ChannelMember:
     name: str = ""    # display name (empty for manager)
 
     @classmethod
-    def from_dict(cls: type["ChannelMember"], key: str, d: Dict[str, Any]) -> "ChannelMember":
+    def from_dict(cls: type["ChannelMember"], key: str, d: dict[str, Any]) -> "ChannelMember":
         """Construct an instance from a plain dictionary."""
         return cls(key=key, type=d["type"], name=d.get("name", ""))
 
@@ -571,7 +571,7 @@ class ChannelMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["ChannelMessage"], d: Dict[str, Any]) -> "ChannelMessage":
+    def from_dict(cls: type["ChannelMessage"], d: dict[str, Any]) -> "ChannelMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d["id"],
@@ -592,7 +592,7 @@ class RelayMessage:
     sender_name: str = ""
 
     @classmethod
-    def from_dict(cls: type["RelayMessage"], d: Dict[str, Any]) -> "RelayMessage":
+    def from_dict(cls: type["RelayMessage"], d: dict[str, Any]) -> "RelayMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
@@ -608,8 +608,8 @@ class GuestStore:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.guests: Dict[str, Dict[str, Any]] = {}
-        self.inboxes: Dict[str, List[Dict[str, Any]]] = {}
+        self.guests: dict[str, dict[str, Any]] = {}
+        self.inboxes: dict[str, list[dict[str, Any]]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -741,7 +741,7 @@ class ChannelStore:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.channels: Dict[str, Dict[str, Any]] = {}
+        self.channels: dict[str, dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -899,7 +899,7 @@ class RelayStore:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.channels: Dict[str, Dict[str, Any]] = {}
+        self.channels: dict[str, dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -1019,7 +1019,7 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 """
 
 
-def relay_auth_guest(channel_id: str, token: str) -> Optional[Dict[str, Any]]:
+def relay_auth_guest(channel_id: str, token: str) -> dict[str, Any] | None:
     """Authenticate a guest token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -1032,7 +1032,7 @@ def relay_auth_guest(channel_id: str, token: str) -> Optional[Dict[str, Any]]:
     return ch
 
 
-def relay_auth_reply(channel_id: str, token: str) -> Optional[Dict[str, Any]]:
+def relay_auth_reply(channel_id: str, token: str) -> dict[str, Any] | None:
     """Authenticate a reply token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -1128,13 +1128,13 @@ class WorkerRecord:
     """Normalized worker representation — single typed object for all sources."""
     name: str
     backend: str = "claude"
-    host: Optional[str] = None
+    host: str | None = None
     tmux_name: str = ""
     callback_url: str = ""
     protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
     version: str = ""
-    tools: Optional[dict] = None
-    chat_id: Optional[int] = None
+    tools: dict | None = None
+    chat_id: int | None = None
     cwd: str = ""
     home_host: str = ""
     home_cwd: str = ""
@@ -1193,17 +1193,17 @@ class WorkerRegistryEntry:
     backend: str = "claude"
     protocol: str = ""
     callback_url: str = ""
-    host: Optional[str] = None
+    host: str | None = None
     version: str = ""
-    chat_id: Optional[int] = None
+    chat_id: int | None = None
     hire_time: int = 0
-    tools: Optional[Dict[str, Any]] = None
+    tools: dict[str, Any] | None = None
     home_host: str = ""
     home_cwd: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
-        d: Dict[str, Any] = {"backend": self.backend}
+        d: dict[str, Any] = {"backend": self.backend}
         for k in ("protocol", "callback_url", "host", "version", "chat_id",
                    "hire_time", "tools", "home_host", "home_cwd"):
             v = getattr(self, k)
@@ -1212,7 +1212,7 @@ class WorkerRegistryEntry:
         return d
 
     @classmethod
-    def from_dict(cls: type["WorkerRegistryEntry"], d: Dict[str, Any]) -> "WorkerRegistryEntry":
+    def from_dict(cls: type["WorkerRegistryEntry"], d: dict[str, Any]) -> "WorkerRegistryEntry":
         """Construct an instance from a plain dictionary."""
         return cls(
             backend=d.get("backend", "claude"),
@@ -1305,10 +1305,10 @@ class RemoteCache:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.tools: Dict[str, str] = {}     # host:tool -> absolute path
-        self.machines: Optional[Dict[str, "Machine"]] = None
-        self.machines_path: Optional[Path] = None
-        self.home_dirs: Dict[str, str] = {}  # host -> remote $HOME path
+        self.tools: dict[str, str] = {}     # host:tool -> absolute path
+        self.machines: dict[str, "Machine"] | None = None
+        self.machines_path: Path | None = None
+        self.home_dirs: dict[str, str] = {}  # host -> remote $HOME path
 
 
 remote_cache = RemoteCache()
@@ -1411,7 +1411,7 @@ def parse_worker_target(target: str) -> tuple:
     return target, None
 
 
-def get_worker_host(name: str) -> Optional[str]:
+def get_worker_host(name: str) -> str | None:
     """Get the SSH host for a worker from the persistent registry, or None if local."""
     registry = _load_registry()
     worker = registry.get("workers", {}).get(name, {})
@@ -1731,7 +1731,7 @@ def _ensure_bare_repo(project_name: str) -> str:
 
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
-                    host: str | None = None) -> Optional[dict]:
+                    host: str | None = None) -> dict | None:
     """Push working state to bare repo without mutating source.
 
     Approach: temporarily `git add -A` to capture untracked files in the index,
@@ -1914,7 +1914,7 @@ def _is_git_repo(cwd: str, host: str | None = None) -> bool:
         return False
 
 
-def _get_project_name(cwd: str, host: str | None = None) -> Optional[str]:
+def _get_project_name(cwd: str, host: str | None = None) -> str | None:
     """Derive project name from git remote.origin.url.
 
     Returns short name (e.g., 'omi' from 'https://github.com/BasedHardware/omi.git')
@@ -1975,9 +1975,9 @@ class TmuxSendState:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.locks: Dict[str, threading.Lock] = {}
+        self.locks: dict[str, threading.Lock] = {}
         self.locks_guard: threading.Lock = threading.Lock()
-        self.flock_fds: Dict[str, int] = {}
+        self.flock_fds: dict[str, int] = {}
 
 
 tmux_send = TmuxSendState()
@@ -2170,7 +2170,7 @@ def _tmux_pane_pids(host: str | None = None) -> dict:
     return pane_map
 
 
-def _get_claude_pid(pane_pid: str, host: str | None = None) -> Optional[str]:
+def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
     """Return Claude PID for a pane, or None if not found."""
     try:
         result = _remote_run(
@@ -2365,8 +2365,8 @@ class ProcessRegistry:
     def __init__(self) -> None:
         """Initialize internal state and locks."""
         self.adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
-        self.pipe_readers: Dict[str, tuple] = {}
-        self.pending_locks: Dict[str, threading.Lock] = {}
+        self.pipe_readers: dict[str, tuple] = {}
+        self.pending_locks: dict[str, threading.Lock] = {}
         self.pending_locks_guard: threading.Lock = threading.Lock()
 
 
@@ -2640,7 +2640,7 @@ class MentionTracker:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.target: Optional[str] = None
+        self.target: str | None = None
         self.count: int = 0
         self.ts: float = 0.0
 
@@ -2675,7 +2675,7 @@ class BridgeRuntimeState:
     """Typed in-memory state (RAM only — tmux IS persistence)."""
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.active: Optional[str] = None
+        self.active: str | None = None
         self.startup_notified: bool = False
         self.tts_enabled: bool = False
         self.mention: MentionTracker = MentionTracker()
@@ -2738,7 +2738,7 @@ class DiskUsage:
     ts: float = 0.0     # timestamp of probe
 
     @classmethod
-    def from_dict(cls: type["DiskUsage"], d: Dict[str, Any]) -> "DiskUsage":
+    def from_dict(cls: type["DiskUsage"], d: dict[str, Any]) -> "DiskUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
@@ -2747,7 +2747,7 @@ class DiskUsage:
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
@@ -2763,7 +2763,7 @@ class MemoryUsage:
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls: type["MemoryUsage"], d: Dict[str, Any]) -> "MemoryUsage":
+    def from_dict(cls: type["MemoryUsage"], d: dict[str, Any]) -> "MemoryUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
@@ -2773,7 +2773,7 @@ class MemoryUsage:
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "used_gb": self.used_gb,
                 "total_gb": self.total_gb, "available_gb": self.available_gb,
@@ -2790,7 +2790,7 @@ class IoUsage:
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls: type["IoUsage"], d: Dict[str, Any]) -> "IoUsage":
+    def from_dict(cls: type["IoUsage"], d: dict[str, Any]) -> "IoUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             read_mb_s=d.get("read_mb_s", 0.0),
@@ -2800,7 +2800,7 @@ class IoUsage:
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {"read_mb_s": self.read_mb_s, "write_mb_s": self.write_mb_s,
                 "iops": self.iops, "util_pct": self.util_pct, "ts": self.ts}
@@ -2815,7 +2815,7 @@ class CpuHog:
     user: str = ""
 
     @classmethod
-    def from_dict(cls: type["CpuHog"], d: Dict[str, Any]) -> "CpuHog":
+    def from_dict(cls: type["CpuHog"], d: dict[str, Any]) -> "CpuHog":
         """Construct an instance from a plain dictionary."""
         return cls(
             pid=d.get("pid", 0),
@@ -2833,7 +2833,7 @@ class WorktreeItem:
     worker: str = ""
 
     @classmethod
-    def from_dict(cls: type["WorktreeItem"], d: Dict[str, Any]) -> "WorktreeItem":
+    def from_dict(cls: type["WorktreeItem"], d: dict[str, Any]) -> "WorktreeItem":
         """Construct an instance from a plain dictionary."""
         return cls(
             path=d.get("path", ""),
@@ -2876,27 +2876,27 @@ class WorkerWatchdogState:
     def __init__(self) -> None:
         # Worker probe state
         """Initialize internal state and locks."""
-        self.worker_states: Dict[str, tuple] = {}
-        self.last_child_ts: Dict[str, float] = {}
-        self.last_seen_claude: Dict[str, float] = {}
-        self.last_hook_ts: Dict[str, float] = {}
-        self.last_alert_ts: Dict[str, float] = {}
-        self.alert_msg_ids: Dict[str, int] = {}
-        self.idle_streak: Dict[str, int] = {}
-        self.prev_worker_states: Dict[str, str] = {}
-        self.consecutive_probe_failures: Dict[str, int] = {}
-        self.consecutive_good_probes: Dict[str, int] = {}
-        self.consecutive_bad_probes: Dict[str, int] = {}
-        self.idle_child_baseline: Dict[str, int] = {}
-        self.prev_children: Dict[str, int] = {}
-        self.last_activity_ts: Dict[str, float] = {}
-        self.worker_cwds: Dict[str, str] = {}
+        self.worker_states: dict[str, tuple] = {}
+        self.last_child_ts: dict[str, float] = {}
+        self.last_seen_claude: dict[str, float] = {}
+        self.last_hook_ts: dict[str, float] = {}
+        self.last_alert_ts: dict[str, float] = {}
+        self.alert_msg_ids: dict[str, int] = {}
+        self.idle_streak: dict[str, int] = {}
+        self.prev_worker_states: dict[str, str] = {}
+        self.consecutive_probe_failures: dict[str, int] = {}
+        self.consecutive_good_probes: dict[str, int] = {}
+        self.consecutive_bad_probes: dict[str, int] = {}
+        self.idle_child_baseline: dict[str, int] = {}
+        self.prev_children: dict[str, int] = {}
+        self.last_activity_ts: dict[str, float] = {}
+        self.worker_cwds: dict[str, str] = {}
         # Restart coordination
-        self.recent_restarts: Dict[str, float] = {}
-        self.restart_in_progress: Dict[str, float] = {}
+        self.recent_restarts: dict[str, float] = {}
+        self.restart_in_progress: dict[str, float] = {}
         self.restart_lock: threading.Lock = threading.Lock()
-        self.force_restart_pending_cwd: Dict[str, bool] = {}
-        self.waiting_input_details: Dict[str, Dict[str, Any]] = {}
+        self.force_restart_pending_cwd: dict[str, bool] = {}
+        self.waiting_input_details: dict[str, dict[str, Any]] = {}
         # Alert cooldowns
         self.last_resolved_ts: dict[str, float] = {}
         # Global watchdog lock
@@ -2931,10 +2931,10 @@ class HostHealthState:
     def __init__(self) -> None:
         # SSH connectivity
         """Initialize internal state and locks."""
-        self.ssh_failures: Dict[str, int] = {}
-        self.down: Dict[str, bool] = {}
-        self.down_since: Dict[str, float] = {}
-        self.last_error: Dict[str, str] = {}
+        self.ssh_failures: dict[str, int] = {}
+        self.down: dict[str, bool] = {}
+        self.down_since: dict[str, float] = {}
+        self.last_error: dict[str, str] = {}
         # Disk
         self.disk_usage: dict[str, Any] = {}
         self.disk_alert_ts: dict[str, float] = {}
@@ -3044,7 +3044,7 @@ def _read_learning_reminder(name: str) -> str:
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
 
 
-def _new_reminder_state() -> Dict[str, Any]:
+def _new_reminder_state() -> dict[str, Any]:
     now = time.time()
     return {
         "response_count": 0,
@@ -3215,7 +3215,7 @@ class MediaGroupState:
 
     def __init__(self) -> None:
         """Initialize internal state and locks."""
-        self.buffer: Dict[str, Dict[str, Any]] = {}
+        self.buffer: dict[str, dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -3234,12 +3234,12 @@ class RewindToken:
         """Check whether this entry has passed its expiration time."""
         return time.time() >= self.expires_at
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {"name": self.name, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls: type["RewindToken"], d: Dict[str, Any]) -> "RewindToken":
+    def from_dict(cls: type["RewindToken"], d: dict[str, Any]) -> "RewindToken":
         """Construct an instance from a plain dictionary."""
         return cls(name=d["name"], expires_at=d["expires_at"])
 
@@ -3256,13 +3256,13 @@ class PrReviewToken:
         """Check whether this entry has passed its expiration time."""
         return time.time() >= self.expires_at
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
         return {"pr_num": self.pr_num, "owner": self.owner,
                 "repo": self.repo, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls: type["PrReviewToken"], d: Dict[str, Any]) -> "PrReviewToken":
+    def from_dict(cls: type["PrReviewToken"], d: dict[str, Any]) -> "PrReviewToken":
         """Construct an instance from a plain dictionary."""
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
@@ -3270,8 +3270,8 @@ class PrReviewToken:
 
 # Token stores — still use raw dicts internally for backward compat,
 # but the dataclasses above define the canonical shape.
-REWIND_TOKENS: Dict[str, Dict[str, Any]] = {}
-PR_REVIEW_TOKENS: Dict[str, Dict[str, Any]] = {}
+REWIND_TOKENS: dict[str, dict[str, Any]] = {}
+PR_REVIEW_TOKENS: dict[str, dict[str, Any]] = {}
 REWIND_TIMEOUT: int = 24 * 60 * 60  # 24 hours (sliding window)
 
 BOT_COMMANDS = [
@@ -3319,7 +3319,7 @@ def save_last_chat_id(chat_id: int | str) -> None:
         print(f"Failed to save last_chat_id: {e}")
 
 
-def load_last_chat_id() -> Optional[int]:
+def load_last_chat_id() -> int | None:
     """Load last known chat ID from file."""
     try:
         if LAST_CHAT_ID_FILE.exists():
@@ -3341,7 +3341,7 @@ def save_last_active(name: str) -> None:
         print(f"Failed to save last_active: {e}")
 
 
-def load_last_active() -> Optional[str]:
+def load_last_active() -> str | None:
     """Load last active worker name from file."""
     try:
         if LAST_ACTIVE_FILE.exists():
@@ -3360,7 +3360,7 @@ def load_last_active() -> Optional[str]:
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 
 
-def _load_registry() -> Dict[str, Any]:
+def _load_registry() -> dict[str, Any]:
     """Load worker registry from disk. Returns {} on missing/corrupt."""
     try:
         if not WORKER_REGISTRY_FILE.exists():
@@ -3381,7 +3381,7 @@ def _load_registry() -> Dict[str, Any]:
         return {}
 
 
-def _save_registry(data: Dict[str, Any]) -> None:
+def _save_registry(data: dict[str, Any]) -> None:
     """Atomic write of registry to disk."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3401,8 +3401,8 @@ def _save_registry(data: Dict[str, Any]) -> None:
         print(f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: Optional[int] = None,
-                   host: Optional[str] = None) -> None:
+def _registry_add(name: str, backend: str, chat_id: int | None = None,
+                   host: str | None = None) -> None:
     """Add a worker to the persistent registry (merge with existing entry)."""
     with watchdog.lock:
         data = _load_registry()
@@ -3423,7 +3423,7 @@ def _registry_add(name: str, backend: str, chat_id: Optional[int] = None,
 
 
 def _registry_add_callback(name: str, callback_url: str, host: str = "",
-                           version: str = "", tools: Optional[Dict[str, Any]] = None) -> None:
+                           version: str = "", tools: dict[str, Any] | None = None) -> None:
     """Add an HTTP callback worker to the persistent registry."""
     with watchdog.lock:
         data = _load_registry()
@@ -3473,7 +3473,7 @@ def _get_worker_cwd(name: str) -> str:
     return cwd if isinstance(cwd, str) else ""
 
 
-def _registry_bootstrap(registered: Dict[str, Dict[str, Any]]) -> None:
+def _registry_bootstrap(registered: dict[str, dict[str, Any]]) -> None:
     """First-run: create registry from currently running tmux sessions."""
     if WORKER_REGISTRY_FILE.exists():
         return
@@ -3534,46 +3534,46 @@ class MessageTransport:
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
-                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                  reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         raise NotImplementedError
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
-                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                       reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a rich-formatted (markdown) text message."""
         raise NotImplementedError
 
-    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a photo to a Telegram chat."""
         raise NotImplementedError
 
-    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
-                      caption: Optional[str] = None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: str | Path,
+                      caption: str | None = None) -> bool:
         """Send a document file to a Telegram chat."""
         raise NotImplementedError
 
-    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
-                       caption: Optional[str] = None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: str | Path,
+                       caption: str | None = None) -> bool:
         """Send an animation (GIF/MP4) to a Telegram chat."""
         raise NotImplementedError
 
-    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a video to a Telegram chat."""
         raise NotImplementedError
 
-    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send an audio file to a Telegram chat."""
         raise NotImplementedError
 
-    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a voice message to a Telegram chat."""
         raise NotImplementedError
 
-    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         """Send a sticker to a Telegram chat."""
         raise NotImplementedError
 
@@ -3582,7 +3582,7 @@ class MessageTransport:
         raise NotImplementedError
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: List[Dict[str, str]]) -> None:
+                     reaction: list[dict[str, str]]) -> None:
         """Set an emoji reaction on a message."""
         raise NotImplementedError
 
@@ -3591,11 +3591,11 @@ class MessageTransport:
         """Edit an existing message by its ID."""
         raise NotImplementedError
 
-    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+    def setup_commands(self, commands: list[dict[str, str]]) -> None:
         """Register bot command suggestions with Telegram."""
         raise NotImplementedError
 
-    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+    def download_file(self, file_id: str, session_name: str) -> str | None:
         """Download a file from Telegram by file ID."""
         raise NotImplementedError
 
@@ -3611,7 +3611,7 @@ class TelegramAPI:
         """Initialize internal state and locks."""
         self.token: str = token
 
-    def api(self, method: str, data: Dict[str, Any]) -> TelegramApiResponse:
+    def api(self, method: str, data: dict[str, Any]) -> TelegramApiResponse:
         """Make a raw Telegram Bot API call and return the response."""
         if not self.token:
             return None
@@ -3638,13 +3638,13 @@ class TelegramAPI:
 
     def send_message(self, chat_id: ChatId, text: str, **kwargs: Any) -> TelegramApiResponse:
         """Send a text message via the Telegram Bot API."""
-        payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         payload.update(kwargs)
         return self.api("sendMessage", payload)
 
     def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: Any) -> TelegramApiResponse:
         """Send a rich-formatted message via the Telegram Bot API."""
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
@@ -3653,26 +3653,26 @@ class TelegramAPI:
 
     def send_photo(self, chat_id: ChatId, photo: str, **kwargs: Any) -> TelegramApiResponse:
         """Send a photo to a Telegram chat."""
-        payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo}
+        payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
         payload.update(kwargs)
         return self.api("sendPhoto", payload)
 
     def send_document(self, chat_id: ChatId, document: str, **kwargs: Any) -> TelegramApiResponse:
         """Send a document file to a Telegram chat."""
-        payload: Dict[str, Any] = {"chat_id": chat_id, "document": document}
+        payload: dict[str, Any] = {"chat_id": chat_id, "document": document}
         payload.update(kwargs)
         return self.api("sendDocument", payload)
 
     def send_animation(self, chat_id: ChatId, animation: str, **kwargs: Any) -> TelegramApiResponse:
         """Send an animation (GIF/MP4) to a Telegram chat."""
-        payload: Dict[str, Any] = {"chat_id": chat_id, "animation": animation}
+        payload: dict[str, Any] = {"chat_id": chat_id, "animation": animation}
         payload.update(kwargs)
         return self.api("sendAnimation", payload)
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: List[Dict[str, str]]) -> TelegramApiResponse:
+                     reaction: list[dict[str, str]]) -> TelegramApiResponse:
         """Set an emoji reaction on a message."""
-        payload: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
         return self.api("setMessageReaction", payload)
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> TelegramApiResponse:
@@ -3694,7 +3694,7 @@ class TelegramTransport(MessageTransport):
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
-                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                  reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
@@ -3705,9 +3705,9 @@ class TelegramTransport(MessageTransport):
         return telegram_api("sendMessage", payload)
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
-                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                       reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a rich-formatted (markdown) text message."""
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
@@ -3715,8 +3715,8 @@ class TelegramTransport(MessageTransport):
             payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
-    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a photo to a Telegram chat."""
         if not BOT_TOKEN:
             return False
@@ -3764,8 +3764,8 @@ class TelegramTransport(MessageTransport):
             print(f"sendPhoto error: {e}")
             return False
 
-    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
-                       caption: Optional[str] = None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: str | Path,
+                       caption: str | None = None) -> bool:
         """Send an animation (GIF/MP4) to a Telegram chat."""
         if not BOT_TOKEN:
             return False
@@ -3812,8 +3812,8 @@ class TelegramTransport(MessageTransport):
             print(f"sendAnimation error: {e}")
             return False
 
-    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
-                      caption: Optional[str] = None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: str | Path,
+                      caption: str | None = None) -> bool:
         """Send a document file to a Telegram chat."""
         if not BOT_TOKEN:
             return False
@@ -3862,7 +3862,7 @@ class TelegramTransport(MessageTransport):
 
     def _send_media_multipart(self, chat_id: ChatId, file_path: Path,
                               field_name: str, api_method: str,
-                              caption: Optional[str] = None) -> bool:
+                              caption: str | None = None) -> bool:
         if not BOT_TOKEN:
             return False
         boundary = uuid.uuid4().hex
@@ -3903,8 +3903,8 @@ class TelegramTransport(MessageTransport):
             print(f"{api_method} error: {e}")
             return False
 
-    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a video to a Telegram chat."""
         ok, validated = validate_document_path(video_path)
         if not ok:
@@ -3912,8 +3912,8 @@ class TelegramTransport(MessageTransport):
             return False
         return self._send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
 
-    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send an audio file to a Telegram chat."""
         ok, validated = validate_document_path(audio_path)
         if not ok:
@@ -3921,8 +3921,8 @@ class TelegramTransport(MessageTransport):
             return False
         return self._send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
 
-    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a voice message to a Telegram chat."""
         ok, validated = validate_document_path(voice_path)
         if not ok:
@@ -3930,7 +3930,7 @@ class TelegramTransport(MessageTransport):
             return False
         return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
 
-    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         """Send a sticker to a Telegram chat."""
         sticker_path = Path(sticker_path)
         if not sticker_path.exists() or not sticker_path.is_file():
@@ -3943,7 +3943,7 @@ class TelegramTransport(MessageTransport):
         telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: List[Dict[str, str]]) -> None:
+                     reaction: list[dict[str, str]]) -> None:
         """Set an emoji reaction on a message."""
         telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": reaction})
 
@@ -3955,11 +3955,11 @@ class TelegramTransport(MessageTransport):
             payload["parse_mode"] = parse_mode
         return telegram_api("editMessageText", payload)
 
-    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+    def setup_commands(self, commands: list[dict[str, str]]) -> None:
         """Register bot command suggestions with Telegram."""
         telegram_api("setMyCommands", {"commands": commands})
 
-    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+    def download_file(self, file_id: str, session_name: str) -> str | None:
         """Download a file from Telegram by file ID."""
         if not BOT_TOKEN:
             return None
@@ -4041,54 +4041,54 @@ class LocalTransport(MessageTransport):
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
-                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                  reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
         return {"ok": True, "result": {"message_id": 1}}
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
-                       reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                       reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a rich-formatted (markdown) text message."""
         self._log("send_rich_text", chat_id, text=markdown[:200])
         return {"ok": True, "result": {"message_id": 1}}
 
-    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a photo to a Telegram chat."""
         self._log("send_photo", chat_id, path=photo_path, caption=caption)
         return True
 
-    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
-                      caption: Optional[str] = None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: str | Path,
+                      caption: str | None = None) -> bool:
         """Send a document file to a Telegram chat."""
         self._log("send_document", chat_id, path=doc_path, caption=caption)
         return True
 
-    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
-                       caption: Optional[str] = None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: str | Path,
+                       caption: str | None = None) -> bool:
         """Send an animation (GIF/MP4) to a Telegram chat."""
         self._log("send_animation", chat_id, path=animation_path, caption=caption)
         return True
 
-    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a video to a Telegram chat."""
         self._log("send_video", chat_id, path=video_path, caption=caption)
         return True
 
-    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send an audio file to a Telegram chat."""
         self._log("send_audio", chat_id, path=audio_path, caption=caption)
         return True
 
-    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a voice message to a Telegram chat."""
         self._log("send_voice", chat_id, path=voice_path, caption=caption)
         return True
 
-    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         """Send a sticker to a Telegram chat."""
         self._log("send_sticker", chat_id, path=sticker_path)
         return True
@@ -4098,7 +4098,7 @@ class LocalTransport(MessageTransport):
         self._log("send_chat_action", chat_id, action=action)
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: List[Dict[str, str]]) -> None:
+                     reaction: list[dict[str, str]]) -> None:
         """Set an emoji reaction on a message."""
         self._log("set_reaction", chat_id, message_id=message_id)
 
@@ -4108,11 +4108,11 @@ class LocalTransport(MessageTransport):
         self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
         return {"ok": True, "result": {"message_id": message_id}}
 
-    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+    def setup_commands(self, commands: list[dict[str, str]]) -> None:
         """Register bot command suggestions with Telegram."""
         self._log("setup_commands", 0, count=len(commands))
 
-    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+    def download_file(self, file_id: str, session_name: str) -> str | None:
         """Download a file from Telegram by file ID."""
         self._log("download_file", 0, file_id=file_id, session=session_name)
         return None
@@ -4127,7 +4127,7 @@ def _init_transport() -> MessageTransport:
 transport = _init_transport()
 
 
-def telegram_api(method: str, data: Dict[str, Any]) -> TelegramApiResponse:
+def telegram_api(method: str, data: dict[str, Any]) -> TelegramApiResponse:
     """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
     if TRANSPORT_MODE == "local":
         print(f"[local-transport] telegram_api {method} {str(data)[:100]}")
@@ -4143,7 +4143,7 @@ def send_telegram_message(chat_id: ChatId, text: str,
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
 
-def download_telegram_file(file_id: str, session_name: str) -> Optional[str]:
+def download_telegram_file(file_id: str, session_name: str) -> str | None:
     """Download a Telegram file to the session inbox.
     Tests can patch bridge.download_telegram_file to intercept file downloads.
     Delegates to transport.download_file() internally.
@@ -4486,7 +4486,7 @@ def get_workers(caller_from: str | None = None) -> list[dict[str, Any]]:
 # download_telegram_file removed — use download_telegram_file() instead
 
 
-def transcribe_voice(file_path: str, timeout: int | None = None) -> Optional[str]:
+def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
     """Transcribe a voice file via STT endpoint. Returns text or None on failure.
 
     Fail-open: any error (timeout, bad response, unreachable) returns None
@@ -4532,7 +4532,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> Optional[str
         return None
 
 
-def synthesize_speech(text: str, voice: str | None = None, language: str = "en") -> Optional[str]:
+def synthesize_speech(text: str, voice: str | None = None, language: str = "en") -> str | None:
     """Synthesize speech from text via TTS endpoint. Returns OGG file path or None.
 
     Fail-open: any error returns None so caller can skip voice and send text only.
@@ -4718,7 +4718,7 @@ CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 
-def _split_protected_segments(text: str, pattern: str) -> List[tuple]:
+def _split_protected_segments(text: str, pattern: str) -> list[tuple]:
     """Split text into (segment, is_protected) based on regex matches."""
     segments = []
     last = 0
@@ -4788,7 +4788,7 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], s
     return clean_text, items
 
 
-def parse_image_tags(text: str) -> List[tuple]:
+def parse_image_tags(text: str) -> list[tuple]:
     """Parse [[image:/path|caption]] tags from text.
 
     Returns (clean_text, [(path, caption), ...])
@@ -4796,7 +4796,7 @@ def parse_image_tags(text: str) -> List[tuple]:
     return _parse_media_tags(text, "image", validate_photo_path)
 
 
-def parse_file_tags(text: str) -> List[tuple]:
+def parse_file_tags(text: str) -> list[tuple]:
     """Parse [[file:/path|caption]] tags from text.
 
     Returns (clean_text, [(path, caption), ...])
@@ -5306,7 +5306,7 @@ TELEGRAM_MAX_LENGTH = 4096
 TELEGRAM_RICH_MAX_LENGTH = 32768
 
 
-def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> List[str]:
+def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     """Split HTML text into chunks that fit within Telegram's message limit.
 
     HTML-aware: tracks open tags and closes/reopens them at split boundaries.
@@ -5425,7 +5425,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> List[str]:
     return chunks
 
 
-def format_multipart_messages(session_name: str, chunks: list[str]) -> List[str]:
+def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]:
     """Format chunks with session prefix (all chunks get prefix, no part numbers).
 
     Single chunk: "<b>name:</b>\ntext"
@@ -5486,7 +5486,7 @@ def get_chat_id_file(name: str) -> Path:
     return get_session_dir(name) / "chat_id"
 
 
-def get_manager_chat_id(name: str) -> Optional[int]:
+def get_manager_chat_id(name: str) -> int | None:
     """Resolve manager chat ID for worker notifications.
 
     Priority:
@@ -5508,7 +5508,7 @@ def get_manager_chat_id(name: str) -> Optional[int]:
         return None
 
 
-def _read_session_file(name: str, filename: str) -> Optional[str]:
+def _read_session_file(name: str, filename: str) -> str | None:
     """Read a session file, routing to remote host for teleported workers.
 
     Tries local cache first (fast), falls back to SSH for remote workers.
@@ -5689,7 +5689,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
 
 
 
-def get_claude_session_cwd(name: str) -> Optional[str]:
+def get_claude_session_cwd(name: str) -> str | None:
     """Read and return the current working directory for a worker session."""
     cwd = _read_session_file(name, "claude_session_cwd")
     if cwd:
@@ -5717,7 +5717,7 @@ def clear_claude_session_id(name: str) -> None:
 
 
 
-def get_any_session_id(name: str) -> Optional[str]:
+def get_any_session_id(name: str) -> str | None:
     """Get any *_session_id value for a worker (backend-agnostic).
 
     Returns (session_id, source) tuple where source is the prefix (e.g. 'claude', 'codex').
@@ -5845,7 +5845,7 @@ def try_set_pending(name: str, chat_id: int | str) -> bool:
         return True
 
 
-def _pending_timestamp(name: str) -> Optional[int]:
+def _pending_timestamp(name: str) -> int | None:
     pending = get_pending_file(name)
     if not pending.exists():
         return None
@@ -5857,19 +5857,19 @@ def _pending_timestamp(name: str) -> Optional[int]:
 
 def compute_state(
     tmux_exists: bool,
-    claude_pid: Optional[str],
+    claude_pid: str | None,
     pending: bool,
-    pending_ts: Optional[int],
+    pending_ts: int | None,
     pending_age: float,
     children: int,
     last_child_ts: float,
     cpu: float,
-    last_hook_ts: Optional[float],
-    last_seen_claude: Optional[float],
+    last_hook_ts: float | None,
+    last_seen_claude: float | None,
     now: float,
     is_interactive: bool = True,
     adapter_alive: bool = False,
-    poisoned_reason: Optional[str] = None,
+    poisoned_reason: str | None = None,
 ) -> tuple[str, str]:
     """Compute the current watchdog state for a worker (READY, BUSY, STUCK, etc.)."""
     if not tmux_exists:
@@ -5991,7 +5991,7 @@ HOOK_FAILURE_THRESHOLD = 3   # failures in window → POISONED
 HOOK_FAILURE_WINDOW = 120    # seconds
 
 
-def _check_hook_failure_signal(name: str) -> Optional[str]:
+def _check_hook_failure_signal(name: str) -> str | None:
     """Check hook-written failure signal file for recent tool failures.
 
     PostToolUseFailure hook appends lines: "<epoch> <tool_name>"
@@ -6060,7 +6060,7 @@ def _clear_hook_failures(name: str) -> None:
             pass  # best-effort io: _clear_hook_failures
 
 
-def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
+def _detect_poisoned(name: str, tmux_name: str) -> str | None:
     # Primary: check hook-written failure signal file
     hook_reason = _check_hook_failure_signal(name)
     if hook_reason:
@@ -6192,7 +6192,7 @@ def _is_host_down(host: str) -> bool:
         return host_health.down.get(host, False)
 
 
-def _check_disk_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _check_disk_usage(host: str | None = None) -> dict[str, Any] | None:
     """Check disk usage on a host (None = local). Returns {pct, free_gb, total_gb} or None."""
     try:
         r = _remote_run(
@@ -6214,7 +6214,7 @@ def _check_disk_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _check_disk_usage_macos(host: str) -> Optional[Dict[str, Any]]:
+def _check_disk_usage_macos(host: str) -> dict[str, Any] | None:
     """Check disk usage on macOS host (df output differs from Linux)."""
     try:
         r = _remote_run(
@@ -6307,7 +6307,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                     pass  # best-effort notify: unknown
 
 
-def _check_mem_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _check_mem_usage(host: str | None = None) -> dict[str, Any] | None:
     """Check memory usage on a host (None = local). Returns {pct, used_gb, total_gb, avail_gb, top_procs} or None."""
     try:
         r = _remote_run(
@@ -6337,7 +6337,7 @@ def _check_mem_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _check_mem_usage_macos(host: str) -> Optional[Dict[str, Any]]:
+def _check_mem_usage_macos(host: str) -> dict[str, Any] | None:
     """Check memory usage on macOS host via vm_stat."""
     try:
         r = _remote_run(
@@ -6456,7 +6456,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                     pass  # best-effort notify: unknown
 
 
-def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _check_io_usage(host: str | None = None) -> dict[str, Any] | None:
     """Check IO stats on a host (None = local). Returns {iowait_pct, read_iops, write_iops, util_pct} or None."""
     try:
         r = _remote_run(
@@ -6517,7 +6517,7 @@ def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _check_io_usage_macos(host: str) -> Optional[Dict[str, Any]]:
+def _check_io_usage_macos(host: str) -> dict[str, Any] | None:
     """Check IO stats on macOS host via iostat."""
     try:
         r = _remote_run(
@@ -6593,7 +6593,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                     pass  # best-effort notify: unknown
 
 
-def _get_cpu_hogs(host: Optional[str] = None, is_mac: bool = False) -> List[Dict[str, Any]]:
+def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[str, Any]]:
     """Get processes using >CPU_HOG_THRESHOLD_PCT CPU on a host. Returns [{pid, cpu, etime_min, cmd}]."""
     try:
         if is_mac:
@@ -6865,7 +6865,7 @@ def _handle_watchdog_transition(
     state: str,
     reason: str,
     since: float,
-    now: Optional[float] = None,
+    now: float | None = None,
 ) -> None:
     if now is None:
         now = time.time()
@@ -7311,12 +7311,12 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # Worker Backend Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def normalize_backend(backend: Optional[str]) -> str:
+def normalize_backend(backend: str | None) -> str:
     """Return a normalized backend name with a safe default."""
     return backend or DEFAULT_BACKEND
 
 
-def normalize_cwd(cwd: Optional[str]) -> str:
+def normalize_cwd(cwd: str | None) -> str:
     """Expand ~ and return absolute path; empty string for unset/blank."""
     if cwd is None:
         return ""
@@ -7326,7 +7326,7 @@ def normalize_cwd(cwd: Optional[str]) -> str:
     return os.path.abspath(os.path.expanduser(raw))
 
 
-def validate_cwd(cwd: Optional[str], host: str | None = None) -> tuple[str, str]:
+def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
     """Validate cwd path. Returns (normalized_path, error_message).
 
     When host is set, validates via SSH on the remote machine instead of locally.
@@ -7402,8 +7402,8 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
 
 def _format_watchdog_status(name: str,
-                            pending_lookup: Optional[Dict[str, Any]] = None,
-                            state_snapshot: Optional[Dict[str, Any]] = None) -> str:
+                            pending_lookup: dict[str, Any] | None = None,
+                            state_snapshot: dict[str, Any] | None = None) -> str:
     if pending_lookup is None:
         pending_lookup = is_pending
 
@@ -7492,9 +7492,9 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
 
 def format_team_lines(
     registered: dict,
-    active: Optional[str],
+    active: str | None,
     pending_lookup: dict[str, bool]=None,
-    worker_live: Optional[dict] = None
+    worker_live: dict | None = None
 ) -> list[str]:
     """Format /team response lines with attention, activity, and context."""
     if pending_lookup is None:
@@ -7804,7 +7804,7 @@ def _extract_activity(lines: list[str]) -> str:
     return "Active"
 
 
-def _extract_context_pct(lines: list[str]) -> Optional[str]:
+def _extract_context_pct(lines: list[str]) -> str | None:
     """Extract context % from tmux output if present."""
     for line in reversed(lines):
         m = re.search(r'Context left.*?(\d+)%', line)
@@ -7895,7 +7895,7 @@ _INTERACTIVE_CONTENT = [
 ]
 
 
-def _extract_question_details(lines: list[str]) -> Optional[dict]:
+def _extract_question_details(lines: list[str]) -> dict | None:
     """Extract interactive question details from tmux pane output.
 
     Returns dict with:
@@ -8019,12 +8019,12 @@ def format_progress_lines(
     online: bool,
     ready: bool,
     mode: str,
-    resume_line: Optional[str] = None,
-    continuity_line: Optional[str] = None,
-    needs_attention: Optional[str] = None,
-    activity: Optional[str] = None,
-    context_pct: Optional[str] = None,
-    question_details: Optional[dict] = None
+    resume_line: str | None = None,
+    continuity_line: str | None = None,
+    needs_attention: str | None = None,
+    activity: str | None = None,
+    context_pct: str | None = None,
+    question_details: dict | None = None
 ) -> list[str]:
     """Format /progress response lines (manager-friendly)."""
     status = []
@@ -8066,7 +8066,7 @@ def format_progress_lines(
     return status
 
 
-def get_worker_backend(name: str, session: Optional[dict] = None) -> str:
+def get_worker_backend(name: str, session: dict | None = None) -> str:
     """Get backend for a worker.
 
     Priority: backend file (canonical) > session dict (cache) > default.
@@ -8180,7 +8180,7 @@ class WorkerManager:
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=5)
         time.sleep(0.2)
 
-    def scan_tmux_sessions(self) -> Dict[str, Dict[str, Any]]:
+    def scan_tmux_sessions(self) -> dict[str, dict[str, Any]]:
         """Scan tmux for claude-* sessions (local + remote machines)."""
         self._sync_paths()
         registered = {}
@@ -8254,7 +8254,7 @@ class WorkerManager:
             self._sessions_cache = None
             self._sessions_cache_ts = 0
 
-    def get_registered_sessions(self, registered: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+    def get_registered_sessions(self, registered: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
         """Get registered sessions from tmux. Cached for _SESSIONS_CACHE_TTL seconds."""
         self._sync_paths()
         if registered is None:
@@ -8493,7 +8493,7 @@ class WorkerManager:
         escaped = cmd.replace('"', '\\"')
         return f'ssh {ssh_target} "{escaped}"'
 
-    def _build_welcome(self, name: str, backend_obj: Any) -> str:
+    def _build_welcome(self, name: str, backend_obj: BackendLifecycle) -> str:
         """Build welcome/instructions message for a worker."""
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
@@ -8995,13 +8995,13 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
     return value.split("=", 1)[1]
 
 
-def scan_tmux_sessions() -> Dict[str, Dict[str, Any]]:
+def scan_tmux_sessions() -> dict[str, dict[str, Any]]:
     """Scan tmux for registered sessions."""
     _sync_worker_manager()
     return worker_manager.scan_tmux_sessions()
 
 
-def get_registered_sessions(registered: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+def get_registered_sessions(registered: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
     return worker_manager.get_registered_sessions(registered)
@@ -9076,7 +9076,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host, timeout=3)
 
 
-def get_docker_run_cmd(name: str, resume_id: str = "") -> List[str]:
+def get_docker_run_cmd(name: str, resume_id: str = "") -> list[str]:
     """Build docker run command for sandbox mode.
 
     Default: mounts ~ to /workspace (rw)
@@ -9154,7 +9154,7 @@ def stop_docker_container(name: str) -> None:
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
 
 
-def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bool:
+def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
     """Send a message to a worker using the appropriate backend."""
     if _send_to_grpc_worker(name, message, "manager"):
         return True
@@ -9162,7 +9162,7 @@ def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bo
     return worker_manager.send(name, message, chat_id)
 
 
-def _fetch_remote_file(host: str, remote_path: str) -> Optional[str]:
+def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     """Fetch a file from a remote host via rsync to a local temp path.
 
     Returns local temp path on success, None on failure.
@@ -9574,7 +9574,7 @@ def send_typing_loop(chat_id: int | str, session_name: str) -> None:
         time.sleep(4)
 
 
-def get_all_chat_ids() -> List[int]:
+def get_all_chat_ids() -> list[int]:
     """Get all unique chat_ids from session files."""
     chat_ids = set()
     if SESSIONS_DIR.exists():
@@ -9616,8 +9616,8 @@ class _LegacyTransportAdapter(MessageTransport):
     for backward compat with tests that pass FakeTelegram to CommandRouter."""
 
     def __init__(self, legacy: Any) -> None:
-        """Initialize internal state and locks."""
-        self._legacy: Any = legacy
+        """Initialize with TelegramAPI or duck-typed test double (must have send_message)."""
+        self._legacy: Any = legacy  # Any: accepts FakeTelegram test doubles without Protocol
 
     @property
     def name(self) -> str:
@@ -9626,42 +9626,42 @@ class _LegacyTransportAdapter(MessageTransport):
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
-                  reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+                  reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         result = self._legacy.send_message(chat_id, text)
         return result if result else {"ok": True, "result": {"message_id": 1}}
 
-    def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a photo to a Telegram chat."""
         return False
 
-    def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
-                      caption: Optional[str] = None) -> bool:
+    def send_document(self, chat_id: ChatId, doc_path: str | Path,
+                      caption: str | None = None) -> bool:
         """Send a document file to a Telegram chat."""
         return False
 
-    def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
-                       caption: Optional[str] = None) -> bool:
+    def send_animation(self, chat_id: ChatId, animation_path: str | Path,
+                       caption: str | None = None) -> bool:
         """Send an animation (GIF/MP4) to a Telegram chat."""
         return False
 
-    def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_video(self, chat_id: ChatId, video_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a video to a Telegram chat."""
         return False
 
-    def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_audio(self, chat_id: ChatId, audio_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send an audio file to a Telegram chat."""
         return False
 
-    def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
-                   caption: Optional[str] = None) -> bool:
+    def send_voice(self, chat_id: ChatId, voice_path: str | Path,
+                   caption: str | None = None) -> bool:
         """Send a voice message to a Telegram chat."""
         return False
 
-    def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         """Send a sticker to a Telegram chat."""
         return False
 
@@ -9670,7 +9670,7 @@ class _LegacyTransportAdapter(MessageTransport):
         pass
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: List[Dict[str, str]]) -> None:
+                     reaction: list[dict[str, str]]) -> None:
         """Set an emoji reaction on a message."""
         if hasattr(self._legacy, 'set_reaction'):
             self._legacy.set_reaction(chat_id, message_id, reaction)
@@ -9680,11 +9680,11 @@ class _LegacyTransportAdapter(MessageTransport):
         """Edit an existing message by its ID."""
         return {"ok": True, "result": {"message_id": message_id}}
 
-    def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+    def setup_commands(self, commands: list[dict[str, str]]) -> None:
         """Register bot command suggestions with Telegram."""
         pass
 
-    def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+    def download_file(self, file_id: str, session_name: str) -> str | None:
         """Download a file from Telegram by file ID."""
         return None
 
@@ -10930,7 +10930,7 @@ class WorkerLifecycleCommandsMixin:
             with watchdog.restart_lock:
                 watchdog.restart_in_progress.pop(name, None)
 
-    def _do_restart(self, name: str, session: Dict[str, Any], chat_id: ChatId, host: Optional[str], tmux_name: str, force: bool, clean: bool) -> bool:
+    def _do_restart(self, name: str, session: dict[str, Any], chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
         """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
@@ -11005,7 +11005,7 @@ class WorkerLifecycleCommandsMixin:
             self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def _restart_remote_worker(self, name: str, backend_name: str, backend: Any, tmux_name: str, host: str, mode: str) -> bool:
+    def _restart_remote_worker(self, name: str, backend_name: str, backend: BackendLifecycle, tmux_name: str, host: str, mode: str) -> bool:
         """Restart a teleported worker on its remote host.
 
         Reuses _stop_worker_for_teleport + _start_worker_on_target which
@@ -11764,23 +11764,23 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
     interactive reply detection. Delegates specialized commands to mixins.
     """
 
-    def __init__(self, transport: Optional[MessageTransport],
+    def __init__(self, transport: MessageTransport | None,
                  workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
         """Initialize internal state and locks."""
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
-        self.transport: Optional[MessageTransport] = transport
+        self.transport: MessageTransport | None = transport
         self.workers: "WorkerManager" = workers
         # Restart-all state
         self._restart_all_lock: threading.Lock = threading.Lock()
         self._restart_all_running: bool = False
         self._restart_all_abort: threading.Event = threading.Event()
-        self._restart_all_thread: Optional[threading.Thread] = None
+        self._restart_all_thread: threading.Thread | None = None
 
         # Each handler takes (arg, chat_id, message_id) and returns True if handled.
         # To add a new command, add one line here. No dispatch changes needed.
-        self._commands: Dict[str, CommandFn] = {
+        self._commands: dict[str, CommandFn] = {
             "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),
             "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),
             "/team": lambda arg, cid, mid: self.cmd_team(cid),
@@ -11802,7 +11802,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
         }
 
-    def reply(self, chat_id: ChatId, text: str, outcome: Optional[str] = None) -> None:
+    def reply(self, chat_id: ChatId, text: str, outcome: str | None = None) -> None:
         """Send a reply message to a chat via the transport."""
         if self.transport is not None:
             self.transport.send_text(chat_id, text)
@@ -11826,7 +11826,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
         self.reply(chat_id, "\n".join(lines))
 
-    def handle_message(self, update: Dict[str, Any]) -> None:
+    def handle_message(self, update: dict[str, Any]) -> None:
         """Route an incoming Telegram update to the appropriate handler."""
         global admin_chat_id
         print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
@@ -11867,7 +11867,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             return True
         return chat_id == admin_chat_id
 
-    def _buffer_media_group(self, media_group_id: str, msg: Dict[str, Any], text: str) -> None:
+    def _buffer_media_group(self, media_group_id: str, msg: dict[str, Any], text: str) -> None:
         """Buffer a media group item and schedule flush when group is complete."""
         with media_groups.lock:
             if media_group_id not in media_groups.buffer:
@@ -12091,7 +12091,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
     def _handle_mention_routing(self, targets: list[str], message: str,
                                 text: str, chat_id: int, msg_id: int,
-                                reply_to: Dict[str, Any] | None,
+                                reply_to: dict[str, Any] | None,
                                 reply_context: str,
                                 reply_context_ts: int | None) -> None:
         """Route a message with @mentions to the targeted workers."""
@@ -13002,7 +13002,7 @@ command_router = CommandRouter(transport, worker_manager)
 # ============================================================
 
 # Background transcript sync tracking: {key: {status, progress, error, path, started}}
-_TRANSCRIPT_SYNC: Dict[str, Any] = {}
+_TRANSCRIPT_SYNC: dict[str, Any] = {}
 _TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
 
 # Path to transcript-index.py script (same directory as bridge.py)
@@ -13068,7 +13068,7 @@ def _render_csv_to_html(csv_text: str) -> str:
     return f'<div class="file-body file-body-csv"><table><thead>{header}</thead><tbody>{body}</tbody></table></div>'
 
 
-def _run_team_chat_query(query_type: str, **kwargs: Any) -> Optional[str]:
+def _run_team_chat_query(query_type: str, **kwargs: Any) -> str | None:
     """Run team-chat-index.py via subprocess. Returns parsed JSON dict."""
     cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
            "--jsonl", TEAM_CHAT_JSONL,
@@ -13091,7 +13091,7 @@ def _run_team_chat_query(query_type: str, **kwargs: Any) -> Optional[str]:
     return None
 
 
-def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> Optional[str]:
+def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> str | None:
     """Run transcript-index.py locally or via SSH. Returns parsed JSON dict."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = TRANSCRIPT_INDEX_SCRIPT
