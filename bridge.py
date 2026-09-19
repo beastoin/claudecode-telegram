@@ -302,6 +302,7 @@ class AppContext:
     transport_mode: str = "telegram"
 
     def __post_init__(self) -> None:
+        """Validate and normalize fields after dataclass initialization."""
         if self.sessions_dir is None:
             self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
         if self.claude_dir is None:
@@ -438,6 +439,7 @@ class GuestSession:
 
     @classmethod
     def from_dict(cls, token_hash: str, d: Dict[str, Any]) -> "GuestSession":
+        """Construct an instance from a plain dictionary."""
         nw = d.get("notified_workers", set())
         if isinstance(nw, list):
             nw = set(nw)
@@ -450,6 +452,7 @@ class GuestSession:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {
             "name": self.name,
             "created_at": self.created_at,
@@ -459,6 +462,7 @@ class GuestSession:
 
     @property
     def is_expired(self) -> bool:
+        """Check whether this entry has passed its expiration time."""
         return time.time() >= self.expires_at_unix
 
 
@@ -472,6 +476,7 @@ class GuestInboxMessage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "GuestInboxMessage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
             sender=d.get("from", d.get("sender", "")),
@@ -489,6 +494,7 @@ class ChannelMember:
 
     @classmethod
     def from_dict(cls, key: str, d: Dict[str, Any]) -> "ChannelMember":
+        """Construct an instance from a plain dictionary."""
         return cls(key=key, type=d["type"], name=d.get("name", ""))
 
 
@@ -503,6 +509,7 @@ class ChannelMessage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ChannelMessage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             id=d["id"],
             seq=d["seq"],
@@ -523,6 +530,7 @@ class RelayMessage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RelayMessage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
             sender=d.get("from", d.get("sender", "")),
@@ -536,6 +544,7 @@ class GuestStore:
     """Thread-safe store for guest sessions and inboxes."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.guests: Dict[str, Dict[str, Any]] = {}
         self.inboxes: Dict[str, List[Dict[str, Any]]] = {}
         self.lock: threading.Lock = threading.Lock()
@@ -595,7 +604,7 @@ def _guest_load() -> None:
         guest_store.inboxes.update(data.get("inboxes", {}))
         if restored:
             print(f"[guest] Restored {restored} active guest(s) from disk", flush=True)
-    except Exception as e:
+    except (json.JSONDecodeError, OSError, KeyError) as e:
         print(f"[guest] Failed to load state: {e}", flush=True)
 
 
@@ -668,6 +677,7 @@ class ChannelStore:
     """Thread-safe store for group channels."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.channels: Dict[str, Dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -825,6 +835,7 @@ class RelayStore:
     """Thread-safe store for relay channels."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.channels: Dict[str, Dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -1128,6 +1139,7 @@ class WorkerRegistryEntry:
     home_cwd: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         d: Dict[str, Any] = {"backend": self.backend}
         for k in ("protocol", "callback_url", "host", "version", "chat_id",
                    "hire_time", "tools", "home_host", "home_cwd"):
@@ -1138,6 +1150,7 @@ class WorkerRegistryEntry:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "WorkerRegistryEntry":
+        """Construct an instance from a plain dictionary."""
         return cls(
             backend=d.get("backend", "claude"),
             protocol=d.get("protocol", ""),
@@ -1156,6 +1169,7 @@ class WorkerRegistryEntry:
 # CORE: Backend Protocol + implementations
 
 def build_claude_start_cmd(resume_id: str = "") -> str:
+    """Build the shell command to start a Claude Code interactive session."""
     cmd = ["claude"]
     if resume_id:
         cmd.extend(["--resume", resume_id])
@@ -1227,6 +1241,7 @@ class RemoteCache:
     """Caches for remote host operations (tools, machines, home dirs)."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.tools: Dict[str, str] = {}     # host:tool -> absolute path
         self.machines: Optional[Dict[str, "Machine"]] = None
         self.machines_path: Optional[Path] = None
@@ -1363,9 +1378,11 @@ class Machine:
 
     @property
     def is_local(self) -> bool:
+        """Check whether this machine is the local bridge host."""
         return self.ssh_target is None
 
     def public_dict(self) -> dict:
+        """Return a sanitized dictionary safe for API responses."""
         return {
             "id": self.id,
             "display_name": self.display_name or self.id,
@@ -1722,7 +1739,7 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
             "staged_files": staged_files,
             "stash_sha": stash_sha or None,
         }
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[git-sync] push state error: {e}")
         return None
 
@@ -1858,7 +1875,7 @@ def _get_project_name(cwd: str, host: str | None = None) -> Optional[str]:
             # HTTPS format
             name = url.rsplit("/", 1)[-1]
         return name if name else None
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return None
 
 
@@ -1894,6 +1911,7 @@ class TmuxSendState:
     """Thread locks and file descriptors for serialized tmux send operations."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.locks: Dict[str, threading.Lock] = {}
         self.locks_guard: threading.Lock = threading.Lock()
         self.flock_fds: Dict[str, int] = {}
@@ -2061,6 +2079,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
 
 
 def tmux_send_escape(tmux_name: str, host: str | None = None) -> None:
+    """Send an escape key sequence to a tmux pane."""
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=5)
 
 
@@ -2170,10 +2189,12 @@ class ClaudeBackend:
     is_interactive = True
 
     def start_cmd(self, resume_id: str = "") -> str:
+        """Start cmd."""
         return build_claude_start_cmd(resume_id)
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
+        """Send."""
         host = get_worker_host(worker_name)
         try:
             if not tmux_exists(tmux_name, host=host, timeout=3):
@@ -2199,6 +2220,7 @@ class ClaudeBackend:
     def is_online(self, tmux_name: str) -> bool:
         # Note: is_online doesn't have worker_name, so can't look up host.
         # For remote workers, the watchdog uses different detection.
+        """Is online."""
         if not tmux_exists(tmux_name):
             return False
         return is_process_running(tmux_name, "claude")
@@ -2211,14 +2233,17 @@ class CodexBackend:
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
+        """Start cmd."""
         return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
+        """Send."""
         adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
         return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
+        """Is online."""
         return tmux_exists(tmux_name)
 
 
@@ -2229,14 +2254,17 @@ class GeminiBackend:
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
+        """Start cmd."""
         return "echo 'Gemini worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
+        """Send."""
         adapter = Path(__file__).parent / "hooks" / "gemini-adapter.py"
         return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
+        """Is online."""
         return tmux_exists(tmux_name)
 
 
@@ -2247,14 +2275,17 @@ class OpenCodeBackend:
     is_interactive = False
 
     def start_cmd(self, resume_id: str = "") -> str:
+        """Start cmd."""
         return "echo 'OpenCode worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
+        """Send."""
         adapter = Path(__file__).parent / "hooks" / "opencode-adapter.py"
         return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
 
     def is_online(self, tmux_name: str) -> bool:
+        """Is online."""
         return tmux_exists(tmux_name)
 
 
@@ -2269,6 +2300,7 @@ class ProcessRegistry:
     """Tracks background process PIDs, pipe reader threads, and pending locks."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
         self.pipe_readers: Dict[str, tuple] = {}
         self.pending_locks: Dict[str, threading.Lock] = {}
@@ -2495,14 +2527,17 @@ def _read_noninteractive_activity(worker_name: str) -> str:
 
 
 def get_backend(name: str) -> Backend:
+    """Look up a backend class by name."""
     return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
 
 
 def is_valid_backend(name: str) -> bool:
+    """Check whether a backend name is registered."""
     return name in BACKENDS
 
 
 def list_backends() -> list[str]:
+    """Return list of all registered backend names."""
     return list(BACKENDS.keys())
 
 
@@ -2525,6 +2560,7 @@ def _which_binary(binary: str) -> str | None:
 
 
 def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
+    """Check if an interactive backend process is running in the given tmux pane."""
     return is_process_running(tmux_name, "claude", host=host)
 
 
@@ -2543,26 +2579,33 @@ class MentionTracker:
     _KEYS = ("target", "count", "ts")
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.target: Optional[str] = None
         self.count: int = 0
         self.ts: float = 0.0
 
     def __getitem__(self, key: str) -> Any:
+        """Get a value by key (dict-like access)."""
         return getattr(self, key)
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Set a value by key (dict-like access)."""
         setattr(self, key, value)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Get a value with optional default (dict-like access)."""
         return getattr(self, key, default)
 
     def keys(self) -> tuple:
+        """Return all keys (dict-like access)."""
         return self._KEYS
 
     def __iter__(self) -> Iterator[tuple[str, Any]]:
+        """Iterate over keys (dict-like access)."""
         return iter(self._KEYS)
 
     def update(self, other: dict) -> None:
+        """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEYS:
                 setattr(self, k, v)
@@ -2571,6 +2614,7 @@ class MentionTracker:
 class BridgeRuntimeState:
     """Typed in-memory state (RAM only — tmux IS persistence)."""
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.active: Optional[str] = None
         self.startup_notified: bool = False
         self.tts_enabled: bool = False
@@ -2581,12 +2625,14 @@ class BridgeRuntimeState:
                 "tts_enabled": "tts_enabled"}
 
     def __getitem__(self, key: str) -> Any:
+        """Get a value by key (dict-like access)."""
         attr = self._KEY_MAP.get(key)
         if attr:
             return getattr(self, attr)
         raise KeyError(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Set a value by key (dict-like access)."""
         attr = self._KEY_MAP.get(key)
         if attr:
             setattr(self, attr, value)
@@ -2594,18 +2640,22 @@ class BridgeRuntimeState:
             raise KeyError(key)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Get a value with optional default (dict-like access)."""
         try:
             return self[key]
         except KeyError:
             return default
 
     def keys(self) -> list:
+        """Return all keys (dict-like access)."""
         return list(self._KEY_MAP.keys())
 
     def __iter__(self) -> Iterator[tuple[str, Any]]:
+        """Iterate over keys (dict-like access)."""
         return iter(self._KEY_MAP)
 
     def update(self, other: dict) -> None:
+        """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEY_MAP:
                 setattr(self, self._KEY_MAP[k], v)
@@ -2629,6 +2679,7 @@ class DiskUsage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DiskUsage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
             free_gb=d.get("free_gb", 0.0),
@@ -2637,6 +2688,7 @@ class DiskUsage:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
 
@@ -2652,6 +2704,7 @@ class MemoryUsage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "MemoryUsage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
             used_gb=d.get("used_gb", 0.0),
@@ -2661,6 +2714,7 @@ class MemoryUsage:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "used_gb": self.used_gb,
                 "total_gb": self.total_gb, "available_gb": self.available_gb,
                 "ts": self.ts}
@@ -2677,6 +2731,7 @@ class IoUsage:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "IoUsage":
+        """Construct an instance from a plain dictionary."""
         return cls(
             read_mb_s=d.get("read_mb_s", 0.0),
             write_mb_s=d.get("write_mb_s", 0.0),
@@ -2686,6 +2741,7 @@ class IoUsage:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {"read_mb_s": self.read_mb_s, "write_mb_s": self.write_mb_s,
                 "iops": self.iops, "util_pct": self.util_pct, "ts": self.ts}
 
@@ -2700,6 +2756,7 @@ class CpuHog:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CpuHog":
+        """Construct an instance from a plain dictionary."""
         return cls(
             pid=d.get("pid", 0),
             cpu_pct=d.get("cpu_pct", d.get("cpu", 0.0)),
@@ -2717,6 +2774,7 @@ class WorktreeItem:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "WorktreeItem":
+        """Construct an instance from a plain dictionary."""
         return cls(
             path=d.get("path", ""),
             size_mb=d.get("size_mb", 0.0),
@@ -2757,6 +2815,7 @@ class WorkerWatchdogState:
 
     def __init__(self) -> None:
         # Worker probe state
+        """Initialize internal state and locks."""
         self.worker_states: Dict[str, tuple] = {}
         self.last_child_ts: Dict[str, float] = {}
         self.last_seen_claude: Dict[str, float] = {}
@@ -2811,6 +2870,7 @@ class HostHealthState:
 
     def __init__(self) -> None:
         # SSH connectivity
+        """Initialize internal state and locks."""
         self.ssh_failures: Dict[str, int] = {}
         self.down: Dict[str, bool] = {}
         self.down_since: Dict[str, float] = {}
@@ -2867,6 +2927,7 @@ class LearningReminderState:
     """Tracks per-worker learning reminder counters, timers, and persistence."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.state: dict[str, Any] = {}
         self.lock: threading.Lock = threading.Lock()
         self.idle_scan_timer: threading.Timer | None = None
@@ -3038,7 +3099,7 @@ def _scan_idle_workers() -> None:
 
             for name in to_fire:
                 _fire_reminder(name, learning_reminders.state[name])
-    except Exception as e:
+    except KeyError as e:
         print(f"Learning reminder idle scan error: {e}")
     finally:
         _schedule_idle_scan()
@@ -3071,7 +3132,7 @@ def _send_learning_reminder(name: str, text: str) -> None:
             print(f"Learning reminder sent to {name}")
         else:
             print(f"Learning reminder: failed to send to {name}")
-    except Exception as e:
+    except (ConnectionError, OSError, TimeoutError) as e:
         print(f"Learning reminder error for {name}: {e}")
 
 
@@ -3093,6 +3154,7 @@ class MediaGroupState:
     """Buffer for Telegram media groups — collects items before routing."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self.buffer: Dict[str, Dict[str, Any]] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -3109,13 +3171,16 @@ class RewindToken:
     expires_at: float    # unix timestamp
 
     def is_expired(self) -> bool:
+        """Check whether this entry has passed its expiration time."""
         return time.time() >= self.expires_at
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {"name": self.name, "expires_at": self.expires_at}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RewindToken":
+        """Construct an instance from a plain dictionary."""
         return cls(name=d["name"], expires_at=d["expires_at"])
 
 
@@ -3128,14 +3193,17 @@ class PrReviewToken:
     expires_at: float
 
     def is_expired(self) -> bool:
+        """Check whether this entry has passed its expiration time."""
         return time.time() >= self.expires_at
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this instance to a plain dictionary."""
         return {"pr_num": self.pr_num, "owner": self.owner,
                 "repo": self.repo, "expires_at": self.expires_at}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PrReviewToken":
+        """Construct an instance from a plain dictionary."""
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
 
@@ -3401,59 +3469,74 @@ class MessageTransport:
 
     @property
     def name(self) -> str:
+        """Return the transport name identifier."""
         raise NotImplementedError
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
                   reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a plain text message."""
         raise NotImplementedError
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a rich-formatted (markdown) text message."""
         raise NotImplementedError
 
     def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a photo to a Telegram chat."""
         raise NotImplementedError
 
     def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
                       caption: Optional[str] = None) -> bool:
+        """Send a document file to a Telegram chat."""
         raise NotImplementedError
 
     def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
                        caption: Optional[str] = None) -> bool:
+        """Send an animation (GIF/MP4) to a Telegram chat."""
         raise NotImplementedError
 
     def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a video to a Telegram chat."""
         raise NotImplementedError
 
     def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send an audio file to a Telegram chat."""
         raise NotImplementedError
 
     def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a voice message to a Telegram chat."""
         raise NotImplementedError
 
     def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+        """Send a sticker to a Telegram chat."""
         raise NotImplementedError
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
+        """Send a chat action indicator (typing, uploading, etc.)."""
         raise NotImplementedError
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: List[Dict[str, str]]) -> None:
+        """Set an emoji reaction on a message."""
         raise NotImplementedError
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId,
                      text: str, parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+        """Edit an existing message by its ID."""
         raise NotImplementedError
 
     def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+        """Register bot command suggestions with Telegram."""
         raise NotImplementedError
 
     def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+        """Download a file from Telegram by file ID."""
         raise NotImplementedError
 
 
@@ -3465,9 +3548,11 @@ class TelegramAPI:
     """Low-level Telegram Bot API caller. Fully type-annotated."""
 
     def __init__(self, token: str) -> None:
+        """Initialize internal state and locks."""
         self.token: str = token
 
     def api(self, method: str, data: Dict[str, Any]) -> TelegramApiResponse:
+        """Make a raw Telegram Bot API call and return the response."""
         if not self.token:
             return None
         req = urllib.request.Request(
@@ -3492,11 +3577,13 @@ class TelegramAPI:
             return None
 
     def send_message(self, chat_id: ChatId, text: str, **kwargs: Any) -> TelegramApiResponse:
+        """Send a text message via the Telegram Bot API."""
         payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
         payload.update(kwargs)
         return self.api("sendMessage", payload)
 
     def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: Any) -> TelegramApiResponse:
+        """Send a rich-formatted message via the Telegram Bot API."""
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
@@ -3505,26 +3592,31 @@ class TelegramAPI:
         return self.api("sendRichMessage", payload)
 
     def send_photo(self, chat_id: ChatId, photo: str, **kwargs: Any) -> TelegramApiResponse:
+        """Send a photo to a Telegram chat."""
         payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo}
         payload.update(kwargs)
         return self.api("sendPhoto", payload)
 
     def send_document(self, chat_id: ChatId, document: str, **kwargs: Any) -> TelegramApiResponse:
+        """Send a document file to a Telegram chat."""
         payload: Dict[str, Any] = {"chat_id": chat_id, "document": document}
         payload.update(kwargs)
         return self.api("sendDocument", payload)
 
     def send_animation(self, chat_id: ChatId, animation: str, **kwargs: Any) -> TelegramApiResponse:
+        """Send an animation (GIF/MP4) to a Telegram chat."""
         payload: Dict[str, Any] = {"chat_id": chat_id, "animation": animation}
         payload.update(kwargs)
         return self.api("sendAnimation", payload)
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: List[Dict[str, str]]) -> TelegramApiResponse:
+        """Set an emoji reaction on a message."""
         payload: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
         return self.api("setMessageReaction", payload)
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> TelegramApiResponse:
+        """Send a chat action indicator (typing, uploading, etc.)."""
         return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
@@ -3532,15 +3624,18 @@ class TelegramTransport(MessageTransport):
     """Transport that sends messages via Telegram Bot API."""
 
     def __init__(self, token: str) -> None:
+        """Initialize internal state and locks."""
         self._api: TelegramAPI = TelegramAPI(token)
 
     @property
     def name(self) -> str:
+        """Return the transport name identifier."""
         return "telegram"
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
                   reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a plain text message."""
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -3551,6 +3646,7 @@ class TelegramTransport(MessageTransport):
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a rich-formatted (markdown) text message."""
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
@@ -3561,6 +3657,7 @@ class TelegramTransport(MessageTransport):
 
     def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a photo to a Telegram chat."""
         if not BOT_TOKEN:
             return False
         ok, validated = validate_photo_path(photo_path)
@@ -3609,6 +3706,7 @@ class TelegramTransport(MessageTransport):
 
     def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
                        caption: Optional[str] = None) -> bool:
+        """Send an animation (GIF/MP4) to a Telegram chat."""
         if not BOT_TOKEN:
             return False
         ok, validated = validate_photo_path(animation_path)
@@ -3656,6 +3754,7 @@ class TelegramTransport(MessageTransport):
 
     def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
                       caption: Optional[str] = None) -> bool:
+        """Send a document file to a Telegram chat."""
         if not BOT_TOKEN:
             return False
         ok, validated = validate_document_path(doc_path)
@@ -3746,6 +3845,7 @@ class TelegramTransport(MessageTransport):
 
     def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a video to a Telegram chat."""
         ok, validated = validate_document_path(video_path)
         if not ok:
             print(validated)
@@ -3754,6 +3854,7 @@ class TelegramTransport(MessageTransport):
 
     def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send an audio file to a Telegram chat."""
         ok, validated = validate_document_path(audio_path)
         if not ok:
             print(validated)
@@ -3762,6 +3863,7 @@ class TelegramTransport(MessageTransport):
 
     def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a voice message to a Telegram chat."""
         ok, validated = validate_document_path(voice_path)
         if not ok:
             print(validated)
@@ -3769,6 +3871,7 @@ class TelegramTransport(MessageTransport):
         return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
 
     def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+        """Send a sticker to a Telegram chat."""
         sticker_path = Path(sticker_path)
         if not sticker_path.exists() or not sticker_path.is_file():
             print(f"Sticker not found: {sticker_path}")
@@ -3776,23 +3879,28 @@ class TelegramTransport(MessageTransport):
         return self._send_media_multipart(chat_id, sticker_path, "sticker", "sendSticker")
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
+        """Send a chat action indicator (typing, uploading, etc.)."""
         telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: List[Dict[str, str]]) -> None:
+        """Set an emoji reaction on a message."""
         telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": reaction})
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+        """Edit an existing message by its ID."""
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
         return telegram_api("editMessageText", payload)
 
     def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+        """Register bot command suggestions with Telegram."""
         telegram_api("setMyCommands", {"commands": commands})
 
     def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+        """Download a file from Telegram by file ID."""
         if not BOT_TOKEN:
             return None
         try:
@@ -3853,10 +3961,12 @@ class LocalTransport(MessageTransport):
     """Transport that logs messages to stdout. For testing without Telegram."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self._log_file: str = os.environ.get("TRANSPORT_LOG", "")
 
     @property
     def name(self) -> str:
+        """Return the transport name identifier."""
         return "local"
 
     def _log(self, method: str, chat_id: ChatId, **kwargs: Any) -> None:
@@ -3872,64 +3982,78 @@ class LocalTransport(MessageTransport):
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
                   reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a plain text message."""
         self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
         return {"ok": True, "result": {"message_id": 1}}
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a rich-formatted (markdown) text message."""
         self._log("send_rich_text", chat_id, text=markdown[:200])
         return {"ok": True, "result": {"message_id": 1}}
 
     def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a photo to a Telegram chat."""
         self._log("send_photo", chat_id, path=photo_path, caption=caption)
         return True
 
     def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
                       caption: Optional[str] = None) -> bool:
+        """Send a document file to a Telegram chat."""
         self._log("send_document", chat_id, path=doc_path, caption=caption)
         return True
 
     def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
                        caption: Optional[str] = None) -> bool:
+        """Send an animation (GIF/MP4) to a Telegram chat."""
         self._log("send_animation", chat_id, path=animation_path, caption=caption)
         return True
 
     def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a video to a Telegram chat."""
         self._log("send_video", chat_id, path=video_path, caption=caption)
         return True
 
     def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send an audio file to a Telegram chat."""
         self._log("send_audio", chat_id, path=audio_path, caption=caption)
         return True
 
     def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a voice message to a Telegram chat."""
         self._log("send_voice", chat_id, path=voice_path, caption=caption)
         return True
 
     def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+        """Send a sticker to a Telegram chat."""
         self._log("send_sticker", chat_id, path=sticker_path)
         return True
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
+        """Send a chat action indicator (typing, uploading, etc.)."""
         self._log("send_chat_action", chat_id, action=action)
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: List[Dict[str, str]]) -> None:
+        """Set an emoji reaction on a message."""
         self._log("set_reaction", chat_id, message_id=message_id)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+        """Edit an existing message by its ID."""
         self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
         return {"ok": True, "result": {"message_id": message_id}}
 
     def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+        """Register bot command suggestions with Telegram."""
         self._log("setup_commands", 0, count=len(commands))
 
     def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+        """Download a file from Telegram by file ID."""
         self._log("download_file", 0, file_id=file_id, session=session_name)
         return None
 
@@ -3971,30 +4095,37 @@ def download_telegram_file(file_id: str, session_name: str) -> Optional[str]:
 # Tests patch these (e.g. patch.object(bridge, 'send_voice', ...)).
 # Production code routes through transport.*; these stubs allow test mocking.
 def send_voice(chat_id: int | str, voice_path: str, caption: str | None = None) -> bool:
+    """Send a voice message to a Telegram chat."""
     return transport.send_voice(chat_id, voice_path, caption)
 
 
 def send_photo(chat_id: int | str, photo_path: str, caption: str | None = None) -> bool:
+    """Send a photo to a Telegram chat."""
     return transport.send_photo(chat_id, photo_path, caption)
 
 
 def send_animation(chat_id: int | str, animation_path: str, caption: str | None = None) -> bool:
+    """Send an animation (GIF/MP4) to a Telegram chat."""
     return transport.send_animation(chat_id, animation_path, caption)
 
 
 def send_document(chat_id: int | str, doc_path: str, caption: str | None = None) -> bool:
+    """Send a document file to a Telegram chat."""
     return transport.send_document(chat_id, doc_path, caption)
 
 
 def send_video(chat_id: int | str, video_path: str, caption: str | None = None) -> bool:
+    """Send a video to a Telegram chat."""
     return transport.send_video(chat_id, video_path, caption)
 
 
 def send_audio(chat_id: int | str, audio_path: str, caption: str | None = None) -> bool:
+    """Send an audio file to a Telegram chat."""
     return transport.send_audio(chat_id, audio_path, caption)
 
 
 def send_sticker(chat_id: int | str, sticker_path: str) -> bool:
+    """Send a sticker to a Telegram chat."""
     return transport.send_sticker(chat_id, sticker_path)
 
 
@@ -4200,7 +4331,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
                         # Forward to worker using backend routing
                         try:
                             _forward_pipe_message(name, message)
-                        except Exception as e:
+                        except (OSError, ValueError) as e:
                             print(f"Error forwarding pipe message to '{name}': {e}")
 
         except FileNotFoundError:
@@ -4396,7 +4527,7 @@ def synthesize_speech(text: str, voice: str | None = None, language: str = "en")
             mode = "chunked" if endpoint != TTS_ENDPOINT else "single"
             print(f"TTS synthesized ({mode}): {len(clean)} chars -> {duration}s audio in {proc_time}s")
             return str(tmp_path)
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, TypeError, OSError, KeyError) as e:
         print(f"TTS error (fail-open): {e}")
         return None
 
@@ -4566,6 +4697,7 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], s
     removed = 0
 
     def replace_tag(match: re.Match[str]) -> str:
+        """Replace HTML tag names in a sanitizer context."""
         nonlocal removed
         if match.group(1):
             # Escaped tag, return without the escape slash.
@@ -4657,6 +4789,7 @@ def markdown_to_telegram_html(text: str) -> str:
         }
 
         def __init__(self, rejected_open_tags: set[str]) -> None:
+            """Initialize internal state and locks."""
             super().__init__(convert_charrefs=False)
             self._out = []
             self._rejected_open_tags = rejected_open_tags
@@ -4700,6 +4833,7 @@ def markdown_to_telegram_html(text: str) -> str:
             return f"<{tag} {' '.join(rendered)}>"
 
         def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            """Process an opening HTML tag during sanitization."""
             accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
             if accepted:
                 self._out.append(self._render_start_tag(tag, attrs))
@@ -4709,6 +4843,7 @@ def markdown_to_telegram_html(text: str) -> str:
                 self._rejected_open_tags.append(tag)
 
         def handle_endtag(self, tag: str) -> None:
+            """Process a closing HTML tag during sanitization."""
             rejected_match = False
             for idx in range(len(self._rejected_open_tags) - 1, -1, -1):
                 if self._rejected_open_tags[idx] == tag:
@@ -4721,6 +4856,7 @@ def markdown_to_telegram_html(text: str) -> str:
                 self._out.append(escape_html(f"</{tag}>"))
 
         def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            """Process a self-closing HTML tag during sanitization."""
             accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
             if accepted:
                 start = self._render_start_tag(tag, attrs)
@@ -4729,18 +4865,23 @@ def markdown_to_telegram_html(text: str) -> str:
                 self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
 
         def handle_data(self, data: str) -> None:
+            """Process raw text content during sanitization."""
             self._out.append(escape_html(data))
 
         def handle_entityref(self, name: str) -> None:
+            """Process a named HTML entity during sanitization."""
             self._out.append(f"&{name};")
 
         def handle_charref(self, name: str) -> None:
+            """Process a numeric HTML character reference during sanitization."""
             self._out.append(f"&#{name};")
 
         def handle_comment(self, data: str) -> None:
+            """Discard HTML comments during sanitization."""
             self._out.append(escape_html(f"<!--{data}-->"))
 
         def html(self) -> str:
+            """Return the sanitized HTML output."""
             return "".join(self._out)
 
     def _sanitize_html(raw: str) -> str:
@@ -5276,10 +5417,12 @@ def ensure_session_dir(name: str) -> Path:
 
 
 def get_pending_file(name: str) -> Path:
+    """Return the path to a worker's pending-message file."""
     return get_session_dir(name) / "pending"
 
 
 def get_chat_id_file(name: str) -> Path:
+    """Return the path to a worker's chat ID file."""
     return get_session_dir(name) / "chat_id"
 
 
@@ -5486,6 +5629,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
 
 
 def get_claude_session_cwd(name: str) -> Optional[str]:
+    """Read and return the current working directory for a worker session."""
     cwd = _read_session_file(name, "claude_session_cwd")
     if cwd:
         cwd = os.path.expanduser(cwd)
@@ -5493,6 +5637,7 @@ def get_claude_session_cwd(name: str) -> Optional[str]:
 
 
 def save_claude_session_cwd(name: str, cwd: str) -> None:
+    """Persist a worker's current working directory to disk."""
     if cwd:
         cwd = os.path.expanduser(cwd)
     d = ensure_session_dir(name)
@@ -5502,6 +5647,7 @@ def save_claude_session_cwd(name: str, cwd: str) -> None:
 
 
 def clear_claude_session_id(name: str) -> None:
+    """Remove the cached session ID for a worker."""
     f = get_session_dir(name) / "claude_session_id"
     if f.exists():
         f.unlink()
@@ -5661,6 +5807,7 @@ def compute_state(
     adapter_alive: bool = False,
     poisoned_reason: Optional[str] = None,
 ) -> tuple[str, str]:
+    """Compute the current watchdog state for a worker (READY, BUSY, STUCK, etc.)."""
     if not tmux_exists:
         return "OFFLINE", "tmux missing"
 
@@ -5927,7 +6074,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
                     watchdog.alert_msg_ids[name] = (msg_id, text)
         else:
             print(f"[watchdog] Alert FAILED for {name} ({state}): {result}")
-    except Exception as e:
+    except KeyError as e:
         print(f"Watchdog alert error: {e}")
 
 
@@ -5999,7 +6146,7 @@ def _check_disk_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
         free_gb = float(parts[2].rstrip("G"))
         pct = int(parts[3].rstrip("%"))
         return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6021,7 +6168,7 @@ def _check_disk_usage_macos(host: str) -> Optional[Dict[str, Any]]:
         free_gb = float(parts[3])
         pct = int(parts[4].rstrip("%"))
         return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6122,7 +6269,7 @@ def _check_mem_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
         pct = int((used / total) * 100) if total > 0 else 0
         top_procs = _get_top_mem_procs(host)
         return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6162,7 +6309,7 @@ def _check_mem_usage_macos(host: str) -> Optional[Dict[str, Any]]:
         pct = int((used / total) * 100) if total > 0 else 0
         top_procs = _get_top_mem_procs(host)
         return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6187,7 +6334,7 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict]:
                     "cmd": parts[10][:80],
                 })
         return procs
-    except Exception:
+    except (ValueError, KeyError):
         return []
 
 
@@ -6302,7 +6449,7 @@ def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
             "write_iops": bo,
             "util_pct": 0,
         }
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6326,7 +6473,7 @@ def _check_io_usage_macos(host: str) -> Optional[Dict[str, Any]]:
             "write_iops": int(float(parts[1])),
             "util_pct": 0,
         }
-    except Exception:
+    except (ValueError, KeyError):
         return None
 
 
@@ -6412,7 +6559,7 @@ def _get_cpu_hogs(host: Optional[str] = None, is_mac: bool = False) -> List[Dict
             cmd_name = parts[3][:80] if len(parts) > 3 else "?"
             hogs.append({"pid": pid, "cpu": cpu, "etime_min": etime_min, "cmd": cmd_name})
         return hogs
-    except Exception:
+    except (ValueError, KeyError):
         return []
 
 
@@ -6680,6 +6827,7 @@ def _handle_watchdog_transition(
         return
 
     def eligible_for_alert() -> bool:
+        """Check whether enough time has passed to send another alert."""
         if state in {"OFFLINE", "DEAD", "EXITED"}:
             return since is not None and (now - since) >= START_GRACE
         return True
@@ -6741,6 +6889,7 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 
 
 def watchdog_loop() -> None:
+    """Main watchdog loop — periodically probes all workers and fires alerts."""
     _disk_check_counter = 0
     while True:
         try:
@@ -6785,7 +6934,7 @@ def watchdog_loop() -> None:
                     else:
                         failed_hosts.add(host)
                         _record_host_probe(host, ok=False, error=f"tmux list-panes exit {r.returncode}")
-                except Exception as e:
+                except (subprocess.SubprocessError, KeyError) as e:
                     failed_hosts.add(host)
                     _record_host_probe(host, ok=False, error=str(e)[:200])
 
@@ -7030,30 +7179,30 @@ def watchdog_loop() -> None:
                 _disk_check_counter = 0
                 try:
                     _probe_disk_all_hosts(set(remote_workers.keys()))
-                except Exception as de:
+                except (subprocess.SubprocessError, OSError) as de:
                     print(f"[watchdog] Disk check error: {de}")
                 try:
                     _probe_mem_all_hosts(set(remote_workers.keys()))
-                except Exception as me:
+                except (subprocess.SubprocessError, OSError) as me:
                     print(f"[watchdog] Memory check error: {me}")
                 try:
                     _probe_io_all_hosts(set(remote_workers.keys()))
-                except Exception as ie:
+                except (subprocess.SubprocessError, OSError) as ie:
                     print(f"[watchdog] IO check error: {ie}")
                 try:
                     _probe_cpu_hogs(set(remote_workers.keys()))
-                except Exception as ce:
+                except (subprocess.SubprocessError, OSError) as ce:
                     print(f"[watchdog] CPU hog check error: {ce}")
                 try:
                     _probe_worktree_sizes(set(remote_workers.keys()))
-                except Exception as we:
+                except (subprocess.SubprocessError, OSError) as we:
                     print(f"[watchdog] Worktree check error: {we}")
                 try:
                     _probe_tailscale()
-                except Exception as te:
+                except (subprocess.SubprocessError, OSError) as te:
                     print(f"[watchdog] Tailscale check error: {te}")
 
-        except Exception as e:
+        except (subprocess.SubprocessError, ValueError, KeyError) as e:
             print(f"Watchdog error: {e}")
 
         time.sleep(WATCHDOG_INTERVAL)
@@ -7846,7 +7995,7 @@ def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") ->
         if grpc_server.send_to_worker(name, message, from_name):
             return True
         print(f"gRPC send failed for '{name}', falling back to tmux backend")
-    except Exception as e:
+    except subprocess.SubprocessError as e:
         print(f"gRPC send error for '{name}', falling back to tmux backend: {e}")
     return False
 
@@ -7881,6 +8030,7 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
 
 class WorkerManager:
     def __init__(self, sessions_dir: Path, tmux_prefix: str) -> None:
+        """Initialize internal state and locks."""
         self.sessions_dir = sessions_dir
         self.tmux_prefix = tmux_prefix
 
@@ -7944,13 +8094,13 @@ class WorkerManager:
                         name = session_name[len(self.tmux_prefix):]
                         backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
                         registered[name] = {"tmux": session_name, "backend": backend}
-        except Exception as e:
+        except (subprocess.SubprocessError, KeyError) as e:
             print(f"Error scanning local tmux: {e}")
 
         # Scan remote machines for tmux sessions
         try:
             machines = get_machine_catalog()
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             machines = {}
         for machine in machines.values():
             if machine.is_local or not machine.ssh_target:
@@ -7978,7 +8128,7 @@ class WorkerManager:
                                 "host": machine.ssh_target,
                             }
                             _registry_add(name, DEFAULT_BACKEND, host=machine.ssh_target)
-            except Exception as e:
+            except (subprocess.SubprocessError, KeyError) as e:
                 print(f"Error scanning tmux on {machine.ssh_target}: {e}")
 
         return registered
@@ -8079,10 +8229,10 @@ class WorkerManager:
                 if backend.is_interactive:
                     try:
                         return is_claude_running(tmux_name, host=host)
-                    except Exception:
+                    except (subprocess.SubprocessError, OSError):
                         return True  # Probe failure on interactive check — assume online
                 return True
-            except Exception:
+            except (subprocess.SubprocessError, OSError):
                 return True  # SSH failure — assume still online (broad catch intentional)
 
         return backend.is_online(tmux_name)
@@ -9201,6 +9351,7 @@ def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> N
 
 
 def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict) -> None:
+    """Handle a gRPC worker registration event."""
     tool_names = ", ".join(sorted(tools.keys())) if tools else "none"
     host_label = host or "unknown-host"
     version_label = version or "unknown-version"
@@ -9226,10 +9377,12 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
 
 
 def handle_grpc_worker_disconnect(name: str) -> None:
+    """Handle a gRPC worker disconnection event."""
     print(f"gRPC worker disconnected: {name}")
 
 
 def handle_grpc_jsonl_received(stream_id: str, data: bytes) -> None:
+    """Handle an incoming JSONL message from a gRPC worker."""
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", stream_id or "stream")
     jsonl_dir = SESSIONS_DIR / "grpc-jsonl"
     jsonl_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -9247,7 +9400,7 @@ def _merge_grpc_workers(workers: list) -> list:
 
     try:
         connected = grpc_server.get_connected_workers()
-    except Exception as e:
+    except (ConnectionError, OSError, TimeoutError) as e:
         print(f"gRPC worker list unavailable: {e}")
         return workers
 
@@ -9357,61 +9510,76 @@ class _LegacyTransportAdapter(MessageTransport):
     for backward compat with tests that pass FakeTelegram to CommandRouter."""
 
     def __init__(self, legacy: Any) -> None:
+        """Initialize internal state and locks."""
         self._legacy: Any = legacy
 
     @property
     def name(self) -> str:
+        """Return the transport name identifier."""
         return "legacy-adapter"
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode | None = None,
                   reply_to: Optional[MessageId] = None) -> TelegramApiResponse:
+        """Send a plain text message."""
         result = self._legacy.send_message(chat_id, text)
         return result if result else {"ok": True, "result": {"message_id": 1}}
 
     def send_photo(self, chat_id: ChatId, photo_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a photo to a Telegram chat."""
         return False
 
     def send_document(self, chat_id: ChatId, doc_path: Union[str, Path],
                       caption: Optional[str] = None) -> bool:
+        """Send a document file to a Telegram chat."""
         return False
 
     def send_animation(self, chat_id: ChatId, animation_path: Union[str, Path],
                        caption: Optional[str] = None) -> bool:
+        """Send an animation (GIF/MP4) to a Telegram chat."""
         return False
 
     def send_video(self, chat_id: ChatId, video_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a video to a Telegram chat."""
         return False
 
     def send_audio(self, chat_id: ChatId, audio_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send an audio file to a Telegram chat."""
         return False
 
     def send_voice(self, chat_id: ChatId, voice_path: Union[str, Path],
                    caption: Optional[str] = None) -> bool:
+        """Send a voice message to a Telegram chat."""
         return False
 
     def send_sticker(self, chat_id: ChatId, sticker_path: Union[str, Path]) -> bool:
+        """Send a sticker to a Telegram chat."""
         return False
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
+        """Send a chat action indicator (typing, uploading, etc.)."""
         pass
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: List[Dict[str, str]]) -> None:
+        """Set an emoji reaction on a message."""
         if hasattr(self._legacy, 'set_reaction'):
             self._legacy.set_reaction(chat_id, message_id, reaction)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+        """Edit an existing message by its ID."""
         return {"ok": True, "result": {"message_id": message_id}}
 
     def setup_commands(self, commands: List[Dict[str, str]]) -> None:
+        """Register bot command suggestions with Telegram."""
         pass
 
     def download_file(self, file_id: str, session_name: str) -> Optional[str]:
+        """Download a file from Telegram by file ID."""
         return None
 
 
@@ -9858,7 +10026,7 @@ class TeleportCommandsMixin:
                     welcome = self.workers._build_welcome(name, backend_obj)
                     time.sleep(3)  # Let Claude finish loading
                     self.workers.send(name, welcome)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
                     print(f"[teleport] Warning: failed to send welcome to {name}: {e}")
 
             state_file.unlink(missing_ok=True)
@@ -9872,7 +10040,7 @@ class TeleportCommandsMixin:
                 msg += f"\nUse /teleback {name} to bring it back."
             self._teleport_notify(chat_id, msg)
 
-        except Exception as e:
+        except (subprocess.SubprocessError, ConnectionError, TimeoutError, TypeError, AttributeError, OSError, ValueError, KeyError) as e:
             import traceback
             traceback.print_exc()
             self._teleport_notify(chat_id, f"Teleport failed: {e}")
@@ -9937,7 +10105,7 @@ class TeleportCommandsMixin:
                         print(f"[teleport] git pull failed, falling back to rsync")
                     else:
                         print(f"[teleport] git push failed, falling back to rsync")
-                except Exception as e:
+                except (subprocess.SubprocessError, OSError, KeyError) as e:
                     print(f"[teleport] git sync error, falling back to rsync: {e}")
 
         return self._rsync_working_directory(
@@ -9965,7 +10133,7 @@ class TeleportCommandsMixin:
                     os.write(fd, gi_result.stdout.encode())
                     os.close(fd)
                     cmd.extend(["--exclude-from", gitignore_tmpfile])
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 print(f"[teleport] git ls-files failed, skipping gitignore excludes: {e}")
 
             for excl in TELEPORT_RSYNC_EXCLUDES:
@@ -10495,6 +10663,7 @@ class WorkerLifecycleCommandsMixin:
     """Worker hire, end, restart, and pause command handlers."""
 
     def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
+        """Handle the /hire command — create a new worker."""
         if not name:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
@@ -10524,6 +10693,7 @@ class WorkerLifecycleCommandsMixin:
         return True
 
     def cmd_end(self, name: str, chat_id: ChatId) -> bool:
+        """Handle the /end command — terminate a worker."""
         if not name:
             self.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
             return True
@@ -10538,6 +10708,7 @@ class WorkerLifecycleCommandsMixin:
         return True
 
     def cmd_pause(self, chat_id: ChatId) -> bool:
+        """Handle the /pause command — send Ctrl-C to a worker."""
         if not state["active"]:
             self.reply(chat_id, "No one assigned.")
             return True
@@ -10561,6 +10732,7 @@ class WorkerLifecycleCommandsMixin:
         return True
 
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
+        """Handle the /restart command — restart a worker session."""
         args = (args or "").strip()
 
         # Parse flags
@@ -11253,7 +11425,7 @@ class ChannelRelayCommandsMixin:
                     try:
                         backend.send(worker_name, tmux_name, tagged,
                                      f"http://localhost:{PORT}", SESSIONS_DIR)
-                    except Exception as e:
+                    except (subprocess.SubprocessError, ConnectionError, TimeoutError) as e:
                         print(f"Channel fan-out to {worker_name} failed: {e}")
             elif info["type"] == "guest":
                 guest_name = info["name"]
@@ -11482,6 +11654,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
     def __init__(self, transport: Optional[MessageTransport],
                  workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
+        """Initialize internal state and locks."""
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: Optional[MessageTransport] = transport
@@ -11518,10 +11691,12 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         }
 
     def reply(self, chat_id: ChatId, text: str, outcome: Optional[str] = None) -> None:
+        """Send a reply message to a chat via the transport."""
         if self.transport is not None:
             self.transport.send_text(chat_id, text)
 
     def send_startup_message(self, chat_id: ChatId) -> None:
+        """Send the bridge startup notification to the admin chat."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
         active = state["active"]
@@ -11540,6 +11715,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         self.reply(chat_id, "\n".join(lines))
 
     def handle_message(self, update: Dict[str, Any]) -> None:
+        """Route an incoming Telegram update to the appropriate handler."""
         global admin_chat_id
         print(f"[handle_message] ENTER update_id={update.get('update_id')}", flush=True)
 
@@ -11898,6 +12074,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return unknown
 
     def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
+        """Format a warning message for unrecognized @mentions."""
         import difflib
 
         registered = self.workers.get_registered_sessions()
@@ -11962,6 +12139,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return text, ts
 
     def format_reply_context(self, reply_text: str, context_text: str, context_ts: str | None = None) -> str:
+        """Format reply-to context for prepending to forwarded messages."""
         reply_text = (reply_text or "").strip()
         context_text = (context_text or "").strip()
         if context_text:
@@ -11977,6 +12155,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return f"Manager reply:\n{reply_text}"
 
     def handle_command(self, text: str, chat_id: int | str, msg_id: int) -> bool:
+        """Parse and dispatch a slash command."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
         if "@" in cmd:
@@ -12011,6 +12190,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
 
     def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
+        """Handle the /pilot command — open a terminal viewer session."""
         if not name:
             self.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
             return True
@@ -12076,6 +12256,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
 
     def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
+        """Handle the /rewind command — generate a transcript viewer link."""
         if not name:
             self.reply(chat_id, "Usage: /rewind <name>\n/rewind team — view team chat", outcome="Needs decision")
             return True
@@ -12123,6 +12304,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return True
 
     def cmd_pr_review(self, arg: str, chat_id: ChatId) -> bool:
+        """Handle the /pr command — open a PR review page."""
         if not arg:
             self.reply(chat_id, "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
             return True
@@ -12207,7 +12389,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                     f"  L1 essential: last 7 days, top 15 items",
                 ]
                 self.reply(chat_id, "\n".join(lines))
-            except Exception as e:
+            except (KeyError, RuntimeError, OSError, ImportError) as e:
                 self.reply(chat_id, f"Memory status failed: {e}")
             return True
 
@@ -12222,7 +12404,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 if len(text) > 4000:
                     text = text[:3997] + "..."
                 self.reply(chat_id, text)
-            except Exception as e:
+            except (KeyError, RuntimeError, OSError, ImportError) as e:
                 self.reply(chat_id, f"Memory wake-up failed: {e}")
             return True
 
@@ -12241,7 +12423,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 if len(text) > 4000:
                     text = text[:3997] + "..."
                 self.reply(chat_id, text)
-            except Exception as e:
+            except (KeyError, RuntimeError, OSError, ImportError) as e:
                 self.reply(chat_id, f"Memory recall failed: {e}")
             return True
 
@@ -12250,7 +12432,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         try:
             from team_memory.search import search_memory
             result = search_memory(query)
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError) as e:
             self.reply(chat_id, f"Memory search failed: {e}", outcome="Needs decision")
             return True
 
@@ -12340,11 +12522,12 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
         except subprocess.TimeoutExpired:
             self.reply(chat_id, "Memory update timed out.", outcome="Needs decision")
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
         return True
 
     def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
+        """Handle the /focus command — switch the active worker."""
         if not name:
             self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
             return True
@@ -12358,6 +12541,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return True
 
     def cmd_team(self, chat_id: ChatId) -> bool:
+        """Handle the /team command — show all workers and their states."""
         registered = self.workers.scan_tmux_sessions()
         registered = self.workers.get_registered_sessions(registered)
 
@@ -12397,6 +12581,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
     def cmd_progress(self, chat_id: ChatId, arg: str = "") -> bool:
         # If a name is given, show that worker's progress
+        """Handle the /progress command — show current worker activity."""
         if arg:
             target = arg.strip().lower().lstrip("@")
             registered = self.workers.get_registered_sessions()
@@ -12540,7 +12725,9 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         return True
 
     def cmd_settings(self, chat_id: ChatId) -> bool:
+        """Handle the /settings command — show bridge configuration."""
         def redact(s: str) -> str:
+            """Redact sensitive tokens/keys from a string for display."""
             if not s:
                 return "(not set)"
             if len(s) <= 8:
@@ -12590,6 +12777,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
 
 
     def route_to_active(self, text: str, chat_id: int | str, msg_id: int) -> None:
+        """Route a text message to the currently focused worker."""
         registered = self.workers.get_registered_sessions()
 
         if not state["active"]:
@@ -12604,6 +12792,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
 
     def route_to_all(self, text: str, chat_id: int | str, msg_id: int) -> None:
+        """Broadcast a text message to all active workers."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
         if not sessions:
@@ -12621,6 +12810,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             self.reply(chat_id, "No one's online to share with.")
 
     def route_message(self, session_name: str, text: str, chat_id: int | str, msg_id: int, one_off: bool=False) -> None:
+        """Deliver a text message to a specific worker via tmux or pipe."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(session_name)
         if not session:
@@ -12872,7 +13062,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                 _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
                                          "started": _TRANSCRIPT_SYNC[key]["started"],
                                          "path": None, "error": stderr[:200] or "rsync failed"}
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
         with _TRANSCRIPT_SYNC_LOCK:
             _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
                                      "started": _TRANSCRIPT_SYNC.get(key, {}).get("started", 0),
@@ -13398,6 +13588,7 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
     def page_url(p: str) -> str:
+        """Build a full URL for a transcript/PR page path."""
         parts = [f"page={p}"]
         if qs_base:
             parts.append(qs_base)
@@ -13966,6 +14157,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     qs_base = "&".join(qs_parts)
 
     def page_url(p: str) -> str:
+        """Build a full URL for a transcript/PR page path."""
         parts = [f"page={p}"]
         if qs_base:
             parts.append(qs_base)
@@ -14453,6 +14645,7 @@ class EndpointRouter:
     """Maps HTTP paths to handler functions via dispatch table."""
 
     def __init__(self) -> None:
+        """Initialize internal state and locks."""
         self._post_exact: dict[str, callable] = {}
         self._post_patterns: list[tuple] = []  # (compiled_re, handler)
         self._get_exact: dict[str, callable] = {}
@@ -14686,7 +14879,7 @@ class GuestEndpointsMixin:
                             try:
                                 be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
                                         f"http://localhost:{PORT}", SESSIONS_DIR)
-                            except Exception as e:
+                            except (ConnectionError, TimeoutError) as e:
                                 print(f"Channel fan-out to {wname} failed: {e}")
                     elif minfo["type"] == "guest":
                         gname = minfo["name"]
@@ -14730,7 +14923,7 @@ class GuestEndpointsMixin:
                             try:
                                 be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
                                         f"http://localhost:{PORT}", SESSIONS_DIR)
-                            except Exception as e:
+                            except (ConnectionError, TimeoutError) as e:
                                 print(f"Channel fan-out to {wname} failed: {e}")
                     elif minfo["type"] == "guest":
                         gname = minfo["name"]
@@ -15084,7 +15277,7 @@ class ChannelEndpointsMixin:
                     try:
                         backend.send(worker_name, tmux_name, tagged,
                                      f"http://localhost:{PORT}", SESSIONS_DIR)
-                    except Exception as e:
+                    except (subprocess.SubprocessError, ConnectionError, TimeoutError) as e:
                         print(f"Channel fan-out to {worker_name} failed: {e}")
             elif info["type"] == "guest":
                 guest_name = info["name"]
@@ -15797,7 +15990,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     page=page, per_page=per_page, search_query=search_query,
                     token=token or "", filter_mode=filter_mode, search_sort=search_sort)
             self._send_html(html_content.encode("utf-8"))
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             print(f"Transcript endpoint error: {e}")
             import traceback
             traceback.print_exc()
@@ -15861,7 +16054,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 page=page, per_page=per_page,
                 search_query=search_query, token=token)
             self._send_html(html_content.encode("utf-8"))
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             print(f"Team chat endpoint error: {e}")
             import traceback
             traceback.print_exc()
@@ -15982,6 +16175,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
         # Exact-match and pattern-match POST handlers are registered in
         # _setup_endpoint_routes() below. Adding a new endpoint means
         # one registration call, not another if/elif here.
+        """Handle all incoming HTTP POST requests."""
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_post(parsed.path)
         if handler:
@@ -16033,7 +16227,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                     args=(update,),
                     daemon=True,
                 ).start()
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError) as e:
             print(f"Error: {e}")
             import traceback
             traceback.print_exc()
@@ -16204,7 +16398,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                 "conflict": conflict,
                 "active_workers": active_workers,
             })
-        except Exception as e:
+        except (subprocess.SubprocessError, json.JSONDecodeError, OSError, KeyError) as e:
             print(f"Register error: {e}")
             self._send_json(500, {"ok": False, "error": str(e)})
 
@@ -16318,7 +16512,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-        except Exception as e:
+        except (json.JSONDecodeError, OSError, ValueError, KeyError) as e:
             print(f"Hook response error: {e}")
             self.send_response(500)
             self.end_headers()
@@ -16352,6 +16546,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
 
 
     def do_GET(self) -> None:
+        """Handle all incoming HTTP GET requests."""
         parsed = urlparse(self.path)
 
         # Guest system endpoints
@@ -16443,6 +16638,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
         self._send_unknown_endpoint("GET", parsed.path)
 
     def do_DELETE(self) -> None:
+        """Handle all incoming HTTP DELETE requests."""
         parsed = urlparse(self.path)
         if parsed.path == "/guest":
             self.handle_guest_disconnect(parsed)
@@ -16491,7 +16687,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
         except MachineConfigError as e:
             print(f"Machines endpoint config error: {e}")
             self._send_json(500, {"error": str(e)})
-        except Exception as e:
+        except KeyError as e:
             print(f"Machines endpoint error: {e}")
             self._send_json(500, {"error": str(e)})
 
@@ -16660,7 +16856,7 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(welcome.encode())
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError, KeyError) as e:
             print(f"Checkin endpoint error: {e}")
             self.send_response(500)
             self.end_headers()
@@ -16781,7 +16977,7 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
         try:
             grpc_server.stop()
             print("gRPC server stopped")
-        except Exception as e:
+        except OSError as e:
             print(f"gRPC server stop failed: {e}")
 
     if gmail_connector_instance is not None:
@@ -16803,6 +16999,7 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
 
 
 def main() -> None:
+    """Entry point — configure and start the bridge HTTP server."""
     global admin_chat_id, grpc_server, gmail_connector_instance, github_connector_instance
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
@@ -16944,7 +17141,7 @@ def main() -> None:
             )
             grpc_server.start(GRPC_PORT)
             print(f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
-        except Exception as e:
+        except (OSError, KeyboardInterrupt) as e:
             grpc_server = None
             print(f"gRPC server disabled: {e}")
     elif BRIDGE_GRPC_IMPORT_ERROR is not None:
@@ -17099,12 +17296,13 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
                             host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
                             url = url.replace("localhost", host)
                         return url
-        except Exception as e:
+        except subprocess.SubprocessError as e:
             print(f"[github] export failed for #{number}: {e}")
         return None
 
     def _connector_on_message(tag: str) -> Callable[..., None]:
         def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: dict[str, Any] | None = None) -> None:
+            """Create an HTTP request handler bound to the current bridge state."""
             if plain_text is None:
                 plain_text = html_text
             _connector_log_message(tag, html_text, plain_text, targets)
@@ -17115,7 +17313,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
                     try:
                         serve_url = _connector_export_github(
                             metadata["number"], metadata.get("repo", "BasedHardware/omi"))
-                    except Exception as e:
+                    except KeyError as e:
                         print(f"[{tag}] github export failed: {e}")
                 # Fallback: render our own HTML page
                 if not serve_url:
@@ -17163,6 +17361,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 
     def _connector_on_alert(tag: str) -> Callable[[str], None]:
         def handler(text: str) -> None:
+            """Create an HTTP request handler bound to the current bridge state."""
             if admin_chat_id:
                 try:
                     send_telegram_message(admin_chat_id, text)

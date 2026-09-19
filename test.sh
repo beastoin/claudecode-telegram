@@ -1116,7 +1116,7 @@ import urllib.error
 import bridge
 
 # Simulate timeout
-with patch('urllib.request.urlopen', side_effect=Exception('timeout')):
+with patch('urllib.request.urlopen', side_effect=TimeoutError('timeout')):
     result = bridge.transcribe_voice('/tmp/test.ogg')
 
 assert result is None, f'Expected None, got {result!r}'
@@ -1311,7 +1311,7 @@ sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
 import bridge
 
-with patch('urllib.request.urlopen', side_effect=Exception('timeout')):
+with patch('urllib.request.urlopen', side_effect=TimeoutError('timeout')):
     result = bridge.synthesize_speech('Hello world')
 
 assert result is None, f'Expected None, got {result!r}'
@@ -5015,26 +5015,26 @@ bridge.telegram_api = fake_api
 bridge.admin_chat_id = 12345
 
 # Clear state
-with bridge._watchdog_lock:
-    bridge._prev_worker_states.clear()
-    bridge._prev_worker_states['bob'] = 'STUCK'
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states.clear()
+    bridge.watchdog.prev_worker_states['bob'] = 'STUCK'
 
 # Mark bob as recently restarted
-bridge._recent_restarts['bob'] = time.time()
+bridge.watchdog.recent_restarts['bob'] = time.time()
 
 # Resolved alert should be suppressed
 bridge._send_resolved_alert('bob', 'READY')
 assert len(calls) == 0, f'Expected 0 calls (suppressed), got {len(calls)}'
 
 # After 30s, should fire again
-bridge._recent_restarts['bob'] = time.time() - 31
+bridge.watchdog.recent_restarts['bob'] = time.time() - 31
 calls.clear()
 bridge._send_resolved_alert('bob', 'READY')
 assert len(calls) == 1, f'Expected 1 call after cooldown, got {len(calls)}'
 
 bridge.telegram_api = orig_api
 bridge.admin_chat_id = None
-bridge._recent_restarts.clear()
+bridge.watchdog.recent_restarts.clear()
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "Watchdog resolved alert suppressed after restart"
@@ -5349,15 +5349,15 @@ class FakeTelegram:
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'}}
 
 # Clear any prior state
-bridge._restart_in_progress.pop('bob', None)
-bridge._recent_restarts.pop('bob', None)
+bridge.watchdog.restart_in_progress.pop('bob', None)
+bridge.watchdog.recent_restarts.pop('bob', None)
 
 tg = FakeTelegram()
 router = bridge.CommandRouter(tg, bridge.worker_manager)
 
 # Simulate in-flight restart
-with bridge._restart_lock:
-    bridge._restart_in_progress['bob'] = time.time()
+with bridge.watchdog.restart_lock:
+    bridge.watchdog.restart_in_progress['bob'] = time.time()
 
 # Try to restart while one is in progress — should be blocked
 with patch.object(bridge, 'get_worker_host', return_value=None), \
@@ -5368,8 +5368,8 @@ with patch.object(bridge, 'get_worker_host', return_value=None), \
 assert any('already in progress' in m.lower() for m in tg.messages), f'Expected in-progress block: {tg.messages}'
 
 # Clean up
-with bridge._restart_lock:
-    bridge._restart_in_progress.pop('bob', None)
+with bridge.watchdog.restart_lock:
+    bridge.watchdog.restart_in_progress.pop('bob', None)
 
 import shutil
 shutil.rmtree(str(tmp), ignore_errors=True)
@@ -5987,7 +5987,7 @@ import sys; sys.path.insert(0, '.')
 import bridge, time
 
 # Test _format_watchdog_status with WAITING_INPUT
-bridge._worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
+bridge.watchdog.worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
 result = bridge._format_watchdog_status('testbot')
 assert 'Needs reply' in result, f'Expected Needs reply, got: {result}'
 assert '2m' in result, f'Expected 2m duration, got: {result}'
@@ -6002,7 +6002,7 @@ assert icon == '\U0001f7e1', f'Expected yellow icon, got: {icon}'
 assert 'reply' in label, f'Expected reply label, got: {label}'
 
 # Clean up
-bridge._worker_states.pop('testbot', None)
+bridge.watchdog.worker_states.pop('testbot', None)
 " 2>&1; then
         success "Watchdog WAITING_INPUT state detection"
     else
@@ -6435,18 +6435,18 @@ import bridge
 
 # Spawn a long-running process to simulate an adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['testworker'] = (proc, None)
+bridge.processes.adapter_pids['testworker'] = (proc, None)
 
 # Verify PID is stored and alive
 assert proc.poll() is None, 'process should be alive'
-assert 'testworker' in bridge._adapter_pids
+assert 'testworker' in bridge.processes.adapter_pids
 
 # Kill it
 bridge.kill_adapter('testworker')
 
 # Verify killed and removed from dict
 assert proc.poll() is not None, 'process should be dead after kill_adapter'
-assert 'testworker' not in bridge._adapter_pids, 'entry should be removed'
+assert 'testworker' not in bridge.processes.adapter_pids, 'entry should be removed'
 
 # kill_adapter on unknown worker is a no-op
 bridge.kill_adapter('nonexistent')
@@ -6454,9 +6454,9 @@ bridge.kill_adapter('nonexistent')
 # kill_adapter on already-dead process is a no-op
 proc2 = subprocess.Popen(['true'])
 proc2.wait()
-bridge._adapter_pids['dead'] = (proc2, None)
+bridge.processes.adapter_pids['dead'] = (proc2, None)
 bridge.kill_adapter('dead')
-assert 'dead' not in bridge._adapter_pids
+assert 'dead' not in bridge.processes.adapter_pids
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -6488,7 +6488,7 @@ bridge.set_pending('alice', 12345)
 
 # Simulate an inflight adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['alice'] = (proc, None)
+bridge.processes.adapter_pids['alice'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before pause'
 
 bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
@@ -6502,7 +6502,7 @@ router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
 router.cmd_pause(12345)
 
 assert proc.poll() is not None, 'adapter should be dead after pause'
-assert 'alice' not in bridge._adapter_pids, 'PID entry should be removed'
+assert 'alice' not in bridge.processes.adapter_pids, 'PID entry should be removed'
 assert not bridge.get_pending_file('alice').exists(), 'pending should be cleared'
 
 print('OK')
@@ -6534,14 +6534,14 @@ session_dir.mkdir()
 
 # Simulate an inflight adapter
 proc = subprocess.Popen(['sleep', '60'])
-bridge._adapter_pids['bob'] = (proc, None)
+bridge.processes.adapter_pids['bob'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before end'
 
 bridge.state['active'] = 'bob'
 ok, err = bridge.worker_manager.end('bob')
 
 assert proc.poll() is not None, 'adapter should be dead after end'
-assert 'bob' not in bridge._adapter_pids, 'PID entry should be removed'
+assert 'bob' not in bridge.processes.adapter_pids, 'PID entry should be removed'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -6606,7 +6606,7 @@ ok = bridge._spawn_adapter(script, 'testworker', 'hello', 'http://localhost:9999
 assert ok, '_spawn_adapter should return True'
 
 # Wait for process to finish
-entry = bridge._adapter_pids.get('testworker')
+entry = bridge.processes.adapter_pids.get('testworker')
 assert entry is not None, 'should be in _adapter_pids'
 proc, stderr_fh = entry
 proc.wait(timeout=5)
@@ -6939,7 +6939,7 @@ test_since_preserved_on_reason_change() {
 import time
 import bridge
 
-bridge._worker_states.clear()
+bridge.watchdog.worker_states.clear()
 now = time.time()
 
 first_since = bridge._record_worker_state('alice', 'DEAD', 'claude missing 1s', now)
@@ -7055,11 +7055,11 @@ state, reason = bridge.compute_state(
 assert state == 'UNTRACKED_BUSY', f'Extra child above baseline: expected UNTRACKED_BUSY, got {state} ({reason})'
 
 # Test _idle_child_baseline map directly
-bridge._idle_child_baseline.clear()
+bridge.watchdog.idle_child_baseline.clear()
 
 # First observation: sets baseline
-bridge._idle_child_baseline['test-worker'] = 2  # simulate 2 MCP servers
-baseline = bridge._idle_child_baseline['test-worker']
+bridge.watchdog.idle_child_baseline['test-worker'] = 2  # simulate 2 MCP servers
+baseline = bridge.watchdog.idle_child_baseline['test-worker']
 assert baseline == 2, f'Expected baseline 2, got {baseline}'
 
 # Effective children with 2 MCP + 1 tool = 3 total, active = 1
@@ -7073,7 +7073,7 @@ children_active = max(0, children_total - baseline)
 assert children_active == 0, f'Expected 0 active children, got {children_active}'
 
 # Cleanup
-bridge._idle_child_baseline.clear()
+bridge.watchdog.idle_child_baseline.clear()
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -7090,32 +7090,32 @@ test_idle_streak_prevents_false_stuck() {
 import bridge
 
 # Reset idle streak
-bridge._idle_streak.clear()
+bridge.watchdog.idle_streak.clear()
 
 # Simulate: compute_state returns STUCK but streak < IDLE_STREAK_STUCK
 # The watchdog loop downgrades to WAITING until streak reaches threshold
 
 # First STUCK sample: streak=1, should downgrade to WAITING
-bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
-streak = bridge._idle_streak['testworker']
+bridge.watchdog.idle_streak['testworker'] = bridge.watchdog.idle_streak.get('testworker', 0) + 1
+streak = bridge.watchdog.idle_streak['testworker']
 assert streak == 1, f'expected streak 1, got {streak}'
 assert streak < bridge.IDLE_STREAK_STUCK, f'streak {streak} should be < {bridge.IDLE_STREAK_STUCK}'
 
 # Second STUCK sample: streak=2, still WAITING
-bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
-streak = bridge._idle_streak['testworker']
+bridge.watchdog.idle_streak['testworker'] = bridge.watchdog.idle_streak.get('testworker', 0) + 1
+streak = bridge.watchdog.idle_streak['testworker']
 assert streak == 2, f'expected streak 2, got {streak}'
 assert streak < bridge.IDLE_STREAK_STUCK, f'streak {streak} should be < {bridge.IDLE_STREAK_STUCK}'
 
 # Third STUCK sample: streak=3, now real STUCK
-bridge._idle_streak['testworker'] = bridge._idle_streak.get('testworker', 0) + 1
-streak = bridge._idle_streak['testworker']
+bridge.watchdog.idle_streak['testworker'] = bridge.watchdog.idle_streak.get('testworker', 0) + 1
+streak = bridge.watchdog.idle_streak['testworker']
 assert streak == 3, f'expected streak 3, got {streak}'
 assert streak >= bridge.IDLE_STREAK_STUCK, f'streak {streak} should be >= {bridge.IDLE_STREAK_STUCK}'
 
 # Non-STUCK state resets streak
-bridge._idle_streak['testworker'] = 0
-assert bridge._idle_streak['testworker'] == 0, 'streak should reset to 0'
+bridge.watchdog.idle_streak['testworker'] = 0
+assert bridge.watchdog.idle_streak['testworker'] == 0, 'streak should reset to 0'
 
 # Verify IDLE_STREAK_STUCK constant
 assert bridge.IDLE_STREAK_STUCK == 3, f'expected IDLE_STREAK_STUCK=3, got {bridge.IDLE_STREAK_STUCK}'
@@ -7145,12 +7145,12 @@ bridge.telegram_api = fake_api
 bridge.admin_chat_id = 12345
 
 # Clear state
-with bridge._watchdog_lock:
-    bridge._prev_worker_states.clear()
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states.clear()
 
 # Simulate STUCK -> READY transition
-with bridge._watchdog_lock:
-    bridge._prev_worker_states['testworker'] = 'STUCK'
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states['testworker'] = 'STUCK'
 
 bridge._send_resolved_alert('testworker', 'READY')
 
@@ -7162,8 +7162,8 @@ assert 'back to normal' in data['text'], f'Expected back to normal in text, got 
 
 # Verify no alert when transition is not from bad to good state
 calls.clear()
-with bridge._watchdog_lock:
-    bridge._prev_worker_states['testworker'] = 'READY'
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states['testworker'] = 'READY'
 bridge._send_resolved_alert('testworker', 'BUSY_TOOL')
 assert len(calls) == 0, f'Expected no call for READY->BUSY_TOOL, got {len(calls)}'
 
@@ -7376,8 +7376,8 @@ states = {
 }
 
 # Inject into _worker_states
-with bridge._watchdog_lock:
-    bridge._worker_states.update(states)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.update(states)
 
 snapshot = dict(states)
 
@@ -7421,9 +7421,9 @@ result = bridge._format_watchdog_status('nonexistent_worker', lambda n: False, s
 assert result == 'Ready', f'Unknown+idle: expected Ready, got {result}'
 
 # Clean up
-with bridge._watchdog_lock:
+with bridge.watchdog.lock:
     for k in list(states.keys()):
-        bridge._worker_states.pop(k, None)
+        bridge.watchdog.worker_states.pop(k, None)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -7983,7 +7983,7 @@ router.workers = mock_workers
 router.telegram = MagicMock()
 
 # Clear any leftover media group state
-bridge._media_group_buffer.clear()
+bridge.media_groups.buffer.clear()
 
 # Use a short wait for testing
 orig_wait = bridge._MEDIA_GROUP_WAIT
@@ -8176,10 +8176,10 @@ bridge._send_resolved_alert = fake_resolved
 bridge.get_worker_host = lambda name: None  # local workers
 
 # Clear state
-with bridge._watchdog_lock:
-    bridge._prev_worker_states.clear()
-    bridge._consecutive_good_probes.clear()
-    bridge._consecutive_bad_probes.clear()
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states.clear()
+    bridge.watchdog.consecutive_good_probes.clear()
+    bridge.watchdog.consecutive_bad_probes.clear()
 
 now = time.time()
 
@@ -8209,10 +8209,10 @@ assert len(alerts) == 0 and len(resolved) == 0, 'READY->BUSY_THINKING should fir
 alerts.clear()
 resolved.clear()
 bridge.get_worker_host = lambda name: 'remote-host'  # remote workers
-with bridge._watchdog_lock:
-    bridge._prev_worker_states.clear()
-    bridge._consecutive_good_probes.clear()
-    bridge._consecutive_bad_probes.clear()
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states.clear()
+    bridge.watchdog.consecutive_good_probes.clear()
+    bridge.watchdog.consecutive_bad_probes.clear()
 
 since_past = now - 60  # past START_GRACE so eligible_for_alert is True
 
@@ -8248,10 +8248,10 @@ assert len(alerts) == 0 and len(resolved) == 0, 'Remote: transient blip absorbed
 bridge._send_watchdog_alert = orig_alert
 bridge._send_resolved_alert = orig_resolved
 bridge.get_worker_host = orig_get_host
-with bridge._watchdog_lock:
-    bridge._prev_worker_states.clear()
-    bridge._consecutive_good_probes.clear()
-    bridge._consecutive_bad_probes.clear()
+with bridge.watchdog.lock:
+    bridge.watchdog.prev_worker_states.clear()
+    bridge.watchdog.consecutive_good_probes.clear()
+    bridge.watchdog.consecutive_bad_probes.clear()
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -9150,7 +9150,7 @@ test_tmux_send_locks() {
     info "Testing per-session tmux send locks..."
 
     if python3 -c "
-from bridge import _get_tmux_send_lock, _tmux_send_locks
+from bridge import _get_tmux_send_lock, tmux_send
 import threading
 
 # Get lock for same session twice - should return same lock
@@ -9767,9 +9767,9 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'alice': 'READY'}
-bridge._worker_states = {'alice': ('STUCK', 'age=400s cpu=0.0', 600)}
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'alice': 'READY'}
+bridge.watchdog.worker_states = {'alice': ('STUCK', 'age=400s cpu=0.0', 600)}
 
 sent = {}
 def fake_api(method, data):
@@ -9859,7 +9859,7 @@ from unittest.mock import patch, MagicMock
 import bridge
 
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
-bridge._remote_tool_cache['mac:tmux'] = '/usr/bin/tmux'
+bridge.remote_cache.tools['mac:tmux'] = '/usr/bin/tmux'
 
 # _remote_run with host='mac' should prefix with ssh and shell-quote args
 with patch('subprocess.run') as mock_run:
@@ -9874,7 +9874,7 @@ with patch('subprocess.run') as mock_run:
     assert '/usr/bin/tmux' in args[-1], f'Expected resolved tmux path, got {args[-1]}'
 
 # Clean up cache
-del bridge._remote_tool_cache['mac:tmux']
+del bridge.remote_cache.tools['mac:tmux']
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "_remote_run remote prefixes ssh"
@@ -10022,7 +10022,7 @@ from unittest.mock import patch, MagicMock, call
 import bridge
 
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
-bridge._remote_tool_cache['mac:tmux'] = '/usr/bin/tmux'
+bridge.remote_cache.tools['mac:tmux'] = '/usr/bin/tmux'
 
 calls = []
 def mock_run(cmd, **kwargs):
@@ -10047,7 +10047,7 @@ load_cmd_str = ' '.join(load_calls[0][0])
 assert 'load-buffer' in load_cmd_str, f'Expected load-buffer in cmd, got {load_cmd_str}'
 assert load_calls[0][1].get('input') == b'hello', f'Should pipe text via input kwarg'
 
-del bridge._remote_tool_cache['mac:tmux']
+del bridge.remote_cache.tools['mac:tmux']
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "tmux_send_message uses SSH for remote workers"
@@ -10064,7 +10064,7 @@ from unittest.mock import patch, MagicMock
 import bridge
 
 # Pre-populate tool cache
-bridge._remote_tool_cache['mac:tmux'] = '/usr/bin/tmux'
+bridge.remote_cache.tools['mac:tmux'] = '/usr/bin/tmux'
 
 with patch('subprocess.run') as mock_run:
     mock_run.return_value = MagicMock(returncode=0)
@@ -10076,7 +10076,7 @@ with patch('subprocess.run') as mock_run:
     cmd_str = ' '.join(args)
     assert 'has-session' in cmd_str, f'Expected has-session in cmd: {cmd_str}'
 
-del bridge._remote_tool_cache['mac:tmux']
+del bridge.remote_cache.tools['mac:tmux']
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "tmux_exists uses SSH for remote host"
@@ -11215,19 +11215,19 @@ path.write_text(json.dumps({
     }
 }))
 old_path = bridge.MACHINES_CONFIG_FILE
-old_cache = bridge._machines_cache
-old_cache_path = bridge._machines_cache_path
+old_cache = bridge.remote_cache.machines
+old_cache_path = bridge.remote_cache.machines_path
 old_get = bridge.get_registered_sessions
 bridge.MACHINES_CONFIG_FILE = path
-bridge._machines_cache = None
-bridge._machines_cache_path = None
+bridge.remote_cache.machines = None
+bridge.remote_cache.machines_path = None
 bridge.get_registered_sessions = lambda registered=None: {
     'mon': {'tmux': 'claude-test-mon', 'backend': 'claude'},
     'kai': {'tmux': 'claude-test-kai', 'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}
 }
-bridge._host_down['beastoin-agents-f1-mac-mini'] = True
-bridge._host_down_since['beastoin-agents-f1-mac-mini'] = 123.0
-bridge._host_last_error['beastoin-agents-f1-mac-mini'] = 'timeout'
+bridge.host_health.down['beastoin-agents-f1-mac-mini'] = True
+bridge.host_health.down_since['beastoin-agents-f1-mac-mini'] = 123.0
+bridge.host_health.last_error['beastoin-agents-f1-mac-mini'] = 'timeout'
 
 data = bridge.get_machines()
 machines = {m['id']: m for m in data['machines']}
@@ -11238,12 +11238,12 @@ assert machines['macmini']['health']['status'] == 'down'
 assert machines['macmini']['health']['last_error'] == 'timeout'
 
 bridge.MACHINES_CONFIG_FILE = old_path
-bridge._machines_cache = old_cache
-bridge._machines_cache_path = old_cache_path
+bridge.remote_cache.machines = old_cache
+bridge.remote_cache.machines_path = old_cache_path
 bridge.get_registered_sessions = old_get
-bridge._host_down.pop('beastoin-agents-f1-mac-mini', None)
-bridge._host_down_since.pop('beastoin-agents-f1-mac-mini', None)
-bridge._host_last_error.pop('beastoin-agents-f1-mac-mini', None)
+bridge.host_health.down.pop('beastoin-agents-f1-mac-mini', None)
+bridge.host_health.down_since.pop('beastoin-agents-f1-mac-mini', None)
+bridge.host_health.last_error.pop('beastoin-agents-f1-mac-mini', None)
 shutil.rmtree(tmp)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -11271,13 +11271,13 @@ path.write_text(json.dumps({
     }
 }))
 old_path = bridge.MACHINES_CONFIG_FILE
-old_cache = bridge._machines_cache
-old_cache_path = bridge._machines_cache_path
+old_cache = bridge.remote_cache.machines
+old_cache_path = bridge.remote_cache.machines_path
 old_get = bridge.get_registered_sessions
 old_target = bridge.BRIDGE_SSH_TARGET
 bridge.MACHINES_CONFIG_FILE = path
-bridge._machines_cache = None
-bridge._machines_cache_path = None
+bridge.remote_cache.machines = None
+bridge.remote_cache.machines_path = None
 bridge.BRIDGE_SSH_TARGET = 'vps'
 bridge.get_registered_sessions = lambda registered=None: {
     'kai': {'tmux': 'claude-test-kai', 'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}
@@ -11289,8 +11289,8 @@ assert machines['macmini']['access'] == 'local', machines['macmini']
 assert machines['vps']['access'] == 'ssh vps', machines['vps']
 
 bridge.MACHINES_CONFIG_FILE = old_path
-bridge._machines_cache = old_cache
-bridge._machines_cache_path = old_cache_path
+bridge.remote_cache.machines = old_cache
+bridge.remote_cache.machines_path = old_cache_path
 bridge.get_registered_sessions = old_get
 bridge.BRIDGE_SSH_TARGET = old_target
 shutil.rmtree(tmp)
@@ -11916,8 +11916,8 @@ bridge.BRIDGE_URL = 'http://localhost:8080'
 bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8080'
 
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
-bridge._remote_tool_cache['mac:claude'] = '/opt/homebrew/bin/claude'
-bridge._remote_tool_cache['mac:tmux'] = '/opt/homebrew/bin/tmux'
+bridge.remote_cache.tools['mac:claude'] = '/opt/homebrew/bin/claude'
+bridge.remote_cache.tools['mac:tmux'] = '/opt/homebrew/bin/tmux'
 
 class MockWorkers:
     tmux_prefix = 'claude-test-'
@@ -11938,8 +11938,8 @@ class MockThread:
     def start(self): pass
 
 bridge._registry_add('lee', 'claude', 123)
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 mock_api = MockTelegramAPI()
 router = bridge.CommandRouter(mock_api, MockWorkers())
@@ -11955,7 +11955,7 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
     router.cmd_teleport('lee mac', 123)
 
 joined = [' '.join(c) for c in remote_calls]
-assert any('curl -sf --connect-timeout 5 http://100.125.36.102:8080/health' in c for c in joined), \
+assert any('curl -sf --connect-timeout 5 http://100.125.36.102:8080/' in c for c in joined), \
     f'Expected health check against BRIDGE_PUBLIC_URL, got: {joined}'
 assert any('Teleporting lee to mac' in s for s in mock_api.sent), \
     f'Expected teleport to proceed, got messages: {mock_api.sent}'
@@ -11972,8 +11972,8 @@ if had_bridge_public_url:
     bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
 else:
     delattr(bridge, 'BRIDGE_PUBLIC_URL')
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -12077,8 +12077,8 @@ bridge.BRIDGE_URL = 'http://localhost:8080'
 bridge.BRIDGE_PUBLIC_URL = ''
 
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
-bridge._remote_tool_cache['mac:claude'] = '/opt/homebrew/bin/claude'
-bridge._remote_tool_cache['mac:tmux'] = '/opt/homebrew/bin/tmux'
+bridge.remote_cache.tools['mac:claude'] = '/opt/homebrew/bin/claude'
+bridge.remote_cache.tools['mac:tmux'] = '/opt/homebrew/bin/tmux'
 
 class MockWorkers:
     tmux_prefix = 'claude-test-'
@@ -12095,8 +12095,8 @@ class MockTelegramAPI:
         self.sent.append(text)
 
 bridge._registry_add('lee', 'claude', 123)
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 mock_api = MockTelegramAPI()
 router = bridge.CommandRouter(mock_api, MockWorkers())
@@ -12122,8 +12122,8 @@ if had_bridge_public_url:
     bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
 else:
     delattr(bridge, 'BRIDGE_PUBLIC_URL')
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -12189,16 +12189,16 @@ assert any('not found' in s.lower() or 'not in registry' in s.lower() for s in m
 
 # Test 2: Worker is busy (inject state)
 mock_api.sent.clear()
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('BUSY_TOOL', 'children=3', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('BUSY_TOOL', 'children=3', 0)
 router.cmd_teleport('lee mac', 123)
 assert any('busy' in s.lower() or 'idle' in s.lower() for s in mock_api.sent), \
     f'T2: should reject busy worker, got: {mock_api.sent}'
 
 # Test 3: Target unreachable
 mock_api.sent.clear()
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 with patch('bridge._remote_run') as mock_rr:
     mock_rr.return_value = MagicMock(returncode=1, stdout='', stderr='err')
     router.cmd_teleport('lee unreachable-host', 123)
@@ -12211,8 +12211,8 @@ bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
 bridge.state.update(orig_state)
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -12276,8 +12276,8 @@ router = bridge.CommandRouter(mock_api, MockWorkers())
 
 bridge._registry_add('lee', 'claude', 123)
 
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 # Mock _get_claude_pid: returns None first (worker stopped), then PID (target started)
 pid_call_count = [0]
@@ -12322,8 +12322,8 @@ assert has_set_env, f'Should set BRIDGE_URL on target'
 # Now test teleback
 ssh_calls.clear()
 # After teleport, lee is on mac. Teleback should bring it local.
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 pid_call_count[0] = 0  # Reset for teleback
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
@@ -12347,8 +12347,8 @@ bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
 bridge.state.update(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -12543,8 +12543,8 @@ mock_api = MockTelegramAPI()
 router = bridge.CommandRouter(mock_api, MockWorkers())
 bridge._registry_add('lee', 'claude', 123)
 
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 pid_call_count = [0]
 def mock_get_claude_pid(pane_pid, host=None):
@@ -12577,8 +12577,8 @@ bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
 bridge.state.update(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -12643,8 +12643,8 @@ mock_api = MockTelegramAPI()
 router = bridge.CommandRouter(mock_api, MockWorkers())
 bridge._registry_add('lee', 'claude', 123)
 
-with bridge._watchdog_lock:
-    bridge._worker_states['lee'] = ('READY', 'idle', 0)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
 # Track the ORDER of operations
 operation_log = []
@@ -12692,8 +12692,8 @@ bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
 bridge.state.update(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
-with bridge._watchdog_lock:
-    bridge._worker_states.pop('lee', None)
+with bridge.watchdog.lock:
+    bridge.watchdog.worker_states.pop('lee', None)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -13356,8 +13356,8 @@ import time
 import bridge
 
 # Reset state
-bridge._last_resolved_ts.clear()
-bridge._prev_worker_states.clear()
+bridge.watchdog.last_resolved_ts.clear()
+bridge.watchdog.prev_worker_states.clear()
 
 alerts = []
 def mock_api(method, params):
@@ -13367,16 +13367,16 @@ def mock_api(method, params):
 with patch.object(bridge, 'admin_chat_id', 123), \
      patch.object(bridge, 'telegram_api', mock_api):
     # Set prev state as DEAD
-    with bridge._watchdog_lock:
-        bridge._prev_worker_states['test'] = 'DEAD'
+    with bridge.watchdog.lock:
+        bridge.watchdog.prev_worker_states['test'] = 'DEAD'
 
     # First resolved alert should send
     bridge._send_resolved_alert('test', 'READY')
     assert len(alerts) == 1, f'First alert should send, got {len(alerts)}'
 
     # Reset prev state back to DEAD to simulate another bad->good transition
-    with bridge._watchdog_lock:
-        bridge._prev_worker_states['test'] = 'DEAD'
+    with bridge.watchdog.lock:
+        bridge.watchdog.prev_worker_states['test'] = 'DEAD'
 
     # Second one within cooldown should be suppressed
     bridge._send_resolved_alert('test', 'READY')
@@ -13401,9 +13401,9 @@ wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
 session = {'tmux': 'claude-test-ren', 'backend': 'claude'}
 
 # SSH failure (exception) should return True (assume online)
-def mock_tmux_exists(name, host=None):
+def mock_tmux_exists(name, host=None, **kwargs):
     if host:
-        raise Exception('SSH connection refused')
+        raise OSError('SSH connection refused')
     return True
 
 with patch('bridge.get_worker_host', return_value='mac-mini'), \
@@ -14357,14 +14357,14 @@ worker_dir = tmp / 'alice'
 worker_dir.mkdir()
 
 # No adapter running, no transcript
-with patch.dict(bridge._adapter_pids, {}, clear=True):
+with patch.dict(bridge.processes.adapter_pids, {}, clear=True):
     activity = bridge._read_noninteractive_activity('alice')
 assert activity == 'idle', f'expected idle with no transcript: {activity}'
 
 # With adapter running
 mock_proc = MagicMock()
 mock_proc.poll.return_value = None
-with patch.dict(bridge._adapter_pids, {'alice': (mock_proc, None)}):
+with patch.dict(bridge.processes.adapter_pids, {'alice': (mock_proc, None)}):
     activity = bridge._read_noninteractive_activity('alice')
 assert activity == 'adapter running', f'expected adapter running: {activity}'
 
@@ -14372,7 +14372,7 @@ assert activity == 'adapter running', f'expected adapter running: {activity}'
 transcript = tmp / 'test.jsonl'
 transcript.write_text('{}')
 os.utime(transcript, (time.time() - 120, time.time() - 120))  # 2 min ago
-with patch.dict(bridge._adapter_pids, {}, clear=True), \
+with patch.dict(bridge.processes.adapter_pids, {}, clear=True), \
      patch.object(bridge, '_find_codex_transcript', return_value=str(transcript)):
     activity = bridge._read_noninteractive_activity('alice')
 assert '2m ago' in activity, f'expected 2m ago in activity: {activity}'
@@ -15995,7 +15995,7 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}regcheckin-'
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('alice', 'claude', 123)
 project_dir = Path(tmpdir) / 'project'
@@ -16189,7 +16189,7 @@ def mock_send_tg(chat_id, text, **kwargs):
 new_cwd = '/Users/beastoinagents/omi/omi-ren'
 
 # Clear cooldown so checkin-triggered restart proceeds
-bridge._recent_restarts.pop('ren', None)
+bridge.watchdog.recent_restarts.pop('ren', None)
 
 class FakeHandler:
     def __init__(self):
@@ -16243,7 +16243,7 @@ bridge.SESSIONS_DIR = tmp_path / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
 bridge.admin_chat_id = None
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('alice', 'claude', 123)
 session_dir = bridge.ensure_session_dir('alice')
@@ -16265,7 +16265,7 @@ bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
-bridge._recent_restarts.pop('alice', None)  # Clear cooldown
+bridge.watchdog.recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -16326,7 +16326,7 @@ bridge.SESSIONS_DIR = tmp_path / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
 bridge.admin_chat_id = 999
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('alice', 'claude', 123)
 session_dir = bridge.ensure_session_dir('alice')
@@ -16348,7 +16348,7 @@ bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (True, None)
 bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
-bridge._recent_restarts.pop('alice', None)  # Clear cooldown
+bridge.watchdog.recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -16403,7 +16403,7 @@ bridge.SESSIONS_DIR = tmp_path / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkinnotify-'
 bridge.admin_chat_id = None
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('alice', 'claude', 123)
 session_dir = bridge.ensure_session_dir('alice')
@@ -16424,7 +16424,7 @@ bridge.is_claude_running = lambda _name, host=None: False  # Allow checkin resta
 bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
 bridge.worker_manager.restart = lambda name, mode='relaunch': (False, 'boom')
-bridge._recent_restarts.pop('alice', None)  # Clear cooldown
+bridge.watchdog.recent_restarts.pop('alice', None)  # Clear cooldown
 
 sent = []
 def fake_send(chat_id, text):
@@ -16481,7 +16481,7 @@ bridge.SESSIONS_DIR = tmp_path / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}cooldown-'
 bridge.admin_chat_id = None
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('bob', 'claude', 123)
 session_dir = bridge.ensure_session_dir('bob')
@@ -16505,7 +16505,7 @@ bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
 bridge.send_telegram_message = lambda *a, **kw: {'ok': True}
 
 # Set recent restart to NOW — should trigger cooldown
-bridge._recent_restarts['bob'] = time.time()
+bridge.watchdog.recent_restarts['bob'] = time.time()
 
 class FakeHandler:
     def __init__(self):
@@ -16554,7 +16554,7 @@ bridge.SESSIONS_DIR = tmp_path / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}guard-'
 bridge.admin_chat_id = None
-bridge._worker_cwds.clear()
+bridge.watchdog.worker_cwds.clear()
 
 bridge._registry_add('bob', 'claude', 123)
 
@@ -16570,7 +16570,7 @@ bridge.tmux_exists = lambda _name, host=None: True
 bridge.is_claude_running = lambda _name, host=None: True  # Claude IS running
 bridge.export_hook_env = lambda *_args, **_kwargs: None
 bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
-bridge._recent_restarts.pop('bob', None)  # No cooldown
+bridge.watchdog.recent_restarts.pop('bob', None)  # No cooldown
 
 restart_calls = []
 bridge.worker_manager.restart = lambda name, mode='relaunch': (restart_calls.append(1), (True, None))[1]
@@ -16934,8 +16934,8 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'alice': 'READY'}
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'alice': 'READY'}
 
 sent = {}
 def fake_api(method, data):
@@ -16968,8 +16968,8 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'bob': 'READY'}
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'bob': 'READY'}
 
 sent = {}
 def fake_api(method, data):
@@ -17000,8 +17000,8 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'carol': 'READY'}
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'carol': 'READY'}
 
 sent = {}
 def fake_api(method, data):
@@ -17032,9 +17032,9 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'dave': 'READY'}
-bridge._waiting_input_details = {
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'dave': 'READY'}
+bridge.watchdog.waiting_input_details = {
     'dave': {
         'header': 'Auth method',
         'options': [
@@ -17074,8 +17074,8 @@ import bridge
 from unittest.mock import patch
 
 bridge.admin_chat_id = 123
-bridge._prev_worker_states = {'eve': 'STUCK'}
-bridge._recent_restarts = {}
+bridge.watchdog.prev_worker_states = {'eve': 'STUCK'}
+bridge.watchdog.recent_restarts = {}
 
 sent = {}
 def fake_api(method, data):
@@ -17198,8 +17198,8 @@ worker_dir.mkdir()
 }))
 
 bridge.admin_chat_id = 123
-bridge._last_alert_ts = {}
-bridge._prev_worker_states = {'bob': 'READY'}
+bridge.watchdog.last_alert_ts = {}
+bridge.watchdog.prev_worker_states = {'bob': 'READY'}
 
 sent = []
 def fake_api(method, data):
@@ -17213,12 +17213,12 @@ with patch('bridge.telegram_api', fake_api):
 assert len(sent) == 0, f'Should suppress DEAD alert during teleport, but sent {len(sent)} messages'
 
 # Verify state was still recorded
-with bridge._watchdog_lock:
-    assert bridge._prev_worker_states.get('bob') == 'DEAD', 'State should still be tracked'
+with bridge.watchdog.lock:
+    assert bridge.watchdog.prev_worker_states.get('bob') == 'DEAD', 'State should still be tracked'
 
 # OFFLINE during teleport: should also NOT send alert
 sent.clear()
-bridge._prev_worker_states = {'bob': 'READY'}
+bridge.watchdog.prev_worker_states = {'bob': 'READY'}
 with patch('bridge.telegram_api', fake_api):
     bridge._handle_watchdog_transition('bob', 'OFFLINE', 'not running', since=100, now=now)
 assert len(sent) == 0, f'Should suppress OFFLINE alert during teleport, but sent {len(sent)} messages'
@@ -17226,7 +17226,7 @@ assert len(sent) == 0, f'Should suppress OFFLINE alert during teleport, but sent
 # Remove teleport_state — now DEAD alert should fire
 (worker_dir / 'teleport_state').unlink()
 sent.clear()
-bridge._prev_worker_states = {'bob': 'READY'}
+bridge.watchdog.prev_worker_states = {'bob': 'READY'}
 with patch('bridge.telegram_api', fake_api):
     bridge._handle_watchdog_transition('bob', 'DEAD', 'process gone', since=100, now=now)
 assert len(sent) == 1, f'Should send DEAD alert without teleport_state, but sent {len(sent)} messages'
@@ -17272,9 +17272,9 @@ import bridge
 import time
 
 # Clear watchdog state
-bridge._worker_states.clear()
-bridge._prev_worker_states.clear()
-bridge._last_alert_ts.clear()
+bridge.watchdog.worker_states.clear()
+bridge.watchdog.prev_worker_states.clear()
+bridge.watchdog.last_alert_ts.clear()
 
 now = time.time()
 
@@ -17282,7 +17282,7 @@ now = time.time()
 since = bridge._record_worker_state('deadworker', 'EXITED', 'session gone', now)
 
 # Verify it's tracked
-entry = bridge._worker_states.get('deadworker')
+entry = bridge.watchdog.worker_states.get('deadworker')
 assert entry is not None, 'EXITED state should be recorded'
 assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
 
@@ -17301,7 +17301,7 @@ orig_api = bridge.telegram_api
 bridge.telegram_api = fake_api
 
 # Simulate transition: first transition should alert (after grace period)
-bridge._prev_worker_states.clear()
+bridge.watchdog.prev_worker_states.clear()
 bridge._handle_watchdog_transition('deadworker', 'EXITED', 'session gone', since=now - 60, now=now)
 assert len(calls) == 1, f'expected 1 alert call, got {len(calls)}'
 txt = calls[0][1]['text']
@@ -17665,9 +17665,10 @@ test_pipe_reader_liveness_check() {
     if python3 -c "
 import threading, time
 from bridge import (
-    start_pipe_reader, stop_pipe_reader, _pipe_reader_threads,
+    start_pipe_reader, stop_pipe_reader, processes,
     get_worker_pipe_path, ensure_worker_pipe, cleanup_worker_pipe
 )
+_pipe_reader_threads = processes.pipe_readers  # alias for test compat
 
 test_name = 'liveness_test'
 pipe_path = get_worker_pipe_path(test_name)
@@ -21939,7 +21940,7 @@ import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
 cid = ch['id']
-bridge._relay_channels[cid] = ch
+bridge.relay_store.channels[cid] = ch
 
 # Good token works
 assert bridge.relay_auth_guest(cid, guest_token) is not None, 'valid guest token rejected'
@@ -21974,7 +21975,7 @@ import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
 cid = ch['id']
-bridge._relay_channels[cid] = ch
+bridge.relay_store.channels[cid] = ch
 
 envelope, msg = bridge.relay_guest_send(cid, 'Hello worker!')
 assert envelope is not None, 'send returned None'
@@ -22002,7 +22003,7 @@ import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
 cid = ch['id']
-bridge._relay_channels[cid] = ch
+bridge.relay_store.channels[cid] = ch
 
 msg = bridge.relay_worker_reply(cid, 'Here is my answer')
 assert msg is not None, 'reply returned None'
@@ -22032,7 +22033,7 @@ import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
 cid = ch['id']
-bridge._relay_channels[cid] = ch
+bridge.relay_store.channels[cid] = ch
 
 # Send then reply
 _, msg1 = bridge.relay_guest_send(cid, 'msg1')
@@ -22333,7 +22334,7 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-test')
-bridge._relay_channels[ch['id']] = ch
+bridge.relay_store.channels[ch['id']] = ch
 print(f'{ch[\"id\"]}|{guest_token}|{reply_token}')
 " 2>/dev/null)
 
@@ -22364,7 +22365,7 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 
 ch, gt, rt = bridge.relay_channel_create('testworker', 'relay-test')
-bridge._relay_channels[ch['id']] = ch
+bridge.relay_store.channels[ch['id']] = ch
 print(ch['id'])
 " 2>/dev/null)
 
@@ -22393,7 +22394,7 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 
 ch, gt, rt = bridge.relay_channel_create('relayworker', 'relay-relayworker')
-bridge._relay_channels[ch['id']] = ch
+bridge.relay_store.channels[ch['id']] = ch
 print(f'{ch[\"id\"]}|{gt}|{rt}')
 " 2>/dev/null)
 
@@ -22428,7 +22429,7 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 
 ch, gt, rt = bridge.relay_channel_create('testworker', 'relay-test')
-bridge._relay_channels[ch['id']] = ch
+bridge.relay_store.channels[ch['id']] = ch
 print(f'{ch[\"id\"]}|{gt}|{rt}')
 " 2>/dev/null)
 
