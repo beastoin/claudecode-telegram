@@ -229,27 +229,11 @@ IDLE_STREAK_STUCK = 3
 ALERT_COOLDOWN = 180
 
 
-# ============================================================
-# SOLID #10: AppContext — injectable configuration container
-#
-# Wraps all module-level config into a single object that can be
-# passed to services instead of imported as globals. This is the
-# foundation for Dependency Inversion: services depend on the
-# AppContext abstraction, not on scattered module globals.
-#
-# Module globals remain as aliases for backward compatibility.
-# New code should accept AppContext parameters; old code migrates
-# incrementally.
-# ============================================================
+# ── AppContext: injectable configuration (SOLID #10, Dependency Inversion) ──
 
 @dataclass
 class AppContext:
-    """Injectable application configuration.
-
-    Centralizes all config that was previously scattered across module
-    globals. Services receive this instead of importing bridge-level
-    constants, making them testable and decoupled.
-    """
+    """Injectable application configuration — replaces scattered module globals."""
     bot_token: str = ""
     port: int = 8270
     bridge_bind: str = "127.0.0.1"
@@ -312,25 +296,11 @@ def get_app_context() -> AppContext:
     return _app_context
 
 
-# ============================================================
-# SOLID #7: IncomingMessage — parse Telegram update once
-#
-# Single Responsibility: extract all fields from a Telegram update
-# dict into a typed object exactly once. Downstream code reads
-# properties instead of re-parsing the raw dict.
-#
-# Interface Segregation: consumers see only the fields they need
-# through the dataclass interface, not the full Telegram JSON.
-# ============================================================
+# ── IncomingMessage: parse Telegram update once (SOLID #7, S/I) ──
 
 @dataclass
 class IncomingMessage:
-    """Parsed Telegram update — created once, read everywhere.
-
-    Replaces scattered msg.get("text"), msg.get("photo"), etc. calls
-    throughout handle_message. Parse once at the boundary, then pass
-    the typed object downstream.
-    """
+    """Parsed Telegram update — created once, read everywhere."""
     update_id: int = 0
     chat_id: Optional[int] = None
     msg_id: Optional[int] = None
@@ -1010,22 +980,11 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list:
     return list(msgs)
 
 
-# ============================================================
-# SOLID #4: WorkerRecord — normalized worker data model
-#
-# Single Responsibility: one canonical representation of a worker,
-# regardless of source (tmux scan, registry file, callback registration).
-# All lookup paths produce WorkerRecord objects instead of ad-hoc dicts.
-# ============================================================
+# ── WorkerRecord: normalized worker data model (SOLID #4, S/D) ──
 
 @dataclass
 class WorkerRecord:
-    """Normalized worker representation.
-
-    Combines data from tmux scans, persistent registry, and callback
-    registrations into a single typed object. Replaces the various
-    dict shapes that were passed around.
-    """
+    """Normalized worker representation — single typed object for all sources."""
     name: str
     backend: str = "claude"
     host: Optional[str] = None
@@ -1103,24 +1062,11 @@ class WorkerRegistryEntry:
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"backend": self.backend}
-        if self.protocol:
-            d["protocol"] = self.protocol
-        if self.callback_url:
-            d["callback_url"] = self.callback_url
-        if self.host:
-            d["host"] = self.host
-        if self.version:
-            d["version"] = self.version
-        if self.chat_id is not None:
-            d["chat_id"] = self.chat_id
-        if self.hire_time:
-            d["hire_time"] = self.hire_time
-        if self.tools:
-            d["tools"] = self.tools
-        if self.home_host:
-            d["home_host"] = self.home_host
-        if self.home_cwd:
-            d["home_cwd"] = self.home_cwd
+        for k in ("protocol", "callback_url", "host", "version", "chat_id",
+                   "hire_time", "tools", "home_host", "home_cwd"):
+            v = getattr(self, k)
+            if v is not None and v != "" and v != 0:
+                d[k] = v
         return d
 
     @classmethod
@@ -1140,318 +1086,6 @@ class WorkerRegistryEntry:
 
 
 # ============================================================
-# SOLID #5: WorkerDelivery — single send path for all worker types
-#
-# Single Responsibility: one class that knows HOW to deliver a message
-# to any worker type (tmux, callback, gRPC, adapter).
-#
-# Open/Closed: new delivery mechanisms (e.g., WebSocket) can be added
-# without modifying existing send paths.
-#
-# Liskov: all workers are sendable through the same interface,
-# regardless of backend type.
-# ============================================================
-
-class WorkerDelivery:
-    """Unified message delivery — the only send path.
-
-    Replaces scattered backend.send() / _send_to_callback_worker() /
-    _send_to_grpc_worker() calls with one entry point that routes
-    based on worker type.
-
-    Note: actual send implementations still live in existing functions
-    during migration. This class provides the single-entry-point contract.
-    """
-
-    def send(self, name: str, message: str, from_name: str = "manager",
-             session: Optional[dict] = None) -> bool:
-        """Send a message to a worker. Returns True if delivered.
-
-        Routing priority:
-        1. gRPC (connected packaged workers)
-        2. HTTP callback (registered callback workers)
-        3. tmux backend (interactive/adapter workers)
-        """
-        # Import-time circular: these functions are defined later in the file.
-        # This method delegates to them; it's wired up at runtime.
-        if _send_to_grpc_worker(name, message, from_name):
-            return True
-        return worker_send(name, message, session=session)
-
-    def send_to_worker_by_record(self, record: WorkerRecord, message: str,
-                                 from_name: str = "manager") -> bool:
-        """Send using a WorkerRecord (preferred over raw name+session)."""
-        if _send_to_grpc_worker(record.name, message, from_name):
-            return True
-        return worker_send(record.name, message, session=record.to_session_dict())
-
-
-# Singleton delivery instance
-_worker_delivery = WorkerDelivery()
-
-
-def get_worker_delivery() -> WorkerDelivery:
-    """Get the singleton WorkerDelivery instance."""
-    return _worker_delivery
-
-
-# ============================================================
-# SOLID #9: ConversationService — guest/channel/relay encapsulation
-#
-# Single Responsibility: one service owns all "conversation" state
-# (guests, channels, relays) instead of scattering across module globals.
-#
-# Dependency Inversion: handlers depend on ConversationService methods,
-# not on raw global dicts and locks.
-#
-# Note: during migration, module-level functions delegate to this service.
-# The service wraps the existing globals rather than replacing them,
-# so all existing code continues to work.
-# ============================================================
-
-class ConversationService:
-    """Encapsulates guest, channel, and relay conversation state.
-
-    Provides a single interface for:
-    - Guest session lifecycle (create, validate, expire, inbox)
-    - Group channel management (create, join, leave, send)
-    - Relay channel management (create, auth, send, reply)
-
-    All state is stored in module-level globals (for backward compat)
-    but accessed through this service's methods.
-    """
-
-    def guest_create(self, name: str = "", team_workers: Optional[set] = None,
-                     ttl: int = GUEST_TTL) -> tuple:
-        """Create a guest session. Returns (token, guest_dict) or raises."""
-        if team_workers is None:
-            team_workers = set()
-        token, token_hash = guest_create_token()
-        with _guest_lock:
-            existing_guests = {g["name"] for g in _guests.values()
-                              if not guest_is_expired(g["expires_at_unix"])}
-        if name:
-            ok, err = guest_validate_name(name, team_workers, existing_guests)
-            if not ok:
-                raise ValueError(err)
-        else:
-            name = guest_generate_name(existing_names=team_workers | existing_guests)
-
-        now = time.time()
-        guest = {
-            "name": name,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-            "expires_at_unix": now + ttl,
-            "notified_workers": set(),
-        }
-        with _guest_lock:
-            _guests[token_hash] = guest
-            _guest_save()
-        return token, guest
-
-    def guest_lookup(self, token_hash: str) -> Optional[dict]:
-        """Look up a guest by token hash. Returns None if expired/missing."""
-        with _guest_lock:
-            guest = _guests.get(token_hash)
-            if guest and guest_is_expired(guest["expires_at_unix"]):
-                _guests.pop(token_hash, None)
-                _guest_save()
-                return None
-            return guest
-
-    def guest_inbox_get(self, name: str, after: str = None) -> list:
-        """Get inbox messages for a guest, optionally after a message ID."""
-        with _guest_lock:
-            inbox = _guest_inboxes.get(name, [])
-        return guest_inbox_filter(inbox, after)
-
-    def guest_inbox_push(self, name: str, msg: dict) -> None:
-        """Push a message to a guest's inbox."""
-        with _guest_lock:
-            inbox = _guest_inboxes.get(name, [])
-            _guest_inboxes[name] = guest_inbox_append(inbox, msg)
-
-    def guest_list(self) -> list:
-        """List all active (non-expired) guests."""
-        now = time.time()
-        with _guest_lock:
-            return [
-                {"name": g["name"], "token_hash": th,
-                 "created_at": g.get("created_at"), "expires_at_unix": g["expires_at_unix"]}
-                for th, g in _guests.items()
-                if now < g["expires_at_unix"]
-            ]
-
-    def guest_revoke(self, token_hash: str) -> Optional[dict]:
-        """Revoke a guest session. Returns the guest dict or None."""
-        with _guest_lock:
-            return _guests.pop(token_hash, None)
-
-    def channel_create(self, label: str, created_by: str,
-                       members: list, ttl: int = CHANNEL_TTL) -> dict:
-        """Create a group channel. Returns the channel dict."""
-        ch_id = channel_create_id(label)
-        ch = channel_new(ch_id, label, created_by, members, ttl)
-        with _channel_lock:
-            _channels[ch_id] = ch
-            _channel_save()
-        return ch
-
-    def channel_get(self, channel_id: str) -> Optional[dict]:
-        """Get a channel by ID. Returns None if expired/missing."""
-        with _channel_lock:
-            ch = _channels.get(channel_id)
-            if ch and channel_is_expired(ch):
-                del _channels[channel_id]
-                _channel_save()
-                return None
-            return ch
-
-    def channel_send(self, channel_id: str, from_member: str, text: str) -> Optional[dict]:
-        """Send a message to a channel. Returns the message dict."""
-        with _channel_lock:
-            ch = _channels.get(channel_id)
-            if not ch or channel_is_expired(ch):
-                return None
-            msg = channel_append_message(ch, from_member, text)
-            _channel_save()
-            return msg
-
-    def channel_list(self) -> list:
-        """List all active channels."""
-        with _channel_lock:
-            return [
-                ch for ch in _channels.values()
-                if not channel_is_expired(ch)
-            ]
-
-    def channel_delete(self, channel_id: str) -> Optional[dict]:
-        """Delete a channel. Returns the channel dict or None."""
-        with _channel_lock:
-            return _channels.pop(channel_id, None)
-
-    def relay_create(self, worker: str, label: str, ttl: int = 86400) -> tuple:
-        """Create a relay channel. Returns (channel, guest_token, reply_token)."""
-        return relay_channel_create(worker, label, ttl)
-
-    def relay_auth(self, channel_id: str, token: str, token_type: str = "guest"):
-        """Authenticate a relay token. Returns channel or None."""
-        if token_type == "reply":
-            return relay_auth_reply(channel_id, token)
-        return relay_auth_guest(channel_id, token)
-
-    def relay_send(self, channel_id: str, text: str) -> tuple:
-        """Guest sends to relay. Returns (envelope_text, msg_dict)."""
-        return relay_guest_send(channel_id, text)
-
-    def relay_reply(self, channel_id: str, text: str) -> Optional[dict]:
-        """Worker replies in relay. Returns message dict or None."""
-        return relay_worker_reply(channel_id, text)
-
-
-# Singleton conversation service
-_conversation_service = ConversationService()
-
-
-def get_conversation_service() -> ConversationService:
-    """Get the singleton ConversationService."""
-    return _conversation_service
-
-
-# ============================================================
-# SOLID #3: Command Protocol — Open/Closed command dispatch
-#
-# Open/Closed: new commands are registered, not hardcoded into
-# an if/elif chain. Adding a command never modifies the router.
-#
-# Single Responsibility: each command class owns its own logic,
-# help text, and validation. The router only dispatches.
-# ============================================================
-
-@dataclass
-class CommandContext:
-    """Context passed to command handlers — everything a command needs."""
-    chat_id: int
-    msg_id: Optional[int]
-    arg: str
-    router: Any  # CommandRouter (forward ref)
-    workers: Any  # WorkerManager (forward ref)
-    transport: Any  # MessageTransport (forward ref)
-
-    def reply(self, text: str, outcome: str = None) -> None:
-        """Convenience: send reply to the chat."""
-        self.router.reply(self.chat_id, text, outcome=outcome)
-
-
-class CommandHandler(Protocol):
-    """Protocol for command handlers — Open/Closed principle.
-
-    Implement this to add a new command without modifying the router.
-    """
-    name: str
-    aliases: List[str]
-    description: str
-
-    def handle(self, ctx: CommandContext) -> bool:
-        """Execute the command. Returns True if handled."""
-        ...
-
-
-class CommandRegistry:
-    """Registry of command handlers — replaces if/elif dispatch.
-
-    Commands register themselves; the router looks them up by name.
-    This makes the command set extensible without modifying CommandRouter.
-
-    Usage:
-        registry = CommandRegistry()
-        registry.register("hire", aliases=[], handler=cmd_hire_func)
-        ...
-        handler = registry.lookup("/hire")
-        if handler:
-            handler(ctx)
-    """
-
-    def __init__(self) -> None:
-        self._commands: dict[str, Callable] = {}  # cmd_name -> handler_func
-        self._aliases: dict[str, str] = {}  # alias -> canonical name
-
-    def register(self, name: str, handler: Callable,
-                 aliases: Optional[list] = None):
-        """Register a command handler function.
-
-        Args:
-            name: canonical command name (without /)
-            handler: function(ctx: CommandContext) -> bool
-            aliases: alternative names for this command
-        """
-        self._commands[name] = handler
-        if aliases:
-            for alias in aliases:
-                self._aliases[alias] = name
-
-    def lookup(self, cmd: str) -> Optional[Callable]:
-        """Look up a handler by command name. Returns None if not found.
-
-        Args:
-            cmd: command name with or without / prefix
-        """
-        name = cmd.lstrip("/").lower()
-        if "@" in name:
-            name = name.split("@")[0]
-        canonical = self._aliases.get(name, name)
-        return self._commands.get(canonical)
-
-    def list_commands(self) -> list[str]:
-        """List all registered command names."""
-        return sorted(self._commands.keys())
-
-    @property
-    def registered_count(self) -> int:
-        return len(self._commands)
-
-
-# ============================================================
 # CORE: Backend Protocol + implementations
 
 def build_claude_start_cmd(resume_id: str = "") -> str:
@@ -1462,16 +1096,7 @@ def build_claude_start_cmd(resume_id: str = "") -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
-# ============================================================
-# SOLID #8: Narrow Backend — Interface Segregation
-#
-# The original Backend Protocol forced every backend to implement
-# lifecycle (start_cmd), delivery (send), and health (is_online)
-# even when only one capability was needed. Split into focused
-# protocols so consumers depend only on the capabilities they use.
-#
-# Backend remains as the union type for backward compatibility.
-# ============================================================
+# ── Narrow Backend: Interface Segregation (SOLID #8, I/L) ──
 
 class BackendLifecycle(Protocol):
     """How to start/restart a backend CLI process."""
@@ -2857,12 +2482,7 @@ class MentionTracker:
 
 
 class BridgeRuntimeState:
-    """Typed in-memory state (RAM only — tmux IS persistence).
-
-    Replaces the raw ``state`` dict with typed attributes.
-    Provides ``__getitem__``/``__setitem__`` for backward compatibility
-    so existing ``state["active"]`` syntax keeps working.
-    """
+    """Typed in-memory state (RAM only — tmux IS persistence)."""
     def __init__(self) -> None:
         self.active: Optional[str] = None
         self.startup_notified: bool = False
@@ -6965,93 +6585,6 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
     return since
 
 
-# ============================================================
-# SOLID #6: Split Watchdog — state machine vs probes vs alerts
-#
-# Single Responsibility: the 350-line watchdog_loop mixed three
-# concerns — probing tmux/process state, computing worker state
-# transitions, and sending Telegram alerts. Now separated:
-#
-# - WatchdogProbe: collects raw data (tmux sessions, PIDs, CPU)
-# - compute_state(): pure function that maps probe data to state
-# - WatchdogAlertManager: decides when to fire alerts
-#
-# The loop orchestrates these, but each concern is independently
-# testable. Dependency Inversion: the loop depends on abstractions
-# (probe, state machine, alerter), not on scattered globals.
-# ============================================================
-
-class WatchdogProbe:
-    """Collects raw worker health data from tmux and process inspection.
-
-    All subprocess calls and SSH probes live here. The probe is
-    deterministic given the same system state — it doesn't make
-    decisions, just gathers facts.
-    """
-
-    @staticmethod
-    def collect_pane_pids() -> dict:
-        """Get local tmux pane PIDs."""
-        return _tmux_pane_pids()
-
-    @staticmethod
-    def collect_remote_pane_pids(host: str) -> tuple[dict, bool]:
-        """Probe remote host for tmux pane PIDs.
-
-        Returns (pids_dict, success). On failure returns ({}, False).
-        """
-        try:
-            r = _remote_run(
-                ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-                host=host, capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                pids = {}
-                for line in r.stdout.splitlines():
-                    parts = line.strip().split()
-                    if len(parts) >= 2 and parts[1].isdigit():
-                        pids[parts[0]] = parts[1]
-                return pids, True
-        except Exception:
-            pass
-        return {}, False
-
-    @staticmethod
-    def collect_process_stats(pids_by_host: dict) -> dict:
-        """Collect CPU/memory stats for worker PIDs across hosts."""
-        stats = {}
-        for host, pids in pids_by_host.items():
-            stats.update(_ps_stats(pids, host=host))
-        return stats
-
-
-class WatchdogAlertManager:
-    """Manages alert timing and deduplication.
-
-    Separates the alerting concern from state detection. Knows about
-    cooldowns, consecutive probe thresholds, and alert message IDs
-    for editing resolved alerts.
-    """
-
-    def __init__(self, cooldown: int = ALERT_COOLDOWN) -> None:
-        self.cooldown = cooldown
-
-    def should_alert(self, name: str, state: str, now: float) -> bool:
-        """Check if an alert should fire for this worker state transition."""
-        with _watchdog_lock:
-            last = _last_alert_ts.get(name, 0)
-        if now - last < self.cooldown:
-            return False
-        # Alert on bad states only
-        return state in ("DEAD", "STUCK", "POISONED", "OFFLINE", "HOST_OFFLINE")
-
-    def record_alert(self, name: str, now: float, msg_id: int = None) -> None:
-        """Record that an alert was sent."""
-        with _watchdog_lock:
-            _last_alert_ts[name] = now
-            if msg_id:
-                _alert_msg_ids[name] = msg_id
-
-
 def watchdog_loop() -> None:
     _disk_check_counter = 0
     while True:
@@ -8187,261 +7720,6 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
         return False
 
 
-# Single Responsibility: watchdog_loop mixed worker state tracking,
-# infra probes (disk, mem, IO, CPU, Tailscale), and alert delivery.
-# Split into WorkerHealthMonitor, HostHealthMonitor, and AlertService.
-#
-# Dependency Inversion: monitors depend on probe functions (injectable),
-# not on hardcoded subprocess calls. AlertService depends on transport
-# abstraction, not on direct send_telegram_message calls.
-# ============================================================
-
-class AlertService:
-    """Handles alert delivery, cooldowns, and message editing.
-
-    Single Responsibility: the ONLY place that sends watchdog alerts
-    to Telegram. Owns cooldown logic and message ID tracking for
-    edit-on-recovery behavior.
-    """
-
-    def __init__(self, cooldown: int = ALERT_COOLDOWN) -> None:
-        self.cooldown = cooldown
-
-    def should_alert(self, name: str, now: float) -> bool:
-        """Check if enough time has passed since last alert for this worker."""
-        last_ts = _last_alert_ts.get(name, 0)
-        return (now - last_ts) >= self.cooldown
-
-    def send_alert(self, name: str, state_str: str, reason: str) -> None:
-        """Send a watchdog alert (delegates to existing _send_watchdog_alert)."""
-        _send_watchdog_alert(name, state_str, reason)
-
-    def send_resolved(self, name: str, new_state: str) -> None:
-        """Send a recovery/resolved notification."""
-        _send_resolved_alert(name, new_state)
-
-
-class WorkerHealthMonitor:
-    """Tracks individual worker health state.
-
-    Single Responsibility: compute worker state from tmux/process probes,
-    track state transitions, detect stuck/stale workers.
-
-    Separated from infra probes (disk, memory, IO) which are
-    HostHealthMonitor's responsibility.
-    """
-
-    def __init__(self, alert_service: AlertService = None) -> None:
-        self.alert_service = alert_service or AlertService()
-
-    def compute_worker_state(self, name: str, tmux_name: str, backend_name: str,
-                             host: str = None, **kwargs) -> tuple:
-        """Compute current state for a single worker.
-
-        Returns (state, reason) tuple. Delegates to existing compute_state().
-        """
-        return compute_state(
-            name=name, tmux_name=tmux_name,
-            backend_name=backend_name, host=host, **kwargs
-        )
-
-    def handle_transition(self, name: str, old_state: str, new_state: str,
-                          reason: str, now: float) -> None:
-        """Handle a worker state transition (delegates to existing handler)."""
-        _handle_watchdog_transition(
-            name=name, old_state=old_state, new_state=new_state,
-            reason=reason, now=now
-        )
-
-
-class HostHealthMonitor:
-    """Tracks infrastructure health across all hosts.
-
-    Single Responsibility: probe remote hosts for disk, memory, IO,
-    CPU hogs, and Tailscale connectivity. Does NOT handle worker-level
-    health (that's WorkerHealthMonitor).
-    """
-
-    def probe_disks(self, remote_hosts: set) -> None:
-        """Check disk usage on all hosts."""
-        _probe_disk_all_hosts(remote_hosts)
-
-    def probe_memory(self, remote_hosts: set) -> None:
-        """Check memory usage on all hosts."""
-        _probe_mem_all_hosts(remote_hosts)
-
-    def probe_io(self, remote_hosts: set) -> None:
-        """Check IO usage on all hosts."""
-        _probe_io_all_hosts(remote_hosts)
-
-    def probe_cpu_hogs(self, remote_hosts: set) -> None:
-        """Detect runaway CPU processes."""
-        _probe_cpu_hogs(remote_hosts)
-
-    def probe_worktrees(self, remote_hosts: set) -> None:
-        """Check worktree sizes for bloat."""
-        _probe_worktree_sizes(remote_hosts)
-
-    def probe_tailscale(self) -> None:
-        """Check Tailscale connectivity."""
-        _probe_tailscale()
-
-    def is_host_down(self, host: str) -> bool:
-        """Check if a host is currently considered down."""
-        return _is_host_down(host)
-
-    def record_probe(self, host: str, ok: bool, error: str = None) -> None:
-        """Record a host probe result."""
-        _record_host_probe(host, ok, error)
-
-
-# ============================================================
-# SOLID #4: WorkerRepository — normalized worker lookup
-#
-# Single Responsibility: ONE place to look up workers, regardless
-# of source (tmux scan, persistent registry, callback registration).
-#
-# Dependency Inversion: callers depend on WorkerRepository interface,
-# not on raw dict manipulation of registry files and tmux output.
-# ============================================================
-
-class WorkerRepository:
-    """Normalized worker lookup across all sources.
-
-    Wraps the existing registry helpers (_load_registry, _save_registry,
-    _registry_add, etc.) with a cleaner interface that returns
-    WorkerRecord objects.
-
-    During migration, the legacy dict-based interface remains available
-    through WorkerManager.get_registered_sessions().
-    """
-
-    def __init__(self, sessions_dir: Path, tmux_prefix: str) -> None:
-        self.sessions_dir = sessions_dir
-        self.tmux_prefix = tmux_prefix
-
-    def get(self, name: str) -> Optional[WorkerRecord]:
-        """Look up a single worker by name. Returns None if not found."""
-        registry = _load_registry()
-        workers = registry.get("workers", {})
-        info = workers.get(name)
-        if info:
-            return WorkerRecord(
-                name=name,
-                backend=info.get("backend", DEFAULT_BACKEND),
-                host=info.get("host"),
-                tmux_name=f"{self.tmux_prefix}{name}",
-                callback_url=info.get("callback_url", ""),
-                protocol=info.get("protocol", ""),
-                version=info.get("version", ""),
-                chat_id=info.get("chat_id"),
-                home_host=info.get("home_host", ""),
-                home_cwd=info.get("home_cwd", ""),
-            )
-        return None
-
-    def add(self, name: str, backend: str, chat_id: int = None,
-            host: str = None) -> None:
-        """Add or update a worker in the registry."""
-        _registry_add(name, backend, chat_id, host)
-
-    def add_callback(self, name: str, callback_url: str, host: str = "",
-                     version: str = "", tools: dict = None) -> None:
-        """Register an HTTP callback worker."""
-        _registry_add_callback(name, callback_url, host, version, tools)
-
-    def remove(self, name: str) -> None:
-        """Remove a worker from the registry."""
-        _registry_remove(name)
-
-    def get_host(self, name: str) -> Optional[str]:
-        """Get the host for a worker (None = local)."""
-        return get_worker_host(name)
-
-    def list_all(self) -> List[WorkerRecord]:
-        """List all workers from the registry."""
-        registry = _load_registry()
-        workers: Dict[str, Any] = registry.get("workers", {})
-        return [
-            WorkerRecord(
-                name=name,
-                backend=info.get("backend", DEFAULT_BACKEND),
-                host=info.get("host"),
-                tmux_name=f"{self.tmux_prefix}{name}",
-                callback_url=info.get("callback_url", ""),
-                protocol=info.get("protocol", ""),
-                version=info.get("version", ""),
-                chat_id=info.get("chat_id"),
-            )
-            for name, info in workers.items()
-        ]
-
-    def list_active(self) -> Dict[str, WorkerRecord]:
-        """List active workers as a name→WorkerRecord dict.
-
-        Delegates to WorkerManager.get_registered_sessions() for the raw scan,
-        then wraps each entry in a typed WorkerRecord.
-        """
-        # Import at call-time to avoid circular dependency at module-load.
-        sessions: Dict[str, Dict[str, Any]] = get_registered_sessions()
-        return {
-            name: WorkerRecord.from_session_dict(name, info, self.tmux_prefix)
-            for name, info in sessions.items()
-        }
-
-
-# ============================================================
-# SOLID #1: WorkerLifecycleService — centralized lifecycle
-#
-# Single Responsibility: one service owns ALL worker lifecycle
-# operations (hire, restart, recover, stop). Previously split
-# across WorkerManager.hire/restart/_restart_dead_worker and
-# CommandRouter._restart_remote_worker/_do_teleport.
-#
-# Dependency Inversion: depends on WorkerRepository and
-# WorkerDelivery abstractions, not on raw globals.
-# ============================================================
-
-class WorkerLifecycleService:
-    """Centralized worker lifecycle management.
-
-    Owns: hire, restart, recover_dead, wait_ready, stop.
-    Delegates tmux operations to existing helpers, registry to
-    WorkerRepository, and delivery to WorkerDelivery.
-
-    During migration, WorkerManager methods delegate here.
-    """
-
-    def __init__(self, repository: WorkerRepository = None,
-                 delivery: WorkerDelivery = None):
-        self._repo = repository
-        self._delivery = delivery or _worker_delivery
-
-    def _ensure_env(self, tmux_name: str, backend: str, host: str = None) -> None:
-        """Export hook env vars to tmux session."""
-        export_hook_env(tmux_name, backend, host)
-
-    def _ensure_session_dir(self, name: str) -> None:
-        """Create session directory if needed."""
-        ensure_session_dir(name)
-
-    def wait_ready(self, tmux_name: str, backend_name: str,
-                   timeout: float = 45.0, host: str = None) -> bool:
-        """Wait for a worker to become ready after start/restart.
-
-        Returns True if worker started within timeout.
-        Delegates to existing _wait_for_restart_ready().
-        """
-        return _wait_for_restart_ready(tmux_name, backend_name, timeout, host)
-
-    def send_welcome(self, name: str, backend_obj, message: str = None) -> None:
-        """Send welcome/instructions to a newly started worker."""
-        if message is None:
-            # Will be wired to WorkerManager._build_welcome() at runtime
-            return
-        worker_send(name, message)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CORE: WorkerManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8566,15 +7844,7 @@ class WorkerManager:
             self._sessions_cache_ts = 0
 
     def get_registered_sessions(self, registered: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
-        """Get registered sessions from tmux (all backends have tmux now).
-
-        Returns a dict mapping worker name → session info dict.
-        For typed access, prefer WorkerRepository.list_active() which
-        returns Dict[str, WorkerRecord].
-
-        Results are cached for _SESSIONS_CACHE_TTL seconds to avoid blocking
-        on SSH timeouts to remote hosts during message routing.
-        """
+        """Get registered sessions from tmux. Cached for _SESSIONS_CACHE_TTL seconds."""
         self._sync_paths()
         if registered is None:
             now = time.time()
@@ -9875,8 +9145,6 @@ def switch_session(name) -> bool:
     return True, None
 
 
-
-
 # ============================================================
 # MESSAGE ROUTING
 # ============================================================
@@ -9992,15 +9260,7 @@ class _LegacyTransportAdapter(MessageTransport):
         return None
 
 
-# ============================================================
-# SOLID #3: Command Registry — Open/Closed Principle
-#
-# Commands are registered in a dict, not an if/elif chain.
-# Adding a new command means adding one entry to the registry,
-# not modifying the dispatch method. The router is open for
-# extension (new commands) and closed for modification (dispatch
-# logic never changes).
-# ============================================================
+# ── CommandRouter: dict-based dispatch (SOLID #3, O/S) ──
 
 # Type alias for command handler functions
 CommandFn = Callable[[str, ChatId, MessageId], bool]
@@ -13838,7 +13098,6 @@ def _transcript_stats(entries: list) -> dict:
             "duration": duration_str}
 
 
-
 def _render_transcript_loading(name: str, sid: str, token: str, sync_key: str) -> str:
     """Render a loading page while transcript syncs from remote host."""
     import html as html_mod, time as _time
@@ -14978,30 +14237,10 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
     return page_html
 
 
-# ============================================================
-# SOLID #2: Thin Handler — extract HTTP dispatch from business logic
-#
-# Single Responsibility: the Handler class should only handle HTTP
-# concerns (parsing, routing, response formatting). Business logic
-# lives in the service classes (WorkerLifecycleService, CommandRouter,
-# ConversationService).
-#
-# Open/Closed: new endpoints are registered in the endpoint map,
-# not by adding more if/elif to do_POST/do_GET.
-#
-# Dependency Inversion: Handler depends on service abstractions,
-# not on module globals.
-# ============================================================
+# ── EndpointRouter + Handler: thin HTTP dispatch (SOLID #2, S/O/D) ──
 
 class EndpointRouter:
-    """Maps HTTP paths to handler functions.
-
-    New endpoints are registered by calling .post() or .get() with
-    a path pattern. The router finds the matching handler and calls
-    it with (handler_instance, body, match_groups).
-
-    This replaces the long if/elif chains in do_POST and do_GET.
-    """
+    """Maps HTTP paths to handler functions via dispatch table."""
 
     def __init__(self) -> None:
         self._post_exact: dict[str, callable] = {}
@@ -17204,13 +16443,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.end_headers()
 
 
-# ============================================================
-# SOLID #2: Endpoint registration — populate the EndpointRouter
-#
-# Each endpoint is registered once here. Adding a new endpoint
-# means one _endpoint_router.post() or .get() call. The Handler's
-# do_POST/do_GET never change.
-# ============================================================
+# ── Endpoint registration ──
 
 def _setup_endpoint_routes() -> None:
     """Register all POST and GET endpoints in the endpoint router.
