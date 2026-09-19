@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
+from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
 
 # ── Type aliases for clarity ────────────────────────────────────────────
 ChatId = int
@@ -1403,7 +1403,7 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
         "from": channel["label"],
         "to": channel["worker"],
         "text": text,
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
     }
     with relay_store.lock:
         channel["messages"].append(msg)
@@ -1426,7 +1426,7 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
         "from": channel["worker"],
         "to": channel["label"],
         "text": text,
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
     }
     with relay_store.lock:
         channel["messages"].append(msg)
@@ -1627,10 +1627,14 @@ class Backend(Protocol):
 # ── Injectable testing seams ──
 
 class SubprocessRunner(Protocol):
-    """Abstraction over subprocess.run for test injection."""
+    """Abstraction over subprocess.run and subprocess.Popen for test injection."""
 
     def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        """Execute a subprocess command."""
+        """Execute a subprocess command and wait for completion."""
+        ...
+
+    def popen(self, args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+        """Spawn a subprocess without waiting for completion."""
         ...
 
 
@@ -1647,11 +1651,15 @@ class Clock(Protocol):
 
 
 class _RealSubprocessRunner:
-    """Production subprocess runner — delegates to subprocess.run."""
+    """Production subprocess runner — delegates to subprocess.run/Popen."""
 
     def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command via the real subprocess module."""
         return subprocess.run(args, **kwargs)
+
+    def popen(self, args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+        """Spawn a subprocess without waiting, via the real subprocess module."""
+        return subprocess.Popen(args, **kwargs)
 
 
 class _RealClock:
@@ -2772,8 +2780,8 @@ class ProcessRegistry:
 
     def __init__(self) -> None:
         """Initialize adapter process tracking and bridge PID references."""
-        self.adapter_pids: dict[str, tuple[subprocess.Popen, object]] = {}
-        self.pipe_readers: dict[str, tuple] = {}
+        self.adapter_pids: dict[str, tuple[subprocess.Popen[Any], IO[str] | None]] = {}
+        self.pipe_readers: dict[str, tuple[threading.Thread, threading.Event]] = {}
         self.pending_locks: dict[str, threading.Lock] = {}
         self.pending_locks_guard: threading.Lock = threading.Lock()
 
@@ -2798,7 +2806,7 @@ def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
     except OSError:
         stderr_fh = None  # Fall back to DEVNULL if dir doesn't exist yet
 
-    proc = subprocess.Popen(
+    proc = _subprocess_runner.popen(
         ["python3", str(adapter_path), worker_name, text, bridge_url, str(sessions_dir)],
         stdout=subprocess.DEVNULL,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
@@ -2835,7 +2843,7 @@ def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
     except OSError:
         stderr_fh = None
 
-    proc = subprocess.Popen(
+    proc = _subprocess_runner.popen(
         ["ssh", "-o", "ConnectTimeout=5", host, remote_cmd],
         stdout=subprocess.DEVNULL,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
@@ -5940,7 +5948,7 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         session_dir = ensure_session_dir(name)
         history_file = session_dir / "session_history.jsonl"
         entry = json.dumps({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
             "session_id": session_id,
             "cwd": cwd or "",
             "event": event,
@@ -12851,7 +12859,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if not enabled:
             self.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
             return True
-        ts = time.strftime("%m%d-%H%M")
+        ts = time.strftime("%m%d-%H%M", time.gmtime(_clock.time()))
         if len(enabled) <= 3:
             slug = "-".join(enabled) + "-" + ts
         else:
@@ -13658,7 +13666,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                 _TRANSCRIPT_SYNC[key]["progress"] = "Syncing transcript..."
 
         # Run rsync with --progress (we poll local file size for progress)
-        proc = subprocess.Popen(
+        proc = _subprocess_runner.popen(
             ["rsync", "-az", f"{host}:{remote_path}", str(local_tmp)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -17871,7 +17879,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 <div class="wrap">
 <header>
 <h1>{icon} {title}</h1>
-<div class="meta">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""} &middot; Updated {time.strftime("%b %d, %H:%M UTC", time.gmtime())}</div>
+<div class="meta">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""} &middot; Updated {time.strftime("%b %d, %H:%M UTC", time.gmtime(_clock.time()))}</div>
 </header>
 <div class="thread">
 {blocks_html}
