@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.40.0
+> Version: 0.41.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,27 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.41.0 - Complete DI threading across entire codebase (quality push round 9)
+
+**Full DI coverage (subprocess + time calls):**
+- Converted ALL remaining `subprocess.run()` → `_subprocess_runner.run()` outside WorkerManager
+  (40 module-level calls: `_remote_run`, `_resolve_remote_tool`, `_remote_copy`,
+  `tmux_send_message`, `_ensure_bare_repo`, `download_file`, `cmd_pilot`, `cmd_pr_review`,
+  Teleport operations, health probes, and more)
+- Converted ALL `time.time()` → `_clock.time()` (91 calls total: WorkerManager + module-level)
+- Converted ALL `time.sleep()` → `_clock.sleep()` (45 calls total)
+- Eliminated all `import time as _time` local imports (10 removed)
+- Only 3 intentional exceptions: `_RealSubprocessRunner.run()` (the implementation),
+  `_RealClock.time()`/`.sleep()` (the implementation), and module-level Tailscale
+  auto-detect (runs before `_subprocess_runner` is initialized)
+
+**DI architecture summary:**
+- `SubprocessRunner` protocol + `_RealSubprocessRunner` production implementation
+- `Clock` protocol + `_RealClock` production implementation
+- Module-level singletons: `_subprocess_runner`, `_clock` (overridable in tests)
+- WorkerManager: `self._runner`, `self._clock` (injected via constructor)
+- Total: 67 subprocess calls + 136 time calls use injectable DI seams
 
 ### v0.40.0 - DI threading, domain TypedDicts, function decomposition (quality push round 8)
 

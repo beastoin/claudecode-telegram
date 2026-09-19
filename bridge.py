@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.40.0"
+VERSION = "0.41.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -408,9 +408,9 @@ except ImportError as e:
 # ── File map ───────────────────────────────────────────────────────────
 #
 #   L1-380      Imports, type aliases, 33 TypedDict/5 NamedTuple models
-#   L~433       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
+#   L~436       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
 #               ResourceAlertConfig, MediaConfig), AppContext
-#   L~830       Guest/channel/relay subsystem (GuestSession, RelayStore)
+#   L~820       Guest/channel/relay subsystem (GuestSession, RelayStore)
 #   L~1570      Backend Protocols + registry (BackendLifecycle, BackendDelivery,
 #               BackendHealth, Backend, SubprocessRunner, Clock, get_backend)
 #   L~1838      OS detection, worker health: _detect_os_family, _machine_health,
@@ -424,10 +424,13 @@ except ImportError as e:
 #   L~8458      WorkerManager class (~1600 lines): hire, fire, restart, status
 #               (DI: accepts SubprocessRunner/Clock for testability)
 #   L~10076     TeleportCommandsMixin (~2000 lines)
-#   L~12139     CommandRouter class (~2200 lines)
-#   L~14490     Transcript HTML rendering
-#   L~15232     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
-#   L~17977     main() function, signal handlers, startup
+#   L~12155     CommandRouter class (~2200 lines)
+#   L~14009     Transcript HTML rendering
+#   L~15247     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
+#   L~17947     main() function, signal handlers, startup
+#
+#   DI coverage (v0.41.0): 67 subprocess + 136 time calls → injectable seams
+#   Only _RealSubprocessRunner/_RealClock and 1 module-init call use direct stdlib
 #
 # ======================================================================
 # CONFIGURATION
