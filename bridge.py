@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.39.0"
+VERSION = "0.40.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -246,6 +246,105 @@ class HealthSummaryDict(TypedDict, total=False):
     io: IoUsageDict | None
     cpu_hogs: list[dict[str, str | float]]
     worktrees: dict[str, float] | None
+
+
+# ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
+
+class GuestSessionDict(TypedDict):
+    """Shape of a guest session stored in GuestStore.guests."""
+    name: str
+    token_hash: str
+    created_at: str
+    expires_at: str
+    expires_at_unix: float
+    notified_workers: set[str]
+
+
+class GuestInboxMessage(TypedDict):
+    """Shape of a message in a guest's inbox."""
+    id: str
+    from_: str   # JSON key is "from"; Python field avoids keyword
+    text: str
+    ts: int
+
+
+class ChannelMemberDict(TypedDict):
+    """Shape of a member entry inside a channel's members dict."""
+    type: str         # "worker", "guest", or "manager"
+    name: str
+
+
+class ChannelMessageDict(TypedDict):
+    """Shape of a message inside a channel's messages list."""
+    id: str
+    seq: int
+    from_: str        # JSON key is "from"
+    text: str
+    ts: int
+
+
+class ChannelDict(TypedDict):
+    """Shape of a channel stored in ChannelStore.channels."""
+    id: str
+    label: str
+    created_at: str
+    expires_at_unix: float
+    seq: int
+    created_by: str
+    members: dict[str, ChannelMemberDict]
+    messages: list[ChannelMessageDict]
+
+
+class RelayMessageDict(TypedDict):
+    """Shape of a message in a relay channel."""
+    message_id: str
+    direction: str    # "guest_to_worker" or "worker_to_guest"
+    from_: str        # JSON key is "from"
+    to: str
+    text: str
+    ts: str
+
+
+class RelayChannelDict(TypedDict):
+    """Shape of a relay channel stored in RelayStore.channels."""
+    id: str
+    label: str
+    worker: str
+    workers: list[str]
+    created_at: str
+    expires_at: str
+    expires_at_unix: float
+    guest_token_hash: str
+    reply_token_hash: str
+    reply_token: str
+    messages: list[RelayMessageDict]
+
+
+class TmuxSessionDict(TypedDict, total=False):
+    """Shape of a scanned tmux session entry."""
+    tmux: str
+    backend: str
+    host: str           # optional — present only for remote sessions
+
+
+class WorkerRegistryEntry(TypedDict, total=False):
+    """Shape of a single worker entry in workers.json."""
+    backend: str
+    chat_id: int | None
+    hire_time: int
+    host: str           # optional
+    home_host: str      # optional — preserved across re-registrations
+    home_cwd: str       # optional — preserved across re-registrations
+    protocol: str       # optional — "http" for callback workers
+    callback_url: str   # optional — for callback workers
+    version: str        # optional — for callback workers
+    tools: dict[str, Any]  # optional — for callback workers
+
+
+class WorkerRegistryData(TypedDict, total=False):
+    """Shape of the top-level workers.json file."""
+    version: int
+    workers: dict[str, WorkerRegistryEntry]
 
 
 # ── NamedTuple models for structured returns ──────────────────────────
@@ -832,8 +931,8 @@ class GuestStore:
 
     def __init__(self) -> None:
         """Initialize guest sessions store with thread-safe locks."""
-        self.guests: dict[str, dict[str, Any]] = {}
-        self.inboxes: dict[str, list[dict[str, Any]]] = {}
+        self.guests: dict[str, GuestSessionDict] = {}
+        self.inboxes: dict[str, list[GuestInboxMessage]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -948,7 +1047,7 @@ def guest_inbox_filter(messages: list, after: str | None = None) -> list:
     return result
 
 
-def guest_inbox_append(inbox: list[dict[str, Any]], msg: dict[str, Any]) -> list[dict[str, Any]]:
+def guest_inbox_append(inbox: list[GuestInboxMessage], msg: GuestInboxMessage) -> list[GuestInboxMessage]:
     """Append a message to inbox, capping at GUEST_INBOX_CAP."""
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
@@ -965,7 +1064,7 @@ class ChannelStore:
 
     def __init__(self) -> None:
         """Initialize channel store with thread-safe locks."""
-        self.channels: dict[str, dict[str, Any]] = {}
+        self.channels: dict[str, ChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -1103,7 +1202,7 @@ def channel_get_messages(channel: dict, after: str | None = None) -> tuple[list,
     return channel["messages"][found_idx + 1:], False
 
 
-def channel_is_expired(channel: dict[str, Any]) -> bool:
+def channel_is_expired(channel: ChannelDict) -> bool:
     """Check if a channel has expired."""
     return time.time() > channel["expires_at_unix"]
 
@@ -1123,7 +1222,7 @@ class RelayStore:
 
     def __init__(self) -> None:
         """Initialize relay channel store with thread-safe locks."""
-        self.channels: dict[str, dict[str, Any]] = {}
+        self.channels: dict[str, RelayChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -1174,7 +1273,7 @@ def _relay_load() -> None:
         print(f"[relay] Failed to load state: {e}", flush=True)
 
 
-def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[dict[str, Any], str, str]:
+def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
     """Create a relay channel with guest and reply tokens. Returns (channel, guest_token, reply_token)."""
     channel_id = channel_create_id(label)
     guest_token = f"gt_{secrets.token_urlsafe(32)}"
@@ -1243,7 +1342,7 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 """
 
 
-def relay_auth_guest(channel_id: str, token: str) -> dict[str, Any] | None:
+def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     """Authenticate a guest token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -1256,7 +1355,7 @@ def relay_auth_guest(channel_id: str, token: str) -> dict[str, Any] | None:
     return ch
 
 
-def relay_auth_reply(channel_id: str, token: str) -> dict[str, Any] | None:
+def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     """Authenticate a reply token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -1269,7 +1368,7 @@ def relay_auth_reply(channel_id: str, token: str) -> dict[str, Any] | None:
     return ch
 
 
-def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, dict[str, Any] | None]:
+def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
     """Guest sends a message to the worker. Returns (envelope_text, message_dict)."""
     with relay_store.lock:
         ch = relay_store.channels.get(channel_id)
@@ -3640,7 +3739,7 @@ def load_last_active() -> str | None:
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 
 
-def _load_registry() -> dict[str, Any]:
+def _load_registry() -> WorkerRegistryData:
     """Load worker registry from disk. Returns {} on missing/corrupt."""
     try:
         if not WORKER_REGISTRY_FILE.exists():
@@ -3661,7 +3760,7 @@ def _load_registry() -> dict[str, Any]:
         return {}
 
 
-def _save_registry(data: dict[str, Any]) -> None:
+def _save_registry(data: WorkerRegistryData) -> None:
     """Atomic write of registry to disk."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3753,7 +3852,7 @@ def _get_worker_cwd(name: str) -> str:
     return cwd if isinstance(cwd, str) else ""
 
 
-def _registry_bootstrap(registered: dict[str, dict[str, Any]]) -> None:
+def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
     """First-run: create registry from currently running tmux sessions."""
     if WORKER_REGISTRY_FILE.exists():
         return
@@ -7220,7 +7319,7 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
 
 
 def _watchdog_probe_remote_hosts(
-    registered: dict[str, Any]
+    registered: dict[str, TmuxSessionDict]
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
     """Probe remote hosts for tmux sessions in bulk.
 
@@ -7257,11 +7356,11 @@ def _watchdog_probe_remote_hosts(
 
 
 def _watchdog_collect_worker_pids(
-    registered: dict[str, Any],
+    registered: dict[str, TmuxSessionDict],
     pane_pids: dict[str, str],
     remote_pane_pids: dict[str, str],
     now: float
-) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
+) -> tuple[dict[str, str], dict[str, bool], dict[str, Backend]]:
     """Collect claude PIDs, tmux presence, and backend info for all workers.
 
     Returns (claude_pids, tmux_present, backend_info).
@@ -7310,10 +7409,10 @@ def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, dict[st
 
 
 def _watchdog_evaluate_workers(
-    registered: dict[str, Any],
+    registered: dict[str, TmuxSessionDict],
     tmux_present: dict[str, bool],
     claude_pids: dict[str, str],
-    backend_info: dict[str, Any],
+    backend_info: dict[str, Backend],
     stats: dict[str, dict[str, float]],
     probe_failed: bool,
     failed_hosts: set[str],
@@ -8325,7 +8424,7 @@ def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") ->
     return False
 
 
-def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: dict[str, Any] | None = None) -> bool:
+def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
     """Send a message to a callback-URL worker (HTTP POST). Returns True on success."""
     callback_url = (session or {}).get("callback_url", "")
     if not callback_url:
@@ -8362,10 +8461,21 @@ class WorkerManager:
     backend selection, and dead-worker restart logic.
     """
 
-    def __init__(self, sessions_dir: Path, tmux_prefix: str) -> None:
-        """Initialize worker manager with tmux prefix, session paths, and internal state."""
+    def __init__(self, sessions_dir: Path, tmux_prefix: str,
+                 runner: SubprocessRunner | None = None,
+                 clock: Clock | None = None) -> None:
+        """Initialize worker manager with tmux prefix, session paths, and DI seams.
+
+        Args:
+            sessions_dir: Root directory for per-worker session files.
+            tmux_prefix: Prefix for tmux session names (e.g. 'claude-prod-').
+            runner: Subprocess runner for test injection (defaults to real subprocess).
+            clock: Clock for test injection (defaults to real wall-clock time).
+        """
         self.sessions_dir = sessions_dir
         self.tmux_prefix = tmux_prefix
+        self._runner: SubprocessRunner = runner or _subprocess_runner
+        self._clock: Clock = clock or _clock
 
     def _sync_paths(self) -> None:
         """Sync instance paths with current module globals (for runtime reconfiguration)."""
@@ -8405,17 +8515,17 @@ class WorkerManager:
         """Change tmux shell cwd before starting backend process."""
         if not cwd:
             return
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=5)
-        time.sleep(0.2)
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=5)
+        self._clock.sleep(0.2)
 
-    def scan_tmux_sessions(self) -> dict[str, dict[str, Any]]:
+    def scan_tmux_sessions(self) -> dict[str, TmuxSessionDict]:
         """Scan tmux for claude-* sessions (local + remote machines)."""
         self._sync_paths()
         registered = {}
 
         # Scan local tmux
         try:
-            result = subprocess.run(
+            result = self._runner.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
                 capture_output=True, text=True, timeout=3
             )
@@ -8482,11 +8592,11 @@ class WorkerManager:
             self._sessions_cache = None
             self._sessions_cache_ts = 0
 
-    def get_registered_sessions(self, registered: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+    def get_registered_sessions(self, registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
         """Get registered sessions from tmux. Cached for _SESSIONS_CACHE_TTL seconds."""
         self._sync_paths()
         if registered is None:
-            now = time.time()
+            now = self._clock.time()
             with self._sessions_cache_lock:
                 if self._sessions_cache is not None and (now - self._sessions_cache_ts) < self._SESSIONS_CACHE_TTL:
                     # Return a shallow copy so callers can mutate without poisoning cache
@@ -8533,11 +8643,11 @@ class WorkerManager:
         # Update cache
         with self._sessions_cache_lock:
             self._sessions_cache = dict(registered)
-            self._sessions_cache_ts = time.time()
+            self._sessions_cache_ts = self._clock.time()
 
         return registered
 
-    def is_online(self, name: str, session: dict[str, Any] | None = None) -> bool:
+    def is_online(self, name: str, session: TmuxSessionDict | None = None) -> bool:
         """Check if worker is online and ready."""
         self._sync_paths()
         if not session:
@@ -8571,7 +8681,7 @@ class WorkerManager:
 
         return backend.is_online(tmux_name)
 
-    def send(self, name: str, message: str, chat_id: int | None = None, session: dict[str, Any] | None = None) -> bool:
+    def send(self, name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
         """Send message to worker using backend registry."""
         self._sync_paths()
         if _send_to_grpc_worker(name, message, "manager"):
@@ -8777,15 +8887,15 @@ class WorkerManager:
         # Strip CLAUDECODE from env so new tmux shell doesn't inherit it
         # (Claude Code refuses to start if it detects a parent session)
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
+        result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
             capture_output=True, env=clean_env, timeout=10
         )
         if result.returncode != 0:
             return False, "Could not start the worker workspace"
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
+        self._runner.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
 
-        time.sleep(0.5)
+        self._clock.sleep(0.5)
         startup_cwd = self._get_startup_cwd(name)
         if startup_cwd:
             self._cd_tmux_to_cwd(tmux_name, startup_cwd)
@@ -8796,12 +8906,12 @@ class WorkerManager:
             save_claude_session_cwd(name, pane_cwd)
 
         export_hook_env(tmux_name, backend)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
         # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name,
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
         ensure_session_dir(name)
         if chat_id:
@@ -8819,19 +8929,19 @@ class WorkerManager:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
             print(f"Started worker '{name}' in sandbox mode")
         else:
             start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
             if backend_obj.is_interactive:
-                time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
+                self._clock.sleep(1.5)
+                self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
 
         if backend_obj.is_interactive:
-            time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
+            self._clock.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
 
         welcome = self._build_welcome(name, backend_obj)
         if not backend_obj.is_interactive:
@@ -8839,7 +8949,7 @@ class WorkerManager:
                 set_pending(name, chat_id)
             # Echo welcome to tmux (visible for debugging) but don't call backend
             # to avoid triggering a codex API call on hire
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
         else:
             self.send(name, welcome)
 
@@ -8956,22 +9066,22 @@ class WorkerManager:
             clear_pending(name)
         elif is_claude_running(tmux_name):
             # Kill running claude first, then restart (resume keeps session ID, relaunch clears it)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], timeout=5)
-            time.sleep(0.5)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=5)
-            time.sleep(1.0)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], timeout=5)
+            self._clock.sleep(0.5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=5)
+            self._clock.sleep(1.0)
             # If still running, force kill
             if is_claude_running(tmux_name):
                 pane_pid = _tmux_pane_pids().get(tmux_name)
                 if pane_pid:
                     claude_pid = _get_claude_pid(pane_pid)
                     if claude_pid:
-                        subprocess.run(["kill", claude_pid], capture_output=True, timeout=5)
+                        self._runner.run(["kill", claude_pid], capture_output=True, timeout=5)
             # Poll until Claude has actually exited (fixed sleep races with slow exits)
             for _ in range(20):
                 if not is_claude_running(tmux_name):
                     break
-                time.sleep(0.25)
+                self._clock.sleep(0.25)
             else:
                 print(f"[restart] {name}: Claude still running after 5s kill wait")
 
@@ -8980,7 +9090,7 @@ class WorkerManager:
             pane_pids = _tmux_pane_pids()
             pane_pid = pane_pids.get(tmux_name)
             if pane_pid:
-                stray = subprocess.run(
+                stray = self._runner.run(
                     ["pgrep", "-P", str(pane_pid)],
                     capture_output=True, text=True, timeout=5
                 )
@@ -8989,37 +9099,37 @@ class WorkerManager:
                         child_pid = child_pid.strip()
                         if child_pid and child_pid.isdigit():
                             print(f"[restart] {name}: killing stray child pid {child_pid}")
-                            subprocess.run(["kill", child_pid], capture_output=True, timeout=5)
-                    time.sleep(0.5)
+                            self._runner.run(["kill", child_pid], capture_output=True, timeout=5)
+                    self._clock.sleep(0.5)
 
         export_hook_env(tmux_name, backend_name)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
         # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name,
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
         if SANDBOX_ENABLED and backend.is_interactive:
             stop_docker_container(name)
-            time.sleep(0.5)
+            self._clock.sleep(0.5)
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
         else:
             start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
 
         # Wait for Claude to actually start before sending welcome
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
             started = False
             for _ in range(10):
-                time.sleep(1.0)
+                self._clock.sleep(1.0)
                 if is_claude_running(tmux_name):
                     started = True
                     break
@@ -9031,9 +9141,9 @@ class WorkerManager:
                 start_cmd = f'unset CLAUDECODE && {start_cmd}'
                 if startup_cwd:
                     start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
+                self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
                 for _ in range(10):
-                    time.sleep(1.0)
+                    self._clock.sleep(1.0)
                     if is_claude_running(tmux_name):
                         started = True
                         break
@@ -9057,7 +9167,7 @@ class WorkerManager:
             else:
                 print(f"[restart] {name}: Claude did not start within 10s, skipping welcome")
         else:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
 
         _reset_learning_reminder(name)
         self.invalidate_sessions_cache()
@@ -9074,21 +9184,21 @@ class WorkerManager:
 
         # Create new tmux session
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        result = subprocess.run(
+        result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
             capture_output=True, env=clean_env, timeout=10
         )
         if result.returncode != 0:
             return False, "Could not create worker workspace"
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
+        self._runner.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
 
-        time.sleep(0.5)
+        self._clock.sleep(0.5)
         export_hook_env(tmux_name, backend_name)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name,
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name,
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
-        time.sleep(0.3)
+        self._clock.sleep(0.3)
 
         ensure_session_dir(name)
         if not backend.is_interactive:
@@ -9113,22 +9223,22 @@ class WorkerManager:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
         else:
             start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
             if backend.is_interactive:
-                time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
+                self._clock.sleep(1.5)
+                self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
 
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
             started = False
             for _ in range(10):
-                time.sleep(1.0)
+                self._clock.sleep(1.0)
                 if is_claude_running(tmux_name):
                     started = True
                     break
@@ -9139,9 +9249,9 @@ class WorkerManager:
                 start_cmd = f'unset CLAUDECODE && {start_cmd}'
                 if startup_cwd:
                     start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
+                self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
                 for _ in range(10):
-                    time.sleep(1.0)
+                    self._clock.sleep(1.0)
                     if is_claude_running(tmux_name):
                         started = True
                         break
@@ -9157,7 +9267,7 @@ class WorkerManager:
             else:
                 print(f"[restart] {name}: dead worker did not start within 10s, skipping welcome")
         else:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
 
         print(f"Dead worker '{name}' recovered from registry (mode={mode})")
         self.invalidate_sessions_cache()
@@ -9178,7 +9288,7 @@ def _sync_worker_manager() -> None:
 # Worker Helpers (centralize backend switching)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def worker_is_online(name: str, session: dict[str, Any] | None = None) -> bool:
+def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
     """Check if worker is online and ready.
 
     Args:
@@ -9194,7 +9304,7 @@ def worker_set_pending(name: str, chat_id: int) -> None:
     set_pending(name, chat_id)
 
 
-def worker_send(name: str, message: str, chat_id: int | None = None, session: dict[str, Any] | None = None) -> bool:
+def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
     """Send message to worker using backend registry.
 
     Args:
@@ -9224,13 +9334,13 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
     return value.split("=", 1)[1]
 
 
-def scan_tmux_sessions() -> dict[str, dict[str, Any]]:
+def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
     """Scan tmux for registered sessions."""
     _sync_worker_manager()
     return worker_manager.scan_tmux_sessions()
 
 
-def get_registered_sessions(registered: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
     """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
     return worker_manager.get_registered_sessions(registered)
@@ -11194,7 +11304,7 @@ class WorkerLifecycleCommandsMixin:
             with watchdog.restart_lock:
                 watchdog.restart_in_progress.pop(name, None)
 
-    def _do_restart(self, name: str, session: dict[str, Any], chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
+    def _do_restart(self, name: str, session: TmuxSessionDict, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
         """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
@@ -11474,15 +11584,142 @@ class WorkerLifecycleCommandsMixin:
 class ChannelRelayCommandsMixin:
     """Channel and relay command handlers for multi-party communication."""
 
+    def _cmd_relay_list(self, chat_id: ChatId) -> bool:
+        """Handle /relay list — show active relay channels."""
+        with relay_store.lock:
+            active = [(cid, ch) for cid, ch in relay_store.channels.items()
+                      if time.time() <= ch["expires_at_unix"]]
+        if active:
+            lines = []
+            for cid, ch in active:
+                msg_count = len(ch.get("messages", []))
+                workers = ch.get("workers", [ch["worker"]])
+                worker_str = ", ".join(workers)
+                lines.append(f"• {cid} → {worker_str} ({msg_count} msgs, expires {ch['expires_at']})")
+            self.reply(chat_id, "\U0001f4e1 Active relays:\n" + "\n".join(lines))
+        else:
+            self.reply(chat_id, "No active relays.")
+        return True
+
+    def _cmd_relay_add(self, parts: list[str], chat_id: ChatId) -> bool:
+        """Handle /relay add <channel_id> <worker>."""
+        if len(parts) < 3:
+            self.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
+            return True
+        channel_id = parts[1]
+        new_worker = parts[2].lower()
+        registered = get_registered_sessions()
+        if new_worker not in registered:
+            self.reply(chat_id, f"Worker \"{new_worker}\" not found.")
+            return True
+        with relay_store.lock:
+            found = relay_store.channels.get(channel_id)
+            if not found or time.time() > found["expires_at_unix"]:
+                found = None
+        if not found:
+            self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
+            return True
+        workers = found.get("workers", [found["worker"]])
+        if new_worker in workers:
+            self.reply(chat_id, f"{new_worker} is already in {channel_id}.")
+            return True
+        with relay_store.lock:
+            found.setdefault("workers", [found["worker"]]).append(new_worker)
+            _relay_save()
+        self.reply(chat_id, f"\U0001f4e1 Added {new_worker} to {channel_id}. Workers: {', '.join(found['workers'])}")
+        return True
+
+    def _cmd_relay_remove(self, parts: list[str], chat_id: ChatId) -> bool:
+        """Handle /relay remove <channel_id> <worker>."""
+        if len(parts) < 3:
+            self.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
+            return True
+        channel_id = parts[1]
+        rm_worker = parts[2].lower()
+        with relay_store.lock:
+            found = relay_store.channels.get(channel_id)
+            if not found or time.time() > found["expires_at_unix"]:
+                found = None
+        if not found:
+            self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
+            return True
+        workers = found.get("workers", [found["worker"]])
+        if rm_worker not in workers:
+            self.reply(chat_id, f"{rm_worker} is not in {channel_id}.")
+            return True
+        if len(workers) <= 1:
+            self.reply(chat_id, f"Can't remove the last worker. Use /relay stop {channel_id} to close it.")
+            return True
+        with relay_store.lock:
+            found["workers"].remove(rm_worker)
+            _relay_save()
+        self.reply(chat_id, f"\U0001f4e1 Removed {rm_worker} from {channel_id}. Workers: {', '.join(found['workers'])}")
+        return True
+
+    def _cmd_relay_status(self, chat_id: ChatId) -> bool:
+        """Handle /relay status — counts for relays, channels, guests."""
+        now = time.time()
+        with relay_store.lock:
+            relay_active = [(cid, ch) for cid, ch in relay_store.channels.items()
+                            if now <= ch["expires_at_unix"]]
+        with channel_store.lock:
+            ch_active = [(cid, ch) for cid, ch in channel_store.channels.items()
+                         if not channel_is_expired(ch)]
+        with guest_store.lock:
+            guest_active = [g for g in guest_store.guests.values()
+                            if now <= g.get("expires_at_unix", 0)]
+
+        lines = ["\U0001f4e1 System Status\n"]
+        lines.append(f"Relays: {len(relay_active)}")
+        for cid, ch in relay_active:
+            msg_count = len(ch.get("messages", []))
+            workers = ch.get("workers", [ch["worker"]])
+            lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
+        lines.append(f"\nChannels: {len(ch_active)}")
+        for cid, ch in ch_active:
+            members = ", ".join(ch["members"].keys())
+            msg_count = len(ch.get("messages", []))
+            lines.append(f"  • {cid} ({ch['label']}) — {members} ({msg_count} msgs)")
+        lines.append(f"\nGuests: {len(guest_active)}")
+        for g in guest_active:
+            inbox_count = len(guest_store.inboxes.get(g["name"], []))
+            lines.append(f"  • {g['name']} (inbox: {inbox_count} msgs)")
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def _cmd_relay_stop(self, parts: list[str], chat_id: ChatId) -> bool:
+        """Handle /relay stop <label> — close a relay channel."""
+        if len(parts) < 2:
+            self.reply(chat_id, "Usage: /relay stop <label>")
+            return True
+        target = parts[1]
+        removed = False
+        with relay_store.lock:
+            to_remove = None
+            if target in relay_store.channels:
+                to_remove = target
+            else:
+                target_lower = target.lower()
+                for cid, ch in relay_store.channels.items():
+                    if ch["label"] == target_lower or ch["worker"] == target_lower:
+                        to_remove = cid
+                        break
+            if to_remove:
+                del relay_store.channels[to_remove]
+                _relay_save()
+                removed = True
+        if removed:
+            self.reply(chat_id, f"\U0001f4e1 Relay \"{target}\" closed.")
+        else:
+            self.reply(chat_id, f"Relay \"{target}\" not found.")
+        return True
+
     def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
         """Relay: connect an external agent to a worker via guideline link.
 
-        /relay lee — open relay to lee, returns a single URL to paste into any agent
-        /relay add <name> <worker> — add a worker to an existing relay
-        /relay remove <name> <worker> — remove a worker from a relay
-        /relay list — list active relay channels
-        /relay status — counts for relays, channels, guests
-        /relay stop <name> — close a relay channel
+        Dispatches to subcommand helpers:
+        /relay <worker> — open relay, returns guideline link URL
+        /relay add/remove/list/status/stop — manage relay channels
         """
         if not arg:
             with relay_store.lock:
@@ -11503,141 +11740,15 @@ class ChannelRelayCommandsMixin:
         parts = arg.strip().split()
         sub = parts[0].lower()
 
-        if sub == "list":
-            with relay_store.lock:
-                active = [(cid, ch) for cid, ch in relay_store.channels.items()
-                          if time.time() <= ch["expires_at_unix"]]
-            if active:
-                lines = []
-                for cid, ch in active:
-                    msg_count = len(ch.get("messages", []))
-                    workers = ch.get("workers", [ch["worker"]])
-                    worker_str = ", ".join(workers)
-                    lines.append(f"• {cid} → {worker_str} ({msg_count} msgs, expires {ch['expires_at']})")
-                self.reply(chat_id, "\U0001f4e1 Active relays:\n" + "\n".join(lines))
-            else:
-                self.reply(chat_id, "No active relays.")
-            return True
-
-        if sub == "add":
-            if len(parts) < 3:
-                self.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
-                return True
-            channel_id = parts[1]
-            new_worker = parts[2].lower()
-            registered = get_registered_sessions()
-            if new_worker not in registered:
-                self.reply(chat_id, f"Worker \"{new_worker}\" not found.")
-                return True
-            with relay_store.lock:
-                found = relay_store.channels.get(channel_id)
-                if not found or time.time() > found["expires_at_unix"]:
-                    found = None
-            if not found:
-                self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
-                return True
-            workers = found.get("workers", [found["worker"]])
-            if new_worker in workers:
-                self.reply(chat_id, f"{new_worker} is already in {channel_id}.")
-                return True
-            with relay_store.lock:
-                found.setdefault("workers", [found["worker"]]).append(new_worker)
-                _relay_save()
-            self.reply(chat_id, f"\U0001f4e1 Added {new_worker} to {channel_id}. Workers: {', '.join(found['workers'])}")
-            return True
-
-        if sub == "remove":
-            if len(parts) < 3:
-                self.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
-                return True
-            channel_id = parts[1]
-            rm_worker = parts[2].lower()
-            with relay_store.lock:
-                found = relay_store.channels.get(channel_id)
-                if not found or time.time() > found["expires_at_unix"]:
-                    found = None
-            if not found:
-                self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
-                return True
-            workers = found.get("workers", [found["worker"]])
-            if rm_worker not in workers:
-                self.reply(chat_id, f"{rm_worker} is not in {channel_id}.")
-                return True
-            if len(workers) <= 1:
-                self.reply(chat_id, f"Can't remove the last worker. Use /relay stop {channel_id} to close it.")
-                return True
-            with relay_store.lock:
-                found["workers"].remove(rm_worker)
-                _relay_save()
-            self.reply(chat_id, f"\U0001f4e1 Removed {rm_worker} from {channel_id}. Workers: {', '.join(found['workers'])}")
-            return True
-
-        if sub == "status":
-            now = time.time()
-            # Relays
-            with relay_store.lock:
-                relay_active = [(cid, ch) for cid, ch in relay_store.channels.items()
-                                if now <= ch["expires_at_unix"]]
-            # Channels
-            with channel_store.lock:
-                ch_active = [(cid, ch) for cid, ch in channel_store.channels.items()
-                             if not channel_is_expired(ch)]
-            # Guests
-            with guest_store.lock:
-                guest_active = [g for g in guest_store.guests.values()
-                                if now <= g.get("expires_at_unix", 0)]
-
-            lines = ["\U0001f4e1 System Status\n"]
-
-            # Relays section
-            lines.append(f"Relays: {len(relay_active)}")
-            for cid, ch in relay_active:
-                msg_count = len(ch.get("messages", []))
-                workers = ch.get("workers", [ch["worker"]])
-                lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
-
-            # Channels section
-            lines.append(f"\nChannels: {len(ch_active)}")
-            for cid, ch in ch_active:
-                members = ", ".join(ch["members"].keys())
-                msg_count = len(ch.get("messages", []))
-                lines.append(f"  • {cid} ({ch['label']}) — {members} ({msg_count} msgs)")
-
-            # Guests section
-            lines.append(f"\nGuests: {len(guest_active)}")
-            for g in guest_active:
-                inbox_count = len(guest_store.inboxes.get(g["name"], []))
-                lines.append(f"  • {g['name']} (inbox: {inbox_count} msgs)")
-
-            self.reply(chat_id, "\n".join(lines))
-            return True
-
-        if sub == "stop":
-            if len(parts) < 2:
-                self.reply(chat_id, "Usage: /relay stop <label>")
-                return True
-            target = parts[1]
-            removed = False
-            with relay_store.lock:
-                # Match by channel_id first, then by label or worker name
-                to_remove = None
-                if target in relay_store.channels:
-                    to_remove = target
-                else:
-                    target_lower = target.lower()
-                    for cid, ch in relay_store.channels.items():
-                        if ch["label"] == target_lower or ch["worker"] == target_lower:
-                            to_remove = cid
-                            break
-                if to_remove:
-                    del relay_store.channels[to_remove]
-                    _relay_save()
-                    removed = True
-            if removed:
-                self.reply(chat_id, f"\U0001f4e1 Relay \"{target}\" closed.")
-            else:
-                self.reply(chat_id, f"Relay \"{target}\" not found.")
-            return True
+        subcommands: dict[str, Callable[..., bool]] = {
+            "list": lambda: self._cmd_relay_list(chat_id),
+            "add": lambda: self._cmd_relay_add(parts, chat_id),
+            "remove": lambda: self._cmd_relay_remove(parts, chat_id),
+            "status": lambda: self._cmd_relay_status(chat_id),
+            "stop": lambda: self._cmd_relay_stop(parts, chat_id),
+        }
+        if sub in subcommands:
+            return subcommands[sub]()
 
         # /relay <worker> — main flow
         worker = sub
@@ -15299,6 +15410,42 @@ class GuestEndpointsMixin:
             "listen_script": listen_script,
         })
 
+    def _fanout_channel_message(self, channel_id: str, from_member: str,
+                                text: str, msg: ChannelMessageDict,
+                                members_snapshot: dict[str, ChannelMemberDict],
+                                registered: dict[str, TmuxSessionDict]) -> None:
+        """Deliver a channel message to all members except the sender."""
+        tagged = f"[{channel_id} from {from_member}] {text}"
+        for member_key, minfo in members_snapshot.items():
+            if member_key == from_member:
+                continue
+            if minfo["type"] == "worker":
+                wname = minfo["name"]
+                if wname in registered:
+                    winfo = registered[wname]
+                    backend_name = get_worker_backend(wname, winfo)
+                    backend = get_backend(backend_name)
+                    try:
+                        backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged,
+                                     f"http://localhost:{PORT}", SESSIONS_DIR)
+                    except (ConnectionError, TimeoutError) as e:
+                        print(f"Channel fan-out to {wname} failed: {e}")
+            elif minfo["type"] == "guest":
+                gname = minfo["name"]
+                with guest_store.lock:
+                    ginbox = guest_store.inboxes.get(gname, [])
+                    guest_store.inboxes[gname] = guest_inbox_append(ginbox, {
+                        "id": msg["id"], "from": from_member,
+                        "channel": channel_id, "text": text, "ts": msg["ts"],
+                    })
+            elif minfo["type"] == "manager":
+                try:
+                    if admin_chat_id:
+                        send_telegram_message(admin_chat_id,
+                            f"[{channel_id}] {from_member}: {text}")
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    print(f"[best-effort:notify:unknown] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
     def handle_guest_send(self, body: bytes = b"") -> None:
         """POST /guest/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
 
@@ -15358,37 +15505,7 @@ class GuestEndpointsMixin:
                         continue
                     msg = channel_append_message(ch, from_member, text)
                     members_snapshot = dict(ch["members"])
-                # Fan-out to other channel members
-                ch_tagged = f"[{ch_id} from {from_member}] {text}"
-                for member_key, minfo in members_snapshot.items():
-                    if member_key == from_member:
-                        continue
-                    if minfo["type"] == "worker":
-                        wname = minfo["name"]
-                        if wname in registered:
-                            winfo = registered[wname]
-                            bn = get_worker_backend(wname, winfo)
-                            be = get_backend(bn)
-                            try:
-                                be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
-                                        f"http://localhost:{PORT}", SESSIONS_DIR)
-                            except (ConnectionError, TimeoutError) as e:
-                                print(f"Channel fan-out to {wname} failed: {e}")
-                    elif minfo["type"] == "guest":
-                        gname = minfo["name"]
-                        with guest_store.lock:
-                            ginbox = guest_store.inboxes.get(gname, [])
-                            guest_store.inboxes[gname] = guest_inbox_append(ginbox, {
-                                "id": msg["id"], "from": from_member,
-                                "channel": ch_id, "text": text, "ts": msg["ts"],
-                            })
-                    elif minfo["type"] == "manager":
-                        try:
-                            if admin_chat_id:
-                                send_telegram_message(admin_chat_id,
-                                    f"[{ch_id}] {from_member}: {text}")
-                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                            print(f"[best-effort:notify:unknown] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                self._fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
             elif target.startswith("ch_"):
@@ -15403,36 +15520,7 @@ class GuestEndpointsMixin:
                         continue
                     msg = channel_append_message(ch, from_member, text)
                     members_snapshot = dict(ch["members"])
-                ch_tagged = f"[{target} from {from_member}] {text}"
-                for member_key, minfo in members_snapshot.items():
-                    if member_key == from_member:
-                        continue
-                    if minfo["type"] == "worker":
-                        wname = minfo["name"]
-                        if wname in registered:
-                            winfo = registered[wname]
-                            bn = get_worker_backend(wname, winfo)
-                            be = get_backend(bn)
-                            try:
-                                be.send(wname, f"{TMUX_PREFIX}{wname}", ch_tagged,
-                                        f"http://localhost:{PORT}", SESSIONS_DIR)
-                            except (ConnectionError, TimeoutError) as e:
-                                print(f"Channel fan-out to {wname} failed: {e}")
-                    elif minfo["type"] == "guest":
-                        gname = minfo["name"]
-                        with guest_store.lock:
-                            ginbox = guest_store.inboxes.get(gname, [])
-                            guest_store.inboxes[gname] = guest_inbox_append(ginbox, {
-                                "id": msg["id"], "from": from_member,
-                                "channel": target, "text": text, "ts": msg["ts"],
-                            })
-                    elif minfo["type"] == "manager":
-                        try:
-                            if admin_chat_id:
-                                send_telegram_message(admin_chat_id,
-                                    f"[{target}] {from_member}: {text}")
-                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                            print(f"[best-effort:notify:unknown] {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                self._fanout_channel_message(target, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
             elif target.startswith("guest:"):
@@ -17485,7 +17573,7 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
     sys.exit(0)
 
 
-def _discover_and_configure_sessions() -> dict[str, dict[str, Any]]:
+def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
     """Discover existing tmux sessions and re-export hook env vars."""
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
@@ -17507,7 +17595,7 @@ def _discover_and_configure_sessions() -> dict[str, dict[str, Any]]:
     return registered
 
 
-def _restore_bridge_state(registered: dict[str, dict[str, Any]]) -> int | None:
+def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     """Restore persisted bridge state (active worker, admin, relay/channel/guest).
 
     Returns the last known chat_id or None.
@@ -17544,7 +17632,7 @@ def _restore_bridge_state(registered: dict[str, dict[str, Any]]) -> int | None:
     return last_chat_id
 
 
-def _log_startup_info(registered: dict[str, dict[str, Any]]) -> None:
+def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     """Print startup configuration summary to stdout."""
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
@@ -17573,7 +17661,7 @@ def _log_startup_info(registered: dict[str, dict[str, Any]]) -> None:
         print("Sandbox mode: disabled (direct execution)")
 
 
-def _send_startup_notification(last_chat_id: int, registered: dict[str, dict[str, Any]]) -> None:
+def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
     """Send startup notification to admin via Telegram."""
     state["startup_notified"] = True
     sessions = list(registered.keys())

@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.39.0
+> Version: 0.40.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,36 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.40.0 - DI threading, domain TypedDicts, function decomposition (quality push round 8)
+
+**Testability (DI threaded through WorkerManager):**
+- Added `runner: SubprocessRunner` and `clock: Clock` parameters to `WorkerManager.__init__()`
+- Replaced 27 `subprocess.run()` → `self._runner.run()` calls inside WorkerManager
+- Replaced 2 `time.time()` → `self._clock.time()` calls (cache TTL)
+- Replaced 21 `time.sleep()` → `self._clock.sleep()` calls
+- Backward compatible: defaults to module-level production implementations
+
+**Type Safety (34 TypedDicts, was 24):**
+- Added 10 new TypedDicts: `GuestSessionDict`, `GuestInboxMessage`, `ChannelMemberDict`,
+  `ChannelMessageDict`, `ChannelDict`, `RelayMessageDict`, `RelayChannelDict`,
+  `TmuxSessionDict`, `WorkerRegistryEntry`, `WorkerRegistryData`
+- Replaced `dict[str, Any]` in: `GuestStore.guests`, `GuestStore.inboxes`,
+  `ChannelStore.channels`, `RelayStore.channels`, `_load_registry`, `_save_registry`,
+  `scan_tmux_sessions`, `get_registered_sessions`, `is_online`, `send`,
+  `worker_is_online`, `worker_send`, `_do_restart`, `_discover_and_configure_sessions`,
+  `_restore_bridge_state`, `_log_startup_info`, `_send_startup_notification`,
+  `_watchdog_probe_remote_hosts`, `_watchdog_collect_worker_pids`, `_watchdog_evaluate_workers`,
+  `_registry_bootstrap`, `_send_to_callback_worker`
+- `dict[str, Any]` count: 119 → 88 (31 eliminated, 88 remaining are legitimate
+  polymorphic types: Telegram API responses, HTTP payloads, kwargs, serialization)
+
+**Code Organization (function decomposition):**
+- Extracted `_fanout_channel_message()` from `handle_guest_send` — eliminates 50 lines
+  of duplicated channel fan-out logic (was copy-pasted for "by label" and "by ID" paths)
+- Decomposed `cmd_relay` (190→30 lines) into 5 focused helpers:
+  `_cmd_relay_list`, `_cmd_relay_add`, `_cmd_relay_remove`, `_cmd_relay_status`, `_cmd_relay_stop`
+- Subcommand dispatch via dict lookup replaces if/elif chain
 
 ### v0.39.0 - Type safety, error logging, media dedup (quality push round 7)
 
