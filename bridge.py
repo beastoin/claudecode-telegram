@@ -806,6 +806,9 @@ def _remote_run(cmd: list, host: str = None, **kwargs) -> subprocess.CompletedPr
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
         timeout_val = kwargs.get("timeout", 10)
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
+    # Default timeout: prevent unbounded subprocess hangs that block bridge threads.
+    # Hot-path callers should pass explicit shorter timeouts (3s probes, 5s sends).
+    kwargs.setdefault("timeout", 10)
     return subprocess.run(cmd, **kwargs)
 
 
@@ -819,9 +822,9 @@ def _remote_copy(src: str, dst: str, host: str = None, direction: str = "push"):
     if not host:
         shutil.copy2(src, dst)
     elif direction == "push":
-        subprocess.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True)
+        subprocess.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=15)
     else:  # pull
-        subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True)
+        subprocess.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=15)
 
 
 def _extract_msg_text(msg: dict) -> str:
@@ -1172,7 +1175,7 @@ def _ensure_bare_repo(project_name: str) -> str:
         os.makedirs(GIT_SERVER_DIR, exist_ok=True)
         subprocess.run(
             ["git", "init", "--bare", bare_path],
-            capture_output=True, text=True, check=True)
+            capture_output=True, text=True, check=True, timeout=10)
     return bare_path
 
 
@@ -1454,11 +1457,11 @@ def _release_flock(fd: int):
     os.close(fd)
 
 
-def tmux_exists(tmux_name: str, host: str = None) -> bool:
+def tmux_exists(tmux_name: str, host: str = None, timeout: int = 3) -> bool:
     """Check if tmux session exists (locally or on remote host via SSH)."""
     return _remote_run(
         ["tmux", "has-session", "-t", tmux_name],
-        host=host, capture_output=True
+        host=host, capture_output=True, timeout=timeout
     ).returncode == 0
 
 
@@ -1487,12 +1490,12 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool
             if literal:
                 r = _remote_run(
                     ["tmux", "send-keys", "-t", tmux_name, "-l", text],
-                    host=host, capture_output=True,
+                    host=host, capture_output=True, timeout=5,
                 )
                 if r.returncode != 0:
                     return False
                 time.sleep(0.5)
-                r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host)
+                r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=5)
                 return r.returncode == 0
 
             buf_name = f"msg-{uuid.uuid4().hex[:8]}"
@@ -1501,7 +1504,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool
                 # Remote: pipe text via stdin to avoid shared filesystem
                 r = _remote_run(
                     ["tmux", "load-buffer", "-b", buf_name, "-"],
-                    host=host, input=text.encode(), capture_output=True,
+                    host=host, input=text.encode(), capture_output=True, timeout=5,
                 )
             else:
                 # Local: write to temp file for tmux load-buffer
@@ -1511,7 +1514,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool
                     os.close(fd)
                     r = subprocess.run(
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile],
-                        capture_output=True,
+                        capture_output=True, timeout=5,
                     )
                 finally:
                     try:
@@ -1531,7 +1534,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool
             # -d: delete buffer after pasting
             r = _remote_run(
                 ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
-                host=host, capture_output=True,
+                host=host, capture_output=True, timeout=5,
             )
             if r.returncode != 0:
                 return False
@@ -1543,7 +1546,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str = None, literal: bool
             # loss on prod sessions with heavy context load.
             time.sleep(1.0)
             # Send Enter to submit the pasted text
-            r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host)
+            r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=5)
             return r.returncode == 0
         finally:
             _release_flock(flock_fd)
@@ -1553,7 +1556,7 @@ def get_pane_command(tmux_name: str, host: str = None) -> str:
     """Get the current command running in tmux pane."""
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
-        host=host, capture_output=True, text=True
+        host=host, capture_output=True, text=True, timeout=3
     )
     return result.stdout.strip() if result.returncode == 0 else ""
 
@@ -1566,7 +1569,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str = None) -> b
 
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
-        host=host, capture_output=True, text=True
+        host=host, capture_output=True, text=True, timeout=3
     )
     if result.returncode != 0:
         return False
@@ -1577,13 +1580,13 @@ def is_process_running(tmux_name: str, process_name: str, host: str = None) -> b
 
     result = _remote_run(
         ["pgrep", "-P", pane_pid, process_name],
-        host=host, capture_output=True
+        host=host, capture_output=True, timeout=3
     )
     return result.returncode == 0
 
 
 def tmux_send_escape(tmux_name: str, host: str = None):
-    _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host)
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=5)
 
 
 def _tmux_pane_pids(host: str = None) -> dict:
@@ -1697,8 +1700,13 @@ class ClaudeBackend:
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         host = get_worker_host(worker_name)
-        if not tmux_exists(tmux_name, host=host):
-            return False
+        try:
+            if not tmux_exists(tmux_name, host=host, timeout=3):
+                return False
+        except Exception:
+            if not host:
+                return False
+            # Remote probe failure — don't block send, attempt delivery anyway
         # Claude's OAuth login dialog doesn't support bracketed paste.
         # Detect login state and use literal send-keys instead.
         literal = False
@@ -3016,8 +3024,8 @@ class TelegramTransport(MessageTransport):
             host = get_worker_host(session_name)
             if host:
                 remote_inbox = str(inbox)
-                _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True)
-                _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True)
+                _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True, timeout=3)
+                _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True, timeout=3)
                 r = subprocess.run(
                     ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
                     capture_output=True, timeout=15)
@@ -4758,7 +4766,7 @@ def _sync_chat_id_to_remote(name, local_chat_id_path):
     try:
         remote_sessions_dir = _remap_sessions_dir(host)
         _remote_run(["mkdir", "-p", f"{remote_sessions_dir}/{name}"],
-                     host=host, capture_output=True)
+                     host=host, capture_output=True, timeout=3)
         _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id",
                       host=host, direction="push")
     except Exception as e:
@@ -6898,7 +6906,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: dict, host: str
     reply = reply.strip().lower()
 
     if reply in ("skip", "cancel", "esc"):
-        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host)
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=5)
         return True
 
     if reply.isdigit():
@@ -6924,7 +6932,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: dict, host: str
         keys.append("Enter")
 
         for key in keys:
-            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host)
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host, timeout=5)
             time.sleep(0.05)
         return True
 
@@ -7078,7 +7086,7 @@ class WorkerManager:
         """Read current pane cwd for a tmux session."""
         result = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
-            host=host, capture_output=True, text=True
+            host=host, capture_output=True, text=True, timeout=3
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -7088,7 +7096,7 @@ class WorkerManager:
         """Change tmux shell cwd before starting backend process."""
         if not cwd:
             return
-        subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"])
+        subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=5)
         time.sleep(0.2)
 
     def scan_tmux_sessions(self):
@@ -7100,7 +7108,7 @@ class WorkerManager:
         try:
             result = subprocess.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=3
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -7245,10 +7253,13 @@ class WorkerManager:
         host = get_worker_host(name)
         if host:
             try:
-                if not tmux_exists(tmux_name, host=host):
+                if not tmux_exists(tmux_name, host=host, timeout=3):
                     return False
                 if backend.is_interactive:
-                    return is_claude_running(tmux_name, host=host)
+                    try:
+                        return is_claude_running(tmux_name, host=host)
+                    except Exception:
+                        return True  # Probe failure on interactive check — assume online
                 return True
             except Exception:
                 return True  # SSH failure — assume still online
@@ -7463,11 +7474,11 @@ class WorkerManager:
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
-            capture_output=True, env=clean_env
+            capture_output=True, env=clean_env, timeout=10
         )
         if result.returncode != 0:
             return False, "Could not start the worker workspace"
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
 
         time.sleep(0.5)
         startup_cwd = self._get_startup_cwd(name)
@@ -7484,7 +7495,7 @@ class WorkerManager:
 
         # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
         time.sleep(0.3)
 
         ensure_session_dir(name)
@@ -7503,16 +7514,16 @@ class WorkerManager:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
             print(f"Started worker '{name}' in sandbox mode")
         else:
             start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
             if backend_obj.is_interactive:
                 time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
 
         if backend_obj.is_interactive:
             time.sleep(2.0 if not SANDBOX_ENABLED else 5.0)
@@ -7523,7 +7534,7 @@ class WorkerManager:
                 set_pending(name, chat_id)
             # Echo welcome to tmux (visible for debugging) but don't call backend
             # to avoid triggering a codex API call on hire
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
         else:
             self.send(name, welcome)
 
@@ -7640,9 +7651,9 @@ class WorkerManager:
             clear_pending(name)
         elif is_claude_running(tmux_name):
             # Kill running claude first, then restart (resume keeps session ID, relaunch clears it)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], timeout=5)
             time.sleep(0.5)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=5)
             time.sleep(1.0)
             # If still running, force kill
             if is_claude_running(tmux_name):
@@ -7650,7 +7661,7 @@ class WorkerManager:
                 if pane_pid:
                     claude_pid = _get_claude_pid(pane_pid)
                     if claude_pid:
-                        subprocess.run(["kill", claude_pid], capture_output=True)
+                        subprocess.run(["kill", claude_pid], capture_output=True, timeout=5)
             # Poll until Claude has actually exited (fixed sleep races with slow exits)
             for _ in range(20):
                 if not is_claude_running(tmux_name):
@@ -7673,7 +7684,7 @@ class WorkerManager:
                         child_pid = child_pid.strip()
                         if child_pid and child_pid.isdigit():
                             print(f"[restart] {name}: killing stray child pid {child_pid}")
-                            subprocess.run(["kill", child_pid], capture_output=True)
+                            subprocess.run(["kill", child_pid], capture_output=True, timeout=5)
                     time.sleep(0.5)
 
         export_hook_env(tmux_name, backend_name)
@@ -7681,7 +7692,7 @@ class WorkerManager:
 
         # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
         time.sleep(0.3)
 
         if SANDBOX_ENABLED and backend.is_interactive:
@@ -7690,13 +7701,13 @@ class WorkerManager:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
         else:
             start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
 
         # Wait for Claude to actually start before sending welcome
         welcome = self._build_welcome(name, backend)
@@ -7715,7 +7726,7 @@ class WorkerManager:
                 start_cmd = f'unset CLAUDECODE && {start_cmd}'
                 if startup_cwd:
                     start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
                 for _ in range(10):
                     time.sleep(1.0)
                     if is_claude_running(tmux_name):
@@ -7741,7 +7752,7 @@ class WorkerManager:
             else:
                 print(f"[restart] {name}: Claude did not start within 10s, skipping welcome")
         else:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
 
         _reset_learning_reminder(name)
         self.invalidate_sessions_cache()
@@ -7760,18 +7771,18 @@ class WorkerManager:
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
-            capture_output=True, env=clean_env
+            capture_output=True, env=clean_env, timeout=10
         )
         if result.returncode != 0:
             return False, "Could not create worker workspace"
-        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True)
+        subprocess.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=5)
 
         time.sleep(0.5)
         export_hook_env(tmux_name, backend_name)
         time.sleep(0.3)
 
         subprocess.run(["tmux", "send-keys", "-t", tmux_name,
-                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"])
+                        'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=5)
         time.sleep(0.3)
 
         ensure_session_dir(name)
@@ -7797,16 +7808,16 @@ class WorkerManager:
             if startup_cwd:
                 self._cd_tmux_to_cwd(tmux_name, startup_cwd)
             docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=5)
         else:
             start_cmd = backend.start_cmd(resume_id)
             start_cmd = f'unset CLAUDECODE && {start_cmd}'
             if startup_cwd:
                 start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
             if backend.is_interactive:
                 time.sleep(1.5)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=5)
 
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
@@ -7823,7 +7834,7 @@ class WorkerManager:
                 start_cmd = f'unset CLAUDECODE && {start_cmd}'
                 if startup_cwd:
                     start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"])
+                subprocess.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=5)
                 for _ in range(10):
                     time.sleep(1.0)
                     if is_claude_running(tmux_name):
@@ -7841,7 +7852,7 @@ class WorkerManager:
             else:
                 print(f"[restart] {name}: dead worker did not start within 10s, skipping welcome")
         else:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"])
+            subprocess.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=5)
 
         print(f"Dead worker '{name}' recovered from registry (mode={mode})")
         self.invalidate_sessions_cache()
@@ -7896,7 +7907,7 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
     """Get a tmux session environment variable value."""
     result = subprocess.run(
         ["tmux", "show-environment", "-t", tmux_name, key],
-        capture_output=True, text=True
+        capture_output=True, text=True, timeout=3
     )
     if result.returncode != 0:
         return ""
@@ -7931,7 +7942,7 @@ def tmux_prompt_empty(tmux_name, timeout=0.5, host: str = None):
     while time.time() - start < timeout:
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p"],
-            host=host, capture_output=True, text=True
+            host=host, capture_output=True, text=True, timeout=3
         )
         if result.returncode == 0:
             # Check for empty prompt: line starting with ❯ followed by only whitespace
@@ -7965,8 +7976,8 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
     except Exception:
         pass  # other bridge dead or unreachable — safe to claim
 
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host)
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host, timeout=3)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host, timeout=3)
     # Remap SESSIONS_DIR for remote hosts (different $HOME path)
     sessions_dir_val = str(SESSIONS_DIR)
     if host:
@@ -7979,12 +7990,12 @@ def export_hook_env(tmux_name, backend: str = DEFAULT_WORKER_BACKEND, host: str 
                 sessions_dir_val = remote_home + sessions_dir_val[len(local_home):]
         except Exception:
             pass
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host)
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host, timeout=3)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host, timeout=3)
     # Always export BRIDGE_URL so workers know where their bridge is
     # Remote workers need BRIDGE_PUBLIC_URL (reachable IP), not localhost
     bridge_url_val = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
-    _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host)
+    _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host, timeout=3)
 
 
 def get_docker_run_cmd(name, resume_id: str = ""):
@@ -8061,8 +8072,8 @@ def get_docker_run_cmd(name, resume_id: str = ""):
 def stop_docker_container(name):
     """Stop and remove a docker container."""
     container_name = f"claude-worker-{name}"
-    subprocess.run(["docker", "stop", container_name], capture_output=True)
-    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+    subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=10)
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
 
 
 def send_to_worker(name: str, message: str, chat_id: Optional[int] = None) -> bool:
