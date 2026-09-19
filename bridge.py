@@ -4134,7 +4134,7 @@ class TelegramTransport(MessageTransport):
             return False
         ok, validated = validate_photo_path(photo_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         photo_data, filename = _prepare_photo_for_telegram(validated)
         mime = mimetypes.guess_type(str(validated))[0] or "image/jpeg"
@@ -4150,7 +4150,7 @@ class TelegramTransport(MessageTransport):
             return False
         ok, validated = validate_photo_path(animation_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         mime = "video/mp4" if validated.suffix.lower() == ".mp4" else "image/gif"
         return self._send_media_multipart(
@@ -4165,7 +4165,7 @@ class TelegramTransport(MessageTransport):
             return False
         ok, validated = validate_document_path(doc_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         return self._send_media_multipart(
             chat_id, validated, "document", "sendDocument", caption,
@@ -4243,7 +4243,7 @@ class TelegramTransport(MessageTransport):
         """Send a video to a Telegram chat."""
         ok, validated = validate_document_path(video_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         return self._send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
 
@@ -4252,7 +4252,7 @@ class TelegramTransport(MessageTransport):
         """Send an audio file to a Telegram chat."""
         ok, validated = validate_document_path(audio_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         return self._send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
 
@@ -4261,7 +4261,7 @@ class TelegramTransport(MessageTransport):
         """Send a voice message to a Telegram chat."""
         ok, validated = validate_document_path(voice_path)
         if not ok:
-            print(validated)
+            _log(_LOG_WARN, "telegram", validated)
             return False
         return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
 
@@ -4366,11 +4366,11 @@ class LocalTransport(MessageTransport):
 
     def _log(self, method: str, chat_id: ChatId, **kwargs: Any) -> None:
         """Log a transport method call with optional kwargs for debugging."""
-        msg = f"[local-transport] {method} chat_id={chat_id}"
+        msg = f"{method} chat_id={chat_id}"
         for k, v in kwargs.items():
             if v is not None:
                 msg += f" {k}={v}"
-        print(msg)
+        _log(_LOG_DEBUG, "local-transport", msg)
         if self._log_file:
             with open(self._log_file, "a") as f:
                 f.write(msg + "\n")
