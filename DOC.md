@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.33.0
+> Version: 0.34.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,27 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.34.0 - Full type-safety refactoring (15-item codex audit)
+
+**Type aliases and boundary types:**
+- `ChatId`, `MessageId`, `ParseMode`, `TelegramApiResponse` type aliases
+- `BridgeRuntimeState` / `MentionTracker` classes replace raw `state` / `_last_mention` dicts (full dict-compat layer)
+- `WorkerRegistryEntry` dataclass for typed registry access
+- `RewindToken`, `PrReviewToken` dataclasses for token stores
+- `GuestSession`, `GuestInboxMessage`, `ChannelMember`, `ChannelMessage`, `RelayMessage` for conversation state
+- `DiskUsage`, `MemoryUsage`, `IoUsage`, `CpuHog`, `WorktreeItem` for health probe results
+- `CommandFn` type alias for command dispatch
+
+**Annotation coverage: 37.8% → 89.7%** (568/633 functions fully annotated):
+- All transport classes (`MessageTransport`, `TelegramTransport`, `LocalTransport`, `_LegacyTransportAdapter`, `TelegramAPI`)
+- All command methods (17 `cmd_*` + `_do_restart`, `_restart_remote_worker`)
+- All registry functions (`_load_registry`, `_save_registry`, `_registry_add`, etc.)
+- All probe functions (`_check_disk_usage`, `_check_mem_usage`, `_check_io_usage`, etc.)
+- All watchdog/cache globals typed with `Dict[str, T]`
+- `WorkerRepository.list_active()` returns `Dict[str, WorkerRecord]`
+
+**Zero behavioral changes.** All 408 tests pass.
 
 ### v0.33.0 - SOLID refactoring + subprocess timeout safety
 
