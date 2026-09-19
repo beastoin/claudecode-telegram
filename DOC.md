@@ -417,6 +417,27 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.35.0 - OOP mixin extraction + complete type annotations + exception narrowing
+
+**Mixin extraction (Code Organization):**
+- CommandRouter (5000 lines) split into 4 focused mixins: TeleportCommandsMixin, WorkerLifecycleCommandsMixin, ChannelRelayCommandsMixin, MediaRoutingMixin.
+- Handler (2150 lines) split into 5 focused mixins: GuestEndpointsMixin, ChannelEndpointsMixin, RelayEndpointsMixin, PrEndpointsMixin, TranscriptEndpointsMixin.
+- Each mixin owns one responsibility. CommandRouter and Handler inherit from their mixins.
+
+**Config dataclasses (frozen, immutable):**
+- WatchdogConfig: watchdog timing (interval, grace periods, cooldowns).
+- ResourceAlertConfig: resource thresholds (disk, CPU, memory, IO, infra).
+- MediaConfig: media handling limits (file size, photo dimensions).
+
+**Type annotation pass (100% coverage):**
+- All 573 functions fully annotated (was 68%).
+- Fixed all `host: str = None` → `host: str | None = None` patterns.
+- Fixed raw `list`, `dict` → parameterized `list[str]`, `dict[str, Any]`.
+
+**Exception narrowing (71% reduction):**
+- 193 broad `except Exception` catches narrowed to 56 specific catches.
+- Silent `pass` blocks replaced with logged best-effort handlers.
+
 ### v0.34.0 - Full type-safety refactoring (15-item codex audit)
 
 **Type aliases and boundary types:**
