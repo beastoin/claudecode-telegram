@@ -15777,16 +15777,16 @@ import subprocess, tempfile, os, io, sys
 from unittest.mock import patch, MagicMock
 import bridge
 
-# Capture stdout to check logging
+# Capture stderr to check logging (errors go to stderr, not stdout)
 captured = io.StringIO()
 
-# Mock subprocess.run to simulate rsync failure with stderr
+# Mock _subprocess_runner.run to simulate rsync failure with stderr
 mock_result = MagicMock()
 mock_result.returncode = 23  # rsync partial transfer error
 mock_result.stderr = b'rsync: connection unexpectedly closed'
 
-with patch('subprocess.run', return_value=mock_result):
-    with patch('sys.stdout', captured):
+with patch.object(bridge._subprocess_runner, 'run', return_value=mock_result):
+    with patch('sys.stderr', captured):
         result = bridge._fetch_remote_file('fake-host', '/remote/photo.png')
 
 output = captured.getvalue()
