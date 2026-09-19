@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import time
 import re
 import urllib.error
@@ -226,7 +227,7 @@ class MediaGroupEntry(TypedDict):
     """Buffered media group state during collection."""
     items: list[TelegramMessageDict]
     caption: str
-    timer: Any  # threading.Timer | None (not importable as type here)
+    timer: threading.Timer | None
 
 
 class ReminderState(TypedDict):
@@ -421,8 +422,8 @@ except ImportError as e:
 #               _TelegramHTMLSanitizer, markdown_to_telegram_html
 #   L~8461      WorkerManager class (~820 lines): hire, fire, restart, status
 #               (DI: accepts SubprocessRunner/Clock for testability)
-#   L~10076     TeleportCommandsMixin (~2000 lines)
-#   L~12155     CommandRouter class (~2200 lines)
+#   L~10076     TeleportCommandsMixin (~1064 lines)
+#   L~12155     CommandRouter class (~1239 lines)
 #   L~14009     Transcript HTML rendering
 #   L~15247     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
 #   L~17947     main() function, signal handlers, startup
@@ -697,7 +698,7 @@ def _log_best_effort(label: str, func: Callable, *args: Any, **kwargs: Any) -> A
     try:
         return func(*args, **kwargs)
     except Exception as exc:
-        _log(_LOG_DEBUG, "{label}", f"{type(exc).__name__}: {exc}")
+        _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
         return None
 
 
@@ -745,23 +746,23 @@ class IncomingMessage:
     chat_id: int | None = None
     msg_id: int | None = None
     text: str = ""
-    # Media fields
-    photo: list | None = None
-    document: dict | None = None
-    animation: dict | None = None
-    audio: dict | None = None
-    voice: dict | None = None
-    video: dict | None = None
-    video_note: dict | None = None
-    sticker: dict | None = None
+    # Media fields (Telegram API JSON shapes)
+    photo: list[dict[str, Any]] | None = None
+    document: dict[str, Any] | None = None
+    animation: dict[str, Any] | None = None
+    audio: dict[str, Any] | None = None
+    voice: dict[str, Any] | None = None
+    video: dict[str, Any] | None = None
+    video_note: dict[str, Any] | None = None
+    sticker: dict[str, Any] | None = None
     # Derived
     has_media: bool = False
     doc_is_image: bool = False
     media_group_id: str | None = None
-    # Reply context
-    reply_to: dict | None = None
+    # Reply context (Telegram API reply_to_message JSON)
+    reply_to: dict[str, Any] | None = None
     # Raw message dict (for edge cases during migration)
-    raw_msg: dict | None = None
+    raw_msg: dict[str, Any] | None = None
 
     @classmethod
     def from_update(cls: type["IncomingMessage"], update: dict[str, Any]) -> "IncomingMessage":
@@ -1460,7 +1461,7 @@ class WorkerRecord:
     callback_url: str = ""
     protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
     version: str = ""
-    tools: dict | None = None
+    tools: dict[str, Any] | None = None
     chat_id: int | None = None
     cwd: str = ""
     home_host: str = ""
@@ -8377,7 +8378,7 @@ def format_progress_lines(
     needs_attention: str | None = None,
     activity: str | None = None,
     context_pct: str | None = None,
-    question_details: dict | None = None
+    question_details: dict[str, Any] | None = None
 ) -> list[str]:
     """Format /progress response lines (manager-friendly)."""
     status = []
@@ -8419,7 +8420,7 @@ def format_progress_lines(
     return status
 
 
-def get_worker_backend(name: str, session: dict | None = None) -> str:
+def get_worker_backend(name: str, session: dict[str, Any] | None = None) -> str:
     """Get backend for a worker.
 
     Priority: backend file (canonical) > session dict (cache) > default.
@@ -13437,7 +13438,7 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         if not text.startswith("Manager sent "):
             text = f"manager: {text}"
 
-        _log(_LOG_INFO, "{chat_id}", f"-> {session_name}: {text[:50]}...")
+        _log(_LOG_INFO, "dispatch", f"chat_id={chat_id} -> {session_name}: {text[:50]}...")
 
         if backend.is_interactive:
             worker_set_pending(session_name, chat_id)
@@ -17565,7 +17566,7 @@ _setup_endpoint_routes()
 # MAIN
 # ============================================================
 
-def graceful_shutdown(signum: int, frame: Any) -> None:
+def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     """Handle shutdown signals gracefully with diagnostic info."""
     from datetime import datetime
     sig_name = signal.Signals(signum).name if signum else "unknown"
@@ -17892,7 +17893,7 @@ def _connector_on_message(tag: str) -> Callable[..., None]:
                     serve_url = _connector_export_github(
                         metadata["number"], metadata.get("repo", "BasedHardware/omi"))
                 except KeyError as e:
-                    _log(_LOG_WARN, "{tag}", f"github export failed: {e}")
+                    _log(_LOG_WARN, tag, f"github export failed: {e}")
             if not serve_url:
                 try:
                     page_html = _connector_render_html(tag, html_text)
@@ -17901,7 +17902,7 @@ def _connector_on_message(tag: str) -> Callable[..., None]:
                         f.write(page_html)
                     serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
                 except OSError as e:
-                    _log(_LOG_WARN, "{tag}", f"beast serve failed: {e}")
+                    _log(_LOG_WARN, tag, f"beast serve failed: {e}")
             summary = _connector_short_summary(tag, plain_text, serve_url, metadata)
             try:
                 send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
@@ -17909,7 +17910,7 @@ def _connector_on_message(tag: str) -> Callable[..., None]:
                 try:
                     send_telegram_message(admin_chat_id, plain_text[:300])
                 except (urllib.error.URLError, OSError, TimeoutError) as e:
-                    _log(_LOG_WARN, "{tag}", f"Telegram send failed: {e}")
+                    _log(_LOG_WARN, tag, f"Telegram send failed: {e}")
             for att in (attachments or []):
                 fpath = att.get("path", "")
                 fname = att.get("filename", "")
@@ -17923,13 +17924,13 @@ def _connector_on_message(tag: str) -> Callable[..., None]:
                     send_video(admin_chat_id, fpath, caption)
                 else:
                     send_document(admin_chat_id, fpath, caption)
-                _log(_LOG_INFO, "{tag}", f"attachment -> Telegram: {fname}")
+                _log(_LOG_INFO, tag, f"attachment -> Telegram: {fname}")
         if targets:
             for name in targets:
                 send_to_worker(name, plain_text)
-                _log(_LOG_INFO, "{tag}", f"-> {name}: {plain_text[:80]}...")
+                _log(_LOG_INFO, tag, f"-> {name}: {plain_text[:80]}...")
         else:
-            _log(_LOG_INFO, "{tag}", f"-> Telegram only (no mentions): {plain_text[:80]}...")
+            _log(_LOG_INFO, tag, f"-> Telegram only (no mentions): {plain_text[:80]}...")
     return handler
 
 
@@ -17946,12 +17947,16 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
             try:
                 send_telegram_message(admin_chat_id, text)
             except (urllib.error.URLError, OSError, TimeoutError) as e:
-                _log(_LOG_WARN, "{tag}", f"Failed to send Telegram alert: {e}")
+                _log(_LOG_WARN, tag, f"Failed to send Telegram alert: {e}")
     return handler
 
 
 def _start_grpc_server() -> Any:
-    """Start the gRPC server if available, return the server instance or None."""
+    """Start the gRPC server if available, return the server instance or None.
+
+    Returns BridgeGRPCServer when available, None otherwise.
+    Typed as Any because BridgeGRPCServer is conditionally imported.
+    """
     if BridgeGRPCServer is not None:
         try:
             server = BridgeGRPCServer(
@@ -17961,10 +17966,10 @@ def _start_grpc_server() -> Any:
                 on_jsonl_received=handle_grpc_jsonl_received,
             )
             server.start(GRPC_PORT)
-            print(f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
+            _log(_LOG_INFO, "grpc", f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
             return server
         except (OSError, KeyboardInterrupt) as e:
-            print(f"gRPC server disabled: {e}")
+            _log(_LOG_WARN, "grpc", f"gRPC server disabled: {e}")
             return None
     elif BRIDGE_GRPC_IMPORT_ERROR is not None:
         _log(_LOG_ERROR, "bridge", f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")

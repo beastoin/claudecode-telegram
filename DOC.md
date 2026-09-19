@@ -444,14 +444,17 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 - `ch` → `channel`, `w` → `worker_name` in `relay_guide_text()`
 - `qs` → `query_params` in all HTTP handlers (13 sites)
 
-**Architecture summary — All 651 functions:**
-- 651/651 fully annotated (100%) with return types and parameter types
-- 651/651 have docstrings (100%)
+**Architecture summary — All 658 functions:**
+- 658/658 fully annotated (100%) with return types and parameter types
+- 658/658 have docstrings (100%)
 - 33 TypedDicts (2 functional-syntax for reserved-word keys)
 - 5 NamedTuples, 6 Protocols
-- Zero bare `list`, zero bare `dict`, zero raw `print(stderr)`
+- All `list`/`dict` annotations parameterized (zero bare `list`, zero bare `dict`)
+- All error diagnostics via `_log()` (zero raw `print(stderr)`)
+- ~100 remaining stdout prints are intentional operational status messages
 - Complete DI threading: 68 subprocess + 136 time calls use injectable seams
-- Structured logging via `_log()` with severity levels
+- Structured logging via `_log()` with severity levels (ERROR/WARN/INFO/DEBUG)
+- 19 `Any` remain at genuine boundaries (`**kwargs`, `__getitem__`, conditionally imported types)
 
 ### v0.41.0 - Complete DI threading across entire codebase (quality push round 9)
 
