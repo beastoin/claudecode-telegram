@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.37.0
+> Version: 0.38.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,21 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.38.0 - Function decomposition: largest functions split into focused helpers
+
+**Decomposed largest functions:**
+- `send_response_to_telegram()` (213→25 lines): extracted `_parse_response_media`, `_send_text_via_telegram`, `_send_html_fallback_chunks`, `_send_text_as_html`, `_send_response_media`, `_send_response_tts`.
+- `markdown_to_telegram_html()` (390→141 lines): moved `_TelegramHTMLSanitizer` to module-level class, extracted `_sanitize_telegram_html`, `_render_md_inline_plain`, `_render_md_inline_html`, `_render_table_as_pre`, `_wrap_plain_tables` to module level.
+- `main()` (410→47 lines): extracted `_discover_and_configure_sessions`, `_restore_bridge_state`, `_log_startup_info`, `_send_startup_notification`, `_start_grpc_server`, `_start_connectors`. Moved connector helpers (`_connector_render_html`, `_connector_short_summary`, `_connector_export_github`, `_connector_on_message`, `_connector_on_alert`) to module level.
+- `_render_transcript_html()` (685→275 lines): extracted `_transcript_html_head`, `_transcript_html_nav`, `_transcript_html_entries`, `_transcript_html_sidebar`, `_transcript_html_scripts`.
+- `_render_team_chat_html()` (401→104 lines): extracted `_team_chat_html_head`, `_team_chat_html_messages`, `_team_chat_html_search_panel`, `_team_chat_html_footer_js`, CSS to `_TEAM_CHAT_CSS` constant.
+
+**Quality metrics:**
+- Total functions: 624 (was 606). All new helpers fully annotated with docstrings.
+- Functions >200 lines: 4 (was 6). Eliminated `main`, `send_response_to_telegram` from top-20.
+- Functions >100 lines: 21 (was 25). No function exceeds 275 lines.
+- Tests: 409 passed, 0 failed.
 
 ### v0.37.0 - TypedDicts, NamedTuples, 100% annotations & docstrings
 

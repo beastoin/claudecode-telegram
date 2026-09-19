@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.37.0"
+VERSION = "0.38.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -4957,208 +4957,278 @@ def escape_html(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+class _TelegramHTMLSanitizer(HTMLParser):
+    """Sanitize HTML to only allow Telegram-safe tags and attributes."""
+
+    SAFE_TAGS: frozenset[str] = frozenset({
+        "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+        "code", "pre", "a", "blockquote", "span", "tg-emoji", "tg-spoiler",
+    })
+    SAFE_ATTRS: dict[str, frozenset[str]] = {
+        "a": frozenset({"href"}),
+        "code": frozenset({"class"}),
+        "blockquote": frozenset({"expandable"}),
+        "span": frozenset({"class"}),
+        "tg-emoji": frozenset({"emoji-id"}),
+    }
+
+    def __init__(self, rejected_open_tags: list[str]) -> None:
+        """Initialize sanitizer with shared rejected-tag tracker."""
+        super().__init__(convert_charrefs=False)
+        self._out: list[str] = []
+        self._rejected_open_tags = rejected_open_tags
+
+    def _escape_attr(self, value: str) -> str:
+        """Escape an HTML attribute value (entities + quotes)."""
+        return escape_html(value).replace('"', "&quot;")
+
+    def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        """Check if all attributes on a tag are in the allowed set."""
+        allowed = self.SAFE_ATTRS.get(tag, frozenset())
+        seen: set[str] = set()
+        for name, value in attrs:
+            if name in seen or name not in allowed:
+                return False
+            seen.add(name)
+            if tag == "a" and name == "href":
+                if value is None:
+                    return False
+            elif tag == "code" and name == "class":
+                if value is None or not value.startswith("language-"):
+                    return False
+            elif tag == "blockquote" and name == "expandable":
+                if value not in (None, "", "expandable"):
+                    return False
+            elif tag == "span" and name == "class":
+                if value != "tg-spoiler":
+                    return False
+            elif tag == "tg-emoji" and name == "emoji-id":
+                if value is None:
+                    return False
+        return True
+
+    def _render_start_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        """Render a safe opening tag with escaped attributes."""
+        if not attrs:
+            return f"<{tag}>"
+        rendered = []
+        for name, value in attrs:
+            if value is None:
+                rendered.append(name)
+            else:
+                rendered.append(f'{name}="{self._escape_attr(value)}"')
+        return f"<{tag} {' '.join(rendered)}>"
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Process an opening HTML tag during sanitization."""
+        accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
+        if accepted:
+            self._out.append(self._render_start_tag(tag, attrs))
+        else:
+            self._out.append(escape_html(self.get_starttag_text() or f"<{tag}>"))
+            self._rejected_open_tags.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        """Process a closing HTML tag during sanitization."""
+        rejected_match = False
+        for idx in range(len(self._rejected_open_tags) - 1, -1, -1):
+            if self._rejected_open_tags[idx] == tag:
+                rejected_match = True
+                del self._rejected_open_tags[idx]
+                break
+        if tag in self.SAFE_TAGS and not rejected_match:
+            self._out.append(f"</{tag}>")
+        else:
+            self._out.append(escape_html(f"</{tag}>"))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Process a self-closing HTML tag during sanitization."""
+        accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
+        if accepted:
+            start = self._render_start_tag(tag, attrs)
+            self._out.append(f"{start[:-1]}/>")
+        else:
+            self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
+
+    def handle_data(self, data: str) -> None:
+        """Process raw text content during sanitization."""
+        self._out.append(escape_html(data))
+
+    def handle_entityref(self, name: str) -> None:
+        """Process a named HTML entity during sanitization."""
+        self._out.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        """Process a numeric HTML character reference during sanitization."""
+        self._out.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        """Discard HTML comments during sanitization."""
+        self._out.append(escape_html(f"<!--{data}-->"))
+
+    def html(self) -> str:
+        """Return the sanitized HTML output."""
+        return "".join(self._out)
+
+
+def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
+    """Sanitize HTML to only allow Telegram-safe tags and attributes."""
+    if not raw:
+        return ""
+    sanitizer = _TelegramHTMLSanitizer(rejected_open_tags)
+    sanitizer.feed(raw)
+    sanitizer.close()
+    return sanitizer.html()
+
+
+def _render_md_inline_plain(children: list[Any]) -> str:
+    """Render inline markdown-it token children to plain text (for <pre> content)."""
+    out: list[str] = []
+    for tok in children:
+        if tok.type in ("text", "code_inline"):
+            out.append(tok.content)
+        elif tok.type in ("softbreak", "hardbreak"):
+            out.append(" ")
+        elif tok.type == "image":
+            out.append(tok.content or "image")
+        elif tok.type in ("strong_open", "strong_close", "em_open", "em_close",
+                          "s_open", "s_close", "link_open", "link_close",
+                          "html_inline"):
+            pass
+        else:
+            if tok.content:
+                out.append(tok.content)
+    return "".join(out)
+
+
+def _render_md_inline_html(children: list[Any], rejected_open_tags: list[str]) -> str:
+    """Render inline markdown-it token children to Telegram HTML."""
+    out: list[str] = []
+    for tok in children:
+        if tok.type == "text":
+            out.append(escape_html(tok.content))
+        elif tok.type == "code_inline":
+            out.append(f"<code>{escape_html(tok.content)}</code>")
+        elif tok.type == "strong_open":
+            out.append("<b>")
+        elif tok.type == "strong_close":
+            out.append("</b>")
+        elif tok.type == "em_open":
+            out.append("<i>")
+        elif tok.type == "em_close":
+            out.append("</i>")
+        elif tok.type == "s_open":
+            out.append("<s>")
+        elif tok.type == "s_close":
+            out.append("</s>")
+        elif tok.type == "link_open":
+            href = escape_html((tok.attrs or {}).get("href", ""))
+            out.append(f'<a href="{href}">')
+        elif tok.type == "link_close":
+            out.append("</a>")
+        elif tok.type == "softbreak":
+            out.append("\n")
+        elif tok.type == "hardbreak":
+            out.append("\n")
+        elif tok.type == "image":
+            alt = escape_html(tok.content or "image")
+            src = escape_html((tok.attrs or {}).get("src", ""))
+            out.append(f'[{alt}]({src})')
+        elif tok.type == "html_inline":
+            out.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
+        else:
+            if tok.content:
+                out.append(escape_html(tok.content))
+    return "".join(out)
+
+
+def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
+    """Render markdown table rows as a <pre>-aligned column block."""
+    all_rows = [headers] + rows
+    if not all_rows or not all_rows[0]:
+        return ""
+    num_cols = max(len(r) for r in all_rows)
+    col_widths = [0] * num_cols
+    for row in all_rows:
+        for ci, cell in enumerate(row):
+            if ci < num_cols:
+                col_widths[ci] = max(col_widths[ci], len(cell))
+    lines: list[str] = []
+    for ri, row in enumerate(all_rows):
+        cols = []
+        for ci in range(num_cols):
+            cell = row[ci] if ci < len(row) else ""
+            cols.append(escape_html(cell.ljust(col_widths[ci])))
+        lines.append("  ".join(cols).rstrip())
+        if ri == 0:
+            lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
+    return f"<pre>{chr(10).join(lines)}</pre>\n"
+
+
+# Pattern for detecting tabular lines (2+ columns separated by 2+ spaces)
+_MULTI_SPACE_RE = re.compile(r'\S  +\S.*\S  +\S')
+
+
+def _wrap_plain_tables(text: str) -> str:
+    """Find consecutive tabular lines outside <pre> and wrap in <pre>."""
+    parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
+    out: list[str] = []
+    for part in parts:
+        if part.startswith('<pre>'):
+            out.append(part)
+            continue
+        lines = part.split('\n')
+        i = 0
+        while i < len(lines):
+            if _MULTI_SPACE_RE.search(lines[i]):
+                run = [lines[i]]
+                j = i + 1
+                while j < len(lines) and (_MULTI_SPACE_RE.search(lines[j]) or lines[j].strip() == ''):
+                    run.append(lines[j])
+                    j += 1
+                tabular_count = sum(1 for line in run if _MULTI_SPACE_RE.search(line))
+                if tabular_count >= 2:
+                    while run and run[-1].strip() == '':
+                        j -= 1
+                        run.pop()
+                    raw = []
+                    for rl in run:
+                        plain = re.sub(r'<[^>]+>', '', rl)
+                        plain = plain.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+                        raw.append(plain)
+                    content = escape_html('\n'.join(raw))
+                    out.append(f'<pre>{content}</pre>')
+                    i = j
+                else:
+                    out.append(lines[i])
+                    i += 1
+            else:
+                out.append(lines[i])
+                i += 1
+    return '\n'.join(out) if out else text
+
+
 def markdown_to_telegram_html(text: str) -> str:
     """Convert markdown to Telegram-compatible HTML using markdown-it-py.
 
     Handles: bold, italic, strikethrough, code, code blocks, links,
-    blockquotes, headings (as bold), lists, tables (as bullet lists), hr.
+    blockquotes, headings (as bold), lists, tables (as pre), hr.
     Unrecognized tokens degrade to plain text.
     """
-    import re
     from markdown_it import MarkdownIt
 
     md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
     tokens = md.parse(text)
 
-    result = []
+    result: list[str] = []
     list_depth = 0
-    ordered_counter = []  # stack of counters for ordered lists
+    ordered_counter: list[int] = []
     in_table = False
-    table_row = []  # current row cells
-    table_headers = []  # header cells
-    table_rows = []  # all data rows
+    table_row: list[str] = []
+    table_headers: list[str] = []
+    table_rows: list[list[str]] = []
     in_thead = False
-    _rejected_open_tags = []
-
-    class _TelegramHTMLSanitizer(HTMLParser):
-        SAFE_TAGS = frozenset({
-            "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
-            "code", "pre", "a", "blockquote", "span", "tg-emoji", "tg-spoiler",
-        })
-        SAFE_ATTRS = {
-            "a": frozenset({"href"}),
-            "code": frozenset({"class"}),
-            "blockquote": frozenset({"expandable"}),
-            "span": frozenset({"class"}),
-            "tg-emoji": frozenset({"emoji-id"}),
-        }
-
-        def __init__(self, rejected_open_tags: set[str]) -> None:
-            """Initialize internal state and locks."""
-            super().__init__(convert_charrefs=False)
-            self._out = []
-            self._rejected_open_tags = rejected_open_tags
-
-        def _escape_attr(self, value: str) -> str:
-            """Escape an HTML attribute value (entities + quotes)."""
-            return escape_html(value).replace('"', "&quot;")
-
-        def _attrs_are_safe(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
-            """Check if all attributes on a tag are in the allowed set."""
-            allowed = self.SAFE_ATTRS.get(tag, frozenset())
-            seen = set()
-            for name, value in attrs:
-                if name in seen or name not in allowed:
-                    return False
-                seen.add(name)
-                if tag == "a" and name == "href":
-                    if value is None:
-                        return False
-                elif tag == "code" and name == "class":
-                    if value is None or not value.startswith("language-"):
-                        return False
-                elif tag == "blockquote" and name == "expandable":
-                    if value not in (None, "", "expandable"):
-                        return False
-                elif tag == "span" and name == "class":
-                    if value != "tg-spoiler":
-                        return False
-                elif tag == "tg-emoji" and name == "emoji-id":
-                    if value is None:
-                        return False
-            return True
-
-        def _render_start_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
-            """Render a safe opening tag with escaped attributes."""
-            if not attrs:
-                return f"<{tag}>"
-            rendered = []
-            for name, value in attrs:
-                if value is None:
-                    rendered.append(name)
-                else:
-                    rendered.append(f'{name}="{self._escape_attr(value)}"')
-            return f"<{tag} {' '.join(rendered)}>"
-
-        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            """Process an opening HTML tag during sanitization."""
-            accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
-            if accepted:
-                self._out.append(self._render_start_tag(tag, attrs))
-            else:
-                self._out.append(escape_html(self.get_starttag_text() or f"<{tag}>"))
-                # Track rejected start tags so matching closing tags are escaped too.
-                self._rejected_open_tags.append(tag)
-
-        def handle_endtag(self, tag: str) -> None:
-            """Process a closing HTML tag during sanitization."""
-            rejected_match = False
-            for idx in range(len(self._rejected_open_tags) - 1, -1, -1):
-                if self._rejected_open_tags[idx] == tag:
-                    rejected_match = True
-                    del self._rejected_open_tags[idx]
-                    break
-            if tag in self.SAFE_TAGS and not rejected_match:
-                self._out.append(f"</{tag}>")
-            else:
-                self._out.append(escape_html(f"</{tag}>"))
-
-        def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            """Process a self-closing HTML tag during sanitization."""
-            accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
-            if accepted:
-                start = self._render_start_tag(tag, attrs)
-                self._out.append(f"{start[:-1]}/>")
-            else:
-                self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
-
-        def handle_data(self, data: str) -> None:
-            """Process raw text content during sanitization."""
-            self._out.append(escape_html(data))
-
-        def handle_entityref(self, name: str) -> None:
-            """Process a named HTML entity during sanitization."""
-            self._out.append(f"&{name};")
-
-        def handle_charref(self, name: str) -> None:
-            """Process a numeric HTML character reference during sanitization."""
-            self._out.append(f"&#{name};")
-
-        def handle_comment(self, data: str) -> None:
-            """Discard HTML comments during sanitization."""
-            self._out.append(escape_html(f"<!--{data}-->"))
-
-        def html(self) -> str:
-            """Return the sanitized HTML output."""
-            return "".join(self._out)
-
-    def _sanitize_html(raw: str) -> str:
-        """Sanitize HTML to only allow Telegram-safe tags and attributes."""
-        if not raw:
-            return ""
-        sanitizer = _TelegramHTMLSanitizer(_rejected_open_tags)
-        sanitizer.feed(raw)
-        sanitizer.close()
-        return sanitizer.html()
-
-    def _render_inline_plain(children: list[Any]) -> str:
-        """Render inline token children to plain text (for use inside <pre>)."""
-        out = []
-        for tok in children:
-            if tok.type in ("text", "code_inline"):
-                out.append(tok.content)
-            elif tok.type in ("softbreak", "hardbreak"):
-                out.append(" ")
-            elif tok.type == "image":
-                out.append(tok.content or "image")
-            elif tok.type in ("strong_open", "strong_close", "em_open", "em_close",
-                              "s_open", "s_close", "link_open", "link_close",
-                              "html_inline"):
-                pass
-            else:
-                if tok.content:
-                    out.append(tok.content)
-        return "".join(out)
-
-    def _render_inline(children: list[Any]) -> str:
-        """Render inline token children to HTML string."""
-        out = []
-        for tok in children:
-            if tok.type == "text":
-                out.append(escape_html(tok.content))
-            elif tok.type == "code_inline":
-                out.append(f"<code>{escape_html(tok.content)}</code>")
-            elif tok.type == "strong_open":
-                out.append("<b>")
-            elif tok.type == "strong_close":
-                out.append("</b>")
-            elif tok.type == "em_open":
-                out.append("<i>")
-            elif tok.type == "em_close":
-                out.append("</i>")
-            elif tok.type == "s_open":
-                out.append("<s>")
-            elif tok.type == "s_close":
-                out.append("</s>")
-            elif tok.type == "link_open":
-                href = escape_html((tok.attrs or {}).get("href", ""))
-                out.append(f'<a href="{href}">')
-            elif tok.type == "link_close":
-                out.append("</a>")
-            elif tok.type == "softbreak":
-                out.append("\n")
-            elif tok.type == "hardbreak":
-                out.append("\n")
-            elif tok.type == "image":
-                alt = escape_html(tok.content or "image")
-                src = escape_html((tok.attrs or {}).get("src", ""))
-                out.append(f'[{alt}]({src})')
-            elif tok.type == "html_inline":
-                out.append(_sanitize_html(tok.content))
-            else:
-                if tok.content:
-                    out.append(escape_html(tok.content))
-        return "".join(out)
+    rejected_open_tags: list[str] = []
 
     i = 0
     while i < len(tokens):
@@ -5171,9 +5241,9 @@ def markdown_to_telegram_html(text: str) -> str:
                 result.append("\n")
         elif tok.type == "inline":
             if in_table:
-                table_row.append(_render_inline_plain(tok.children or []))
+                table_row.append(_render_md_inline_plain(tok.children or []))
             else:
-                result.append(_render_inline(tok.children or []))
+                result.append(_render_md_inline_html(tok.children or [], rejected_open_tags))
 
         # Headings -> bold
         elif tok.type == "heading_open":
@@ -5238,25 +5308,9 @@ def markdown_to_telegram_html(text: str) -> str:
             table_rows = []
         elif tok.type == "table_close":
             in_table = False
-            # Render as <pre> with aligned columns
-            all_rows = [table_headers] + table_rows
-            if all_rows and all_rows[0]:
-                num_cols = max(len(r) for r in all_rows)
-                col_widths = [0] * num_cols
-                for row in all_rows:
-                    for ci, cell in enumerate(row):
-                        if ci < num_cols:
-                            col_widths[ci] = max(col_widths[ci], len(cell))
-                lines = []
-                for ri, row in enumerate(all_rows):
-                    cols = []
-                    for ci in range(num_cols):
-                        cell = row[ci] if ci < len(row) else ""
-                        cols.append(escape_html(cell.ljust(col_widths[ci])))
-                    lines.append("  ".join(cols).rstrip())
-                    if ri == 0:
-                        lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
-                result.append(f"<pre>{''.join(chr(10).join(lines))}</pre>\n")
+            pre_block = _render_table_as_pre(table_headers, table_rows)
+            if pre_block:
+                result.append(pre_block)
             table_headers = []
             table_rows = []
         elif tok.type == "thead_open":
@@ -5282,7 +5336,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
         # HTML blocks
         elif tok.type == "html_block":
-            result.append(_sanitize_html(tok.content))
+            result.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
 
         else:
             if tok.content:
@@ -5294,59 +5348,7 @@ def markdown_to_telegram_html(text: str) -> str:
     while "\n\n\n" in output:
         output = output.replace("\n\n\n", "\n\n")
 
-    # Post-process: wrap runs of plain-text tabular lines in <pre>.
-    # Detects lines with 2+ internal multi-space gaps (column alignment)
-    # that are NOT already inside <pre> tags.
-    _MULTI_SPACE = re.compile(r'\S  +\S.*\S  +\S')  # 2+ columns with 2+ space gaps
-
-    def _wrap_plain_tables(text: str) -> str:
-        """Find consecutive tabular lines outside <pre> and wrap in <pre>."""
-        parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
-        out = []
-        for part in parts:
-            if part.startswith('<pre>'):
-                out.append(part)
-                continue
-            lines = part.split('\n')
-            i = 0
-            while i < len(lines):
-                if _MULTI_SPACE.search(lines[i]):
-                    # Start of tabular run
-                    run = [lines[i]]
-                    j = i + 1
-                    while j < len(lines) and (_MULTI_SPACE.search(lines[j]) or lines[j].strip() == ''):
-                        run.append(lines[j])
-                        j += 1
-                    # Only wrap if 2+ tabular lines
-                    tabular_count = sum(1 for l in run if _MULTI_SPACE.search(l))
-                    if tabular_count >= 2:
-                        # Strip trailing empty lines from run
-                        while run and run[-1].strip() == '':
-                            j -= 1
-                            run.pop()
-                        raw = []
-                        for rl in run:
-                            plain = re.sub(r'<[^>]+>', '', rl)
-                            plain = plain.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-                            raw.append(plain)
-                        content = escape_html('\n'.join(raw))
-                        out.append(f'<pre>{content}</pre>')
-                        i = j
-                    else:
-                        out.append(lines[i])
-                        i += 1
-                else:
-                    out.append(lines[i])
-                    i += 1
-            # Rejoin non-pre parts with newlines (but parts list alternates)
-            if out and not out[-1].startswith('<pre>') and not part.startswith('<pre>'):
-                pass  # already appended line by line
-        # Reconstruct: join lines that aren't pre blocks
-        # Actually, simpler approach: rebuild from parts
-        return '\n'.join(out) if out else text
-
-    output = _wrap_plain_tables(output)
-    return output
+    return _wrap_plain_tables(output)
 
 
 def _pipe_tables_to_html(text: str) -> str:
@@ -9370,18 +9372,12 @@ def _localize_media(name: str, media_list: list[dict[str, Any]]) -> list[dict[st
     return result
 
 
-def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
-    """Send a response to Telegram. Shared by hook responses.
+def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]], str | None]:
+    """Parse media tags and speak tag from response text.
 
-    Args:
-        name: Session/worker name for message prefix
-        text: Response text (may contain image/file tags)
-        chat_id: Telegram chat ID
-        log_prefix: Prefix for log messages (e.g., "Response", "Hook response")
+    Returns (clean_text, images, files, speak_text).
+    For teleported workers, skips local file existence checks during parsing.
     """
-    # Parse image and file tags from text (before converting to preserve tag syntax)
-    # For teleported workers, skip local file existence check during parsing
-    # (files are on the remote host, not local) — validate after fetching
     host = get_worker_host(name)
     if host:
         _accept_all = lambda p: (True, Path(p))
@@ -9391,8 +9387,8 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         clean_text, images = parse_image_tags(text)
         clean_text, files = parse_file_tags(clean_text)
 
-    # Still support explicit [[speak:custom text]] tag for custom voice text
-    speak_text = None
+    # Extract explicit [[speak:custom text]] tag
+    speak_text: str | None = None
     speak_match = re.search(r'\[\[speak(?::([^\]]*))?\]\]', clean_text)
     if speak_match:
         custom = speak_match.group(1)
@@ -9401,134 +9397,147 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         if custom is not None and custom.strip():
             speak_text = custom.strip()
 
-    # For teleported workers, fetch remote files to local temp paths
+    # Fetch remote files to local temp paths for teleported workers
     images = _localize_media(name, images)
     files = _localize_media(name, files)
 
-    # Auto-TTS: synthesize voice for every response when enabled (/voice on|off)
-    # Use explicit [[speak:text]] if provided, otherwise use the clean response text
-    if speak_text is None and TTS_ENDPOINT and state.get("tts_enabled", True):
-        speak_text = clean_text  # raw text before HTML conversion
+    return clean_text, images, files, speak_text
 
-    # Debug: log when sending very short text (helps trace empty "name:" messages)
-    if clean_text and len(clean_text.strip()) <= 5:
-        print(f"{log_prefix} DEBUG short msg: {name}, text={repr(clean_text)}, "
-              f"images={len(images)}, files={len(files)}")
 
-    # Send text message if there's text content
-    if clean_text:
-        # Try sendRichMessage first (Bot API 10.1+: native headings, tables, 32K limit)
-        rich_sent = False
-        if hasattr(transport, 'send_rich_text'):
-            # Strip redundant worker name prefix
-            rich_text = clean_text.lstrip()
-            prefix_lower = f"{name}:".lower()
-            if rich_text.lower().startswith(prefix_lower):
-                rich_text = rich_text[len(prefix_lower):].lstrip()
-            rich_text = _pipe_tables_to_html(rich_text)
-            rich_md = f"**{name}:**\n{rich_text}"
+def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
+    """Send text content to Telegram, trying rich → HTML → plain fallback chain."""
+    # Try sendRichMessage first (Bot API 10.1+: native headings, tables, 32K limit)
+    rich_sent = False
+    rich_failed_at = -1
+    rich_chunks: list[str] = []
+    prev_msg_id: int | None = None
 
-            prefix_reserve = len(name) + 30
-            rich_chunks = split_message(rich_md, TELEGRAM_RICH_MAX_LENGTH - prefix_reserve)
+    if hasattr(transport, 'send_rich_text'):
+        # Strip redundant worker name prefix
+        rich_text = clean_text.lstrip()
+        prefix_lower = f"{name}:".lower()
+        if rich_text.lower().startswith(prefix_lower):
+            rich_text = rich_text[len(prefix_lower):].lstrip()
+        rich_text = _pipe_tables_to_html(rich_text)
+        rich_md = f"**{name}:**\n{rich_text}"
 
-            prev_msg_id = None
-            rich_sent = True
-            rich_failed_at = -1
-            for i, chunk in enumerate(rich_chunks):
-                if i > 0:
-                    chunk = f"**{name}:** _(continued)_\n{chunk}"
-                result = transport.send_rich_text(
-                    chat_id, chunk,
-                    reply_to=prev_msg_id if prev_msg_id else None
-                )
-                if result and result.get("ok"):
-                    prev_msg_id = result.get("result", {}).get("message_id")
-                    if len(rich_chunks) > 1:
-                        print(f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
-                    else:
-                        print(f"{log_prefix} sent (rich): {name} -> Telegram OK")
+        prefix_reserve = len(name) + 30
+        rich_chunks = split_message(rich_md, TELEGRAM_RICH_MAX_LENGTH - prefix_reserve)
+
+        rich_sent = True
+        for i, chunk in enumerate(rich_chunks):
+            if i > 0:
+                chunk = f"**{name}:** _(continued)_\n{chunk}"
+            result = transport.send_rich_text(
+                chat_id, chunk,
+                reply_to=prev_msg_id if prev_msg_id else None
+            )
+            if result and result.get("ok"):
+                prev_msg_id = result.get("result", {}).get("message_id")
+                if len(rich_chunks) > 1:
+                    print(f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
                 else:
-                    error_code = (result or {}).get("error_code", 0)
-                    desc = (result or {}).get("description", "")
-                    print(f"{log_prefix} sendRichMessage failed ({error_code}: {desc}), falling back to HTML")
-                    rich_sent = False
-                    rich_failed_at = i
-                    break
-                if i < len(rich_chunks) - 1:
-                    time.sleep(0.05)
+                    print(f"{log_prefix} sent (rich): {name} -> Telegram OK")
+            else:
+                error_code = (result or {}).get("error_code", 0)
+                desc = (result or {}).get("description", "")
+                print(f"{log_prefix} sendRichMessage failed ({error_code}: {desc}), falling back to HTML")
+                rich_sent = False
+                rich_failed_at = i
+                break
+            if i < len(rich_chunks) - 1:
+                time.sleep(0.05)
 
-        # Fallback: sendMessage with HTML parse_mode (Bot API <10.1 or rich failed)
-        if not rich_sent and rich_failed_at > 0:
-            # Partial failure: some rich chunks already sent. Only send remaining as HTML.
-            remaining_md = '\n'.join(rich_chunks[rich_failed_at:])
-            remaining_html = markdown_to_telegram_html(remaining_md)
-            prefix_reserve = len(name) + 30
-            chunks = split_message(remaining_html, TELEGRAM_MAX_LENGTH - prefix_reserve)
-            formatted_parts = format_multipart_messages(name, chunks)
-            for i, part in enumerate(formatted_parts):
+    # Partial rich failure: send remaining chunks as HTML
+    if not rich_sent and rich_failed_at > 0:
+        prev_msg_id = _send_html_fallback_chunks(
+            name, rich_chunks[rich_failed_at:], chat_id, log_prefix,
+            prev_msg_id, rich_failed_at, len(rich_chunks))
+        rich_sent = True  # handled
+
+    # Full HTML path (no rich support or rich never tried)
+    if not rich_sent:
+        _send_text_as_html(name, clean_text, chat_id, log_prefix)
+
+
+def _send_html_fallback_chunks(
+    name: str, remaining_chunks: list[str], chat_id: int,
+    log_prefix: str, prev_msg_id: int | None,
+    start_index: int, total_chunks: int
+) -> int | None:
+    """Send remaining rich chunks as HTML after partial rich failure."""
+    remaining_md = '\n'.join(remaining_chunks)
+    remaining_html = markdown_to_telegram_html(remaining_md)
+    prefix_reserve = len(name) + 30
+    chunks = split_message(remaining_html, TELEGRAM_MAX_LENGTH - prefix_reserve)
+    formatted_parts = format_multipart_messages(name, chunks)
+    for i, part in enumerate(formatted_parts):
+        result = transport.send_text(
+            chat_id, part, parse_mode="HTML",
+            reply_to=prev_msg_id if prev_msg_id else None
+        )
+        if result and result.get("ok"):
+            prev_msg_id = result.get("result", {}).get("message_id")
+            print(f"{log_prefix} sent (html fallback): {name} part {start_index + i + 1}/{total_chunks} -> Telegram OK")
+        else:
+            plain_text = re.sub(r'<[^>]+>', '', part)
+            plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+            transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
+        if i < len(formatted_parts) - 1:
+            time.sleep(0.05)
+    return prev_msg_id
+
+
+def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
+    """Send text as HTML with plain-text fallback on 400 errors."""
+    html_text = markdown_to_telegram_html(clean_text)
+    prefix_reserve = len(name) + 30
+    chunks = split_message(html_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
+    formatted_parts = format_multipart_messages(name, chunks)
+
+    prev_msg_id: int | None = None
+    for i, part in enumerate(formatted_parts):
+        result = transport.send_text(
+            chat_id, part, parse_mode="HTML",
+            reply_to=prev_msg_id if prev_msg_id else None
+        )
+        if result and result.get("ok"):
+            prev_msg_id = result.get("result", {}).get("message_id")
+            if len(formatted_parts) > 1:
+                print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
+            else:
+                print(f"{log_prefix} sent: {name} -> Telegram OK")
+        else:
+            desc = (result or {}).get("description", "")
+            error_code = (result or {}).get("error_code", 0)
+            if error_code == 400:
+                print(f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
+                plain_text = re.sub(r'<[^>]+>', '', part)
+                plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
                 result = transport.send_text(
-                    chat_id, part, parse_mode="HTML",
+                    chat_id, plain_text,
                     reply_to=prev_msg_id if prev_msg_id else None
                 )
                 if result and result.get("ok"):
                     prev_msg_id = result.get("result", {}).get("message_id")
-                    print(f"{log_prefix} sent (html fallback): {name} part {rich_failed_at + i + 1}/{len(rich_chunks)} -> Telegram OK")
+                    print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
                 else:
-                    plain_text = re.sub(r'<[^>]+>', '', part)
-                    plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                    transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
-                if i < len(formatted_parts) - 1:
-                    time.sleep(0.05)
-            rich_sent = True  # handled
+                    print(f"{log_prefix} failed (plain): {name} -> {result}")
+            else:
+                print(f"{log_prefix} failed: {name} -> {result}")
 
-        if not rich_sent:
-            clean_text = markdown_to_telegram_html(clean_text)
-            prefix_reserve = len(name) + 30
-            chunks = split_message(clean_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
-            formatted_parts = format_multipart_messages(name, chunks)
+        if i < len(formatted_parts) - 1:
+            time.sleep(0.05)
 
-            prev_msg_id = None
-            for i, part in enumerate(formatted_parts):
-                result = transport.send_text(
-                    chat_id, part, parse_mode="HTML",
-                    reply_to=prev_msg_id if prev_msg_id else None
-                )
-                if result and result.get("ok"):
-                    prev_msg_id = result.get("result", {}).get("message_id")
-                    if len(formatted_parts) > 1:
-                        print(f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
-                    else:
-                        print(f"{log_prefix} sent: {name} -> Telegram OK")
-                else:
-                    desc = (result or {}).get("description", "")
-                    error_code = (result or {}).get("error_code", 0)
-                    is_400 = error_code == 400
-                    if is_400:
-                        print(f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
-                        plain_text = re.sub(r'<[^>]+>', '', part)
-                        plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                        result = transport.send_text(
-                            chat_id, plain_text,
-                            reply_to=prev_msg_id if prev_msg_id else None
-                        )
-                        if result and result.get("ok"):
-                            prev_msg_id = result.get("result", {}).get("message_id")
-                            print(f"{log_prefix} sent (plain): {name} -> Telegram OK")
-                        else:
-                            print(f"{log_prefix} failed (plain): {name} -> {result}")
-                    else:
-                        print(f"{log_prefix} failed: {name} -> {result}")
 
-                if i < len(formatted_parts) - 1:
-                    time.sleep(0.05)
-
+def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
+    """Send image and file attachments to Telegram with type-based routing."""
     # Send images
     for img_path, img_caption in images:
         if img_path is None:
             transport.send_text(chat_id, f"{name}: {img_caption}")
             continue
         full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
-        # Use sendAnimation for GIFs and MP4s to preserve animation
         if Path(img_path).suffix.lower() in (".gif", ".mp4"):
             sent = send_animation(chat_id, img_path, full_caption)
         else:
@@ -9560,29 +9569,56 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         else:
             transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
-    # Auto-TTS: synthesize and send voice alongside text
-    # Skip TTS for messages >1000 chars. Split into paragraphs for separate voice messages.
+
+def _send_response_tts(name: str, speak_text: str, chat_id: int) -> None:
+    """Synthesize TTS audio and send voice messages in a background thread."""
+    paragraphs = [p.strip() for p in speak_text.split('\n\n') if p.strip()]
+    if not paragraphs:
+        paragraphs = [speak_text]
+
+    def _tts_worker() -> None:
+        """Synthesize and send TTS voice messages for each paragraph."""
+        try:
+            for i, para in enumerate(paragraphs):
+                print(f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
+                voice_path = synthesize_speech(para)
+                if voice_path:
+                    send_voice(chat_id, voice_path, caption=f"{name}:")
+                    try:
+                        os.unlink(voice_path)
+                    except OSError:
+                        pass  # best-effort cleanup: _tts_worker
+        except OSError as e:
+            print(f"TTS thread error: {e}")
+
+    threading.Thread(target=_tts_worker, daemon=True).start()
+
+
+def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
+    """Send a worker response to Telegram — text, media, and TTS.
+
+    Orchestrates: media parsing → text sending (rich/HTML/plain fallback) →
+    image/file delivery → optional TTS synthesis.
+    """
+    clean_text, images, files, speak_text = _parse_response_media(name, text)
+
+    # Auto-TTS: use clean text when no explicit [[speak:...]] tag
+    if speak_text is None and TTS_ENDPOINT and state.get("tts_enabled", True):
+        speak_text = clean_text
+
+    # Debug: log very short text (helps trace empty "name:" messages)
+    if clean_text and len(clean_text.strip()) <= 5:
+        print(f"{log_prefix} DEBUG short msg: {name}, text={repr(clean_text)}, "
+              f"images={len(images)}, files={len(files)}")
+
+    if clean_text:
+        _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
+
+    _send_response_media(name, images, files, chat_id)
+
+    # TTS: skip for messages >1000 chars
     if speak_text is not None and speak_text and len(speak_text) <= 1000:
-        # Split into paragraphs (double newline), filter empty
-        paragraphs = [p.strip() for p in speak_text.split('\n\n') if p.strip()]
-        if not paragraphs:
-            paragraphs = [speak_text]
-        def _tts_and_send() -> None:
-            """Synthesize TTS audio and send voice messages for each paragraph."""
-            try:
-                for i, para in enumerate(paragraphs):
-                    print(f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
-                    voice_path = synthesize_speech(para)
-                    if voice_path:
-                        send_voice(chat_id, voice_path, caption=f"{name}:")
-                        try:
-                            os.unlink(voice_path)
-                        except OSError as exc:
-                            pass  # best-effort io: _tts_and_send
-            except OSError as e:
-                print(f"TTS thread error: {e}")
-        # Run TTS in background thread to not block /response return
-        threading.Thread(target=_tts_and_send, daemon=True).start()
+        _send_response_tts(name, speak_text, chat_id)
 
 
 def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> None:
@@ -13831,67 +13867,167 @@ vertical-align:middle;margin-right:8px}}
 </div></body></html>'''
 
 
-def _render_team_chat_html(page: int | None = None, per_page: int = 50,
-                           search_query: str = "", token: str = "",
-                           live_base_url: str = "") -> str:
-    """Render team Telegram chat as paginated HTML page."""
+
+# ── Team chat HTML helpers (decomposed from _render_team_chat_html) ──
+
+
+_TEAM_CHAT_CSS = """<style>
+:root {
+  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
+  --user-bg:rgba(255,255,255,.04); --code-bg:#1a1c1a; --link:#75dbf0; --radius:6px;
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
+}
+@media(prefers-color-scheme:light){
+  :root{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
+    --user-bg:rgba(0,0,0,.03);--code-bg:#f4f4f0;--link:#0969da;}
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:14px}
+body{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:48rem;margin:0 auto;padding:24px 16px 80px}
+header{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}
+h1{font-size:1.3rem;font-weight:700}
+.meta{color:var(--muted);font-size:.85rem;margin-top:4px}
+/* Search */
+.search-bar{display:flex;gap:8px;margin-bottom:16px}
+.search-bar input{flex:1;background:var(--code-bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:8px 12px;color:var(--fg);font-size:.9rem;
+  font-family:var(--sans);outline:none}
+.search-bar input:focus{border-color:var(--link)}
+.search-bar button{background:var(--code-bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:8px 16px;color:var(--fg);cursor:pointer;
+  font-family:var(--sans);font-size:.9rem}
+.search-bar button:hover{border-color:var(--muted)}
+.search-info{background:rgba(117,219,240,.06);border:1px solid rgba(117,219,240,.15);
+  border-radius:var(--radius);padding:8px 12px;margin-bottom:16px;font-size:.85rem;color:var(--link)}
+/* Pagination */
+.pg{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:16px 0;font-size:.85rem}
+.pg-btn{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--fg);text-decoration:none;transition:border-color .15s}
+.pg-btn:hover{border-color:var(--muted)}
+.pg-cur{background:var(--link);color:#000;border-color:var(--link);font-weight:600}
+.pg-dis{opacity:.3;pointer-events:none}
+.pg-info{margin-left:8px;color:var(--muted)}
+/* Chat messages */
+.thread{display:flex;flex-direction:column;gap:4px}
+.chat-msg{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:8px 8px;
+  border-radius:8px;transition:background .2s}
+.chat-msg:target{background:rgba(117,219,240,.1)}
+.chat-msg:hover{background:var(--user-bg)}
+.chat-body{min-width:0}
+.u-av{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px}
+.u-av img{width:100%;height:100%;object-fit:cover;border-radius:50%}
+.u-av svg{width:100%;height:100%}
+.u-name{font-weight:600;font-size:.85rem;margin-right:6px}
+.ts{font-size:.75rem;color:var(--muted)}
+.chat-text{white-space:pre-wrap;word-break:break-word;font-size:.9rem;line-height:1.6;margin-top:2px}
+.chat-text a{color:var(--link)}
+/* Media */
+.media-wrap{margin:4px 0 6px}
+.chat-photo{max-width:100%;border-radius:8px;display:block;cursor:pointer;
+  border:1px solid var(--border)}
+.chat-photo:hover{opacity:.9}
+.file-dl{display:block;font-size:.75rem;color:var(--muted);margin-top:2px;text-decoration:none}
+.file-dl:hover{color:var(--link)}
+.file-card{background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden}
+.file-header{display:flex;align-items:center;gap:6px;padding:8px 10px;font-size:.85rem;
+  color:var(--fg);cursor:pointer;list-style:none}
+.file-header::-webkit-details-marker{display:none}
+.file-header:hover{background:var(--user-bg)}
+.file-header .chev{margin-left:auto;width:14px;height:14px;color:var(--muted);
+  transition:transform .15s;flex-shrink:0}
+details.file-card[open] .chev{transform:rotate(90deg)}
+details.file-card[open] .file-header{border-bottom:1px solid var(--border)}
+.file-icon{font-size:1rem}
+.file-dl-btn{margin-left:auto;color:var(--muted);text-decoration:none;font-size:1rem;
+  padding:0 4px;border-radius:4px}
+.file-dl-btn:hover{color:var(--link);background:rgba(117,219,240,.08)}
+.file-preview{width:100%;height:300px;border:0;background:var(--bg);color:var(--fg)}
+.file-preview-pdf{height:500px}
+/* Inline file content */
+.file-body{padding:12px 14px;font-size:.85rem;line-height:1.6;color:var(--fg);
+  max-height:500px;overflow:auto;border-top:1px solid var(--border)}
+.file-body-md{font-family:var(--sans)}
+.file-body-md h1,.file-body-md h2,.file-body-md h3,.file-body-md h4{margin:12px 0 6px;font-weight:600}
+.file-body-md h1{font-size:1.3rem}.file-body-md h2{font-size:1.1rem}.file-body-md h3{font-size:.95rem}
+.file-body-md p{margin:4px 0}.file-body-md li{margin:2px 0 2px 16px;list-style:disc}
+.file-body-md hr{border:0;border-top:1px solid var(--border);margin:10px 0}
+.file-body-md a{color:var(--link)}.file-body-md strong{font-weight:600}
+.file-body-md .md-code{background:var(--code-bg);padding:8px 10px;border-radius:4px;display:block;
+  font-family:var(--mono);font-size:.8rem;overflow-x:auto;white-space:pre;margin:6px 0}
+.file-body-md .md-inline{background:var(--code-bg);padding:1px 4px;border-radius:3px;font-family:var(--mono);font-size:.8rem}
+.file-body-code{font-family:var(--mono);white-space:pre;overflow-x:auto;margin:0;
+  background:var(--code-bg);border-top:1px solid var(--border)}
+.file-body-code code{font-size:.8rem;line-height:1.5}
+.file-body-text{font-family:var(--mono);white-space:pre-wrap;word-break:break-word;margin:0;
+  background:var(--code-bg);border-top:1px solid var(--border)}
+.file-body-csv{overflow-x:auto;border-top:1px solid var(--border)}
+.file-body-csv table{width:100%;border-collapse:collapse;font-size:.8rem}
+.file-body-csv th,.file-body-csv td{padding:4px 8px;border:1px solid var(--border);text-align:left}
+.file-body-csv th{background:var(--card);font-weight:600;position:sticky;top:0}
+.file-card-link{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+  background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--fg);text-decoration:none;font-size:.85rem}
+.file-card-link:hover{border-color:var(--link);color:var(--link)}
+/* Reply context */
+.reply-ctx{display:block;border-left:3px solid var(--link);padding:2px 8px;margin:2px 0 4px;
+  font-size:.8rem;color:var(--muted);text-decoration:none;border-radius:2px;
+  background:rgba(117,219,240,.04);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.reply-ctx:hover{background:rgba(117,219,240,.1);color:var(--fg)}
+.reply-name{font-weight:600;color:var(--link);margin-right:4px}
+/* Context link (search → full view) */
+.ctx-link{font-size:.75rem;color:var(--muted);text-decoration:none;margin-left:4px;
+  opacity:.6;transition:opacity .15s}
+.ctx-link:hover{opacity:1;color:var(--link)}
+/* Jump buttons */
+.jump{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:6px}
+.jump a{width:32px;height:32px;border-radius:50%;background:var(--code-bg);border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;color:var(--muted);text-decoration:none;font-size:1rem;
+  transition:border-color .15s}
+.jump a:hover{border-color:var(--muted);color:var(--fg)}
+</style>"""
+
+
+_TEAM_CHAT_JS = """<script>
+// Render timestamps in browser timezone
+document.querySelectorAll('.ts[data-ts]').forEach(el => {
+  try {
+    const d = new Date(el.dataset.ts);
+    if (!isNaN(d)) el.textContent = d.toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  } catch(e) {}
+});
+// Scroll to target anchor if present
+if (location.hash) {
+  const el = document.querySelector(location.hash);
+  if (el) setTimeout(() => el.scrollIntoView({behavior:'smooth',block:'center'}), 100);
+}
+</script>"""
+
+
+def _team_chat_html_head(title: str) -> str:
+    """Return the HTML head section with CSS for the team chat page."""
     import html as html_mod
-    esc = html_mod.escape
+    return (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<title>' + html_mod.escape(title) + '</title>\n'
+        '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">\n'
+        + _TEAM_CHAT_CSS
+        + '\n</head>'
+    )
 
-    if search_query:
-        query_result = _run_team_chat_query("search", search=search_query,
-                                            page=page or 1, per_page=per_page)
-    else:
-        query_result = _run_team_chat_query("entries", page=page, per_page=per_page)
 
-    if not query_result:
-        return ('<html><body style="background:#0b0d0b;color:#e5e5e0;font-family:system-ui;padding:40px">'
-                '<h1>Team chat not available</h1>'
-                '<p>Run <code>/memory update</code> to index the latest export.</p></body></html>')
-
-    messages = query_result.get("messages", [])
-    if search_query:
-        total = query_result.get("total_results", 0)
-    else:
-        total = query_result.get("total", 0)
-    total_pages = query_result.get("total_pages", 1)
-    page = query_result.get("page", 1)
-
-    # Pagination query string (needed by message blocks for reply/context links)
-    qs_parts = []
-    if token:
-        qs_parts.append(f"token={esc(token)}")
-    if per_page != 50:
-        qs_parts.append(f"per_page={per_page}")
-    if search_query:
-        qs_parts.append(f"q={esc(search_query)}")
-    qs_base = "&".join(qs_parts)
-    _url_prefix = live_base_url + "?" if live_base_url else "?"
-
-    def page_url(p: str) -> str:
-        """Build a full URL for a transcript/PR page path."""
-        parts = [f"page={p}"]
-        if qs_base:
-            parts.append(qs_base)
-        return _url_prefix + "&".join(parts)
-
-    # Build msg_id → message lookup for reply context
-    msg_by_id = {m.get("msg_id"): m for m in messages if m.get("msg_id")}
-
-    # For reply-to messages not on this page, batch-fetch from DB
-    missing_reply_ids = set()
-    for msg in messages:
-        rid = msg.get("reply_to")
-        if rid and rid not in msg_by_id:
-            missing_reply_ids.add(rid)
-    reply_cache = {}
-    if missing_reply_ids:
-        for rid in missing_reply_ids:
-            r = _run_team_chat_query("msg-by-id", msg_id=rid)
-            if r and r.get("idx") is not None:
-                reply_cache[rid] = r
-
-    # Build message blocks
+def _team_chat_html_messages(messages: list[dict], msg_by_id: dict, reply_cache: dict,
+                             search_query: str, per_page: int, token: str,
+                             url_prefix: str, qs_base: str,
+                             esc: "Callable[[str], str]") -> str:
+    """Return rendered HTML for all team chat message blocks."""
+    _url_prefix = url_prefix
     blocks = []
     for msg in messages:
         msg_id = msg.get("msg_id", 0)
@@ -14039,6 +14175,99 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
             f'</div></div>'
         )
 
+
+    return "".join(blocks)
+
+
+def _team_chat_html_search_panel(search_val: str, search_result: str,
+                                 live_base_url: str, token: str,
+                                 per_page: int,
+                                 esc: "Callable[[str], str]") -> str:
+    """Return the search form and result info HTML for team chat."""
+    action_attr = f' action="{esc(live_base_url)}"' if live_base_url else ''
+    per_page_input = (
+        f'<input type="hidden" name="per_page" value="{per_page}">'
+        if per_page != 50 else ''
+    )
+    return (
+        f'<form class="search-bar" method="get"{action_attr}>\n'
+        f'<input type="text" name="q" value="{search_val}" placeholder="Search messages...">\n'
+        f'<button type="submit">Search</button>\n'
+        f'<input type="hidden" name="token" value="{esc(token)}">\n'
+        f'{per_page_input}\n'
+        f'</form>\n\n'
+        f'{search_result}'
+    )
+
+
+def _team_chat_html_footer_js() -> str:
+    """Return the JavaScript section for the team chat page."""
+    return _TEAM_CHAT_JS
+
+
+def _render_team_chat_html(page: int | None = None, per_page: int = 50,
+                           search_query: str = "", token: str = "",
+                           live_base_url: str = "") -> str:
+    """Render team Telegram chat as paginated HTML page."""
+    import html as html_mod
+    esc = html_mod.escape
+
+    if search_query:
+        query_result = _run_team_chat_query("search", search=search_query,
+                                            page=page or 1, per_page=per_page)
+    else:
+        query_result = _run_team_chat_query("entries", page=page, per_page=per_page)
+
+    if not query_result:
+        return ('<html><body style="background:#0b0d0b;color:#e5e5e0;font-family:system-ui;padding:40px">'
+                '<h1>Team chat not available</h1>'
+                '<p>Run <code>/memory update</code> to index the latest export.</p></body></html>')
+
+    messages = query_result.get("messages", [])
+    if search_query:
+        total = query_result.get("total_results", 0)
+    else:
+        total = query_result.get("total", 0)
+    total_pages = query_result.get("total_pages", 1)
+    page = query_result.get("page", 1)
+
+    # Pagination query string (needed by message blocks for reply/context links)
+    qs_parts = []
+    if token:
+        qs_parts.append(f"token={esc(token)}")
+    if per_page != 50:
+        qs_parts.append(f"per_page={per_page}")
+    if search_query:
+        qs_parts.append(f"q={esc(search_query)}")
+    qs_base = "&".join(qs_parts)
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+
+    def page_url(p: str) -> str:
+        """Build a full URL for a transcript/PR page path."""
+        parts = [f"page={p}"]
+        if qs_base:
+            parts.append(qs_base)
+        return _url_prefix + "&".join(parts)
+
+    # Build msg_id → message lookup for reply context
+    msg_by_id = {m.get("msg_id"): m for m in messages if m.get("msg_id")}
+
+    # For reply-to messages not on this page, batch-fetch from DB
+    missing_reply_ids = set()
+    for msg in messages:
+        rid = msg.get("reply_to")
+        if rid and rid not in msg_by_id:
+            missing_reply_ids.add(rid)
+    reply_cache = {}
+    if missing_reply_ids:
+        for rid in missing_reply_ids:
+            r = _run_team_chat_query("msg-by-id", msg_id=rid)
+            if r and r.get("idx") is not None:
+                reply_cache[rid] = r
+
+    blocks_html = _team_chat_html_messages(
+        messages, msg_by_id, reply_cache, search_query,
+        per_page, token, _url_prefix, qs_base, esc)
     # Pagination nav
     nav_html = ""
     if total_pages > 1:
@@ -14060,446 +14289,30 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     if search_query:
         search_result = f'<div class="search-info">Found {total} matching messages for "<strong>{esc(search_query)}</strong>"</div>'
 
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Team Chat</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<style>
-:root {{
-  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
-  --user-bg:rgba(255,255,255,.04); --code-bg:#1a1c1a; --link:#75dbf0; --radius:6px;
-  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
-}}
-@media(prefers-color-scheme:light){{
-  :root{{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
-    --user-bg:rgba(0,0,0,.03);--code-bg:#f4f4f0;--link:#0969da;}}
-}}
-*{{margin:0;padding:0;box-sizing:border-box}}
-html{{font-size:14px}}
-body{{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
-  -webkit-font-smoothing:antialiased}}
-.wrap{{max-width:48rem;margin:0 auto;padding:24px 16px 80px}}
-header{{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}}
-h1{{font-size:1.3rem;font-weight:700}}
-.meta{{color:var(--muted);font-size:.85rem;margin-top:4px}}
-/* Search */
-.search-bar{{display:flex;gap:8px;margin-bottom:16px}}
-.search-bar input{{flex:1;background:var(--code-bg);border:1px solid var(--border);
-  border-radius:var(--radius);padding:8px 12px;color:var(--fg);font-size:.9rem;
-  font-family:var(--sans);outline:none}}
-.search-bar input:focus{{border-color:var(--link)}}
-.search-bar button{{background:var(--code-bg);border:1px solid var(--border);
-  border-radius:var(--radius);padding:8px 16px;color:var(--fg);cursor:pointer;
-  font-family:var(--sans);font-size:.9rem}}
-.search-bar button:hover{{border-color:var(--muted)}}
-.search-info{{background:rgba(117,219,240,.06);border:1px solid rgba(117,219,240,.15);
-  border-radius:var(--radius);padding:8px 12px;margin-bottom:16px;font-size:.85rem;color:var(--link)}}
-/* Pagination */
-.pg{{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:16px 0;font-size:.85rem}}
-.pg-btn{{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius);
-  color:var(--fg);text-decoration:none;transition:border-color .15s}}
-.pg-btn:hover{{border-color:var(--muted)}}
-.pg-cur{{background:var(--link);color:#000;border-color:var(--link);font-weight:600}}
-.pg-dis{{opacity:.3;pointer-events:none}}
-.pg-info{{margin-left:8px;color:var(--muted)}}
-/* Chat messages */
-.thread{{display:flex;flex-direction:column;gap:4px}}
-.chat-msg{{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:8px 8px;
-  border-radius:8px;transition:background .2s}}
-.chat-msg:target{{background:rgba(117,219,240,.1)}}
-.chat-msg:hover{{background:var(--user-bg)}}
-.chat-body{{min-width:0}}
-.u-av{{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px}}
-.u-av img{{width:100%;height:100%;object-fit:cover;border-radius:50%}}
-.u-av svg{{width:100%;height:100%}}
-.u-name{{font-weight:600;font-size:.85rem;margin-right:6px}}
-.ts{{font-size:.75rem;color:var(--muted)}}
-.chat-text{{white-space:pre-wrap;word-break:break-word;font-size:.9rem;line-height:1.6;margin-top:2px}}
-.chat-text a{{color:var(--link)}}
-/* Media */
-.media-wrap{{margin:4px 0 6px}}
-.chat-photo{{max-width:100%;border-radius:8px;display:block;cursor:pointer;
-  border:1px solid var(--border)}}
-.chat-photo:hover{{opacity:.9}}
-.file-dl{{display:block;font-size:.75rem;color:var(--muted);margin-top:2px;text-decoration:none}}
-.file-dl:hover{{color:var(--link)}}
-.file-card{{background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
-  overflow:hidden}}
-.file-header{{display:flex;align-items:center;gap:6px;padding:8px 10px;font-size:.85rem;
-  color:var(--fg);cursor:pointer;list-style:none}}
-.file-header::-webkit-details-marker{{display:none}}
-.file-header:hover{{background:var(--user-bg)}}
-.file-header .chev{{margin-left:auto;width:14px;height:14px;color:var(--muted);
-  transition:transform .15s;flex-shrink:0}}
-details.file-card[open] .chev{{transform:rotate(90deg)}}
-details.file-card[open] .file-header{{border-bottom:1px solid var(--border)}}
-.file-icon{{font-size:1rem}}
-.file-dl-btn{{margin-left:auto;color:var(--muted);text-decoration:none;font-size:1rem;
-  padding:0 4px;border-radius:4px}}
-.file-dl-btn:hover{{color:var(--link);background:rgba(117,219,240,.08)}}
-.file-preview{{width:100%;height:300px;border:0;background:var(--bg);color:var(--fg)}}
-.file-preview-pdf{{height:500px}}
-/* Inline file content */
-.file-body{{padding:12px 14px;font-size:.85rem;line-height:1.6;color:var(--fg);
-  max-height:500px;overflow:auto;border-top:1px solid var(--border)}}
-.file-body-md{{font-family:var(--sans)}}
-.file-body-md h1,.file-body-md h2,.file-body-md h3,.file-body-md h4{{margin:12px 0 6px;font-weight:600}}
-.file-body-md h1{{font-size:1.3rem}}.file-body-md h2{{font-size:1.1rem}}.file-body-md h3{{font-size:.95rem}}
-.file-body-md p{{margin:4px 0}}.file-body-md li{{margin:2px 0 2px 16px;list-style:disc}}
-.file-body-md hr{{border:0;border-top:1px solid var(--border);margin:10px 0}}
-.file-body-md a{{color:var(--link)}}.file-body-md strong{{font-weight:600}}
-.file-body-md .md-code{{background:var(--code-bg);padding:8px 10px;border-radius:4px;display:block;
-  font-family:var(--mono);font-size:.8rem;overflow-x:auto;white-space:pre;margin:6px 0}}
-.file-body-md .md-inline{{background:var(--code-bg);padding:1px 4px;border-radius:3px;font-family:var(--mono);font-size:.8rem}}
-.file-body-code{{font-family:var(--mono);white-space:pre;overflow-x:auto;margin:0;
-  background:var(--code-bg);border-top:1px solid var(--border)}}
-.file-body-code code{{font-size:.8rem;line-height:1.5}}
-.file-body-text{{font-family:var(--mono);white-space:pre-wrap;word-break:break-word;margin:0;
-  background:var(--code-bg);border-top:1px solid var(--border)}}
-.file-body-csv{{overflow-x:auto;border-top:1px solid var(--border)}}
-.file-body-csv table{{width:100%;border-collapse:collapse;font-size:.8rem}}
-.file-body-csv th,.file-body-csv td{{padding:4px 8px;border:1px solid var(--border);text-align:left}}
-.file-body-csv th{{background:var(--card);font-weight:600;position:sticky;top:0}}
-.file-card-link{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
-  background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);
-  color:var(--fg);text-decoration:none;font-size:.85rem}}
-.file-card-link:hover{{border-color:var(--link);color:var(--link)}}
-/* Reply context */
-.reply-ctx{{display:block;border-left:3px solid var(--link);padding:2px 8px;margin:2px 0 4px;
-  font-size:.8rem;color:var(--muted);text-decoration:none;border-radius:2px;
-  background:rgba(117,219,240,.04);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}}
-.reply-ctx:hover{{background:rgba(117,219,240,.1);color:var(--fg)}}
-.reply-name{{font-weight:600;color:var(--link);margin-right:4px}}
-/* Context link (search → full view) */
-.ctx-link{{font-size:.75rem;color:var(--muted);text-decoration:none;margin-left:4px;
-  opacity:.6;transition:opacity .15s}}
-.ctx-link:hover{{opacity:1;color:var(--link)}}
-/* Jump buttons */
-.jump{{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:6px}}
-.jump a{{width:32px;height:32px;border-radius:50%;background:var(--code-bg);border:1px solid var(--border);
-  display:flex;align-items:center;justify-content:center;color:var(--muted);text-decoration:none;font-size:1rem;
-  transition:border-color .15s}}
-.jump a:hover{{border-color:var(--muted);color:var(--fg)}}
-</style>
-</head>
-<body>
-<div class="wrap">
-<header>
-<h1>Team Chat</h1>
-<div class="meta">Telegram chat history</div>
-</header>
+    head = _team_chat_html_head("Team Chat")
+    search_panel = _team_chat_html_search_panel(
+        search_val, search_result, live_base_url, token, per_page, esc)
+    footer_js = _team_chat_html_footer_js()
 
-<form class="search-bar" method="get"{' action="' + esc(live_base_url) + '"' if live_base_url else ''}>
-<input type="text" name="q" value="{search_val}" placeholder="Search messages...">
-<button type="submit">Search</button>
-<input type="hidden" name="token" value="{esc(token)}">
-{"" if per_page == 50 else f'<input type="hidden" name="per_page" value="{per_page}">'}
-</form>
-
-{search_result}
-{nav_html}
-
-<div class="thread" id="thread">
-{"".join(blocks)}
-</div>
-
-{nav_html}
-</div>
-
-<div class="jump">
-<a href="#" onclick="window.scrollTo(0,0);return false">&uarr;</a>
-<a href="#" onclick="window.scrollTo(0,document.body.scrollHeight);return false">&darr;</a>
-</div>
-
-<script>
-// Render timestamps in browser timezone
-document.querySelectorAll('.ts[data-ts]').forEach(el => {{
-  try {{
-    const d = new Date(el.dataset.ts);
-    if (!isNaN(d)) el.textContent = d.toLocaleString(undefined, {{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}});
-  }} catch(e) {{}}
-}});
-// Scroll to target anchor if present
-if (location.hash) {{
-  const el = document.querySelector(location.hash);
-  if (el) setTimeout(() => el.scrollIntoView({{behavior:'smooth',block:'center'}}), 100);
-}}
-</script>
-</body>
-</html>'''
+    return (head
+            + '\n<body>\n<div class="wrap">\n<header>\n'
+            '<h1>Team Chat</h1>\n'
+            '<div class="meta">Telegram chat history</div>\n'
+            '</header>\n\n'
+            + search_panel + '\n'
+            + nav_html + '\n\n'
+            '<div class="thread" id="thread">\n'
+            + blocks_html + '\n</div>\n\n'
+            + nav_html + '\n</div>\n\n'
+            '<div class="jump">\n'
+            '<a href="#" onclick="window.scrollTo(0,0);return false">&uarr;</a>\n'
+            '<a href="#" onclick="window.scrollTo(0,document.body.scrollHeight);return false">&darr;</a>\n'
+            '</div>\n\n'
+            + footer_js + '\n</body>\n</html>')
 
 
-def _render_transcript_html(name: str, session_id: str | None = None,
-                            page: int | None = None, per_page: int = 50,
-                            search_query: str = "", token: str = "",
-                            filter_mode: str = "", search_sort: str = "relevance",
-                            live_base_url: str = "") -> str:
-    """Render a worker's transcript as polished HTML (ampcode.com style).
-
-    Supports pagination (?page=N&per_page=50) and search (?q=term).
-    filter_mode="prompts" shows only user messages.
-    page=None means "show last page" (most recent entries).
-    Uses marked.js for markdown and highlight.js for syntax highlighting.
-
-    live_base_url: when set, pagination/search/filter links use this absolute
-    URL prefix instead of relative URLs.  Used by /rewind static snapshots so
-    links point back to the bridge's live /transcript/<name> endpoint.
-    """
-    import html as html_mod
-    esc = html_mod.escape
-
-    # For remote workers, bypass local path resolution and query via SSH directly
-    host = get_worker_host(name)
-    if host:
-        cwd = get_claude_session_cwd(name) or ""
-        sid = session_id or get_claude_session_id(name, authoritative=True)
-        if not sid:
-            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
-        remote_home = _get_remote_home(host) or ""
-        if not remote_home:
-            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Cannot resolve remote home for {esc(name)}</h1></body></html>"
-        remote_cwd = cwd
-        local_home = os.path.expanduser("~")
-        if remote_cwd.startswith(local_home) and remote_home != local_home:
-            remote_cwd = remote_home + remote_cwd[len(local_home):]
-        remote_slug = _project_slug(remote_cwd)
-        jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
-        transcript_path = None  # No local file for remote workers
-    else:
-        transcript_path, sid, cwd = _resolve_transcript_path(name, session_id)
-        if not sid:
-            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
-        if not transcript_path or transcript_path == "syncing":
-            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not found</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
-        jsonl_path = str(transcript_path)
-
-    # Query transcript-index.py — combined entries+stats in single call (saves SSH round-trip)
-    if search_query:
-        query_result = _run_transcript_query(
-            jsonl_path, sid, "search+stats", host=host,
-            search=search_query, page=page or 1, per_page=per_page, sort=search_sort)
-    else:
-        query_result = _run_transcript_query(
-            jsonl_path, sid, "entries+stats", host=host,
-            page=page, per_page=per_page, filter_mode=filter_mode)
-    stats_result = query_result.pop("stats", None) if query_result else None
-
-    # Fallback to old parsing if script fails
-    if not query_result:
-        if not transcript_path or not Path(str(transcript_path)).exists():
-            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not available</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
-        all_entries = _parse_transcript_entries(transcript_path)
-        total = len(all_entries)
-        for _i, _e in enumerate(all_entries):
-            _e["_idx"] = _i
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        if page is None:
-            page = total_pages
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        page_entries = all_entries[start:start + per_page]
-        stats = _transcript_stats(all_entries)
-        file_size_str = ""
-    else:
-        # Reconstruct entry dicts from raw_json
-        page_entries = []
-        for e in query_result.get("entries", []):
-            try:
-                entry = json.loads(e["raw_json"])
-                entry["_idx"] = e.get("idx", -1)
-                page_entries.append(entry)
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-        if search_query:
-            total = query_result.get("total_results", 0)
-        else:
-            total = query_result.get("total", 0)
-        total_pages = query_result.get("total_pages", 1)
-        page = query_result.get("page", 1)
-
-        _empty_stats = {"n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0,
-                        "lines_del": 0, "lines_mod": 0, "n_files": 0, "model": "",
-                        "version": "", "git_branch": "", "first_ts": "", "last_ts": "",
-                        "input_tokens": 0, "output_tokens": 0, "duration": ""}
-        stats = stats_result if stats_result else _empty_stats
-
-    # File size of the transcript JSONL (local only)
-    file_size_str = ""
-    if not host:
-        try:
-            file_size_bytes = os.path.getsize(transcript_path)
-            if file_size_bytes >= 1_048_576:
-                file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
-            elif file_size_bytes >= 1024:
-                file_size_str = f"{file_size_bytes / 1024:.0f} KB"
-            else:
-                file_size_str = f"{file_size_bytes} B"
-        except OSError as exc:
-            pass  # best-effort io: unknown
-
-    # Pre-index tool results by tool_use_id for merging into tool_use blocks
-    _tool_results = {}
-    for entry in page_entries:
-        if entry.get("type") == "user":
-            ct = entry.get("message", {}).get("content", [])
-            if isinstance(ct, list):
-                for item in ct:
-                    if isinstance(item, dict) and item.get("type") == "tool_result":
-                        tuid = item.get("tool_use_id", "")
-                        rt = item.get("content", "")
-                        if isinstance(rt, list):
-                            rt = "\n".join(r.get("text", "") for r in rt if isinstance(r, dict) and r.get("type") == "text")
-                        _tool_results[tuid] = {"content": str(rt), "is_error": bool(item.get("is_error"))}
-
-    # Render blocks — group consecutive assistant entries into a turn-body
-    # No avatar/label on assistant turns (matches AmpCode: only user has avatar)
-    blocks = []
-    in_assistant_turn = False
-
-    # When live_base_url is set (static snapshot), links point to bridge endpoint
-    _url_prefix = live_base_url + "?" if live_base_url else "?"
-
-    # Build context URL for search mode (click message → jump to full transcript)
-    def _ctx_url(entry: dict[str, Any]) -> str:
-        """Build a context URL for search results — links to full transcript."""
-        if not search_query:
-            return ""
-        idx = entry.get("_idx", -1)
-        if idx < 0:
-            return ""
-        ctx_page = (idx // per_page) + 1
-        ctx_qs = []
-        if token:
-            ctx_qs.append(f"token={esc(token)}")
-        if session_id:
-            ctx_qs.append(f"sid={esc(session_id)}")
-        if per_page != 50:
-            ctx_qs.append(f"per_page={per_page}")
-        ctx_qs.append(f"page={ctx_page}")
-        return f'{_url_prefix}{"&".join(ctx_qs)}#e-{idx}'
-
-    for entry in page_entries:
-        etype = entry.get("type", "")
-        role = entry.get("message", {}).get("role", "")
-        # Skip tool_result entries — they're merged into tool_use blocks
-        is_tool_result = (etype == "user" and role == "user" and
-                          isinstance(entry.get("message", {}).get("content"), list) and
-                          any(c.get("type") == "tool_result" for c in entry.get("message", {}).get("content", []) if isinstance(c, dict)))
-        if is_tool_result:
-            continue
-        h = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
-        if not h:
-            continue
-        eidx = entry.get("_idx", -1)
-        anchor = f' id="e-{eidx}"' if eidx >= 0 else ""
-        curl = _ctx_url(entry)
-        is_assistant = (etype == "assistant" and role == "assistant")
-        if is_assistant:
-            if curl:
-                if in_assistant_turn:
-                    blocks.append('</div>')
-                    in_assistant_turn = False
-                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
-                blocks.append(h)
-            else:
-                if not in_assistant_turn:
-                    blocks.append(f'<div class="turn-body"{anchor}>')
-                    in_assistant_turn = True
-                blocks.append(h)
-        else:
-            if in_assistant_turn:
-                blocks.append('</div>')
-                in_assistant_turn = False
-            if curl:
-                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
-            elif anchor:
-                h = f'<div{anchor}>{h}</div>'
-            blocks.append(h)
-    if in_assistant_turn:
-        blocks.append('</div>')
-
-    # Build query string for pagination links (token first to preserve auth)
-    qs_parts = []
-    if token:
-        qs_parts.append(f"token={esc(token)}")
-    if session_id:
-        qs_parts.append(f"sid={esc(session_id)}")
-    if per_page != 50:
-        qs_parts.append(f"per_page={per_page}")
-    if search_query:
-        qs_parts.append(f"q={esc(search_query)}")
-    if filter_mode:
-        qs_parts.append(f"filter={esc(filter_mode)}")
-    qs_base = "&".join(qs_parts)
-
-    def page_url(p: str) -> str:
-        """Build a full URL for a transcript/PR page path."""
-        parts = [f"page={p}"]
-        if qs_base:
-            parts.append(qs_base)
-        return _url_prefix + "&".join(parts)
-
-    # Pagination nav
-    nav_html = ""
-    if total_pages > 1:
-        nav_items = []
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(1)}">First</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(page-1)}">Prev</a>')
-        # Page numbers: show up to 7 centered on current
-        start_p = max(1, page - 3)
-        end_p = min(total_pages, start_p + 6)
-        start_p = max(1, end_p - 6)
-        for p in range(start_p, end_p + 1):
-            cls = " pg-cur" if p == page else ""
-            nav_items.append(f'<a class="pg-btn{cls}" href="{page_url(p)}">{p}</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(page+1)}">Next</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(total_pages)}">Last</a>')
-        nav_html = f'<nav class="pg">{"".join(nav_items)}<span class="pg-info">Page {page}/{total_pages} ({total} entries)</span></nav>'
-
-    search_val = esc(search_query) if search_query else ""
-    search_result = ""
-    if search_query:
-        sort_label = "by time" if search_sort == "time" else "by relevance"
-        alt_sort = "time" if search_sort == "relevance" else "relevance"
-        alt_label = "time" if search_sort == "relevance" else "relevance"
-        sort_qs = []
-        if token:
-            sort_qs.append(f"token={esc(token)}")
-        if session_id:
-            sort_qs.append(f"sid={esc(session_id)}")
-        sort_qs.append(f"q={esc(search_query)}")
-        if per_page != 50:
-            sort_qs.append(f"per_page={per_page}")
-        sort_qs.append(f"sort={alt_sort}")
-        sort_url = f'{_url_prefix}{"&".join(sort_qs)}'
-        search_result = (
-            f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" '
-            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>'
-        )
-
-    # Build prompts filter URL (toggle on/off)
-    _filt_qs = []
-    if token:
-        _filt_qs.append(f"token={esc(token)}")
-    if session_id:
-        _filt_qs.append(f"sid={esc(session_id)}")
-    if per_page != 50:
-        _filt_qs.append(f"per_page={per_page}")
-    if filter_mode != "prompts":
-        _filt_qs.append("filter=prompts")
-    prompts_filter_url = _url_prefix + "&".join(_filt_qs) if _filt_qs else _url_prefix.rstrip("?")
-    filter_banner = ""
-    if filter_mode == "prompts":
-        _clear_qs = [p for p in _filt_qs]  # already excludes filter=prompts
-        _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
-        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
-
+def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
+    """Return the DOCTYPE, head, CSS and opening body/layout tags."""
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14719,7 +14532,14 @@ a:hover{{text-decoration:underline}}
 <div class="wrap">
 <div class="main">
 <div class="content">
-<header>
+'''
+
+
+def _transcript_html_nav(name: str, stats: dict[str, Any],
+                         prompts_filter_url: str,
+                         esc: Callable[[str], str]) -> str:
+    """Return the header bar with worker name and session metadata."""
+    return f'''<header>
 <div class="h-row"><h1>{esc(name)}</h1><button class="sb-toggle" onclick="document.querySelector('.sidebar').classList.toggle('sb-open')" title="Session info"><svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M0 8a8 8 0 1116 0A8 8 0 010 8zm8-6.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM6.5 7.75A.75.75 0 017.25 7h1a.75.75 0 01.75.75v2.75h.25a.75.75 0 010 1.5h-2a.75.75 0 010-1.5h.25v-2h-.25a.75.75 0 01-.75-.75zM8 6a1 1 0 110-2 1 1 0 010 2z"/></svg></button></div>
 <div class="meta">
 {"<span class='mi'><svg viewBox=\"0 0 16 16\" fill=\"currentColor\"><path d=\"M8 16A8 8 0 108 0a8 8 0 000 16zm.25-11.75v4l3 1.5-.5 1-3.5-1.75v-4.75h1z\"/></svg>" + esc(stats["first_ts"][:10]) + "</span>" if stats["first_ts"] else ""}
@@ -14729,7 +14549,90 @@ a:hover{{text-decoration:underline}}
 <span class="mi"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.433 2.304A4.49 4.49 0 003.5 6c0 1.598.832 3.002 2.09 3.802.518.328.929.923.902 1.64v.008l-.164 3.337a.75.75 0 11-1.498-.073l.163-3.34c.007-.14-.1-.313-.357-.476A5.994 5.994 0 012 6c0-2.033 1.01-3.83 2.555-4.916A1.89 1.89 0 015.433 2.304z"/></svg>{stats["n_tool"]} tool call{"s" if stats["n_tool"] != 1 else ""}</span>
 </div>
 </header>
-<form class="search-bar" method="get"{' action="' + esc(live_base_url) + '"' if live_base_url else ''}>
+'''
+
+
+def _transcript_html_entries(page_entries: list[dict[str, Any]],
+                             tool_results: dict[str, dict],
+                             search_val: str,
+                             filter_banner: str, search_result: str,
+                             nav_html: str, live_base_url: str,
+                             name: str, token: str, search_query: str,
+                             total: int, per_page: int, page: int,
+                             total_pages: int,
+                             esc: Callable[[str], str],
+                             session_id: str | None,
+                             filter_mode: str) -> str:
+    """Return the search form, filter/search banners, thread content and pagination."""
+    _tool_results = tool_results
+    # Render blocks — group consecutive assistant entries into a turn-body
+    # No avatar/label on assistant turns (matches AmpCode: only user has avatar)
+    blocks = []
+    in_assistant_turn = False
+
+    # When live_base_url is set (static snapshot), links point to bridge endpoint
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+
+    # Build context URL for search mode (click message → jump to full transcript)
+    def _ctx_url(entry: dict[str, Any]) -> str:
+        """Build a context URL for search results — links to full transcript."""
+        if not search_query:
+            return ""
+        idx = entry.get("_idx", -1)
+        if idx < 0:
+            return ""
+        ctx_page = (idx // per_page) + 1
+        ctx_qs = []
+        if token:
+            ctx_qs.append(f"token={esc(token)}")
+        if session_id:
+            ctx_qs.append(f"sid={esc(session_id)}")
+        if per_page != 50:
+            ctx_qs.append(f"per_page={per_page}")
+        ctx_qs.append(f"page={ctx_page}")
+        return f'{_url_prefix}{"&".join(ctx_qs)}#e-{idx}'
+
+    for entry in page_entries:
+        etype = entry.get("type", "")
+        role = entry.get("message", {}).get("role", "")
+        # Skip tool_result entries — they're merged into tool_use blocks
+        is_tool_result = (etype == "user" and role == "user" and
+                          isinstance(entry.get("message", {}).get("content"), list) and
+                          any(c.get("type") == "tool_result" for c in entry.get("message", {}).get("content", []) if isinstance(c, dict)))
+        if is_tool_result:
+            continue
+        h = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
+        if not h:
+            continue
+        eidx = entry.get("_idx", -1)
+        anchor = f' id="e-{eidx}"' if eidx >= 0 else ""
+        curl = _ctx_url(entry)
+        is_assistant = (etype == "assistant" and role == "assistant")
+        if is_assistant:
+            if curl:
+                if in_assistant_turn:
+                    blocks.append('</div>')
+                    in_assistant_turn = False
+                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
+                blocks.append(h)
+            else:
+                if not in_assistant_turn:
+                    blocks.append(f'<div class="turn-body"{anchor}>')
+                    in_assistant_turn = True
+                blocks.append(h)
+        else:
+            if in_assistant_turn:
+                blocks.append('</div>')
+                in_assistant_turn = False
+            if curl:
+                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
+            elif anchor:
+                h = f'<div{anchor}>{h}</div>'
+            blocks.append(h)
+    if in_assistant_turn:
+        blocks.append('</div>')
+
+    return f'''<form class="search-bar" method="get"{' action="' + esc(live_base_url) + '"' if live_base_url else ''}>
 <input type="text" name="q" placeholder="Search transcript…" value="{search_val}">
 <button type="submit">Search</button>
 {"<input type='hidden' name='token' value='" + esc(token) + "'>" if token else ""}
@@ -14745,7 +14648,15 @@ a:hover{{text-decoration:underline}}
 {"".join(blocks)}
 </div>
 {nav_html}
-</div>
+'''
+
+
+def _transcript_html_footer(sid: str, stats: dict[str, Any],
+                              file_size_str: str, total: int,
+                              page: int, total_pages: int,
+                              esc: Callable[[str], str]) -> str:
+    """Return the closing content div, sidebar panel, layout wrappers and jump buttons."""
+    return f'''</div>
 <aside class="sidebar"><div class="sidebar-inner">
 <div class="sb-title">Session Info</div>
 <div class="sb-row"><span class="sb-label">Session</span><span class="sb-val">{esc(sid[:12])}</span></div>
@@ -14773,112 +14684,117 @@ a:hover{{text-decoration:underline}}
 <a href="#" title="Top" onclick="window.scrollTo(0,0);return false">↑</a>
 <a href="#" title="Bottom" onclick="window.scrollTo(0,document.body.scrollHeight);return false">↓</a>
 </div>
-<script>
+'''
+
+
+def _transcript_html_search_js() -> str:
+    """Return the JavaScript block for markdown rendering, search highlight and live updates."""
+    return '''<script>
 // Render markdown blocks with marked.js + highlight.js
-marked.setOptions({{
-  highlight: function(code, lang) {{
-    if (lang && hljs.getLanguage(lang)) {{
-      return hljs.highlight(code, {{language: lang}}).value;
-    }}
+marked.setOptions({
+  highlight: function(code, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(code, {language: lang}).value;
+    }
     return hljs.highlightAuto(code).value;
-  }},
+  },
   breaks: true,
   gfm: true
-}});
-function decodeB64Utf8(b64) {{
+});
+function decodeB64Utf8(b64) {
   var bin = atob(b64);
   var bytes = new Uint8Array(bin.length);
   for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new TextDecoder('utf-8').decode(bytes);
-}}
-document.querySelectorAll('.markdown[data-md]').forEach(function(el) {{
-  try {{
+}
+document.querySelectorAll('.markdown[data-md]').forEach(function(el) {
+  try {
     var md = decodeB64Utf8(el.getAttribute('data-md'));
     el.innerHTML = marked.parse(md);
-  }} catch(e) {{
+  } catch(e) {
     el.textContent = 'Error rendering markdown: ' + e.message;
-  }}
-}});
+  }
+});
 // Wrap tables in scroll containers
-document.querySelectorAll('.a-text table').forEach(function(table) {{
+document.querySelectorAll('.a-text table').forEach(function(table) {
   var wrap = document.createElement('div');
   wrap.className = 'table-wrap';
   table.parentNode.insertBefore(wrap, table);
   wrap.appendChild(table);
-}});
+});
 // Add copy buttons to code blocks
-document.querySelectorAll('.a-text pre').forEach(function(pre) {{
+document.querySelectorAll('.a-text pre').forEach(function(pre) {
   var btn = document.createElement('button');
   btn.className = 'copy-btn';
   btn.textContent = 'Copy';
-  btn.onclick = function() {{
+  btn.onclick = function() {
     var code = pre.querySelector('code');
-    navigator.clipboard.writeText(code ? code.textContent : pre.textContent).then(function() {{
+    navigator.clipboard.writeText(code ? code.textContent : pre.textContent).then(function() {
       btn.textContent = 'Copied!';
       btn.classList.add('copied');
-      setTimeout(function() {{ btn.textContent = 'Copy'; btn.classList.remove('copied'); }}, 2000);
-    }});
-  }};
+      setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+    });
+  };
   pre.appendChild(btn);
-}});
+});
 // Keyboard shortcuts
-document.addEventListener('keydown', function(e) {{
+document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT') return;
-  if (e.key === '/') {{ e.preventDefault(); document.querySelector('.search-bar input').focus(); }}
-  if (e.key === 'Home') {{ window.scrollTo(0,0); }}
-  if (e.key === 'End') {{ window.scrollTo(0,document.body.scrollHeight); }}
-}});
+  if (e.key === '/') { e.preventDefault(); document.querySelector('.search-bar input').focus(); }
+  if (e.key === 'Home') { window.scrollTo(0,0); }
+  if (e.key === 'End') { window.scrollTo(0,document.body.scrollHeight); }
+});
 // Highlight search terms in thread content
-(function() {{
+(function() {
   var thread = document.getElementById('thread');
   var q = thread && thread.getAttribute('data-search');
   if (!q) return;
-  var terms = q.split(/\\s+/).filter(function(t) {{ return t.length > 0; }});
+  var terms = q.split(/\\s+/).filter(function(t) { return t.length > 0; });
   if (!terms.length) return;
-  var pattern = new RegExp('(' + terms.map(function(t) {{
-    return t.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&');
-  }}).join('|') + ')', 'gi');
-  function walk(node) {{
-    if (node.nodeType === 3) {{
+  var pattern = new RegExp('(' + terms.map(function(t) {
+    return t.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+  }).join('|') + ')', 'gi');
+  function walk(node) {
+    if (node.nodeType === 3) {
       var text = node.textContent;
       if (!pattern.test(text)) return;
       pattern.lastIndex = 0;
       var frag = document.createDocumentFragment();
       var last = 0;
       var match;
-      while ((match = pattern.exec(text)) !== null) {{
+      while ((match = pattern.exec(text)) !== null) {
         if (match.index > last) frag.appendChild(document.createTextNode(text.slice(last, match.index)));
         var mark = document.createElement('mark');
         mark.textContent = match[0];
         frag.appendChild(mark);
         last = pattern.lastIndex;
-      }}
+      }
       if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
       node.parentNode.replaceChild(frag, node);
-    }} else if (node.nodeType === 1 && !/^(script|style|mark|code|pre)$/i.test(node.tagName)) {{
+    } else if (node.nodeType === 1 && !/^(script|style|mark|code|pre)$/i.test(node.tagName)) {
       var children = Array.from(node.childNodes);
       for (var i = 0; i < children.length; i++) walk(children[i]);
-    }}
-  }}
+    }
+  }
   // Highlight in user messages and assistant text
-  thread.querySelectorAll('.u-text, .a-text').forEach(function(el) {{ walk(el); }});
-}})();
+  thread.querySelectorAll('.u-text, .a-text').forEach(function(el) { walk(el); });
+})();
 // Render timestamps in browser timezone
 var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
-  try {{
+document.querySelectorAll('.ts[data-ts]').forEach(function(el) {
+  try {
     var d = new Date(el.getAttribute('data-ts'));
-    if (!isNaN(d)) {{
+    if (!isNaN(d)) {
       var mon = months[d.getMonth()];
       var day = d.getDate();
       var h = String(d.getHours()).padStart(2,'0');
       var m = String(d.getMinutes()).padStart(2,'0');
       el.textContent = mon + ' ' + day + ' ' + h + ':' + m;
-    }}
-  }} catch(e) {{}}
-}});
+    }
+  } catch(e) {}
+});
 // Live updates: poll for new entries, show banner when available
-(function() {{
+(function() {
   var thread = document.getElementById('thread');
   if (!thread) return;
   var total = parseInt(thread.getAttribute('data-total')) || 0;
@@ -14894,31 +14810,242 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
   var banner = document.getElementById('live-banner');
   var polling = true;
   var pollUrl = updatesUrl + '?token=' + encodeURIComponent(token) + '&since=' + total;
-  function poll() {{
+  function poll() {
     if (!polling) return;
-    fetch(pollUrl).then(function(r) {{ return r.json(); }}).then(function(d) {{
-      if (d.new > 0) {{
+    fetch(pollUrl).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.new > 0) {
         banner.textContent = d.new + ' new entr' + (d.new === 1 ? 'y' : 'ies') + ' — click to load';
         banner.style.display = 'block';
         polling = false;  // Stop polling once banner is shown
-      }} else {{
+      } else {
         setTimeout(poll, 5000);
-      }}
-    }}).catch(function() {{
+      }
+    }).catch(function() {
       setTimeout(poll, 10000);  // Retry slower on error
-    }});
-  }}
-  banner.addEventListener('click', function() {{
+    });
+  }
+  banner.addEventListener('click', function() {
     // Navigate to last page of transcript (fresh render with new entries)
     var url = pageUrl + '?token=' + encodeURIComponent(token) + '&per_page=' + perPage;
     window.location.href = url;
-  }});
+  });
   setTimeout(poll, 5000);  // Start polling after 5s
-}})();
+})();
 </script>
 </body>
 </html>'''
-    return page_html
+
+
+def _render_transcript_html(name: str, session_id: str | None = None,
+                            page: int | None = None, per_page: int = 50,
+                            search_query: str = "", token: str = "",
+                            filter_mode: str = "", search_sort: str = "relevance",
+                            live_base_url: str = "") -> str:
+    """Render a worker's transcript as polished HTML (ampcode.com style).
+
+    Supports pagination (?page=N&per_page=50) and search (?q=term).
+    filter_mode="prompts" shows only user messages.
+    page=None means "show last page" (most recent entries).
+    Uses marked.js for markdown and highlight.js for syntax highlighting.
+
+    live_base_url: when set, pagination/search/filter links use this absolute
+    URL prefix instead of relative URLs.  Used by /rewind static snapshots so
+    links point back to the bridge's live /transcript/<name> endpoint.
+    """
+    import html as html_mod
+    esc = html_mod.escape
+
+    # For remote workers, bypass local path resolution and query via SSH directly
+    host = get_worker_host(name)
+    if host:
+        cwd = get_claude_session_cwd(name) or ""
+        sid = session_id or get_claude_session_id(name, authoritative=True)
+        if not sid:
+            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
+        remote_home = _get_remote_home(host) or ""
+        if not remote_home:
+            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Cannot resolve remote home for {esc(name)}</h1></body></html>"
+        remote_cwd = cwd
+        local_home = os.path.expanduser("~")
+        if remote_cwd.startswith(local_home) and remote_home != local_home:
+            remote_cwd = remote_home + remote_cwd[len(local_home):]
+        remote_slug = _project_slug(remote_cwd)
+        jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+        transcript_path = None  # No local file for remote workers
+    else:
+        transcript_path, sid, cwd = _resolve_transcript_path(name, session_id)
+        if not sid:
+            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
+        if not transcript_path or transcript_path == "syncing":
+            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not found</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
+        jsonl_path = str(transcript_path)
+
+    # Query transcript-index.py — combined entries+stats in single call (saves SSH round-trip)
+    if search_query:
+        query_result = _run_transcript_query(
+            jsonl_path, sid, "search+stats", host=host,
+            search=search_query, page=page or 1, per_page=per_page, sort=search_sort)
+    else:
+        query_result = _run_transcript_query(
+            jsonl_path, sid, "entries+stats", host=host,
+            page=page, per_page=per_page, filter_mode=filter_mode)
+    stats_result = query_result.pop("stats", None) if query_result else None
+
+    # Fallback to old parsing if script fails
+    if not query_result:
+        if not transcript_path or not Path(str(transcript_path)).exists():
+            return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not available</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
+        all_entries = _parse_transcript_entries(transcript_path)
+        total = len(all_entries)
+        for _i, _e in enumerate(all_entries):
+            _e["_idx"] = _i
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        if page is None:
+            page = total_pages
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * per_page
+        page_entries = all_entries[start:start + per_page]
+        stats = _transcript_stats(all_entries)
+        file_size_str = ""
+    else:
+        # Reconstruct entry dicts from raw_json
+        page_entries = []
+        for e in query_result.get("entries", []):
+            try:
+                entry = json.loads(e["raw_json"])
+                entry["_idx"] = e.get("idx", -1)
+                page_entries.append(entry)
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        if search_query:
+            total = query_result.get("total_results", 0)
+        else:
+            total = query_result.get("total", 0)
+        total_pages = query_result.get("total_pages", 1)
+        page = query_result.get("page", 1)
+
+        _empty_stats = {"n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0,
+                        "lines_del": 0, "lines_mod": 0, "n_files": 0, "model": "",
+                        "version": "", "git_branch": "", "first_ts": "", "last_ts": "",
+                        "input_tokens": 0, "output_tokens": 0, "duration": ""}
+        stats = stats_result if stats_result else _empty_stats
+
+    # File size of the transcript JSONL (local only)
+    file_size_str = ""
+    if not host:
+        try:
+            file_size_bytes = os.path.getsize(transcript_path)
+            if file_size_bytes >= 1_048_576:
+                file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
+            elif file_size_bytes >= 1024:
+                file_size_str = f"{file_size_bytes / 1024:.0f} KB"
+            else:
+                file_size_str = f"{file_size_bytes} B"
+        except OSError as exc:
+            pass  # best-effort io: unknown
+
+    # Pre-index tool results by tool_use_id for merging into tool_use blocks
+    _tool_results = {}
+    for entry in page_entries:
+        if entry.get("type") == "user":
+            ct = entry.get("message", {}).get("content", [])
+            if isinstance(ct, list):
+                for item in ct:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        tuid = item.get("tool_use_id", "")
+                        rt = item.get("content", "")
+                        if isinstance(rt, list):
+                            rt = "\n".join(r.get("text", "") for r in rt if isinstance(r, dict) and r.get("type") == "text")
+                        _tool_results[tuid] = {"content": str(rt), "is_error": bool(item.get("is_error"))}
+
+
+    # Build query string for pagination links (token first to preserve auth)
+    qs_parts = []
+    if token:
+        qs_parts.append(f"token={esc(token)}")
+    if session_id:
+        qs_parts.append(f"sid={esc(session_id)}")
+    if per_page != 50:
+        qs_parts.append(f"per_page={per_page}")
+    if search_query:
+        qs_parts.append(f"q={esc(search_query)}")
+    if filter_mode:
+        qs_parts.append(f"filter={esc(filter_mode)}")
+    qs_base = "&".join(qs_parts)
+
+    def page_url(p: str) -> str:
+        """Build a full URL for a transcript/PR page path."""
+        parts = [f"page={p}"]
+        if qs_base:
+            parts.append(qs_base)
+        return _url_prefix + "&".join(parts)
+
+    # Pagination nav
+    nav_html = ""
+    if total_pages > 1:
+        nav_items = []
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(1)}">First</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(page-1)}">Prev</a>')
+        # Page numbers: show up to 7 centered on current
+        start_p = max(1, page - 3)
+        end_p = min(total_pages, start_p + 6)
+        start_p = max(1, end_p - 6)
+        for p in range(start_p, end_p + 1):
+            cls = " pg-cur" if p == page else ""
+            nav_items.append(f'<a class="pg-btn{cls}" href="{page_url(p)}">{p}</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(page+1)}">Next</a>')
+        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(total_pages)}">Last</a>')
+        nav_html = f'<nav class="pg">{"".join(nav_items)}<span class="pg-info">Page {page}/{total_pages} ({total} entries)</span></nav>'
+
+    search_val = esc(search_query) if search_query else ""
+    search_result = ""
+    if search_query:
+        sort_label = "by time" if search_sort == "time" else "by relevance"
+        alt_sort = "time" if search_sort == "relevance" else "relevance"
+        alt_label = "time" if search_sort == "relevance" else "relevance"
+        sort_qs = []
+        if token:
+            sort_qs.append(f"token={esc(token)}")
+        if session_id:
+            sort_qs.append(f"sid={esc(session_id)}")
+        sort_qs.append(f"q={esc(search_query)}")
+        if per_page != 50:
+            sort_qs.append(f"per_page={per_page}")
+        sort_qs.append(f"sort={alt_sort}")
+        sort_url = f'{_url_prefix}{"&".join(sort_qs)}'
+        search_result = (
+            f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" '
+            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>'
+        )
+
+    # Build prompts filter URL (toggle on/off)
+    _filt_qs = []
+    if token:
+        _filt_qs.append(f"token={esc(token)}")
+    if session_id:
+        _filt_qs.append(f"sid={esc(session_id)}")
+    if per_page != 50:
+        _filt_qs.append(f"per_page={per_page}")
+    if filter_mode != "prompts":
+        _filt_qs.append("filter=prompts")
+    prompts_filter_url = _url_prefix + "&".join(_filt_qs) if _filt_qs else _url_prefix.rstrip("?")
+    filter_banner = ""
+    if filter_mode == "prompts":
+        _clear_qs = [p for p in _filt_qs]  # already excludes filter=prompts
+        _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
+        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
+
+    return (_transcript_html_head(name, esc)
+            + _transcript_html_nav(name, stats, prompts_filter_url, esc)
+            + _transcript_html_entries(
+                page_entries, _tool_results, search_val,
+                filter_banner, search_result, nav_html,
+                live_base_url, name, token, search_query, total, per_page,
+                page, total_pages, esc, session_id, filter_mode)
+            + _transcript_html_footer(sid, stats, file_size_str, total,
+                                       page, total_pages, esc)
+            + _transcript_html_search_js())
 
 
 # ── EndpointRouter + Handler: thin HTTP dispatch ──
@@ -17291,37 +17418,14 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
     sys.exit(0)
 
 
-def main() -> None:
-    """Entry point — configure and start the bridge HTTP server."""
-    global admin_chat_id, grpc_server, gmail_connector_instance, github_connector_instance
-
-    if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN not set")
-        return
-
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, graceful_shutdown)
-    signal.signal(signal.SIGINT, graceful_shutdown)
-
-    # Create sessions directory with secure permissions (0o700)
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    SESSIONS_DIR.chmod(0o700)
-
-    try:
-        machines = get_machine_catalog(force_reload=True)
-        print(f"Machine catalog: {list(machines.keys())} ({MACHINES_CONFIG_FILE})")
-    except MachineConfigError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-    # Discover existing sessions
+def _discover_and_configure_sessions() -> dict[str, dict[str, Any]]:
+    """Discover existing tmux sessions and re-export hook env vars."""
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
     if registered:
         print(f"Discovered sessions: {list(registered.keys())}")
         for name, info in registered.items():
-            # SAFETY: only touch sessions that match OUR prefix to avoid
-            # overwriting env vars of workers belonging to other nodes
+            # SAFETY: only touch sessions that match OUR prefix
             tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
             if not tmux_name.startswith(TMUX_PREFIX):
                 print(f"  SKIP {name}: tmux '{tmux_name}' doesn't match prefix '{TMUX_PREFIX}'")
@@ -17330,12 +17434,19 @@ def main() -> None:
             backend_obj = get_backend(backend_name)
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
-            # Re-export hook env so workers get the current BRIDGE_URL
             host = info.get("host") or get_worker_host(name)
             if tmux_exists(tmux_name, host=host):
                 export_hook_env(tmux_name, backend_name, host=host)
+    return registered
 
-    # Load last active worker from file (if still exists)
+
+def _restore_bridge_state(registered: dict[str, dict[str, Any]]) -> int | None:
+    """Restore persisted bridge state (active worker, admin, relay/channel/guest).
+
+    Returns the last known chat_id or None.
+    """
+    global admin_chat_id
+
     last_active = load_last_active()
     if last_active and last_active in registered:
         state["active"] = last_active
@@ -17343,7 +17454,7 @@ def main() -> None:
     elif last_active:
         print(f"Last active worker '{last_active}' no longer exists")
 
-    # Log team dir and checkin note status
+    # Log team dir status
     if os.path.isdir(TEAM_DIR):
         print(f"Team dir: {TEAM_DIR}")
         _startup_note = read_checkin_note()
@@ -17354,18 +17465,20 @@ def main() -> None:
     else:
         print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
 
-    # Load last chat ID for auto-notification
     last_chat_id = load_last_chat_id()
     if last_chat_id:
         if admin_chat_id is None:
             admin_chat_id = last_chat_id
             print(f"Restored admin from last_chat_id: {admin_chat_id}")
 
-    # Restore persisted relay/channel/guest state
     _relay_load()
     _channel_load()
     _guest_load()
+    return last_chat_id
 
+
+def _log_startup_info(registered: dict[str, dict[str, Any]]) -> None:
+    """Print startup configuration summary to stdout."""
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
     print(f"Hook endpoint: http://localhost:{PORT}/response")
@@ -17381,116 +17494,95 @@ def main() -> None:
     else:
         print("Admin: auto-learn (first user to message becomes admin)")
 
-    # Sandbox status
     if SANDBOX_ENABLED:
         print(f"Sandbox mode: Workers run in Docker containers")
         print(f"Mounted: {Path.home()} → /workspace")
         if SANDBOX_EXTRA_MOUNTS:
-            for host, container, ro in SANDBOX_EXTRA_MOUNTS:
+            for host_path, container_path, ro in SANDBOX_EXTRA_MOUNTS:
                 ro_flag = " (ro)" if ro else ""
-                print(f"Mounted: {host} → {container}{ro_flag}")
+                print(f"Mounted: {host_path} → {container_path}{ro_flag}")
         print("Workers can only access mounted directories")
     else:
         print("Sandbox mode: disabled (direct execution)")
 
-    # Send startup notification if we have a last known chat ID
-    if last_chat_id:
-        state["startup_notified"] = True
-        sessions = list(registered.keys())
-        active = state["active"]
 
-        lines = ["I'm online and ready."]
-        if sessions:
-            lines.append(f"Team: {', '.join(sessions)}")
-            if active:
-                lines.append(f"Focused: {active}")
-        else:
-            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
+def _send_startup_notification(last_chat_id: int, registered: dict[str, dict[str, Any]]) -> None:
+    """Send startup notification to admin via Telegram."""
+    state["startup_notified"] = True
+    sessions = list(registered.keys())
+    active = state["active"]
 
-        if SANDBOX_ENABLED:
-            lines.append(f"Sandbox: {Path.home()} → /workspace")
+    lines = ["I'm online and ready."]
+    if sessions:
+        lines.append(f"Team: {', '.join(sessions)}")
+        if active:
+            lines.append(f"Focused: {active}")
+    else:
+        lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
 
-        result = transport.send_text(last_chat_id, "\n".join(lines))
-        if result and result.get("ok"):
-            print(f"Sent startup notification to chat {last_chat_id}")
-        else:
-            print(f"Failed to send startup notification: {result}")
+    if SANDBOX_ENABLED:
+        lines.append(f"Sandbox: {Path.home()} → /workspace")
 
-    watchdog = threading.Thread(target=watchdog_loop, daemon=True)
-    watchdog.start()
+    result = transport.send_text(last_chat_id, "\n".join(lines))
+    if result and result.get("ok"):
+        print(f"Sent startup notification to chat {last_chat_id}")
+    else:
+        print(f"Failed to send startup notification: {result}")
 
-    _load_learning_reminder_state()
-    _seed_learning_reminder_state(registered.keys())
-    _schedule_idle_scan()
-    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
 
-    if BridgeGRPCServer is not None:
-        try:
-            grpc_server = BridgeGRPCServer(
-                on_worker_response=handle_grpc_worker_response,
-                on_worker_register=handle_grpc_worker_register,
-                on_worker_disconnect=handle_grpc_worker_disconnect,
-                on_jsonl_received=handle_grpc_jsonl_received,
-            )
-            grpc_server.start(GRPC_PORT)
-            print(f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
-        except (OSError, KeyboardInterrupt) as e:
-            grpc_server = None
-            print(f"gRPC server disabled: {e}")
-    elif BRIDGE_GRPC_IMPORT_ERROR is not None:
-        print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
+# ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
-    _connector_message_log = {}  # tag -> deque of {ts, html, plain, targets}
+_connector_message_log: dict[str, Any] = {}  # tag -> deque of {ts, html, plain, targets}
 
-    def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
-        """Log a connector message for debugging (capped at 20 per tag)."""
-        from collections import deque
-        if tag not in _connector_message_log:
-            _connector_message_log[tag] = deque(maxlen=20)
-        _connector_message_log[tag].append({
-            "ts": time.time(),
-            "html": html_text,
-            "plain": plain_text,
-            "targets": targets or [],
-        })
 
-    def _connector_render_html(tag: str, current_html: str) -> str:
-        """Render HTML page with current message + recent history (rewind style)."""
-        import html as html_mod
-        esc = html_mod.escape
-        msgs = list(_connector_message_log.get(tag, []))
-        icon = "🔔" if tag == "github" else "📧"
-        title = f"{tag.title()} Feed"
+def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
+    """Log a connector message for debugging (capped at 20 per tag)."""
+    from collections import deque
+    if tag not in _connector_message_log:
+        _connector_message_log[tag] = deque(maxlen=20)
+    _connector_message_log[tag].append({
+        "ts": time.time(),
+        "html": html_text,
+        "plain": plain_text,
+        "targets": targets or [],
+    })
 
-        blocks = []
-        for i, m in enumerate(msgs):
-            ts = time.strftime("%b %d, %H:%M", time.gmtime(m["ts"]))
-            who = ", ".join(m["targets"]) if m["targets"] else "all"
-            content = m["html"]
-            # Auto-link URLs in content
-            content = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', content)
-            content = content.replace("\n", "<br>")
-            is_latest = (i == len(msgs) - 1)
-            cls = "chat-msg latest" if is_latest else "chat-msg"
-            label = "NEW" if is_latest else ""
-            badge = f'<span class="badge">Latest</span>' if is_latest else ""
-            av_letter = tag[0].upper()
-            av_color = "#8b5cf6" if tag == "github" else "#f59e0b"
-            blocks.append(
-                f'<div class="{cls}">'
-                f'<div class="u-av"><svg viewBox="0 0 28 28"><rect width="28" height="28" rx="14" fill="{av_color}"/>'
-                f'<text x="14" y="18" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">{av_letter}</text></svg></div>'
-                f'<div class="chat-body">'
-                f'<span class="u-name">{esc(tag.title())}</span>'
-                f'<span class="ts">{ts}</span>'
-                f'<span class="target">→ {esc(who)}</span>'
-                f'{badge}'
-                f'<div class="chat-text">{content}</div>'
-                f'</div></div>'
-            )
 
-        blocks_html = "\n".join(blocks)
-        return f'''<!DOCTYPE html>
+def _connector_render_html(tag: str, current_html: str) -> str:
+    """Render HTML page with current message + recent history (rewind style)."""
+    import html as html_mod
+    esc = html_mod.escape
+    msgs = list(_connector_message_log.get(tag, []))
+    icon = "🔔" if tag == "github" else "📧"
+    title = f"{tag.title()} Feed"
+
+    blocks = []
+    for i, m in enumerate(msgs):
+        ts = time.strftime("%b %d, %H:%M", time.gmtime(m["ts"]))
+        who = ", ".join(m["targets"]) if m["targets"] else "all"
+        content = m["html"]
+        content = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', content)
+        content = content.replace("\n", "<br>")
+        is_latest = (i == len(msgs) - 1)
+        cls = "chat-msg latest" if is_latest else "chat-msg"
+        badge = f'<span class="badge">Latest</span>' if is_latest else ""
+        av_letter = tag[0].upper()
+        av_color = "#8b5cf6" if tag == "github" else "#f59e0b"
+        blocks.append(
+            f'<div class="{cls}">'
+            f'<div class="u-av"><svg viewBox="0 0 28 28"><rect width="28" height="28" rx="14" fill="{av_color}"/>'
+            f'<text x="14" y="18" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">{av_letter}</text></svg></div>'
+            f'<div class="chat-body">'
+            f'<span class="u-name">{esc(tag.title())}</span>'
+            f'<span class="ts">{ts}</span>'
+            f'<span class="target">→ {esc(who)}</span>'
+            f'{badge}'
+            f'<div class="chat-text">{content}</div>'
+            f'</div></div>'
+        )
+
+    blocks_html = "\n".join(blocks)
+    return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -17549,126 +17641,151 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 </body>
 </html>'''
 
-    def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: dict[str, Any] | None = None) -> str:
-        """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
-        import html as _html
-        import re as _re
-        icon = "🔔" if tag == "github" else "📧"
-        body = plain_text.strip()
-        body = _re.sub(r'^manager\s*\(via\s+\w+[^)]*\):\s*', '', body)
-        body = _re.sub(r'\[thread:[^\]]+\]\s*', '', body)
-        body = " ".join(body.split())
-        if len(body) > 200:
-            body = body[:197] + "…"
-        ref_match = _re.search(r'#(\d+)', plain_text)
-        thread_match = _re.search(r'\[thread:([^\]]+)\]', plain_text)
-        header = f"{icon} <b>{tag.title()}</b>"
-        if ref_match:
-            num = ref_match.group(1)
-            repo = (metadata or {}).get("repo", "BasedHardware/omi")
-            gh_url = f"https://github.com/{repo}/issues/{num}"
-            header += f' <a href="{gh_url}">#{num}</a>'
-        elif thread_match:
-            header += f" {_html.escape('thread:' + thread_match.group(1))}"
-        parts = [header, _html.escape(body)]
-        if serve_url:
-            parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
-        return "\n".join(parts)
 
-    def _connector_export_github(number: int, repo: str) -> None:
-        """Export a GitHub issue/PR via beast github export --serve, return public URL."""
-        try:
-            r = subprocess.run(
-                ["beast", "github", "export", str(number), "--format", "print",
-                 "--serve", "--repo", repo, "--fresh"],
-                capture_output=True, text=True, timeout=30)
-            if r.returncode == 0:
-                for line in r.stderr.splitlines() + r.stdout.splitlines():
-                    if "http" in line and ("localhost" in line or "serve" in line.lower()):
-                        url = line.strip().split()[-1].rstrip("/")
-                        if "localhost" in url:
-                            host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
-                            url = url.replace("localhost", host)
-                        return url
-        except subprocess.SubprocessError as e:
-            print(f"[github] export failed for #{number}: {e}")
-        return None
+def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: dict[str, Any] | None = None) -> str:
+    """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
+    import html as _html
+    icon = "🔔" if tag == "github" else "📧"
+    body = plain_text.strip()
+    body = re.sub(r'^manager\s*\(via\s+\w+[^)]*\):\s*', '', body)
+    body = re.sub(r'\[thread:[^\]]+\]\s*', '', body)
+    body = " ".join(body.split())
+    if len(body) > 200:
+        body = body[:197] + "…"
+    ref_match = re.search(r'#(\d+)', plain_text)
+    thread_match = re.search(r'\[thread:([^\]]+)\]', plain_text)
+    header = f"{icon} <b>{tag.title()}</b>"
+    if ref_match:
+        num = ref_match.group(1)
+        repo = (metadata or {}).get("repo", "BasedHardware/omi")
+        gh_url = f"https://github.com/{repo}/issues/{num}"
+        header += f' <a href="{gh_url}">#{num}</a>'
+    elif thread_match:
+        header += f" {_html.escape('thread:' + thread_match.group(1))}"
+    parts = [header, _html.escape(body)]
+    if serve_url:
+        parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
+    return "\n".join(parts)
 
-    def _connector_on_message(tag: str) -> Callable[..., None]:
-        """Create a message handler for a connector tag (Gmail/GitHub)."""
-        def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: dict[str, Any] | None = None) -> None:
-            """Create an HTTP request handler bound to the current bridge state."""
-            if plain_text is None:
-                plain_text = html_text
-            _connector_log_message(tag, html_text, plain_text, targets)
-            if admin_chat_id:
-                serve_url = None
-                # GitHub: use beast github export for polished thread view
-                if tag == "github" and metadata and metadata.get("number"):
-                    try:
-                        serve_url = _connector_export_github(
-                            metadata["number"], metadata.get("repo", "BasedHardware/omi"))
-                    except KeyError as e:
-                        print(f"[{tag}] github export failed: {e}")
-                # Fallback: render our own HTML page
-                if not serve_url:
-                    try:
-                        page_html = _connector_render_html(tag, html_text)
-                        slug = f"connector-{tag}"
-                        tmp_path = f"/tmp/connector-{tag}.html"
-                        with open(tmp_path, "w") as f:
-                            f.write(page_html)
-                        serve_url = _beast_serve_deploy(tmp_path, slug)
-                    except OSError as e:
-                        print(f"[{tag}] beast serve failed: {e}")
-                summary = _connector_short_summary(tag, plain_text, serve_url, metadata)
+
+def _connector_export_github(number: int, repo: str) -> str | None:
+    """Export a GitHub issue/PR via beast github export --serve, return public URL."""
+    try:
+        r = subprocess.run(
+            ["beast", "github", "export", str(number), "--format", "print",
+             "--serve", "--repo", repo, "--fresh"],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            for line in r.stderr.splitlines() + r.stdout.splitlines():
+                if "http" in line and ("localhost" in line or "serve" in line.lower()):
+                    url = line.strip().split()[-1].rstrip("/")
+                    if "localhost" in url:
+                        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
+                        url = url.replace("localhost", host)
+                    return url
+    except subprocess.SubprocessError as e:
+        print(f"[github] export failed for #{number}: {e}")
+    return None
+
+
+def _connector_on_message(tag: str) -> Callable[..., None]:
+    """Create a message handler for a connector tag (Gmail/GitHub)."""
+    def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: dict[str, Any] | None = None) -> None:
+        """Route connector message to Telegram admin and/or target workers."""
+        if plain_text is None:
+            plain_text = html_text
+        _connector_log_message(tag, html_text, plain_text, targets)
+        if admin_chat_id:
+            serve_url: str | None = None
+            if tag == "github" and metadata and metadata.get("number"):
                 try:
-                    send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
-                except OSError:
-                    try:
-                        send_telegram_message(admin_chat_id, plain_text[:300])
-                    except (urllib.error.URLError, OSError, TimeoutError) as e:
-                        print(f"[{tag}] Telegram send failed: {e}")
-                for att in (attachments or []):
-                    fpath = att.get("path", "")
-                    fname = att.get("filename", "")
-                    if not fpath or not os.path.isfile(fpath):
-                        continue
-                    ext = os.path.splitext(fname)[1].lower()
-                    caption = f"📧 {fname}"
-                    if ext in ALLOWED_IMAGE_EXTENSIONS:
-                        send_photo(admin_chat_id, fpath, caption)
-                    elif ext in VIDEO_EXTENSIONS:
-                        send_video(admin_chat_id, fpath, caption)
-                    else:
-                        send_document(admin_chat_id, fpath, caption)
-                    print(f"[{tag}] attachment -> Telegram: {fname}")
-            if targets:
-                for name in targets:
-                    send_to_worker(name, plain_text)
-                    print(f"[{tag}] -> {name}: {plain_text[:80]}...")
-            else:
-                print(f"[{tag}] -> Telegram only (no mentions): {plain_text[:80]}...")
-        return handler
-
-    def _connector_get_workers() -> set[str]:
-        """Return the set of registered worker names for connector routing."""
-        return set(get_registered_sessions().keys())
-
-    def _connector_on_alert(tag: str) -> Callable[[str], None]:
-        """Create an alert handler for a connector tag (sends to admin chat)."""
-        def handler(text: str) -> None:
-            """Create an HTTP request handler bound to the current bridge state."""
-            if admin_chat_id:
+                    serve_url = _connector_export_github(
+                        metadata["number"], metadata.get("repo", "BasedHardware/omi"))
+                except KeyError as e:
+                    print(f"[{tag}] github export failed: {e}")
+            if not serve_url:
                 try:
-                    send_telegram_message(admin_chat_id, text)
+                    page_html = _connector_render_html(tag, html_text)
+                    tmp_path = f"/tmp/connector-{tag}.html"
+                    with open(tmp_path, "w") as f:
+                        f.write(page_html)
+                    serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
+                except OSError as e:
+                    print(f"[{tag}] beast serve failed: {e}")
+            summary = _connector_short_summary(tag, plain_text, serve_url, metadata)
+            try:
+                send_telegram_message(admin_chat_id, summary, parse_mode="HTML")
+            except OSError:
+                try:
+                    send_telegram_message(admin_chat_id, plain_text[:300])
                 except (urllib.error.URLError, OSError, TimeoutError) as e:
-                    print(f"[{tag}] Failed to send Telegram alert: {e}")
-        return handler
+                    print(f"[{tag}] Telegram send failed: {e}")
+            for att in (attachments or []):
+                fpath = att.get("path", "")
+                fname = att.get("filename", "")
+                if not fpath or not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                caption = f"📧 {fname}"
+                if ext in ALLOWED_IMAGE_EXTENSIONS:
+                    send_photo(admin_chat_id, fpath, caption)
+                elif ext in VIDEO_EXTENSIONS:
+                    send_video(admin_chat_id, fpath, caption)
+                else:
+                    send_document(admin_chat_id, fpath, caption)
+                print(f"[{tag}] attachment -> Telegram: {fname}")
+        if targets:
+            for name in targets:
+                send_to_worker(name, plain_text)
+                print(f"[{tag}] -> {name}: {plain_text[:80]}...")
+        else:
+            print(f"[{tag}] -> Telegram only (no mentions): {plain_text[:80]}...")
+    return handler
 
-    gmail_connector_instance = None
+
+def _connector_get_workers() -> set[str]:
+    """Return the set of registered worker names for connector routing."""
+    return set(get_registered_sessions().keys())
+
+
+def _connector_on_alert(tag: str) -> Callable[[str], None]:
+    """Create an alert handler for a connector tag (sends to admin chat)."""
+    def handler(text: str) -> None:
+        """Forward alert text to admin via Telegram."""
+        if admin_chat_id:
+            try:
+                send_telegram_message(admin_chat_id, text)
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                print(f"[{tag}] Failed to send Telegram alert: {e}")
+    return handler
+
+
+def _start_grpc_server() -> Any:
+    """Start the gRPC server if available, return the server instance or None."""
+    if BridgeGRPCServer is not None:
+        try:
+            server = BridgeGRPCServer(
+                on_worker_response=handle_grpc_worker_response,
+                on_worker_register=handle_grpc_worker_register,
+                on_worker_disconnect=handle_grpc_worker_disconnect,
+                on_jsonl_received=handle_grpc_jsonl_received,
+            )
+            server.start(GRPC_PORT)
+            print(f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
+            return server
+        except (OSError, KeyboardInterrupt) as e:
+            print(f"gRPC server disabled: {e}")
+            return None
+    elif BRIDGE_GRPC_IMPORT_ERROR is not None:
+        print(f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
+    return None
+
+
+def _start_connectors() -> tuple[Any, Any]:
+    """Start Gmail and GitHub connectors if enabled, return (gmail, github) instances."""
+    gmail_inst = None
     if GMAIL_ENABLED and GmailConnector is not None:
-        gmail_connector_instance = GmailConnector(
+        gmail_inst = GmailConnector(
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
@@ -17676,14 +17793,14 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
             get_registered_workers=_connector_get_workers,
             on_alert=_connector_on_alert("gmail"),
         )
-        gmail_connector_instance.start()
+        gmail_inst.start()
         print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
     elif GMAIL_ENABLED and GmailConnector is None:
         print(f"Gmail connector disabled: {GMAIL_IMPORT_ERROR}")
 
-    github_connector_instance = None
+    github_inst = None
     if GITHUB_ENABLED and GitHubConnector is not None:
-        github_connector_instance = GitHubConnector(
+        github_inst = GitHubConnector(
             repo=GITHUB_REPO,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
@@ -17692,10 +17809,56 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
             on_alert=_connector_on_alert("github"),
             state_file=str(NODE_DIR / "github_state.json"),
         )
-        github_connector_instance.start()
+        github_inst.start()
         print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {GITHUB_REPO}")
     elif GITHUB_ENABLED and GitHubConnector is None:
         print(f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
+
+    return gmail_inst, github_inst
+
+
+def main() -> None:
+    """Entry point — configure and start the bridge HTTP server.
+
+    Orchestrates: validation → signal setup → session discovery →
+    state restoration → startup logging → notification → background services.
+    """
+    global admin_chat_id, grpc_server, gmail_connector_instance, github_connector_instance
+
+    if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
+        print("Error: TELEGRAM_BOT_TOKEN not set")
+        return
+
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
+
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    SESSIONS_DIR.chmod(0o700)
+
+    try:
+        machines = get_machine_catalog(force_reload=True)
+        print(f"Machine catalog: {list(machines.keys())} ({MACHINES_CONFIG_FILE})")
+    except MachineConfigError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    registered = _discover_and_configure_sessions()
+    last_chat_id = _restore_bridge_state(registered)
+    _log_startup_info(registered)
+
+    if last_chat_id:
+        _send_startup_notification(last_chat_id, registered)
+
+    watchdog = threading.Thread(target=watchdog_loop, daemon=True)
+    watchdog.start()
+
+    _load_learning_reminder_state()
+    _seed_learning_reminder_state(registered.keys())
+    _schedule_idle_scan()
+    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
+
+    grpc_server = _start_grpc_server()
+    gmail_connector_instance, github_connector_instance = _start_connectors()
 
     try:
         ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()
