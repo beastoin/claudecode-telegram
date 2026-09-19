@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.35.0"
+VERSION = "0.36.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -25,13 +25,76 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Protocol, runtime_checkable, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Protocol, TypedDict, runtime_checkable, Union
 
 # ── Type aliases for clarity ────────────────────────────────────────────
 ChatId = int
 MessageId = int
 ParseMode = Optional[Literal["HTML", "MarkdownV2"]]
 TelegramApiResponse = Optional[Dict[str, Any]]
+
+# ── TypedDict models for raw JSON shapes ────────────────────────────────
+
+
+class TelegramUser(TypedDict, total=False):
+    """Telegram User object fields."""
+    id: int
+    is_bot: bool
+    first_name: str
+    last_name: str
+    username: str
+
+
+class TelegramChat(TypedDict, total=False):
+    """Telegram Chat object fields."""
+    id: int
+    type: str
+    title: str
+    username: str
+
+
+class TelegramMessageDict(TypedDict, total=False):
+    """Telegram Message object fields (raw JSON from API)."""
+    message_id: int
+    chat: TelegramChat
+    date: int
+    text: str
+    photo: list[dict[str, Any]]
+    document: dict[str, Any]
+    voice: dict[str, Any]
+    video: dict[str, Any]
+    animation: dict[str, Any]
+    audio: dict[str, Any]
+    sticker: dict[str, Any]
+    reply_to_message: dict[str, Any]
+    caption: str
+    media_group_id: str
+
+
+class TelegramUpdate(TypedDict, total=False):
+    """Telegram Update object fields (raw webhook payload)."""
+    update_id: int
+    message: TelegramMessageDict
+    edited_message: TelegramMessageDict
+    callback_query: dict[str, Any]
+
+
+class RegistryData(TypedDict):
+    """Worker registry JSON shape."""
+    version: int
+    workers: dict[str, dict[str, Any]]
+
+
+class WorkerEndpointInfo(TypedDict, total=False):
+    """Worker info returned by /workers endpoint."""
+    name: str
+    backend: str
+    status: str
+    host: str
+    tmux: str
+    protocol: str
+    send_example: str
+
 
 try:
     from bridge_grpc import BridgeGRPCServer
@@ -115,8 +178,8 @@ if not BRIDGE_PUBLIC_URL:
             text=True, timeout=3).stdout.strip()
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
-    except (subprocess.SubprocessError, OSError):
-        pass
+    except (subprocess.SubprocessError, OSError) as exc:
+        pass  # best-effort probe: unknown
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
 # BRIDGE_SSH_TARGET: ssh alias that remote machines use to reach the bridge host.
@@ -278,7 +341,7 @@ IDLE_STREAK_STUCK = _wd_cfg.idle_streak_stuck
 ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 
 
-# ── AppContext: injectable configuration (SOLID #10, Dependency Inversion) ──
+# ── AppContext: injectable configuration ──
 
 @dataclass
 class AppContext:
@@ -346,7 +409,7 @@ def get_app_context() -> AppContext:
     return _app_context
 
 
-# ── IncomingMessage: parse Telegram update once (SOLID #7, S/I) ──
+# ── IncomingMessage: parse Telegram update once ──
 
 @dataclass
 class IncomingMessage:
@@ -374,7 +437,7 @@ class IncomingMessage:
     raw_msg: Optional[dict] = None
 
     @classmethod
-    def from_update(cls, update: dict) -> "IncomingMessage":
+    def from_update(cls: type["IncomingMessage"], update: dict) -> "IncomingMessage":
         """Factory: parse a Telegram update dict into an IncomingMessage."""
         msg = update.get("message", {})
         text = msg.get("text", "") or msg.get("caption", "")
@@ -438,7 +501,7 @@ class GuestSession:
     notified_workers: set
 
     @classmethod
-    def from_dict(cls, token_hash: str, d: Dict[str, Any]) -> "GuestSession":
+    def from_dict(cls: type["GuestSession"], token_hash: str, d: Dict[str, Any]) -> "GuestSession":
         """Construct an instance from a plain dictionary."""
         nw = d.get("notified_workers", set())
         if isinstance(nw, list):
@@ -475,7 +538,7 @@ class GuestInboxMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "GuestInboxMessage":
+    def from_dict(cls: type["GuestInboxMessage"], d: Dict[str, Any]) -> "GuestInboxMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
@@ -493,7 +556,7 @@ class ChannelMember:
     name: str = ""    # display name (empty for manager)
 
     @classmethod
-    def from_dict(cls, key: str, d: Dict[str, Any]) -> "ChannelMember":
+    def from_dict(cls: type["ChannelMember"], key: str, d: Dict[str, Any]) -> "ChannelMember":
         """Construct an instance from a plain dictionary."""
         return cls(key=key, type=d["type"], name=d.get("name", ""))
 
@@ -508,7 +571,7 @@ class ChannelMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "ChannelMessage":
+    def from_dict(cls: type["ChannelMessage"], d: Dict[str, Any]) -> "ChannelMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d["id"],
@@ -529,7 +592,7 @@ class RelayMessage:
     sender_name: str = ""
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "RelayMessage":
+    def from_dict(cls: type["RelayMessage"], d: Dict[str, Any]) -> "RelayMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("id", ""),
@@ -1058,7 +1121,7 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list:
     return list(msgs)
 
 
-# ── WorkerRecord: normalized worker data model (SOLID #4, S/D) ──
+# ── WorkerRecord: normalized worker data model ──
 
 @dataclass
 class WorkerRecord:
@@ -1107,7 +1170,7 @@ class WorkerRecord:
         return d
 
     @classmethod
-    def from_session_dict(cls, name: str, session: dict, tmux_prefix: str = "") -> "WorkerRecord":
+    def from_session_dict(cls: type["WorkerRecord"], name: str, session: dict, tmux_prefix: str = "") -> "WorkerRecord":
         """Create from legacy session dict (as returned by get_registered_sessions)."""
         return cls(
             name=name,
@@ -1149,7 +1212,7 @@ class WorkerRegistryEntry:
         return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "WorkerRegistryEntry":
+    def from_dict(cls: type["WorkerRegistryEntry"], d: Dict[str, Any]) -> "WorkerRegistryEntry":
         """Construct an instance from a plain dictionary."""
         return cls(
             backend=d.get("backend", "claude"),
@@ -1177,7 +1240,7 @@ def build_claude_start_cmd(resume_id: str = "") -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
-# ── Narrow Backend: Interface Segregation (SOLID #8, I/L) ──
+# ── Narrow Backend: Interface Segregation ──
 
 class BackendLifecycle(Protocol):
     """How to start/restart a backend CLI process."""
@@ -1272,8 +1335,8 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
             remote_cache.tools[key] = found
             print(f"[bridge] discovered {tool} on {host}: {found}")
             return found
-    except (subprocess.SubprocessError, OSError):
-        pass
+    except (subprocess.SubprocessError, OSError) as exc:
+        pass  # best-effort probe: _resolve_remote_tool
     return tool  # fallback to bare name
 
 
@@ -1764,8 +1827,8 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
             r = _remote_run(["git", "-C", target_cwd, "rev-parse", "--git-dir"],
                             host=host, capture_output=True, text=True, timeout=10)
             is_existing = r.returncode == 0
-        except (subprocess.SubprocessError, OSError):
-            pass
+        except (subprocess.SubprocessError, OSError) as exc:
+            pass  # best-effort probe: _git_pull_state
 
         if not is_existing:
             # Fresh clone from bare repo
@@ -2012,8 +2075,8 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 finally:
                     try:
                         os.unlink(tmpfile)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        pass  # best-effort io: unknown
 
             if r.returncode != 0:
                 return False
@@ -2213,8 +2276,8 @@ class ClaudeBackend:
             )
             if r.returncode == 0 and "Paste code here" in r.stdout:
                 literal = True
-        except (subprocess.SubprocessError, OSError):
-            pass
+        except (subprocess.SubprocessError, OSError) as exc:
+            pass  # best-effort probe: send
         return tmux_send_message(tmux_name, text, host=host, literal=literal)
 
     def is_online(self, tmux_name: str) -> bool:
@@ -2390,8 +2453,8 @@ def kill_adapter(name: str) -> None:
     if stderr_fh:
         try:
             stderr_fh.close()
-        except OSError:
-            pass
+        except OSError as exc:
+            pass  # best-effort io: kill_adapter
 
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
@@ -2419,8 +2482,8 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
                 host=host, capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip().split("\n")[0]
-        except (subprocess.SubprocessError, OSError):
-            pass
+        except (subprocess.SubprocessError, OSError) as exc:
+            pass  # best-effort probe: _find_codex_transcript
         return None
 
     import glob
@@ -2521,8 +2584,8 @@ def _read_noninteractive_activity(worker_name: str) -> str:
                     return f"idle (last response {age // 60}m ago)"
                 else:
                     return f"idle (last response {age // 3600}h ago)"
-        except (subprocess.SubprocessError, OSError, ValueError):
-            pass
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            pass  # best-effort probe: unknown
     return "idle"
 
 
@@ -2564,11 +2627,8 @@ def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
     return is_process_running(tmux_name, "claude", host=host)
 
 
-# ── SOLID #4: BridgeRuntimeState — typed in-memory state ────────────────
-#
-# Replaces the raw `state` dict and `_last_mention` dict with a typed
-# class. All runtime state reads/writes go through this object.
-# The `state` dict alias remains for backward compatibility during migration.
+# ── BridgeRuntimeState: typed in-memory state ──
+
 
 class MentionTracker:
     """Tracks consecutive @mentions for auto-focus.
@@ -2600,11 +2660,11 @@ class MentionTracker:
         """Return all keys (dict-like access)."""
         return self._KEYS
 
-    def __iter__(self) -> Iterator[tuple[str, Any]]:
+    def __iter__(self) -> Iterator[str]:
         """Iterate over keys (dict-like access)."""
         return iter(self._KEYS)
 
-    def update(self, other: dict) -> None:
+    def update(self, other: dict[str, Any]) -> None:
         """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEYS:
@@ -2650,11 +2710,11 @@ class BridgeRuntimeState:
         """Return all keys (dict-like access)."""
         return list(self._KEY_MAP.keys())
 
-    def __iter__(self) -> Iterator[tuple[str, Any]]:
+    def __iter__(self) -> Iterator[str]:
         """Iterate over keys (dict-like access)."""
         return iter(self._KEY_MAP)
 
-    def update(self, other: dict) -> None:
+    def update(self, other: dict[str, Any]) -> None:
         """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEY_MAP:
@@ -2678,7 +2738,7 @@ class DiskUsage:
     ts: float = 0.0     # timestamp of probe
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "DiskUsage":
+    def from_dict(cls: type["DiskUsage"], d: Dict[str, Any]) -> "DiskUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
@@ -2703,7 +2763,7 @@ class MemoryUsage:
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "MemoryUsage":
+    def from_dict(cls: type["MemoryUsage"], d: Dict[str, Any]) -> "MemoryUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
@@ -2730,7 +2790,7 @@ class IoUsage:
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "IoUsage":
+    def from_dict(cls: type["IoUsage"], d: Dict[str, Any]) -> "IoUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             read_mb_s=d.get("read_mb_s", 0.0),
@@ -2755,7 +2815,7 @@ class CpuHog:
     user: str = ""
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "CpuHog":
+    def from_dict(cls: type["CpuHog"], d: Dict[str, Any]) -> "CpuHog":
         """Construct an instance from a plain dictionary."""
         return cls(
             pid=d.get("pid", 0),
@@ -2773,7 +2833,7 @@ class WorktreeItem:
     worker: str = ""
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "WorktreeItem":
+    def from_dict(cls: type["WorktreeItem"], d: Dict[str, Any]) -> "WorktreeItem":
         """Construct an instance from a plain dictionary."""
         return cls(
             path=d.get("path", ""),
@@ -3179,7 +3239,7 @@ class RewindToken:
         return {"name": self.name, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "RewindToken":
+    def from_dict(cls: type["RewindToken"], d: Dict[str, Any]) -> "RewindToken":
         """Construct an instance from a plain dictionary."""
         return cls(name=d["name"], expires_at=d["expires_at"])
 
@@ -3202,7 +3262,7 @@ class PrReviewToken:
                 "repo": self.repo, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "PrReviewToken":
+    def from_dict(cls: type["PrReviewToken"], d: Dict[str, Any]) -> "PrReviewToken":
         """Construct an instance from a plain dictionary."""
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
@@ -3316,8 +3376,8 @@ def _load_registry() -> Dict[str, Any]:
             print(f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
             try:
                 WORKER_REGISTRY_FILE.rename(corrupt_path)
-            except OSError:
-                pass
+            except OSError as exc:
+                pass  # best-effort io: _load_registry
         return {}
 
 
@@ -3334,8 +3394,8 @@ def _save_registry(data: Dict[str, Any]) -> None:
         except OSError:
             try:
                 os.unlink(tmp_path)
-            except OSError:
-                pass
+            except OSError as exc:
+                pass  # best-effort io: _save_registry
             raise
     except OSError as e:
         print(f"Failed to save worker registry: {e}")
@@ -5478,11 +5538,11 @@ def _read_session_file(name: str, filename: str) -> Optional[str]:
                     ensure_session_dir(name)
                     f.write_text(val)
                     f.chmod(0o600)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    pass  # best-effort io: unknown
                 return val
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            pass  # best-effort parse: unknown
     return ""
 
 
@@ -5543,8 +5603,8 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         with open(f, "a") as fh:
             fh.write(entry + "\n")
         f.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        pass  # best-effort io: _log_session_event
 
 
 def get_session_history(name: str, event: str | None = None) -> list:
@@ -5579,8 +5639,8 @@ def _cache_session_id(name: str, sid: str) -> None:
             _log_session_event(name, sid, cwd, "cache")
         f.write_text(sid)
         f.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        pass  # best-effort io: _cache_session_id
 
 
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
@@ -5605,7 +5665,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     """
     cache_file = get_session_dir(name) / "claude_session_id"
 
-    def _read_cache() -> dict[str, str]:
+    def _read_cache() -> str:
         if cache_file.exists():
             val = cache_file.read_text().strip()
             if val:
@@ -5628,12 +5688,14 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     return ""
 
 
+
 def get_claude_session_cwd(name: str) -> Optional[str]:
     """Read and return the current working directory for a worker session."""
     cwd = _read_session_file(name, "claude_session_cwd")
     if cwd:
         cwd = os.path.expanduser(cwd)
     return cwd
+
 
 
 def save_claude_session_cwd(name: str, cwd: str) -> None:
@@ -5646,11 +5708,13 @@ def save_claude_session_cwd(name: str, cwd: str) -> None:
     f.chmod(0o600)
 
 
+
 def clear_claude_session_id(name: str) -> None:
     """Remove the cached session ID for a worker."""
     f = get_session_dir(name) / "claude_session_id"
     if f.exists():
         f.unlink()
+
 
 
 def get_any_session_id(name: str) -> Optional[str]:
@@ -5749,8 +5813,8 @@ def clear_pending(name: str) -> None:
     pending = d / "pending"
     try:
         pending.unlink()
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as exc:
+        pass  # best-effort cleanup: clear_pending
 
 
 def is_pending(name: str) -> bool:
@@ -5987,13 +6051,13 @@ def _clear_hook_failures(name: str) -> None:
         try:
             _remote_run(["rm", "-f", signal_path], host=host,
                         capture_output=True, timeout=5)
-        except (subprocess.SubprocessError, OSError):
-            pass
+        except (subprocess.SubprocessError, OSError) as exc:
+            pass  # best-effort probe: _clear_hook_failures
     else:
         try:
             Path(signal_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            pass  # best-effort io: _clear_hook_failures
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> Optional[str]:
@@ -6239,8 +6303,8 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
                     )
-                except (urllib.error.URLError, OSError, TimeoutError):
-                    pass
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    pass  # best-effort notify: unknown
 
 
 def _check_mem_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -6293,8 +6357,8 @@ def _check_mem_usage_macos(host: str) -> Optional[Dict[str, Any]]:
             if "page size of" in line:
                 try:
                     page_size = int(line.split("page size of")[1].strip().rstrip("."))
-                except (ValueError, IndexError):
-                    pass
+                except (ValueError, IndexError) as exc:
+                    pass  # best-effort parse: _check_mem_usage_macos
             elif "Pages free:" in line:
                 free_pages = int(line.split(":")[1].strip().rstrip("."))
             elif "Pages inactive:" in line:
@@ -6388,8 +6452,8 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
                     )
-                except (urllib.error.URLError, OSError, TimeoutError):
-                    pass
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    pass  # best-effort notify: unknown
 
 
 def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -6426,8 +6490,8 @@ def _check_io_usage(host: Optional[str] = None) -> Optional[Dict[str, Any]]:
                     "write_iops": round(total_w_iops),
                     "util_pct": round(max_util, 1),
                 }
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
-        pass
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        pass  # best-effort parse: unknown
     try:
         r = _remote_run(
             ["vmstat", "1", "2"],
@@ -6525,8 +6589,8 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                         admin_chat_id,
                         f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
                     )
-                except (urllib.error.URLError, OSError, TimeoutError):
-                    pass
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    pass  # best-effort notify: unknown
 
 
 def _get_cpu_hogs(host: Optional[str] = None, is_mac: bool = False) -> List[Dict[str, Any]]:
@@ -6701,8 +6765,8 @@ def _probe_worktree_sizes(remote_hosts: set) -> None:
                             admin_chat_id,
                             f"✅ Worktree size recovered: {host_label} — {total_gb:.1f}GB (below {WORKTREE_ALERT_THRESHOLD_GB}GB)"
                         )
-                    except (urllib.error.URLError, OSError, TimeoutError):
-                        pass
+                    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                        pass  # best-effort notify: unknown
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             print(f"[watchdog] Worktree check error for {host_label}: {e}")
 
@@ -6746,8 +6810,8 @@ def _probe_tailscale() -> None:
                     "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
                 )
                 print("[watchdog] Tailscale recovery alert sent")
-            except (urllib.error.URLError, OSError, TimeoutError):
-                pass
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                pass  # best-effort notify: unknown
 
 
 # (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
@@ -8064,6 +8128,13 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WorkerManager:
+    """Manages worker lifecycle: hire, end, restart, and tmux session orchestration.
+
+    Tracks active workers via tmux session discovery and the persistent
+    registry file. Handles session creation, welcome message injection,
+    backend selection, and dead-worker restart logic.
+    """
+
     def __init__(self, sessions_dir: Path, tmux_prefix: str) -> None:
         """Initialize internal state and locks."""
         self.sessions_dir = sessions_dir
@@ -8995,8 +9066,8 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             local_home = str(Path.home())
             if remote_home and remote_home != local_home and sessions_dir_val.startswith(local_home):
                 sessions_dir_val = remote_home + sessions_dir_val[len(local_home):]
-        except (subprocess.SubprocessError, OSError):
-            pass
+        except (subprocess.SubprocessError, OSError) as exc:
+            pass  # best-effort probe: unknown
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "SESSIONS_DIR", sessions_dir_val], host=host, timeout=3)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host, timeout=3)
     # Always export BRIDGE_URL so workers know where their bridge is
@@ -9341,8 +9412,8 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
                         send_voice(chat_id, voice_path, caption=f"{name}:")
                         try:
                             os.unlink(voice_path)
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            pass  # best-effort io: _tts_and_send
             except OSError as e:
                 print(f"TTS thread error: {e}")
         # Run TTS in background thread to not block /response return
@@ -9515,8 +9586,8 @@ def get_all_chat_ids() -> List[int]:
                         chat_id = chat_id_file.read_text().strip()
                         if chat_id:
                             chat_ids.add(chat_id)
-                    except (OSError, ValueError):
-                        pass
+                    except (OSError, ValueError) as exc:
+                        pass  # best-effort parse: get_all_chat_ids
     # Also include current admin if known
     if admin_chat_id:
         chat_ids.add(str(admin_chat_id))
@@ -9618,7 +9689,7 @@ class _LegacyTransportAdapter(MessageTransport):
         return None
 
 
-# ── CommandRouter: dict-based dispatch (SOLID #3, O/S) ──
+# ── CommandRouter: dict-based dispatch ──
 
 # Type alias for command handler functions
 CommandFn = Callable[[str, ChatId, MessageId], bool]
@@ -10082,8 +10153,8 @@ class TeleportCommandsMixin:
             try:
                 state_file = SESSIONS_DIR / name / "teleport_state"
                 state_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                pass  # best-effort io: unknown
 
     def _stop_worker_for_teleport(self, name: str, tmux_name: str, host: str | None=None) -> str | None:
         """Gracefully stop Claude Code and return session_id."""
@@ -10682,15 +10753,15 @@ class TeleportCommandsMixin:
         try:
             state_file = SESSIONS_DIR / name / "teleport_state"
             state_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            pass  # best-effort io: unknown
 
     def _teleport_notify(self, chat_id: int | str, text: str) -> None:
         """Send progress notification during teleport."""
         try:
             transport.send_text(chat_id, text)
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: _teleport_notify
 
 
 
@@ -11686,6 +11757,13 @@ class MediaRoutingMixin:
 
 
 class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, ChannelRelayCommandsMixin, MediaRoutingMixin):
+    """Dispatches Telegram commands and messages to appropriate handlers.
+
+    Maintains a registry of /command → handler mappings. Routes incoming
+    messages to focused workers, handles @mentions, media groups, and
+    interactive reply detection. Delegates specialized commands to mixins.
+    """
+
     def __init__(self, transport: Optional[MessageTransport],
                  workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
@@ -11700,7 +11778,6 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
         self._restart_all_abort: threading.Event = threading.Event()
         self._restart_all_thread: Optional[threading.Thread] = None
 
-        # SOLID #3: Command registry — maps command name to handler.
         # Each handler takes (arg, chat_id, message_id) and returns True if handled.
         # To add a new command, add one line here. No dispatch changes needed.
         self._commands: Dict[str, CommandFn] = {
@@ -12199,7 +12276,6 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        # SOLID #3: Registry-based dispatch — O(1) lookup, no if/elif chain.
         # Adding a new command = adding one entry to self._commands in __init__.
         handler = self._commands.get(cmd)
         if handler:
@@ -12279,8 +12355,8 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                 headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 _json.loads(resp.read())
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: unknown
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
         pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
         names_str = ", ".join(enabled)
@@ -12513,8 +12589,8 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
                             page_info = _run_team_chat_query("page-for-msg", msg_id=first_msg_id)
                             if page_info and page_info.get("page"):
                                 source_link = f"\n{base_url}/team-chat?token={tc_token}&page={page_info['page']}#msg-{first_msg_id}"
-                        except (ValueError, IndexError):
-                            pass
+                        except (ValueError, IndexError) as exc:
+                            pass  # best-effort parse: unknown
                 lines.append(f"{i}. {preview}{source_link}")
 
         self.reply(chat_id, "\n".join(lines))
@@ -13086,8 +13162,8 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                     with _TRANSCRIPT_SYNC_LOCK:
                         _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)"
                         _TRANSCRIPT_SYNC[key]["pct"] = pct
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as exc:
+                pass  # best-effort parse: unknown
 
         if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
             with _TRANSCRIPT_SYNC_LOCK:
@@ -13156,8 +13232,8 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                                              daemon=True)
                         t.start()
                         return "syncing", sid, cwd
-            except (OSError, subprocess.SubprocessError):
-                pass
+            except (OSError, subprocess.SubprocessError) as exc:
+                pass  # best-effort probe: unknown
 
     if transcript_path.exists():
         return transcript_path, sid, cwd
@@ -13524,8 +13600,8 @@ def _transcript_stats(entries: list) -> dict:
                 duration_str = f"{hours}h {mins}m"
             else:
                 duration_str = f"{mins}m"
-        except (ValueError, TypeError, KeyError):
-            pass
+        except (ValueError, TypeError, KeyError) as exc:
+            pass  # best-effort parse: unknown
     return {"n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
             "lines_add": lines_add, "lines_del": lines_del,
             "lines_mod": lines_mod, "n_files": len(files_modified), "model": model,
@@ -13742,8 +13818,8 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
                 try:
                     with open(_file_full, "r", encoding="utf-8", errors="replace") as _ff:
                         _file_content = _ff.read(64_000)  # cap at 64KB
-                except OSError:
-                    pass
+                except OSError as exc:
+                    pass  # best-effort io: unknown
                 if ext == ".md":
                     # Render markdown to HTML
                     _rendered = _render_md_to_html(_file_content)
@@ -14096,8 +14172,8 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                 file_size_str = f"{file_size_bytes / 1024:.0f} KB"
             else:
                 file_size_str = f"{file_size_bytes} B"
-        except OSError:
-            pass
+        except OSError as exc:
+            pass  # best-effort io: unknown
 
     # Pre-index tool results by tool_use_id for merging into tool_use blocks
     _tool_results = {}
@@ -14676,7 +14752,7 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {{
     return page_html
 
 
-# ── EndpointRouter + Handler: thin HTTP dispatch (SOLID #2, S/O/D) ──
+# ── EndpointRouter + Handler: thin HTTP dispatch ──
 
 class EndpointRouter:
     """Maps HTTP paths to handler functions via dispatch table."""
@@ -14827,8 +14903,8 @@ class GuestEndpointsMixin:
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f514 Guest \"{name}\" connected")
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: unknown
 
         print(f"Guest registered: {name} (expires {expires_at})")
         self._send_json(200, {
@@ -14931,8 +15007,8 @@ class GuestEndpointsMixin:
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"[{ch_id}] {from_member}: {text}")
-                        except (urllib.error.URLError, OSError, TimeoutError):
-                            pass
+                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                            pass  # best-effort notify: unknown
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
             elif target.startswith("ch_"):
@@ -14975,8 +15051,8 @@ class GuestEndpointsMixin:
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"[{target}] {from_member}: {text}")
-                        except (urllib.error.URLError, OSError, TimeoutError):
-                            pass
+                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                            pass  # best-effort notify: unknown
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
             elif target.startswith("guest:"):
@@ -15016,8 +15092,8 @@ class GuestEndpointsMixin:
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
                                     f"\U0001f514 Guest \"{guest_name}\" → {worker}")
-                        except (urllib.error.URLError, OSError, TimeoutError):
-                            pass
+                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                            pass  # best-effort notify: unknown
                 results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
 
         # Single target: flat response for backwards compat
@@ -15124,8 +15200,8 @@ class GuestEndpointsMixin:
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f514 Guest \"{guest['name']}\" disconnected")
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: handle_guest_disconnect
 
         print(f"Guest disconnected: {guest['name']}")
         self._send_json(200, {"ok": True, "name": guest["name"]})
@@ -15205,8 +15281,8 @@ class ChannelEndpointsMixin:
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: unknown
 
         print(f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
         self._send_json(200, {
@@ -15246,8 +15322,8 @@ class ChannelEndpointsMixin:
                         parts.append(f"removed {', '.join(removed)}")
                     send_telegram_message(admin_chat_id,
                         f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
-            except (urllib.error.URLError, OSError, TimeoutError):
-                pass
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                pass  # best-effort notify: handle_channel_members
 
         self._send_json(200, {
             "ok": True,
@@ -15330,8 +15406,8 @@ class ChannelEndpointsMixin:
                     if admin_chat_id:
                         send_telegram_message(admin_chat_id,
                             f"[{channel_id}] {from_member}: {text}")
-                except (urllib.error.URLError, OSError, TimeoutError):
-                    pass
+                except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                    pass  # best-effort notify: unknown
 
         self._send_json(200, {
             "ok": True,
@@ -15432,8 +15508,8 @@ class ChannelEndpointsMixin:
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
                     f"\U0001f4e2 Channel {channel_id} closed")
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: handle_channel_delete
         print(f"Channel deleted: {channel_id}")
         self._send_json(200, {"ok": True, "channel": channel_id})
 
@@ -15684,8 +15760,8 @@ class PrEndpointsMixin:
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: unknown
 
         # Route to workers via @mentions
         targets, _ = command_router.parse_at_mentions(comment_body)
@@ -15761,8 +15837,8 @@ class PrEndpointsMixin:
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            pass  # best-effort notify: unknown
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -16172,6 +16248,13 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
 
 class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin, RelayEndpointsMixin, PrEndpointsMixin, TranscriptEndpointsMixin):
+    """HTTP request handler for the Telegram webhook and worker API endpoints.
+
+    Processes incoming Telegram updates (POST /), routes them through
+    CommandRouter, and serves worker management endpoints (/hire, /workers,
+    /checkin, /health, etc.). Delegates specialized endpoints to mixins.
+    """
+
     def _send_json(self, status_code: int, data: dict) -> None:
         """Send a JSON response with proper Content-Type."""
         body = json.dumps(data).encode()
@@ -16208,7 +16291,6 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
         })
 
     def do_POST(self) -> None:
-        # SOLID #2: Registry-based endpoint dispatch.
         # Exact-match and pattern-match POST handlers are registered in
         # _setup_endpoint_routes() below. Adding a new endpoint means
         # one registration call, not another if/elif here.
@@ -16422,8 +16504,8 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                                       for s in r.stdout.strip().split("\n")
                                       if s.startswith(TMUX_PREFIX)]
                     conflict = name in active_workers if name else False
-            except (subprocess.SubprocessError, OSError):
-                pass
+            except (subprocess.SubprocessError, OSError) as exc:
+                pass  # best-effort probe: unknown
             worker_manager.invalidate_sessions_cache()
             self._send_json(200, {
                 "ok": True,
@@ -16533,8 +16615,8 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                         _log_session_event(session_name, hook_sid, cwd, "hook")
                         sid_file.write_text(hook_sid)
                         sid_file.chmod(0o600)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    pass  # best-effort io: unknown
 
             # Send response using shared helper
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
@@ -17005,8 +17087,8 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
         with open(f"/proc/{ppid}/cmdline", "rb") as f:
             cmdline = f.read().decode().replace("\x00", " ").strip()
             parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
-    except (OSError, UnicodeDecodeError):
-        pass
+    except (OSError, UnicodeDecodeError) as exc:
+        pass  # best-effort io: graceful_shutdown
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
 
@@ -17021,15 +17103,15 @@ def graceful_shutdown(signum: int, frame: Any) -> None:
         try:
             gmail_connector_instance.stop()
             print("Gmail connector stopped")
-        except (RuntimeError, OSError):
-            pass
+        except (RuntimeError, OSError) as exc:
+            pass  # best-effort io: graceful_shutdown
 
     if github_connector_instance is not None:
         try:
             github_connector_instance.stop()
             print("GitHub connector stopped")
-        except (RuntimeError, OSError):
-            pass
+        except (RuntimeError, OSError) as exc:
+            pass  # best-effort io: unknown
 
     send_shutdown_message()
     sys.exit(0)
