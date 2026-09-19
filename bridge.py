@@ -406,7 +406,7 @@ except ImportError as e:
 
 # ── File map ───────────────────────────────────────────────────────────
 #
-#   L1-380      Imports, type aliases, 33 TypedDict/5 NamedTuple models
+#   L1-380      Imports, type aliases, 33 TypedDict/5 NamedTuple/1 type alias models
 #   L~436       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
 #               ResourceAlertConfig, MediaConfig), AppContext
 #   L~820       Guest/channel/relay subsystem (GuestSession, RelayStore)

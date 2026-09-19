@@ -440,21 +440,42 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
   `_send_start_command()`, `_wait_for_startup()`, `_retry_after_stale_resume()`
 - Each helper has a single responsibility with full docstring
 
-**Naming:**
-- `ch` → `channel`, `w` → `worker_name` in `relay_guide_text()`
-- `qs` → `query_params` in all HTTP handlers (13 sites)
+**Code organization (continued):**
+- Decomposed `_extract_activity()` (220→25 lines) into 11 focused priority-check helpers:
+  `_activity_from_spinner`, `_activity_from_tool`, `_activity_from_rate_limit`,
+  `_activity_from_interactive`, `_activity_from_prompt`, `_activity_from_editor`,
+  `_activity_from_hooks`, `_activity_from_confirmation`, `_activity_from_tasks`,
+  `_activity_from_output_block`, `_activity_from_error`
+- Main function now a typed priority cascade via `_ActivityCheck` type alias
 
-**Architecture summary — All 658 functions:**
-- 658/658 fully annotated (100%) with return types and parameter types
-- 658/658 have docstrings (100%)
+**Naming:**
+- `ch` → `channel` across all relay/channel functions (19 sites)
+- `w` → `worker_name` in `relay_guide_text()`
+- `qs` → `query_params` in all HTTP handlers (13 sites)
+- `ws` → `worker_state` in teleport pre-flight (2 sites)
+- `r_home` → `home_result` in teleport subprocess results (6 sites)
+- `r_id` → `id_result` in teleport subprocess results (1 site)
+- `h` → `html_out` in `_render_md_to_html()` (24 sites)
+- `h` → `name_hash`, `entry_html` in transcript rendering (6 sites)
+- `d` → `session_dir` in session file functions (6 sites)
+- `d`/`k`/`v` → `result`/`field_name`/`value` in dataclass serialization (2 sites)
+- `fp` → `file_path`, `file_path_esc`, `file_path_html` in transcript HTML (4 sites)
+- `av` → `avatar` in team chat HTML (3 sites)
+- `g` → `guest` in guest store (1 site)
+- Zero non-common single-letter variable names remaining
+
+**Architecture summary — All 669 functions:**
+- 669/669 fully annotated (100%) with return types and parameter types
+- 669/669 have docstrings (100%)
 - 33 TypedDicts (2 functional-syntax for reserved-word keys)
-- 5 NamedTuples, 6 Protocols
+- 5 NamedTuples, 6 Protocols, 1 type alias (_ActivityCheck)
 - All `list`/`dict` annotations parameterized (zero bare `list`, zero bare `dict`)
 - All error diagnostics via `_log()` (zero raw `print(stderr)`)
 - ~100 remaining stdout prints are intentional operational status messages
 - Complete DI threading: 68 subprocess + 136 time calls use injectable seams
 - Structured logging via `_log()` with severity levels (ERROR/WARN/INFO/DEBUG)
 - 19 `Any` remain at genuine boundaries (`**kwargs`, `__getitem__`, conditionally imported types)
+- Zero non-common single-letter variable names
 
 ### v0.41.0 - Complete DI threading across entire codebase (quality push round 9)
 
