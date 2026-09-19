@@ -959,12 +959,12 @@ def _guest_save() -> None:
         active_guests = {}
         for k, v in guest_store.guests.items():
             if now <= v.get("expires_at_unix", 0):
-                g = dict(v)
+                guest = dict(v)
                 # Convert set to list for JSON
-                if isinstance(g.get("notified_workers"), set):
-                    g["notified_workers"] = list(g["notified_workers"])
-                active_guests[k] = g
-        active_names = {g["name"] for g in active_guests.values()}
+                if isinstance(guest.get("notified_workers"), set):
+                    guest["notified_workers"] = list(guest["notified_workers"])
+                active_guests[k] = guest
+        active_names = {guest["name"] for guest in active_guests.values()}
         active_inboxes = {k: v for k, v in guest_store.inboxes.items() if k in active_names}
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w") as f:
@@ -1284,7 +1284,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
     guest_token = f"gt_{secrets.token_urlsafe(32)}"
     reply_token = f"rt_{secrets.token_urlsafe(32)}"
     now = _clock.time()
-    ch = {
+    channel = {
         "id": channel_id,
         "label": label,
         "worker": worker,
@@ -1297,7 +1297,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
         "reply_token": reply_token,
         "messages": [],
     }
-    return ch, guest_token, reply_token
+    return channel, guest_token, reply_token
 
 
 def _relay_base_url() -> str:
@@ -1350,42 +1350,42 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     """Authenticate a guest token for a relay channel. Returns channel or None."""
     with relay_store.lock:
-        ch = relay_store.channels.get(channel_id)
-    if not ch:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
         return None
-    if _clock.time() > ch.get("expires_at_unix", 0):
+    if _clock.time() > channel.get("expires_at_unix", 0):
         return None
-    if hashlib.sha256(token.encode()).hexdigest() != ch.get("guest_token_hash"):
+    if hashlib.sha256(token.encode()).hexdigest() != channel.get("guest_token_hash"):
         return None
-    return ch
+    return channel
 
 
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     """Authenticate a reply token for a relay channel. Returns channel or None."""
     with relay_store.lock:
-        ch = relay_store.channels.get(channel_id)
-    if not ch:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
         return None
-    if _clock.time() > ch.get("expires_at_unix", 0):
+    if _clock.time() > channel.get("expires_at_unix", 0):
         return None
-    if hashlib.sha256(token.encode()).hexdigest() != ch.get("reply_token_hash"):
+    if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"):
         return None
-    return ch
+    return channel
 
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
     """Guest sends a message to the worker. Returns (envelope_text, message_dict)."""
     with relay_store.lock:
-        ch = relay_store.channels.get(channel_id)
-    if not ch:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
         return None, None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
     base = f"{_relay_base_url()}/v1/{channel_id}"
-    reply_token = ch["reply_token"]
+    reply_token = channel["reply_token"]
 
     envelope = (
-        f"[RELAY from {ch['label']}]\n"
+        f"[RELAY from {channel['label']}]\n"
         f"channel: {channel_id}\n"
         f"message_id: {msg_id}\n"
         f"reply: curl -fsS {base}/reply "
@@ -1400,13 +1400,13 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
     msg = {
         "message_id": msg_id,
         "direction": "guest_to_worker",
-        "from": ch["label"],
-        "to": ch["worker"],
+        "from": channel["label"],
+        "to": channel["worker"],
         "text": text,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     with relay_store.lock:
-        ch["messages"].append(msg)
+        channel["messages"].append(msg)
         _relay_save()
 
     return envelope, msg
@@ -1415,21 +1415,21 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     """Worker replies to the guest. Returns message dict."""
     with relay_store.lock:
-        ch = relay_store.channels.get(channel_id)
-    if not ch:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
         return None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
     msg = {
         "message_id": msg_id,
         "direction": "worker_to_guest",
-        "from": ch["worker"],
-        "to": ch["label"],
+        "from": channel["worker"],
+        "to": channel["label"],
         "text": text,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     with relay_store.lock:
-        ch["messages"].append(msg)
+        channel["messages"].append(msg)
         _relay_save()
     return msg
 
@@ -1437,10 +1437,10 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[dict[str, Any]]:
     """Get messages for a relay channel, optionally after a message ID."""
     with relay_store.lock:
-        ch = relay_store.channels.get(channel_id)
-    if not ch:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
         return []
-    msgs = ch["messages"]
+    msgs = channel["messages"]
     if not after:
         return list(msgs)
     for i, m in enumerate(msgs):
@@ -1485,17 +1485,17 @@ class WorkerRecord:
 
     def to_session_dict(self) -> dict[str, Any]:
         """Convert back to legacy session dict for backward compatibility."""
-        d: dict[str, Any] = {"backend": self.backend}
+        result: dict[str, Any] = {"backend": self.backend}
         if self.tmux_name:
-            d["tmux"] = self.tmux_name
+            result["tmux"] = self.tmux_name
         if self.host:
-            d["host"] = self.host
+            result["host"] = self.host
         if self.callback_url:
-            d["callback_url"] = self.callback_url
-            d["protocol"] = "http"
+            result["callback_url"] = self.callback_url
+            result["protocol"] = "http"
         if self.version:
-            d["version"] = self.version
-        return d
+            result["version"] = self.version
+        return result
 
     @classmethod
     def from_session_dict(cls: type["WorkerRecord"], name: str, session: dict[str, Any], tmux_prefix: str = "") -> "WorkerRecord":
@@ -1531,28 +1531,28 @@ class WorkerRegistryEntry:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this instance to a plain dictionary."""
-        d: dict[str, Any] = {"backend": self.backend}
-        for k in ("protocol", "callback_url", "host", "version", "chat_id",
-                   "hire_time", "tools", "home_host", "home_cwd"):
-            v = getattr(self, k)
-            if v is not None and v != "" and v != 0:
-                d[k] = v
-        return d
+        result: dict[str, Any] = {"backend": self.backend}
+        for field_name in ("protocol", "callback_url", "host", "version", "chat_id",
+                           "hire_time", "tools", "home_host", "home_cwd"):
+            value = getattr(self, field_name)
+            if value is not None and value != "" and value != 0:
+                result[field_name] = value
+        return result
 
     @classmethod
-    def from_dict(cls: type["WorkerRegistryEntry"], d: dict[str, Any]) -> "WorkerRegistryEntry":
+    def from_dict(cls: type["WorkerRegistryEntry"], data: dict[str, Any]) -> "WorkerRegistryEntry":
         """Construct an instance from a plain dictionary."""
         return cls(
-            backend=d.get("backend", "claude"),
-            protocol=d.get("protocol", ""),
-            callback_url=d.get("callback_url", ""),
-            host=d.get("host"),
-            version=d.get("version", ""),
-            chat_id=d.get("chat_id"),
-            hire_time=d.get("hire_time", 0),
-            tools=d.get("tools"),
-            home_host=d.get("home_host", ""),
-            home_cwd=d.get("home_cwd", ""),
+            backend=data.get("backend", "claude"),
+            protocol=data.get("protocol", ""),
+            callback_url=data.get("callback_url", ""),
+            host=data.get("host"),
+            version=data.get("version", ""),
+            chat_id=data.get("chat_id"),
+            hire_time=data.get("hire_time", 0),
+            tools=data.get("tools"),
+            home_host=data.get("home_host", ""),
+            home_cwd=data.get("home_cwd", ""),
         )
 
 
@@ -5813,12 +5813,12 @@ def get_session_dir(name: str) -> Path:
 
 def ensure_session_dir(name: str) -> Path:
     """Create session directory if needed with secure permissions (0o700)."""
-    d = get_session_dir(name)
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    session_dir = get_session_dir(name)
+    session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Ensure parent directories also have secure permissions
     SESSIONS_DIR.chmod(0o700)
-    d.chmod(0o700)
-    return d
+    session_dir.chmod(0o700)
+    return session_dir
 
 
 def get_pending_file(name: str) -> Path:
@@ -5937,17 +5937,17 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
     if not session_id:
         return
     try:
-        d = ensure_session_dir(name)
-        f = d / "session_history.jsonl"
+        session_dir = ensure_session_dir(name)
+        history_file = session_dir / "session_history.jsonl"
         entry = json.dumps({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "session_id": session_id,
             "cwd": cwd or "",
             "event": event,
         })
-        with open(f, "a") as fh:
+        with open(history_file, "a") as fh:
             fh.write(entry + "\n")
-        f.chmod(0o600)
+        history_file.chmod(0o600)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
 
@@ -5976,14 +5976,14 @@ def _cache_session_id(name: str, sid: str) -> None:
     if not sid:
         return
     try:
-        d = ensure_session_dir(name)
-        f = d / "claude_session_id"
-        old = f.read_text().strip() if f.exists() else ""
+        session_dir = ensure_session_dir(name)
+        id_file = session_dir / "claude_session_id"
+        old = id_file.read_text().strip() if id_file.exists() else ""
         if old != sid:
             cwd = get_claude_session_cwd(name)
             _log_session_event(name, sid, cwd, "cache")
-        f.write_text(sid)
-        f.chmod(0o600)
+        id_file.write_text(sid)
+        id_file.chmod(0o600)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
 
@@ -6048,18 +6048,18 @@ def save_claude_session_cwd(name: str, cwd: str) -> None:
     """Persist a worker's current working directory to disk."""
     if cwd:
         cwd = os.path.expanduser(cwd)
-    d = ensure_session_dir(name)
-    f = d / "claude_session_cwd"
-    f.write_text(cwd)
-    f.chmod(0o600)
+    session_dir = ensure_session_dir(name)
+    cwd_file = session_dir / "claude_session_cwd"
+    cwd_file.write_text(cwd)
+    cwd_file.chmod(0o600)
 
 
 
 def clear_claude_session_id(name: str) -> None:
     """Remove the cached session ID for a worker."""
-    f = get_session_dir(name) / "claude_session_id"
-    if f.exists():
-        f.unlink()
+    id_file = get_session_dir(name) / "claude_session_id"
+    if id_file.exists():
+        id_file.unlink()
 
 
 
@@ -6093,9 +6093,9 @@ def _get_pending_lock(name: str) -> threading.Lock:
 
 def set_pending(name: str, chat_id: int | str) -> None:
     """Mark session as having a pending request with secure permissions (0o600)."""
-    d = ensure_session_dir(name)
-    pending = d / "pending"
-    chat_id_file = d / "chat_id"
+    session_dir = ensure_session_dir(name)
+    pending = session_dir / "pending"
+    chat_id_file = session_dir / "chat_id"
     pending.write_text(str(int(_clock.time())))
     pending.chmod(0o600)
     chat_id_file.write_text(str(chat_id))
@@ -6155,8 +6155,8 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
 
 def clear_pending(name: str) -> None:
     """Clear pending status for session."""
-    d = get_session_dir(name)
-    pending = d / "pending"
+    session_dir = get_session_dir(name)
+    pending = session_dir / "pending"
     try:
         pending.unlink()
     except FileNotFoundError as exc:
@@ -7936,33 +7936,17 @@ def _normalize_activity(raw: str) -> str:
     return raw
 
 
-def _extract_activity(lines: list[str]) -> str:
-    """Extract a 1-line activity summary from tmux pane output.
+# Type alias for activity-check functions used by _extract_activity cascade.
+_ActivityCheck = Callable[[list[str]], str | None]
 
-    Based on Claude Code v2.1.59 (repo d6ab0ea, 2026-02-26).
-    Scans for Claude Code UI signals. Priority:
-    1.  Active thinking spinner (· Verb… / * Verb…) — NOT ✻ (past tense)
-    2.  Tool actively running (● ToolName( + ⎿ Running…)
-    3.  Rate limiting / connection errors (blockers — before prompt check)
-    4.  Mode bars (⏵⏵ permission/accept-edits, ⏸ plan mode) vs idle (❯)
-    5.  Editor mode ("Save and close editor to continue...")
-    6.  Hook execution ("Running SessionStart/PreCompact hooks…")
-    7.  Confirmation prompts (plan approval, accept edits, team lead, etc.)
-    8.  Task progress (✔/◻)
-    9.  Last ● output block (non-tool)
-    10. Standalone error line
+
+def _activity_from_spinner(stripped: list[str]) -> str | None:
+    """Detect active thinking spinner (priority 1).
+
+    Claude Code cycles through various Unicode chars as spinner frames.
+    ✻ is ALSO a spinner frame — distinguish by "…" presence.
+    "✻ Verbing… (49m)" = active; "✻ Thought for 5s" = completed (no "…").
     """
-    if not lines:
-        return "Active"
-
-    stripped = [l.strip() for l in lines if l.strip()]
-    if not stripped:
-        return "Idle"
-
-    # 1. Active thinking spinner — "· Verb…" or "* Verb…" or "✢ Verb…" etc.
-    #    Claude Code cycles through various Unicode chars as spinner frames.
-    #    ✻ is ALSO a spinner frame (not just past tense) — distinguish by "…" presence.
-    #    "✻ Verbing… (49m)" = active; "✻ Thought for 5s" = completed (no "…").
     _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
         first = raw[0] if raw else ""
@@ -7971,33 +7955,38 @@ def _extract_activity(lines: list[str]) -> str:
         if first not in _ACTIVE_SPINNER_CHARS:
             continue
         # "· Compacting conversation… (5m 26s · thought for 5s)" → verb + duration
-        m = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
-        if m:
-            verb = m.group(1).strip()
-            dur = m.group(2).split('·')[0].strip()
+        match = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
+        if match:
+            verb = match.group(1).strip()
+            dur = match.group(2).split('·')[0].strip()
             return f"{verb} ({dur})"
-        # Fallback: "· Verb…" or "· Verb" without duration ($ anchor fixes greedy)
-        vm = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
-        if vm:
-            verb = vm.group(1).strip()
-            dm = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
-            return f"{verb} ({dm.group(1).strip()})" if dm else verb
+        # Fallback: "· Verb…" or "· Verb" without duration
+        verb_match = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
+        if verb_match:
+            verb = verb_match.group(1).strip()
+            dur_match = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
+            return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
+    return None
 
-    # 2. Tool actively running: "● ToolName(...)" followed by "⎿ Running…"
-    #    Also handles MCP tools: "● mcp__server__tool("
+
+def _activity_from_tool(stripped: list[str]) -> str | None:
+    """Detect actively running tool (priority 2).
+
+    Matches "● ToolName(...)" followed by "⎿ Running…" within 5 lines.
+    Also handles MCP tools: "● mcp__server__tool(".
+    """
     last_running_tool = None
     for i, raw in enumerate(stripped):
-        m_tool = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
-        if not m_tool:
+        tool_match = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
+        if not tool_match:
             continue
-        tool = m_tool.group(1)
-        # Look ahead up to 5 lines for "⎿ Running…" (tolerant of intermediate lines)
+        tool = tool_match.group(1)
         for j in range(i + 1, min(i + 6, len(stripped))):
-            s = stripped[j]
-            if not s:
+            line = stripped[j]
+            if not line:
                 continue
-            if s.startswith("⎿"):
-                if "Running" in s and "background" not in s:
+            if line.startswith("⎿"):
+                if "Running" in line and "background" not in line:
                     last_running_tool = tool
                 break
     if last_running_tool:
@@ -8006,43 +7995,44 @@ def _extract_activity(lines: list[str]) -> str:
             parts = last_running_tool.split("__")
             last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
         return f"Running {last_running_tool}"
+    return None
 
-    # 3. Rate limiting / connection errors (BEFORE prompt — blockers override idle)
+
+def _activity_from_rate_limit(stripped: list[str]) -> str | None:
+    """Detect rate limiting or connection errors (priority 3)."""
     for raw in reversed(stripped):
-        ll = raw.lower()
-        if "rate limit" in ll:
+        lower = raw.lower()
+        if "rate limit" in lower:
             return "Rate limited — waiting to retry"
-        if "connection error" in ll and "retrying" in ll:
+        if "connection error" in lower and "retrying" in lower:
             return "Connection error — retrying"
-        if ll.startswith("retrying") or "retrying in" in ll:
+        if lower.startswith("retrying") or "retrying in" in lower:
             return "Retrying API request"
+    return None
 
-    # 3b. Interactive prompts — Claude Code TUI has taken over input.
-    #      These footer lines appear at the bottom when a selection/question UI
-    #      is active. The ❯ symbol in these states is a SELECTION CURSOR, not
-    #      the text input prompt. Must check BEFORE the ❯ prompt check below.
-    #      Uses module-level _INTERACTIVE_FOOTERS list (shared with _extract_question_details).
+
+def _activity_from_interactive(stripped: list[str]) -> str | None:
+    """Detect interactive prompts — TUI selection/question UI (priority 3b/3c).
+
+    Checks footer lines (shared with _extract_question_details) and content
+    patterns. Must run BEFORE the ❯ prompt check because ❯ in these states
+    is a SELECTION CURSOR, not the text input prompt.
+    """
+    # 3b. Footer-based detection
     for raw in reversed(stripped):
         for footer in _INTERACTIVE_FOOTERS:
             if footer in raw:
-                # Try to extract question header (☐ line)
-                for q_raw in stripped:
-                    if "☐" in q_raw:
-                        q = q_raw.replace("☐", "").strip()
-                        if q:
-                            return f"Waiting for input: {q}"
+                for question_line in stripped:
+                    if "☐" in question_line:
+                        question = question_line.replace("☐", "").strip()
+                        if question:
+                            return f"Waiting for input: {question}"
                 return "Waiting for user input"
 
-    # 3c. Content-based interactive detection — prompts without standard footers.
-    #      ExitPlanMode, EnterPlanMode, and tool permission prompts may not render
-    #      any _INTERACTIVE_FOOTERS pattern (e.g. plan approval only shows "ctrl-g to edit"
-    #      when an editor is configured, and nothing at all otherwise).
-    #      Must check BEFORE the ❯ prompt check to avoid misclassifying ❯ selection cursor.
-    #      Uses module-level _INTERACTIVE_CONTENT list.
+    # 3c. Content-based detection (plan approval, tool permission)
     for raw in stripped:
         for pattern in _INTERACTIVE_CONTENT:
             if pattern in raw:
-                # Check if this is a plan approval specifically
                 if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
                     return "Waiting for plan approval"
                 if "plan mode" in raw.lower():
@@ -8050,19 +8040,17 @@ def _extract_activity(lines: list[str]) -> str:
                 if raw.startswith("Allow "):
                     return "Waiting for tool permission"
                 return "Waiting for user input"
+    return None
 
-    # 4. Prompt + mode bars — all bottom-bar elements are informational, not blocking
-    #    ⏵⏵ bypass permissions on · 1 bash    → mode bar (bypass ON, 1 bash auto-approved)
-    #    ⏵⏵ bypass permissions on (shift+tab)  → mode bar (bypass ON, no recent actions)
-    #    ⏵⏵ accept edits on (shift+tab)       → mode bar (accept edits mode)
-    #    ⏸ plan mode on (shift+tab to cycle)  → plan mode indicator
-    #    ❯                                     → idle prompt
-    #    ❯ some text                           → idle (auto-suggestion hint, not a message)
-    #
-    #  "bypass permissions on" means permissions ARE being bypassed — worker is NOT blocked.
-    #  The · N action count shows what was auto-approved (informational).
+
+def _activity_from_prompt(stripped: list[str]) -> str | None:
+    """Detect prompt/mode bars — ❯ idle, ⏸ plan mode (priority 4).
+
+    Bottom-bar elements are informational, not blocking.
+    "bypass permissions on" means permissions ARE being bypassed.
+    """
     last_prompt_idx = None
-    last_plan_bar_idx = None  # "⏸ plan mode on"
+    last_plan_bar_idx = None
     for i, raw in enumerate(stripped):
         if raw.startswith("❯"):
             last_prompt_idx = i
@@ -8077,20 +8065,29 @@ def _extract_activity(lines: list[str]) -> str:
     # Prompt present = ready (text after ❯ is auto-suggestion hint)
     if last_prompt_idx is not None:
         return "Ready"
+    return None
 
-    # 5. Editor mode — worker waiting for external editor
+
+def _activity_from_editor(stripped: list[str]) -> str | None:
+    """Detect external editor mode (priority 5)."""
     for raw in reversed(stripped):
         if "Save and close editor to continue" in raw:
             return "Waiting for external editor"
+    return None
 
-    # 6. Hook execution — system hooks running
+
+def _activity_from_hooks(stripped: list[str]) -> str | None:
+    """Detect system hook execution (priority 6)."""
     for raw in reversed(stripped):
         if "Running SessionStart" in raw:
             return "Running SessionStart hooks"
         if "Running PreCompact" in raw:
             return "Running PreCompact hooks"
+    return None
 
-    # 7. Confirmation prompts (plan approval, team lead, etc.)
+
+def _activity_from_confirmation(stripped: list[str]) -> str | None:
+    """Detect confirmation prompts — plan approval, team lead (priority 7)."""
     for raw in reversed(stripped):
         if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
             return "Waiting for plan approval"
@@ -8098,28 +8095,35 @@ def _extract_activity(lines: list[str]) -> str:
             return "In plan mode"
         if "Waiting for team lead" in raw:
             return "Waiting for team lead approval"
+    return None
 
-    # 8. Task progress
+
+def _activity_from_tasks(stripped: list[str]) -> str | None:
+    """Detect task progress checklist (priority 8)."""
     done = 0
     total = 0
     for raw in stripped:
-        s = raw.lstrip()
-        if s.startswith("✔") or s.startswith("✅"):
+        line = raw.lstrip()
+        if line.startswith("✔") or line.startswith("✅"):
             done += 1
             total += 1
-        elif s.startswith("◻"):
+        elif line.startswith("◻"):
             total += 1
     if total >= 2:
         return f"Tasks ({done}/{total} done)"
+    return None
 
-    # 9. Last non-tool ● output block
-    def _is_block_end(text: str) -> bool:
-        """Detect if a tmux line signals the end of a Claude output block."""
-        t = text.lstrip()
-        if t.startswith("Context left until auto-compact:"):
-            return True
-        return t.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
 
+def _is_output_block_end(text: str) -> bool:
+    """Detect if a tmux line signals the end of a Claude output block."""
+    trimmed = text.lstrip()
+    if trimmed.startswith("Context left until auto-compact:"):
+        return True
+    return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
+
+
+def _activity_from_output_block(stripped: list[str]) -> str | None:
+    """Extract last non-tool ● output block summary (priority 9)."""
     for i in range(len(stripped) - 1, -1, -1):
         raw = stripped[i]
         if not raw.startswith("●"):
@@ -8127,33 +8131,71 @@ def _extract_activity(lines: list[str]) -> str:
         # Skip tool calls (● CapitalWord( or ● mcp__server__tool()
         if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw):
             continue
-        parts = []
+        parts: list[str] = []
         head = re.sub(r'^●\s*', '', raw).strip()
         if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
             parts.append(head)
         j = i + 1
         while j < len(stripped):
             nxt = stripped[j]
-            if _is_block_end(nxt):
+            if _is_output_block_end(nxt):
                 break
-            t = nxt.strip()
-            if t and not t.startswith("⎿") and not t.startswith("(ctrl+"):
-                parts.append(t)
+            text = nxt.strip()
+            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"):
+                parts.append(text)
             j += 1
         if parts:
             msg = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
             if len(msg) > 120:
                 msg = msg[:117].rstrip() + "..."
             return msg
+    return None
 
-    # 10. Standalone error (case-insensitive for broader coverage)
+
+def _activity_from_error(stripped: list[str]) -> str | None:
+    """Detect standalone error lines (priority 10)."""
     for raw in reversed(stripped):
         if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
-            ll = raw.lower()
-            if ll.startswith("error"):
+            lower = raw.lower()
+            if lower.startswith("error"):
                 tail = raw[len("Error"):].lstrip(": ").strip()
                 return f"Error: {tail}" if tail else "Error"
             return f"Error: {raw[:60]}"
+    return None
+
+
+def _extract_activity(lines: list[str]) -> str:
+    """Extract a 1-line activity summary from tmux pane output.
+
+    Based on Claude Code v2.1.59 (repo d6ab0ea, 2026-02-26).
+    Scans for Claude Code UI signals in priority order.
+    Each check is a focused helper returning str | None.
+    """
+    if not lines:
+        return "Active"
+
+    stripped = [line.strip() for line in lines if line.strip()]
+    if not stripped:
+        return "Idle"
+
+    # Priority cascade — first match wins
+    _CHECKS: list[_ActivityCheck] = [
+        _activity_from_spinner,       # 1. Active thinking spinner
+        _activity_from_tool,          # 2. Tool actively running
+        _activity_from_rate_limit,    # 3. Rate limiting / connection errors
+        _activity_from_interactive,   # 3b/3c. Interactive prompts
+        _activity_from_prompt,        # 4. Prompt + mode bars
+        _activity_from_editor,        # 5. Editor mode
+        _activity_from_hooks,         # 6. Hook execution
+        _activity_from_confirmation,  # 7. Confirmation prompts
+        _activity_from_tasks,         # 8. Task progress
+        _activity_from_output_block,  # 9. Last ● output block
+        _activity_from_error,         # 10. Standalone error
+    ]
+    for check in _CHECKS:
+        result = check(stripped)
+        if result is not None:
+            return result
 
     return "Active"
 
@@ -11925,41 +11967,41 @@ class ChannelRelayCommandsMixin:
             members = parts[2:] if len(parts) > 2 else []
             members.append("manager")
             channel_id = channel_create_id(label)
-            ch = channel_new(channel_id, label, "manager", members)
+            channel = channel_new(channel_id, label, "manager", members)
             with channel_store.lock:
-                channel_store.channels[channel_id] = ch
+                channel_store.channels[channel_id] = channel
                 _channel_save()
-            member_str = ", ".join(ch["members"].keys())
+            member_str = ", ".join(channel["members"].keys())
             self.reply(chat_id,
                 f"\U0001f4e2 Channel {channel_id} ({label})\nMembers: {member_str}")
             return True
 
         if subcmd == "list":
             with channel_store.lock:
-                active = [(cid, ch) for cid, ch in channel_store.channels.items()
-                          if not channel_is_expired(ch)]
+                active = [(cid, channel) for cid, channel in channel_store.channels.items()
+                          if not channel_is_expired(channel)]
             if not active:
                 self.reply(chat_id, "No active channels.")
             else:
                 lines = []
-                for cid, ch in active:
-                    members = ", ".join(ch["members"].keys())
-                    lines.append(f"{cid} ({ch['label']}) — {members}")
+                for cid, channel in active:
+                    members = ", ".join(channel["members"].keys())
+                    lines.append(f"{cid} ({channel['label']}) — {members}")
                 self.reply(chat_id, "\n".join(lines))
             return True
 
-        # Remaining commands: /ch <channel_id> <action>
+        # Remaining commands: /channel <channel_id> <action>
         channel_id = subcmd
         with channel_store.lock:
-            ch = channel_store.channels.get(channel_id)
-        if not ch or channel_is_expired(ch):
+            channel = channel_store.channels.get(channel_id)
+        if not channel or channel_is_expired(channel):
             self.reply(chat_id, f"Channel {channel_id} not found.", outcome="Needs decision")
             return True
 
         if len(parts) < 2:
             # Just show channel info
-            members = ", ".join(ch["members"].keys())
-            self.reply(chat_id, f"{channel_id} ({ch['label']})\nMembers: {members}\nMessages: {len(ch['messages'])}")
+            members = ", ".join(channel["members"].keys())
+            self.reply(chat_id, f"{channel_id} ({channel['label']})\nMembers: {members}\nMessages: {len(channel['messages'])}")
             return True
 
         action = parts[1].lower()
@@ -11972,17 +12014,17 @@ class ChannelRelayCommandsMixin:
             return True
 
         if action == "members":
-            members = ", ".join(ch["members"].keys())
+            members = ", ".join(channel["members"].keys())
             self.reply(chat_id, f"{channel_id} members: {members}")
             return True
 
         if action == "add":
             to_add = parts[2:]
             if not to_add:
-                self.reply(chat_id, "Usage: /ch <id> add <member...>", outcome="Needs decision")
+                self.reply(chat_id, "Usage: /channel <id> add <member...>", outcome="Needs decision")
                 return True
             with channel_store.lock:
-                added = channel_add_members(ch, to_add)
+                added = channel_add_members(channel, to_add)
             if added:
                 self.reply(chat_id, f"{channel_id}: added {', '.join(added)}")
             else:
@@ -11992,10 +12034,10 @@ class ChannelRelayCommandsMixin:
         if action == "remove":
             to_remove = parts[2:]
             if not to_remove:
-                self.reply(chat_id, "Usage: /ch <id> remove <member...>", outcome="Needs decision")
+                self.reply(chat_id, "Usage: /channel <id> remove <member...>", outcome="Needs decision")
                 return True
             with channel_store.lock:
-                removed = channel_remove_members(ch, to_remove)
+                removed = channel_remove_members(channel, to_remove)
             if removed:
                 self.reply(chat_id, f"{channel_id}: removed {', '.join(removed)}")
             else:
@@ -12005,8 +12047,8 @@ class ChannelRelayCommandsMixin:
         # Default: send message to channel
         message_text = " ".join(parts[1:])
         with channel_store.lock:
-            msg = channel_append_message(ch, "manager", message_text)
-            members_snapshot = dict(ch["members"])
+            msg = channel_append_message(channel, "manager", message_text)
+            members_snapshot = dict(channel["members"])
         registered = get_registered_sessions()
         _fanout_channel_message(channel_id, "manager", message_text, msg,
                                      members_snapshot, registered)
@@ -13485,38 +13527,38 @@ TEAM_CHAT_MEDIA_DIR = os.path.expanduser("~/team/exports/chat-full")
 def _render_md_to_html(md_text: str) -> str:
     """Simple markdown to HTML renderer for file previews."""
     import re as _re, html as _html
-    h = _html.escape(md_text)
+    html_out = _html.escape(md_text)
     # Headers
-    h = _re.sub(r'^######\s+(.+)$', r'<h6>\1</h6>', h, flags=_re.MULTILINE)
-    h = _re.sub(r'^#####\s+(.+)$', r'<h5>\1</h5>', h, flags=_re.MULTILINE)
-    h = _re.sub(r'^####\s+(.+)$', r'<h4>\1</h4>', h, flags=_re.MULTILINE)
-    h = _re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', h, flags=_re.MULTILINE)
-    h = _re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', h, flags=_re.MULTILINE)
-    h = _re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', h, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^######\s+(.+)$', r'<h6>\1</h6>', html_out, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^#####\s+(.+)$', r'<h5>\1</h5>', html_out, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^####\s+(.+)$', r'<h4>\1</h4>', html_out, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', html_out, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', html_out, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', html_out, flags=_re.MULTILINE)
     # Code blocks (fenced)
-    h = _re.sub(r'```[a-z]*\n(.*?)```', r'<pre class="md-code"><code>\1</code></pre>', h, flags=_re.DOTALL)
+    html_out = _re.sub(r'```[a-z]*\n(.*?)```', r'<pre class="md-code"><code>\1</code></pre>', html_out, flags=_re.DOTALL)
     # Inline code
-    h = _re.sub(r'`([^`]+)`', r'<code class="md-inline">\1</code>', h)
+    html_out = _re.sub(r'`([^`]+)`', r'<code class="md-inline">\1</code>', html_out)
     # Bold + italic
-    h = _re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', h)
-    h = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', h)
-    h = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', h)
+    html_out = _re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', html_out)
+    html_out = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_out)
+    html_out = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', html_out)
     # Horizontal rule
-    h = _re.sub(r'^---+$', r'<hr>', h, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^---+$', r'<hr>', html_out, flags=_re.MULTILINE)
     # Unordered lists
-    h = _re.sub(r'^[-*]\s+(.+)$', r'<li>\1</li>', h, flags=_re.MULTILINE)
+    html_out = _re.sub(r'^[-*]\s+(.+)$', r'<li>\1</li>', html_out, flags=_re.MULTILINE)
     # Links
-    h = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', h)
+    html_out = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', html_out)
     # Line breaks → paragraphs (double newline)
-    h = _re.sub(r'\n{2,}', '</p><p>', h)
+    html_out = _re.sub(r'\n{2,}', '</p><p>', html_out)
     # Single newlines → <br>
-    h = h.replace('\n', '<br>')
+    html_out = html_out.replace('\n', '<br>')
     # Clean up br inside pre
-    h = _re.sub(r'(<pre[^>]*>.*?</pre>)', lambda m: m.group(0).replace('<br>', '\n'), h, flags=_re.DOTALL)
+    html_out = _re.sub(r'(<pre[^>]*>.*?</pre>)', lambda m: m.group(0).replace('<br>', '\n'), html_out, flags=_re.DOTALL)
     # Clean up br inside headers
     for tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-        h = _re.sub(rf'(<{tag}>.*?</{tag}>)', lambda m: m.group(0).replace('<br>', ''), h, flags=_re.DOTALL)
-    return f'<p>{h}</p>'
+        html_out = _re.sub(rf'(<{tag}>.*?</{tag}>)', lambda m: m.group(0).replace('<br>', ''), html_out, flags=_re.DOTALL)
+    return f'<p>{html_out}</p>'
 
 
 def _render_csv_to_html(csv_text: str) -> str:
@@ -13735,11 +13777,11 @@ def _generate_member_avatar(name: str) -> str:
     Produces 1000+ unique variants via:
     - Hue (36 steps) × shape (6) × accent (5) × saturation (2) = 2160 combos
     """
-    h = hash(name) & 0xFFFFFFFF
-    hue = (h % 36) * 10  # 0-350 in steps of 10
-    sat = 55 + (h >> 6 & 1) * 15  # 55 or 70
-    shape_idx = (h >> 7) % 6
-    accent_idx = (h >> 10) % 5
+    name_hash = hash(name) & 0xFFFFFFFF
+    hue = (name_hash % 36) * 10  # 0-350 in steps of 10
+    sat = 55 + (name_hash >> 6 & 1) * 15  # 55 or 70
+    shape_idx = (name_hash >> 7) % 6
+    accent_idx = (name_hash >> 10) % 5
     initials = name[:2].upper() if len(name) >= 2 else name.upper()
 
     bg = f"hsl({hue},{sat}%,42%)"
@@ -13918,7 +13960,7 @@ def _transcript_entry_to_html(entry: dict[str, Any], esc: Callable[[str], str], 
 
                     # Edit tool with old_string/new_string → render as diff
                     if tn == "Edit" and ti.get("old_string") is not None:
-                        fp = esc(ti.get("file_path", "?"))
+                        file_path_esc = esc(ti.get("file_path", "?"))
                         old_s = ti.get("old_string", "")
                         new_s = ti.get("new_string", "")
                         old_lines = old_s.splitlines(True)
@@ -13941,8 +13983,8 @@ def _transcript_entry_to_html(entry: dict[str, Any], esc: Callable[[str], str], 
                         n_pure_add = n_add - n_overlap
                         n_pure_del = n_del - n_overlap
                         stats_html = f'<span class="diff-stat"><span class="diff-plus">+{n_pure_add}</span> <span class="diff-minus">-{n_pure_del}</span> <span class="diff-mod">~{n_overlap}</span></span>'
-                        pp = fp.rsplit("/", 1)
-                        fp_html = f'<span class="fp-dir">{esc(pp[0])}/</span>{esc(pp[1])}' if len(pp) > 1 else esc(fp)
+                        pp = file_path_esc.rsplit("/", 1)
+                        fp_html = f'<span class="fp-dir">{esc(pp[0])}/</span>{esc(pp[1])}' if len(pp) > 1 else esc(file_path_esc)
                         err_cls = " act-err" if tr_err else ""
                         parts.append(f'<details class="act diff-act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp_html}</span>{stats_html}{_chev}</summary><div class="diff-body">{diff_body}</div></details>')
                     elif tn == "Bash" and inp:
@@ -13956,13 +13998,13 @@ def _transcript_entry_to_html(entry: dict[str, Any], esc: Callable[[str], str], 
                         pp = inp.rsplit("/", 1)
                         dp = esc(pp[0]) if len(pp) > 1 else ""
                         bp = esc(pp[-1])
-                        fp = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
+                        file_path_html = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
                         if tr_esc and not _skip_result:
                             # File tool with result → expandable
                             err_cls = " act-err" if tr_err else ""
-                            parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
+                            parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{file_path_html}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
                         else:
-                            parts.append(f'<div class="chip">{tool_svg}<span class="fp">{fp}</span></div>')
+                            parts.append(f'<div class="chip">{tool_svg}<span class="fp">{file_path_html}</span></div>')
                     else:
                         if tr_esc and not _skip_result:
                             err_cls = " act-err" if tr_err else ""
@@ -14012,9 +14054,9 @@ def _transcript_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
             ti = c.get("input", {})
             if c.get("name") == "Edit" and ti.get("old_string") is not None:
                 n_edit += 1
-                fp = ti.get("file_path", "")
-                if fp:
-                    files_modified.add(fp)
+                file_path = ti.get("file_path", "")
+                if file_path:
+                    files_modified.add(file_path)
                 n_old = len(ti.get("old_string", "").splitlines(True))
                 n_new = len(ti.get("new_string", "").splitlines(True))
                 overlap = min(n_old, n_new)
@@ -14022,9 +14064,9 @@ def _transcript_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
                 lines_del += n_old - overlap
                 lines_add += n_new - overlap
             elif c.get("name") in ("Write", "Read", "Edit"):
-                fp = ti.get("file_path", "")
-                if fp:
-                    files_modified.add(fp)
+                file_path = ti.get("file_path", "")
+                if file_path:
+                    files_modified.add(file_path)
     model = version = git_branch = ""
     first_ts = last_ts = ""
     input_tokens = output_tokens = 0
@@ -14331,11 +14373,11 @@ def _team_chat_html_messages(messages: list[dict[str, Any]], msg_by_id: dict[str
 
         # Avatar
         if sender == "manager":
-            av = _MANAGER_AV
+            avatar = _MANAGER_AV
         elif sender in _TEAM_MEMBERS:
-            av = _generate_member_avatar(sender)
+            avatar = _generate_member_avatar(sender)
         else:
-            av = _generate_member_avatar(sender or "system")
+            avatar = _generate_member_avatar(sender or "system")
 
         name_html = f'<span class="u-name">{esc(sender)}</span>'
         ts_html = f'<span class="ts" data-ts="{esc(ts)}">{esc(ts[11:16]) if len(ts) > 16 else ""}</span>'
@@ -14431,7 +14473,7 @@ def _team_chat_html_messages(messages: list[dict[str, Any]], msg_by_id: dict[str
 
         blocks.append(
             f'<div class="chat-msg" id="msg-{msg_id}">'
-            f'{av}<div class="chat-body">'
+            f'{avatar}<div class="chat-body">'
             f'{name_html} {ts_html}{ctx_link}'
             f'{reply_html}'
             f'{media_html}'
@@ -14865,8 +14907,8 @@ def _transcript_html_entries(page_entries: list[dict[str, Any]],
                           any(c.get("type") == "tool_result" for c in entry.get("message", {}).get("content", []) if isinstance(c, dict)))
         if is_tool_result:
             continue
-        h = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
-        if not h:
+        entry_html = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
+        if not entry_html:
             continue
         eidx = entry.get("_idx", -1)
         anchor = f' id="e-{eidx}"' if eidx >= 0 else ""
@@ -14877,22 +14919,22 @@ def _transcript_html_entries(page_entries: list[dict[str, Any]],
                 if in_assistant_turn:
                     blocks.append('</div>')
                     in_assistant_turn = False
-                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
-                blocks.append(h)
+                entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
+                blocks.append(entry_html)
             else:
                 if not in_assistant_turn:
                     blocks.append(f'<div class="turn-body"{anchor}>')
                     in_assistant_turn = True
-                blocks.append(h)
+                blocks.append(entry_html)
         else:
             if in_assistant_turn:
                 blocks.append('</div>')
                 in_assistant_turn = False
             if curl:
-                h = f'<a class="ctx-wrap" href="{curl}"{anchor}>{h}</a>'
+                entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
             elif anchor:
-                h = f'<div{anchor}>{h}</div>'
-            blocks.append(h)
+                entry_html = f'<div{anchor}>{entry_html}</div>'
+            blocks.append(entry_html)
     if in_assistant_turn:
         blocks.append('</div>')
 
@@ -15565,15 +15607,15 @@ class GuestEndpointsMixin:
             elif target.startswith("ch_"):
                 # Channel by ID
                 with channel_store.lock:
-                    ch = channel_store.channels.get(target)
-                    if not ch or channel_is_expired(ch):
+                    channel = channel_store.channels.get(target)
+                    if not channel or channel_is_expired(channel):
                         results.append({"target": target, "ok": False, "error": "channel not found"})
                         continue
-                    if from_member not in ch["members"]:
+                    if from_member not in channel["members"]:
                         results.append({"target": target, "ok": False, "error": "not a member"})
                         continue
-                    msg = channel_append_message(ch, from_member, text)
-                    members_snapshot = dict(ch["members"])
+                    msg = channel_append_message(channel, from_member, text)
+                    members_snapshot = dict(channel["members"])
                 _fanout_channel_message(target, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
@@ -15791,10 +15833,10 @@ class ChannelEndpointsMixin:
             created_by = "manager"
 
         channel_id = channel_create_id(label)
-        ch = channel_new(channel_id, label, created_by, valid_members, ttl)
+        channel = channel_new(channel_id, label, created_by, valid_members, ttl)
 
         with channel_store.lock:
-            channel_store.channels[channel_id] = ch
+            channel_store.channels[channel_id] = channel
             _channel_save()
 
         # Telegram notification
@@ -15825,14 +15867,14 @@ class ChannelEndpointsMixin:
             return
 
         with channel_store.lock:
-            ch = channel_store.channels.get(channel_id)
-            if not ch or channel_is_expired(ch):
+            channel = channel_store.channels.get(channel_id)
+            if not channel or channel_is_expired(channel):
                 self._send_json(404, {"ok": False, "error": "channel not found"})
                 return
 
-            added = channel_add_members(ch, data.get("add", []))
-            removed = channel_remove_members(ch, data.get("remove", []))
-            current = list(ch["members"].keys())
+            added = channel_add_members(channel, data.get("add", []))
+            removed = channel_remove_members(channel, data.get("remove", []))
+            current = list(channel["members"].keys())
 
         if added or removed:
             try:
@@ -15886,15 +15928,15 @@ class ChannelEndpointsMixin:
             from_member = "manager"
 
         with channel_store.lock:
-            ch = channel_store.channels.get(channel_id)
-            if not ch or channel_is_expired(ch):
+            channel = channel_store.channels.get(channel_id)
+            if not channel or channel_is_expired(channel):
                 self._send_json(404, {"ok": False, "error": "channel not found"})
                 return
-            if from_member not in ch["members"] and from_member != "manager":
+            if from_member not in channel["members"] and from_member != "manager":
                 self._send_json(403, {"ok": False, "error": f"{from_member} not a member"})
                 return
-            msg = channel_append_message(ch, from_member, text)
-            members_snapshot = dict(ch["members"])
+            msg = channel_append_message(channel, from_member, text)
+            members_snapshot = dict(channel["members"])
 
         # Fan-out to all members except sender
         tagged = f"[{channel_id} from {from_member}] {text}"
@@ -15954,21 +15996,21 @@ class ChannelEndpointsMixin:
                 return
             from_member = f"guest:{guest['name']}"
             with channel_store.lock:
-                ch = channel_store.channels.get(channel_id)
-                if not ch or channel_is_expired(ch):
+                channel = channel_store.channels.get(channel_id)
+                if not channel or channel_is_expired(channel):
                     self._send_json(404, {"ok": False, "error": "channel not found"})
                     return
-                if from_member not in ch["members"]:
+                if from_member not in channel["members"]:
                     self._send_json(403, {"ok": False, "error": "not a member of this channel"})
                     return
-                msgs, truncated = channel_get_messages(ch, after)
+                msgs, truncated = channel_get_messages(channel, after)
         else:
             with channel_store.lock:
-                ch = channel_store.channels.get(channel_id)
-                if not ch or channel_is_expired(ch):
+                channel = channel_store.channels.get(channel_id)
+                if not channel or channel_is_expired(channel):
                     self._send_json(404, {"ok": False, "error": "channel not found"})
                     return
-                msgs, truncated = channel_get_messages(ch, after)
+                msgs, truncated = channel_get_messages(channel, after)
 
         resp = {
             "ok": True,
@@ -16020,10 +16062,10 @@ class ChannelEndpointsMixin:
     def handle_channel_delete(self, channel_id: str) -> None:
         """DELETE /channels/{id} — delete a channel."""
         with channel_store.lock:
-            ch = channel_store.channels.pop(channel_id, None)
-            if ch:
+            channel = channel_store.channels.pop(channel_id, None)
+            if channel:
                 _channel_save()
-        if not ch:
+        if not channel:
             self._send_json(404, {"ok": False, "error": "channel not found"})
             return
         try:
@@ -16056,13 +16098,13 @@ class RelayEndpointsMixin:
             self._send_json(401, {"error": "missing token"})
             return
 
-        ch = relay_auth_guest(channel_id, token)
-        if not ch:
+        channel = relay_auth_guest(channel_id, token)
+        if not channel:
             self._send_json(403, {"error": "invalid or expired channel/token"})
             return
 
         if action is None:
-            guide = relay_guide_text(ch, token)
+            guide = relay_guide_text(channel, token)
             self.send_response(200)
             self.send_header("Content-Type", "text/markdown; charset=utf-8")
             self.end_headers()
@@ -16079,10 +16121,10 @@ class RelayEndpointsMixin:
         if action == "status":
             self._send_json(200, {
                 "channel_id": channel_id,
-                "worker": ch["worker"],
-                "label": ch["label"],
-                "expires_at": ch["expires_at"],
-                "message_count": len(ch["messages"]),
+                "worker": channel["worker"],
+                "label": channel["label"],
+                "expires_at": channel["expires_at"],
+                "message_count": len(channel["messages"]),
             })
             return
 
@@ -16095,8 +16137,8 @@ class RelayEndpointsMixin:
             self._send_json(401, {"error": "missing token"})
             return
 
-        ch = relay_auth_guest(channel_id, token)
-        if not ch:
+        channel = relay_auth_guest(channel_id, token)
+        if not channel:
             self._send_json(403, {"error": "invalid or expired channel/token"})
             return
 
@@ -16116,7 +16158,7 @@ class RelayEndpointsMixin:
             self._send_json(500, {"error": "channel not found"})
             return
 
-        workers = ch.get("workers", [ch["worker"]])
+        workers = channel.get("workers", [channel["worker"]])
         delivered = {}
         for w in workers:
             delivered[w] = send_to_worker(w, envelope)
@@ -16133,8 +16175,8 @@ class RelayEndpointsMixin:
             self._send_json(401, {"error": "missing token"})
             return
 
-        ch = relay_auth_reply(channel_id, token)
-        if not ch:
+        channel = relay_auth_reply(channel_id, token)
+        if not channel:
             self._send_json(403, {"error": "invalid or expired channel/token"})
             return
 
