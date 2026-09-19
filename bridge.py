@@ -8817,7 +8817,7 @@ class WorkerManager:
                 })
         return workers
 
-    def _wrap_for_caller(self, cmd: str, peer_host: str, caller_host: str) -> str:
+    def _wrap_for_caller(self, cmd: str, peer_host: str | None, caller_host: str | None) -> str:
         """Wrap a shell command so it executes on the peer's machine from the caller's POV.
 
         - Same machine (incl. both None): bare command, no ssh.
@@ -10525,7 +10525,7 @@ class TeleportCommandsMixin:
 
         except (subprocess.SubprocessError, ConnectionError, TimeoutError, TypeError, AttributeError, OSError, ValueError, KeyError) as e:
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
             self._teleport_notify(chat_id, f"Teleport failed: {e}")
             try:
                 state_file = SESSIONS_DIR / name / "teleport_state"
@@ -13467,8 +13467,8 @@ def _render_csv_to_html(csv_text: str) -> str:
     return f'<div class="file-body file-body-csv"><table><thead>{header}</thead><tbody>{body}</tbody></table></div>'
 
 
-def _run_team_chat_query(query_type: str, **kwargs: Any) -> str | None:
-    """Run team-chat-index.py via subprocess. Returns parsed JSON dict."""
+def _run_team_chat_query(query_type: str, **kwargs: Any) -> dict[str, Any] | None:
+    """Run team-chat-index.py via subprocess. Returns parsed JSON dict or None on failure."""
     cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
            "--jsonl", TEAM_CHAT_JSONL,
            "--db", TEAM_CHAT_DB,
@@ -13490,8 +13490,8 @@ def _run_team_chat_query(query_type: str, **kwargs: Any) -> str | None:
     return None
 
 
-def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> str | None:
-    """Run transcript-index.py locally or via SSH. Returns parsed JSON dict."""
+def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> dict[str, Any] | None:
+    """Run transcript-index.py locally or via SSH. Returns parsed JSON dict or None on failure."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = TRANSCRIPT_INDEX_SCRIPT
     if host:
@@ -16551,7 +16551,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         except (OSError, ValueError, KeyError) as e:
             print(f"Transcript endpoint error: {e}", file=sys.stderr, flush=True)
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
@@ -16614,7 +16614,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         except (OSError, ValueError, KeyError) as e:
             print(f"Team chat endpoint error: {e}", file=sys.stderr, flush=True)
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
@@ -17037,12 +17037,11 @@ class Handler(BaseHTTPRequestHandler, GuestEndpointsMixin, ChannelEndpointsMixin
                         cid_file.write_text(str(admin_chat_id))
                         cid_file.chmod(0o600)
             tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
-            import subprocess as _sp
             conflict = False
             active_workers = []
             try:
-                r = _sp.run(["tmux", "list-sessions", "-F", "#{session_name}"],
-                            capture_output=True, text=True, timeout=5)
+                r = _subprocess_runner.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                                           capture_output=True, text=True, timeout=5)
                 if r.returncode == 0:
                     active_workers = [s.removeprefix(TMUX_PREFIX)
                                       for s in r.stdout.strip().split("\n")

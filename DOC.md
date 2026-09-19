@@ -606,7 +606,7 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 - MediaConfig: media handling limits (file size, photo dimensions).
 
 **Type annotation pass (100% coverage):**
-- All 573 functions fully annotated (was 68%).
+- All 651 functions fully annotated (was 68%).
 - Fixed all `host: str = None` → `host: str | None = None` patterns.
 - Fixed raw `list`, `dict` → parameterized `list[str]`, `dict[str, Any]`.
 
