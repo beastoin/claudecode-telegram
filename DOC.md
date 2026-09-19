@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.41.0
+> Version: 0.42.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,42 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.42.0 - Structured logging, type parameterization, restart decomposition (quality push round 10)
+
+**Structured logging:**
+- Added `_log(level, component, msg, exc=)` function with severity levels (ERROR/WARN/INFO/DEBUG)
+- Converted ALL 178 `print(file=sys.stderr)` calls → `_log()` with proper severity
+- Converted 71 `print(f"[component] ...")` stdout diagnostic calls → `_log()`
+- Eliminated all 5 `traceback.print_exc()` calls → `_log(exc=e)` pattern
+- Format: `[LEVEL:component] message` — machine-parseable, grep-friendly
+- Zero raw `print()` calls for error diagnostics remain
+
+**Type safety:**
+- Parameterized ALL bare `list` and `dict` annotations (15 sites)
+- Zero bare `list`, zero bare `dict` in the codebase
+- Fixed return type annotations: `_run_team_chat_query`, `_run_transcript_query` (str → dict)
+- Fixed parameter annotation: `_wrap_for_caller` (str → str | None)
+- Fixed `/checkin` handler DI bypass: `import subprocess as _sp` → `_subprocess_runner`
+
+**Code organization:**
+- Decomposed `restart()` (164→40 lines) into 6 focused helpers:
+  `_prepare_restart_state()`, `_stop_running_claude()`, `_kill_stray_children()`,
+  `_send_start_command()`, `_wait_for_startup()`, `_retry_after_stale_resume()`
+- Each helper has a single responsibility with full docstring
+
+**Naming:**
+- `ch` → `channel`, `w` → `worker_name` in `relay_guide_text()`
+- `qs` → `query_params` in all HTTP handlers (13 sites)
+
+**Architecture summary — All 651 functions:**
+- 651/651 fully annotated (100%) with return types and parameter types
+- 651/651 have docstrings (100%)
+- 33 TypedDicts (2 functional-syntax for reserved-word keys)
+- 5 NamedTuples, 6 Protocols
+- Zero bare `list`, zero bare `dict`, zero raw `print(stderr)`
+- Complete DI threading: 68 subprocess + 136 time calls use injectable seams
+- Structured logging via `_log()` with severity levels
 
 ### v0.41.0 - Complete DI threading across entire codebase (quality push round 9)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.41.0"
+VERSION = "0.42.0"
 
 from dataclasses import dataclass, field
 import hashlib
@@ -427,8 +427,9 @@ except ImportError as e:
 #   L~15247     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
 #   L~17947     main() function, signal handlers, startup
 #
-#   DI coverage (v0.41.0): 67 subprocess + 136 time calls → injectable seams
+#   DI coverage (v0.42.0): 68 subprocess + 136 time calls → injectable seams
 #   Only _RealSubprocessRunner/_RealClock and 1 module-init call use direct stdlib
+#   Structured logging: all diagnostics via _log(LEVEL, component, msg)
 #
 # ======================================================================
 # CONFIGURATION
