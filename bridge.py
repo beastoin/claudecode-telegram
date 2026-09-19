@@ -10190,8 +10190,8 @@ class TeleportCommandsMixin:
 
         # 2. Worker not actively busy? (EXITED/OFFLINE/UNKNOWN are all fine)
         with watchdog.lock:
-            ws = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-        current_state = ws[0]
+            worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        current_state = worker_state[0]
         if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
             self.reply(chat_id,
                 f"{worker_name} is busy. Must be idle to teleport.\n"
@@ -10319,8 +10319,8 @@ class TeleportCommandsMixin:
 
         # Worker must not be actively busy
         with watchdog.lock:
-            ws = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-        if ws[0] in ("BUSY_TOOL", "BUSY_THINKING"):
+            worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
             self.reply(chat_id,
                 f"{worker_name} is busy. Must be idle to teleback.")
             return True
@@ -10389,10 +10389,10 @@ class TeleportCommandsMixin:
 
         # Get remote git status
         # Detect remote CWD (may have different $HOME prefix)
-        r_home = _remote_run(
+        home_result = _remote_run(
             ["bash", "-c", "echo $HOME"], host=remote_host,
             capture_output=True, text=True, timeout=5)
-        remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+        remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
         local_home = os.path.expanduser("~")
 
         remote_cwd = local_cwd
@@ -10453,19 +10453,19 @@ class TeleportCommandsMixin:
                 # e.g., /home/claude/project → /Users/beastoinagents/project
                 if target_cwd and target_host:
                     local_home = os.path.expanduser("~")
-                    r_home = _remote_run(
+                    home_result = _remote_run(
                         ["bash", "-c", "echo $HOME"], host=target_host,
                         capture_output=True, text=True, timeout=5)
-                    remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                    remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
                     if remote_home and remote_home != local_home and target_cwd.startswith(local_home):
                         target_cwd = remote_home + target_cwd[len(local_home):]
 
             # Expand ~ in target_cwd to remote $HOME
             if target_cwd and target_cwd.startswith("~") and target_host:
-                r_home = _remote_run(
+                home_result = _remote_run(
                     ["bash", "-c", "echo $HOME"], host=target_host,
                     capture_output=True, text=True, timeout=5)
-                remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
                 if remote_home:
                     target_cwd = remote_home + target_cwd[1:]
             elif target_cwd and target_cwd.startswith("~"):
@@ -10820,9 +10820,9 @@ class TeleportCommandsMixin:
                     _log(_LOG_INFO, "teleport", f"{w}")
 
             # Adapt settings.json paths for target $HOME
-            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
+            home_result = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
                                   capture_output=True, text=True, timeout=5)
-            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
             local_home = home
             if remote_home and remote_home != local_home:
                 settings_src = os.path.expanduser("~/.claude/settings.json")
@@ -10879,10 +10879,10 @@ class TeleportCommandsMixin:
         if r.returncode == 0 and r.stdout.strip():
             for remote_file in r.stdout.strip().splitlines():
                 # Convert remote path to local: replace remote $HOME with local
-                r_home = _remote_run(
+                home_result = _remote_run(
                     ["bash", "-c", "echo $HOME"], host=source_host,
                     capture_output=True, text=True, timeout=5)
-                remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
                 if remote_home and remote_file.startswith(remote_home):
                     local_file = home + remote_file[len(remote_home):]
                     local_dir = os.path.dirname(local_file)
@@ -11075,10 +11075,10 @@ class TeleportCommandsMixin:
         target_sessions_dir = str(SESSIONS_DIR)
         local_home = os.path.expanduser("~")
         if target_host:
-            r_home = _remote_run(
+            home_result = _remote_run(
                 ["bash", "-c", "echo $HOME"], host=target_host,
                 capture_output=True, text=True, timeout=5)
-            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
             if remote_home and remote_home != local_home and target_sessions_dir.startswith(local_home):
                 target_sessions_dir = remote_home + target_sessions_dir[len(local_home):]
 
@@ -11117,9 +11117,9 @@ class TeleportCommandsMixin:
 
         # Claude Code refuses --dangerously-skip-permissions as root
         if target_host:
-            r_id = _remote_run(["id", "-u"], host=target_host,
+            id_result = _remote_run(["id", "-u"], host=target_host,
                                capture_output=True, text=True)
-            if r_id.returncode == 0 and r_id.stdout.strip() == "0":
+            if id_result.returncode == 0 and id_result.stdout.strip() == "0":
                 cli_cmd = cli_cmd.replace(" --dangerously-skip-permissions", "")
 
         start_cmd = f'unset CLAUDECODE && {cli_cmd}'
@@ -11466,10 +11466,10 @@ class WorkerLifecycleCommandsMixin:
         if target_cwd and host:
             local_home = os.path.expanduser("~")
             if target_cwd.startswith(local_home):
-                r_home = _remote_run(
+                home_result = _remote_run(
                     ["bash", "-c", "echo $HOME"], host=host,
                     capture_output=True, text=True, timeout=5)
-                remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+                remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
                 if remote_home and remote_home != local_home:
                     target_cwd = remote_home + target_cwd[len(local_home):]
 
@@ -11517,9 +11517,9 @@ class WorkerLifecycleCommandsMixin:
         # If the file doesn't exist on the target, --resume will fail immediately
         if resume_id and target_cwd and host:
             # Build the project dir path on the remote host
-            r_home = _remote_run(["bash", "-c", "echo $HOME"], host=host,
+            home_result = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                                   capture_output=True, text=True, timeout=5)
-            remote_home = r_home.stdout.strip() if r_home.returncode == 0 else ""
+            remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
             if remote_home:
                 # Claude Code project dir: ~/.claude/projects/-<cwd with / replaced by->
                 cwd_slug = target_cwd.replace("/", "-")
