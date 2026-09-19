@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.38.1
+> Version: 0.39.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,36 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.39.0 - Type safety, error logging, media dedup (quality push round 7)
+
+**Error Handling (0 silent pass blocks):**
+- Converted all 52 `pass # best-effort` blocks to `print()` logging via stderr
+  (every failure now surfaces in logs instead of being silently swallowed)
+- Annotated 8 bare `pass` blocks with `# intentional no-op: <reason>`
+- Updated `_log_best_effort()` helper to use stderr consistently
+- Zero remaining silent error swallowing — aligns with "fail loudly" philosophy
+
+**Type Safety (24 TypedDicts, was 13):**
+- Added 11 new TypedDicts: `DiskUsageDict`, `MemUsageDict`, `IoUsageDict`,
+  `RewindTokenEntry`, `PrReviewTokenEntry`, `ProcStatsEntry`, `QuestionOption`,
+  `QuestionDetails`, `MediaGroupEntry`, `ReminderState`, `HealthSummaryDict`
+- Replaced `dict[str, Any]` in: `HostHealthState` (disk/mem/io/worktree stores),
+  `WorkerWatchdogState.waiting_input_details`, `LearningReminderState.state`,
+  `MediaGroupState.buffer`, token stores (`REWIND_TOKENS`, `PR_REVIEW_TOKENS`)
+- Typed return values: `_check_disk_usage*`, `_check_mem_usage*`, `_check_io_usage*`,
+  `_ps_stats`, `_extract_question_details`, `_new_reminder_state`, `_fire_reminder`,
+  `_extract_msg_text`, `to_health_summary`, `_send_interactive_reply`
+- `dict[str, Any]` count: 139 → 119 (14% reduction)
+
+**Code Organization (media sending dedup):**
+- Enhanced `_send_media_multipart()` with optional `file_data`, `filename`,
+  `mime_type` parameters for pre-processed content
+- Refactored `send_photo()`, `send_animation()`, `send_document()` to use the
+  shared `_send_media_multipart()` helper (~90 lines of duplicate multipart
+  body-building eliminated)
+- All 6 media types now go through one code path: send_photo, send_animation,
+  send_document, send_video, send_audio, send_voice
 
 ### v0.38.1 - Quality audit fixes: router migration, type safety, testability protocols
 
