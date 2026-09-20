@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.43.0
+> Version: 0.44.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,28 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.44.0 - Named constants, function decomposition (quality push round 12)
+
+**Named timeout/delay constants — 217+ magic numbers replaced:**
+- 23 named constants (`TIMEOUT_TMUX_CHECK`, `TIMEOUT_REMOTE_CMD`, `DELAY_PIPE_POLL`, etc.)
+  replace all bare numeric timeout/sleep values across the codebase
+- Constants grouped at module level with descriptive comments
+- One exception: line 492 keeps literal `timeout=3` (runs before constants init)
+
+**Function decomposition — largest functions brought under 100 lines:**
+- `_do_teleport` (168 → 48 lines): extracted `_resolve_teleport_cwd()`,
+  `_teleport_sync_data()`, `_teleport_commit_phase()`, `_teleport_finalize()`
+- `cmd_teleport` (143 → 21 lines): extracted `_parse_teleport_args()`,
+  `_validate_teleport_target()`
+- Remaining large functions are content-heavy HTML templates (not logic)
+
+**Pilot web improvements:**
+- Grid session TTL increased 300s → 1800s (30 minutes)
+- Added keepalive mechanism: grid page re-registers expired sessions every 60s
+- Pilot timeout increased to match (30 minutes)
+
+**Tests:** 409 passing (FAST mode), 0 failures
 
 ### v0.43.0 - Complete DI coverage, CommandRouter decomposition (quality push round 11)
 

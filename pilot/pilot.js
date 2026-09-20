@@ -17,7 +17,7 @@ const PILOT_TOKEN = process.env.PILOT_TOKEN || '';
 const ACTIVE_CONNECTIONS = new Map();
 const ENABLED_SESSIONS = new Map(); // sessionName -> { host?: string }
 const SESSION_TIMERS = new Map(); // sessionName -> timeout handle
-const PILOT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const PILOT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const GRID_SESSIONS = new Map(); // slug -> { sessions: [...], createdAt, expiresAt, timer }
 
 function enableSession(sessionName, host) {
@@ -1415,11 +1415,33 @@ function renderGridPage({ token, slug, gridSession }) {
       } catch (err) { /* retry next interval */ }
     }
 
+    // Keep sessions alive while the grid page is open
+    var knownHosts = {}; // session name -> host, remembered from /api/enabled responses
+    async function keepAlive() {
+      if (!filterSessions) return;
+      var wanted = JSON.parse(filterSessions);
+      var enabledNames = sessions.map(function(s) { return s.name; });
+      // Remember host info from currently enabled sessions
+      for (var j = 0; j < sessions.length; j++) {
+        if (sessions[j].host) knownHosts[sessions[j].name] = sessions[j].host;
+      }
+      for (var i = 0; i < wanted.length; i++) {
+        var name = wanted[i];
+        if (enabledNames.indexOf(name) !== -1) continue; // already enabled
+        try {
+          var url = '/api/pilot?session=' + encodeURIComponent(name);
+          if (knownHosts[name]) url += '&host=' + encodeURIComponent(knownHosts[name]);
+          await fetch(url + (tokenQuery ? '&' + tokenQuery.substring(1) : ''), { method: 'POST' });
+        } catch (err) { /* best effort */ }
+      }
+    }
+
     (async function init() {
       try {
         await loadEnabledSessions();
         buildGrid();
         setInterval(loadEnabledSessions, 15000);
+        setInterval(keepAlive, 60000); // re-enable expired sessions every 60s
       } catch (err) {
         gridContainer.innerHTML = '<div class="empty-state">Error: ' + err.message + '</div>';
       }
@@ -1505,7 +1527,12 @@ try {
     const slug = pathname === '/grid' ? null : decodeURIComponent(pathname.slice('/grid/'.length));
     const gs = slug ? getGridSession(slug) : null;
     if (slug && !gs) {
-      sendHtml(res, 404, `<!doctype html><html><body style="background:#0a0a08;color:#40d870;font-family:monospace;padding:40px;text-align:center"><h2>Session expired</h2><p>This pilot session has ended. Run /pilot again from Telegram.</p></body></html>`);
+      sendHtml(res, 404, `<!doctype html><html><body style="background:#0a0a08;color:#40d870;font-family:monospace;padding:40px;text-align:center">
+<h2>Session expired</h2>
+<p>This pilot session has ended (30min TTL).</p>
+<p>Run <code>/pilot</code> again from Telegram to start a new session.</p>
+<p style="margin-top:20px"><a href="/grid" style="color:#60ff90;text-decoration:underline">View all enabled sessions →</a></p>
+</body></html>`);
       return;
     }
     sendHtml(
