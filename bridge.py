@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code <-> Telegram Bridge - Multi-Session Control Panel"""
 
-VERSION = "0.42.0"
+VERSION = "0.43.0"
 
 from dataclasses import dataclass, field
 import hashlib

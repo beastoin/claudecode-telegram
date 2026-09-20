@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.42.0
+> Version: 0.43.0
 
 ## Current Philosophy (Summary)
 
@@ -416,6 +416,37 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 ---
 
 ## Changelog
+
+### v0.43.0 - Complete DI coverage, CommandRouter decomposition (quality push round 11)
+
+**DI completeness — all external boundaries now injectable:**
+- Added `popen()` method to SubprocessRunner Protocol — all 3 `subprocess.Popen` sites
+  (local adapter, remote adapter, transcript rsync) now go through `_subprocess_runner.popen()`
+- Routed all 5 bare `time.gmtime()` calls through `_clock.time()` — zero implicit current-time
+  captures remain, enabling deterministic timestamp testing
+- Added module-level `_urlopen: Callable[..., Any]` — all 12 `urllib.request.urlopen()` calls
+  now go through injectable `_urlopen()`, covering Telegram API, file downloads, webhook management
+- Three DI seams fully cover all external I/O:
+  `_subprocess_runner` (run + popen), `_clock` (time + sleep), `_urlopen` (all HTTP)
+
+**Class decomposition — CommandRouter 1239 → 878 lines (29% reduction):**
+- New `MentionRoutingMixin` (187 lines, 9 methods): @mention parsing, auto-focus streak,
+  reply context formatting, worker prefix parsing, unknown mention warnings
+- New `MemoryCommandsMixin` (178 lines, 6 methods): /memory command dispatch, search,
+  recall, wake-up, status, incremental ingest
+- Total mixin count: 12 (was 10)
+
+**Type precision:**
+- Parameterized `ProcessRegistry.adapter_pids`: `dict[str, tuple[Popen[Any], IO[str] | None]]`
+- Parameterized `ProcessRegistry.pipe_readers`: `dict[str, tuple[Thread, Event]]`
+- Fixed `_guest_auth()` return: `dict | None` → `GuestSessionDict | None`
+- Fixed `_channel_auth_guest()` return: `dict | None` → `GuestSessionDict | None`
+- Added `IO` to typing imports
+- Zero bare generics remaining
+
+**Test updates:**
+- Updated 9 test patches from `'urllib.request.urlopen'` to `'bridge._urlopen'`
+- 409 tests passing (FAST mode)
 
 ### v0.42.0 - Structured logging, type parameterization, restart decomposition (quality push round 10)
 
