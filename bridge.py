@@ -12274,7 +12274,376 @@ class MediaRoutingMixin:
 
 
 
-class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, ChannelRelayCommandsMixin, MediaRoutingMixin):
+class MentionRoutingMixin:
+    """@mention parsing, routing, auto-focus streak, and reply context handling."""
+
+    def _reset_mention_streak(self) -> None:
+        """Reset the @mention auto-focus streak tracker."""
+        _last_mention["target"] = None
+        _last_mention["count"] = 0
+        _last_mention["ts"] = 0
+
+    def _handle_mention_routing(self, targets: list[str], message: str,
+                                text: str, chat_id: int, msg_id: int,
+                                reply_to: dict[str, Any] | None,
+                                reply_context: str,
+                                reply_context_ts: int | None) -> None:
+        """Route a message with @mentions to the targeted workers."""
+        # Bare @mention means focus switch only (silent on success)
+        if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
+            target = targets[0]
+            registered = self.workers.get_registered_sessions()
+            if target in registered:
+                state["active"] = target
+                save_last_active(target)
+            else:
+                self.reply(chat_id, f"Can't focus guest {target}.")
+            self._reset_mention_streak()
+            return
+
+        if reply_context:
+            message = self.format_reply_context(message, reply_context, reply_context_ts)
+
+        statuses = []
+        if reply_to:
+            reply_media = self._extract_reply_media(reply_to, targets[0])
+            if reply_media:
+                media_text = reply_media
+                if message:
+                    media_text = f"{message}\n\n{reply_media}"
+                for name in targets:
+                    statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
+            else:
+                for name in targets:
+                    statuses.append(self._route_mention(name, message, chat_id, msg_id))
+        else:
+            for name in targets:
+                statuses.append(self._route_mention(name, message, chat_id, msg_id))
+
+        sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
+        offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
+        if offline:
+            parts = [f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline."]
+            if sent_to:
+                parts.append(f"Delivered to {', '.join(sent_to)}.")
+            self.reply(chat_id, " ".join(parts))
+
+        # Auto-focus: same single registered worker mentioned 2+ times within 60s
+        registered = self.workers.get_registered_sessions()
+        now = _clock.time()
+        if len(targets) == 1 and targets[0] in registered:
+            target = targets[0]
+            if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
+                _last_mention["count"] += 1
+            else:
+                _last_mention["target"] = target
+                _last_mention["count"] = 1
+            _last_mention["ts"] = now
+            if _last_mention["count"] >= 2 and state["active"] != target:
+                state["active"] = target
+                save_last_active(target)
+                self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
+        else:
+            self._reset_mention_streak()
+
+    # @mention regex: negative lookbehind skips @ inside email addresses
+    # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)
+    _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
+
+    def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
+        """Extract known @mentions from anywhere in text. Returns (targets, original_text).
+        Matches registered workers first, then active guests. Full message preserved."""
+        if not text:
+            return [], ""
+        registered = self.workers.get_registered_sessions()
+        with guest_store.lock:
+            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        known = set(registered.keys()) | guest_names
+        found = []
+        for match in self._mention_re.finditer(text):
+            name = match.group(1).lower()
+            if name in known and name not in found:
+                found.append(name)
+        return found, text
+
+    def unknown_at_mentions(self, text: str) -> list[str]:
+        """Return @mentions that do not match a known worker/guest."""
+        if not text:
+            return []
+        registered = self.workers.get_registered_sessions()
+        with guest_store.lock:
+            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        known = set(registered.keys()) | guest_names | {"all"}
+        unknown = []
+        for match in self._mention_re.finditer(text):
+            name = match.group(1).lower()
+            if name not in known and name not in unknown:
+                unknown.append(name)
+        return unknown
+
+    def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
+        """Format a warning message for unrecognized @mentions."""
+        import difflib
+
+        registered = self.workers.get_registered_sessions()
+        with guest_store.lock:
+            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        known = sorted(set(registered.keys()) | guest_names)
+        parts = []
+        for name in unknown_mentions:
+            suggestions = difflib.get_close_matches(name, known, n=3, cutoff=0.5)
+            if suggestions:
+                parts.append(f"@{name}. Did you mean {', '.join('@' + s for s in suggestions)}?")
+            else:
+                parts.append(f"@{name}.")
+        return f"⚠️ Unknown: {' '.join(parts)}"
+
+    def _route_mention(self, name: str, message: str, chat_id: int | str, msg_id: int) -> dict[str, Any] | None:
+        """Route a @mention to either a worker or a guest inbox. Workers win name collisions."""
+        registered = self.workers.get_registered_sessions()
+        session = registered.get(name)
+        if session:
+            if not self.workers.is_online(name, session):
+                return {"name": name, "status": "offline"}
+            self.route_message(name, message, chat_id, msg_id, one_off=True)
+            return {"name": name, "status": "sent"}
+
+        with guest_store.lock:
+            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
+        if name in guest_names:
+            msg_obj = {
+                "id": f"gm_{secrets.token_hex(4)}",
+                "from": "manager",
+                "text": message,
+                "ts": int(_clock.time()),
+            }
+            with guest_store.lock:
+                inbox = guest_store.inboxes.get(name, [])
+                guest_store.inboxes[name] = guest_inbox_append(inbox, msg_obj)
+            return {"name": name, "status": "sent"}
+
+        return {"name": name, "status": "unknown"}
+
+    def parse_worker_prefix(self, text: str) -> tuple[str | None, str]:
+        """Parse 'name: message' prefix from bot-sent messages."""
+        if not text:
+            return None, ""
+        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
+        if not match:
+            return None, ""
+        name = match.group(1).lower()
+        message = match.group(2).strip()
+        registered = self.workers.get_registered_sessions()
+        if name not in registered:
+            return None, ""
+        return name, message
+
+    def get_reply_context(self, reply_msg: dict[str, Any]) -> tuple[str, int | None]:
+        """Extract text and timestamp from a replied-to message."""
+        if not reply_msg:
+            return "", None
+        text = _extract_msg_text(reply_msg)
+        ts = reply_msg.get("date")
+        return text, ts
+
+    def format_reply_context(self, reply_text: str, context_text: str, context_ts: str | None = None) -> str:
+        """Format reply-to context for prepending to forwarded messages."""
+        reply_text = (reply_text or "").strip()
+        context_text = (context_text or "").strip()
+        if context_text:
+            ts_str = ""
+            if context_ts:
+                ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
+            return (
+                "Manager reply:\n"
+                f"{reply_text}\n\n"
+                f"Context (your previous message{ts_str}):\n"
+                f"{context_text}"
+            )
+        return f"Manager reply:\n{reply_text}"
+
+
+class MemoryCommandsMixin:
+    """Team memory search, recall, and indexing commands."""
+
+    def cmd_memory(self, query: str, chat_id: ChatId) -> bool:
+        """Dispatch /memory subcommands. /memory <query|subcommand>"""
+        if not query:
+            self.reply(chat_id,
+                       "Usage: /memory <query>\n"
+                       "Examples:\n"
+                       "  /memory what did I tell kai about auth\n"
+                       "  /memory PR 6377 --agent taro\n"
+                       "  /memory OTP problem --days 30\n"
+                       "  /memory update  (re-index latest export)\n"
+                       "  /memory status  (stack health)\n"
+                       "  /memory wake-up [wing]  (L0+L1 context)\n"
+                       "  /memory recall --wing=X [--room=Y]",
+                       outcome="Needs decision")
+            return True
+
+        subcmd = query.strip().lower().split()[0]
+        dispatch: dict[str, Callable[[str, ChatId], bool]] = {
+            "update": lambda q, c: self._memory_update(c),
+            "status": lambda q, c: self._memory_status(c),
+            "wake-up": self._memory_wakeup,
+            "recall": self._memory_recall,
+        }
+        handler = dispatch.get(subcmd)
+        if handler:
+            return handler(query, chat_id)
+        return self._memory_search(query, chat_id)
+
+    def _memory_status(self, chat_id: ChatId) -> bool:
+        """Show memory stack health summary."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            info = stack.status()
+            wings = info.get("wing_distribution", {})
+            wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
+            lines = [
+                "Memory Stack Status:",
+                f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
+                f"  Messages: {info.get('total_messages', 0)}",
+                f"  Summaries: {info.get('total_summaries', 0)}",
+                f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
+                f"  L1 essential: last 7 days, top 15 items",
+            ]
+            self.reply(chat_id, "\n".join(lines))
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory status failed: {e}")
+        return True
+
+    def _memory_wakeup(self, query: str, chat_id: ChatId) -> bool:
+        """Generate L0+L1 wake-up context for a wing."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            parts = query.strip().split()
+            wing = parts[1] if len(parts) > 1 else None
+            text = stack.wake_up(wing=wing)
+            if len(text) > 4000:
+                text = text[:3997] + "..."
+            self.reply(chat_id, text)
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory wake-up failed: {e}")
+        return True
+
+    def _memory_recall(self, query: str, chat_id: ChatId) -> bool:
+        """On-demand L2 recall with optional --wing and --room filters."""
+        try:
+            from team_memory.memory_stack import MemoryStack
+            stack = MemoryStack()
+            wing = room = None
+            for part in query.split():
+                if part.startswith("--wing="):
+                    wing = part.split("=", 1)[1]
+                elif part.startswith("--room="):
+                    room = part.split("=", 1)[1]
+            text = stack.recall(wing=wing, room=room)
+            if len(text) > 4000:
+                text = text[:3997] + "..."
+            self.reply(chat_id, text)
+        except (KeyError, RuntimeError, OSError, ImportError) as e:
+            self.reply(chat_id, f"Memory recall failed: {e}")
+        return True
+
+    def _memory_search(self, query: str, chat_id: ChatId) -> bool:
+        """Full-text search across team chat memory with source links."""
+        self.reply(chat_id, "Searching memory...")
+
+        try:
+            from team_memory.search import search_memory
+            result = search_memory(query)
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            self.reply(chat_id, f"Memory search failed: {e}", outcome="Needs decision")
+            return True
+
+        answer = result.get("answer", "")
+        sources = result.get("results", [])
+
+        if not answer and not sources:
+            self.reply(chat_id, "No results found.")
+            return True
+
+        lines = [f"\U0001f9e0 {answer}" if answer else "\U0001f9e0 No direct answer found."]
+
+        if sources:
+            lines.append("")
+            import secrets
+            tc_token = secrets.token_urlsafe(32)
+            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
+            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+
+            lines.append("\U0001f4ce Sources:")
+            for i, r in enumerate(sources[:3], 1):
+                chunk_lines = r.get("text", "").split("\n")
+                preview = "\n".join(chunk_lines[:2])
+                if len(preview) > 200:
+                    preview = preview[:197] + "..."
+                source_link = ""
+                chunk_id = r.get("_id", "")
+                if chunk_id.startswith("tg_"):
+                    parts = chunk_id.split("_")
+                    if len(parts) >= 2:
+                        try:
+                            first_msg_id = int(parts[1])
+                            page_info = _run_team_chat_query("page-for-msg", msg_id=first_msg_id)
+                            if page_info and page_info.get("page"):
+                                source_link = f"\n{base_url}/team-chat?token={tc_token}&page={page_info['page']}#msg-{first_msg_id}"
+                        except (ValueError, IndexError) as exc:
+                            _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
+                lines.append(f"{i}. {preview}{source_link}")
+
+        self.reply(chat_id, "\n".join(lines))
+        return True
+
+    def _memory_update(self, chat_id: int | str) -> bool:
+        """Run incremental ingest from latest export in ~/team/exports/."""
+        import glob as _glob
+        exports_dir = os.path.expanduser("~/team/exports")
+        zips = sorted(_glob.glob(os.path.join(exports_dir, "ChatExport_*.json.zip")))
+        if not zips:
+            self.reply(chat_id, f"No exports found in {exports_dir}/", outcome="Needs decision")
+            return True
+
+        latest = zips[-1]
+        self.reply(chat_id, f"Indexing from {os.path.basename(latest)}...")
+
+        try:
+            # Parse
+            parse_script = str(Path(__file__).parent / "team_memory" / "parse.py")
+            parsed_path = "/tmp/team-memory-parsed-full.jsonl"
+            r = _subprocess_runner.run(
+                [sys.executable, parse_script, "--zip", latest, "--out", parsed_path],
+                capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                self.reply(chat_id, f"Parse failed: {r.stderr[:300]}", outcome="Needs decision")
+                return True
+
+            # Ingest (incremental)
+            ingest_script = str(Path(__file__).parent / "team_memory" / "ingest.py")
+            r = _subprocess_runner.run(
+                [sys.executable, ingest_script, parsed_path, "--incremental"],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                self.reply(chat_id, f"Ingest failed: {r.stderr[:300]}", outcome="Needs decision")
+                return True
+
+            # Extract stats from output
+            lines = r.stdout.strip().split("\n")
+            summary = lines[-1] if lines else "Done"
+            self.reply(chat_id, f"Memory updated.\n{summary}")
+
+        except subprocess.TimeoutExpired:
+            self.reply(chat_id, "Memory update timed out.", outcome="Needs decision")
+        except (subprocess.SubprocessError, OSError) as e:
+            self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
+        return True
+
+
+class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, ChannelRelayCommandsMixin, MediaRoutingMixin, MentionRoutingMixin, MemoryCommandsMixin):
     """Dispatches Telegram commands and messages to appropriate handlers.
 
     Maintains a registry of /command → handler mappings. Routes incoming
@@ -12601,191 +12970,6 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
 
-    def _reset_mention_streak(self) -> None:
-        """Reset the @mention auto-focus streak tracker."""
-        _last_mention["target"] = None
-        _last_mention["count"] = 0
-        _last_mention["ts"] = 0
-
-    def _handle_mention_routing(self, targets: list[str], message: str,
-                                text: str, chat_id: int, msg_id: int,
-                                reply_to: dict[str, Any] | None,
-                                reply_context: str,
-                                reply_context_ts: int | None) -> None:
-        """Route a message with @mentions to the targeted workers."""
-        # Bare @mention means focus switch only (silent on success)
-        if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
-            target = targets[0]
-            registered = self.workers.get_registered_sessions()
-            if target in registered:
-                state["active"] = target
-                save_last_active(target)
-            else:
-                self.reply(chat_id, f"Can't focus guest {target}.")
-            self._reset_mention_streak()
-            return
-
-        if reply_context:
-            message = self.format_reply_context(message, reply_context, reply_context_ts)
-
-        statuses = []
-        if reply_to:
-            reply_media = self._extract_reply_media(reply_to, targets[0])
-            if reply_media:
-                media_text = reply_media
-                if message:
-                    media_text = f"{message}\n\n{reply_media}"
-                for name in targets:
-                    statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
-            else:
-                for name in targets:
-                    statuses.append(self._route_mention(name, message, chat_id, msg_id))
-        else:
-            for name in targets:
-                statuses.append(self._route_mention(name, message, chat_id, msg_id))
-
-        sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
-        offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
-        if offline:
-            parts = [f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline."]
-            if sent_to:
-                parts.append(f"Delivered to {', '.join(sent_to)}.")
-            self.reply(chat_id, " ".join(parts))
-
-        # Auto-focus: same single registered worker mentioned 2+ times within 60s
-        registered = self.workers.get_registered_sessions()
-        now = _clock.time()
-        if len(targets) == 1 and targets[0] in registered:
-            target = targets[0]
-            if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
-                _last_mention["count"] += 1
-            else:
-                _last_mention["target"] = target
-                _last_mention["count"] = 1
-            _last_mention["ts"] = now
-            if _last_mention["count"] >= 2 and state["active"] != target:
-                state["active"] = target
-                save_last_active(target)
-                self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
-        else:
-            self._reset_mention_streak()
-
-    # @mention regex: negative lookbehind skips @ inside email addresses
-    # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)
-    _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
-
-    def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
-        """Extract known @mentions from anywhere in text. Returns (targets, original_text).
-        Matches registered workers first, then active guests. Full message preserved."""
-        if not text:
-            return [], ""
-        registered = self.workers.get_registered_sessions()
-        with guest_store.lock:
-            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
-        known = set(registered.keys()) | guest_names
-        found = []
-        for match in self._mention_re.finditer(text):
-            name = match.group(1).lower()
-            if name in known and name not in found:
-                found.append(name)
-        return found, text
-
-    def unknown_at_mentions(self, text: str) -> list[str]:
-        """Return @mentions that do not match a known worker/guest."""
-        if not text:
-            return []
-        registered = self.workers.get_registered_sessions()
-        with guest_store.lock:
-            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
-        known = set(registered.keys()) | guest_names | {"all"}
-        unknown = []
-        for match in self._mention_re.finditer(text):
-            name = match.group(1).lower()
-            if name not in known and name not in unknown:
-                unknown.append(name)
-        return unknown
-
-    def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
-        """Format a warning message for unrecognized @mentions."""
-        import difflib
-
-        registered = self.workers.get_registered_sessions()
-        with guest_store.lock:
-            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
-        known = sorted(set(registered.keys()) | guest_names)
-        parts = []
-        for name in unknown_mentions:
-            suggestions = difflib.get_close_matches(name, known, n=3, cutoff=0.5)
-            if suggestions:
-                parts.append(f"@{name}. Did you mean {', '.join('@' + s for s in suggestions)}?")
-            else:
-                parts.append(f"@{name}.")
-        return f"⚠️ Unknown: {' '.join(parts)}"
-
-    def _route_mention(self, name: str, message: str, chat_id: int | str, msg_id: int) -> dict[str, Any] | None:
-        """Route a @mention to either a worker or a guest inbox. Workers win name collisions."""
-        registered = self.workers.get_registered_sessions()
-        session = registered.get(name)
-        if session:
-            if not self.workers.is_online(name, session):
-                return {"name": name, "status": "offline"}
-            self.route_message(name, message, chat_id, msg_id, one_off=True)
-            return {"name": name, "status": "sent"}
-
-        with guest_store.lock:
-            guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
-        if name in guest_names:
-            msg_obj = {
-                "id": f"gm_{secrets.token_hex(4)}",
-                "from": "manager",
-                "text": message,
-                "ts": int(_clock.time()),
-            }
-            with guest_store.lock:
-                inbox = guest_store.inboxes.get(name, [])
-                guest_store.inboxes[name] = guest_inbox_append(inbox, msg_obj)
-            return {"name": name, "status": "sent"}
-
-        return {"name": name, "status": "unknown"}
-
-    def parse_worker_prefix(self, text: str) -> tuple[str | None, str]:
-        """Parse 'name: message' prefix from bot-sent messages."""
-        if not text:
-            return None, ""
-        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
-        if not match:
-            return None, ""
-        name = match.group(1).lower()
-        message = match.group(2).strip()
-        registered = self.workers.get_registered_sessions()
-        if name not in registered:
-            return None, ""
-        return name, message
-
-    def get_reply_context(self, reply_msg: dict[str, Any]) -> tuple[str, int | None]:
-        """Extract text and timestamp from a replied-to message."""
-        if not reply_msg:
-            return "", None
-        text = _extract_msg_text(reply_msg)
-        ts = reply_msg.get("date")
-        return text, ts
-
-    def format_reply_context(self, reply_text: str, context_text: str, context_ts: str | None = None) -> str:
-        """Format reply-to context for prepending to forwarded messages."""
-        reply_text = (reply_text or "").strip()
-        context_text = (context_text or "").strip()
-        if context_text:
-            ts_str = ""
-            if context_ts:
-                ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
-            return (
-                "Manager reply:\n"
-                f"{reply_text}\n\n"
-                f"Context (your previous message{ts_str}):\n"
-                f"{context_text}"
-            )
-        return f"Manager reply:\n{reply_text}"
-
     def handle_command(self, text: str, chat_id: int | str, msg_id: int) -> bool:
         """Parse and dispatch a slash command."""
         parts = text.split(maxsplit=1)
@@ -12981,182 +13165,6 @@ class CommandRouter(TeleportCommandsMixin, WorkerLifecycleCommandsMixin, Channel
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
             url = f"{base_url}/pr-review/{pr_num}?token={token}"
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
-        return True
-
-    def cmd_memory(self, query: str, chat_id: ChatId) -> bool:
-        """Dispatch /memory subcommands. /memory <query|subcommand>"""
-        if not query:
-            self.reply(chat_id,
-                       "Usage: /memory <query>\n"
-                       "Examples:\n"
-                       "  /memory what did I tell kai about auth\n"
-                       "  /memory PR 6377 --agent taro\n"
-                       "  /memory OTP problem --days 30\n"
-                       "  /memory update  (re-index latest export)\n"
-                       "  /memory status  (stack health)\n"
-                       "  /memory wake-up [wing]  (L0+L1 context)\n"
-                       "  /memory recall --wing=X [--room=Y]",
-                       outcome="Needs decision")
-            return True
-
-        subcmd = query.strip().lower().split()[0]
-        dispatch: dict[str, Callable[[str, ChatId], bool]] = {
-            "update": lambda q, c: self._memory_update(c),
-            "status": lambda q, c: self._memory_status(c),
-            "wake-up": self._memory_wakeup,
-            "recall": self._memory_recall,
-        }
-        handler = dispatch.get(subcmd)
-        if handler:
-            return handler(query, chat_id)
-        return self._memory_search(query, chat_id)
-
-    def _memory_status(self, chat_id: ChatId) -> bool:
-        """Show memory stack health summary."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            info = stack.status()
-            wings = info.get("wing_distribution", {})
-            wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
-            lines = [
-                "Memory Stack Status:",
-                f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
-                f"  Messages: {info.get('total_messages', 0)}",
-                f"  Summaries: {info.get('total_summaries', 0)}",
-                f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
-                f"  L1 essential: last 7 days, top 15 items",
-            ]
-            self.reply(chat_id, "\n".join(lines))
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory status failed: {e}")
-        return True
-
-    def _memory_wakeup(self, query: str, chat_id: ChatId) -> bool:
-        """Generate L0+L1 wake-up context for a wing."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            parts = query.strip().split()
-            wing = parts[1] if len(parts) > 1 else None
-            text = stack.wake_up(wing=wing)
-            if len(text) > 4000:
-                text = text[:3997] + "..."
-            self.reply(chat_id, text)
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory wake-up failed: {e}")
-        return True
-
-    def _memory_recall(self, query: str, chat_id: ChatId) -> bool:
-        """On-demand L2 recall with optional --wing and --room filters."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            wing = room = None
-            for part in query.split():
-                if part.startswith("--wing="):
-                    wing = part.split("=", 1)[1]
-                elif part.startswith("--room="):
-                    room = part.split("=", 1)[1]
-            text = stack.recall(wing=wing, room=room)
-            if len(text) > 4000:
-                text = text[:3997] + "..."
-            self.reply(chat_id, text)
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory recall failed: {e}")
-        return True
-
-    def _memory_search(self, query: str, chat_id: ChatId) -> bool:
-        """Full-text search across team chat memory with source links."""
-        self.reply(chat_id, "Searching memory...")
-
-        try:
-            from team_memory.search import search_memory
-            result = search_memory(query)
-        except (OSError, json.JSONDecodeError, KeyError) as e:
-            self.reply(chat_id, f"Memory search failed: {e}", outcome="Needs decision")
-            return True
-
-        answer = result.get("answer", "")
-        sources = result.get("results", [])
-
-        if not answer and not sources:
-            self.reply(chat_id, "No results found.")
-            return True
-
-        lines = [f"\U0001f9e0 {answer}" if answer else "\U0001f9e0 No direct answer found."]
-
-        if sources:
-            lines.append("")
-            import secrets
-            tc_token = secrets.token_urlsafe(32)
-            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
-            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-
-            lines.append("\U0001f4ce Sources:")
-            for i, r in enumerate(sources[:3], 1):
-                chunk_lines = r.get("text", "").split("\n")
-                preview = "\n".join(chunk_lines[:2])
-                if len(preview) > 200:
-                    preview = preview[:197] + "..."
-                source_link = ""
-                chunk_id = r.get("_id", "")
-                if chunk_id.startswith("tg_"):
-                    parts = chunk_id.split("_")
-                    if len(parts) >= 2:
-                        try:
-                            first_msg_id = int(parts[1])
-                            page_info = _run_team_chat_query("page-for-msg", msg_id=first_msg_id)
-                            if page_info and page_info.get("page"):
-                                source_link = f"\n{base_url}/team-chat?token={tc_token}&page={page_info['page']}#msg-{first_msg_id}"
-                        except (ValueError, IndexError) as exc:
-                            _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
-                lines.append(f"{i}. {preview}{source_link}")
-
-        self.reply(chat_id, "\n".join(lines))
-        return True
-
-    def _memory_update(self, chat_id: int | str) -> bool:
-        """Run incremental ingest from latest export in ~/team/exports/."""
-        import glob as _glob
-        exports_dir = os.path.expanduser("~/team/exports")
-        zips = sorted(_glob.glob(os.path.join(exports_dir, "ChatExport_*.json.zip")))
-        if not zips:
-            self.reply(chat_id, f"No exports found in {exports_dir}/", outcome="Needs decision")
-            return True
-
-        latest = zips[-1]
-        self.reply(chat_id, f"Indexing from {os.path.basename(latest)}...")
-
-        try:
-            # Parse
-            parse_script = str(Path(__file__).parent / "team_memory" / "parse.py")
-            parsed_path = "/tmp/team-memory-parsed-full.jsonl"
-            r = _subprocess_runner.run(
-                [sys.executable, parse_script, "--zip", latest, "--out", parsed_path],
-                capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                self.reply(chat_id, f"Parse failed: {r.stderr[:300]}", outcome="Needs decision")
-                return True
-
-            # Ingest (incremental)
-            ingest_script = str(Path(__file__).parent / "team_memory" / "ingest.py")
-            r = _subprocess_runner.run(
-                [sys.executable, ingest_script, parsed_path, "--incremental"],
-                capture_output=True, text=True, timeout=300)
-            if r.returncode != 0:
-                self.reply(chat_id, f"Ingest failed: {r.stderr[:300]}", outcome="Needs decision")
-                return True
-
-            # Extract stats from output
-            lines = r.stdout.strip().split("\n")
-            summary = lines[-1] if lines else "Done"
-            self.reply(chat_id, f"Memory updated.\n{summary}")
-
-        except subprocess.TimeoutExpired:
-            self.reply(chat_id, "Memory update timed out.", outcome="Needs decision")
-        except (subprocess.SubprocessError, OSError) as e:
-            self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
         return True
 
     def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
@@ -15450,7 +15458,7 @@ _endpoint_router = EndpointRouter()
 class GuestEndpointsMixin:
     """Guest system HTTP endpoint handlers."""
 
-    def _guest_auth(self, parsed: dict[str, Any]=None) -> dict | None:
+    def _guest_auth(self, parsed: dict[str, Any] | None = None) -> GuestSessionDict | None:
         """Authenticate guest from token query param. Returns guest dict or None (sends 403)."""
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [""])[0]
@@ -15790,7 +15798,7 @@ class GuestEndpointsMixin:
 class ChannelEndpointsMixin:
     """Channel HTTP endpoint handlers."""
 
-    def _channel_auth_guest(self, parsed: dict[str, Any]) -> dict | None:
+    def _channel_auth_guest(self, parsed: dict[str, Any]) -> GuestSessionDict | None:
         """Authenticate a guest from query token for channel access. Returns guest or sends error."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
