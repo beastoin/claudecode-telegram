@@ -417,6 +417,12 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.44.1 - Session ID race guard
+
+**Race guard in `_cache_session_id`:** When the Stop hook fires after a CWD change (checkin), it writes back the old session_id. Previously, `_cache_session_id` would blindly rebind that stale session_id to the new CWD, making `get_claude_session_id` return a wrong session for `--resume`. Now `_cache_session_id` detects when the same session_id is being rewritten with a different CWD (the race signature) and rejects the write. New session_ids from a genuinely new Claude instance are still accepted.
+
+**Behavior tests:** Race test upgraded from documenting the gap to enforcing the fix — verifies stale writes are rejected, new sessions accepted, and file content is correct.
+
 ### v0.44.0 - Named constants, function decomposition (quality push round 12)
 
 **Named timeout/delay constants — 217+ magic numbers replaced:**

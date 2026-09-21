@@ -5985,6 +5985,12 @@ def _cache_session_id(name: str, sid: str) -> None:
     get_claude_session_id() validates that line 2 matches the worker's
     current CWD. If the CWD has changed, the session_id is stale and
     ignored — no separate "clear on CWD change" step needed.
+
+    Race guard: if the incoming session_id matches what's already cached
+    but the cached CWD doesn't match the current CWD, this is a stale
+    write from a pre-CWD-change hook — reject it. This prevents the Stop
+    hook from re-polluting a session_id that was invalidated by a CWD
+    change.
     """
     if not sid:
         return
@@ -5993,7 +5999,20 @@ def _cache_session_id(name: str, sid: str) -> None:
         id_file = session_dir / "claude_session_id"
         cwd = get_claude_session_cwd(name) or ""
         old_content = id_file.read_text().strip() if id_file.exists() else ""
-        old_sid = old_content.split("\n")[0] if old_content else ""
+        old_lines = old_content.split("\n", 1) if old_content else []
+        old_sid = old_lines[0].strip() if old_lines else ""
+        old_cwd = old_lines[1].strip() if len(old_lines) > 1 else ""
+
+        # Race guard: same session_id being rewritten after CWD changed.
+        # The hook is still sending the old session_id from the previous
+        # directory — don't let it rebind to the new CWD.
+        if (sid == old_sid and old_cwd and cwd and
+                old_cwd.rstrip("/") != cwd.rstrip("/")):
+            _log(_LOG_WARN, "session",
+                 f"{name}: rejecting stale session_id write "
+                 f"(sid={sid[:12]}, old_cwd={old_cwd}, current_cwd={cwd})")
+            return
+
         if old_sid != sid:
             _log_session_event(name, sid, cwd, "cache")
         id_file.write_text(f"{sid}\n{cwd}")

@@ -13757,9 +13757,10 @@ try:
     assert e['cwd'] == '/home/claude/new-project'
     assert e['session_id'] == 'old-sid-123'
 
-    # session_id should be cleared
-    sid_file = worker_dir / 'claude_session_id'
-    assert not sid_file.exists(), 'session_id should be cleared after CWD change'
+    # session_id should be stale (get_claude_session_id returns empty because
+    # CWD changed — the file may still exist but self-validates at read time)
+    got = bridge.get_claude_session_id('cwdworker')
+    assert got == '', f'stale session_id should self-invalidate after CWD change, got {got!r}'
 
     print('OK')
 finally:
@@ -13769,6 +13770,207 @@ finally:
         success "Checkin CWD change logs event to history"
     else
         fail "Checkin CWD change should log event to history"
+    fi
+}
+
+test_session_id_self_validates_against_cwd() {
+    info "Testing session_id self-validates: stale CWD returns empty, matching CWD returns sid..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'valworker'
+worker_dir.mkdir()
+
+# Write session_id with CWD binding (new format: sid\ncwd)
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+(worker_dir / 'claude_session_id').write_text('sid-aaa\n/home/claude/project-a')
+
+# Matching CWD: should return the session_id
+sid = bridge.get_claude_session_id('valworker')
+assert sid == 'sid-aaa', f'matching CWD should return sid, got {sid!r}'
+
+# Change CWD to project-b
+bridge.save_claude_session_cwd('valworker', '/home/claude/project-b')
+
+# Now session_id is stale (bound to project-a, current is project-b)
+sid = bridge.get_claude_session_id('valworker')
+assert sid == '', f'stale CWD should return empty, got {sid!r}'
+
+# Write a new session_id bound to the new CWD
+bridge._cache_session_id('valworker', 'sid-bbb')
+sid = bridge.get_claude_session_id('valworker')
+assert sid == 'sid-bbb', f'new sid for matching CWD should work, got {sid!r}'
+
+# Verify the file has both lines
+content = (worker_dir / 'claude_session_id').read_text().strip()
+lines = content.split('\n')
+assert lines[0] == 'sid-bbb', f'line 1 should be sid, got {lines[0]!r}'
+assert lines[1] == '/home/claude/project-b', f'line 2 should be CWD, got {lines[1]!r}'
+
+bridge.SESSIONS_DIR = orig
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "session_id self-validates against CWD"
+    else
+        fail "session_id should self-validate against CWD"
+    fi
+}
+
+test_session_id_race_after_cwd_change() {
+    info "Testing Stop hook can't pollute session_id after CWD change..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'raceworker'
+worker_dir.mkdir()
+
+# Worker starts in project-a with session sid-old
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+bridge._cache_session_id('raceworker', 'sid-old')
+
+# Verify sid-old works
+sid = bridge.get_claude_session_id('raceworker')
+assert sid == 'sid-old', f'initial sid should work, got {sid!r}'
+
+# CWD changes to project-b (what checkin does)
+bridge.save_claude_session_cwd('raceworker', '/home/claude/project-b')
+
+# sid-old is now stale when read
+sid = bridge.get_claude_session_id('raceworker')
+assert sid == '', f'sid should be stale after CWD change, got {sid!r}'
+
+# Simulate the race: Stop hook fires and writes back sid-old
+# _cache_session_id should REJECT this because the same sid is being
+# rewritten with a different CWD (race guard).
+bridge._cache_session_id('raceworker', 'sid-old')
+
+# sid-old must STILL be stale — the race guard prevented rebinding
+sid = bridge.get_claude_session_id('raceworker')
+assert sid == '', f'sid should still be stale after race write, got {sid!r}'
+
+# But a genuinely NEW session_id from the new CWD should be accepted
+bridge._cache_session_id('raceworker', 'sid-new')
+sid = bridge.get_claude_session_id('raceworker')
+assert sid == 'sid-new', f'new sid should be accepted, got {sid!r}'
+
+# Verify the file has the new sid bound to project-b
+content = (worker_dir / 'claude_session_id').read_text().strip()
+lines = content.split('\\n')
+assert lines[0] == 'sid-new', f'file should have sid-new, got {lines[0]!r}'
+assert lines[1].rstrip('/') == '/home/claude/project-b', f'file should have project-b CWD, got {lines[1]!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "session_id race guard rejects stale writes"
+    else
+        fail "session_id race test failed"
+    fi
+}
+
+test_restart_clears_session_id_on_cwd_mismatch() {
+    info "Testing /restart detects CWD mismatch in has_session_id check..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'cwdmismatch'
+worker_dir.mkdir()
+
+# Session_id bound to project-a
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+bridge._cache_session_id('cwdmismatch', 'sid-proj-a')
+
+# CWD changes
+bridge.save_claude_session_cwd('cwdmismatch', '/home/claude/project-b')
+
+# has_session_id check (what _do_restart does at L11518-11520):
+# Even though the file exists, get_claude_session_id returns empty
+has_session_id = False
+session_dir = bridge.SESSIONS_DIR / 'cwdmismatch'
+if session_dir.exists():
+    has_session_id = any(session_dir.glob('*_session_id'))
+
+# File exists on disk...
+assert has_session_id, 'session_id file should exist on disk'
+
+# ...but get_claude_session_id returns empty (stale)
+sid = bridge.get_claude_session_id('cwdmismatch')
+assert sid == '', f'stale session should return empty, got {sid!r}'
+
+# This means _do_restart's has_session_id check (file existence) would
+# find the file and try to resume. But _prepare_restart_state calls
+# get_claude_session_id which returns empty — so resume_id is empty.
+# Empty resume_id means backend.start_cmd('') → fresh start. Safe.
+mode = 'resume'
+resume_id = bridge.get_claude_session_id('cwdmismatch', authoritative=False) or \
+            bridge.get_claude_session_id('cwdmismatch', authoritative=True)
+assert resume_id == '', f'stale session should give empty resume_id, got {resume_id!r}'
+
+bridge.SESSIONS_DIR = orig
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "restart detects stale session_id via CWD mismatch"
+    else
+        fail "restart should detect stale session_id via CWD mismatch"
+    fi
+}
+
+test_session_id_backwards_compat_old_format() {
+    info "Testing old-format session_id files (UUID only, no CWD) still work..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'oldworker'
+worker_dir.mkdir()
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/some-project')
+
+# Old format: just UUID, no CWD line
+(worker_dir / 'claude_session_id').write_text('old-format-uuid-only')
+
+# Should still return the UUID (backwards compatible)
+sid = bridge.get_claude_session_id('oldworker')
+assert sid == 'old-format-uuid-only', f'old format should work, got {sid!r}'
+
+bridge.SESSIONS_DIR = orig
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "old-format session_id files work (backwards compat)"
+    else
+        fail "old-format session_id files should be backwards compatible"
     fi
 }
 
@@ -22932,6 +23134,10 @@ run_unit_tests() {
     run_test test_cache_session_id_logs_event
     run_test test_hook_response_logs_session_id
     run_test test_checkin_cwd_change_logs_event
+    run_test test_session_id_self_validates_against_cwd
+    run_test test_session_id_race_after_cwd_change
+    run_test test_restart_clears_session_id_on_cwd_mismatch
+    run_test test_session_id_backwards_compat_old_format
     run_test test_get_session_history
     run_test test_get_claude_session_id_authoritative_overrides_stale
     run_test test_get_claude_session_id_authoritative_remote
