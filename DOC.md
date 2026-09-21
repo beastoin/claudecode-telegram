@@ -417,6 +417,10 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.44.3 - CWD change notification
+
+**Telegram notification on CWD change:** When a worker's workspace changes via checkin, the manager gets a notification showing the old directory (with session_id prefix if one existed), the new directory, and that it's a fresh start. Helps track when workers move between projects and whether a previous session was discarded.
+
 ### v0.44.2 - Auto-trust workspace on CWD change
 
 **Auto-trust new directories:** When a worker's CWD changes (via checkin, hire, or restart), the bridge now adds the directory to `~/.claude.json` with `hasTrustDialogAccepted: true`. This prevents Claude Code's interactive "trust this folder?" prompt from blocking non-interactive tmux sessions when they restart in a directory they haven't used before.

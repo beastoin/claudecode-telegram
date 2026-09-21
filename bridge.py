@@ -6013,6 +6013,26 @@ def _ensure_workspace_trusted(
         _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
 
 
+def _build_cwd_change_notice(
+    name: str,
+    old_cwd: str,
+    new_cwd: str,
+    old_sid: str,
+) -> str:
+    """Build a Telegram notification for a worker CWD change.
+
+    Tells the manager where the worker was, where it's going, and
+    whether a previous session was discarded.
+    """
+    lines = [f"⚠️ {name}: workspace changed"]
+    if old_sid:
+        lines.append(f"<b>from:</b> <code>{old_cwd}</code> (session <code>{old_sid[:12]}…</code>)")
+    else:
+        lines.append(f"<b>from:</b> <code>{old_cwd}</code> (no previous session)")
+    lines.append(f"<b>to:</b> <code>{new_cwd}</code> (fresh start)")
+    return "\n".join(lines)
+
+
 def _cache_session_id(name: str, sid: str) -> None:
     """Write session_id + its CWD to local cache file (best effort, 0o600).
 
@@ -17511,6 +17531,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     # self-validates by comparing stored CWD against current CWD.
                     # Stale session IDs (from old directory) are ignored at read time.
                     _log(_LOG_WARN, "checkin", f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate")
+                    notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
+                    notify_chat_id = get_manager_chat_id(name)
+                    if notify_chat_id is not None:
+                        send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
                 _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
 
                 if tmux_name and tmux_exists(tmux_name, host=host):

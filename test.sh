@@ -14125,6 +14125,83 @@ print('OK')
     fi
 }
 
+test_cwd_change_notifies_previous_session() {
+    info "Testing CWD change sends notification with previous session info..."
+
+    if python3 -c "
+import tempfile, shutil
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+orig = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'notifyworker'
+worker_dir.mkdir()
+
+# Worker has a session in project-a
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+bridge._cache_session_id('notifyworker', 'abc12345-6789-dead-beef-cafe00000001')
+
+# Build the notification message
+msg = bridge._build_cwd_change_notice(
+    'notifyworker',
+    old_cwd='/home/claude/project-a',
+    new_cwd='/home/claude/project-b',
+    old_sid='abc12345-6789-dead-beef-cafe00000001',
+)
+
+# Must contain both directories
+assert '/home/claude/project-a' in msg, f'should contain old CWD, got {msg!r}'
+assert '/home/claude/project-b' in msg, f'should contain new CWD, got {msg!r}'
+# Must contain truncated session_id
+assert 'abc12345' in msg, f'should contain session_id prefix, got {msg!r}'
+# Must contain worker name
+assert 'notifyworker' in msg, f'should contain worker name, got {msg!r}'
+# Must indicate fresh start
+assert 'fresh' in msg.lower() or 'new' in msg.lower() or 'discard' in msg.lower(), f'should indicate fresh start, got {msg!r}'
+
+bridge.SESSIONS_DIR = orig
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "CWD change notification contains previous session info"
+    else
+        fail "CWD change notification should contain previous session info"
+    fi
+}
+
+test_cwd_change_notice_no_previous_session() {
+    info "Testing CWD change notification when there's no previous session..."
+
+    if python3 -c "
+import bridge
+
+# No previous session_id
+msg = bridge._build_cwd_change_notice(
+    'freshworker',
+    old_cwd='/home/claude/project-a',
+    new_cwd='/home/claude/project-b',
+    old_sid='',
+)
+
+# Must contain both directories
+assert '/home/claude/project-a' in msg
+assert '/home/claude/project-b' in msg
+# Should indicate no previous session (not show a fake session_id)
+assert 'no previous session' in msg.lower() or 'no session' in msg.lower(), \
+    f'should indicate no previous session, got {msg!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "CWD change notification handles no previous session"
+    else
+        fail "CWD change notification should handle no previous session"
+    fi
+}
+
 test_get_session_history() {
     info "Testing get_session_history returns parsed entries with optional filters..."
 
@@ -23293,6 +23370,8 @@ run_unit_tests() {
     run_test test_ensure_workspace_trusted_preserves_existing
     run_test test_ensure_workspace_trusted_skips_already_trusted
     run_test test_checkin_cwd_change_trusts_new_dir
+    run_test test_cwd_change_notifies_previous_session
+    run_test test_cwd_change_notice_no_previous_session
     run_test test_get_session_history
     run_test test_get_claude_session_id_authoritative_overrides_stale
     run_test test_get_claude_session_id_authoritative_remote
