@@ -417,6 +417,12 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.44.4 - Cross-machine teleport fix
+
+**Skip `--resume` on cross-machine teleport:** Session JSONL files are machine-local. When teleporting VPS→Mac Mini (or vice versa), the source session_id doesn't exist on the target. Claude exits with "No conversation found" and the teleport fails. Now `_do_teleport` detects cross-machine moves (`source_host != target_host`) and starts fresh instead of trying to resume.
+
+**Test harness scaffolding:** Added `tests/bridge_testkit.py` — `BridgeHarness` context manager with ready objects (`h.worker()`, `h.trusted_dirs()`, fake clock/telegram/subprocess). New behavior tests use 5-10 lines instead of 30.
+
 ### v0.44.3 - CWD change notification
 
 **Telegram notification on CWD change:** When a worker's workspace changes via checkin, the manager gets a notification showing the old directory (with session_id prefix if one existed), the new directory, and that it's a fresh start. Helps track when workers move between projects and whether a previous session was discarded.

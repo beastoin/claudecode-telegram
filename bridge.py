@@ -10730,9 +10730,16 @@ class CommandRouter:
 
             self._teleport_notify(chat_id,
                 f"Starting {name} on {target_host or 'local'}...")
-            _log(_LOG_INFO, "teleport", f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={session_id}, backend={backend_name})")
+            # Cross-machine teleport: session JSONL files are machine-local.
+            # Resuming a VPS session_id on Mac Mini (or vice versa) fails with
+            # "No conversation found". Start fresh on the target instead.
+            resume_id = session_id
+            if source_host != target_host and session_id:
+                _log(_LOG_INFO, "teleport", f"{name}: cross-machine teleport, skipping --resume (session is on {source_host or 'local'}, target is {target_host or 'local'})")
+                resume_id = ""
+            _log(_LOG_INFO, "teleport", f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={resume_id}, backend={backend_name})")
             ok = self._start_worker_on_target(
-                name, target_host, target_cwd, session_id, backend_name)
+                name, target_host, target_cwd, resume_id, backend_name)
             _log(_LOG_INFO, "teleport", f"{name}: _start_worker_on_target returned {ok}")
             if not ok:
                 # Clean up target, restart source

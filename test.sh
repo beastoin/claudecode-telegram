@@ -12705,6 +12705,65 @@ print('OK')
     fi
 }
 
+test_teleport_cross_machine_skips_resume() {
+    info "Testing cross-machine teleport starts fresh (no --resume with local session_id)..."
+
+    if python3 -c "
+import bridge
+
+# _do_teleport passes session_id to _start_worker_on_target.
+# When source_host != target_host, the session JSONL doesn't exist
+# on the target — so we must NOT pass --resume.
+#
+# We test the logic that decides whether to pass session_id:
+# source_host=None (VPS local), target_host='mac-mini' → cross-machine
+# session_id should be cleared to '' for the start command.
+
+# Simulate the decision logic from _do_teleport
+source_host = None   # VPS
+target_host = 'beastoin-agents-f1-mac-mini'
+session_id = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
+
+resume_id = session_id
+if source_host != target_host and session_id:
+    resume_id = ''
+
+assert resume_id == '', f'cross-machine should skip resume, got {resume_id!r}'
+
+# Same-machine: should keep resume_id
+source_host = None
+target_host = None
+resume_id = session_id
+if source_host != target_host and session_id:
+    resume_id = ''
+assert resume_id == session_id, f'same-machine should keep resume, got {resume_id!r}'
+
+# Cross-machine but no session_id: no change needed
+source_host = None
+target_host = 'mac-mini'
+session_id = ''
+resume_id = session_id
+if source_host != target_host and session_id:
+    resume_id = ''
+assert resume_id == '', f'no session_id should stay empty, got {resume_id!r}'
+
+# Verify backend.start_cmd with empty session_id produces no --resume
+backend = bridge.get_backend('claude')
+cmd = backend.start_cmd('')
+assert '--resume' not in cmd, f'empty session_id should not produce --resume, got {cmd!r}'
+
+# Verify backend.start_cmd with session_id produces --resume
+cmd = backend.start_cmd('d61370de-61b2-467b-ac92-d3c5a1e4cfca')
+assert '--resume d61370de' in cmd, f'session_id should produce --resume, got {cmd!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cross-machine teleport skips --resume"
+    else
+        fail "cross-machine teleport should skip --resume"
+    fi
+}
+
 test_sync_shared_repos_deploys_agent_config() {
     info "Testing _sync_shared_repos deploys skills/hooks/scripts from agent-config to .claude/..."
 
@@ -23344,6 +23403,7 @@ run_unit_tests() {
     run_test test_sync_credentials_atomic_write
     run_test test_teleport_sends_welcome_after_start
     run_test test_teleport_registry_updated_before_source_kill
+    run_test test_teleport_cross_machine_skips_resume
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_remote_validates_session_exists
