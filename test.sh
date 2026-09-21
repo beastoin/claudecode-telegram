@@ -13974,6 +13974,157 @@ print('OK')
     fi
 }
 
+test_ensure_workspace_trusted_adds_new_dir() {
+    info "Testing _ensure_workspace_trusted adds untrusted directory to ~/.claude.json..."
+
+    if python3 -c "
+import tempfile, shutil, json
+from pathlib import Path
+import bridge
+
+# Use a temp file as the claude.json to avoid touching real config
+tmpdir = Path(tempfile.mkdtemp())
+fake_claude_json = tmpdir / 'claude.json'
+
+# Start with empty projects
+fake_claude_json.write_text(json.dumps({'projects': {}}))
+
+# Trust a new directory
+bridge._ensure_workspace_trusted('/home/claude/new-project', config_path=fake_claude_json)
+
+# Verify it was added
+data = json.loads(fake_claude_json.read_text())
+proj = data.get('projects', {}).get('/home/claude/new-project', {})
+assert proj.get('hasTrustDialogAccepted') == True, f'should be trusted, got {proj!r}'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ensure_workspace_trusted adds new directory"
+    else
+        fail "_ensure_workspace_trusted should add new directory"
+    fi
+}
+
+test_ensure_workspace_trusted_preserves_existing() {
+    info "Testing _ensure_workspace_trusted preserves existing trusted directories..."
+
+    if python3 -c "
+import tempfile, shutil, json
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+fake_claude_json = tmpdir / 'claude.json'
+
+# Start with an existing trusted directory
+existing = {
+    'projects': {
+        '/home/claude/existing-project': {'hasTrustDialogAccepted': True, 'allowedTools': ['Bash']}
+    },
+    'autoUpdaterStatus': 'disabled'
+}
+fake_claude_json.write_text(json.dumps(existing))
+
+# Trust a new directory
+bridge._ensure_workspace_trusted('/home/claude/new-project', config_path=fake_claude_json)
+
+# Verify both exist and existing wasn't modified
+data = json.loads(fake_claude_json.read_text())
+assert data['autoUpdaterStatus'] == 'disabled', 'top-level keys should be preserved'
+old = data['projects']['/home/claude/existing-project']
+assert old['hasTrustDialogAccepted'] == True, 'existing trust should remain'
+assert old['allowedTools'] == ['Bash'], 'existing config should be untouched'
+new = data['projects']['/home/claude/new-project']
+assert new['hasTrustDialogAccepted'] == True, 'new dir should be trusted'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ensure_workspace_trusted preserves existing directories"
+    else
+        fail "_ensure_workspace_trusted should preserve existing directories"
+    fi
+}
+
+test_ensure_workspace_trusted_skips_already_trusted() {
+    info "Testing _ensure_workspace_trusted is no-op for already-trusted directory..."
+
+    if python3 -c "
+import tempfile, shutil, json, os
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+fake_claude_json = tmpdir / 'claude.json'
+
+# Already trusted
+existing = {
+    'projects': {
+        '/home/claude/project-a': {'hasTrustDialogAccepted': True}
+    }
+}
+fake_claude_json.write_text(json.dumps(existing))
+mtime_before = os.path.getmtime(str(fake_claude_json))
+
+import time; time.sleep(0.05)  # ensure mtime would change if rewritten
+
+# Trust same directory again
+bridge._ensure_workspace_trusted('/home/claude/project-a', config_path=fake_claude_json)
+
+mtime_after = os.path.getmtime(str(fake_claude_json))
+assert mtime_before == mtime_after, f'file should not be rewritten for already-trusted dir'
+
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "_ensure_workspace_trusted skips already-trusted directory"
+    else
+        fail "_ensure_workspace_trusted should skip already-trusted directory"
+    fi
+}
+
+test_checkin_cwd_change_trusts_new_dir() {
+    info "Testing checkin CWD change auto-trusts the new directory..."
+
+    if python3 -c "
+import tempfile, shutil, json
+from pathlib import Path
+import bridge
+
+tmpdir = Path(tempfile.mkdtemp())
+fake_claude_json = tmpdir / 'claude.json'
+fake_claude_json.write_text(json.dumps({'projects': {}}))
+
+orig_sessions = bridge.SESSIONS_DIR
+bridge.SESSIONS_DIR = tmpdir / 'sessions'
+bridge.SESSIONS_DIR.mkdir()
+
+worker_dir = bridge.SESSIONS_DIR / 'trustworker'
+worker_dir.mkdir()
+
+# Worker starts in project-a
+(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+
+# Simulate what checkin does on CWD change: save new CWD + trust it
+bridge.save_claude_session_cwd('trustworker', '/home/claude/project-b')
+bridge._ensure_workspace_trusted('/home/claude/project-b', config_path=fake_claude_json)
+
+# Verify the new directory is trusted
+data = json.loads(fake_claude_json.read_text())
+proj = data.get('projects', {}).get('/home/claude/project-b', {})
+assert proj.get('hasTrustDialogAccepted') == True, f'new CWD should be auto-trusted, got {proj!r}'
+
+bridge.SESSIONS_DIR = orig_sessions
+shutil.rmtree(tmpdir, ignore_errors=True)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "checkin CWD change auto-trusts new directory"
+    else
+        fail "checkin CWD change should auto-trust new directory"
+    fi
+}
+
 test_get_session_history() {
     info "Testing get_session_history returns parsed entries with optional filters..."
 
@@ -23138,6 +23289,10 @@ run_unit_tests() {
     run_test test_session_id_race_after_cwd_change
     run_test test_restart_clears_session_id_on_cwd_mismatch
     run_test test_session_id_backwards_compat_old_format
+    run_test test_ensure_workspace_trusted_adds_new_dir
+    run_test test_ensure_workspace_trusted_preserves_existing
+    run_test test_ensure_workspace_trusted_skips_already_trusted
+    run_test test_checkin_cwd_change_trusts_new_dir
     run_test test_get_session_history
     run_test test_get_claude_session_id_authoritative_overrides_stale
     run_test test_get_claude_session_id_authoritative_remote

@@ -417,6 +417,14 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.44.2 - Auto-trust workspace on CWD change
+
+**Auto-trust new directories:** When a worker's CWD changes (via checkin, hire, or restart), the bridge now adds the directory to `~/.claude.json` with `hasTrustDialogAccepted: true`. This prevents Claude Code's interactive "trust this folder?" prompt from blocking non-interactive tmux sessions when they restart in a directory they haven't used before.
+
+**Behavior:** Skips the write if already trusted. Preserves all existing config in `~/.claude.json`. Wired into hire, restart, and checkin CWD change paths.
+
+**4 behavior tests:** adds new dir, preserves existing, skips already-trusted (no-op), checkin integration.
+
 ### v0.44.1 - Session ID race guard
 
 **Race guard in `_cache_session_id`:** When the Stop hook fires after a CWD change (checkin), it writes back the old session_id. Previously, `_cache_session_id` would blindly rebind that stale session_id to the new CWD, making `get_claude_session_id` return a wrong session for `--resume`. Now `_cache_session_id` detects when the same session_id is being rewritten with a different CWD (the race signature) and rejects the write. New session_ids from a genuinely new Claude instance are still accepted.

@@ -5975,6 +5975,44 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, A
     return entries
 
 
+# Default path for Claude Code's workspace trust config.
+_CLAUDE_JSON_PATH = Path.home() / ".claude.json"
+
+
+def _ensure_workspace_trusted(
+    cwd: str,
+    config_path: Path | None = None,
+) -> None:
+    """Add *cwd* to Claude Code's trusted-workspace list (best effort).
+
+    Claude Code stores workspace trust in ``~/.claude.json`` under
+    ``projects.<path>.hasTrustDialogAccepted``.  When a worker restarts
+    in a directory that hasn't been trusted yet, Claude shows an
+    interactive "trust this folder?" prompt that blocks non-interactive
+    sessions.  This function pre-trusts the directory so the prompt
+    never appears.
+
+    Skips the write if the directory is already trusted.
+    """
+    if not cwd:
+        return
+    target = config_path or _CLAUDE_JSON_PATH
+    try:
+        if target.exists():
+            data = json.loads(target.read_text())
+        else:
+            data = {}
+        projects = data.setdefault("projects", {})
+        entry = projects.get(cwd, {})
+        if entry.get("hasTrustDialogAccepted") is True:
+            return  # already trusted — skip rewrite
+        projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
+        target.write_text(json.dumps(data, indent=2))
+        _log(_LOG_INFO, "trust", f"pre-trusted workspace: {cwd}")
+    except (OSError, json.JSONDecodeError) as exc:
+        _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
+
+
 def _cache_session_id(name: str, sid: str) -> None:
     """Write session_id + its CWD to local cache file (best effort, 0o600).
 
@@ -9217,6 +9255,7 @@ class WorkerManager:
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd:
             save_claude_session_cwd(name, startup_cwd)
+            _ensure_workspace_trusted(startup_cwd)
         return resume_id, startup_cwd
 
     def _stop_running_claude(self, name: str, tmux_name: str) -> None:
@@ -9380,6 +9419,7 @@ class WorkerManager:
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd:
             save_claude_session_cwd(name, startup_cwd)
+            _ensure_workspace_trusted(startup_cwd)
 
         if SANDBOX_ENABLED and backend.is_interactive:
             if startup_cwd:
@@ -17463,6 +17503,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 _set_worker_cwd(name, requested_cwd)
                 old_cwd = get_claude_session_cwd(name)
                 save_claude_session_cwd(name, requested_cwd)
+                _ensure_workspace_trusted(requested_cwd)
                 if old_cwd and old_cwd.rstrip("/") != requested_cwd.rstrip("/"):
                     old_sid = get_claude_session_id(name)
                     _log_session_event(name, old_sid or "(none)", requested_cwd, "cwd_change")
