@@ -5976,17 +5976,27 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, A
 
 
 def _cache_session_id(name: str, sid: str) -> None:
-    """Write session_id to local VPS cache file (best effort, 0o600)."""
+    """Write session_id + its CWD to local cache file (best effort, 0o600).
+
+    The file stores two lines:
+        line 1: session UUID
+        line 2: CWD path the session was created in
+
+    get_claude_session_id() validates that line 2 matches the worker's
+    current CWD. If the CWD has changed, the session_id is stale and
+    ignored — no separate "clear on CWD change" step needed.
+    """
     if not sid:
         return
     try:
         session_dir = ensure_session_dir(name)
         id_file = session_dir / "claude_session_id"
-        old = id_file.read_text().strip() if id_file.exists() else ""
-        if old != sid:
-            cwd = get_claude_session_cwd(name)
+        cwd = get_claude_session_cwd(name) or ""
+        old_content = id_file.read_text().strip() if id_file.exists() else ""
+        old_sid = old_content.split("\n")[0] if old_content else ""
+        if old_sid != sid:
             _log_session_event(name, sid, cwd, "cache")
-        id_file.write_text(sid)
+        id_file.write_text(f"{sid}\n{cwd}")
         id_file.chmod(0o600)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
@@ -5995,43 +6005,56 @@ def _cache_session_id(name: str, sid: str) -> None:
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     """Return the Claude Code session UUID for a worker.
 
-    The local `claude_session_id` file is a per-worker cache populated by
-    (a) the Stop hook POST to /response and (b) this function's scan fallback.
+    The local `claude_session_id` file stores two lines:
+        line 1: session UUID
+        line 2: CWD path the session was created in
+
+    Self-validating: if the stored CWD doesn't match the worker's current
+    CWD, the session_id is stale (from a previous directory) and ignored.
+    This prevents --resume with a wrong session after CWD changes, even if
+    the Stop hook wrote back the old session_id in a race window.
+
+    Old files with only a UUID (no line 2) are treated as valid for
+    backwards compatibility.
 
     The per-worker cache is ALWAYS preferred over _scan_latest_session_id()
     because the scan picks the newest JSONL by mtime in the project dir,
-    which is ambiguous when multiple workers share the same CWD — they all
-    resolve to the same "latest" file, causing cross-worker session contamination.
-
-    authoritative=False (default): return the cached value if present.
-        If the cache is empty, scan the transcript dir and cache the result.
-    authoritative=True: same as False — prefer the per-worker cached value.
-        Falls back to scan only when cache is empty (self-heal for first-time
-        workers or after relaunch clears session files).
-        NOTE: Previously this always scanned, which caused a bug where workers
-        sharing a CWD (e.g., finn and x both in ~/claudecode-telegram) would
-        both get the same session ID — whichever JSONL was newest by mtime.
+    which is ambiguous when multiple workers share the same CWD.
     """
     cache_file = get_session_dir(name) / "claude_session_id"
+    current_cwd = get_claude_session_cwd(name)
 
     def _read_cache() -> str:
-        """Read cached session ID from disk, or empty string if absent."""
-        if cache_file.exists():
-            val = cache_file.read_text().strip()
-            if val:
-                return val
-        return ""
+        """Read cached session ID, validating CWD if present."""
+        if not cache_file.exists():
+            return ""
+        content = cache_file.read_text().strip()
+        if not content:
+            return ""
+        lines = content.split("\n", 1)
+        sid = lines[0].strip()
+        if not sid:
+            return ""
+        # Validate CWD binding (line 2) against current CWD
+        if len(lines) > 1:
+            cached_cwd = lines[1].strip()
+            if (cached_cwd and current_cwd and
+                    cached_cwd.rstrip("/") != current_cwd.rstrip("/")):
+                _log(_LOG_INFO, "session",
+                     f"{name}: stale session_id (cached_cwd={cached_cwd}, "
+                     f"current_cwd={current_cwd})")
+                return ""
+        return sid
 
     # Both modes: prefer per-worker cache (worker-specific, set by Stop hook).
-    # Only fall back to CWD-based scan when cache is empty (self-heal).
+    # Only fall back to CWD-based scan when cache is empty or stale.
     val = _read_cache()
     if val:
         return val
-    # Cache empty — scan as fallback to self-heal
-    cwd = get_claude_session_cwd(name)
-    if cwd:
+    # Cache empty or stale — scan as fallback to self-heal
+    if current_cwd:
         host = get_worker_host(name)
-        scanned = _scan_latest_session_id(cwd, host=host)
+        scanned = _scan_latest_session_id(current_cwd, host=host)
         if scanned:
             _cache_session_id(name, scanned)
             return scanned
@@ -17250,19 +17273,12 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
             _log(_LOG_INFO, "hook", f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Update session ID cache if provided (keeps VPS in sync with remote workers)
+            # Update session ID cache if provided (keeps VPS in sync with remote workers).
+            # _cache_session_id stores the CWD alongside the session_id, so
+            # get_claude_session_id will self-invalidate if the CWD changes later.
             hook_sid = data.get("session_id", "")
             if hook_sid:
-                try:
-                    sid_file = ensure_session_dir(session_name) / "claude_session_id"
-                    old_sid = sid_file.read_text().strip() if sid_file.exists() else ""
-                    if old_sid != hook_sid:
-                        cwd = get_claude_session_cwd(session_name)
-                        _log_session_event(session_name, hook_sid, cwd, "hook")
-                        sid_file.write_text(hook_sid)
-                        sid_file.chmod(0o600)
-                except OSError as exc:
-                    _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+                _cache_session_id(session_name, hook_sid)
 
             # Send response using shared helper
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
@@ -17431,8 +17447,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 if old_cwd and old_cwd.rstrip("/") != requested_cwd.rstrip("/"):
                     old_sid = get_claude_session_id(name)
                     _log_session_event(name, old_sid or "(none)", requested_cwd, "cwd_change")
-                    clear_claude_session_id(name)
-                    _log(_LOG_WARN, "checkin", f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), cleared stale session_id")
+                    # No need to clear session_id — get_claude_session_id()
+                    # self-validates by comparing stored CWD against current CWD.
+                    # Stale session IDs (from old directory) are ignored at read time.
+                    _log(_LOG_WARN, "checkin", f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate")
                 _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
 
                 if tmux_name and tmux_exists(tmux_name, host=host):

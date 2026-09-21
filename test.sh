@@ -13868,14 +13868,15 @@ sid = bridge.get_claude_session_id('worker1', authoritative=True)
 assert sid == 'stale-uuid-does-not-exist', f'authoritative should prefer cache, got {sid!r}'
 
 # Cache still has the per-worker value (NOT overwritten by scan)
-cached = (session_dir / 'claude_session_id').read_text().strip()
+cached = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
 assert cached == 'stale-uuid-does-not-exist', f'cache should not be overwritten by scan: got {cached!r}'
 
 # When cache is EMPTY, scan kicks in as fallback (self-heal)
 (session_dir / 'claude_session_id').write_text('')
 sid_healed = bridge.get_claude_session_id('worker1', authoritative=True)
 assert sid_healed == real_uuid, f'empty cache should trigger scan fallback, got {sid_healed!r}'
-cached_healed = (session_dir / 'claude_session_id').read_text().strip()
+# Cache file now stores session_id + CWD (two lines)
+cached_healed = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
 assert cached_healed == real_uuid, f'scan result should be cached after self-heal: got {cached_healed!r}'
 
 bridge.SESSIONS_DIR = orig_sessions
@@ -13935,7 +13936,8 @@ assert sid == 'stale-vps-cache', f'authoritative should prefer cache over remote
 with patch('bridge._remote_run', side_effect=mock_remote):
     sid = bridge.get_claude_session_id('ren', authoritative=True)
 assert sid == 'fresh-mac-uuid', f'empty cache should trigger remote scan, got {sid!r}'
-cached = (session_dir / 'claude_session_id').read_text().strip()
+# Cache file now stores session_id + CWD (two lines)
+cached = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
 assert cached == 'fresh-mac-uuid', f'scan result should be cached: {cached!r}'
 
 bridge.NODE_DIR = orig_node
