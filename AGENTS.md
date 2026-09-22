@@ -36,7 +36,70 @@ Do these three steps when you make changes that need a new version:
 
 ## Update Surfaces
 
-When you change a message path (inbound, outbound, worker-to-worker, connector, management, or error), update the **Message Flow Map** in README.md — it is the audit surface.
+When you change a message path (inbound, outbound, worker-to-worker, connector, management, or error), update the **Message Flow Map** below — it is the audit surface.
+
+## Message Flow Map
+
+Every path a message takes through the system. Check here before changing any message behavior.
+
+### Inbound: Telegram → Worker
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| Hire worker | `/hire <name>` | Creates tmux session, registers worker, sets focus |
+| Bare message | Text (no `/` or `@`) | 👀 react, `tmux send-keys` to focused worker |
+| @mention | `@name <msg>` | 👀 react, one-off delivery, focus unchanged |
+| @all broadcast | `@all <msg>` | 👀 react, delivered to all active workers |
+| Implicit `/name` | Bare `<name>` as entire message | Treated as `/focus <name>` if worker exists |
+| Reply-to | Telegram reply to a worker message | Routes to originating worker |
+| Focus switch | `/focus <name>` | Changes active worker |
+| File/image | Telegram attachment | Downloads to temp, path injected into message |
+| Non-admin | Message from unknown chat_id | Silently rejected |
+
+### Outbound: Worker → Telegram
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| Worker reply | Claude stop hook fires | `send-to-telegram.sh` → `POST /response` → `name: <text>` in Telegram |
+| Media tags | `[[image:/path\|caption]]` in output | Hook sends raw text; bridge parses and sends via `sendPhoto`/`sendDocument` |
+| Long reply | Output > 4096 chars | Bridge splits into multiple messages, preserves code blocks |
+| Proactive message | Worker outputs without pending request | Hook sends if `chat_id` file exists |
+
+### Worker ↔ Worker
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| tmux send | Worker calls send command from `/workers` | `flock` + `tmux paste-buffer` (serialized) |
+| Pipe send | Worker writes to named pipe | `echo "msg" > /tmp/claudecode-telegram/<node>/<worker>/in.pipe` |
+| Cross-machine | Worker calls SSH + send command | SSH wraps the tmux send |
+
+### Connector Inbound
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| Gmail | New email from allowed sender | Connector polls → bridge → Telegram + workers |
+| GitHub | New comment from allowed user | Connector polls → bridge → Telegram + workers |
+| Blocked sender | Email/comment from non-allowed sender | Silently dropped (fail-closed allowlist) |
+
+### Management
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| Team status | `/team` | Scans tmux sessions, health state per worker |
+| Worker restart | `/restart <name>` | Kills + restarts tmux session |
+| Teleport | `/teleport <name> <host>` | Syncs state, starts on target, stops source |
+| Remote register | `POST /register` | Registers pre-existing worker session from remote host |
+| End worker | `/end <name>` | Kills tmux session, removes from registry |
+| Bridge restart | Process restart | Scans tmux + reads `workers.json`, recovers all workers |
+
+### Error Paths
+
+| Flow | Trigger | Behavior |
+|------|---------|----------|
+| Session missing | Message to non-existent worker | Bridge replies with error in Telegram |
+| Worker dead | tmux session exited | Health check marks EXITED, visible in `/team` |
+| Hook no chat_id | Hook fires but no `chat_id` file | Hook exits silently |
+| Stale transcript | JSONL not updated recently | Hook sends health alert to `/health-alert` endpoint |
 
 ## Testing Requirements
 
