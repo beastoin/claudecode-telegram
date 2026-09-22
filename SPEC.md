@@ -66,11 +66,11 @@ Spec IDs are stable references and may not appear in numeric order in the docume
 | SPEC-018 | Bridge architecture (OOP) | Active | FB-004 | 8d6a973 |
 | SPEC-019 | Machine catalog | Active | FB-003 | 8d6a973 |
 | SPEC-020 | Connector sender allowlists | Active | AUDIT-001 | 8d6a973 |
-| SPEC-021 | Behavior tests required | Active | FB-001 | pending |
-| SPEC-022 | Configurable paths (no hardcoding) | Active | AUDIT-002 | pending |
-| SPEC-023 | Node isolation | Active | FB-003 | pending |
-| SPEC-024 | Process lifecycle safety (PID-based) | Active | AUDIT-002 | pending |
-| SPEC-025 | Dev-before-prod deployment | Active | AUDIT-002 | pending |
+| SPEC-021 | Behavior tests required | Active | FB-001 | 2b6cd8f |
+| SPEC-022 | Configurable paths (no hardcoding) | Active | AUDIT-002 | 2b6cd8f |
+| SPEC-023 | Node isolation | Active | FB-003 | 2b6cd8f |
+| SPEC-024 | Process lifecycle safety (PID-based) | Active | AUDIT-002 | 2b6cd8f |
+| SPEC-025 | Dev-before-prod deployment | Active | AUDIT-002 | 2b6cd8f |
 
 ## Superseded Specs
 
@@ -276,13 +276,14 @@ Adding a machine: add an entry to `machines.json` with `ssh_target`, `bridge_bas
 All bridge logic lives in `bridge.py`. The architecture uses SOLID principles within a single file:
 
 - **AppContext** for dependency injection (subprocess, clock, urlopen)
-- **TypedDicts** and **NamedTuples** for data structures (33 TypedDicts, 5 NamedTuples)
+- **TypedDicts** and **NamedTuples** for data structures (31 TypedDicts, 5 NamedTuples)
 - **Service classes** for responsibilities (WorkerManager, TelegramAPI, CommandRouter)
 - **Protocols** for interfaces (Backend, SubprocessRunner, Clock)
-- **Mixins** for organized command groups (12 mixins on CommandRouter)
 - **Registry dispatch** for extensible command routing
 
-This is a deliberate choice: one file keeps the system greppable, diffable, and simple to deploy. See the changelog for the quality push history (v0.33.0 through v0.44.0).
+CommandRouter logic is inlined (mixins were removed during consolidation). Connector implementations live in `connectors/`, not in bridge.py.
+
+This is a deliberate choice: one file for core logic keeps the system greppable, diffable, and simple to deploy. See the changelog for the quality push history (v0.33.0 through v0.44.0).
 
 ## SPEC-019. Machine Catalog. [FB-003]
 
@@ -515,7 +516,7 @@ def handle_message(update):
 Why two modes?
 1. **Pre-configured** — Secure. No race condition on the first message.
 2. **Auto-learn** — Zero configuration for quick setup.
-3. **RAM-only** — Restart the bridge to reset the admin. This is a feature, not a bug.
+3. **Persisted admin** — The learned admin chat ID is stored in `last_chat_id` and restored on bridge restart. Delete the `last_chat_id` file to reset the admin.
 
 ## SPEC-008. Secure by Default. [FB-001, AUDIT-001]
 

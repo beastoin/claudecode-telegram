@@ -86,6 +86,9 @@ Every path a message takes through the system. This is the audit surface — che
 | Hire worker | `/hire <name>` | Creates tmux session `claude-<node>-<name>` | Registers worker, sets focus, sends welcome | SPEC-001, SPEC-014 |
 | Bare message | Any text (no `/` or `@`) | Routes to focused worker | 👀 react, `tmux send-keys` to active session | SPEC-012, SPEC-013 |
 | @mention | `@name <msg>` | Routes to named worker, focus unchanged | 👀 react, one-off delivery | SPEC-012 |
+| @all broadcast | `@all <msg>` | Routes to every active worker | 👀 react, delivered to all sessions | SPEC-012 |
+| Implicit `/name` | Bare `<name>` as entire message | Treated as `/focus <name>` if worker exists | Shorthand focus switch | SPEC-012 |
+| Reply-to | Telegram reply to a worker message | Routes to originating worker | 👀 react, preserves reply context | SPEC-012 |
 | Focus switch | `/focus <name>` | Changes active worker | Next bare messages go to new focus | SPEC-012 |
 | File/image | Telegram attachment | Downloads to temp, path injected into message | Worker receives local file path | |
 | Non-admin | Message from unknown chat_id | Silently rejected | No response, no error revealed | SPEC-007, SPEC-008 |
@@ -95,7 +98,7 @@ Every path a message takes through the system. This is the audit surface — che
 | Flow | Trigger | Route | Behavior | Spec |
 |------|---------|-------|----------|------|
 | Worker reply | Claude stop event fires hook | `send-to-telegram.sh` → `POST /response` → Telegram | Message appears as `worker_name: <text>` | SPEC-016, SPEC-013 |
-| Media tags | `[[image:/path\|caption]]` in output | Hook parses, bridge sends via `sendPhoto`/`sendDocument` | Inline image or file in chat | SPEC-016 |
+| Media tags | `[[image:/path\|caption]]` in output | Hook sends raw text; bridge parses tags and sends via `sendPhoto`/`sendDocument` | Inline image or file in chat | SPEC-016 |
 | Long reply | Output > 4096 chars | Bridge splits into multiple messages | Preserves code blocks across splits | |
 | Proactive message | Worker outputs without pending request | Hook sends if `chat_id` file exists | No `pending` gate — always delivers | SPEC-016 |
 
@@ -122,6 +125,7 @@ Every path a message takes through the system. This is the audit surface — che
 | Team status | `/team` | Scans tmux sessions | Health state per worker (READY/WORKING/STUCK/...) | SPEC-001, SPEC-015 |
 | Worker restart | `/restart <name>` | Kills + restarts tmux session | Resumes session context if available | SPEC-001 |
 | Teleport | `/teleport <name> <host>` | Syncs state, starts on target, stops source | Cross-machine worker migration | SPEC-010 |
+| Remote register | `POST /register` from remote host | Registers pre-existing worker session | Adds to registry, exports env vars | SPEC-010 |
 | End worker | `/end <name>` | Kills tmux session | Removes from registry | SPEC-001, SPEC-014 |
 | Bridge restart | Process restart | Scans tmux + reads `workers.json` | Recovers all workers, restores focus | SPEC-001, SPEC-003 |
 
