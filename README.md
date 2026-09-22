@@ -206,7 +206,6 @@ claudecode-telegram/
 ├── connectors/            # Gmail, GitHub polling integrations [SPEC-020]
 ├── team_memory/           # /memory command — chat history search [SPEC.md inside]
 ├── tools/                 # PR review, indexers, pilot terminal viewer, git-hooks
-├── skills/                # Claude skill definitions (bridge interaction guide)
 ├── tests/                 # Python test files
 ├── experiments/           # Forge worker binary, void microVM, MCP prototypes
 ├── SPEC.md                # System design specs and changelog
