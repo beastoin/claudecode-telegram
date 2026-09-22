@@ -17,10 +17,10 @@ Do these three steps when you make changes that need a new version:
    VERSION="x.y.z"
    ```
 
-2. Update `SPEC.md`:
-   - Set the new version number in the header.
-   - Add a changelog entry. Describe breaking changes, new features, and architecture changes.
-   - Update the design philosophy sections if core principles changed.
+2. Update `SPEC.md` and `CHANGELOG.md`:
+   - Set the new version number in the SPEC.md header.
+   - Add a changelog entry in `CHANGELOG.md`. Describe breaking changes, new features, and architecture changes.
+   - Update the design philosophy sections in SPEC.md if core principles changed.
 
 3. Run the acceptance tests before you commit:
    ```bash
@@ -37,8 +37,6 @@ Do these three steps when you make changes that need a new version:
 ## Update Surfaces
 
 When you change a message path (inbound, outbound, worker-to-worker, connector, management, or error), update the **Message Flow Map** in README.md — it is the audit surface.
-
-When you change a feature's behavior, check `FEATURES.md` for a matching MUST requirement and update it if needed.
 
 ## Testing Requirements
 
