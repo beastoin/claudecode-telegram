@@ -21143,7 +21143,7 @@ def mock_run(cmd, **kwargs):
     return r
 
 with patch('connectors.subprocess.run', side_effect=mock_run):
-    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+    result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 # Must NOT call beast
 for cmd in call_log:
@@ -21211,7 +21211,7 @@ def mock_run(cmd, **kwargs):
     return r
 
 with patch('connectors.subprocess.run', side_effect=mock_run):
-    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+    result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 2, f'Expected 2 merged comments, got {len(result)}'
 ids = {c['id'] for c in result}
@@ -21255,7 +21255,7 @@ def mock_run(cmd, **kwargs):
     return r
 
 with patch('connectors.subprocess.run', side_effect=mock_run):
-    result = gc._get_all_comments('2026-06-21T00:00:00Z')
+    result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 1, f'Expected 1 deduped comment, got {len(result)}'
 print('OK')
