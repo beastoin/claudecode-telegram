@@ -1,28 +1,101 @@
 # Design Philosophy
 
-> Version: 0.44.0
+> Version: 0.45.0
 
-## Current Philosophy (Summary)
+## Documentation Contract
 
-| Principle | Description |
-|-----------|-------------|
-| **tmux IS persistence** | No database. tmux sessions are the source of truth for worker state |
-| **`claude-<name>` naming** | Configurable prefix via `TMUX_PREFIX` (default: `claude-`) |
-| **RAM state only** | Core worker state derived from tmux on demand. Supplementary files (`workers.json`, `guest_state.json`, `channel_state.json`, `relay_state.json`) persist feature-specific data |
-| **Per-session files** | Minimal hook-to-bridge coordination via filesystem |
-| **Fail loudly** | No silent errors. No hidden retries |
-| **Token isolation** | `TELEGRAM_BOT_TOKEN` never leaves the bridge process |
-| **Admin config** | Pre-set via `ADMIN_CHAT_ID` or auto-learn from the first user |
-| **Secure by default** | 0o700 dirs, 0o600 files, silent rejection of non-admins |
-| **Decentralized worker comms** | Workers send messages directly to each other. Manager tools may use bridge control-plane APIs |
-| **Machines are config** | Static host topology lives in `machines.json`. tmux and workers are runtime state |
-| **SOLID in a single file** | AppContext for DI, typed records for data, service classes for responsibilities, protocol splits for interfaces, registry dispatch for extension — all within `bridge.py` |
+This document is the **spec** — the source of truth for system design and architecture.
+Authority flows downstream. Citations point upstream only.
+
+```
+DOC.md (spec)  →  AGENTS.md (build rules)  →  Code  →  Tests
+   ↑                    ↑                        ↑         ↑
+ manager             agent                    agent     agent
+ (owner)            (owner)                  (owner)   (owner)
+
+Authority flows →  (downstream)
+Citations point ←  (upstream only)
+```
+
+**Rules:**
+- Citations point upstream only. AGENTS.md cites DOC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. DOC.md never references AGENTS.md.
+- Manager owns DOC.md. Agent owns AGENTS.md + code + tests.
+- When a spec changes, everything downstream is invalidated and must be updated (cascade forward).
+- When code diverges from spec, agent STOPS and notifies manager — never patch downstream and hope upstream catches up.
+
+**Citation format:**
+- AGENTS.md cites: `[SPEC-NNN]`
+- Code cites: `# SPEC-NNN` (in comments on key decisions)
+- Tests cite: test function names trace to spec behavior
+
+**Contract invariants:**
+- Every `SPEC-NNN` in the Spec Index has exactly one detailed section header below.
+- Every detailed `SPEC-NNN` section appears in the Spec Index.
+- Every AGENTS.md Quick Reference row cites at least one `SPEC-NNN`.
+
+**Feedback intake:** Every input that changes the spec gets an ID at intake:
+- Manager feedback → `FB-{NNN}` (e.g., FB-001 = initial design session)
+- Audit findings → `AUDIT-{NNN}` (e.g., AUDIT-001 = security review)
+- Requirements → `REQ-{NNN}`
 
 ---
 
-## Core Principle: tmux IS the Persistence
+## Spec Index
 
-The most important design decision: **tmux sessions are the primary source of truth for worker state**. The bridge derives worker presence, online status, and routing from tmux on demand. Supplementary JSON files (`workers.json`, `guest_state.json`, `channel_state.json`, `relay_state.json`, `last_chat_id`, `last_active`) persist feature-specific data under the node directory.
+Spec IDs are stable references and may not appear in numeric order in the document.
+
+| ID | Title | Status | Citations | Commit |
+|----|-------|--------|-----------|--------|
+| SPEC-001 | tmux IS persistence | Active | FB-001 | 8d6a973 |
+| SPEC-002 | `claude-<name>` naming | Active | FB-001 | 8d6a973 |
+| SPEC-003 | RAM state only | Active | FB-001 | 8d6a973 |
+| SPEC-004 | Per-session files | Active | FB-001 | 8d6a973 |
+| SPEC-005 | Fail loudly | Active | FB-001 | 8d6a973 |
+| SPEC-006 | Token isolation | Active | FB-001, AUDIT-001 | 8d6a973 |
+| SPEC-007 | Admin config | Active | FB-001 | 8d6a973 |
+| SPEC-008 | Secure by default | Active | FB-001, AUDIT-001 | 8d6a973 |
+| SPEC-009 | Decentralized worker comms | Active | FB-002 | 8d6a973 |
+| SPEC-010 | Machines are config | Active | FB-003 | 8d6a973 |
+| SPEC-011 | SOLID in a single file | Active | FB-004 | 8d6a973 |
+| SPEC-012 | Message routing | Active | FB-001 | 8d6a973 |
+| SPEC-013 | Feedback philosophy (clean chat) | Active | FB-001 | 8d6a973 |
+| SPEC-014 | Worker registration (3 paths) | Active | FB-001 | 8d6a973 |
+| SPEC-015 | No magic routing | Active | FB-001 | 8d6a973 |
+| SPEC-016 | Hook: minimal and defensive | Active | FB-001 | 8d6a973 |
+| SPEC-017 | Single chat UX | Active | FB-001 | 8d6a973 |
+| SPEC-018 | Bridge architecture (OOP) | Active | FB-004 | 8d6a973 |
+| SPEC-019 | Machine catalog | Active | FB-003 | 8d6a973 |
+| SPEC-020 | Connector sender allowlists | Active | AUDIT-001 | 8d6a973 |
+| SPEC-021 | Behavior tests required | Active | FB-001 | pending |
+| SPEC-022 | Configurable paths (no hardcoding) | Active | AUDIT-002 | pending |
+| SPEC-023 | Node isolation | Active | FB-003 | pending |
+| SPEC-024 | Process lifecycle safety (PID-based) | Active | AUDIT-002 | pending |
+| SPEC-025 | Dev-before-prod deployment | Active | AUDIT-002 | pending |
+
+## Superseded Specs
+
+| ID | Original | Superseded by | Why |
+|----|----------|---------------|-----|
+| *(none yet)* | | | |
+
+## Feedback Log
+
+| ID | Source | Approx Date | Summary |
+|----|--------|------|---------|
+| FB-001 | Manager initial design | 2024-06 | Core architecture: tmux persistence, single chat, fail loudly, token isolation |
+| FB-002 | Manager | 2024-10 | Workers should communicate directly, not through the bridge |
+| FB-003 | Manager | 2025-01 | Multi-machine support: static topology, runtime workers |
+| FB-004 | Manager quality push | 2025-04 | SOLID principles, DI, type safety — all within bridge.py |
+| AUDIT-001 | Security review | 2024-07 | Token isolation, file permissions, connector allowlists |
+| FB-005 | Manager reorg | 2026-08 | Project restructure: connectors/, tools/, tests/, experiments/ |
+| FB-006 | Manager doc contract | 2026-09 | Adopt voxboard spec/citation system for docs-as-contract |
+| AUDIT-002 | Operational incidents | 2024-09 | pkill killed prod, direct-to-prod deploy broke v0.9.2 |
+
+---
+
+## SPEC-001. tmux IS the Persistence. [FB-001]
+
+The most important design decision: **tmux sessions are the primary source of truth for worker state**. [FB-001] The bridge derives worker presence, online status, and routing from tmux on demand. Supplementary JSON files (`workers.json`, `guest_state.json`, `channel_state.json`, `relay_state.json`, `last_chat_id`, `last_active`) persist feature-specific data under the node directory.
 
 ```
 Traditional approach:          This approach:
@@ -46,7 +119,7 @@ Traditional approach:          This approach:
 3. **Manual tmux usage works.** Start `claude` in any `claude-*` session. The bridge finds it.
 4. **Debugging is trivial.** Run `tmux list-sessions` to see what exists.
 
-## Naming Convention: `claude-<name>`
+## SPEC-002. Naming Convention: `claude-<name>`. [FB-001]
 
 The user says `/hire backend`. The bridge creates tmux session `claude-backend`.
 
@@ -55,7 +128,7 @@ This prefix pattern gives you:
 - **Namespace isolation**: No conflict with other tmux sessions
 - **Clear ownership**: You can see which sessions the bridge manages
 
-## RAM State: Ephemeral by Design
+## SPEC-003. RAM State: Ephemeral by Design. [FB-001]
 
 ```python
 state = {
@@ -74,7 +147,7 @@ Supplementary features persist data to JSON files:
 - `relay_state.json` — relay link tokens
 - `last_active`, `last_chat_id` — focus and admin persistence
 
-## Per-Session Files: Minimal Coordination
+## SPEC-004. Per-Session Files: Minimal Coordination. [FB-001]
 
 ```
 ~/.claude/telegram/sessions/
@@ -91,7 +164,7 @@ Why files instead of IPC?
 - Files are the simplest cross-process communication method.
 - The hook only needs two facts: "where do I send this?" and "should I send at all?"
 
-## Message Routing: Simple Rules
+## SPEC-012. Message Routing: Simple Rules. [FB-001]
 
 ```
 Input                    → Routes to
@@ -104,7 +177,7 @@ fix the bug              → active session (currently frontend)
 
 `@name` mentions route messages without changing focus. Use `/focus <name>` to switch.
 
-## Feedback Philosophy
+## SPEC-013. Feedback Philosophy (Clean Chat). [FB-001]
 
 - 👀 means the message reached the worker.
 - The worker reply is the confirmation: `worker_name: response`.
@@ -113,7 +186,7 @@ fix the bug              → active session (currently frontend)
 - The manager wants a clean chat. The emoji gives instant feedback.
 - The bridge speaks only when no worker reply will come.
 
-## Worker Registration
+## SPEC-014. Worker Registration (3 Paths). [FB-001]
 
 Workers register through three paths:
 
@@ -123,7 +196,7 @@ Workers register through three paths:
 
 The persistent worker registry (`workers.json`) survives bridge restarts. The bridge rebuilds runtime state from tmux sessions and the registry on startup.
 
-## No Summaries, No Magic
+## SPEC-015. No Summaries, No Magic. [FB-001]
 
 The `/team` command shows workers with health state, focus indicator, backend, and activity context.
 
@@ -146,7 +219,7 @@ Why?
 2. The manager knows which worker should handle each task.
 3. Magic routing fails often enough to cause frustration.
 
-## Error Handling: Fail Loudly, Recover Gracefully
+## SPEC-005. Error Handling: Fail Loudly, Recover Gracefully. [FB-001]
 
 - Session does not exist? Tell the user immediately.
 - tmux died? The next message reports it.
@@ -154,7 +227,7 @@ Why?
 
 No silent failures. No retry loops that hide problems.
 
-## The Hook: Minimal and Defensive
+## SPEC-016. The Hook: Minimal and Defensive. [FB-001]
 
 The hook (`send-to-telegram.sh`) runs on every Claude stop event. It reads configuration from the tmux session environment:
 
@@ -171,7 +244,7 @@ The hook POSTs extracted text to `{BRIDGE_URL}/response`. It also writes `claude
 
 The `pending` file is used for the busy indicator in `/team` and `/progress`. It is not a send gate (changed in v0.6.2 to enable proactive messaging).
 
-## Why Single Chat?
+## SPEC-017. Why Single Chat? [FB-001]
 
 One Telegram DM manages all Claude instances because:
 1. **Context stays in one place.** Scroll up to see what you asked any Claude.
@@ -180,7 +253,7 @@ One Telegram DM manages all Claude instances because:
 
 The `@name` syntax and `/focus` command give full control without the overhead of multiple chats.
 
-## Bridge Architecture (v0.19.0)
+## SPEC-018. Bridge Architecture. [FB-004]
 
 The bridge uses small, explicit classes:
 
@@ -192,7 +265,26 @@ The bridge uses small, explicit classes:
 
 The bridge detects interactive vs non-interactive mode from `backend.is_interactive`. It does not hardcode backend names.
 
-## Machine Catalog
+## SPEC-010. Machines Are Config. [FB-003]
+
+Static host topology lives in `machines.json`. Machines are infrastructure, not runtime state. The bridge reads the machine catalog on startup and serves it via `/machines`. Worker placement is derived from tmux sessions at runtime — it is never stored in the machine config.
+
+Adding a machine: add an entry to `machines.json` with `ssh_target`, `bridge_base_url`, `home_root`, `os_family`. The bridge discovers workers on all configured machines.
+
+## SPEC-011. SOLID in a Single File. [FB-004]
+
+All bridge logic lives in `bridge.py`. The architecture uses SOLID principles within a single file:
+
+- **AppContext** for dependency injection (subprocess, clock, urlopen)
+- **TypedDicts** and **NamedTuples** for data structures (33 TypedDicts, 5 NamedTuples)
+- **Service classes** for responsibilities (WorkerManager, TelegramAPI, CommandRouter)
+- **Protocols** for interfaces (Backend, SubprocessRunner, Clock)
+- **Mixins** for organized command groups (12 mixins on CommandRouter)
+- **Registry dispatch** for extensible command routing
+
+This is a deliberate choice: one file keeps the system greppable, diffable, and simple to deploy. See the changelog for the quality push history (v0.33.0 through v0.44.0).
+
+## SPEC-019. Machine Catalog. [FB-003]
 
 **Status:** Read-only catalog endpoint.
 
@@ -219,7 +311,7 @@ Required fields match the SDD: `ssh_target`, `bridge_base_url`, `home_root`, `os
 
 `GET /machines` returns the catalog plus derived worker placement, caller-aware access hints (`local` or `ssh <target>`), and current host health. A missing file falls back to one implicit local bridge machine. A malformed file fails loudly.
 
-## Inter-Worker Messaging (Decentralized Discovery)
+## SPEC-009. Inter-Worker Messaging (Decentralized Discovery). [FB-002]
 
 **Status:** Available (tmux send-keys + named pipes)
 
@@ -295,9 +387,73 @@ cat /tmp/claudecode-telegram/<node>/<worker>/in.pipe
 
 ---
 
-## Security Model (v0.3.0+)
+## SPEC-021. Behavior Tests Required. [FB-001]
 
-### Token Isolation
+Every new feature must have an end-to-end behavior test. Tests verify what users care about, not that code structure exists. A test that checks "HTTP returns 200" without verifying delivery is scaffolding, not a behavior test.
+
+**What qualifies as a behavior test:**
+- Worker stays alive after hire (not just "hire returned OK")
+- Message reaches worker end-to-end (not just "send function exists")
+- Pipe delivery works between workers (not just "pipe was created")
+
+See AGENTS.md `[SPEC-021]` for the full testing workflow (TDD, mode gates, test/scaffolding examples).
+
+## SPEC-022. Configurable Paths (No Hardcoding). [AUDIT-002]
+
+All paths must be configurable through environment variables with sensible defaults. Hardcoded paths break test isolation and multi-node setups.
+
+```bash
+# Right: configurable with default
+SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
+
+# Wrong: hardcoded
+SESSIONS_DIR="$HOME/.claude/telegram/sessions"
+```
+
+Env vars must propagate through the full process chain. Use `tmux set-environment` at each boundary, not `tmux send-keys "export ..."`.
+
+## SPEC-023. Node Isolation. [FB-003]
+
+All runtime paths are namespaced by node (derived from `TMUX_PREFIX`). No shared state between prod, dev, and test nodes.
+
+```
+/tmp/claudecode-telegram/<node>/<worker>/in.pipe
+/tmp/claudecode-telegram/<node>/<worker>/inbox/
+/tmp/claudecode-telegram/<node>/locks/<session>.lock
+```
+
+This prevents collisions when multiple nodes run simultaneously on the same machine.
+
+## SPEC-024. Process Lifecycle Safety (PID-Based). [AUDIT-002]
+
+Always use PID-based process management. Never use pattern-based killing (`pkill`, `killall`). Production runs multiple nodes concurrently — pattern-based killing causes collateral damage.
+
+```bash
+# Right: PID-based
+./bridge.sh --node prod stop
+kill $(cat ~/.claude/telegram/nodes/prod/pid)
+
+# Wrong: pattern-based (kills ALL nodes)
+pkill -f bridge.py
+lsof -ti :8271 | xargs kill
+```
+
+Before killing any port, verify which node owns it: `cat ~/.claude/telegram/nodes/*/port`.
+
+## SPEC-025. Dev-Before-Prod Deployment. [AUDIT-002]
+
+Always test on the dev node before deploying to prod:
+
+1. Start dev bridge with dev bot token on port 8272
+2. Run full integration tests against dev
+3. Test manually through Telegram on the dev bot
+4. Only then deploy to prod
+
+Local/unit tests prove concepts in isolation. Real integration bugs only surface with actual Telegram traffic.
+
+---
+
+## SPEC-006. Token Isolation. [FB-001, AUDIT-001]
 
 The most important security principle: **Claude never sees the bot token.**
 
@@ -329,7 +485,7 @@ The bridge-centric architecture prevents this:
 
 PORT varies by node: prod=8271, dev=8272, test=8295, default=8270.
 
-### Admin Configuration
+## SPEC-007. Admin Configuration. [FB-001]
 
 Two modes:
 
@@ -361,7 +517,9 @@ Why two modes?
 2. **Auto-learn** — Zero configuration for quick setup.
 3. **RAM-only** — Restart the bridge to reset the admin. This is a feature, not a bug.
 
-### Optional Webhook Verification
+## SPEC-008. Secure by Default. [FB-001, AUDIT-001]
+
+### Webhook Verification
 
 If `TELEGRAM_WEBHOOK_SECRET` is set:
 1. The bridge adds `secret_token` to the webhook registration.
@@ -378,7 +536,7 @@ All session files use restrictive permissions:
 
 This prevents other users on multi-user systems from reading chat IDs or session data.
 
-### Connector Sender Allowlists
+## SPEC-020. Connector Sender Allowlists. [AUDIT-001]
 
 External connectors (Gmail, GitHub) poll third-party APIs and forward messages to the bridge. Each connector has a **mandatory sender filter**. Only messages from the configured sender reach Telegram and workers. The connector drops everything else silently.
 

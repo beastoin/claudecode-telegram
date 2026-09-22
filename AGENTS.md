@@ -107,33 +107,47 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 - End-to-end tests give you confidence when you refactor.
 - End-to-end tests are the safety net for this project.
 
-## Design Philosophy
+## Design Philosophy & Doc Contract
 
-The source of truth is `DOC.md`.
-All principles are documented there with full context.
+The source of truth is `DOC.md` — it contains the **spec** (system design, architecture decisions).
+This file (AGENTS.md) contains the **build rules** (how to work in the repo).
 
-When you make changes, verify that the changes align with the philosophy in `DOC.md`.
-If you add new principles, update `DOC.md` first (both the summary table and the detailed section).
+**Authority flows downstream:** `DOC.md → AGENTS.md → Code → Tests`. **Citations point upstream only.**
+- This file cites DOC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. DOC.md never references this file.
+- Manager owns DOC.md. Agent owns AGENTS.md, code, and tests.
+- When DOC.md changes, cascade forward: update AGENTS.md → code → tests.
+- When code diverges from spec, STOP and notify manager. Never patch downstream first.
+- When adding new specs, update DOC.md first (Spec Index + detailed section), then cascade here.
 
-### Quick Reference (see DOC.md for details)
+### Quick Reference (cite spec IDs for traceability)
 
-| Principle | Rule |
-|-----------|------|
-| Tests required | Every new feature must have an end-to-end test |
-| tmux IS persistence | No database. tmux sessions are the source of truth for worker state |
-| `claude-<name>` naming | Configurable prefix via `TMUX_PREFIX` (default: `claude-`) |
-| RAM state only | Core worker state derived from tmux. Supplementary files for registry, guests, channels, relay |
-| Per-session files | Minimal hook-to-gateway coordination |
-| Fail loudly | No silent errors, no hidden retries |
-| Token isolation | `TELEGRAM_BOT_TOKEN` never leaves the bridge process |
-| Admin config | `ADMIN_CHAT_ID` env var or auto-learn first user |
-| Secure by default | 0o700 dirs, 0o600 files |
-| Decentralized worker comms | Worker-to-worker sends stay direct; manager tools may use bridge APIs |
-| Machines are config | Static host topology lives in `machines.json`; tmux/workers are runtime truth |
+| Spec ID | Principle | Rule |
+|---------|-----------|------|
+| SPEC-021 | Tests required | Every new feature must have an end-to-end behavior test |
+| SPEC-001 | tmux IS persistence | No database. tmux sessions are the source of truth for worker state |
+| SPEC-002 | `claude-<name>` naming | Configurable prefix via `TMUX_PREFIX` (default: `claude-`) |
+| SPEC-003 | RAM state only | Core worker state derived from tmux. Supplementary files for registry, guests, channels, relay |
+| SPEC-004 | Per-session files | Minimal hook-to-gateway coordination |
+| SPEC-005 | Fail loudly | No silent errors, no hidden retries |
+| SPEC-006 | Token isolation | `TELEGRAM_BOT_TOKEN` never leaves the bridge process |
+| SPEC-007 | Admin config | `ADMIN_CHAT_ID` env var or auto-learn first user |
+| SPEC-008 | Secure by default | 0o700 dirs, 0o600 files |
+| SPEC-009 | Decentralized worker comms | Worker-to-worker sends stay direct; manager tools may use bridge APIs |
+| SPEC-010 | Machines are config | Static host topology lives in `machines.json`; tmux/workers are runtime truth |
+| SPEC-011 | SOLID in a single file | All bridge logic in `bridge.py`; DI, TypedDicts, Protocols, mixins |
+| SPEC-012 | Message routing | `@name` for one-off, `/focus` for switch, bare text to active |
+| SPEC-013 | Clean chat | 👀 = received; bridge speaks only for errors and state commands |
+| SPEC-015 | No magic routing | No AI summaries, no auto-context sharing, no smart routing |
+| SPEC-016 | Hook: minimal | Hook reads tmux env, POSTs to bridge; exit if no chat_id |
+| SPEC-020 | Connector allowlists | Every connector has mandatory sender filter; fail-closed |
+| SPEC-022 | Configurable paths | All paths via env vars with defaults; propagate through tmux set-environment |
+| SPEC-023 | Node isolation | All runtime paths namespaced by node; no shared state between prod/dev/test |
+| SPEC-024 | Process lifecycle safety | PID-based only; never pkill/pattern-based killing; verify port ownership |
+| SPEC-025 | Dev-before-prod | Test on dev node before deploying to prod; local tests are not sufficient |
 
 ## Learnings
 
-### Never hardcode paths
+### Never hardcode paths [SPEC-022]
 
 **Problem:** Hardcoded paths break test isolation. They make the system inflexible.
 
@@ -147,7 +161,7 @@ SESSIONS_DIR="${SESSIONS_DIR:-$HOME/.claude/telegram/sessions}"
 SESSIONS_DIR="$HOME/.claude/telegram/sessions"
 ```
 
-### Env vars must propagate through the full chain
+### Env vars must propagate through the full chain [SPEC-022]
 
 **Problem:** Process A spawns process B. Process B runs process C. Env vars from A do not automatically reach C.
 
@@ -167,7 +181,7 @@ tmux send-keys -t session_name "export BRIDGE_URL=http://localhost:8271" Enter
 
 Check all entry points. If a session can be created through `WorkerManager.hire()`, `WorkerManager.restart()`, `_restart_dead_worker()`, or `POST /register`, all four must export the required env vars.
 
-### When you add configurable behavior, audit all code paths
+### When you add configurable behavior, audit all code paths [SPEC-022]
 
 **Problem:** A new config option was added in one place. Other places that need the option were missed.
 
@@ -185,7 +199,7 @@ Check all entry points. If a session can be created through `WorkerManager.hire(
 
 Agents and future contributors rely on these files as the source of truth.
 
-### Per-node pipe and inbox isolation
+### Per-node pipe and inbox isolation [SPEC-023]
 
 **Problem:** Pipes and inboxes under `/tmp` were shared across nodes. This caused collisions between prod, dev, and test.
 
@@ -215,7 +229,7 @@ Agents and future contributors rely on these files as the source of truth.
 5. Make sure `start_bridge()` passes all required env vars, not just token and port.
 6. Add explicit stop conditions (max retries or timeouts). Log when the watchdog gives up.
 
-### Never use pkill on multi-node setups
+### Never use pkill on multi-node setups [SPEC-024]
 
 **Problem:** `pkill -f cloudflared` or `pkill -f bridge.py` kills all matching processes across all nodes.
 
@@ -238,7 +252,7 @@ kill $(cat ~/.claude/telegram/nodes/prod/pid)
 
 Production runs multiple nodes (prod, dev, test) at the same time. Pattern-based killing causes collateral damage to other running nodes.
 
-### Verify port ownership before you kill
+### Verify port ownership before you kill [SPEC-024]
 
 **Problem:** Ran `lsof -ti :8271 | xargs kill` and assumed it was the dev node. Port 8271 is prod. This killed the production bridge.
 
@@ -284,7 +298,7 @@ TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./bridge.sh --node prod --no-sandbox ru
 
 This is faster and more reliable than extracting tokens from process memory. It works even if the bridge is already dead.
 
-### Use script commands or PID files to stop services
+### Use script commands or PID files to stop services [SPEC-024]
 
 **Problem:** Used pkill to restart the bridge. This caused a production outage.
 
@@ -299,7 +313,7 @@ kill $(cat ~/.claude/telegram/nodes/prod/pid)
 
 pkill is too broad. It can kill processes across nodes. This causes downtime.
 
-### Always test on the dev node before you deploy to prod
+### Always test on the dev node before you deploy to prod [SPEC-025]
 
 **Problem:** Deployed a v0.9.2 fix directly to prod without testing on dev first. Ran a local stress test but skipped real integration testing.
 
@@ -312,7 +326,7 @@ pkill is too broad. It can kill processes across nodes. This causes downtime.
 
 Local and unit tests prove that concepts work in isolation. Real integration bugs only surface with actual Telegram traffic on a separate dev instance. Do not test on prod.
 
-### tmux send race condition
+### tmux send race condition [SPEC-001]
 
 **Problem:** Concurrent sends to the same tmux session interleave (text1, text2, Enter1, Enter2). This causes about 50% message loss.
 
@@ -366,7 +380,7 @@ Sed substitution is global. It replaces all occurrences of the pattern, includin
 2. Test on macOS before you merge (this is the primary target platform).
 3. Avoid GNU-specific extensions: `%N`, `stat -c`, `sed -i`, `grep -P`.
 
-### Test behavior, not scaffolding
+### Test behavior, not scaffolding [SPEC-021]
 
 **Problem:** Tests verified structure (functions exist, HTTP returns OK) but not actual behavior. A non-interactive worker subprocess died immediately, but the tests passed because they only checked:
 
