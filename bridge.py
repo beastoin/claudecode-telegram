@@ -5992,25 +5992,83 @@ def _ensure_workspace_trusted(
     sessions.  This function pre-trusts the directory so the prompt
     never appears.
 
+    Uses file locking to prevent concurrent writes from corrupting the
+    JSON (e.g., two workers being hired/teleported simultaneously).
+
     Skips the write if the directory is already trusted.
     """
     if not cwd:
         return
     target = config_path or _CLAUDE_JSON_PATH
     try:
-        if target.exists():
-            data = json.loads(target.read_text())
-        else:
-            data = {}
-        projects = data.setdefault("projects", {})
-        entry = projects.get(cwd, {})
-        if entry.get("hasTrustDialogAccepted") is True:
-            return  # already trusted — skip rewrite
-        projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
-        target.write_text(json.dumps(data, indent=2))
-        _log(_LOG_INFO, "trust", f"pre-trusted workspace: {cwd}")
+        import fcntl
+        lock_path = target.with_suffix(".lock")
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                if target.exists():
+                    data = json.loads(target.read_text())
+                else:
+                    data = {}
+                projects = data.setdefault("projects", {})
+                entry = projects.get(cwd, {})
+                if entry.get("hasTrustDialogAccepted") is True:
+                    return  # already trusted — skip rewrite
+                projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
+                target.write_text(json.dumps(data, indent=2))
+                _log(_LOG_INFO, "trust", f"pre-trusted workspace: {cwd}")
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
     except (OSError, json.JSONDecodeError) as exc:
         _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
+
+
+def _ensure_workspace_trusted_remote(
+    cwd: str,
+    host: str | None,
+) -> None:
+    """Pre-trust *cwd* on a remote (or local) machine's ``~/.claude.json``.
+
+    Same as :func:`_ensure_workspace_trusted` but operates on a remote
+    host via SSH + inline Python.  When *host* is ``None`` (local),
+    delegates to the local function.
+
+    Best effort — never raises.
+    """
+    if not cwd:
+        return
+    if not host:
+        _ensure_workspace_trusted(cwd)
+        return
+    # Run a small Python snippet on the remote machine (with file locking)
+    script = (
+        "import json, pathlib, os, fcntl; "
+        "p = pathlib.Path(os.path.expanduser('~/.claude.json')); "
+        "lk = open(str(p) + '.lock', 'w'); "
+        "fcntl.flock(lk, fcntl.LOCK_EX); "
+        "d = json.loads(p.read_text()) if p.exists() else {}; "
+        "proj = d.setdefault('projects', {}); "
+        f"e = proj.get({cwd!r}, {{}}); "
+        "changed = e.get('hasTrustDialogAccepted') is not True; "
+        f"proj[{cwd!r}] = {{**e, 'hasTrustDialogAccepted': True}} if changed else e; "
+        "p.write_text(json.dumps(d, indent=2)) if changed else None; "
+        "fcntl.flock(lk, fcntl.LOCK_UN); lk.close(); "
+        "print('trusted' if changed else 'already')"
+    )
+    try:
+        r = _remote_run(
+            ["python3", "-c", script],
+            host=host, capture_output=True, text=True,
+            timeout=TIMEOUT_TMUX_SEND)
+        if r.returncode == 0:
+            _log(_LOG_INFO, "trust",
+                 f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
+        else:
+            _log(_LOG_WARN, "trust",
+                 f"remote pre-trust failed on {host}: {r.stderr[:200]}")
+    except (OSError, TimeoutError) as exc:
+        _log(_LOG_WARN, "trust",
+             f"remote pre-trust {cwd} on {host}: {exc}")
 
 
 def _build_cwd_change_notice(
@@ -6030,6 +6088,35 @@ def _build_cwd_change_notice(
     else:
         lines.append(f"<b>from:</b> <code>{old_cwd}</code> (no previous session)")
     lines.append(f"<b>to:</b> <code>{new_cwd}</code> (fresh start)")
+    return "\n".join(lines)
+
+
+def _build_teleport_context(
+    name: str,
+    source_host: str | None,
+    target_host: str,
+    source_cwd: str,
+    session_id: str,
+) -> str:
+    """Build context message injected into a worker after cross-machine teleport.
+
+    Tells the worker where they came from, where they are now, and how to
+    retrieve previous work via ``beast transcript search``.
+    """
+    src_label = source_host or "VPS (local)"
+    lines = [
+        f"📦 You were teleported from {src_label} to {target_host}.",
+        f"Previous workspace: {source_cwd}",
+    ]
+    if session_id:
+        lines.append(f"Previous session: {session_id}")
+        lines.append("")
+        lines.append(
+            "To retrieve your previous work context, run:\n"
+            f"  beast transcript search --session {session_id} --last 20 --full"
+        )
+    else:
+        lines.append("No previous session was active.")
     return "\n".join(lines)
 
 
@@ -10415,6 +10502,30 @@ class CommandRouter:
             self.reply(chat_id, f"tmux not found on {target_host}. Install it first.")
             return True
 
+        # 6a. rsync on target? (needed for credential/transcript/working-dir sync)
+        rsync_path = _resolve_remote_tool("rsync", target_host)
+        if rsync_path == "rsync":
+            self.reply(chat_id, f"rsync not found on {target_host}. Install it first.")
+            return True
+
+        # 6b. Backend-specific binary on target?
+        if backend_name != "claude":
+            backend_path = _resolve_remote_tool(backend_name, target_host)
+            if backend_path == backend_name:
+                self.reply(chat_id,
+                    f"{backend_name} not found on {target_host}. "
+                    f"Worker uses backend '{backend_name}', which must be installed on target.")
+                return True
+
+        # 6c. tmux session collision on target?
+        tmux_name = f"{self.workers.tmux_prefix}{worker_name}"
+        r = _remote_run(
+            ["bash", "-c", f"tmux has-session -t {tmux_name} 2>/dev/null && echo exists || echo none"],
+            host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        if r.returncode == 0 and "exists" in r.stdout:
+            self._teleport_notify(chat_id,
+                f"⚠️ tmux session '{tmux_name}' already exists on {target_host} — will be replaced.")
+
         # 7. Need a reachable URL for remote workers
         target_bridge_url = BRIDGE_PUBLIC_URL or BRIDGE_URL
         if "localhost" in target_bridge_url or "127.0.0.1" in target_bridge_url:
@@ -10513,13 +10624,37 @@ class CommandRouter:
             worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
         if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
             self.reply(chat_id,
-                f"{worker_name} is busy. Must be idle to teleback.")
+                f"{worker_name} is busy. Must be idle to teleback. "
+                f"Wait or /pause {worker_name} first.")
+            return True
+
+        # No teleport already in progress?
+        teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+        if teleport_file.exists():
+            self.reply(chat_id, f"{worker_name} has a teleport in progress.")
             return True
 
         target_host = home_host  # Where we're going back to (None = local)
         target_cwd = home_cwd or get_claude_session_cwd(worker_name)
 
-        # If going back to local, verify current remote host is reachable
+        # If target is a remote host, verify essentials
+        if target_host:
+            # Target reachable?
+            r = _remote_run(["echo", "ok"], host=target_host,
+                            capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+            if r.returncode != 0:
+                self.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")
+                return True
+
+            # claude/tmux/rsync on target?
+            for tool in ("claude", "tmux", "rsync"):
+                tool_path = _resolve_remote_tool(tool, target_host)
+                if tool_path == tool:
+                    self.reply(chat_id,
+                        f"{tool} not found on {target_host}. Install it first.")
+                    return True
+
+        # Verify current remote host is reachable (where worker lives now)
         if current_host:
             r = _remote_run(["echo", "ok"], host=current_host,
                             capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -10728,15 +10863,18 @@ class CommandRouter:
             # The hook's /response POST will repopulate it on first response.
             clear_claude_session_id(name)
 
+            # Pre-trust the target CWD on the target machine so Claude Code
+            # doesn't show the interactive "trust this folder?" prompt that
+            # blocks non-interactive sessions.
+            _ensure_workspace_trusted_remote(target_cwd, target_host)
+
             self._teleport_notify(chat_id,
                 f"Starting {name} on {target_host or 'local'}...")
-            # Cross-machine teleport: session JSONL files are machine-local.
-            # Resuming a VPS session_id on Mac Mini (or vice versa) fails with
-            # "No conversation found". Start fresh on the target instead.
+            # Cross-machine teleport: session JSONL was synced by
+            # _sync_session_transcript above. _start_worker_on_target validates
+            # the file exists on the target before attempting --resume.
+            # If sync failed, the validation clears resume_id gracefully.
             resume_id = session_id
-            if source_host != target_host and session_id:
-                _log(_LOG_INFO, "teleport", f"{name}: cross-machine teleport, skipping --resume (session is on {source_host or 'local'}, target is {target_host or 'local'})")
-                resume_id = ""
             _log(_LOG_INFO, "teleport", f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={resume_id}, backend={backend_name})")
             ok = self._start_worker_on_target(
                 name, target_host, target_cwd, resume_id, backend_name)
@@ -10776,6 +10914,18 @@ class CommandRouter:
                     welcome = self.workers._build_welcome(name, backend_obj)
                     _clock.sleep(DELAY_PROCESS_SETTLE)  # Let Claude finish loading
                     self.workers.send(name, welcome)
+                    # Cross-machine: inject teleport context so worker knows
+                    # about previous session and how to retrieve their work
+                    if source_host != target_host:
+                        ctx = _build_teleport_context(
+                            name=name,
+                            source_host=source_host,
+                            target_host=target_host,
+                            source_cwd=source_cwd,
+                            session_id=session_id,
+                        )
+                        _clock.sleep(0.5)
+                        self.workers.send(name, ctx)
                 except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
                     _log(_LOG_WARN, "teleport", f"Warning: failed to send welcome to {name}: {e}")
 
@@ -11731,6 +11881,10 @@ class CommandRouter:
                         f.unlink()
                 else:
                     _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
+
+        # Pre-trust the CWD on the remote machine so Claude Code
+        # doesn't block on the interactive trust prompt.
+        _ensure_workspace_trusted_remote(target_cwd, host)
 
         # Delegate to existing remote start flow
         # skip_session_sync=True: worker was already on this host, target session files are authoritative

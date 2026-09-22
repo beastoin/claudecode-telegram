@@ -11918,6 +11918,7 @@ bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8080'
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
 bridge.remote_cache.tools['mac:claude'] = '/opt/homebrew/bin/claude'
 bridge.remote_cache.tools['mac:tmux'] = '/opt/homebrew/bin/tmux'
+bridge.remote_cache.tools['mac:rsync'] = '/usr/bin/rsync'
 
 class MockWorkers:
     tmux_prefix = 'claude-test-'
@@ -11947,6 +11948,9 @@ remote_calls = []
 
 def mock_remote_run(cmd, **kwargs):
     remote_calls.append(list(cmd))
+    # Return 'none' for tmux has-session check so it doesn't warn
+    if any('has-session' in str(c) for c in cmd):
+        return MagicMock(returncode=0, stdout='none\\n', stderr='')
     return MagicMock(returncode=0, stdout='ok\\n', stderr='')
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
@@ -12079,6 +12083,7 @@ bridge.BRIDGE_PUBLIC_URL = ''
 # Pre-populate tool cache so _resolve_remote_tool doesn't SSH
 bridge.remote_cache.tools['mac:claude'] = '/opt/homebrew/bin/claude'
 bridge.remote_cache.tools['mac:tmux'] = '/opt/homebrew/bin/tmux'
+bridge.remote_cache.tools['mac:rsync'] = '/usr/bin/rsync'
 
 class MockWorkers:
     tmux_prefix = 'claude-test-'
@@ -12221,6 +12226,66 @@ print('OK')
         success "Teleport pre-flight checks reject bad states"
     else
         fail "Teleport pre-flight checks test failed"
+    fi
+}
+
+test_teleport_preflight_checks_rsync_and_backend() {
+    info "Testing teleport preflight checks rsync + backend binary on target..."
+
+    if python3 -c "
+import inspect, bridge
+
+src = inspect.getsource(bridge.CommandRouter.cmd_teleport)
+
+# Must check rsync on target
+assert 'rsync' in src and '_resolve_remote_tool' in src, \
+    'cmd_teleport should check rsync on target via _resolve_remote_tool'
+
+# Must check backend-specific binary (not just claude)
+assert 'backend_name' in src and 'backend_name != \"claude\"' in src, \
+    'cmd_teleport should check backend-specific binary when not claude'
+
+# Must check tmux session collision
+assert 'has-session' in src or 'tmux_name' in src, \
+    'cmd_teleport should detect tmux session collision on target'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleport preflight checks rsync + backend binary"
+    else
+        fail "teleport preflight should check rsync + backend binary"
+    fi
+}
+
+test_teleback_preflight_checks_essentials() {
+    info "Testing teleback has essential preflight checks..."
+
+    if python3 -c "
+import inspect, bridge
+
+src = inspect.getsource(bridge.CommandRouter.cmd_teleback)
+
+# Must check teleport_state (no concurrent teleport)
+assert 'teleport_state' in src, \
+    'cmd_teleback should check for teleport already in progress'
+
+# Must check claude/tmux/rsync on target when target is remote
+assert '_resolve_remote_tool' in src, \
+    'cmd_teleback should check tool availability on target'
+
+# Must check target reachable (for remote home host)
+assert 'Cannot reach home host' in src or 'Cannot reach' in src, \
+    'cmd_teleback should check target host reachability'
+
+# Must suggest /pause in busy message (same as teleport)
+assert 'pause' in src.lower(), \
+    'cmd_teleback busy message should suggest /pause'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleback has essential preflight checks"
+    else
+        fail "teleback should have essential preflight checks"
     fi
 }
 
@@ -12705,62 +12770,393 @@ print('OK')
     fi
 }
 
-test_teleport_cross_machine_skips_resume() {
-    info "Testing cross-machine teleport starts fresh (no --resume with local session_id)..."
+test_teleport_cross_machine_passes_session_for_resume() {
+    info "Testing cross-machine teleport passes session_id (synced JSONL enables --resume)..."
+
+    if python3 -c "
+import bridge, inspect
+
+# v0.44.5+: _do_teleport no longer blanket-skips --resume for cross-machine.
+# Instead, _sync_session_transcript copies the JSONL to the target first,
+# and _start_worker_on_target validates the file exists before --resume.
+#
+# Verify _do_teleport passes session_id straight through (no cross-machine skip)
+
+src = inspect.getsource(bridge.CommandRouter._do_teleport)
+
+# Should NOT have the old blanket skip logic
+assert 'skipping --resume' not in src, \
+    '_do_teleport should not blanket-skip --resume for cross-machine'
+
+# Should still assign resume_id from session_id
+assert 'resume_id = session_id' in src, \
+    '_do_teleport should pass session_id through as resume_id'
+
+# Should call _sync_session_transcript before _start_worker_on_target
+sync_pos = src.find('_sync_session_transcript')
+start_pos = src.find('_start_worker_on_target')
+assert sync_pos > 0, '_do_teleport must call _sync_session_transcript'
+assert start_pos > 0, '_do_teleport must call _start_worker_on_target'
+assert sync_pos < start_pos, \
+    '_sync_session_transcript must run before _start_worker_on_target'
+
+# Verify backend.start_cmd with session_id produces --resume
+backend = bridge.get_backend('claude')
+cmd = backend.start_cmd('d61370de-61b2-467b-ac92-d3c5a1e4cfca')
+assert '--resume d61370de' in cmd, f'session_id should produce --resume, got {cmd!r}'
+
+# Verify backend.start_cmd with empty session_id produces no --resume
+cmd = backend.start_cmd('')
+assert '--resume' not in cmd, f'empty session_id should not produce --resume, got {cmd!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "cross-machine teleport passes session_id for resume after sync"
+    else
+        fail "cross-machine teleport should pass session_id for resume after sync"
+    fi
+}
+
+test_sync_session_transcript_targets_single_session() {
+    info "Testing _sync_session_transcript syncs only the specific session file, not all..."
+
+    if python3 -c "
+import bridge, types, os, tempfile
+
+# Capture rsync commands
+rsync_cmds = []
+orig_runner = bridge._subprocess_runner
+
+class FakeRunner:
+    def run(self, cmd, **kw):
+        rsync_cmds.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+    def Popen(self, *a, **kw):
+        return types.SimpleNamespace(pid=1, communicate=lambda: ('', ''))
+
+bridge._subprocess_runner = FakeRunner()
+
+# Create a fake CommandRouter-like object to call the method
+class FakeRouter:
+    _sync_session_transcript = bridge.CommandRouter._sync_session_transcript
+
+router = FakeRouter()
+
+# Sync a specific session
+sid = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
+router._sync_session_transcript(
+    sid,
+    source_cwd='/home/claude/mira-nex',
+    target_cwd='/Users/agent/mira-nex',
+    source_host=None,
+    target_host='mac-mini',
+)
+
+# Filter to only rsync commands (skip the mkdir ssh command)
+rsync_only = [c for c in rsync_cmds if c[0] == 'rsync']
+
+# Should have exactly 2 rsync calls: one for .jsonl, one for subdir
+assert len(rsync_only) == 2, f'expected 2 rsync calls, got {len(rsync_only)}'
+
+# First: the JSONL file itself
+cmd1 = ' '.join(rsync_only[0])
+assert f'{sid}.jsonl' in cmd1, f'first rsync should target session JSONL, got {cmd1!r}'
+
+# Second: the session subdirectory
+cmd2 = ' '.join(rsync_only[1])
+assert f'{sid}/' in cmd2, f'second rsync should target session subdir, got {cmd2!r}'
+
+# Neither should glob all .jsonl files
+for cmd in rsync_only:
+    cmd_str = ' '.join(cmd)
+    assert '*.jsonl' not in cmd_str, f'should NOT sync all jsonl files, got {cmd_str!r}'
+
+bridge._subprocess_runner = orig_runner
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "sync targets only the specific session file"
+    else
+        fail "sync should target only the specific session file"
+    fi
+}
+
+test_teleport_context_message_has_session_and_search_cmd() {
+    info "Testing cross-machine teleport context includes previous session + search command..."
 
     if python3 -c "
 import bridge
 
-# _do_teleport passes session_id to _start_worker_on_target.
-# When source_host != target_host, the session JSONL doesn't exist
-# on the target — so we must NOT pass --resume.
-#
-# We test the logic that decides whether to pass session_id:
-# source_host=None (VPS local), target_host='mac-mini' → cross-machine
-# session_id should be cleared to '' for the start command.
+# Build teleport context for a cross-machine move with a known session
+msg = bridge._build_teleport_context(
+    name='nex',
+    source_host=None,
+    target_host='beastoin-agents-f1-mac-mini',
+    source_cwd='/home/claude/mira-nex',
+    session_id='d61370de-61b2-467b-ac92-d3c5a1e4cfca',
+)
 
-# Simulate the decision logic from _do_teleport
-source_host = None   # VPS
-target_host = 'beastoin-agents-f1-mac-mini'
-session_id = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
-
-resume_id = session_id
-if source_host != target_host and session_id:
-    resume_id = ''
-
-assert resume_id == '', f'cross-machine should skip resume, got {resume_id!r}'
-
-# Same-machine: should keep resume_id
-source_host = None
-target_host = None
-resume_id = session_id
-if source_host != target_host and session_id:
-    resume_id = ''
-assert resume_id == session_id, f'same-machine should keep resume, got {resume_id!r}'
-
-# Cross-machine but no session_id: no change needed
-source_host = None
-target_host = 'mac-mini'
-session_id = ''
-resume_id = session_id
-if source_host != target_host and session_id:
-    resume_id = ''
-assert resume_id == '', f'no session_id should stay empty, got {resume_id!r}'
-
-# Verify backend.start_cmd with empty session_id produces no --resume
-backend = bridge.get_backend('claude')
-cmd = backend.start_cmd('')
-assert '--resume' not in cmd, f'empty session_id should not produce --resume, got {cmd!r}'
-
-# Verify backend.start_cmd with session_id produces --resume
-cmd = backend.start_cmd('d61370de-61b2-467b-ac92-d3c5a1e4cfca')
-assert '--resume d61370de' in cmd, f'session_id should produce --resume, got {cmd!r}'
+# Must tell worker they were teleported
+assert 'teleport' in msg.lower(), f'should mention teleport, got {msg!r}'
+# Must include source machine info
+assert 'VPS' in msg or '100.125' in msg or 'local' in msg, f'should mention source, got {msg!r}'
+# Must include the session_id (or prefix) so worker can look it up
+assert 'd61370de' in msg, f'should include session_id prefix, got {msg!r}'
+# Must include a beast transcript search command
+assert 'beast transcript search' in msg, f'should include search command, got {msg!r}'
+assert '--session' in msg, f'should include --session flag, got {msg!r}'
+# Must include source CWD so worker knows where they were
+assert '/home/claude/mira-nex' in msg or 'mira-nex' in msg, f'should include source cwd, got {msg!r}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "cross-machine teleport skips --resume"
+        success "teleport context has session info + search command"
     else
-        fail "cross-machine teleport should skip --resume"
+        fail "teleport context should have session info + search command"
+    fi
+}
+
+test_teleport_context_wired_into_do_teleport() {
+    info "Testing _do_teleport code path calls _build_teleport_context for cross-machine..."
+
+    if python3 -c "
+import inspect, bridge
+
+# Verify the wiring: _do_teleport code calls _build_teleport_context
+# when source_host != target_host
+src = inspect.getsource(bridge.CommandRouter._do_teleport)
+
+# Must call _build_teleport_context
+assert '_build_teleport_context' in src, \
+    '_do_teleport should call _build_teleport_context'
+
+# Must guard on cross-machine (source_host != target_host)
+assert 'source_host != target_host' in src, \
+    '_do_teleport should check source_host != target_host'
+
+# Must pass session_id to the builder
+assert 'session_id' in src, \
+    '_do_teleport should pass session_id to context builder'
+
+# Must send the context via self.workers.send
+assert 'self.workers.send' in src, \
+    '_do_teleport should send context via self.workers.send'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleport context is wired into _do_teleport for cross-machine"
+    else
+        fail "teleport context should be wired into _do_teleport for cross-machine"
+    fi
+}
+
+test_ensure_workspace_trusted_remote_runs_on_target() {
+    info "Testing _ensure_workspace_trusted_remote sends trust script to remote host..."
+
+    if python3 -c "
+import bridge, types
+
+# Capture remote commands
+remote_cmds = []
+orig_remote_run = bridge._remote_run
+
+def fake_remote_run(cmd, host=None, **kw):
+    remote_cmds.append((cmd, host))
+    return types.SimpleNamespace(returncode=0, stdout='trusted', stderr='')
+
+bridge._remote_run = fake_remote_run
+
+bridge._ensure_workspace_trusted_remote(
+    cwd='/Users/beastoinagents/mira-nex',
+    host='beastoin-agents-f1-mac-mini',
+)
+
+bridge._remote_run = orig_remote_run
+
+# Should have run a python3 command on the remote host
+assert len(remote_cmds) == 1, f'expected 1 remote command, got {len(remote_cmds)}'
+cmd, host = remote_cmds[0]
+assert host == 'beastoin-agents-f1-mac-mini', f'wrong host: {host}'
+assert cmd[0] == 'python3', f'should run python3 on remote, got {cmd[0]}'
+script = cmd[2]  # -c argument
+assert 'hasTrustDialogAccepted' in script, f'script should set trust flag'
+assert '/Users/beastoinagents/mira-nex' in script, f'script should include target cwd'
+assert 'fcntl' in script, f'remote script should use file locking (fcntl)'
+assert 'LOCK_EX' in script, f'remote script should use exclusive lock'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "remote trust runs python3 on target host"
+    else
+        fail "remote trust should run python3 on target host"
+    fi
+}
+
+test_restart_remote_trusts_cwd_before_start() {
+    info "Testing _restart_remote_worker pre-trusts CWD on remote host..."
+
+    if python3 -c "
+import inspect, bridge
+
+src = inspect.getsource(bridge.CommandRouter._restart_remote_worker)
+
+# Must call _ensure_workspace_trusted_remote before _start_worker_on_target
+assert '_ensure_workspace_trusted_remote' in src, \
+    '_restart_remote_worker should call _ensure_workspace_trusted_remote'
+
+trust_pos = src.find('_ensure_workspace_trusted_remote(')
+start_pos = src.find('self._start_worker_on_target(')
+assert trust_pos > 0 and start_pos > 0, 'both calls must exist'
+assert trust_pos < start_pos, \
+    f'trust ({trust_pos}) must run before start ({start_pos})'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "restart_remote pre-trusts CWD before worker start"
+    else
+        fail "restart_remote should pre-trust CWD before worker start"
+    fi
+}
+
+test_teleport_trusts_target_cwd_before_start() {
+    info "Testing _do_teleport pre-trusts target CWD on target machine..."
+
+    if python3 -c "
+import inspect, bridge
+
+src = inspect.getsource(bridge.CommandRouter._do_teleport)
+
+# Must call _ensure_workspace_trusted_remote
+assert '_ensure_workspace_trusted_remote' in src, \
+    '_do_teleport should call _ensure_workspace_trusted_remote'
+
+# Trust must happen before the actual _start_worker_on_target call
+# (not the mention in comments). Actual calls use 'self._start_worker_on_target'
+trust_pos = src.find('_ensure_workspace_trusted_remote(')
+start_pos = src.find('self._start_worker_on_target(')
+assert trust_pos > 0 and start_pos > 0, 'both function calls must appear in source'
+assert trust_pos < start_pos, \
+    f'trust ({trust_pos}) must run before start ({start_pos})'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleport pre-trusts target CWD before worker start"
+    else
+        fail "teleport should pre-trust target CWD before worker start"
+    fi
+}
+
+test_ensure_workspace_trusted_remote_delegates_local() {
+    info "Testing _ensure_workspace_trusted_remote delegates to local for host=None..."
+
+    if python3 -c "
+import bridge, json, tempfile, pathlib
+
+# Use a temp file as the config
+tmp = tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w')
+tmp.write('{}')
+tmp.close()
+orig_path = bridge._CLAUDE_JSON_PATH
+bridge._CLAUDE_JSON_PATH = pathlib.Path(tmp.name)
+
+# host=None should use local _ensure_workspace_trusted
+bridge._ensure_workspace_trusted_remote('/some/local/path', host=None)
+
+data = json.loads(pathlib.Path(tmp.name).read_text())
+trusted = data.get('projects', {}).get('/some/local/path', {}).get('hasTrustDialogAccepted')
+assert trusted is True, f'local trust should be set, got {data}'
+
+bridge._CLAUDE_JSON_PATH = orig_path
+pathlib.Path(tmp.name).unlink()
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "remote trust delegates to local for host=None"
+    else
+        fail "remote trust should delegate to local for host=None"
+    fi
+}
+
+test_ensure_workspace_trusted_concurrent_writes_safe() {
+    info "Testing concurrent trust writes don't corrupt claude.json..."
+
+    if python3 -c "
+import bridge, json, tempfile, pathlib, threading
+
+# Create a temp config file with some existing data
+tmp = tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w')
+json.dump({'projects': {'/existing': {'hasTrustDialogAccepted': True}}}, tmp)
+tmp.close()
+config = pathlib.Path(tmp.name)
+
+orig_path = bridge._CLAUDE_JSON_PATH
+bridge._CLAUDE_JSON_PATH = config
+
+# Simulate 10 concurrent trust additions
+errors = []
+def add_trust(cwd):
+    try:
+        bridge._ensure_workspace_trusted(cwd)
+    except Exception as e:
+        errors.append(str(e))
+
+threads = []
+for i in range(10):
+    t = threading.Thread(target=add_trust, args=(f'/project-{i}',))
+    threads.append(t)
+    t.start()
+
+for t in threads:
+    t.join()
+
+bridge._CLAUDE_JSON_PATH = orig_path
+
+# Read final state
+data = json.loads(config.read_text())
+projects = data.get('projects', {})
+
+# All 10 + the original should be present (no data loss from races)
+assert len(errors) == 0, f'errors during concurrent writes: {errors}'
+assert '/existing' in projects, 'existing entry should survive'
+for i in range(10):
+    assert f'/project-{i}' in projects, f'/project-{i} missing — concurrent write lost data'
+    assert projects[f'/project-{i}'].get('hasTrustDialogAccepted') is True
+
+# JSON should be valid
+json.loads(config.read_text())
+
+config.unlink()
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "concurrent trust writes are safe (file locking)"
+    else
+        fail "concurrent trust writes should be safe"
+    fi
+}
+
+test_teleport_context_message_no_session() {
+    info "Testing teleport context without previous session..."
+
+    if python3 -c "
+import bridge
+
+# No previous session
+msg = bridge._build_teleport_context(
+    name='nex',
+    source_host=None,
+    target_host='mac-mini',
+    source_cwd='/home/claude/mira-nex',
+    session_id='',
+)
+
+# Should still mention teleport
+assert 'teleport' in msg.lower(), f'should mention teleport, got {msg!r}'
+# Should NOT include beast transcript search (no session to search)
+assert '--session' not in msg, f'should not include --session when no session, got {msg!r}'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "teleport context handles no previous session"
+    else
+        fail "teleport context should handle no previous session"
     fi
 }
 
@@ -23398,12 +23794,23 @@ run_unit_tests() {
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url
     run_test test_teleport_preflight_checks
+    run_test test_teleport_preflight_checks_rsync_and_backend
+    run_test test_teleback_preflight_checks_essentials
     run_test test_teleport_end_to_end
     run_test test_sync_credentials_always_overwrites
     run_test test_sync_credentials_atomic_write
     run_test test_teleport_sends_welcome_after_start
     run_test test_teleport_registry_updated_before_source_kill
-    run_test test_teleport_cross_machine_skips_resume
+    run_test test_teleport_cross_machine_passes_session_for_resume
+    run_test test_sync_session_transcript_targets_single_session
+    run_test test_teleport_context_message_has_session_and_search_cmd
+    run_test test_teleport_context_wired_into_do_teleport
+    run_test test_ensure_workspace_trusted_remote_runs_on_target
+    run_test test_restart_remote_trusts_cwd_before_start
+    run_test test_teleport_trusts_target_cwd_before_start
+    run_test test_ensure_workspace_trusted_remote_delegates_local
+    run_test test_ensure_workspace_trusted_concurrent_writes_safe
+    run_test test_teleport_context_message_no_session
     run_test test_sync_shared_repos_deploys_agent_config
     run_test test_restart_teleported_worker
     run_test test_restart_remote_validates_session_exists

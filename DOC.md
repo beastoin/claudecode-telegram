@@ -417,6 +417,31 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 
 ## Changelog
 
+### v0.44.7 - Teleport preflight hardening
+
+**File locking on `~/.claude.json` writes:** Both local and remote `_ensure_workspace_trusted` now use `fcntl.flock(LOCK_EX)` to prevent concurrent writes from corrupting the JSON file. Tested with 10 concurrent threads.
+
+**New teleport preflight checks:**
+- **rsync on target** (check 6a) — rsync is required for credential/transcript/working-dir sync.
+- **Backend-specific binary** (check 6b) — if worker uses `codex` backend, checks that `codex` is on the target (not just `claude`).
+- **tmux session collision** (check 6c) — warns if a tmux session with the same name already exists on the target.
+
+**Teleback preflight parity:** `cmd_teleback` was missing most preflight checks that `cmd_teleport` has. Added:
+- No teleport already in progress (teleport_state file check)
+- Target reachable when home_host is remote
+- claude/tmux/rsync installed on target when home_host is remote
+- `/pause` suggestion in busy-worker error message
+
+### v0.44.6 - Remote workspace trust for teleport
+
+**Pre-trust target CWD on remote machine before worker start:** Teleport now calls `_ensure_workspace_trusted_remote(target_cwd, target_host)` before starting the worker on the target machine. This adds the target directory to the remote machine's `~/.claude.json` with `hasTrustDialogAccepted: true`, preventing Claude Code's interactive trust prompt from blocking non-interactive sessions. Previously, teleporting to a new directory on Mac Mini would hang because the trust entry only existed for the VPS path (e.g., `/home/claude/mira-nex`), not the remapped Mac Mini path (`/Users/beastoinagents/mira-nex`).
+
+**Restore cross-machine session resume:** Removed the v0.44.4 blanket skip of `--resume` for cross-machine teleports. The session JSONL is already synced to the target by `_sync_session_transcript` before worker start. `_start_worker_on_target` validates the file exists on the target before attempting `--resume` — if sync failed, it clears resume_id gracefully. The blanket skip was masking this working mechanism.
+
+### v0.44.5 - Teleport context injection
+
+**Teleport context message for workers:** When a worker is teleported cross-machine, they now receive a context message telling them: where they came from (source host + CWD), their previous session_id, and how to retrieve their previous work via `beast transcript search --session <id> --last 20 --full`. Workers that had no active session just get a note about the teleport without the search command. This solves the problem where teleported workers lost all context about their prior work.
+
 ### v0.44.4 - Cross-machine teleport fix
 
 **Skip `--resume` on cross-machine teleport:** Session JSONL files are machine-local. When teleporting VPS→Mac Mini (or vice versa), the source session_id doesn't exist on the target. Claude exits with "No conversation found" and the teleport fails. Now `_do_teleport` detects cross-machine moves (`source_host != target_host`) and starts fresh instead of trying to resume.
