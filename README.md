@@ -473,7 +473,7 @@ git clone https://github.com/beastoin/claudecode-telegram
 ls claudecode-telegram/
 ```
 
-You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `DOC.md`, and `test.sh`.
+You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `SPEC.md`, and `test.sh`.
 
 3. Enter the project folder.
 
@@ -502,7 +502,7 @@ tar xzf claudecode-telegram.tar.gz
 ls claudecode-telegram/
 ```
 
-You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `DOC.md`, and `test.sh`.
+You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `SPEC.md`, and `test.sh`.
 
 3. Enter the project folder.
 
@@ -1014,7 +1014,7 @@ claudecode-telegram/
 |-- connectors/            # Gmail, GitHub polling integrations
 |-- tools/                 # Utilities: PR review, indexers, pilot terminal viewer
 |-- experiments/           # Forge worker binary, STT service, MCP prototypes
-|-- DOC.md                 # Design philosophy, changelog
+|-- SPEC.md                 # Design philosophy, changelog
 |-- AGENTS.md              # Agent instructions (single source of truth)
 |-- TEST.md                # Testing documentation
 `-- test.sh                # Automated acceptance tests

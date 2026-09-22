@@ -13,7 +13,7 @@ Do these three steps when you make changes that need a new version:
    VERSION="x.y.z"
    ```
 
-2. Update `DOC.md`:
+2. Update `SPEC.md`:
    - Set the new version number in the header.
    - Add a changelog entry. Describe breaking changes, new features, and architecture changes.
    - Update the design philosophy sections if core principles changed.
@@ -40,7 +40,7 @@ Do these three steps when you make changes that need a new version:
 | `test.sh` | Automated acceptance tests |
 | `AGENTS.md` | Agent instructions, rules, learnings (this file) |
 | `CLAUDE.md` | Pointer to AGENTS.md |
-| `DOC.md` | Design philosophy and changelog |
+| `SPEC.md` | Design philosophy and changelog |
 | `TEST.md` | Testing documentation |
 
 ## Testing Requirements
@@ -109,15 +109,15 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 
 ## Design Philosophy & Doc Contract
 
-The source of truth is `DOC.md` — it contains the **spec** (system design, architecture decisions).
+The source of truth is `SPEC.md` — it contains the **spec** (system design, architecture decisions).
 This file (AGENTS.md) contains the **rules and workflow** (how agents work in this repo).
 
-**Authority flows downstream:** `DOC.md → AGENTS.md → Code → Tests`. **Citations point upstream only.**
-- This file cites DOC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. DOC.md never references this file.
-- Manager owns DOC.md. Agent owns AGENTS.md, code, and tests.
-- When DOC.md changes, cascade forward: update AGENTS.md → code → tests.
+**Authority flows downstream:** `SPEC.md → AGENTS.md → Code → Tests`. **Citations point upstream only.**
+- This file cites SPEC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. SPEC.md never references this file.
+- Manager owns SPEC.md. Agent owns AGENTS.md, code, and tests.
+- When SPEC.md changes, cascade forward: update AGENTS.md → code → tests.
 - When code diverges from spec, STOP and notify manager. Never patch downstream first.
-- When adding new specs, update DOC.md first (Spec Index + detailed section), then cascade here.
+- When adding new specs, update SPEC.md first (Spec Index + detailed section), then cascade here.
 
 ### Quick Reference (cite spec IDs for traceability)
 
@@ -195,7 +195,7 @@ Check all entry points. If a session can be created through `WorkerManager.hire(
 
 **Problem:** Fixes and gotchas get rediscovered when the memory is stale or scattered.
 
-**Rule:** Record new operational learnings here. Record architecture changes in `DOC.md`. Record test additions in `TEST.md`. Remove or update notes when behavior changes.
+**Rule:** Record new operational learnings here. Record architecture changes in `SPEC.md`. Record test additions in `TEST.md`. Remove or update notes when behavior changes.
 
 Agents and future contributors rely on these files as the source of truth.
 

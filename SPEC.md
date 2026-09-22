@@ -8,7 +8,7 @@ This document is the **spec** — the source of truth for system design and arch
 Authority flows downstream. Citations point upstream only.
 
 ```
-DOC.md (spec)  →  AGENTS.md (rules & workflow)  →  Code  →  Tests
+SPEC.md (spec)  →  AGENTS.md (rules & workflow)  →  Code  →  Tests
    ↑                    ↑                        ↑         ↑
  manager             agent                    agent     agent
  (owner)            (owner)                  (owner)   (owner)
@@ -18,8 +18,8 @@ Citations point ←  (upstream only)
 ```
 
 **Rules:**
-- Citations point upstream only. AGENTS.md cites DOC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. DOC.md never references AGENTS.md.
-- Manager owns DOC.md. Agent owns AGENTS.md + code + tests.
+- Citations point upstream only. AGENTS.md cites SPEC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. SPEC.md never references AGENTS.md.
+- Manager owns SPEC.md. Agent owns AGENTS.md + code + tests.
 - When a spec changes, everything downstream is invalidated and must be updated (cascade forward).
 - When code diverges from spec, agent STOPS and notifies manager — never patch downstream and hope upstream catches up.
 
