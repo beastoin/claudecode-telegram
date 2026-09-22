@@ -8,7 +8,7 @@ This document is the **spec** — the source of truth for system design and arch
 Authority flows downstream. Citations point upstream only.
 
 ```
-DOC.md (spec)  →  AGENTS.md (build rules)  →  Code  →  Tests
+DOC.md (spec)  →  AGENTS.md (rules & workflow)  →  Code  →  Tests
    ↑                    ↑                        ↑         ↑
  manager             agent                    agent     agent
  (owner)            (owner)                  (owner)   (owner)

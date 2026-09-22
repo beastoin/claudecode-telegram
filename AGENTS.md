@@ -110,7 +110,7 @@ FULL=1 TEST_BOT_TOKEN='...' TEST_CHAT_ID='...' ./test.sh
 ## Design Philosophy & Doc Contract
 
 The source of truth is `DOC.md` — it contains the **spec** (system design, architecture decisions).
-This file (AGENTS.md) contains the **build rules** (how to work in the repo).
+This file (AGENTS.md) contains the **rules and workflow** (how agents work in this repo).
 
 **Authority flows downstream:** `DOC.md → AGENTS.md → Code → Tests`. **Citations point upstream only.**
 - This file cites DOC.md spec IDs (`[SPEC-NNN]`). Code cites spec IDs in comments. DOC.md never references this file.
