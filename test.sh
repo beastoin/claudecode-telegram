@@ -41,7 +41,7 @@ export SESSIONS_DIR="$TEST_SESSION_DIR"
 
 # Create stub binaries for backends not installed (needed for binary check)
 TEST_BIN_DIR="$(mktemp -d)"
-for bin_name in codex gemini opencode; do
+for bin_name in codex; do
     if ! command -v "$bin_name" &>/dev/null; then
         printf '#!/bin/sh\necho "stub"\n' > "$TEST_BIN_DIR/$bin_name"
         chmod +x "$TEST_BIN_DIR/$bin_name"
@@ -19030,7 +19030,7 @@ import bridge
 assert hasattr(bridge, 'BACKENDS'), 'BACKENDS registry should exist'
 
 # Check expected backends are registered
-expected = ['claude', 'codex', 'gemini', 'opencode']
+expected = ['claude', 'codex']
 for name in expected:
     assert name in bridge.BACKENDS, f'{name} should be in BACKENDS'
 
@@ -20856,7 +20856,7 @@ test_gmail_connector_import() {
     if python3 -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from connectors.gmail_connector import GmailConnector
+from connectors import GmailConnector
 gc = GmailConnector(
     gws_bin='/usr/bin/gws',
     from_filter='test@example.com',
@@ -20881,7 +20881,7 @@ test_gmail_connector_poll_cycle() {
 import sys, os, json, base64
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.gmail_connector import GmailConnector
+from connectors import GmailConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -20926,7 +20926,7 @@ def mock_run(cmd, **kwargs):
     call_count[0] += 1
     return r
 
-with patch('connectors.gmail_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 message, got {len(received)}'
@@ -20949,7 +20949,7 @@ test_github_connector_import() {
     if python3 -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
     from_user='testuser',
@@ -20974,7 +20974,7 @@ test_github_connector_uses_gh_api() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21009,7 +21009,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 # Must NOT call beast
@@ -21040,7 +21040,7 @@ test_github_connector_merges_issue_and_pr_comments() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21077,7 +21077,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 2, f'Expected 2 merged comments, got {len(result)}'
@@ -21097,7 +21097,7 @@ test_github_connector_dedup_comments() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21121,7 +21121,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = json.dumps([dup_comment])
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 1, f'Expected 1 deduped comment, got {len(result)}'
@@ -21139,7 +21139,7 @@ test_github_connector_preflight_uses_gh() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21159,7 +21159,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '{}'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     with patch('os.path.isfile', return_value=True):
         ok, msg = gc.preflight_check()
 
@@ -21181,7 +21181,7 @@ test_github_connector_poll_cycle() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -21217,7 +21217,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 delivered message, got {len(received)}'
@@ -21239,7 +21239,7 @@ test_github_connector_filters_sender() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -21273,7 +21273,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 0, f'Expected 0 messages for other user, got {len(received)}'
@@ -21291,7 +21291,7 @@ test_github_connector_delivers_after_downtime() {
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 # Simulate: bridge was running, saved state, then went down.
 # A comment was posted during downtime. On restart, it should be delivered.
@@ -21330,7 +21330,7 @@ def mock_run_seed(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run_seed):
+with patch('connectors.subprocess.run', side_effect=mock_run_seed):
     gc._on_preflight_ok()
     # Do one poll to save state
     gc.poll_once()
@@ -21373,7 +21373,7 @@ def mock_run_restart(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run_restart):
+with patch('connectors.subprocess.run', side_effect=mock_run_restart):
     gc2._on_preflight_ok()
     gc2.poll_once()
 
@@ -21395,7 +21395,7 @@ test_github_connector_persists_poll_time() {
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors.github_connector import GitHubConnector
+from connectors import GitHubConnector
 
 tmpdir = tempfile.mkdtemp()
 state_file = os.path.join(tmpdir, 'github_state.json')
@@ -21417,7 +21417,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '[]'
     return r
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     gc._on_preflight_ok()
     saved_time = gc._last_poll_time
     gc.poll_once()
@@ -21439,7 +21439,7 @@ gc2 = GitHubConnector(
     state_file=state_file,
 )
 
-with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.subprocess.run', side_effect=mock_run):
     gc2._on_preflight_ok()
 
 # Should NOT reset to now-1h; should use saved time (or close to it)

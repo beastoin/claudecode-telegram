@@ -258,7 +258,7 @@ The `@name` syntax and `/focus` command give full control without the overhead o
 The bridge uses small, explicit classes:
 
 - **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `binary`, `is_interactive`, `start_cmd(resume_id="")`, `send()`, `is_online()`.
-- **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive). All live in `bridge.py`.
+- **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend` (non-interactive). All live in `bridge.py`.
 - **WorkerManager**: Worker lifecycle and routing (`hire`, `end`, `send`, `is_online`, `get_workers`, `scan_tmux_sessions`).
 - **TelegramAPI**: Wraps all Telegram API calls (sendMessage, sendPhoto, sendDocument, etc.).
 - **CommandRouter**: All `/command` handlers and message routing. Delegates to `WorkerManager` and `TelegramAPI`.

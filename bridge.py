@@ -383,17 +383,13 @@ class RouteResolution(NamedTuple):
 
 
 try:
-    from connectors.gmail_connector import GmailConnector
+    from connectors import GmailConnector, GitHubConnector
     GMAIL_IMPORT_ERROR = None
-except ImportError as e:
-    GmailConnector = None
-    GMAIL_IMPORT_ERROR = e
-
-try:
-    from connectors.github_connector import GitHubConnector
     GITHUB_IMPORT_ERROR = None
 except ImportError as e:
+    GmailConnector = None
     GitHubConnector = None
+    GMAIL_IMPORT_ERROR = e
     GITHUB_IMPORT_ERROR = e
 
 
@@ -523,6 +519,8 @@ API_ENDPOINTS = {
     "POST /notify": "Send notification to all admin chats",
     "POST /health-alert": "Hook: JSONL health alert (stale transcript detection)",
     "POST /register": "Forge/callback worker registration (name, host, version, tools, callback_url)",
+    "GET /connectors": "Connector status (gmail, github — running, failures, config)",
+    "POST /connectors/restart": "Restart a connector: {name: 'gmail'|'github'}",
 }
 
 # Sandbox mode: run Claude Code in Docker container for isolation
@@ -2713,53 +2711,9 @@ class CodexBackend:
         return tmux_exists(tmux_name)
 
 
-class GeminiBackend:
-    """Google Gemini CLI - non-interactive mode (stub)."""
-    name = "gemini"
-    binary = "gemini"
-    is_interactive = False
-
-    def start_cmd(self, resume_id: str = "") -> str:
-        """Start cmd."""
-        return "echo 'Gemini worker ready (non-interactive)'"
-
-    def send(self, worker_name: str, tmux_name: str, text: str,
-             bridge_url: str, sessions_dir: Path) -> bool:
-        """Send."""
-        adapter = Path(__file__).parent / "hooks" / "gemini-adapter.py"
-        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
-
-    def is_online(self, tmux_name: str) -> bool:
-        """Is online."""
-        return tmux_exists(tmux_name)
-
-
-class OpenCodeBackend:
-    """OpenCode CLI - non-interactive mode (stub)."""
-    name = "opencode"
-    binary = "opencode"
-    is_interactive = False
-
-    def start_cmd(self, resume_id: str = "") -> str:
-        """Start cmd."""
-        return "echo 'OpenCode worker ready (non-interactive)'"
-
-    def send(self, worker_name: str, tmux_name: str, text: str,
-             bridge_url: str, sessions_dir: Path) -> bool:
-        """Send."""
-        adapter = Path(__file__).parent / "hooks" / "opencode-adapter.py"
-        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
-
-    def is_online(self, tmux_name: str) -> bool:
-        """Is online."""
-        return tmux_exists(tmux_name)
-
-
 BACKENDS = {
     "claude": ClaudeBackend(),
     "codex": CodexBackend(),
-    "gemini": GeminiBackend(),
-    "opencode": OpenCodeBackend(),
 }
 
 class ProcessRegistry:
@@ -7918,7 +7872,7 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
     name = name_parts[0]
 
-    # Check for backend prefix syntax (e.g., codex-alice, gemini-bob)
+    # Check for backend prefix syntax (e.g., codex-alice)
     for backend_name in list_backends():
         prefix = f"{backend_name}-"
         if name.startswith(prefix):
@@ -17130,6 +17084,27 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             _log(_LOG_ERROR, "bridge", f"Register error: {e}")
             self._send_json(500, {"ok": False, "error": str(e)})
 
+    def handle_connectors_status(self) -> None:
+        """GET /connectors — return status of all connectors."""
+        self._send_json(200, _get_connectors_status())
+
+    def handle_connectors_restart(self, body: bytes = b"") -> None:
+        """POST /connectors/restart — restart a connector by name.
+
+        Body: {"name": "gmail"} or {"name": "github"}
+        """
+        try:
+            data = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+        name = str(data.get("name", "")).strip().lower()
+        if not name:
+            self._send_json(400, {"ok": False, "error": "Missing 'name' (gmail or github)"})
+            return
+        ok, msg = _restart_connector(name)
+        self._send_json(200 if ok else 500, {"ok": ok, "name": name, "message": msg})
+
     def handle_send_endpoint(self, body: bytes = b"") -> None:
         """Send a prompt to a worker.
 
@@ -17508,6 +17483,7 @@ def _setup_endpoint_routes() -> None:
     r.post("/guest", lambda h, b: h.handle_guest_register(b))
     r.post("/channels", lambda h, b: h.handle_channel_create(b))
     r.post("/health-alert", lambda h, b: h.handle_health_alert(b))
+    r.post("/connectors/restart", lambda h, b: h.handle_connectors_restart(b))
 
     # POST endpoints (prefix/pattern match)
     r.post_pattern(r'^/guest/send', lambda h, b, m: h.handle_guest_send(b))
@@ -17535,6 +17511,7 @@ def _setup_endpoint_routes() -> None:
     r.get("/machines", lambda h, p: h.handle_machines_endpoint(p))
     r.get("/checkin", lambda h, p: h.handle_checkin_endpoint(p))
     r.get("/health/workers", lambda h, p: h.handle_health_workers_endpoint())
+    r.get("/connectors", lambda h, p: h.handle_connectors_status())
     r.get("/channels", lambda h, p: h.handle_channels_list(p))
     r.get("/pr-file-content", lambda h, p: h.handle_pr_file_content(p))
     r.get("/pr-keepalive", lambda h, p: h.handle_pr_keepalive(p))
@@ -17982,6 +17959,79 @@ def _start_connectors() -> tuple[Any, Any]:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
 
     return gmail_inst, github_inst
+
+
+def _restart_connector(name: str) -> tuple[bool, str]:
+    """Hot-restart a connector by name. Returns (ok, message)."""
+    global gmail_connector_instance, github_connector_instance
+
+    if name == "gmail":
+        if not GMAIL_ENABLED:
+            return False, "Gmail connector not enabled (GMAIL_ENABLED=0)"
+        if GmailConnector is None:
+            return False, f"Gmail connector import failed: {GMAIL_IMPORT_ERROR}"
+        if gmail_connector_instance is not None:
+            gmail_connector_instance.stop()
+        gmail_connector_instance = GmailConnector(
+            gws_bin=GMAIL_GWS_BIN,
+            from_filter=GMAIL_FROM_FILTER,
+            poll_interval=GMAIL_POLL_INTERVAL,
+            on_message=_connector_on_message("gmail"),
+            get_registered_workers=_connector_get_workers,
+            on_alert=_connector_on_alert("gmail"),
+        )
+        ok, msg = gmail_connector_instance.restart()
+        if ok:
+            print(f"Gmail connector restarted: {msg}")
+        else:
+            print(f"Gmail connector restart failed: {msg}")
+        return ok, msg
+
+    elif name == "github":
+        if not GITHUB_ENABLED:
+            return False, "GitHub connector not enabled (BRIDGE_GHPOLL_ENABLED=0)"
+        if GitHubConnector is None:
+            return False, f"GitHub connector import failed: {GITHUB_IMPORT_ERROR}"
+        if github_connector_instance is not None:
+            github_connector_instance.stop()
+        github_connector_instance = GitHubConnector(
+            repo=GITHUB_REPO,
+            from_user=GITHUB_FROM_USER,
+            poll_interval=GITHUB_POLL_INTERVAL,
+            on_message=_connector_on_message("github"),
+            get_registered_workers=_connector_get_workers,
+            on_alert=_connector_on_alert("github"),
+            state_file=str(NODE_DIR / "github_state.json"),
+        )
+        ok, msg = github_connector_instance.restart()
+        if ok:
+            print(f"GitHub connector restarted: {msg}")
+        else:
+            print(f"GitHub connector restart failed: {msg}")
+        return ok, msg
+
+    else:
+        return False, f"Unknown connector: {name} (valid: gmail, github)"
+
+
+def _get_connectors_status() -> dict[str, Any]:
+    """Return status dict for all connectors."""
+    result: dict[str, Any] = {}
+    if GMAIL_ENABLED:
+        if gmail_connector_instance is not None:
+            result["gmail"] = gmail_connector_instance.status()
+        else:
+            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}
+    else:
+        result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
+    if GITHUB_ENABLED:
+        if github_connector_instance is not None:
+            result["github"] = github_connector_instance.status()
+        else:
+            result["github"] = {"name": "github", "running": False, "error": "not initialized"}
+    else:
+        result["github"] = {"name": "github", "running": False, "enabled": False}
+    return result
 
 
 def main() -> None:

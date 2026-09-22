@@ -6,8 +6,7 @@ import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
-from connectors.github_connector import GitHubConnector
-from connectors.base_connector import CONSECUTIVE_FAIL_WARN
+from connectors import GitHubConnector, CONSECUTIVE_FAIL_WARN
 
 
 def make_connector(**overrides):

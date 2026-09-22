@@ -1623,6 +1623,105 @@ EOF
 }
 
 # ============================================================
+# CONNECTOR MANAGEMENT
+# ============================================================
+
+cmd_connector() {
+    local subcmd="${1:-status}"
+    shift || true
+
+    local node
+    node=$(resolve_target_node)
+    local port
+    port=$(get_default_port "$node")
+
+    # Check bridge is running
+    if ! curl -sf "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+        error "Bridge not running on port $port (node: $node)"
+        hint "./bridge.sh --node $node run"
+        return 1
+    fi
+
+    case "$subcmd" in
+        status)
+            local result
+            result=$(curl -sf "http://127.0.0.1:$port/connectors" 2>&1)
+            if [[ $? -ne 0 ]]; then
+                error "Failed to reach bridge connectors endpoint"
+                return 1
+            fi
+
+            log "$(bold "Connectors") (node: $node)"
+            log ""
+
+            # Parse JSON and display each connector
+            echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for name, info in data.items():
+    running = info.get('running', False)
+    enabled = info.get('enabled', True)
+    if not enabled:
+        status = '$(dim "disabled")'
+    elif running:
+        status = '$(green "running")'
+    else:
+        err = info.get('error', 'stopped')
+        status = '$(red "stopped")' + f' ({err})' if err != 'stopped' else '$(red "stopped")'
+    line = f'  {name:10s} {status}'
+    failures = info.get('consecutive_failures', 0)
+    if failures > 0:
+        line += f'  failures={failures}'
+    sender = info.get('sender_filter', '')
+    if sender:
+        line += f'  filter={sender}'
+    interval = info.get('poll_interval', 0)
+    if interval:
+        line += f'  interval={interval}s'
+    print(line)
+" 2>/dev/null || echo "$result" | python3 -m json.tool
+            ;;
+
+        restart)
+            local name="$1"
+            if [[ -z "$name" ]]; then
+                error "Usage: ./bridge.sh connector restart <gmail|github>"
+                return 1
+            fi
+
+            log "Restarting $name connector..."
+            local result
+            result=$(curl -sf -X POST "http://127.0.0.1:$port/connectors/restart" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\": \"$name\"}" 2>&1)
+            if [[ $? -ne 0 ]]; then
+                error "Failed to restart $name connector"
+                echo "$result"
+                return 1
+            fi
+
+            local ok
+            ok=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null)
+            local msg
+            msg=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('message', ''))" 2>/dev/null)
+
+            if [[ "$ok" == "True" ]]; then
+                success "$name connector restarted: $msg"
+            else
+                error "$name connector restart failed: $msg"
+                return 1
+            fi
+            ;;
+
+        *)
+            error "Unknown connector command: $subcmd"
+            hint "Usage: ./bridge.sh connector status|restart <name>"
+            return 1
+            ;;
+    esac
+}
+
+# ============================================================
 # ARGUMENT PARSING + DISPATCH
 # ============================================================
 
@@ -1677,9 +1776,10 @@ main() {
         clean)   cmd_clean;;
         status)  cmd_status;;
         webhook) cmd_webhook "$@";;
-        hook)    cmd_hook "$@";;
-        help)    cmd_help;;
-        *)       error "Unknown command: $cmd"; hint "./bridge.sh --help"; exit 2;;
+        hook)      cmd_hook "$@";;
+        connector) cmd_connector "$@";;
+        help)      cmd_help;;
+        *)         error "Unknown command: $cmd"; hint "./bridge.sh --help"; exit 2;;
     esac
 }
 
