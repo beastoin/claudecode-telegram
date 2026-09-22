@@ -8,7 +8,7 @@ This file is the single source of truth.
 
 Do these three steps when you make changes that need a new version:
 
-1. Update the version in `claudecode-telegram.sh`:
+1. Update the version in `bridge.sh`:
    ```bash
    VERSION="x.y.z"
    ```
@@ -35,7 +35,7 @@ Do these three steps when you make changes that need a new version:
 | File | Purpose |
 |------|---------|
 | `bridge.py` | Telegram webhook handler, worker management, all HTTP endpoints |
-| `claudecode-telegram.sh` | CLI wrapper, tunnel/webhook setup |
+| `bridge.sh` | CLI wrapper, tunnel/webhook setup |
 | `hooks/send-to-telegram.sh` | Claude Stop hook — sends responses to Telegram |
 | `test.sh` | Automated acceptance tests |
 | `AGENTS.md` | Agent instructions, rules, learnings (this file) |
@@ -233,7 +233,7 @@ lsof -ti :8271 | xargs kill
 kill $(cat ~/.claude/telegram/nodes/prod/pid)
 
 # RIGHT — use the script's stop command
-./claudecode-telegram.sh --node prod stop
+./bridge.sh --node prod stop
 ```
 
 Production runs multiple nodes (prod, dev, test) at the same time. Pattern-based killing causes collateral damage to other running nodes.
@@ -274,7 +274,7 @@ Do not assume that a port belongs to a specific node. Always verify before you r
 ```bash
 # Load token and restart prod
 source ~/.config/claudecode-telegram/prod.env
-TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./claudecode-telegram.sh --node prod --no-sandbox run
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./bridge.sh --node prod --no-sandbox run
 ```
 
 | File | Purpose |
@@ -291,7 +291,7 @@ This is faster and more reliable than extracting tokens from process memory. It 
 **Rule:** Use the stop command from the script, or kill through the node PID file:
 ```bash
 # RIGHT — use script command
-./claudecode-telegram.sh --node prod stop
+./bridge.sh --node prod stop
 
 # RIGHT — use per-node PID file
 kill $(cat ~/.claude/telegram/nodes/prod/pid)

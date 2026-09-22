@@ -269,7 +269,7 @@ These tests run without a bridge. They test Python functions and constants direc
 
 ### CLI Tests (FAST Mode)
 
-These tests run `claudecode-telegram.sh` directly. They do not start a bridge.
+These tests run `bridge.sh` directly. They do not start a bridge.
 
 - `--help` shows usage
 - `--version` shows version
@@ -454,13 +454,13 @@ curl -X POST http://localhost:8295 \
 Start a quick tunnel (random URL each time):
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 Or use a persistent URL:
 
 ```bash
-./claudecode-telegram.sh run --tunnel-url https://your.domain.com
+./bridge.sh run --tunnel-url https://your.domain.com
 ```
 
 ## Test Isolation

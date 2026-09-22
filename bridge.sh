@@ -475,7 +475,7 @@ cmd_run() {
     # Check if this node is already running
     if is_node_running "$node"; then
         error "Node '$node' is already running"
-        hint "Use: ./claudecode-telegram.sh --node $node restart"
+        hint "Use: ./bridge.sh --node $node restart"
         exit 1
     fi
 
@@ -915,7 +915,7 @@ cmd_clean() {
 cmd_restart() {
     if $ALL_NODES; then
         error "--all not supported for restart"
-        hint "Restart nodes individually: ./claudecode-telegram.sh --node <name> restart"
+        hint "Restart nodes individually: ./bridge.sh --node <name> restart"
         exit 2
     fi
 
@@ -1029,7 +1029,7 @@ cmd_status() {
 
         if [[ -z "$all_nodes" ]]; then
             log "No nodes configured"
-            hint "Run: ./claudecode-telegram.sh run"
+            hint "Run: ./bridge.sh run"
             return 0
         fi
 
@@ -1247,7 +1247,7 @@ cmd_webhook() {
     case "$action" in
         info)   cmd_webhook_info;;
         delete) cmd_webhook_delete;;
-        "")     error "URL required"; hint "./claudecode-telegram.sh webhook <url>"; exit 2;;
+        "")     error "URL required"; hint "./bridge.sh webhook <url>"; exit 2;;
         *)      cmd_webhook_set "$action";;
     esac
 }
@@ -1323,7 +1323,7 @@ cmd_hook() {
         install)   cmd_hook_install "$@";;
         uninstall) cmd_hook_uninstall "$@";;
         test)      cmd_hook_test;;
-        "")        error "Subcommand required"; hint "./claudecode-telegram.sh hook <install|uninstall|test>"; exit 2;;
+        "")        error "Subcommand required"; hint "./bridge.sh hook <install|uninstall|test>"; exit 2;;
         *)         error "Unknown: hook $action"; exit 2;;
     esac
 }
@@ -1534,17 +1534,17 @@ cmd_help() {
 claudecode-telegram - Bridge Claude Code to Telegram (Multi-Node)
 
 USAGE
-  ./claudecode-telegram.sh [flags] <command> [args]
+  ./bridge.sh [flags] <command> [args]
 
 QUICK START
   export TELEGRAM_BOT_TOKEN='...'
-  ./claudecode-telegram.sh run
+  ./bridge.sh run
 
 MULTI-NODE
-  NODE_NAME=prod ./claudecode-telegram.sh run     # Start prod node
-  NODE_NAME=dev ./claudecode-telegram.sh run      # Start dev node
-  ./claudecode-telegram.sh --node prod stop       # Stop prod only
-  ./claudecode-telegram.sh --all status           # Status of all nodes
+  NODE_NAME=prod ./bridge.sh run     # Start prod node
+  NODE_NAME=dev ./bridge.sh run      # Start dev node
+  ./bridge.sh --node prod stop       # Stop prod only
+  ./bridge.sh --all status           # Status of all nodes
 
 TELEGRAM COMMANDS
   /hire <name>      Create new Claude instance
@@ -1679,7 +1679,7 @@ main() {
         webhook) cmd_webhook "$@";;
         hook)    cmd_hook "$@";;
         help)    cmd_help;;
-        *)       error "Unknown command: $cmd"; hint "./claudecode-telegram.sh --help"; exit 2;;
+        *)       error "Unknown command: $cmd"; hint "./bridge.sh --help"; exit 2;;
     esac
 }
 

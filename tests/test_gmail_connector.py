@@ -3,7 +3,7 @@ import base64
 import json
 import pytest
 from unittest.mock import patch, MagicMock
-from gmail_connector import GmailConnector
+from connectors.gmail_connector import GmailConnector
 
 
 def make_connector(**overrides):

@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .env
+*.bak
+*.swp
+*.swo
+node_modules/
+/build/
+/runs/

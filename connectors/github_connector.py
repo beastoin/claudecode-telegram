@@ -12,7 +12,7 @@ import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
-from base_connector import BaseConnector
+from .base_connector import BaseConnector
 
 
 class GitHubConnector(BaseConnector):

@@ -473,7 +473,7 @@ git clone https://github.com/beastoin/claudecode-telegram
 ls claudecode-telegram/
 ```
 
-You should see entries that include `bridge.py`, `claudecode-telegram.sh`, `hooks`, `DOC.md`, and `test.sh`.
+You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `DOC.md`, and `test.sh`.
 
 3. Enter the project folder.
 
@@ -502,7 +502,7 @@ tar xzf claudecode-telegram.tar.gz
 ls claudecode-telegram/
 ```
 
-You should see entries that include `bridge.py`, `claudecode-telegram.sh`, `hooks`, `DOC.md`, and `test.sh`.
+You should see entries that include `bridge.py`, `bridge.sh`, `hooks`, `DOC.md`, and `test.sh`.
 
 3. Enter the project folder.
 
@@ -519,7 +519,7 @@ cd claudecode-telegram
 Hooks are small scripts that send worker replies from Claude sessions back into Telegram.
 
 ```bash
-./claudecode-telegram.sh hook install
+./bridge.sh hook install
 ```
 
 You should see success lines that mention Stop/SessionStart hooks.
@@ -559,7 +559,7 @@ This starts the bridge, tunnel, and webhook so Telegram can reach your workers.
 > Fix: install tmux first (Part 2), verify with `tmux -V`, then rerun.
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 You should see output similar to:
@@ -570,16 +570,16 @@ You should see output similar to:
 Open a second terminal in the same folder and verify:
 
 ```bash
-./claudecode-telegram.sh status
+./bridge.sh status
 ```
 
 You should see node status marked running.
 
 If this fails:
 - Error: `Connection refused`.
-- Fix: the bridge is not running. Run `./claudecode-telegram.sh run` again. Keep that terminal open.
+- Fix: the bridge is not running. Run `./bridge.sh run` again. Keep that terminal open.
 - Error: `Webhook setup failed (DNS may still be propagating)`.
-- Fix: wait 20-60 seconds. Then rerun `./claudecode-telegram.sh run`.
+- Fix: wait 20-60 seconds. Then rerun `./bridge.sh run`.
 
 ---
 
@@ -644,8 +644,8 @@ If this fails:
 
 1. Open terminal in `claudecode-telegram`.
 2. Export bot token if not already set in your shell profile.
-3. Run `./claudecode-telegram.sh run`.
-4. Confirm with `./claudecode-telegram.sh status`.
+3. Run `./bridge.sh run`.
+4. Confirm with `./bridge.sh status`.
 
 ### Real Commands (from our real workflow)
 
@@ -702,17 +702,17 @@ Backend selection (available: `claude`, `codex`, `gemini`, `opencode`):
 
 | Command | What it does |
 |---------|--------------|
-| `./claudecode-telegram.sh run` | Start bridge + tunnel + webhook |
-| `./claudecode-telegram.sh restart` | Restart node, preserve tmux sessions |
-| `./claudecode-telegram.sh stop` | Stop node |
-| `./claudecode-telegram.sh clean` | Reset admin/chat ID |
-| `./claudecode-telegram.sh status` | Show status |
-| `./claudecode-telegram.sh webhook <url>` | Set webhook URL manually |
-| `./claudecode-telegram.sh webhook info` | Show webhook details |
-| `./claudecode-telegram.sh webhook delete` | Remove webhook |
-| `./claudecode-telegram.sh hook install` | Install Claude hooks |
-| `./claudecode-telegram.sh hook uninstall` | Remove Claude hooks |
-| `./claudecode-telegram.sh hook test` | Send test message to Telegram |
+| `./bridge.sh run` | Start bridge + tunnel + webhook |
+| `./bridge.sh restart` | Restart node, preserve tmux sessions |
+| `./bridge.sh stop` | Stop node |
+| `./bridge.sh clean` | Reset admin/chat ID |
+| `./bridge.sh status` | Show status |
+| `./bridge.sh webhook <url>` | Set webhook URL manually |
+| `./bridge.sh webhook info` | Show webhook details |
+| `./bridge.sh webhook delete` | Remove webhook |
+| `./bridge.sh hook install` | Install Claude hooks |
+| `./bridge.sh hook uninstall` | Remove Claude hooks |
+| `./bridge.sh hook test` | Send test message to Telegram |
 
 ### Runtime flags
 
@@ -756,7 +756,7 @@ Override with `--port <n>` or `PORT` env var.
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Bot does not respond | Bridge down or wrong admin | Run `./claudecode-telegram.sh status`. Restart if needed. |
+| Bot does not respond | Bridge down or wrong admin | Run `./bridge.sh status`. Restart if needed. |
 | `👀` but no reply | Worker busy or stuck | Run `/progress`, then `/restart`. |
 | `No one assigned` | No focused worker | Run `/team`, then `/focus <name>`. |
 
@@ -837,7 +837,7 @@ echo "$ANTHROPIC_API_KEY"
 If blank, add the key to your shell startup file (Part 3). Open a new terminal. Then restart the bridge:
 
 ```bash
-./claudecode-telegram.sh restart
+./bridge.sh restart
 ```
 
 ### Bot does not react with `👀`
@@ -852,11 +852,11 @@ echo "$TELEGRAM_BOT_TOKEN"
 ```
 
 ```bash
-./claudecode-telegram.sh status
+./bridge.sh status
 ```
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 ### `Connection refused`
@@ -867,13 +867,13 @@ Why it happens:
 Fix:
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 Then verify:
 
 ```bash
-./claudecode-telegram.sh status
+./bridge.sh status
 ```
 
 ### Tunnel issues (cloudflared)
@@ -891,7 +891,7 @@ cloudflared --version
 If command not found, install cloudflared (Part 2). Then rerun the bridge:
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 ### Webhook mismatch or stale webhook
@@ -902,15 +902,15 @@ Why it happens:
 Fix:
 
 ```bash
-./claudecode-telegram.sh webhook info
+./bridge.sh webhook info
 ```
 
 ```bash
-./claudecode-telegram.sh webhook delete
+./bridge.sh webhook delete
 ```
 
 ```bash
-./claudecode-telegram.sh run
+./bridge.sh run
 ```
 
 ### Wrong admin account controls the bot
@@ -921,7 +921,7 @@ Why it happens:
 Fix:
 
 ```bash
-./claudecode-telegram.sh clean
+./bridge.sh clean
 ```
 
 Then restart. Send the first message from the correct Telegram account.
@@ -934,7 +934,7 @@ Why it happens:
 Fix:
 
 ```bash
-./claudecode-telegram.sh hook install
+./bridge.sh hook install
 ```
 
 Then restart your Claude worker session (`/restart`). Or end and hire the worker again.
@@ -1006,13 +1006,14 @@ The bridge passes this to Telegram during webhook setup. It verifies the secret 
 ```text
 claudecode-telegram/
 |-- bridge.py              # HTTP server, worker management, all endpoints
-|-- claudecode-telegram.sh # CLI wrapper, tunnel/webhook setup
+|-- bridge.sh # CLI wrapper, tunnel/webhook setup
 |-- hooks/
 |   |-- send-to-telegram.sh    # Stop hook: sends Claude output to Telegram
 |   |-- checkin-on-start.sh    # SessionStart hook: refreshes worker instructions
 |   `-- forward-to-bridge.py  # Helper: forwards response to bridge
-|-- forge/                 # Go-based worker binary builder
-|-- pilot/                 # Headless browser server for web access
+|-- connectors/            # Gmail, GitHub polling integrations
+|-- tools/                 # Utilities: PR review, indexers, pilot terminal viewer
+|-- experiments/           # Forge worker binary, STT service, MCP prototypes
 |-- DOC.md                 # Design philosophy, changelog
 |-- AGENTS.md              # Agent instructions (single source of truth)
 |-- TEST.md                # Testing documentation
@@ -1056,7 +1057,7 @@ claudecode-telegram/
 - Keep a lightweight team memory with two shared files: `~/team/playbook.md` and `~/team/learnings.md`.
 - Daily: ops manager asks for learnings. Team adds quick notes.
 - Result: the team gets smarter every day. Fewer repeated mistakes.
-- **[See our playbook template with real examples](TEMPLATE-PLAYBOOK.md)**
+- See git history for the playbook template (`TEMPLATE-PLAYBOOK.md`).
 
 ## Credits
 

@@ -167,7 +167,7 @@
 - MUST accept `MCP_INVENTORY_INCLUDE_COMMAND` (`1`/`0`, default `0`).
 - MUST accept `MCP_INVENTORY_INCLUDE_ENV_KEYS` (`1`/`0`, default `1`).
 
-### CLI (claudecode-telegram.sh)
+### CLI (bridge.sh)
 - MUST accept `TELEGRAM_BOT_TOKEN`.
 - MUST accept `ADMIN_CHAT_ID` (optional).
 - MUST accept `TUNNEL_URL` (optional).
@@ -1015,7 +1015,7 @@ error: Invalid node name: <value>
 - Unknown command/flag:
 ```
 error: Unknown command: <cmd>
-→ ./claudecode-telegram.sh --help
+→ ./bridge.sh --help
 error: Unknown flag: <flag>
 ```
 

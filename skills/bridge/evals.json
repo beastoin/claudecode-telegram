@@ -1,0 +1,23 @@
+{
+  "skill_name": "bridge",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I generated a chart at /tmp/sales.png and want to send it to the manager via Telegram. How do I do that?",
+      "expected_output": "Worker uses [[image:/tmp/sales.png|caption]] in response text, NOT echo or curl",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I need to ask aki to review my code changes. How do I send him a message?",
+      "expected_output": "Worker runs curl -s $BRIDGE_URL/workers?from={name} first, then uses the send_example from the response",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I tried doing echo '[[image:/tmp/screenshot.png]]' in bash but the manager didn't receive the image. What went wrong?",
+      "expected_output": "Worker understands that Bash stdout is invisible to the Stop hook, and puts the tag in response text instead",
+      "files": []
+    }
+  ]
+}

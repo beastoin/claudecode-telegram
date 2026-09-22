@@ -201,7 +201,7 @@ hook_curl_code() {
 start_test_pilot() {
     lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
     sleep 0.2
-    PORT="$TEST_PILOT_PORT" node "$SCRIPT_DIR/pilot/pilot.js" > "$PILOT_LOG" 2>&1 &
+    PORT="$TEST_PILOT_PORT" node "$SCRIPT_DIR/tools/pilot/pilot.js" > "$PILOT_LOG" 2>&1 &
     PILOT_PID=$!
     if wait_for_port "$TEST_PILOT_PORT"; then
         return 0
@@ -690,63 +690,63 @@ test_cli_flags_and_commands() {
     local all_pass=true
 
     # --flag=value syntax
-    if ! ./claudecode-telegram.sh --node=testnode --port=9999 --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --node=testnode --port=9999 --help 2>/dev/null | grep -qi "usage"; then
         fail "Equals syntax (--flag=value) failed"
         all_pass=false
     fi
 
     # --node flag
-    if ! ./claudecode-telegram.sh --node mynode --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --node mynode --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --node flag failed"
         all_pass=false
     fi
 
     # --port flag
-    if ! ./claudecode-telegram.sh --port 9999 --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --port 9999 --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --port flag failed"
         all_pass=false
     fi
 
     # --all flag
-    if ! ./claudecode-telegram.sh --all --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --all --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --all flag failed"
         all_pass=false
     fi
 
     # --no-tunnel flag
-    if ! ./claudecode-telegram.sh --help 2>/dev/null | grep -q "no-tunnel"; then
+    if ! ./bridge.sh --help 2>/dev/null | grep -q "no-tunnel"; then
         fail "CLI --no-tunnel not documented"
         all_pass=false
     fi
 
     # --tunnel-url flag
-    if ! ./claudecode-telegram.sh --help 2>/dev/null | grep -q "tunnel-url"; then
+    if ! ./bridge.sh --help 2>/dev/null | grep -q "tunnel-url"; then
         fail "CLI --tunnel-url not documented"
         all_pass=false
     fi
 
     # --headless flag
-    if ! ./claudecode-telegram.sh --headless --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --headless --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --headless flag failed"
         all_pass=false
     fi
 
     # -q (quiet) flag
     local result
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh -q --version 2>&1)
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh -q --version 2>&1)
     if ! echo "$result" | grep -q "claudecode-telegram"; then
         fail "CLI -q flag failed"
         all_pass=false
     fi
 
     # -v (verbose) flag
-    if ! ./claudecode-telegram.sh -v --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh -v --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI -v flag failed"
         all_pass=false
     fi
 
     # --no-color flag
-    if ! ./claudecode-telegram.sh --no-color --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --no-color --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --no-color flag failed"
         all_pass=false
     fi
@@ -754,44 +754,44 @@ test_cli_flags_and_commands() {
     # --env-file flag
     local tmp_env=$(mktemp)
     echo "TEST_VAR=hello" > "$tmp_env"
-    if ! ./claudecode-telegram.sh --env-file="$tmp_env" --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --env-file="$tmp_env" --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --env-file flag failed"
         all_pass=false
     fi
     rm -f "$tmp_env"
 
     # --sandbox-image flag
-    if ! ./claudecode-telegram.sh --sandbox-image=myimage:latest --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --sandbox-image=myimage:latest --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --sandbox-image flag failed"
         all_pass=false
     fi
 
     # --mount flag
-    if ! ./claudecode-telegram.sh --mount=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --mount=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --mount flag failed"
         all_pass=false
     fi
 
     # --mount-ro flag
-    if ! ./claudecode-telegram.sh --mount-ro=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
+    if ! ./bridge.sh --mount-ro=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --mount-ro flag failed"
         all_pass=false
     fi
 
     # stop command
-    if ! ./claudecode-telegram.sh --help 2>/dev/null | grep -q "stop"; then
+    if ! ./bridge.sh --help 2>/dev/null | grep -q "stop"; then
         fail "CLI stop command not documented"
         all_pass=false
     fi
 
     # restart command
-    if ! ./claudecode-telegram.sh --help 2>/dev/null | grep -q "restart"; then
+    if ! ./bridge.sh --help 2>/dev/null | grep -q "restart"; then
         fail "CLI restart command not documented"
         all_pass=false
     fi
 
     # clean command
-    if ! ./claudecode-telegram.sh --help 2>/dev/null | grep -q "clean"; then
+    if ! ./bridge.sh --help 2>/dev/null | grep -q "clean"; then
         fail "CLI clean command not documented"
         all_pass=false
     fi
@@ -1001,7 +1001,7 @@ test_cli_webhook_commands() {
     # webhook set URL
     local test_url="https://example.com/test-webhook-${RANDOM}"
     local result
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook "$test_url" 2>&1) || true
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh webhook "$test_url" 2>&1) || true
     if echo "$result" | grep -qi -e "configured\|ok\|success"; then
         success "CLI webhook set URL works"
     else
@@ -1009,7 +1009,7 @@ test_cli_webhook_commands() {
     fi
 
     # webhook requires HTTPS
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook "http://example.com/test" 2>&1) || true
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh webhook "http://example.com/test" 2>&1) || true
     if echo "$result" | grep -qi -e "https\|error\|must"; then
         success "CLI webhook rejects non-HTTPS URL"
     else
@@ -1017,7 +1017,7 @@ test_cli_webhook_commands() {
     fi
 
     # webhook delete requires confirmation
-    result=$(echo "n" | TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook delete 2>&1) || true
+    result=$(echo "n" | TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh webhook delete 2>&1) || true
     if echo "$result" | grep -qi -e "cancel\|delete\|confirm\|y/n"; then
         success "CLI webhook delete asks for confirmation"
     else
@@ -1040,7 +1040,7 @@ test_cli_webhook_commands() {
             echo "WARNING: failed to restore webhook URL after test — manual restart may be needed" >&2
         fi
     else
-        TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook delete --force 2>/dev/null || true
+        TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh webhook delete --force 2>/dev/null || true
     fi
 }
 
@@ -2357,11 +2357,11 @@ print('OK')
 }
 
 
-# ── Transcript Index Tests (transcript-index.py) ──────────────────────────
+# ── Transcript Index Tests (transcript_indexer.py) ──────────────────────────
 
 test_tindex_missing_file() {
-    info "Testing transcript-index.py handles missing JSONL..."
-    if result=$(python3 transcript-index.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
+    info "Testing transcript_indexer.py handles missing JSONL..."
+    if result=$(python3 tools/transcript_indexer.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2370,32 +2370,32 @@ assert d['total'] == 0, f'Expected total=0, got {d[\"total\"]}'
 assert d['total_pages'] == 0
 assert d['page'] == 1
 print('OK')
-" && success "transcript-index.py handles missing JSONL" || fail "Missing file test failed"
+" && success "transcript_indexer.py handles missing JSONL" || fail "Missing file test failed"
     else
-        fail "transcript-index.py crashed on missing file"
+        fail "transcript_indexer.py crashed on missing file"
     fi
     rm -f /tmp/test-tindex-missing.db
 }
 
 test_tindex_empty_file() {
-    info "Testing transcript-index.py handles empty JSONL..."
+    info "Testing transcript_indexer.py handles empty JSONL..."
     local tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d['entries'] == [], f'Expected empty entries'
 assert d['total'] == 0
 print('OK')
-" && success "transcript-index.py handles empty JSONL" || fail "Empty file test failed"
+" && success "transcript_indexer.py handles empty JSONL" || fail "Empty file test failed"
     else
-        fail "transcript-index.py crashed on empty file"
+        fail "transcript_indexer.py crashed on empty file"
     fi
     rm -f "$tmp" /tmp/test-tindex-empty.db
 }
 
 test_tindex_basic_indexing() {
-    info "Testing transcript-index.py indexes entries into SQLite..."
+    info "Testing transcript_indexer.py indexes entries into SQLite..."
     local tmp=$(mktemp /tmp/tindex-basic-XXXX.jsonl)
     local db="/tmp/test-tindex-basic.db"
     python3 -c "
@@ -2409,7 +2409,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json, sqlite3
 d = json.load(sys.stdin)
@@ -2427,15 +2427,15 @@ parsed = j2.loads(d['entries'][0]['raw_json'])
 assert parsed['message']['content'] == 'Hello world'
 db.close()
 print('OK')
-" && success "transcript-index.py indexes entries" || fail "Basic indexing test failed"
+" && success "transcript_indexer.py indexes entries" || fail "Basic indexing test failed"
     else
-        fail "transcript-index.py crashed on basic indexing"
+        fail "transcript_indexer.py crashed on basic indexing"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_skips_noise() {
-    info "Testing transcript-index.py skips noise entry types..."
+    info "Testing transcript_indexer.py skips noise entry types..."
     local tmp=$(mktemp /tmp/tindex-noise-XXXX.jsonl)
     local db="/tmp/test-tindex-noise.db"
     python3 -c "
@@ -2453,7 +2453,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2463,15 +2463,15 @@ assert 'progress' not in types
 assert 'system' not in types
 assert 'queue-operation' not in types
 print('OK')
-" && success "transcript-index.py skips noise types" || fail "Noise skip test failed"
+" && success "transcript_indexer.py skips noise types" || fail "Noise skip test failed"
     else
-        fail "transcript-index.py crashed on noise entries"
+        fail "transcript_indexer.py crashed on noise entries"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_plain_text_extraction() {
-    info "Testing transcript-index.py extracts searchable plain text..."
+    info "Testing transcript_indexer.py extracts searchable plain text..."
     local tmp=$(mktemp /tmp/tindex-text-XXXX.jsonl)
     local db="/tmp/test-tindex-text.db"
     python3 -c "
@@ -2485,7 +2485,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     python3 -c "
 import sqlite3
 db = sqlite3.connect('$db')
@@ -2500,7 +2500,7 @@ print('OK')
 }
 
 test_tindex_incremental() {
-    info "Testing transcript-index.py indexes only new bytes..."
+    info "Testing transcript_indexer.py indexes only new bytes..."
     local tmp=$(mktemp /tmp/tindex-incr-XXXX.jsonl)
     local db="/tmp/test-tindex-incr.db"
     python3 -c "
@@ -2515,7 +2515,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # First index
-    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Append 2 more entries
     python3 -c "
 import json
@@ -2528,7 +2528,7 @@ with open('$tmp', 'a') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Re-index (incremental)
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2538,13 +2538,13 @@ assert d['entries'][4]['type'] == 'user'
 print('OK')
 " && success "Incremental indexing works" || fail "Incremental indexing test failed"
     else
-        fail "transcript-index.py crashed on incremental"
+        fail "transcript_indexer.py crashed on incremental"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_no_reindex_unchanged() {
-    info "Testing transcript-index.py skips reindex when file unchanged..."
+    info "Testing transcript_indexer.py skips reindex when file unchanged..."
     local tmp=$(mktemp /tmp/tindex-noop-XXXX.jsonl)
     local db="/tmp/test-tindex-noop.db"
     python3 -c "
@@ -2552,15 +2552,15 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Get db mtime
     local mtime1=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     sleep 1
     # Run again — should skip indexing
-    python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     local mtime2=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2568,13 +2568,13 @@ assert d['total'] == 1, f'Expected 1, got {d[\"total\"]}'
 print('OK')
 " && success "No reindex when unchanged" || fail "No-reindex test failed"
     else
-        fail "transcript-index.py crashed on no-reindex"
+        fail "transcript_indexer.py crashed on no-reindex"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_pagination() {
-    info "Testing transcript-index.py pagination..."
+    info "Testing transcript_indexer.py pagination..."
     local tmp=$(mktemp /tmp/tindex-page-XXXX.jsonl)
     local db="/tmp/test-tindex-page.db"
     python3 -c "
@@ -2585,7 +2585,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Default (no --page) should be last page
-    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
+    result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2596,7 +2596,7 @@ assert len(d['entries']) == 20, f'Last page should have 20 entries, got {len(d[\
 print('OK1')
 " 2>/dev/null | grep -q "OK1" || { fail "Pagination default-last-page failed"; rm -f "$tmp" "$db"; return; }
     # Explicit page 1
-    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
+    result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2606,7 +2606,7 @@ assert json.loads(d['entries'][0]['raw_json'])['message']['content'] == 'Message
 print('OK2')
 " 2>/dev/null | grep -q "OK2" || { fail "Pagination page-1 failed"; rm -f "$tmp" "$db"; return; }
     # Page 2
-    result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
+    result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2619,7 +2619,7 @@ print('OK3')
 }
 
 test_tindex_fts5_search() {
-    info "Testing transcript-index.py FTS5 search with BM25 ranking..."
+    info "Testing transcript_indexer.py FTS5 search with BM25 ranking..."
     local tmp=$(mktemp /tmp/tindex-search-XXXX.jsonl)
     local db="/tmp/test-tindex-search.db"
     python3 -c "
@@ -2633,7 +2633,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2644,13 +2644,13 @@ assert 'teleport teleport teleport' in str(first_text), f'3x teleport should be 
 print('OK')
 " && success "FTS5 search ranks correctly" || fail "FTS5 search ranking failed"
     else
-        fail "transcript-index.py crashed on search"
+        fail "transcript_indexer.py crashed on search"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_search_no_results() {
-    info "Testing transcript-index.py search with no matches..."
+    info "Testing transcript_indexer.py search with no matches..."
     local tmp=$(mktemp /tmp/tindex-nores-XXXX.jsonl)
     local db="/tmp/test-tindex-nores.db"
     python3 -c "
@@ -2658,7 +2658,7 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2667,13 +2667,13 @@ assert d['entries'] == []
 print('OK')
 " && success "Search no-results works" || fail "Search no-results failed"
     else
-        fail "transcript-index.py crashed on empty search"
+        fail "transcript_indexer.py crashed on empty search"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_filter_prompts() {
-    info "Testing transcript-index.py prompts filter..."
+    info "Testing transcript_indexer.py prompts filter..."
     local tmp=$(mktemp /tmp/tindex-filter-XXXX.jsonl)
     local db="/tmp/test-tindex-filter.db"
     python3 -c "
@@ -2690,7 +2690,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2701,13 +2701,13 @@ assert 'Another real prompt' in texts
 print('OK')
 " && success "Prompts filter works" || fail "Prompts filter failed"
     else
-        fail "transcript-index.py crashed on filter"
+        fail "transcript_indexer.py crashed on filter"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_stats() {
-    info "Testing transcript-index.py stats query..."
+    info "Testing transcript_indexer.py stats query..."
     local tmp=$(mktemp /tmp/tindex-stats-XXXX.jsonl)
     local db="/tmp/test-tindex-stats.db"
     python3 -c "
@@ -2722,7 +2722,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 transcript-index.py --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
+    if result=$(python3 tools/transcript_indexer.py --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2742,18 +2742,18 @@ assert d['lines_del'] == 0, f'lines_del={d[\"lines_del\"]}'
 print('OK')
 " && success "Stats query works" || fail "Stats query failed"
     else
-        fail "transcript-index.py crashed on stats"
+        fail "transcript_indexer.py crashed on stats"
     fi
     rm -f "$tmp" "$db"
 }
 
 # ── End Transcript Index Tests ────────────────────────────────────────────
 
-# ── Team Chat Index Tests (team-chat-index.py) ───────────────────────────
+# ── Team Chat Index Tests (chat_indexer.py) ───────────────────────────
 
 test_tcindex_missing_file() {
-    info "Testing team-chat-index.py handles missing JSONL..."
-    if result=$(python3 team-chat-index.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tcindex-missing.db --query entries 2>/dev/null); then
+    info "Testing chat_indexer.py handles missing JSONL..."
+    if result=$(python3 tools/chat_indexer.py --jsonl /nonexistent/path.jsonl --db /tmp/test-tcindex-missing.db --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2762,32 +2762,32 @@ assert d['total'] == 0, f'Expected total=0, got {d[\"total\"]}'
 assert d['total_pages'] == 0
 assert d['page'] == 1
 print('OK')
-" && success "team-chat-index.py handles missing JSONL" || fail "Missing file test failed"
+" && success "chat_indexer.py handles missing JSONL" || fail "Missing file test failed"
     else
-        fail "team-chat-index.py crashed on missing file"
+        fail "chat_indexer.py crashed on missing file"
     fi
     rm -f /tmp/test-tcindex-missing.db
 }
 
 test_tcindex_empty_file() {
-    info "Testing team-chat-index.py handles empty JSONL..."
+    info "Testing chat_indexer.py handles empty JSONL..."
     local tmp=$(mktemp /tmp/tcindex-empty-XXXX.jsonl)
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db /tmp/test-tcindex-empty.db --query entries 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db /tmp/test-tcindex-empty.db --query entries 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d['messages'] == [], 'Expected empty messages'
 assert d['total'] == 0
 print('OK')
-" && success "team-chat-index.py handles empty JSONL" || fail "Empty file test failed"
+" && success "chat_indexer.py handles empty JSONL" || fail "Empty file test failed"
     else
-        fail "team-chat-index.py crashed on empty file"
+        fail "chat_indexer.py crashed on empty file"
     fi
     rm -f "$tmp" /tmp/test-tcindex-empty.db
 }
 
 test_tcindex_basic_indexing() {
-    info "Testing team-chat-index.py indexes messages into SQLite..."
+    info "Testing chat_indexer.py indexes messages into SQLite..."
     local tmp=$(mktemp /tmp/tcindex-basic-XXXX.jsonl)
     local db="/tmp/test-tcindex-basic.db"
     python3 -c "
@@ -2801,7 +2801,7 @@ with open('$tmp', 'w') as f:
     for m in msgs:
         f.write(json.dumps(m) + '\n')
 "
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json, sqlite3
 d = json.load(sys.stdin)
@@ -2816,15 +2816,15 @@ count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
 assert count == 3, f'SQLite has {count} rows, expected 3'
 db.close()
 print('OK')
-" && success "team-chat-index.py indexes messages" || fail "Basic indexing test failed"
+" && success "chat_indexer.py indexes messages" || fail "Basic indexing test failed"
     else
-        fail "team-chat-index.py crashed on basic indexing"
+        fail "chat_indexer.py crashed on basic indexing"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tcindex_sender_resolution() {
-    info "Testing team-chat-index.py resolves sender names correctly..."
+    info "Testing chat_indexer.py resolves sender names correctly..."
     local tmp=$(mktemp /tmp/tcindex-sender-XXXX.jsonl)
     local db="/tmp/test-tcindex-sender.db"
     python3 -c "
@@ -2839,7 +2839,7 @@ with open('$tmp', 'w') as f:
     for m in msgs:
         f.write(json.dumps(m) + '\n')
 "
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2851,15 +2851,15 @@ assert msgs[2]['display_sender'] == 'beasts', f'beasts without prefix should sta
 assert msgs[3]['display_sender'] == 'mon', f'beasts+mon: should be mon, got {msgs[3][\"display_sender\"]}'
 assert msgs[3]['text'] == 'Here is the cost analysis', f'mon text prefix not stripped: {msgs[3][\"text\"]}'
 print('OK')
-" && success "team-chat-index.py resolves senders" || fail "Sender resolution test failed"
+" && success "chat_indexer.py resolves senders" || fail "Sender resolution test failed"
     else
-        fail "team-chat-index.py crashed on sender resolution"
+        fail "chat_indexer.py crashed on sender resolution"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tcindex_incremental() {
-    info "Testing team-chat-index.py indexes incrementally..."
+    info "Testing chat_indexer.py indexes incrementally..."
     local tmp=$(mktemp /tmp/tcindex-incr-XXXX.jsonl)
     local db="/tmp/test-tcindex-incr.db"
     # Write 3 messages
@@ -2875,7 +2875,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(m) + '\n')
 "
     # First run
-    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
     # Append 2 more
     python3 -c "
 import json
@@ -2887,7 +2887,7 @@ with open('$tmp', 'a') as f:
     for m in msgs:
         f.write(json.dumps(m) + '\n')
 "
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries --page 1 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json, sqlite3
 d = json.load(sys.stdin)
@@ -2900,15 +2900,15 @@ idxs = [r[0] for r in db.execute('SELECT idx FROM messages ORDER BY idx').fetcha
 assert idxs == [0, 1, 2, 3, 4], f'Indices not continuous: {idxs}'
 db.close()
 print('OK')
-" && success "team-chat-index.py incremental indexing" || fail "Incremental test failed"
+" && success "chat_indexer.py incremental indexing" || fail "Incremental test failed"
     else
-        fail "team-chat-index.py crashed on incremental"
+        fail "chat_indexer.py crashed on incremental"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tcindex_no_reindex_unchanged() {
-    info "Testing team-chat-index.py skips reindex when unchanged..."
+    info "Testing chat_indexer.py skips reindex when unchanged..."
     local tmp=$(mktemp /tmp/tcindex-noreindex-XXXX.jsonl)
     local db="/tmp/test-tcindex-noreindex.db"
     python3 -c "
@@ -2921,12 +2921,12 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(m) + '\n')
 "
     # First index
-    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
     # Get db modification time
     local mtime1=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     sleep 1
     # Run again — should skip
-    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
     local mtime2=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     # DB mod time should be same (WAL mode may differ, so check entry count)
     if python3 -c "
@@ -2936,7 +2936,7 @@ count = db.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
 assert count == 1, f'Expected 1, got {count} — reindexed!'
 print('OK')
 "; then
-        success "team-chat-index.py skips reindex when unchanged"
+        success "chat_indexer.py skips reindex when unchanged"
     else
         fail "Reindexed when file unchanged"
     fi
@@ -2944,7 +2944,7 @@ print('OK')
 }
 
 test_tcindex_pagination() {
-    info "Testing team-chat-index.py pagination..."
+    info "Testing chat_indexer.py pagination..."
     local tmp=$(mktemp /tmp/tcindex-page-XXXX.jsonl)
     local db="/tmp/test-tcindex-page.db"
     # Write 10 messages
@@ -2957,7 +2957,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(m) + '\n')
 "
     # Test: default page (last), per_page=3
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2969,10 +2969,10 @@ assert d['messages'][0]['msg_id'] == 509, f'Last msg should be 509, got {d[\"mes
 print('OK - default last page')
 " && success "Pagination default last page" || fail "Pagination default page failed"
     else
-        fail "team-chat-index.py crashed on pagination"
+        fail "chat_indexer.py crashed on pagination"
     fi
     # Test: page 1
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 --page 1 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries --per-page 3 --page 1 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2983,13 +2983,13 @@ assert d['messages'][2]['msg_id'] == 502
 print('OK - page 1')
 " && success "Pagination page 1" || fail "Pagination page 1 failed"
     else
-        fail "team-chat-index.py crashed on page 1"
+        fail "chat_indexer.py crashed on page 1"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tcindex_fts5_search() {
-    info "Testing team-chat-index.py FTS5 search..."
+    info "Testing chat_indexer.py FTS5 search..."
     local tmp=$(mktemp /tmp/tcindex-search-XXXX.jsonl)
     local db="/tmp/test-tcindex-search.db"
     python3 -c "
@@ -3003,7 +3003,7 @@ with open('$tmp', 'w') as f:
     for m in msgs:
         f.write(json.dumps(m) + '\n')
 "
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query search --search gemini 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query search --search gemini 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -3014,15 +3014,15 @@ msg_ids = [m['msg_id'] for m in d['messages']]
 assert 600 in msg_ids and 601 in msg_ids, f'Expected 600 and 601 in results, got {msg_ids}'
 assert 602 not in msg_ids, f'602 (Flutter) should not match gemini'
 print('OK')
-" && success "team-chat-index.py FTS5 search" || fail "FTS5 search failed"
+" && success "chat_indexer.py FTS5 search" || fail "FTS5 search failed"
     else
-        fail "team-chat-index.py crashed on search"
+        fail "chat_indexer.py crashed on search"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tcindex_page_for_msg() {
-    info "Testing team-chat-index.py page-for-msg query..."
+    info "Testing chat_indexer.py page-for-msg query..."
     local tmp=$(mktemp /tmp/tcindex-pfm-XXXX.jsonl)
     local db="/tmp/test-tcindex-pfm.db"
     # Write 10 messages (ids 700-709)
@@ -3035,9 +3035,9 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(m) + '\n')
 "
     # Index first
-    python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
+    python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>&1
     # Test: msg 700 (idx=0) with per_page=3 → page 1
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 700 --per-page 3 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 700 --per-page 3 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -3048,7 +3048,7 @@ print('OK - msg 700 on page 1')
 "  || fail "page-for-msg 700 failed"
     fi
     # Test: msg 705 (idx=5) with per_page=3 → page 2 (idx 3,4,5)
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 705 --per-page 3 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 705 --per-page 3 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -3057,7 +3057,7 @@ print('OK - msg 705 on page 2')
 "  || fail "page-for-msg 705 failed"
     fi
     # Test: nonexistent msg
-    if result=$(python3 team-chat-index.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 999 --per-page 3 2>/dev/null); then
+    if result=$(python3 tools/chat_indexer.py --jsonl "$tmp" --db "$db" --query page-for-msg --msg-id 999 --per-page 3 2>/dev/null); then
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -3065,7 +3065,7 @@ assert d['page'] is None, f'Nonexistent msg should return page=None, got {d[\"pa
 print('OK - nonexistent msg')
 " || fail "page-for-msg nonexistent failed"
     fi
-    success "team-chat-index.py page-for-msg query"
+    success "chat_indexer.py page-for-msg query"
     rm -f "$tmp" "$db"
 }
 
@@ -8749,7 +8749,7 @@ print('OK')
 test_cli_help() {
     info "Testing CLI --help..."
 
-    if ./claudecode-telegram.sh --help 2>/dev/null | grep -q "USAGE"; then
+    if ./bridge.sh --help 2>/dev/null | grep -q "USAGE"; then
         success "CLI --help works"
     else
         fail "CLI --help failed"
@@ -8759,7 +8759,7 @@ test_cli_help() {
 test_cli_version() {
     info "Testing CLI --version..."
 
-    if ./claudecode-telegram.sh --version 2>/dev/null | grep -q "claudecode-telegram"; then
+    if ./bridge.sh --version 2>/dev/null | grep -q "claudecode-telegram"; then
         success "CLI --version works"
     else
         fail "CLI --version failed"
@@ -8771,7 +8771,7 @@ test_cli_unknown_command() {
 
     # The output has color codes, so we strip them first or check for "Unknown"
     local result
-    result=$(./claudecode-telegram.sh unknowncommand 2>&1 || true)
+    result=$(./bridge.sh unknowncommand 2>&1 || true)
 
     if echo "$result" | grep -qi "unknown"; then
         success "CLI rejects unknown commands"
@@ -8785,7 +8785,7 @@ test_cli_missing_token_error() {
 
     # Unset token and try to run webhook info
     local result
-    result=$(TELEGRAM_BOT_TOKEN="" ./claudecode-telegram.sh webhook info 2>&1 || true)
+    result=$(TELEGRAM_BOT_TOKEN="" ./bridge.sh webhook info 2>&1 || true)
 
     if echo "$result" | grep -q "TELEGRAM_BOT_TOKEN"; then
         success "CLI reports missing token error"
@@ -8802,7 +8802,7 @@ test_cli_hook_install_uninstall() {
 
     # Test hook install (with force to overwrite if exists)
     # Override CLAUDE_DIR too — it may be inherited from parent env
-    if HOME="$temp_home" CLAUDE_DIR="$temp_home/.claude" CLAUDE_SETTINGS_FILE="$temp_home/.claude/settings.json" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh hook install --force 2>/dev/null; then
+    if HOME="$temp_home" CLAUDE_DIR="$temp_home/.claude" CLAUDE_SETTINGS_FILE="$temp_home/.claude/settings.json" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh hook install --force 2>/dev/null; then
         if [[ -f "$temp_home/.claude/hooks/send-to-telegram.sh" ]]; then
             success "CLI hook install creates Stop hook file"
         else
@@ -9091,7 +9091,7 @@ test_cli_status_command() {
 
     # Test status command with no nodes running (should not error)
     local result
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh --node nonexistent status 2>&1) || true
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh --node nonexistent status 2>&1) || true
 
     # Should output something about the node (stopped or not configured)
     if echo "$result" | grep -qi -e "stopped\|running\|node"; then
@@ -9111,7 +9111,7 @@ test_cli_webhook_info() {
     fi
 
     local result
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh webhook info 2>&1) || true
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh webhook info 2>&1) || true
 
     # Should output webhook info, "not configured", or empty (invalid token)
     if echo "$result" | grep -qi -e "url\|webhook\|configured\|pending\|warning\|unavailable\|error"; then
@@ -9128,7 +9128,7 @@ test_cli_hook_test_no_chat() {
 
     # hook test requires a chat_id file to exist
     local result
-    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./claudecode-telegram.sh --node emptynode hook test 2>&1) || true
+    result=$(TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh --node emptynode hook test 2>&1) || true
 
     # Should report no chat ID found
     if echo "$result" | grep -qi -e "no chat\|not found\|send a message"; then
@@ -20999,7 +20999,7 @@ test_gmail_connector_import() {
     if python3 -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from gmail_connector import GmailConnector
+from connectors.gmail_connector import GmailConnector
 gc = GmailConnector(
     gws_bin='/usr/bin/gws',
     from_filter='test@example.com',
@@ -21024,7 +21024,7 @@ test_gmail_connector_poll_cycle() {
 import sys, os, json, base64
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from gmail_connector import GmailConnector
+from connectors.gmail_connector import GmailConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -21069,7 +21069,7 @@ def mock_run(cmd, **kwargs):
     call_count[0] += 1
     return r
 
-with patch('gmail_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.gmail_connector.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 message, got {len(received)}'
@@ -21092,7 +21092,7 @@ test_github_connector_import() {
     if python3 -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
     from_user='testuser',
@@ -21117,7 +21117,7 @@ test_github_connector_uses_gh_api() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21152,7 +21152,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 # Must NOT call beast
@@ -21183,7 +21183,7 @@ test_github_connector_merges_issue_and_pr_comments() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21220,7 +21220,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 2, f'Expected 2 merged comments, got {len(result)}'
@@ -21240,7 +21240,7 @@ test_github_connector_dedup_comments() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21264,7 +21264,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = json.dumps([dup_comment])
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     result = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 1, f'Expected 1 deduped comment, got {len(result)}'
@@ -21282,7 +21282,7 @@ test_github_connector_preflight_uses_gh() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -21302,7 +21302,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '{}'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     with patch('os.path.isfile', return_value=True):
         ok, msg = gc.preflight_check()
 
@@ -21324,7 +21324,7 @@ test_github_connector_poll_cycle() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -21360,7 +21360,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 delivered message, got {len(received)}'
@@ -21382,7 +21382,7 @@ test_github_connector_filters_sender() {
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -21416,7 +21416,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 0, f'Expected 0 messages for other user, got {len(received)}'
@@ -21434,7 +21434,7 @@ test_github_connector_delivers_after_downtime() {
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 # Simulate: bridge was running, saved state, then went down.
 # A comment was posted during downtime. On restart, it should be delivered.
@@ -21473,7 +21473,7 @@ def mock_run_seed(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run_seed):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run_seed):
     gc._on_preflight_ok()
     # Do one poll to save state
     gc.poll_once()
@@ -21516,7 +21516,7 @@ def mock_run_restart(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run_restart):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run_restart):
     gc2._on_preflight_ok()
     gc2.poll_once()
 
@@ -21538,7 +21538,7 @@ test_github_connector_persists_poll_time() {
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from github_connector import GitHubConnector
+from connectors.github_connector import GitHubConnector
 
 tmpdir = tempfile.mkdtemp()
 state_file = os.path.join(tmpdir, 'github_state.json')
@@ -21560,7 +21560,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '[]'
     return r
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     gc._on_preflight_ok()
     saved_time = gc._last_poll_time
     gc.poll_once()
@@ -21582,7 +21582,7 @@ gc2 = GitHubConnector(
     state_file=state_file,
 )
 
-with patch('github_connector.subprocess.run', side_effect=mock_run):
+with patch('connectors.github_connector.subprocess.run', side_effect=mock_run):
     gc2._on_preflight_ok()
 
 # Should NOT reset to now-1h; should use saved time (or close to it)
@@ -23624,8 +23624,8 @@ run_forge_go_tests() {
     fi
 
     ((tests_run++)) || true
-    info "Running: cd forge && go test $go_test_flags ./..."
-    if (cd "$SCRIPT_DIR/forge" && go test $go_test_flags ./... 2>&1); then
+    info "Running: cd experiments/forge && go test $go_test_flags ./..."
+    if (cd "$SCRIPT_DIR/experiments/forge" && go test $go_test_flags ./... 2>&1); then
         success "Forge Go tests passed"
     else
         fail "Forge Go tests failed"
@@ -24020,7 +24020,7 @@ run_unit_tests() {
     run_test test_transcript_prompts_filter
     run_test test_transcript_dynamic_avatars
     run_test test_transcript_sidebar_stats
-    # Unit tests - Transcript Index (transcript-index.py)
+    # Unit tests - Transcript Index (transcript_indexer.py)
     log ""
     log "── Transcript Index Tests (Unit) ───────────────────────────────────────"
     run_test test_tindex_missing_file
@@ -24035,7 +24035,7 @@ run_unit_tests() {
     run_test test_tindex_search_no_results
     run_test test_tindex_filter_prompts
     run_test test_tindex_stats
-    # Unit tests - Team Chat Index (team-chat-index.py)
+    # Unit tests - Team Chat Index (chat_indexer.py)
     log ""
     log "── Team Chat Index Tests (Unit) ────────────────────────────────────────"
     run_test test_tcindex_missing_file

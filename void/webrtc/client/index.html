@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Void Browser</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+#video { width: 100%; height: 100%; object-fit: contain; background: #111; }
+#overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.85); color: #fff; font-family: system-ui, sans-serif;
+  z-index: 10; transition: opacity 0.3s;
+}
+#overlay.hidden { opacity: 0; pointer-events: none; }
+#status { text-align: center; padding: 20px; }
+#status h2 { font-size: 18px; margin-bottom: 12px; }
+#status p { font-size: 14px; color: #aaa; margin-bottom: 8px; }
+#connect-btn {
+  padding: 14px 32px; font-size: 16px; border: none; border-radius: 8px;
+  background: #2563eb; color: #fff; cursor: pointer; margin-top: 16px;
+}
+#connect-btn:disabled { background: #555; cursor: wait; }
+#bar {
+  position: fixed; bottom: 0; left: 0; width: 100%; padding: 8px;
+  background: rgba(0,0,0,0.7); display: flex; gap: 8px; z-index: 5;
+}
+#bar input {
+  flex: 1; padding: 10px; font-size: 14px; border: 1px solid #444;
+  border-radius: 6px; background: #222; color: #fff; outline: none;
+}
+#bar button {
+  padding: 10px 16px; font-size: 14px; border: none; border-radius: 6px;
+  background: #2563eb; color: #fff; cursor: pointer;
+}
+#bar.hidden { display: none; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+
+<div id="overlay">
+  <div id="status">
+    <h2>Void Browser</h2>
+    <p id="msg">Ready to connect</p>
+    <button id="connect-btn" onclick="start()">Connect</button>
+  </div>
+</div>
+
+<div id="bar" class="hidden">
+  <input id="url-input" type="url" placeholder="Enter URL..." value="">
+  <button onclick="navigate()">Go</button>
+</div>
+
+<script>
+const GATEWAY = location.origin;
+let pc, dc, sessionId, token, videoEl, overlay;
+
+function log(t) { document.getElementById('msg').textContent = t; }
+
+async function start() {
+  const btn = document.getElementById('connect-btn');
+  btn.disabled = true;
+  log('Creating session...');
+  videoEl = document.getElementById('video');
+  overlay = document.getElementById('overlay');
+
+  try {
+    // Create session
+    const createResp = await fetch(GATEWAY + '/session/create', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+    const createData = await createResp.json();
+    sessionId = createData.session_id;
+    token = createData.token;
+    log('Session: ' + sessionId);
+
+    // Create WebRTC peer connection
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+    pc.ontrack = (ev) => {
+      videoEl.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      videoEl.play().catch(() => {});
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') {
+        overlay.classList.add('hidden');
+        document.getElementById('bar').classList.remove('hidden');
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        overlay.classList.remove('hidden');
+        log('Disconnected: ' + pc.connectionState);
+        btn.disabled = false;
+      }
+    };
+
+    // Create data channel for input
+    dc = pc.createDataChannel('input');
+    dc.onopen = () => console.log('DataChannel open');
+
+    // Add transceiver for receiving video
+    pc.addTransceiver('video', { direction: 'recvonly' });
+
+    // Create and send offer
+    log('Creating offer...');
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Wait for ICE gathering (with 5s timeout)
+    log('Gathering ICE...');
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      const timer = setTimeout(() => {
+        log('ICE timeout, sending partial...');
+        resolve();
+      }, 5000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+
+    // Send offer to gateway
+    log('Sending offer...');
+    const sigResp = await fetch(GATEWAY + '/signal/offer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ session_id: sessionId, token: token, offer: pc.localDescription })
+    });
+
+    log('Parsing answer...');
+    const sigData = await sigResp.json();
+
+    if (sigData.error) {
+      log('Signal error: ' + sigData.error);
+      btn.disabled = false;
+      return;
+    }
+
+    await pc.setRemoteDescription(sigData.answer);
+    log('Waiting for video...');
+
+  } catch (e) {
+    log('Error: ' + e.message);
+    btn.disabled = false;
+  }
+}
+
+// Input handling — translate touch/mouse events to CDP-compatible format
+function sendInput(msg) {
+  if (dc && dc.readyState === 'open') {
+    dc.send(JSON.stringify(msg));
+  }
+}
+
+function videoCoords(e) {
+  const rect = videoEl.getBoundingClientRect();
+  const vw = videoEl.videoWidth || 720;
+  const vh = videoEl.videoHeight || 1280;
+  // Map screen coords to video coords
+  const scaleX = vw / rect.width;
+  const scaleY = vh / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+function touchCoords(touch) {
+  const rect = videoEl.getBoundingClientRect();
+  const vw = videoEl.videoWidth || 720;
+  const vh = videoEl.videoHeight || 1280;
+  const scaleX = vw / rect.width;
+  const scaleY = vh / rect.height;
+  const x = (touch.clientX - rect.left) * scaleX;
+  const y = (touch.clientY - rect.top) * scaleY;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+// Touch events
+videoEl = document.getElementById('video');
+
+document.addEventListener('touchstart', (e) => {
+  if (e.target !== videoEl) return;
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const c = touchCoords(t);
+  sendInput({ type: 'touch', x: c.x, y: c.y, phase: 'start' });
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+  if (e.target !== videoEl) return;
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const c = touchCoords(t);
+  sendInput({ type: 'touch', x: c.x, y: c.y, phase: 'move' });
+}, { passive: false });
+
+document.addEventListener('touchend', (e) => {
+  if (e.target !== videoEl) return;
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const c = touchCoords(t);
+  sendInput({ type: 'touch', x: c.x, y: c.y, phase: 'end' });
+}, { passive: false });
+
+// Mouse events (for desktop testing)
+let mouseDown = false;
+videoEl.addEventListener('mousedown', (e) => {
+  mouseDown = true;
+  const c = videoCoords(e);
+  sendInput({ type: 'mouse', x: c.x, y: c.y, button: 'left', action: 'down' });
+});
+videoEl.addEventListener('mousemove', (e) => {
+  if (!mouseDown) return;
+  const c = videoCoords(e);
+  sendInput({ type: 'mouse', x: c.x, y: c.y, button: 'left', action: 'move' });
+});
+videoEl.addEventListener('mouseup', (e) => {
+  mouseDown = false;
+  const c = videoCoords(e);
+  sendInput({ type: 'mouse', x: c.x, y: c.y, button: 'left', action: 'up' });
+});
+
+// Keyboard events
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  sendInput({ type: 'key', key: e.key, code: e.code, action: 'down' });
+});
+document.addEventListener('keyup', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  sendInput({ type: 'key', key: e.key, code: e.code, action: 'up' });
+});
+
+// URL navigation
+function navigate() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) return;
+  sendInput({ type: 'navigate', url: url });
+}
+document.getElementById('url-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') navigate();
+});
+</script>
+</body>
+</html>

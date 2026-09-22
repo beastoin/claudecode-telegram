@@ -194,7 +194,7 @@ The bridge detects interactive vs non-interactive mode from `backend.is_interact
 
 ## Machine Catalog
 
-**Status:** Read-only catalog endpoint (MachineAdapter refactor proposed in `SDD-host-awareness.md`)
+**Status:** Read-only catalog endpoint.
 
 Machines are static infrastructure, not runtime worker state. The bridge reads `MACHINES_CONFIG_FILE` (default `~/.config/claudecode-telegram/machines.json`) with the SDD v1 schema:
 
@@ -899,7 +899,7 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 - `test_workers_no_from_backward_compat` — omitting `?from=` preserves legacy bridge-POV behavior
 - `test_workers_from_includes_machine_id` — each worker dict has `machine` field
 
-**Parked (out of scope for this fix):** Machine/MachineAdapter abstraction, generation fencing for the teleport race, `POST /send` centralized router, outbox for offline non-interactive workers. See `SDD-host-awareness.md` for the full staged proposal.
+**Parked (out of scope for this fix):** Machine/MachineAdapter abstraction, generation fencing for the teleport race, `POST /send` centralized router, outbox for offline non-interactive workers.
 
 ### v0.30.0 - Self-healing session ID cache for teleported workers
 
@@ -1368,7 +1368,7 @@ class Backend(Protocol):
 
 **New `clean` command:**
 ```bash
-./claudecode-telegram.sh --node prod clean   # Reset stale chat_id files
+./bridge.sh --node prod clean   # Reset stale chat_id files
 ```
 Fixes the "wrong chat_id persists forever" issue. Removes admin_chat_id and session chat_id files. The next message re-registers admin.
 
@@ -1477,7 +1477,7 @@ The hooks configuration must use nested structure per Claude Code docs:
 
 **Example:**
 ```bash
-./claudecode-telegram.sh start --sandbox \
+./bridge.sh start --sandbox \
   --mount /data \
   --mount /var/log:/logs \
   --mount-ro /etc/ssl/certs
@@ -1595,8 +1595,8 @@ Previously, `--port=1789` was silently ignored (falling back to node config). Th
 
 Now both work:
 ```bash
-./claudecode-telegram.sh run --node=prod --port=1789   # ✅ equals syntax
-./claudecode-telegram.sh run --node prod --port 1789   # ✅ space syntax
+./bridge.sh run --node=prod --port=1789   # ✅ equals syntax
+./bridge.sh run --node prod --port 1789   # ✅ space syntax
 ```
 
 ### v0.10.0 - Simplify CLI (~200 lines removed)
@@ -1896,17 +1896,17 @@ Here's the diagram:
 **Usage:**
 ```bash
 # Start nodes (PORT defaults derived from node name, overridable)
-NODE_NAME=prod ./claudecode-telegram.sh --no-sandbox run    # default port 8271
-NODE_NAME=dev ./claudecode-telegram.sh --no-sandbox run     # default port 8272
+NODE_NAME=prod ./bridge.sh --no-sandbox run    # default port 8271
+NODE_NAME=dev ./bridge.sh --no-sandbox run     # default port 8272
 
 # Stop specific node
-./claudecode-telegram.sh --node dev stop
+./bridge.sh --node dev stop
 
 # Clean stale chat_id (fixes wrong admin)
-./claudecode-telegram.sh --node prod clean
+./bridge.sh --node prod clean
 
 # Status of all nodes
-./claudecode-telegram.sh --all status
+./bridge.sh --all status
 ```
 
 **Recommended node configurations:**
@@ -1960,7 +1960,7 @@ Ports are defaults, not fixed. Override with `--port <n>` or `PORT` env var.
 
 **Usage:**
 ```bash
-./claudecode-telegram.sh restart   # Restarts bridge + tunnel, keeps sessions
+./bridge.sh restart   # Restarts bridge + tunnel, keeps sessions
 ```
 
 ### v0.5.2 - PID File
@@ -1973,7 +1973,7 @@ Ports are defaults, not fixed. Override with `--port <n>` or `PORT` env var.
 
 **Why:**
 - Easy identification of claudecode-telegram processes.
-- Clean termination via `./claudecode-telegram.sh stop` or `kill $(cat ~/.claude/telegram/claudecode-telegram.pid)`.
+- Clean termination via `./bridge.sh stop` or `kill $(cat ~/.claude/telegram/claudecode-telegram.pid)`.
 
 ### v0.5.1 - Test Isolation & System Command
 

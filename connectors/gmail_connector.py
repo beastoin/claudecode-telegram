@@ -12,7 +12,7 @@ import subprocess
 import time
 from typing import Callable, Optional
 
-from base_connector import BaseConnector
+from .base_connector import BaseConnector
 
 CONSECUTIVE_FAIL_REBOOTSTRAP = 5
 

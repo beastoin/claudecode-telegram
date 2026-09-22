@@ -383,21 +383,14 @@ class RouteResolution(NamedTuple):
 
 
 try:
-    from bridge_grpc import BridgeGRPCServer
-    BRIDGE_GRPC_IMPORT_ERROR = None
-except ImportError as e:
-    BridgeGRPCServer = None
-    BRIDGE_GRPC_IMPORT_ERROR = e
-
-try:
-    from gmail_connector import GmailConnector
+    from connectors.gmail_connector import GmailConnector
     GMAIL_IMPORT_ERROR = None
 except ImportError as e:
     GmailConnector = None
     GMAIL_IMPORT_ERROR = e
 
 try:
-    from github_connector import GitHubConnector
+    from connectors.github_connector import GitHubConnector
     GITHUB_IMPORT_ERROR = None
 except ImportError as e:
     GitHubConnector = None
@@ -451,8 +444,6 @@ if NODE_NAME and not os.environ.get("PORT"):
 else:
     PORT = int(os.environ.get("PORT", "8270"))
 
-GRPC_PORT = int(os.environ.get("BRIDGE_GRPC_PORT", str(PORT + 1)))
-grpc_server = None  # initialized in main()
 gmail_connector_instance = None  # initialized in main()
 github_connector_instance = None  # initialized in main()
 
@@ -4821,7 +4812,7 @@ def get_workers(caller_from: str | None = None) -> list[dict[str, Any]]:
     is rendered from that caller's machine perspective.
     """
     _sync_worker_manager()
-    return _merge_grpc_workers(worker_manager.get_workers(caller_from=caller_from))
+    return worker_manager.get_workers(caller_from=caller_from)
 
 
 # download_telegram_file removed — use download_telegram_file() instead
@@ -8671,22 +8662,6 @@ def get_worker_backend(name: str, session: dict[str, Any] | None = None) -> str:
     return DEFAULT_BACKEND
 
 
-def _send_to_grpc_worker(name: str, message: str, from_name: str = "manager") -> bool:
-    """Send a message to a gRPC-connected worker. Returns True on success."""
-    if grpc_server is None:
-        return False
-
-    try:
-        if not grpc_server.is_worker_connected(name):
-            return False
-        if grpc_server.send_to_worker(name, message, from_name):
-            return True
-        _log(_LOG_WARN, "bridge", f"gRPC send failed for '{name}', falling back to tmux backend")
-    except subprocess.SubprocessError as e:
-        _log(_LOG_ERROR, "bridge", f"gRPC send error for '{name}', falling back to tmux backend: {e}")
-    return False
-
-
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
     """Send a message to a callback-URL worker (HTTP POST). Returns True on success."""
     callback_url = (session or {}).get("callback_url", "")
@@ -8947,8 +8922,6 @@ class WorkerManager:
     def send(self, name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
         """Send message to worker using backend registry."""
         self._sync_paths()
-        if _send_to_grpc_worker(name, message, "manager"):
-            return True
         if not session:
             sessions = self.get_registered_sessions()
             session = sessions.get(name)
@@ -9804,8 +9777,6 @@ def stop_docker_container(name: str) -> None:
 
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
     """Send a message to a worker using the appropriate backend."""
-    if _send_to_grpc_worker(name, message, "manager"):
-        return True
     _sync_worker_manager()
     return worker_manager.send(name, message, chat_id)
 
@@ -10103,50 +10074,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         _send_response_tts(name, speak_text, chat_id)
 
 
-def handle_grpc_worker_response(name: str, text: str, payload: bytes = b"") -> None:
-    """Route a gRPC worker response through the same Telegram path as hooks."""
-    try:
-        if not name or not text:
-            _log(_LOG_WARN, "grpc", f"gRPC response ignored: missing worker name or text")
-            return
-
-        chat_id_file = get_chat_id_file(name)
-        if not chat_id_file.exists():
-            _log(_LOG_INFO, "grpc", f"gRPC response: no chat_id for session '{name}'")
-            return
-
-        chat_id = chat_id_file.read_text().strip()
-        _log(_LOG_INFO, "grpc", f"gRPC response: {name} -> chat {chat_id} ({len(text)} chars)")
-
-        if payload:
-            try:
-                data = json.loads(payload.decode("utf-8"))
-                session_id = data.get("session_id", "")
-                if session_id:
-                    sid_file = ensure_session_dir(name) / "claude_session_id"
-                    old_sid = sid_file.read_text().strip() if sid_file.exists() else ""
-                    if old_sid != session_id:
-                        sid_file.write_text(session_id)
-                        sid_file.chmod(0o600)
-            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-                _log(_LOG_WARN, "grpc", f"gRPC response payload ignored for '{name}': {e}")
-
-        send_response_to_telegram(name, text, int(chat_id), log_prefix="gRPC response")
-        _check_learning_reminder(name)
-        clear_pending(name)
-        mark_hook_event(name)
-    except OSError as e:
-        _log(_LOG_ERROR, "bridge", f"gRPC response error for '{name}': {e}")
-
-
-def handle_grpc_worker_register(name: str, host: str, version: str, tools: dict[str, Any]) -> None:
-    """Handle a gRPC worker registration event."""
-    tool_names = ", ".join(sorted(tools.keys())) if tools else "none"
-    host_label = host or "unknown-host"
-    version_label = version or "unknown-version"
-    _log(_LOG_INFO, "grpc", f"gRPC worker registered: {name} ({host_label}, {version_label}, tools: {tool_names})")
-
-
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     """Deploy an HTML file via beast serve and return the public URL, or None on failure."""
     try:
@@ -10163,54 +10090,6 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "bridge", f"beast serve deploy failed for {slug}: {e}")
     return None
-
-
-def handle_grpc_worker_disconnect(name: str) -> None:
-    """Handle a gRPC worker disconnection event."""
-    _log(_LOG_INFO, "grpc", f"gRPC worker disconnected: {name}")
-
-
-def handle_grpc_jsonl_received(stream_id: str, data: bytes) -> None:
-    """Handle an incoming JSONL message from a gRPC worker."""
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", stream_id or "stream")
-    jsonl_dir = SESSIONS_DIR / "grpc-jsonl"
-    jsonl_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    jsonl_dir.chmod(0o700)
-    path = jsonl_dir / f"{safe_id}.jsonl"
-    path.write_bytes(data)
-    path.chmod(0o600)
-    _log(_LOG_INFO, "grpc", f"gRPC JSONL received: {stream_id or safe_id} -> {path} ({len(data)} bytes)")
-
-
-def _merge_grpc_workers(workers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Include connected gRPC workers in /workers without changing tmux entries."""
-    if grpc_server is None:
-        return workers
-
-    try:
-        connected = grpc_server.get_connected_workers()
-    except (ConnectionError, OSError, TimeoutError) as e:
-        _log(_LOG_WARN, "grpc", f"gRPC worker list unavailable: {e}")
-        return workers
-
-    existing = {worker.get("name") for worker in workers}
-    for worker in workers:
-        if worker.get("name") in connected:
-            worker["grpc_connected"] = True
-
-    for name in connected:
-        if name in existing:
-            continue
-        workers.append({
-            "name": name,
-            "machine": "",
-            "protocol": "grpc",
-            "address": f"{BRIDGE_BIND}:{GRPC_PORT}",
-            "grpc_connected": True,
-            "note": "Connected over gRPC MessageStream. Manager messages route through the gRPC stream.",
-        })
-
-    return workers
 
 
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> bool:
@@ -13384,8 +13263,8 @@ class CommandRouter:
 
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
 
-        # Run pr-review.py — pass full URL (with fragment) so it can highlight linked comment
-        script_path = Path(__file__).parent / "pr-review.py"
+        # Run pr_review.py — pass full URL (with fragment) so it can highlight linked comment
+        script_path = Path(__file__).parent / "tools" / "pr_review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
             r = _subprocess_runner.run(
@@ -13777,9 +13656,9 @@ command_router = CommandRouter(transport, worker_manager)
 _TRANSCRIPT_SYNC: dict[str, Any] = {}
 _TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
 
-# Path to transcript-index.py script (same directory as bridge.py)
-TRANSCRIPT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcript-index.py")
-TEAM_CHAT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team-chat-index.py")
+# Path to indexer scripts (tools/ subdirectory)
+TRANSCRIPT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "transcript_indexer.py")
+TEAM_CHAT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "chat_indexer.py")
 TEAM_CHAT_JSONL = "/tmp/team-memory-parsed-full.jsonl"
 TEAM_CHAT_DB = "/tmp/team-chat-cache/team.db"
 TEAM_CHAT_MEDIA_DIR = os.path.expanduser("~/team/exports/chat-full")
@@ -13841,7 +13720,7 @@ def _render_csv_to_html(csv_text: str) -> str:
 
 
 def _run_team_chat_query(query_type: str, **kwargs: Any) -> dict[str, Any] | None:
-    """Run team-chat-index.py via subprocess. Returns parsed JSON dict or None on failure."""
+    """Run chat_indexer.py via subprocess. Returns parsed JSON dict or None on failure."""
     cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
            "--jsonl", TEAM_CHAT_JSONL,
            "--db", TEAM_CHAT_DB,
@@ -13864,14 +13743,14 @@ def _run_team_chat_query(query_type: str, **kwargs: Any) -> dict[str, Any] | Non
 
 
 def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> dict[str, Any] | None:
-    """Run transcript-index.py locally or via SSH. Returns parsed JSON dict or None on failure."""
+    """Run transcript_indexer.py locally or via SSH. Returns parsed JSON dict or None on failure."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = TRANSCRIPT_INDEX_SCRIPT
     if host:
         # Use script on remote host (deployed via scp/rsync)
         remote_home = _get_remote_home(host) or ""
         if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/transcript-index.py"
+            script_path = f"{remote_home}/claudecode-telegram/tools/transcript_indexer.py"
     cmd = ["python3", script_path, "--jsonl", str(jsonl_path),
            "--db", db_path, "--query", query]
     if kwargs.get("page") is not None:
@@ -15453,7 +15332,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not found</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
         jsonl_path = str(transcript_path)
 
-    # Query transcript-index.py — combined entries+stats in single call (saves SSH round-trip)
+    # Query transcript_indexer.py — combined entries+stats in single call (saves SSH round-trip)
     if search_query:
         query_result = _run_transcript_query(
             jsonl_path, sid, "search+stats", host=host,
@@ -16995,7 +16874,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             if search_sort not in ("relevance", "time"):
                 search_sort = "relevance"
             filter_mode = query_params.get("filter", [""])[0].strip()
-            # Remote workers use SSH via transcript-index.py — skip rsync loading page
+            # Remote workers use SSH via transcript_indexer.py — skip rsync loading page
             host = get_worker_host(name)
             if not host:
                 # Local workers: check if transcript needs remote sync
@@ -17888,13 +17767,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
 
-    if grpc_server is not None:
-        try:
-            grpc_server.stop()
-            print("gRPC server stopped")
-        except OSError as e:
-            _log(_LOG_WARN, "bridge", f"gRPC server stop failed: {e}")
-
     if gmail_connector_instance is not None:
         try:
             gmail_connector_instance.stop()
@@ -18255,31 +18127,6 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
     return handler
 
 
-def _start_grpc_server() -> Any:
-    """Start the gRPC server if available, return the server instance or None.
-
-    Returns BridgeGRPCServer when available, None otherwise.
-    Typed as Any because BridgeGRPCServer is conditionally imported.
-    """
-    if BridgeGRPCServer is not None:
-        try:
-            server = BridgeGRPCServer(
-                on_worker_response=handle_grpc_worker_response,
-                on_worker_register=handle_grpc_worker_register,
-                on_worker_disconnect=handle_grpc_worker_disconnect,
-                on_jsonl_received=handle_grpc_jsonl_received,
-            )
-            server.start(GRPC_PORT)
-            _log(_LOG_INFO, "grpc", f"gRPC server on {BRIDGE_BIND}:{GRPC_PORT}")
-            return server
-        except (OSError, KeyboardInterrupt) as e:
-            _log(_LOG_WARN, "grpc", f"gRPC server disabled: {e}")
-            return None
-    elif BRIDGE_GRPC_IMPORT_ERROR is not None:
-        _log(_LOG_ERROR, "bridge", f"gRPC server disabled: {BRIDGE_GRPC_IMPORT_ERROR}")
-    return None
-
-
 def _start_connectors() -> tuple[Any, Any]:
     """Start Gmail and GitHub connectors if enabled, return (gmail, github) instances."""
     gmail_inst = None
@@ -18322,7 +18169,7 @@ def main() -> None:
     Orchestrates: validation → signal setup → session discovery →
     state restoration → startup logging → notification → background services.
     """
-    global admin_chat_id, grpc_server, gmail_connector_instance, github_connector_instance
+    global admin_chat_id, gmail_connector_instance, github_connector_instance
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
         _log(_LOG_ERROR, "telegram", "Error: TELEGRAM_BOT_TOKEN not set")
@@ -18356,7 +18203,6 @@ def main() -> None:
     _schedule_idle_scan()
     print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
 
-    grpc_server = _start_grpc_server()
     gmail_connector_instance, github_connector_instance = _start_connectors()
 
     try:
