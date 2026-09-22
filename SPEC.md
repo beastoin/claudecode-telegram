@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.45.0
+> Version: 0.44.7
 
 ## Documentation Contract
 
@@ -151,10 +151,10 @@ Supplementary features persist data to JSON files:
 
 ```
 ~/.claude/telegram/sessions/
-├── backend/
-│   ├── pending      # Timestamp when request started
-│   └── chat_id      # Where to send the response
-└── frontend/
+├── <worker_name>/           # e.g. "backend", "frontend", "lee"
+│   ├── pending              # Timestamp when request started
+│   └── chat_id              # Where to send the response
+└── <another_worker>/
     ├── pending
     └── chat_id
 ```
@@ -207,7 +207,7 @@ The `/team` command shows workers with health state, focus indicator, backend, a
   mon [WORKING] (codex) attention: 1m, running cost analysis
 ```
 
-Health buckets: READY, WORKING, WAITING, STUCK, POISONED, EXITED, HOST_OFFLINE, WAITING_INPUT.
+Internal health states: READY, BUSY_TOOL, BUSY_THINKING, STUCK, DEAD, OFFLINE, HOST_OFFLINE, POISONED, EXITED, WAITING_INPUT. The `/team` display maps BUSY_TOOL and BUSY_THINKING to "Working".
 
 The bridge deliberately avoids:
 - AI-generated summaries of what each worker does
@@ -257,7 +257,7 @@ The `@name` syntax and `/focus` command give full control without the overhead o
 
 The bridge uses small, explicit classes:
 
-- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `is_interactive`, `start_cmd(resume_id="")`, `send()`, `is_online()`.
+- **Backend Protocol** (`typing.Protocol`): `Backend` interface with `name`, `binary`, `is_interactive`, `start_cmd(resume_id="")`, `send()`, `is_online()`.
 - **Backend implementations**: `ClaudeBackend` (interactive), `CodexBackend`, `GeminiBackend`, `OpenCodeBackend` (non-interactive). All live in `bridge.py`.
 - **WorkerManager**: Worker lifecycle and routing (`hire`, `end`, `send`, `is_online`, `get_workers`, `scan_tmux_sessions`).
 - **TelegramAPI**: Wraps all Telegram API calls (sendMessage, sendPhoto, sendDocument, etc.).

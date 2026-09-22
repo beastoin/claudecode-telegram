@@ -122,7 +122,7 @@ Every path a message takes through the system. This is the audit surface — che
 
 | Flow | Trigger | Route | Behavior | Spec |
 |------|---------|-------|----------|------|
-| Team status | `/team` | Scans tmux sessions | Health state per worker (READY/WORKING/STUCK/...) | SPEC-001, SPEC-015 |
+| Team status | `/team` | Scans tmux sessions | Health state per worker (READY/BUSY/STUCK/DEAD/OFFLINE/...) | SPEC-001, SPEC-015 |
 | Worker restart | `/restart <name>` | Kills + restarts tmux session | Resumes session context if available | SPEC-001 |
 | Teleport | `/teleport <name> <host>` | Syncs state, starts on target, stops source | Cross-machine worker migration | SPEC-010 |
 | Remote register | `POST /register` from remote host | Registers pre-existing worker session | Adds to registry, exports env vars | SPEC-010 |
@@ -155,6 +155,9 @@ Every path a message takes through the system. This is the audit surface — che
 | `/restart [name]` | Restart worker (resume context) |
 | `/restart --clean` | Restart with fresh context |
 | `/teleport <name> <host>` | Move worker to another machine |
+| `/teleback <name>` | Bring teleported worker back |
+| `/channel create <label> <members>` | Create a worker channel |
+| `/settings` | Show bridge configuration |
 | `/voice on\|off` | Toggle voice replies |
 | `/pilot <name>` | Toggle web terminal viewer |
 | `/relay <worker>` | Open public channel |
@@ -183,7 +186,7 @@ Full shell reference and runtime flags in the Setup Guide below.
 
 ## Status
 
-**Version:** 0.45.0 · **Tests:** 431 passing
+**Version:** 0.44.7 · **Tests:** 431 passing (FAST mode, v0.44.7)
 
 **Changelog and specifications:** [SPEC.md](SPEC.md)
 
