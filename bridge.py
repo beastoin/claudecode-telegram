@@ -3,8 +3,10 @@
 
 VERSION = "0.44.0"
 
+import collections
 from dataclasses import dataclass, field
 import hashlib
+import http.client
 import os
 import json
 import mimetypes
@@ -22,17 +24,58 @@ import urllib.error
 import urllib.request
 import shlex
 from html.parser import HTMLParser
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
+from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
 
 # ── Type aliases for clarity ────────────────────────────────────────────
 ChatId = int
 MessageId = int
 ParseMode = Literal["HTML", "MarkdownV2"] | None
-TelegramApiResponse = dict[str, Any] | None
+class TelegramApiResponseDict(TypedDict, total=False):
+    """Shape of a Telegram Bot API JSON response."""
+    ok: bool
+    result: object  # varies by method — Message, User, bool, etc.
+    description: str
+    error_code: int
+
+TelegramApiResponse = TelegramApiResponseDict | None
+
+# Handler type for EndpointRouter — handlers are lambdas adapting dispatch
+# to concrete method signatures; the router itself is method-agnostic.
+RouteHandler = Callable[..., None]
+
+# ── Safe JSON field accessors ────────────────────────────────────────────
+# After cast(dict[str, object], json.loads(...)), .get() returns object.
+# These helpers narrow to concrete types so callers can .strip(), compare, etc.
+
+
+def _str_field(d: dict[str, object], key: str, default: str = "") -> str:
+    """Extract a string field from a parsed JSON dict, with type narrowing."""
+    val = d.get(key, default)
+    return str(val) if val is not None else default
+
+
+def _int_field(d: dict[str, object], key: str, default: int = 0) -> int:
+    """Extract an int field from a parsed JSON dict, with type narrowing."""
+    val = d.get(key, default)
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str):
+        try:
+            return int(val)
+        except ValueError:
+            return default
+    return default
+
+
+def _bool_field(d: dict[str, object], key: str, default: bool = False) -> bool:
+    """Extract a bool field from a parsed JSON dict, with type narrowing."""
+    val = d.get(key, default)
+    return bool(val)
+
 
 # ── TypedDict models for raw JSON shapes ────────────────────────────────
 
@@ -119,20 +162,22 @@ class TelegramMessageDict(TypedDict, total=False):
     document: TelegramDocument
     voice: TelegramVoice
     video: TelegramVideo
+    video_note: TelegramVideo
     animation: TelegramDocument
     audio: TelegramAudio
     sticker: TelegramSticker
-    reply_to_message: dict[str, Any]
+    reply_to_message: "TelegramMessageDict"
     caption: str
     media_group_id: str
 
 
-class TelegramCallbackQuery(TypedDict, total=False):
-    """Telegram CallbackQuery object fields."""
-    id: str
-    from_user: TelegramUser
-    message: TelegramMessageDict
-    data: str
+# Note: Telegram API uses "from" (a Python keyword), so we use functional TypedDict form.
+TelegramCallbackQuery = TypedDict("TelegramCallbackQuery", {
+    "id": str,
+    "from": TelegramUser,
+    "message": TelegramMessageDict,
+    "data": str,
+}, total=False)
 
 
 class TelegramUpdate(TypedDict, total=False):
@@ -146,7 +191,7 @@ class TelegramUpdate(TypedDict, total=False):
 class RegistryData(TypedDict):
     """Worker registry JSON shape."""
     version: int
-    workers: dict[str, dict[str, Any]]
+    workers: dict[str, "RegistryWorkerDict"]
 
 
 class WorkerEndpointInfo(TypedDict, total=False):
@@ -158,13 +203,16 @@ class WorkerEndpointInfo(TypedDict, total=False):
     tmux: str
     protocol: str
     send_example: str
+    machine: str
+    address: str
+    note: str
 
 
 # ── Probe / token / state TypedDicts ────────────────────────────────
 
 class DiskUsageDict(TypedDict, total=False):
     """Disk usage probe result from _check_disk_usage."""
-    pct: int
+    pct: float
     free_gb: float
     total_gb: float
     ts: float  # added when stored in HostHealthState
@@ -249,16 +297,115 @@ class HealthSummaryDict(TypedDict, total=False):
     worktrees: dict[str, float] | None
 
 
+class MachineHealthDict(TypedDict, total=False):
+    """Health status for a single machine."""
+    status: str
+    down_since: float | None
+    last_error: str | None
+    disk: DiskUsageDict | None
+    memory: MemUsageDict | None
+    io: IoUsageDict | None
+
+
+class MachinePublicDict(TypedDict, total=False):
+    """Public-facing machine info returned by API."""
+    id: str
+    display_name: str
+    ssh_target: str | None
+    bridge_base_url: str
+    home_root: str
+    os_family: str
+    tailscale_ip: str
+    role: str
+    configured: bool
+    access: str
+    workers: list[dict[str, str]]
+    worker_count: int
+    health: MachineHealthDict
+
+
+class MachinesCatalogResponse(TypedDict):
+    """Response shape of get_machines()."""
+    version: int
+    config_path: str
+    caller: str | None
+    machines: list[MachinePublicDict]
+
+
+class GitPushStateResult(TypedDict, total=False):
+    """Result metadata from _git_push_state."""
+    orig_sha: str
+    orig_branch: str
+    staged_files: list[str]
+    stash_sha: str | None
+
+
+class CodexTranscriptEntry(TypedDict, total=False):
+    """A parsed entry from a codex transcript."""
+    role: str
+    text: str
+    timestamp: str
+
+
+class TopMemProcEntry(TypedDict, total=False):
+    """Process entry from _get_top_mem_procs."""
+    pid: str
+    rss_gb: float
+    pct: str
+    cmd: str
+
+
+class CpuHogEntry(TypedDict, total=False):
+    """Process entry from _get_cpu_hogs."""
+    pid: int
+    cpu: float
+    etime_min: int
+    cmd: str
+
+
+class TelegramSendPayload(TypedDict, total=False):
+    """Payload dict for Telegram Bot API send methods."""
+    chat_id: int
+    text: str
+    photo: str
+    document: str
+    animation: str
+    action: str
+    message_id: int
+    reaction: list[dict[str, str]]
+    parse_mode: str
+    reply_to_message_id: int
+    reply_markup: dict[str, object]
+    rich_message: dict[str, str]
+
+
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
 
-class GuestSessionDict(TypedDict):
-    """Shape of a guest session stored in GuestStore.guests."""
+class _GuestSessionDictRequired(TypedDict):
+    """Required fields in a guest session dict."""
     name: str
-    token_hash: str
     created_at: str
-    expires_at: str
     expires_at_unix: float
-    notified_workers: set[str]
+    notified_workers: set[str] | list[str]
+
+
+class GuestSessionDict(_GuestSessionDictRequired, total=False):
+    """Shape of a guest session stored in GuestStore.guests.
+
+    token_hash and expires_at are present in storage but not in to_dict() output.
+    """
+    token_hash: str
+    expires_at: str
+
+
+GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
+    "id": str,
+    "from": str,
+    "sender": str,
+    "text": str,
+    "ts": int,
+}, total=False)
+"""Shape of a guest inbox message in storage."""
 
 
 class ChannelMemberDict(TypedDict, total=False):
@@ -292,15 +439,22 @@ class ChannelDict(TypedDict):
     messages: list[ChannelMessageDict]
 
 
-RelayMessageDict = TypedDict("RelayMessageDict", {
+_RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
     "message_id": str,
-    "direction": str,      # "guest_to_worker" or "worker_to_guest"
+    "direction": str,
     "from": str,
     "to": str,
     "text": str,
     "ts": str,
 })
-"""Shape of a message in a relay channel."""
+
+
+class RelayMessageDict(_RelayMessageDictRequired, total=False):
+    """Shape of a message in a relay channel.
+
+    sender_name is optional — present when a named sender is known.
+    """
+    sender_name: str
 
 
 class RelayChannelDict(TypedDict):
@@ -325,6 +479,16 @@ class TmuxSessionDict(TypedDict, total=False):
     host: str           # optional — present only for remote sessions
 
 
+class WorkerSessionDict(TypedDict, total=False):
+    """Shape of a legacy session dict for backward compatibility."""
+    backend: str
+    tmux: str
+    host: str
+    callback_url: str
+    protocol: str
+    version: str
+
+
 class RegistryWorkerDict(TypedDict, total=False):
     """Raw dict shape of a single worker entry in workers.json.
 
@@ -339,13 +503,125 @@ class RegistryWorkerDict(TypedDict, total=False):
     protocol: str       # optional — "http" for callback workers
     callback_url: str   # optional — for callback workers
     version: str        # optional — for callback workers
-    tools: dict[str, Any]  # optional — for callback workers
+    tools: dict[str, object]  # optional — for callback workers; shape varies
 
 
 class RegistryFileDict(TypedDict, total=False):
     """Raw dict shape of the top-level workers.json file."""
     version: int
     workers: dict[str, RegistryWorkerDict]
+
+
+# ── Transcript / Connector / Endpoint TypedDicts ─────────────────────
+
+
+class TranscriptSyncState(TypedDict, total=False):
+    """Shape of transcript background sync tracking entry."""
+    status: str     # "syncing", "done", "error"
+    progress: str
+    error: str
+    path: str
+    started: float
+    pct: int
+
+
+class TranscriptMessageUsage(TypedDict, total=False):
+    """Token usage stats from a Claude transcript message."""
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+
+
+class TranscriptMessageContent(TypedDict, total=False):
+    """A single content block in a transcript message (text, tool_use, tool_result)."""
+    type: str           # "text", "tool_use", "tool_result"
+    text: str
+    name: str           # tool name (for tool_use)
+    id: str             # tool_use_id
+    input: dict[str, str]
+    content: str | list[object]  # tool result content (str or list of blocks)
+    is_error: bool
+
+
+class TranscriptMessage(TypedDict, total=False):
+    """Message object inside a transcript entry."""
+    role: str           # "user", "assistant"
+    content: str | list[TranscriptMessageContent]
+    model: str
+    usage: TranscriptMessageUsage
+
+
+class TranscriptEntry(TypedDict, total=False):
+    """A single entry from a Claude JSONL transcript file."""
+    type: str           # "user", "assistant", "system", "progress", etc.
+    message: TranscriptMessage
+    timestamp: str
+    version: str
+    gitBranch: str
+    _idx: int           # added by pagination logic
+
+
+class TranscriptStatsDict(TypedDict):
+    """Return shape of _transcript_stats()."""
+    n_user: int
+    n_tool: int
+    n_edit: int
+    lines_add: int
+    lines_del: int
+    lines_mod: int
+    n_files: int
+    model: str
+    version: str
+    git_branch: str
+    first_ts: str
+    last_ts: str
+    input_tokens: int
+    output_tokens: int
+    duration: str
+
+
+class ToolResultDict(TypedDict, total=False):
+    """Tool result entry in transcript tool_results map."""
+    content: str
+    is_error: bool
+
+
+class TeamChatMessageDict(TypedDict, total=False):
+    """Shape of a team chat message from chat_indexer.py."""
+    msg_id: int
+    display_sender: str
+    text: str
+    timestamp: str
+    reply_to: int | None
+
+
+class ConnectorMessageLogEntry(TypedDict):
+    """Shape of entries in the connector message log deque."""
+    ts: float
+    html: str
+    plain: str
+    targets: list[str]
+
+
+class ConnectorMetadataDict(TypedDict, total=False):
+    """Metadata passed to connector message handlers."""
+    number: int
+    repo: str
+
+
+class ConnectorStatusDict(TypedDict, total=False):
+    """Status of a single connector."""
+    name: str
+    running: bool
+    error: str
+    enabled: bool
+
+
+class MentionRouteResult(TypedDict):
+    """Return shape of CommandRouter._route_mention."""
+    name: str
+    status: str  # "sent", "offline", "unknown"
 
 
 # ── NamedTuple models for structured returns ──────────────────────────
@@ -378,7 +654,7 @@ class AuthorDetection(NamedTuple):
 
 class RouteResolution(NamedTuple):
     """Result of resolving an HTTP route to its handler."""
-    handler: Callable[..., None] | None
+    handler: RouteHandler | None
     match: re.Match[str] | None
 
 
@@ -708,7 +984,7 @@ class AppContext:
             self.bridge_url = f"http://localhost:{self.port}"
 
 
-def _log_best_effort(label: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:
     """Call func(*args, **kwargs) and log on failure instead of crashing.
 
     Use for fire-and-forget operations where failure is acceptable but
@@ -767,25 +1043,25 @@ class IncomingMessage:
     msg_id: int | None = None
     text: str = ""
     # Media fields (Telegram API JSON shapes)
-    photo: list[dict[str, Any]] | None = None
-    document: dict[str, Any] | None = None
-    animation: dict[str, Any] | None = None
-    audio: dict[str, Any] | None = None
-    voice: dict[str, Any] | None = None
-    video: dict[str, Any] | None = None
-    video_note: dict[str, Any] | None = None
-    sticker: dict[str, Any] | None = None
+    photo: list[TelegramPhotoSize] | None = None
+    document: TelegramDocument | None = None
+    animation: TelegramDocument | None = None
+    audio: TelegramAudio | None = None
+    voice: TelegramVoice | None = None
+    video: TelegramVideo | None = None
+    video_note: TelegramVideo | None = None
+    sticker: TelegramSticker | None = None
     # Derived
     has_media: bool = False
     doc_is_image: bool = False
     media_group_id: str | None = None
     # Reply context (Telegram API reply_to_message JSON)
-    reply_to: dict[str, Any] | None = None
+    reply_to: TelegramMessageDict | None = None
     # Raw message dict (for edge cases during migration)
-    raw_msg: dict[str, Any] | None = None
+    raw_msg: TelegramMessageDict | None = None
 
     @classmethod
-    def from_update(cls: type["IncomingMessage"], update: dict[str, Any]) -> "IncomingMessage":
+    def from_update(cls: type["IncomingMessage"], update: TelegramUpdate) -> "IncomingMessage":
         """Factory: parse a Telegram update dict into an IncomingMessage."""
         msg = update.get("message", {})
         text = msg.get("text", "") or msg.get("caption", "")
@@ -849,7 +1125,7 @@ class GuestSession:
     notified_workers: set[str]
 
     @classmethod
-    def from_dict(cls: type["GuestSession"], token_hash: str, data: dict[str, Any]) -> "GuestSession":
+    def from_dict(cls: type["GuestSession"], token_hash: str, data: GuestSessionDict) -> "GuestSession":
         """Construct an instance from a plain dictionary."""
         notified = data.get("notified_workers", set())
         if isinstance(notified, list):
@@ -862,7 +1138,7 @@ class GuestSession:
             notified_workers=notified,
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> GuestSessionDict:
         """Serialize this instance to a plain dictionary."""
         return {
             "name": self.name,
@@ -886,7 +1162,7 @@ class GuestInboxMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["GuestInboxMessage"], data: dict[str, Any]) -> "GuestInboxMessage":
+    def from_dict(cls: type["GuestInboxMessage"], data: GuestInboxMessageDict) -> "GuestInboxMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=data.get("id", ""),
@@ -904,7 +1180,7 @@ class ChannelMember:
     name: str = ""    # display name (empty for manager)
 
     @classmethod
-    def from_dict(cls: type["ChannelMember"], key: str, data: dict[str, Any]) -> "ChannelMember":
+    def from_dict(cls: type["ChannelMember"], key: str, data: ChannelMemberDict) -> "ChannelMember":
         """Construct an instance from a plain dictionary."""
         return cls(key=key, type=data["type"], name=data.get("name", ""))
 
@@ -919,7 +1195,7 @@ class ChannelMessage:
     ts: int
 
     @classmethod
-    def from_dict(cls: type["ChannelMessage"], data: dict[str, Any]) -> "ChannelMessage":
+    def from_dict(cls: type["ChannelMessage"], data: ChannelMessageDict) -> "ChannelMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
             id=data["id"],
@@ -940,10 +1216,10 @@ class RelayMessage:
     sender_name: str = ""
 
     @classmethod
-    def from_dict(cls: type["RelayMessage"], d: dict[str, Any]) -> "RelayMessage":
+    def from_dict(cls: type["RelayMessage"], d: RelayMessageDict) -> "RelayMessage":
         """Construct an instance from a plain dictionary."""
         return cls(
-            id=d.get("id", ""),
+            id=d.get("message_id", ""),
             sender=d.get("from", d.get("sender", "")),
             text=d.get("text", ""),
             ts=d.get("ts", 0),
@@ -957,7 +1233,7 @@ class GuestStore:
     def __init__(self) -> None:
         """Initialize guest sessions store with thread-safe locks."""
         self.guests: dict[str, GuestSessionDict] = {}
-        self.inboxes: dict[str, list[dict[str, Any]]] = {}
+        self.inboxes: dict[str, list[GuestInboxMessageDict]] = {}
         self.lock: threading.Lock = threading.Lock()
 
 
@@ -1056,7 +1332,7 @@ def guest_is_expired(expires_at_unix: float) -> bool:
     return _clock.time() >= expires_at_unix
 
 
-def guest_inbox_filter(messages: list[dict[str, Any]], after: str | None = None) -> list[dict[str, Any]]:
+def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
     """Filter messages, returning only those after the given message ID."""
     if not after:
         return list(messages)
@@ -1072,7 +1348,7 @@ def guest_inbox_filter(messages: list[dict[str, Any]], after: str | None = None)
     return result
 
 
-def guest_inbox_append(inbox: list[dict[str, Any]], msg: dict[str, Any]) -> list[dict[str, Any]]:
+def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
     """Append a message to inbox, capping at GUEST_INBOX_CAP."""
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
@@ -1332,7 +1608,7 @@ def relay_guide_url(channel_id: str, guest_token: str) -> str:
     return f"{_relay_base_url()}/v1/{channel_id}?token={guest_token}"
 
 
-def relay_guide_text(channel: dict[str, Any], guest_token: str) -> str:
+def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
     """Generate markdown guide for a relay channel."""
     base = f"{_relay_base_url()}/v1/{channel['id']}"
     worker_name = channel["worker"]
@@ -1454,7 +1730,7 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     return msg
 
 
-def relay_get_messages(channel_id: str, after: str | None = None) -> list[dict[str, Any]]:
+def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
     """Get messages for a relay channel, optionally after a message ID."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -1481,7 +1757,7 @@ class WorkerRecord:
     callback_url: str = ""
     protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
     version: str = ""
-    tools: dict[str, Any] | None = None
+    tools: dict[str, object] | None = None
     chat_id: int | None = None
     cwd: str = ""
     home_host: str = ""
@@ -1503,9 +1779,9 @@ class WorkerRecord:
         # Defer to Backend for the canonical answer
         return self.backend == "claude"
 
-    def to_session_dict(self) -> dict[str, Any]:
+    def to_session_dict(self) -> WorkerSessionDict:
         """Convert back to legacy session dict for backward compatibility."""
-        result: dict[str, Any] = {"backend": self.backend}
+        result: WorkerSessionDict = {"backend": self.backend}
         if self.tmux_name:
             result["tmux"] = self.tmux_name
         if self.host:
@@ -1518,7 +1794,7 @@ class WorkerRecord:
         return result
 
     @classmethod
-    def from_session_dict(cls: type["WorkerRecord"], name: str, session: dict[str, Any], tmux_prefix: str = "") -> "WorkerRecord":
+    def from_session_dict(cls: type["WorkerRecord"], name: str, session: WorkerSessionDict, tmux_prefix: str = "") -> "WorkerRecord":
         """Create from legacy session dict (as returned by get_registered_sessions)."""
         return cls(
             name=name,
@@ -1545,13 +1821,13 @@ class WorkerRegistryEntry:
     version: str = ""
     chat_id: int | None = None
     hire_time: int = 0
-    tools: dict[str, Any] | None = None
+    tools: dict[str, object] | None = None
     home_host: str = ""
     home_cwd: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> RegistryWorkerDict:
         """Serialize this instance to a plain dictionary."""
-        result: dict[str, Any] = {"backend": self.backend}
+        result: RegistryWorkerDict = {"backend": self.backend}
         for field_name in ("protocol", "callback_url", "host", "version", "chat_id",
                            "hire_time", "tools", "home_host", "home_cwd"):
             value = getattr(self, field_name)
@@ -1560,7 +1836,7 @@ class WorkerRegistryEntry:
         return result
 
     @classmethod
-    def from_dict(cls: type["WorkerRegistryEntry"], data: dict[str, Any]) -> "WorkerRegistryEntry":
+    def from_dict(cls: type["WorkerRegistryEntry"], data: RegistryWorkerDict) -> "WorkerRegistryEntry":
         """Construct an instance from a plain dictionary."""
         return cls(
             backend=data.get("backend", "claude"),
@@ -1610,14 +1886,22 @@ class Backend(Protocol):
 
 # ── Injectable testing seams ──
 
+class MarkdownToken(Protocol):
+    """Protocol for markdown-it-py inline tokens."""
+    type: str
+    content: str
+    children: list['MarkdownToken'] | None
+    attrs: dict[str, str] | None
+
+
 class SubprocessRunner(Protocol):
     """Abstraction over subprocess.run and subprocess.Popen for test injection."""
 
-    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command and wait for completion."""
         ...
 
-    def popen(self, args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         """Spawn a subprocess without waiting for completion."""
         ...
 
@@ -1637,11 +1921,11 @@ class Clock(Protocol):
 class _RealSubprocessRunner:
     """Production subprocess runner — delegates to subprocess.run/Popen."""
 
-    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command via the real subprocess module."""
         return subprocess.run(args, **kwargs)
 
-    def popen(self, args: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         """Spawn a subprocess without waiting, via the real subprocess module."""
         return subprocess.Popen(args, **kwargs)
 
@@ -1661,7 +1945,7 @@ class _RealClock:
 # Module-level defaults (overridable in tests by replacing these singletons)
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
-_urlopen: Callable[..., Any] = urllib.request.urlopen  # Injectable for testing
+_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # Injectable for testing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1733,7 +2017,7 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
     return tool  # fallback to bare name
 
 
-def _remote_run(cmd: list[str], host: str | None = None, **kwargs: Any) -> subprocess.CompletedProcess:
+def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
     """Run a command, optionally on a remote host via SSH.
 
     When host is None, runs locally. When set, builds a single shell command
@@ -1838,7 +2122,7 @@ class Machine:
         """Check whether this machine is the local bridge host."""
         return self.ssh_target is None
 
-    def public_dict(self) -> dict[str, Any]:
+    def public_dict(self) -> MachinePublicDict:
         """Return a sanitized dictionary safe for API responses."""
         return {
             "id": self.id,
@@ -1872,7 +2156,7 @@ def _validate_machine_id(machine_id: str) -> str:
     return machine_id
 
 
-def _coerce_optional_str(value: Any, field: str, machine_id: str) -> str:
+def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
     """Coerce a config value to str, allowing None (→ empty string)."""
     if value is None:
         return ""
@@ -1906,7 +2190,7 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
         return {_implicit_local_machine().id: _implicit_local_machine()}
 
     try:
-        data = json.loads(config_path.read_text())
+        data = cast(dict[str, object], json.loads(config_path.read_text()))
     except json.JSONDecodeError as e:
         raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
     except OSError as e:
@@ -2004,7 +2288,7 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
     )
 
 
-def _machine_health(machine: Machine) -> dict[str, Any]:
+def _machine_health(machine: Machine) -> MachineHealthDict:
     """Build a health status dict for a machine (disk, memory, IO, up/down)."""
     host_label = machine.ssh_target or "VPS"
     health = {
@@ -2040,14 +2324,14 @@ def _machine_access(machine: Machine, caller_host: str | None) -> str:
     return f"ssh {target_host}"
 
 
-def get_machines(caller_from: str | None = None) -> dict[str, Any]:
+def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
     """Return configured machines plus derived workers, access, and health."""
     machines = get_machine_catalog()
     registered = get_registered_sessions()
     caller_info = registered.get(caller_from, {}) if caller_from else {}
     caller_host = caller_info.get("host") if caller_info else (get_worker_host(caller_from) if caller_from else None)
 
-    rows: dict[str, dict[str, Any]] = {}
+    rows: dict[str, MachinePublicDict] = {}
     for machine in machines.values():
         row = machine.public_dict()
         row["access"] = _machine_access(machine, caller_host)
@@ -2132,7 +2416,7 @@ def _ensure_bare_repo(project_name: str) -> str:
 
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
-                    host: str | None = None) -> dict[str, Any] | None:
+                    host: str | None = None) -> GitPushStateResult | None:
     """Push working state to bare repo without mutating source.
 
     Approach: temporarily `git add -A` to capture untracked files in the index,
@@ -2209,7 +2493,7 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
 
 
 def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
-                    metadata: dict[str, Any], host: str | None = None) -> bool:
+                    metadata: GitPushStateResult, host: str | None = None) -> bool:
     """Pull and apply working state on target. Returns success.
 
     For fresh targets: clones from bare repo.
@@ -2467,8 +2751,10 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 # Local: write to temp file for tmux load-buffer
                 fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
                 try:
-                    os.write(fd, text.encode())
-                    os.close(fd)
+                    try:
+                        os.write(fd, text.encode())
+                    finally:
+                        os.close(fd)
                     r = _subprocess_runner.run(
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile],
                         capture_output=True, timeout=TIMEOUT_TMUX_SEND,
@@ -2721,8 +3007,10 @@ class ProcessRegistry:
 
     def __init__(self) -> None:
         """Initialize adapter process tracking and bridge PID references."""
-        self.adapter_pids: dict[str, tuple[subprocess.Popen[Any], IO[str] | None]] = {}
+        self.adapter_pids: dict[str, tuple[subprocess.Popen[str], IO[str] | None]] = {}
+        self.adapter_pids_lock: threading.Lock = threading.Lock()
         self.pipe_readers: dict[str, tuple[threading.Thread, threading.Event]] = {}
+        self.pipe_readers_lock: threading.Lock = threading.Lock()
         self.pending_locks: dict[str, threading.Lock] = {}
         self.pending_locks_guard: threading.Lock = threading.Lock()
 
@@ -2752,7 +3040,8 @@ def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
         stdout=subprocess.DEVNULL,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
     )
-    processes.adapter_pids[worker_name] = (proc, stderr_fh)
+    with processes.adapter_pids_lock:
+        processes.adapter_pids[worker_name] = (proc, stderr_fh)
     return True
 
 
@@ -2789,14 +3078,16 @@ def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
         stdout=subprocess.DEVNULL,
         stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
     )
-    processes.adapter_pids[worker_name] = (proc, stderr_fh)
+    with processes.adapter_pids_lock:
+        processes.adapter_pids[worker_name] = (proc, stderr_fh)
     _log(_LOG_INFO, "adapter", f"Spawned remote adapter for '{worker_name}' on {host}")
     return True
 
 
 def kill_adapter(name: str) -> None:
     """Kill inflight adapter process for a worker."""
-    entry = processes.adapter_pids.pop(name, None)
+    with processes.adapter_pids_lock:
+        entry = processes.adapter_pids.pop(name, None)
     if entry is None:
         return
     proc, stderr_fh = entry
@@ -2851,7 +3142,7 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
     return None
 
 
-def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict[str, Any]]:
+def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
     """Parse a codex native JSONL file into a list of messages.
 
     Reads the same format beast hours ParseCodexFile() handles:
@@ -2873,7 +3164,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict[str
         if not line.strip():
             continue
         try:
-            ev = json.loads(line)
+            ev = cast(dict[str, object], json.loads(line))
         except json.JSONDecodeError:
             continue
 
@@ -2902,7 +3193,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[dict[str
     return messages
 
 
-def _read_codex_transcript(worker_name: str) -> list[dict[str, Any]]:
+def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     """Read the codex native transcript for a worker."""
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
@@ -2913,7 +3204,8 @@ def _read_codex_transcript(worker_name: str) -> list[dict[str, Any]]:
 
 def _read_noninteractive_activity(worker_name: str) -> str:
     """Return human-readable activity string for a non-interactive worker."""
-    entry = processes.adapter_pids.get(worker_name)
+    with processes.adapter_pids_lock:
+        entry = processes.adapter_pids.get(worker_name)
     if entry:
         proc, _ = entry
         if proc.poll() is None:
@@ -3001,15 +3293,15 @@ class MentionTracker:
         self.count: int = 0
         self.ts: float = 0.0
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> str | int | float | None:
         """Get a value by key (dict-like access)."""
         return getattr(self, key)
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def __setitem__(self, key: str, value: str | int | float | None) -> None:
         """Set a value by key (dict-like access)."""
         setattr(self, key, value)
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: str | int | float | None = None) -> str | int | float | None:
         """Get a value with optional default (dict-like access)."""
         return getattr(self, key, default)
 
@@ -3021,7 +3313,7 @@ class MentionTracker:
         """Iterate over keys (dict-like access)."""
         return iter(self._KEYS)
 
-    def update(self, other: dict[str, Any]) -> None:
+    def update(self, other: dict[str, str | int | float | None]) -> None:
         """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEYS:
@@ -3041,14 +3333,14 @@ class BridgeRuntimeState:
     _KEY_MAP = {"active": "active", "startup_notified": "startup_notified",
                 "tts_enabled": "tts_enabled"}
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> str | bool | None:
         """Get a value by key (dict-like access)."""
         attr = self._KEY_MAP.get(key)
         if attr:
             return getattr(self, attr)
         raise KeyError(key)
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def __setitem__(self, key: str, value: str | bool | None) -> None:
         """Set a value by key (dict-like access)."""
         attr = self._KEY_MAP.get(key)
         if attr:
@@ -3056,7 +3348,7 @@ class BridgeRuntimeState:
         else:
             raise KeyError(key)
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: str | bool | None = None) -> str | bool | None:
         """Get a value with optional default (dict-like access)."""
         try:
             return self[key]
@@ -3071,7 +3363,7 @@ class BridgeRuntimeState:
         """Iterate over keys (dict-like access)."""
         return iter(self._KEY_MAP)
 
-    def update(self, other: dict[str, Any]) -> None:
+    def update(self, other: dict[str, str | bool | None]) -> None:
         """Update from a mapping (dict-like access)."""
         for k, v in other.items():
             if k in self._KEY_MAP:
@@ -3095,7 +3387,7 @@ class DiskUsage:
     ts: float = 0.0     # timestamp of probe
 
     @classmethod
-    def from_dict(cls: type["DiskUsage"], d: dict[str, Any]) -> "DiskUsage":
+    def from_dict(cls: type["DiskUsage"], d: DiskUsageDict) -> "DiskUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
@@ -3104,7 +3396,7 @@ class DiskUsage:
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> DiskUsageDict:
         """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
@@ -3116,51 +3408,52 @@ class MemoryUsage:
     pct: float          # usage percentage (0-100)
     used_gb: float      # used memory in GB
     total_gb: float     # total memory in GB
-    available_gb: float = 0.0
+    avail_gb: float = 0.0
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls: type["MemoryUsage"], d: dict[str, Any]) -> "MemoryUsage":
+    def from_dict(cls: type["MemoryUsage"], d: MemUsageDict) -> "MemoryUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
             used_gb=d.get("used_gb", 0.0),
             total_gb=d.get("total_gb", 0.0),
-            available_gb=d.get("available_gb", 0.0),
+            avail_gb=d.get("avail_gb", 0.0),
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> MemUsageDict:
         """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "used_gb": self.used_gb,
-                "total_gb": self.total_gb, "available_gb": self.available_gb,
+                "total_gb": self.total_gb, "avail_gb": self.avail_gb,
                 "ts": self.ts}
 
 
 @dataclass
 class IoUsage:
     """Result of an I/O usage probe."""
-    read_mb_s: float = 0.0
-    write_mb_s: float = 0.0
-    iops: int = 0
+    iowait_pct: float = 0.0
+    read_iops: int = 0
+    write_iops: int = 0
     util_pct: float = 0.0
     ts: float = 0.0
 
     @classmethod
-    def from_dict(cls: type["IoUsage"], d: dict[str, Any]) -> "IoUsage":
+    def from_dict(cls: type["IoUsage"], d: IoUsageDict) -> "IoUsage":
         """Construct an instance from a plain dictionary."""
         return cls(
-            read_mb_s=d.get("read_mb_s", 0.0),
-            write_mb_s=d.get("write_mb_s", 0.0),
-            iops=d.get("iops", 0),
+            iowait_pct=d.get("iowait_pct", 0.0),
+            read_iops=d.get("read_iops", 0),
+            write_iops=d.get("write_iops", 0),
             util_pct=d.get("util_pct", 0.0),
             ts=d.get("ts", 0.0),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> IoUsageDict:
         """Serialize this instance to a plain dictionary."""
-        return {"read_mb_s": self.read_mb_s, "write_mb_s": self.write_mb_s,
-                "iops": self.iops, "util_pct": self.util_pct, "ts": self.ts}
+        return {"iowait_pct": self.iowait_pct, "read_iops": self.read_iops,
+                "write_iops": self.write_iops, "util_pct": self.util_pct,
+                "ts": self.ts}
 
 
 @dataclass
@@ -3172,7 +3465,7 @@ class CpuHog:
     user: str = ""
 
     @classmethod
-    def from_dict(cls: type["CpuHog"], d: dict[str, Any]) -> "CpuHog":
+    def from_dict(cls: type["CpuHog"], d: CpuHogEntry) -> "CpuHog":
         """Construct an instance from a plain dictionary."""
         return cls(
             pid=d.get("pid", 0),
@@ -3190,7 +3483,7 @@ class WorktreeItem:
     worker: str = ""
 
     @classmethod
-    def from_dict(cls: type["WorktreeItem"], d: dict[str, Any]) -> "WorktreeItem":
+    def from_dict(cls: type["WorktreeItem"], d: dict[str, str | float]) -> "WorktreeItem":
         """Construct an instance from a plain dictionary."""
         return cls(
             path=d.get("path", ""),
@@ -3233,7 +3526,7 @@ class WorkerWatchdogState:
     def __init__(self) -> None:
         # Worker probe state
         """Initialize worker watchdog counters, locks, and health maps."""
-        self.worker_states: dict[str, tuple] = {}
+        self.worker_states: dict[str, tuple[str, str, float]] = {}
         self.last_child_ts: dict[str, float] = {}
         self.last_seen_claude: dict[str, float] = {}
         self.last_hook_ts: dict[str, float] = {}
@@ -3283,10 +3576,14 @@ watchdog = WorkerWatchdogState()
 
 
 class HostHealthState:
-    """Tracks health metrics for all remote hosts (SSH, disk, CPU, memory, IO, worktrees, Tailscale)."""
+    """Tracks health metrics for all remote hosts (SSH, disk, CPU, memory, IO, worktrees, Tailscale).
+
+    Thread safety: all reads/writes to mutable dicts must be under self.lock.
+    """
 
     def __init__(self) -> None:
         """Initialize per-host health metrics (SSH, disk, memory, IO, CPU, Tailscale)."""
+        self.lock: threading.Lock = threading.Lock()
         # SSH connectivity
         self.ssh_failures: dict[str, int] = {}
         self.down: dict[str, bool] = {}
@@ -3412,7 +3709,7 @@ def _new_reminder_state() -> ReminderState:
     }
 
 
-def _learning_reminder_state_file() -> Path:
+def _learning_reminder_state_file() -> str | None:
     """Path to persistent state file (NODE_DIR/learning_reminders.json)."""
     try:
         return os.path.join(str(NODE_DIR), "learning_reminders.json")
@@ -3592,12 +3889,12 @@ class RewindToken:
         """Check whether this entry has passed its expiration time."""
         return _clock.time() >= self.expires_at
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> RewindTokenEntry:
         """Serialize this instance to a plain dictionary."""
         return {"name": self.name, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls: type["RewindToken"], d: dict[str, Any]) -> "RewindToken":
+    def from_dict(cls: type["RewindToken"], d: RewindTokenEntry) -> "RewindToken":
         """Construct an instance from a plain dictionary."""
         return cls(name=d["name"], expires_at=d["expires_at"])
 
@@ -3614,13 +3911,13 @@ class PrReviewToken:
         """Check whether this entry has passed its expiration time."""
         return _clock.time() >= self.expires_at
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> PrReviewTokenEntry:
         """Serialize this instance to a plain dictionary."""
         return {"pr_num": self.pr_num, "owner": self.owner,
                 "repo": self.repo, "expires_at": self.expires_at}
 
     @classmethod
-    def from_dict(cls: type["PrReviewToken"], d: dict[str, Any]) -> "PrReviewToken":
+    def from_dict(cls: type["PrReviewToken"], d: PrReviewTokenEntry) -> "PrReviewToken":
         """Construct an instance from a plain dictionary."""
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
@@ -3630,6 +3927,7 @@ class PrReviewToken:
 # but the dataclasses above define the canonical shape.
 REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
 PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
+_token_maps_lock: threading.Lock = threading.Lock()
 REWIND_TIMEOUT: int = 24 * 60 * 60  # 24 hours (sliding window)
 
 BOT_COMMANDS = [
@@ -3723,7 +4021,7 @@ def _load_registry() -> RegistryFileDict:
         if not WORKER_REGISTRY_FILE.exists():
             return {}
         raw = WORKER_REGISTRY_FILE.read_text()
-        data = json.loads(raw)
+        data = cast(RegistryFileDict, json.loads(raw))
         if not isinstance(data, dict) or "workers" not in data:
             raise ValueError("invalid registry format")
         return data
@@ -3780,7 +4078,7 @@ def _registry_add(name: str, backend: str, chat_id: int | None = None,
 
 
 def _registry_add_callback(name: str, callback_url: str, host: str = "",
-                           version: str = "", tools: dict[str, Any] | None = None) -> None:
+                           version: str = "", tools: dict[str, object] | None = None) -> None:
     """Add an HTTP callback worker to the persistent registry."""
     with watchdog.lock:
         data = _load_registry()
@@ -3877,84 +4175,86 @@ RESERVED_NAMES = {
 TRANSPORT_MODE = os.environ.get("TRANSPORT", "telegram")
 
 
-class MessageTransport:
-    """Interface for all outbound messaging from bridge to manager.
+@runtime_checkable
+class MessageTransport(Protocol):
+    """Protocol for all outbound messaging from bridge to manager.
 
     All methods are fully type-annotated so static checkers can verify
     that transports and callers agree on argument/return types.
+    Uses Protocol (not ABC) so test mocks satisfy structural subtyping.
     """
 
     @property
     def name(self) -> str:
         """Return the transport name identifier."""
-        raise NotImplementedError
+        ...
 
     def send_text(self, chat_id: ChatId, text: str,
-                  parse_mode: ParseMode | None = None,
+                  parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
-        raise NotImplementedError
+        ...
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a rich-formatted (markdown) text message."""
-        raise NotImplementedError
+        ...
 
     def send_photo(self, chat_id: ChatId, photo_path: str | Path,
                    caption: str | None = None) -> bool:
         """Send a photo to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_document(self, chat_id: ChatId, doc_path: str | Path,
                       caption: str | None = None) -> bool:
         """Send a document file to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_animation(self, chat_id: ChatId, animation_path: str | Path,
                        caption: str | None = None) -> bool:
         """Send an animation (GIF/MP4) to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_video(self, chat_id: ChatId, video_path: str | Path,
                    caption: str | None = None) -> bool:
         """Send a video to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_audio(self, chat_id: ChatId, audio_path: str | Path,
                    caption: str | None = None) -> bool:
         """Send an audio file to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_voice(self, chat_id: ChatId, voice_path: str | Path,
                    caption: str | None = None) -> bool:
         """Send a voice message to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         """Send a sticker to a Telegram chat."""
-        raise NotImplementedError
+        ...
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         """Send a chat action indicator (typing, uploading, etc.)."""
-        raise NotImplementedError
+        ...
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> None:
         """Set an emoji reaction on a message."""
-        raise NotImplementedError
+        ...
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId,
-                     text: str, parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+                     text: str, parse_mode: ParseMode = None) -> TelegramApiResponse:
         """Edit an existing message by its ID."""
-        raise NotImplementedError
+        ...
 
     def setup_commands(self, commands: list[dict[str, str]]) -> None:
         """Register bot command suggestions with Telegram."""
-        raise NotImplementedError
+        ...
 
     def download_file(self, file_id: str, session_name: str) -> str | None:
         """Download a file from Telegram by file ID."""
-        raise NotImplementedError
+        ...
 
 
 # ============================================================
@@ -3968,7 +4268,7 @@ class TelegramAPI:
         """Initialize Telegram Bot API client with the given token."""
         self.token: str = token
 
-    def api(self, method: str, data: dict[str, Any]) -> TelegramApiResponse:
+    def api(self, method: str, data: dict[str, object]) -> TelegramApiResponse:
         """Make a raw Telegram Bot API call and return the response."""
         if not self.token:
             return None
@@ -3979,12 +4279,12 @@ class TelegramAPI:
         )
         try:
             with _urlopen(req, timeout=TIMEOUT_HTTP_API) as r:
-                return json.loads(r.read())
+                return cast(dict[str, object], json.loads(r.read()))
         except urllib.error.HTTPError as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
             try:
                 raw = e.read()
-                body = json.loads(raw)
+                body = cast(dict[str, object], json.loads(raw))
                 return body  # Return error response so callers can inspect description
             except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, ValueError):
                 # Non-JSON error body (proxy, middlebox, empty) — return structured error
@@ -3993,43 +4293,43 @@ class TelegramAPI:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
             return None
 
-    def send_message(self, chat_id: ChatId, text: str, **kwargs: Any) -> TelegramApiResponse:
+    def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse:
         """Send a text message via the Telegram Bot API."""
-        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        payload: dict[str, object] = {"chat_id": chat_id, "text": text}
         payload.update(kwargs)
         return self.api("sendMessage", payload)
 
-    def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: Any) -> TelegramApiResponse:
+    def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: object) -> TelegramApiResponse:
         """Send a rich-formatted message via the Telegram Bot API."""
-        payload: dict[str, Any] = {
+        payload: dict[str, object] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
         payload.update(kwargs)
         return self.api("sendRichMessage", payload)
 
-    def send_photo(self, chat_id: ChatId, photo: str, **kwargs: Any) -> TelegramApiResponse:
+    def send_photo(self, chat_id: ChatId, photo: str, **kwargs: object) -> TelegramApiResponse:
         """Send a photo to a Telegram chat."""
-        payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
+        payload: dict[str, object] = {"chat_id": chat_id, "photo": photo}
         payload.update(kwargs)
         return self.api("sendPhoto", payload)
 
-    def send_document(self, chat_id: ChatId, document: str, **kwargs: Any) -> TelegramApiResponse:
+    def send_document(self, chat_id: ChatId, document: str, **kwargs: object) -> TelegramApiResponse:
         """Send a document file to a Telegram chat."""
-        payload: dict[str, Any] = {"chat_id": chat_id, "document": document}
+        payload: dict[str, object] = {"chat_id": chat_id, "document": document}
         payload.update(kwargs)
         return self.api("sendDocument", payload)
 
-    def send_animation(self, chat_id: ChatId, animation: str, **kwargs: Any) -> TelegramApiResponse:
+    def send_animation(self, chat_id: ChatId, animation: str, **kwargs: object) -> TelegramApiResponse:
         """Send an animation (GIF/MP4) to a Telegram chat."""
-        payload: dict[str, Any] = {"chat_id": chat_id, "animation": animation}
+        payload: dict[str, object] = {"chat_id": chat_id, "animation": animation}
         payload.update(kwargs)
         return self.api("sendAnimation", payload)
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> TelegramApiResponse:
         """Set an emoji reaction on a message."""
-        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
+        payload: dict[str, object] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
         return self.api("setMessageReaction", payload)
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> TelegramApiResponse:
@@ -4050,7 +4350,7 @@ class TelegramTransport(MessageTransport):
         return "telegram"
 
     def send_text(self, chat_id: ChatId, text: str,
-                  parse_mode: ParseMode | None = None,
+                  parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         payload = {"chat_id": chat_id, "text": text}
@@ -4064,7 +4364,7 @@ class TelegramTransport(MessageTransport):
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a rich-formatted (markdown) text message."""
-        payload: dict[str, Any] = {
+        payload: dict[str, object] = {
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
@@ -4175,7 +4475,7 @@ class TelegramTransport(MessageTransport):
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
             )
             with _urlopen(req, timeout=TIMEOUT_HTTP_UPLOAD) as r:
-                result = json.loads(r.read())
+                result = cast(dict[str, object], json.loads(r.read()))
                 if result.get("ok"):
                     _log(_LOG_INFO, "telegram", f"{api_method} sent: {fname}")
                     return True
@@ -4231,7 +4531,7 @@ class TelegramTransport(MessageTransport):
         telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": reaction})
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
-                     parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         """Edit an existing message by its ID."""
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
@@ -4253,7 +4553,7 @@ class TelegramTransport(MessageTransport):
                 headers={"Content-Type": "application/json"}
             )
             with _urlopen(req, timeout=TIMEOUT_HTTP_DOWNLOAD) as r:
-                result = json.loads(r.read())
+                result = cast(dict[str, object], json.loads(r.read()))
                 if not result.get("ok"):
                     _log(_LOG_WARN, "bridge", f"getFile failed: {result}")
                     return None
@@ -4312,7 +4612,7 @@ class LocalTransport(MessageTransport):
         """Return the transport name identifier."""
         return "local"
 
-    def _log(self, method: str, chat_id: ChatId, **kwargs: Any) -> None:
+    def _log(self, method: str, chat_id: ChatId, **kwargs: object) -> None:
         """Log a transport method call with optional kwargs for debugging."""
         msg = f"{method} chat_id={chat_id}"
         for k, v in kwargs.items():
@@ -4324,7 +4624,7 @@ class LocalTransport(MessageTransport):
                 f.write(msg + "\n")
 
     def send_text(self, chat_id: ChatId, text: str,
-                  parse_mode: ParseMode | None = None,
+                  parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
@@ -4387,7 +4687,7 @@ class LocalTransport(MessageTransport):
         self._log("set_reaction", chat_id, message_id=message_id)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
-                     parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         """Edit an existing message by its ID."""
         self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
         return {"ok": True, "result": {"message_id": message_id}}
@@ -4412,7 +4712,7 @@ def _init_transport() -> MessageTransport:
 transport = _init_transport()
 
 
-def telegram_api(method: str, data: dict[str, Any]) -> TelegramApiResponse:
+def telegram_api(method: str, data: dict[str, object]) -> TelegramApiResponse:
     """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
     if TRANSPORT_MODE == "local":
         _log(_LOG_INFO, "local-transport", f"telegram_api {method} {str(data)[:100]}")
@@ -4423,7 +4723,7 @@ def telegram_api(method: str, data: dict[str, Any]) -> TelegramApiResponse:
 
 
 def send_telegram_message(chat_id: ChatId, text: str,
-                          parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+                          parse_mode: ParseMode = None) -> TelegramApiResponse:
     """Send a Telegram message, optionally with parse_mode (HTML or MarkdownV2)."""
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
@@ -4691,8 +4991,9 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
             stop_event.wait(0.5)
 
     # Clean up registry so start_pipe_reader can restart if needed
-    if name in processes.pipe_readers:
-        processes.pipe_readers.pop(name, None)
+    with processes.pipe_readers_lock:
+        if name in processes.pipe_readers:
+            processes.pipe_readers.pop(name, None)
     _log(_LOG_INFO, "pipe", f"Pipe reader stopped for worker '{name}'")
 
 
@@ -4707,14 +5008,15 @@ def _forward_pipe_message(name: str, message: str) -> None:
 
 def start_pipe_reader(name: str) -> None:
     """Start a background thread to read from the worker's input pipe."""
-    if name in processes.pipe_readers:
-        thread, _stop = processes.pipe_readers[name]
-        if thread.is_alive():
-            # Already running
-            return
-        # Thread crashed or exited — clean up stale entry and restart
-        _log(_LOG_WARN, "pipe", f"Pipe reader thread for '{name}' is dead, restarting")
-        processes.pipe_readers.pop(name, None)
+    with processes.pipe_readers_lock:
+        if name in processes.pipe_readers:
+            thread, _stop = processes.pipe_readers[name]
+            if thread.is_alive():
+                # Already running
+                return
+            # Thread crashed or exited — clean up stale entry and restart
+            _log(_LOG_WARN, "pipe", f"Pipe reader thread for '{name}' is dead, restarting")
+            processes.pipe_readers.pop(name, None)
 
     pipe_path = get_worker_pipe_path(name)
     if not pipe_path.exists():
@@ -4728,17 +5030,18 @@ def start_pipe_reader(name: str) -> None:
         daemon=True,
         name=f"pipe-reader-{name}"
     )
-    processes.pipe_readers[name] = (thread, stop_event)
+    with processes.pipe_readers_lock:
+        processes.pipe_readers[name] = (thread, stop_event)
     thread.start()
     _log(_LOG_INFO, "pipe", f"Started pipe reader thread for '{name}'")
 
 
 def stop_pipe_reader(name: str) -> None:
     """Stop the pipe reader thread for a worker."""
-    if name not in processes.pipe_readers:
-        return
-
-    thread, stop_event = processes.pipe_readers.pop(name)
+    with processes.pipe_readers_lock:
+        if name not in processes.pipe_readers:
+            return
+        thread, stop_event = processes.pipe_readers.pop(name)
     stop_event.set()
 
     # Write a dummy byte to unblock the reader if it's waiting
@@ -4758,7 +5061,7 @@ def stop_pipe_reader(name: str) -> None:
         _log(_LOG_WARN, "bridge", f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
 
-def get_workers(caller_from: str | None = None) -> list[dict[str, Any]]:
+def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     """Get all active workers with their communication details.
 
     If ``caller_from`` is set to a worker name, ``send_example`` for each peer
@@ -4805,7 +5108,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
         with _urlopen(req, timeout=timeout) as r:
-            result = json.loads(r.read())
+            result = cast(dict[str, object], json.loads(r.read()))
             text = result.get("text", "").strip()
             if text:
                 duration = result.get("audio_duration_s", "?")
@@ -4881,7 +5184,7 @@ TELEGRAM_PHOTO_MAX_SUM = 10000  # width + height must not exceed this
 TELEGRAM_PHOTO_MAX_DIM = 5000   # neither dimension may exceed this
 
 
-def _prepare_photo_for_telegram(photo_path: str) -> tuple[bytes, str]:
+def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     """Auto-resize a photo if it exceeds Telegram's sendPhoto limits.
 
     Telegram returns 400 Bad Request when width+height > 10000 or either
@@ -4923,7 +5226,7 @@ def _prepare_photo_for_telegram(photo_path: str) -> tuple[bytes, str]:
         return photo_path.read_bytes(), photo_path.name
 
 
-def validate_photo_path(photo_path: str) -> FileValidation:
+def validate_photo_path(photo_path: str | Path) -> FileValidation:
     """Validate a photo path. Returns FileValidation(ok, Path_or_error_str)."""
     photo_path = Path(photo_path)
 
@@ -4957,7 +5260,7 @@ def is_blocked_filename(filename: str) -> bool:
     return False
 
 
-def validate_document_path(doc_path: str) -> FileValidation:
+def validate_document_path(doc_path: str | Path) -> FileValidation:
     """Validate a document path. Returns FileValidation(ok, Path_or_error_str)."""
     doc_path = Path(doc_path)
 
@@ -5032,7 +5335,7 @@ def _collapse_excess_newlines(text: str) -> str:
     return "".join(output)
 
 
-def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str], FileValidation]) -> tuple[str, list[tuple[str, str]]]:
+def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str, str]]]:
     """Parse media tags, skipping escaped tags and code spans.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -5221,7 +5524,7 @@ def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
     return sanitizer.html()
 
 
-def _render_md_inline_plain(children: list[Any]) -> str:
+def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
     """Render inline markdown-it token children to plain text (for <pre> content)."""
     out: list[str] = []
     for tok in children:
@@ -5241,7 +5544,7 @@ def _render_md_inline_plain(children: list[Any]) -> str:
     return "".join(out)
 
 
-def _render_md_inline_html(children: list[Any], rejected_open_tags: list[str]) -> str:
+def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: list[str]) -> str:
     """Render inline markdown-it token children to Telegram HTML."""
     out: list[str] = []
     for tok in children:
@@ -5900,7 +6203,7 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
 
 
-def get_session_history(name: str, event: str | None = None) -> list[dict[str, Any]]:
+def get_session_history(name: str, event: str | None = None) -> list[dict[str, str]]:
     """Read the session audit log for a worker. Optional event filter."""
     f = get_session_dir(name) / "session_history.jsonl"
     if not f.exists():
@@ -5910,7 +6213,7 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, A
         if not line:
             continue
         try:
-            e = json.loads(line)
+            e = cast(dict[str, object], json.loads(line))
             if event and e.get("event") != event:
                 continue
             entries.append(e)
@@ -5951,7 +6254,7 @@ def _ensure_workspace_trusted(
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 if target.exists():
-                    data = json.loads(target.read_text())
+                    data = cast(dict[str, object], json.loads(target.read_text()))
                 else:
                     data = {}
                 projects = data.setdefault("projects", {})
@@ -6198,10 +6501,11 @@ def clear_claude_session_id(name: str) -> None:
 
 
 
-def get_any_session_id(name: str) -> str | None:
+def get_any_session_id(name: str) -> tuple[str, str]:
     """Get any *_session_id value for a worker (backend-agnostic).
 
     Returns (session_id, source) tuple where source is the prefix (e.g. 'claude', 'codex').
+    Returns ('', '') when no session ID is found.
     """
     session_dir = get_session_dir(name)
     if not session_dir.exists():
@@ -6862,7 +7166,7 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
         return None
 
 
-def _get_top_mem_procs(host: str | None = None) -> list[dict[str, Any]]:
+def _get_top_mem_procs(host: str | None = None) -> list[dict[str, str | float]]:
     """Get top 5 memory-consuming processes on a host."""
     try:
         r = _remote_run(
@@ -6949,7 +7253,7 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
             host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode == 0 and r.stdout.strip():
             import json as _json
-            data = _json.loads(r.stdout)
+            data = cast(dict[str, object], _json.loads(r.stdout))
             stats = data.get("sysstat", {}).get("hosts", [{}])[0].get("statistics", [])
             if len(stats) >= 2:
                 disks = stats[-1].get("disk", [])
@@ -7078,7 +7382,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                     _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
 
-def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[str, Any]]:
+def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[str, int | float | str]]:
     """Get processes using >CPU_HOG_THRESHOLD_PCT CPU on a host. Returns [{pid, cpu, etime_min, cmd}]."""
     try:
         if is_mac:
@@ -7265,7 +7569,7 @@ def _probe_tailscale() -> None:
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode == 0:
             import json as _json
-            data = _json.loads(r.stdout)
+            data = cast(dict[str, object], _json.loads(r.stdout))
             is_up = data.get("BackendState") == "Running"
         else:
             is_up = False
@@ -7532,7 +7836,7 @@ def _watchdog_collect_worker_pids(
     """
     claude_pids: dict[str, str] = {}
     tmux_present: dict[str, bool] = {}
-    backend_info: dict[str, Any] = {}
+    backend_info: dict[str, Backend] = {}
 
     for name, session in registered.items():
         backend_name = get_worker_backend(name, session)
@@ -7615,7 +7919,8 @@ def _watchdog_evaluate_workers(
 
         adapter_alive = False
         if not is_interactive:
-            entry = processes.adapter_pids.get(name)
+            with processes.adapter_pids_lock:
+                entry = processes.adapter_pids.get(name)
             if entry:
                 proc, _stderr = entry
                 adapter_alive = proc.poll() is None
@@ -7709,7 +8014,7 @@ def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -
 def _watchdog_refine_state(
     name: str, tmux_name: str,
     worker_state: str, reason: str,
-    state_args: dict[str, Any],
+    state_args: dict[str, bool | str | int | float | None],
     is_interactive: bool, pending: bool, pending_age: float,
     host: str | None, now: float
 ) -> tuple[str, str]:
@@ -7889,8 +8194,8 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
 
 def _format_watchdog_status(name: str,
-                            pending_lookup: dict[str, Any] | None = None,
-                            state_snapshot: dict[str, Any] | None = None) -> str:
+                            pending_lookup: Callable[[str], bool] | None = None,
+                            state_snapshot: dict[str, tuple[str, str, float]] | None = None) -> str:
     """Format a human-readable watchdog status line for one worker."""
     if pending_lookup is None:
         pending_lookup = is_pending
@@ -7979,10 +8284,10 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
 
 
 def format_team_lines(
-    registered: dict[str, Any],
+    registered: dict[str, TmuxSessionDict],
     active: str | None,
-    pending_lookup: dict[str, bool] | None = None,
-    worker_live: dict[str, Any] | None = None
+    pending_lookup: Callable[[str], bool] | None = None,
+    worker_live: dict[str, TmuxSessionDict] | None = None
 ) -> list[str]:
     """Format /team response lines with attention, activity, and context."""
     if pending_lookup is None:
@@ -8555,7 +8860,7 @@ def format_progress_lines(
     needs_attention: str | None = None,
     activity: str | None = None,
     context_pct: str | None = None,
-    question_details: dict[str, Any] | None = None
+    question_details: QuestionDetails | None = None
 ) -> list[str]:
     """Format /progress response lines (manager-friendly)."""
     status = []
@@ -8597,7 +8902,7 @@ def format_progress_lines(
     return status
 
 
-def get_worker_backend(name: str, session: dict[str, Any] | None = None) -> str:
+def get_worker_backend(name: str, session: RegistryWorkerDict | None = None) -> str:
     """Get backend for a worker.
 
     Priority: backend file (canonical) > session dict (cache) > default.
@@ -8890,7 +9195,7 @@ class WorkerManager:
 
         return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
 
-    def get_workers(self, caller_from: str | None = None) -> list[dict[str, Any]]:
+    def get_workers(self, caller_from: str | None = None) -> list[WorkerEndpointInfo]:
         """Get all active workers with their communication details.
 
         If ``caller_from`` is the name of a registered worker, each ``send_example``
@@ -9650,7 +9955,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host, timeout=TIMEOUT_TMUX_CHECK)
 
 
-def get_docker_run_cmd(name: str, resume_id: str = "") -> list[str]:
+def get_docker_run_cmd(name: str, resume_id: str = "") -> str:
     """Build docker run command for sandbox mode.
 
     Default: mounts ~ to /workspace (rw)
@@ -9757,7 +10062,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     return None
 
 
-def _localize_media(name: str, media_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
     """For teleported workers, fetch remote files to local temp paths.
 
     Always fetches from remote for teleported workers, even if a local file
@@ -10034,7 +10339,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
             capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0:
-            data = json.loads(r.stdout)
+            data = cast(dict[str, object], json.loads(r.stdout))
             url = data.get("url", "")
             if url and "localhost" in url:
                 host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
@@ -10045,26 +10350,26 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     return None
 
 
-def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> bool:
-    """Create a new worker instance."""
+def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> tuple[bool, str | None]:
+    """Create a new worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
     return worker_manager.hire(name, backend, chat_id=chat_id)
 
 
-def kill_session(name: str) -> bool:
-    """Kill a worker instance."""
+def kill_session(name: str) -> tuple[bool, str | None]:
+    """Kill a worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
     return worker_manager.end(name)
 
 
-def restart_claude(name: str, mode: str = "relaunch") -> bool:
-    """Restart claude in an existing tmux session."""
+def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
+    """Restart claude in an existing tmux session. Returns (success, error_message)."""
     _sync_worker_manager()
     return worker_manager.restart(name, mode=mode)
 
 
-def switch_session(name: str) -> bool:
-    """Switch active session."""
+def switch_session(name: str) -> tuple[bool, str | None]:
+    """Switch active session. Returns (success, error_message)."""
     registered = get_registered_sessions()
     if name not in registered:
         return False, f"Worker '{name}' not found"
@@ -10089,24 +10394,24 @@ def send_typing_loop(chat_id: int | str, session_name: str) -> None:
         _clock.sleep(DELAY_CLAUDE_LOAD)
 
 
-def get_all_chat_ids() -> list[int]:
+def get_all_chat_ids() -> list[ChatId]:
     """Get all unique chat_ids from session files."""
-    chat_ids = set()
+    chat_ids: set[ChatId] = set()
     if SESSIONS_DIR.exists():
         for session_dir in SESSIONS_DIR.iterdir():
             if session_dir.is_dir():
                 chat_id_file = session_dir / "chat_id"
                 if chat_id_file.exists():
                     try:
-                        chat_id = chat_id_file.read_text().strip()
-                        if chat_id:
-                            chat_ids.add(chat_id)
+                        raw = chat_id_file.read_text().strip()
+                        if raw:
+                            chat_ids.add(int(raw))
                     except (OSError, ValueError) as exc:
                         _log(_LOG_DEBUG, "parse:get_all_chat_ids", f"{type(exc).__name__}: {exc}")
     # Also include current admin if known
     if admin_chat_id:
-        chat_ids.add(str(admin_chat_id))
-    return chat_ids
+        chat_ids.add(admin_chat_id)
+    return list(chat_ids)
 
 
 def send_shutdown_message() -> None:
@@ -10126,13 +10431,19 @@ def send_shutdown_message() -> None:
 # NON-CORE: CommandRouter
 # ============================================================
 
+class _LegacyTransportProto(Protocol):
+    """Protocol for legacy TelegramAPI-style test doubles (FakeTelegram etc.)."""
+
+    def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse: ...
+
+
 class _LegacyTransportAdapter(MessageTransport):
     """Wraps legacy TelegramAPI-style objects (with send_message/set_reaction)
     for backward compat with tests that pass FakeTelegram to CommandRouter."""
 
-    def __init__(self, legacy: Any) -> None:
+    def __init__(self, legacy: _LegacyTransportProto) -> None:
         """Initialize with TelegramAPI or duck-typed test double (must have send_message)."""
-        self._legacy: Any = legacy  # Any: accepts FakeTelegram test doubles without Protocol
+        self._legacy: _LegacyTransportProto = legacy
 
     @property
     def name(self) -> str:
@@ -10140,7 +10451,7 @@ class _LegacyTransportAdapter(MessageTransport):
         return "legacy-adapter"
 
     def send_text(self, chat_id: ChatId, text: str,
-                  parse_mode: ParseMode | None = None,
+                  parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
         """Send a plain text message."""
         result = self._legacy.send_message(chat_id, text)
@@ -10191,7 +10502,7 @@ class _LegacyTransportAdapter(MessageTransport):
             self._legacy.set_reaction(chat_id, message_id, reaction)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
-                     parse_mode: ParseMode | None = None) -> TelegramApiResponse:
+                     parse_mode: ParseMode = None) -> TelegramApiResponse:
         """Edit an existing message by its ID."""
         return {"ok": True, "result": {"message_id": message_id}}
 
@@ -11198,8 +11509,8 @@ class CommandRouter:
             r = _remote_run(["cat", ".claude/.credentials.json"],
                              host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode == 0 and r.stdout.strip():
-                remote_data = json.loads(r.stdout)
-                local_data = json.loads(open(local_creds).read())
+                remote_data = cast(dict[str, object], json.loads(r.stdout))
+                local_data = cast(dict[str, object], json.loads(open(local_creds).read()))
                 remote_oauth = remote_data.get("claudeAiOauth", {})
                 local_oauth = local_data.get("claudeAiOauth", {})
                 remote_refresh = remote_oauth.get("refreshToken", "")
@@ -11991,7 +12302,7 @@ class CommandRouter:
         parts = arg.strip().split()
         sub = parts[0].lower()
 
-        subcommands: dict[str, Callable[..., bool]] = {
+        subcommands: dict[str, Callable[[], bool]] = {
             "list": lambda: self._cmd_relay_list(chat_id),
             "add": lambda: self._cmd_relay_add(parts, chat_id),
             "remove": lambda: self._cmd_relay_remove(parts, chat_id),
@@ -12153,7 +12464,7 @@ class CommandRouter:
 
     # ── Media Routing ──────────────────────────────────────────────────
 
-    def _extract_reply_media(self, reply_to: dict[str, Any], target_worker: str) -> str | None:
+    def _extract_reply_media(self, reply_to: TelegramMessageDict, target_worker: str) -> str | None:
         """Download media from a reply-to message. Returns media text or None."""
         # Check for media types in priority order
         animation = reply_to.get("animation")
@@ -12205,7 +12516,7 @@ class CommandRouter:
 
         return f"Manager forwarded {media_label}: {local_path}"
 
-    def _worker_from_reply(self, msg: dict[str, Any]) -> str | None:
+    def _worker_from_reply(self, msg: TelegramMessageDict) -> str | None:
         """Extract worker name from a reply-to message's text prefix (e.g. 'bob:\\n...')."""
         reply_to = msg.get("reply_to_message") if msg else None
         if not reply_to:
@@ -12312,7 +12623,7 @@ class CommandRouter:
 
         self._route_media_message(full_text, caption, chat_id, msg_id, msg=first_msg)
 
-    def _resolve_media_target(self, caption: str, msg: dict[str, Any]) -> tuple[str | None, str | None]:
+    def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> tuple[str | None, str | None]:
         """Determine which worker's inbox to download media into.
 
         Uses same priority as _route_media_message: @mentions > reply-to > active.
@@ -12327,7 +12638,7 @@ class CommandRouter:
             return reply_worker
         return state["active"]
 
-    def _route_media_message(self, media_text: str, caption: str, chat_id: int | str, msg_id: int, msg: dict[str, Any]=None) -> None:
+    def _route_media_message(self, media_text: str, caption: str, chat_id: int | str, msg_id: int, msg: TelegramMessageDict | None=None) -> None:
         """Route a media message, honoring @mentions in caption or reply-to context."""
         if caption:
             unknown_mentions = self.unknown_at_mentions(caption)
@@ -12368,7 +12679,7 @@ class CommandRouter:
 
     def _handle_mention_routing(self, targets: list[str], message: str,
                                 text: str, chat_id: int, msg_id: int,
-                                reply_to: dict[str, Any] | None,
+                                reply_to: TelegramMessageDict | None,
                                 reply_context: str,
                                 reply_context_ts: int | None) -> None:
         """Route a message with @mentions to the targeted workers."""
@@ -12481,7 +12792,7 @@ class CommandRouter:
                 parts.append(f"@{name}.")
         return f"⚠️ Unknown: {' '.join(parts)}"
 
-    def _route_mention(self, name: str, message: str, chat_id: int | str, msg_id: int) -> dict[str, Any] | None:
+    def _route_mention(self, name: str, message: str, chat_id: int | str, msg_id: int) -> MentionRouteResult | None:
         """Route a @mention to either a worker or a guest inbox. Workers win name collisions."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
@@ -12521,7 +12832,7 @@ class CommandRouter:
             return None, ""
         return name, message
 
-    def get_reply_context(self, reply_msg: dict[str, Any]) -> tuple[str, int | None]:
+    def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
         """Extract text and timestamp from a replied-to message."""
         if not reply_msg:
             return "", None
@@ -12611,7 +12922,7 @@ class CommandRouter:
 
         self.reply(chat_id, "\n".join(lines))
 
-    def handle_message(self, update: dict[str, Any]) -> None:
+    def handle_message(self, update: TelegramUpdate) -> None:
         """Route an incoming Telegram update to the appropriate handler."""
         global admin_chat_id
         _log(_LOG_INFO, "handle_message", f"ENTER update_id={update.get('update_id')}")
@@ -12652,7 +12963,7 @@ class CommandRouter:
             return True
         return chat_id == admin_chat_id
 
-    def _buffer_media_group(self, media_group_id: str, msg: dict[str, Any], text: str) -> None:
+    def _buffer_media_group(self, media_group_id: str, msg: TelegramMessageDict, text: str) -> None:
         """Buffer a media group item and schedule flush when group is complete."""
         with media_groups.lock:
             if media_group_id not in media_groups.buffer:
@@ -12934,7 +13245,7 @@ class CommandRouter:
                     url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
                 with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                    _json.loads(resp.read())
+                    cast(dict[str, object], _json.loads(resp.read()))
                 enabled.append(n)
                 session_names.append(session_name)
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -12954,7 +13265,7 @@ class CommandRouter:
                 data=payload, method="POST",
                 headers={"Content-Type": "application/json"})
             with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                _json.loads(resp.read())
+                cast(dict[str, object], _json.loads(resp.read()))
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
@@ -12979,7 +13290,8 @@ class CommandRouter:
         base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
         # Team chat viewer
         if name in ("team", "--team"):
-            REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
+            with _token_maps_lock:
+                REWIND_TOKENS[token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
             url = f"{base_url}/team-chat?token={token}"
             try:
                 html_content = _render_team_chat_html(
@@ -12996,7 +13308,8 @@ class CommandRouter:
                 _log(_LOG_WARN, "bridge", f"Team chat snapshot deploy failed: {e}")
             self.reply(chat_id, f"\U0001f4ac Team chat\n{url}")
             return True
-        REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + REWIND_TIMEOUT}
+        with _token_maps_lock:
+            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + REWIND_TIMEOUT}
         url = f"{base_url}/transcript/{name}?token={token}"
         try:
             # Pass live_base_url so pagination/search links point to the bridge
@@ -13059,7 +13372,8 @@ class CommandRouter:
         else:
             import secrets
             token = secrets.token_urlsafe(32)
-            PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _clock.time() + 300}
+            with _token_maps_lock:
+                PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _clock.time() + 300}
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
             url = f"{base_url}/pr-review/{pr_num}?token={token}"
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
@@ -13428,7 +13742,7 @@ command_router = CommandRouter(transport, worker_manager)
 # ============================================================
 
 # Background transcript sync tracking: {key: {status, progress, error, path, started}}
-_TRANSCRIPT_SYNC: dict[str, Any] = {}
+_TRANSCRIPT_SYNC: dict[str, TranscriptSyncState] = {}
 _TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
 
 # Path to indexer scripts (tools/ subdirectory)
@@ -13494,30 +13808,40 @@ def _render_csv_to_html(csv_text: str) -> str:
     return f'<div class="file-body file-body-csv"><table><thead>{header}</thead><tbody>{body}</tbody></table></div>'
 
 
-def _run_team_chat_query(query_type: str, **kwargs: Any) -> dict[str, Any] | None:
+def _run_team_chat_query(query_type: str, *,
+                         page: int | None = None,
+                         per_page: int | None = None,
+                         search: str | None = None,
+                         msg_id: int | None = None) -> dict[str, object] | None:
     """Run chat_indexer.py via subprocess. Returns parsed JSON dict or None on failure."""
     cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
            "--jsonl", TEAM_CHAT_JSONL,
            "--db", TEAM_CHAT_DB,
            "--query", query_type]
-    if kwargs.get("page") is not None:
-        cmd.extend(["--page", str(kwargs["page"])])
-    if kwargs.get("per_page") is not None:
-        cmd.extend(["--per-page", str(kwargs["per_page"])])
-    if kwargs.get("search"):
-        cmd.extend(["--search", kwargs["search"]])
-    if kwargs.get("msg_id") is not None:
-        cmd.extend(["--msg-id", str(kwargs["msg_id"])])
+    if page is not None:
+        cmd.extend(["--page", str(page)])
+    if per_page is not None:
+        cmd.extend(["--per-page", str(per_page)])
+    if search:
+        cmd.extend(["--search", search])
+    if msg_id is not None:
+        cmd.extend(["--msg-id", str(msg_id)])
     try:
         r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout)
+            return cast(dict[str, object], json.loads(r.stdout))
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "bridge", f"Team chat query error: {e}")
     return None
 
 
-def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | None=None, **kwargs: Any) -> dict[str, Any] | None:
+def _run_transcript_query(jsonl_path: str, sid: str, query: str,
+                          host: str | None = None, *,
+                          page: int | None = None,
+                          per_page: int | None = None,
+                          search: str | None = None,
+                          filter_mode: str | None = None,
+                          sort: str | None = None) -> dict[str, object] | None:
     """Run transcript_indexer.py locally or via SSH. Returns parsed JSON dict or None on failure."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = TRANSCRIPT_INDEX_SCRIPT
@@ -13528,16 +13852,16 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | Non
             script_path = f"{remote_home}/claudecode-telegram/tools/transcript_indexer.py"
     cmd = ["python3", script_path, "--jsonl", str(jsonl_path),
            "--db", db_path, "--query", query]
-    if kwargs.get("page") is not None:
-        cmd.extend(["--page", str(kwargs["page"])])
-    if kwargs.get("per_page") is not None:
-        cmd.extend(["--per-page", str(kwargs["per_page"])])
-    if kwargs.get("search"):
-        cmd.extend(["--search", kwargs["search"]])
-    if kwargs.get("filter_mode"):
-        cmd.extend(["--filter", kwargs["filter_mode"]])
-    if kwargs.get("sort") and kwargs["sort"] != "relevance":
-        cmd.extend(["--sort", kwargs["sort"]])
+    if page is not None:
+        cmd.extend(["--page", str(page)])
+    if per_page is not None:
+        cmd.extend(["--per-page", str(per_page)])
+    if search:
+        cmd.extend(["--search", search])
+    if filter_mode:
+        cmd.extend(["--filter", filter_mode])
+    if sort and sort != "relevance":
+        cmd.extend(["--sort", sort])
     try:
         if host:
             # For remote workers, use the script on the remote host
@@ -13545,7 +13869,7 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str, host: str | Non
         else:
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout)
+            return cast(dict[str, object], json.loads(r.stdout))
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
     return None
@@ -13665,7 +13989,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     return None, sid, cwd
 
 
-def _parse_transcript_entries(transcript_path: str) -> list[dict[str, Any]]:
+def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
     """Parse JSONL transcript into a list of visible entries (skip noise)."""
     entries = []
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
@@ -13674,7 +13998,7 @@ def _parse_transcript_entries(transcript_path: str) -> list[dict[str, Any]]:
             if not line:
                 continue
             try:
-                entry = json.loads(line)
+                entry = cast(dict[str, object], json.loads(line))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             etype = entry.get("type", "")
@@ -13778,7 +14102,7 @@ _TRANSCRIPT_TOOL_SVGS: dict[str, str] = {
 _TRANSCRIPT_DEFAULT_TOOL_SVG = '<svg class="t-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M5.433 2.304A4.49 4.49 0 003.5 6c0 1.598.832 3.002 2.09 3.802.518.328.929.923.902 1.64v.008l-.164 3.337a.75.75 0 11-1.498-.073l.163-3.34c.007-.14-.1-.313-.357-.476A5.994 5.994 0 012 6c0-2.033 1.01-3.83 2.555-4.916A1.89 1.89 0 015.433 2.304zM10.567 2.304A4.49 4.49 0 0112.5 6c0 1.598-.832 3.002-2.09 3.802-.518.328-.929.923-.902 1.64v.008l.164 3.337a.75.75 0 101.498-.073l-.163-3.34c-.007-.14.1-.313.357-.476A5.994 5.994 0 0114 6c0-2.033-1.01-3.83-2.555-4.916a1.89 1.89 0 00-.878 1.22z"/></svg>'
 
 
-def _transcript_entry_to_html(entry: dict[str, Any], esc: Callable[[str], str], tool_results: dict[str, Any] | None = None) -> str:
+def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None) -> str:
     """Convert a single transcript entry to HTML block(s).
 
     Matches ampcode.com visual style: tool results merged into tool_use blocks,
@@ -13954,7 +14278,7 @@ def _format_model_name(model_name: str) -> str:
     return s
 
 
-def _transcript_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
     """Extract metadata stats from transcript entries."""
     n_user = sum(1 for e in entries if e.get("type") == "user"
                  and e.get("message", {}).get("role") == "user"
@@ -14249,7 +14573,7 @@ def _team_chat_html_head(title: str) -> str:
     )
 
 
-def _team_chat_html_messages(messages: list[dict[str, Any]], msg_by_id: dict[str, Any], reply_cache: dict[str, Any],
+def _team_chat_html_messages(messages: list[TeamChatMessageDict], msg_by_id: dict[object, TeamChatMessageDict], reply_cache: dict[object, dict[str, object]],
                              search_query: str, per_page: int, token: str,
                              url_prefix: str, qs_base: str,
                              esc: "Callable[[str], str]") -> str:
@@ -14762,7 +15086,7 @@ a:hover{{text-decoration:underline}}
 '''
 
 
-def _transcript_html_nav(name: str, stats: dict[str, Any],
+def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
                          prompts_filter_url: str,
                          esc: Callable[[str], str]) -> str:
     """Return the header bar with worker name and session metadata."""
@@ -14779,8 +15103,8 @@ def _transcript_html_nav(name: str, stats: dict[str, Any],
 '''
 
 
-def _transcript_html_entries(page_entries: list[dict[str, Any]],
-                             tool_results: dict[str, dict[str, Any]],
+def _transcript_html_entries(page_entries: list[TranscriptEntry],
+                             tool_results: dict[str, ToolResultDict],
                              search_val: str,
                              filter_banner: str, search_result: str,
                              nav_html: str, live_base_url: str,
@@ -14801,7 +15125,7 @@ def _transcript_html_entries(page_entries: list[dict[str, Any]],
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
     # Build context URL for search mode (click message → jump to full transcript)
-    def _ctx_url(entry: dict[str, Any]) -> str:
+    def _ctx_url(entry: TranscriptEntry) -> str:
         """Build a context URL for search results — links to full transcript."""
         if not search_query:
             return ""
@@ -14878,7 +15202,7 @@ def _transcript_html_entries(page_entries: list[dict[str, Any]],
 '''
 
 
-def _transcript_html_footer(sid: str, stats: dict[str, Any],
+def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
                               file_size_str: str, total: int,
                               page: int, total_pages: int,
                               esc: Callable[[str], str]) -> str:
@@ -15139,7 +15463,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         page_entries = []
         for e in query_result.get("entries", []):
             try:
-                entry = json.loads(e["raw_json"])
+                entry = cast(dict[str, object], json.loads(e["raw_json"]))
                 entry["_idx"] = e.get("idx", -1)
                 page_entries.append(entry)
             except (json.JSONDecodeError, KeyError):
@@ -15290,39 +15614,39 @@ class EndpointRouter:
 
     def __init__(self) -> None:
         """Initialize per-method route tables."""
-        self._post_exact: dict[str, Callable[..., None]] = {}
-        self._post_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
-        self._get_exact: dict[str, Callable[..., None]] = {}
-        self._get_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
-        self._delete_exact: dict[str, Callable[..., None]] = {}
-        self._delete_patterns: list[tuple[re.Pattern[str], Callable[..., None]]] = []
+        self._post_exact: dict[str, RouteHandler] = {}
+        self._post_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
+        self._get_exact: dict[str, RouteHandler] = {}
+        self._get_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
+        self._delete_exact: dict[str, RouteHandler] = {}
+        self._delete_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
 
-    def post(self, path: str, handler: Callable[..., None]) -> None:
+    def post(self, path: str, handler: RouteHandler) -> None:
         """Register a POST handler for an exact path."""
         self._post_exact[path] = handler
 
-    def post_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
+    def post_pattern(self, pattern: str, handler: RouteHandler) -> None:
         """Register a POST handler for a regex path pattern."""
         self._post_patterns.append((re.compile(pattern), handler))
 
-    def get(self, path: str, handler: Callable[..., None]) -> None:
+    def get(self, path: str, handler: RouteHandler) -> None:
         """Register a GET handler for an exact path."""
         self._get_exact[path] = handler
 
-    def get_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
+    def get_pattern(self, pattern: str, handler: RouteHandler) -> None:
         """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
-    def delete(self, path: str, handler: Callable[..., None]) -> None:
+    def delete(self, path: str, handler: RouteHandler) -> None:
         """Register a DELETE handler for an exact path."""
         self._delete_exact[path] = handler
 
-    def delete_pattern(self, pattern: str, handler: Callable[..., None]) -> None:
+    def delete_pattern(self, pattern: str, handler: RouteHandler) -> None:
         """Register a DELETE handler for a regex path pattern."""
         self._delete_patterns.append((re.compile(pattern), handler))
 
-    def _resolve(self, exact: dict[str, Callable[..., None]],
-                 patterns: list[tuple[re.Pattern[str], Callable[..., None]]],
+    def _resolve(self, exact: dict[str, RouteHandler],
+                 patterns: list[tuple[re.Pattern[str], RouteHandler]],
                  path: str) -> RouteResolution:
         """Resolve a path against exact then pattern tables."""
         handler = exact.get(path)
@@ -15448,7 +15772,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── Guest Endpoints ────────────────────────────────────────────
 
-    def _guest_auth(self, parsed: dict[str, Any] | None = None) -> GuestSessionDict | None:
+    def _guest_auth(self, parsed: ParseResult | None = None) -> GuestSessionDict | None:
         """Authenticate guest from token query param. Returns guest dict or None (sends 403)."""
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [""])[0]
@@ -15470,11 +15794,11 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_register(self, body: bytes = b"") -> None:
         """POST /guest — register as a temporary guest agent."""
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             data = {}
 
-        requested_name = data.get("name", "").strip().lower()
+        requested_name = _str_field(data, "name").strip().lower()
         team_workers = set(get_registered_sessions().keys())
 
         with guest_store.lock:
@@ -15567,12 +15891,12 @@ class Handler(BaseHTTPRequestHandler):
         if not guest:
             return
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
-        text = data.get("text", "").strip()
+        text = _str_field(data, "text").strip()
         if not text:
             self._send_json(400, {"ok": False, "error": "text required"})
             return
@@ -15682,14 +16006,14 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_reply(self, body: bytes = b"") -> None:
         """POST /guest/reply — worker sends reply to a guest's inbox."""
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
-        guest_name = data.get("guest", "").strip()
-        from_worker = data.get("from", "").strip()
-        text = data.get("text", "").strip()
+        guest_name = _str_field(data, "guest").strip()
+        from_worker = _str_field(data, "from").strip()
+        text = _str_field(data, "text").strip()
         if not guest_name or not text:
             self._send_json(400, {"ok": False, "error": "guest and text required"})
             return
@@ -15706,7 +16030,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_json(200, {"ok": True, "message_id": msg_id})
 
-    def handle_guest_inbox(self, parsed: dict[str, Any]) -> None:
+    def handle_guest_inbox(self, parsed: ParseResult) -> None:
         """GET /guest/inbox?token=xxx[&after=gm_xxx] — poll for messages."""
         guest = self._guest_auth(parsed)
         if not guest:
@@ -15721,7 +16045,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True, "name": guest_name, "messages": filtered,
         })
 
-    def handle_guest_status(self, parsed: dict[str, Any]) -> None:
+    def handle_guest_status(self, parsed: ParseResult) -> None:
         """GET /guest/status?token=xxx — check session validity."""
         guest = self._guest_auth(parsed)
         if not guest:
@@ -15756,7 +16080,7 @@ class Handler(BaseHTTPRequestHandler):
                 _guest_save()
         self._send_json(200, {"ok": True, "guests": guests_list})
 
-    def handle_guest_disconnect(self, parsed: dict[str, Any]) -> None:
+    def handle_guest_disconnect(self, parsed: ParseResult) -> None:
         """DELETE /guest?token=xxx — disconnect guest session."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [""])[0]
@@ -15787,7 +16111,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── Channel Endpoints ──────────────────────────────────────────
 
-    def _channel_auth_guest(self, parsed: dict[str, Any]) -> GuestSessionDict | None:
+    def _channel_auth_guest(self, parsed: ParseResult) -> GuestSessionDict | None:
         """Authenticate a guest from query token for channel access. Returns guest or sends error."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
@@ -15805,15 +16129,15 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_create(self, body: bytes = b"") -> None:
         """POST /channels — create a group channel."""
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
-        label = data.get("label", "").strip()
+        label = _str_field(data, "label").strip()
         members = data.get("members", [])
-        include_manager = data.get("include_manager", True)
-        ttl = min(data.get("ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
+        include_manager = _bool_field(data, "include_manager", True)
+        ttl = min(_int_field(data, "ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
 
         if not isinstance(members, list):
             self._send_json(400, {"ok": False, "error": "members must be a list"})
@@ -15873,7 +16197,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/members — add/remove members."""
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -15912,12 +16236,12 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/send — send message to channel (fan-out)."""
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
-        text = data.get("text", "").strip()
+        text = _str_field(data, "text").strip()
         if not text:
             self._send_json(400, {"ok": False, "error": "text required"})
             return
@@ -15926,7 +16250,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
-        from_member = data.get("from", "")
+        from_member = _str_field(data, "from")
 
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -15992,7 +16316,7 @@ class Handler(BaseHTTPRequestHandler):
             "seq": msg["seq"],
         })
 
-    def handle_channel_messages(self, channel_id: str, parsed: dict[str, Any]) -> None:
+    def handle_channel_messages(self, channel_id: str, parsed: ParseResult) -> None:
         """GET /channels/{id}/messages — poll channel messages. Guests must provide ?token=."""
         query_params = parse_qs(parsed.query)
         after = query_params.get("after", [None])[0]
@@ -16033,7 +16357,7 @@ class Handler(BaseHTTPRequestHandler):
             resp["truncated"] = True
         self._send_json(200, resp)
 
-    def handle_channels_list(self, parsed: dict[str, Any]=None) -> None:
+    def handle_channels_list(self, parsed: ParseResult | None = None) -> None:
         """GET /channels — list active channels. With ?token=, filter to guest's channels."""
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [None])[0]
@@ -16102,7 +16426,7 @@ class Handler(BaseHTTPRequestHandler):
         params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
         return params.get("token", "")
 
-    def handle_relay_get(self, channel_id: str, action: str | None, parsed: dict[str, Any]) -> None:
+    def handle_relay_get(self, channel_id: str, action: str | None, parsed: ParseResult) -> None:
         """Handle GET /v1/<channel_id>[/action]."""
         token = self._relay_get_token()
         if not token:
@@ -16154,12 +16478,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
 
-        text = data.get("text", "").strip()
+        text = _str_field(data, "text").strip()
         if not text:
             self._send_json(400, {"error": "missing text"})
             return
@@ -16192,12 +16516,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
 
-        text = data.get("text", "").strip()
+        text = _str_field(data, "text").strip()
         if not text:
             self._send_json(400, {"error": "missing text"})
             return
@@ -16216,19 +16540,19 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── PR Endpoints ──────────────────────────────────────────────
 
-    def handle_pr_file_content(self, parsed: dict[str, Any]) -> None:
+    def handle_pr_file_content(self, parsed: ParseResult) -> None:
         """Fetch file content from GitHub for diff context expansion."""
         import base64 as _b64
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
         now = _clock.time()
-        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
-            self.send_response(403)
-            self.end_headers()
-            return
-
-        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        with _token_maps_lock:
+            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
+                self.send_response(403)
+                self.end_headers()
+                return
+            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
 
         owner = params.get("owner", [None])[0]
         repo = params.get("repo", [None])[0]
@@ -16264,42 +16588,44 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
 
-    def handle_pr_keepalive(self, parsed: dict[str, Any]) -> None:
+    def handle_pr_keepalive(self, parsed: ParseResult) -> None:
         """Extend PR review token expiry on client activity."""
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
         now = _clock.time()
-        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
-            self.send_response(403)
-            self.end_headers()
-            return
-        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        with _token_maps_lock:
+            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
+                self.send_response(403)
+                self.end_headers()
+                return
+            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
         self.send_response(204)
         self.end_headers()
 
     def handle_pr_general_comment(self, body: bytes) -> None:
         """Post a general (non-inline) comment on a PR via GitHub API."""
         try:
-            data = json.loads(body)
+            data = cast(dict[str, object], json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b"Invalid JSON")
             return
 
-        token = data.get("token", "")
+        token = _str_field(data, "token")
         now = _clock.time()
-        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired")
-            return
-        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        with _token_maps_lock:
+            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Token expired")
+                return
+            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
 
-        owner = data.get("owner", "")
-        repo = data.get("repo", "")
-        pr_num = data.get("pr_num", 0)
-        comment_body = data.get("body", "").strip()
+        owner = _str_field(data, "owner")
+        repo = _str_field(data, "repo")
+        pr_num = _int_field(data, "pr_num")
+        comment_body = _str_field(data, "body").strip()
         if not all([owner, repo, pr_num, comment_body]):
             self.send_response(400)
             self.end_headers()
@@ -16352,26 +16678,27 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_merge(self, body: bytes) -> None:
         """Merge a PR via GitHub API."""
         try:
-            data = json.loads(body)
+            data = cast(dict[str, object], json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b"Invalid JSON")
             return
 
-        token = data.get("token", "")
+        token = _str_field(data, "token")
         now = _clock.time()
-        if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired")
-            return
-        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        with _token_maps_lock:
+            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Token expired")
+                return
+            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
 
-        owner = data.get("owner", "")
-        repo = data.get("repo", "")
-        pr_num = data.get("pr_num", 0)
-        merge_method = data.get("merge_method", "merge")
+        owner = _str_field(data, "owner")
+        repo = _str_field(data, "repo")
+        pr_num = _int_field(data, "pr_num")
+        merge_method = _str_field(data, "merge_method", "merge")
         if merge_method not in ("merge", "squash", "rebase"):
             merge_method = "merge"
 
@@ -16415,7 +16742,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"ok": true}')
 
-    def handle_pr_review_endpoint(self, parsed: dict[str, Any]) -> None:
+    def handle_pr_review_endpoint(self, parsed: ParseResult) -> None:
         """Serve generated PR review HTML.
 
         Requires a valid token (?token=...) generated by /pr command.
@@ -16426,19 +16753,20 @@ class Handler(BaseHTTPRequestHandler):
 
         # Cleanup expired tokens
         now = _clock.time()
-        expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
-        for k in expired:
-            del PR_REVIEW_TOKENS[k]
+        with _token_maps_lock:
+            expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
+            for k in expired:
+                del PR_REVIEW_TOKENS[k]
 
-        if not token or token not in PR_REVIEW_TOKENS:
-            self.send_response(403)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>")
-            return
+            if not token or token not in PR_REVIEW_TOKENS:
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>")
+                return
 
-        info = PR_REVIEW_TOKENS[token]
-        pr_num = info["pr_num"]
+            info = PR_REVIEW_TOKENS[token]
+            pr_num = info["pr_num"]
         html_path = f"/tmp/pr-review-{pr_num}.html"
 
         if not os.path.exists(html_path):
@@ -16454,35 +16782,35 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_comment(self, body: bytes) -> None:
         """Post an inline comment on a PR via GitHub API + notify Telegram."""
         try:
-            data = json.loads(body)
+            data = cast(dict[str, object], json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b"Invalid JSON")
             return
 
-        token = data.get("token", "")
+        token = _str_field(data, "token")
         now = _clock.time()
-        expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
-        for k in expired:
-            del PR_REVIEW_TOKENS[k]
-        if not token or token not in PR_REVIEW_TOKENS:
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired - reload the PR review page")
-            return
+        with _token_maps_lock:
+            expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
+            for k in expired:
+                del PR_REVIEW_TOKENS[k]
+            if not token or token not in PR_REVIEW_TOKENS:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Token expired - reload the PR review page")
+                return
+            # Extend token expiry on use
+            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
 
-        # Extend token expiry on use
-        PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
-
-        owner = data.get("owner", "")
-        repo = data.get("repo", "")
-        pr_num = data.get("pr_num", 0)
-        path = data.get("path", "")
-        line = data.get("line", 0)
-        side = data.get("side", "RIGHT")
-        comment_body = data.get("body", "").strip()
-        head_sha = data.get("head_sha", "")
+        owner = _str_field(data, "owner")
+        repo = _str_field(data, "repo")
+        pr_num = _int_field(data, "pr_num")
+        path = _str_field(data, "path")
+        line = _int_field(data, "line")
+        side = _str_field(data, "side", "RIGHT")
+        comment_body = _str_field(data, "body").strip()
+        head_sha = _str_field(data, "head_sha")
 
         if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
             self.send_response(400)
@@ -16544,7 +16872,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── Transcript Endpoints ─────────────────────────────────────
 
-    def handle_transcript_endpoint(self, parsed: dict[str, Any]) -> None:
+    def handle_transcript_endpoint(self, parsed: ParseResult) -> None:
         """Serve polished HTML transcript for a worker.
 
         Requires a valid rewind token (?token=...) generated by /rewind command.
@@ -16558,12 +16886,13 @@ class Handler(BaseHTTPRequestHandler):
             query_params = parse_qs(parsed.query)
             # Token auth — clean up expired tokens first
             now = _clock.time()
-            expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del REWIND_TOKENS[k]
             token = query_params.get("token", [None])[0]
-            if not token or token not in REWIND_TOKENS:
-                body = """<!DOCTYPE html><html><head><meta charset="utf-8">
+            with _token_maps_lock:
+                expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
+                for k in expired:
+                    del REWIND_TOKENS[k]
+                if not token or token not in REWIND_TOKENS:
+                    body = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Session Expired</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;
@@ -16578,15 +16907,14 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 <p>This link has expired or is invalid.</p>
 <p>Send <code>/rewind &lt;name&gt;</code> in Telegram to get a fresh 5-minute link.</p>
 </div></body></html>""".encode("utf-8")
-                self.send_response(403)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            # Refresh token expiry on each valid interaction (sliding window)
-            REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                # Refresh token expiry on each valid interaction (sliding window)
+                REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
 
             parts = parsed.path.rstrip("/").split("/")
             # /transcript/<name>
@@ -16675,7 +17003,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.end_headers()
             self.wfile.write(str(e).encode())
 
-    def handle_team_chat_endpoint(self, parsed: dict[str, Any]) -> None:
+    def handle_team_chat_endpoint(self, parsed: ParseResult) -> None:
         """Serve team Telegram chat viewer.
 
         GET /team-chat?token=...
@@ -16686,12 +17014,13 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             query_params = parse_qs(parsed.query)
             # Token auth — same as transcript endpoint
             now = _clock.time()
-            expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del REWIND_TOKENS[k]
             token = query_params.get("token", [None])[0]
-            if not token or token not in REWIND_TOKENS:
-                body = """<!DOCTYPE html><html><head><meta charset="utf-8">
+            with _token_maps_lock:
+                expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
+                for k in expired:
+                    del REWIND_TOKENS[k]
+                if not token or token not in REWIND_TOKENS:
+                    body = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Session Expired</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;
@@ -16706,14 +17035,13 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 <p>This link has expired or is invalid.</p>
 <p>Send <code>/rewind team</code> in Telegram to get a fresh 5-minute link.</p>
 </div></body></html>""".encode("utf-8")
-                self.send_response(403)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+                    self.send_response(403)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
 
             page_raw = query_params.get("page", [None])[0]
             try:
@@ -16736,7 +17064,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.end_headers()
             self.wfile.write(str(e).encode())
 
-    def handle_team_chat_media(self, parsed: dict[str, Any]) -> None:
+    def handle_team_chat_media(self, parsed: ParseResult) -> None:
         """Serve media files (photos/files) from team chat export.
 
         GET /team-chat-media/photos/photo_1@28-01-2026_18-09-13.jpg?token=...
@@ -16750,13 +17078,13 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         # Token auth
         now = _clock.time()
         token = query_params.get("token", [None])[0]
-        if not token or token not in REWIND_TOKENS or REWIND_TOKENS[token]["expires_at"] <= now:
-            self.send_response(403)
-            self.end_headers()
-            return
-
-        # Refresh token expiry on access
-        REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+        with _token_maps_lock:
+            if not token or token not in REWIND_TOKENS or REWIND_TOKENS[token]["expires_at"] <= now:
+                self.send_response(403)
+                self.end_headers()
+                return
+            # Refresh token expiry on access
+            REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
 
         # Extract relative path (after /team-chat-media/)
         from urllib.parse import unquote
@@ -16810,7 +17138,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     # ── Core HTTP Handler ─────────────────────────────────────────
 
-    def _send_json(self, status_code: int, data: dict[str, Any]) -> None:
+    def _send_json(self, status_code: int, data: dict[str, object]) -> None:
         """Send a JSON response with proper Content-Type."""
         body = json.dumps(data).encode()
         self.send_response(status_code)
@@ -16895,13 +17223,13 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.end_headers()
         self.wfile.write(b"OK")
         try:
-            update = json.loads(body)
+            update = cast(dict[str, object], json.loads(body))
             update_types = [k for k in update.keys() if k != "update_id"]
             msg = update.get("message", {})
             text = msg.get("text", "") or msg.get("caption", "")
             _log(_LOG_INFO, "webhook", f"update_id={update.get('update_id')}, types={update_types}, text={repr(text[:50]) if text else '(none)'}")
             if "message" in update:
-                def _safe_handle(upd: dict[str, Any]) -> None:
+                def _safe_handle(upd: TelegramUpdate) -> None:
                     """Handle a Telegram update in a thread, logging errors instead of crashing."""
                     try:
                         command_router.handle_message(upd)
@@ -16927,9 +17255,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         teleported workers.
         """
         try:
-            data = json.loads(body)
-            text = data.get("text", "")
-            name = data.get("name", "")
+            data = cast(dict[str, object], json.loads(body))
+            text = _str_field(data, "text")
+            name = _str_field(data, "name")
 
             if not text:
                 self.send_response(400)
@@ -17005,10 +17333,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Sends a one-time Telegram alert to admin so they can restart the worker.
         """
         try:
-            data = json.loads(body) if body else {}
-            worker = data.get("worker", "unknown")
-            issue = data.get("issue", "unknown")
-            age = data.get("transcript_age", 0)
+            data = cast(dict[str, object], json.loads(body)) if body else {}
+            worker = _str_field(data, "worker", "unknown")
+            issue = _str_field(data, "issue", "unknown")
+            age = _int_field(data, "transcript_age")
 
             age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
             alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
@@ -17032,7 +17360,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Response: {"ok": true}
         """
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
             name = data.get("Name", data.get("name", ""))
             host = data.get("Host", data.get("host", ""))
             version = data.get("Version", data.get("version", ""))
@@ -17094,7 +17422,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Body: {"name": "gmail"} or {"name": "github"}
         """
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -17113,7 +17441,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         The "from" field (default "system") is prefixed to the message.
         """
         try:
-            data = json.loads(body) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -17148,7 +17476,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         FILE SUPPORT: Parses [[image:/path|caption]] (photos, animations) and [[file:/path|caption]] (documents, video, audio, voice, stickers) tags.
         """
         try:
-            data = json.loads(body)
+            data = cast(dict[str, object], json.loads(body))
             session_name = data.get("session")
             text = data.get("text", "")
 
@@ -17275,7 +17603,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             return
         self._send_unknown_endpoint("DELETE", parsed.path)
 
-    def handle_workers_endpoint(self, parsed: dict[str, Any]=None) -> None:
+    def handle_workers_endpoint(self, parsed: ParseResult | None = None) -> None:
         """Return list of active workers with communication details.
 
         GET /workers                 — bridge-POV send_example (legacy)
@@ -17299,7 +17627,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.end_headers()
             self.wfile.write(str(e).encode())
 
-    def handle_machines_endpoint(self, parsed: dict[str, Any]=None) -> None:
+    def handle_machines_endpoint(self, parsed: ParseResult | None = None) -> None:
         """Return configured machines with derived workers, access, and health.
 
         GET /machines             — bridge-POV access hints
@@ -17317,7 +17645,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             _log(_LOG_ERROR, "bridge", f"Machines endpoint error: {e}")
             self._send_json(500, {"error": str(e)})
 
-    def handle_checkin_endpoint(self, parsed: dict[str, Any]) -> None:
+    def handle_checkin_endpoint(self, parsed: ParseResult) -> None:
         """Return worker instructions as plain text.
 
         GET /checkin                    — generic instructions (uses default backend)
@@ -17697,14 +18025,13 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
 
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
-_connector_message_log: dict[str, Any] = {}  # tag -> deque of {ts, html, plain, targets}
+_connector_message_log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
 
 
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     """Log a connector message for debugging (capped at 20 per tag)."""
-    from collections import deque
     if tag not in _connector_message_log:
-        _connector_message_log[tag] = deque(maxlen=20)
+        _connector_message_log[tag] = collections.deque(maxlen=20)
     _connector_message_log[tag].append({
         "ts": _clock.time(),
         "html": html_text,
@@ -17807,7 +18134,7 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 </html>'''
 
 
-def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: dict[str, Any] | None = None) -> str:
+def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None) -> str:
     """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
     import html as _html
     icon = "🔔" if tag == "github" else "📧"
@@ -17853,9 +18180,9 @@ def _connector_export_github(number: int, repo: str) -> str | None:
     return None
 
 
-def _connector_on_message(tag: str) -> Callable[..., None]:
+def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[str] | None, ConnectorMetadataDict | None], None]:
     """Create a message handler for a connector tag (Gmail/GitHub)."""
-    def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: dict[str, Any] | None = None) -> None:
+    def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
         """Route connector message to Telegram admin and/or target workers."""
         if plain_text is None:
             plain_text = html_text
@@ -17925,7 +18252,7 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
     return handler
 
 
-def _start_connectors() -> tuple[Any, Any]:
+def _start_connectors() -> tuple[object, object]:
     """Start Gmail and GitHub connectors if enabled, return (gmail, github) instances."""
     gmail_inst = None
     if GMAIL_ENABLED and GmailConnector is not None:
@@ -18014,9 +18341,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
         return False, f"Unknown connector: {name} (valid: gmail, github)"
 
 
-def _get_connectors_status() -> dict[str, Any]:
+def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     """Return status dict for all connectors."""
-    result: dict[str, Any] = {}
+    result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
         if gmail_connector_instance is not None:
             result["gmail"] = gmail_connector_instance.status()
