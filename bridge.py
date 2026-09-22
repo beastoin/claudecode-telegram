@@ -3692,7 +3692,6 @@ BOT_COMMANDS = [
     {"command": "relay", "description": "Open public channel: /relay <worker>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
-    {"command": "memory", "description": "Search team chat memory: /memory <query>"},
     # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
@@ -12593,183 +12592,6 @@ class CommandRouter:
         return f"Manager reply:\n{reply_text}"
 
 
-    # ── Memory Commands ─────────────────────────────────────────────
-
-    def cmd_memory(self, query: str, chat_id: ChatId) -> bool:
-        """Dispatch /memory subcommands. /memory <query|subcommand>"""
-        if not query:
-            self.reply(chat_id,
-                       "Usage: /memory <query>\n"
-                       "Examples:\n"
-                       "  /memory what did I tell kai about auth\n"
-                       "  /memory PR 6377 --agent taro\n"
-                       "  /memory OTP problem --days 30\n"
-                       "  /memory update  (re-index latest export)\n"
-                       "  /memory status  (stack health)\n"
-                       "  /memory wake-up [wing]  (L0+L1 context)\n"
-                       "  /memory recall --wing=X [--room=Y]",
-                       outcome="Needs decision")
-            return True
-
-        subcmd = query.strip().lower().split()[0]
-        dispatch: dict[str, Callable[[str, ChatId], bool]] = {
-            "update": lambda q, c: self._memory_update(c),
-            "status": lambda q, c: self._memory_status(c),
-            "wake-up": self._memory_wakeup,
-            "recall": self._memory_recall,
-        }
-        handler = dispatch.get(subcmd)
-        if handler:
-            return handler(query, chat_id)
-        return self._memory_search(query, chat_id)
-
-    def _memory_status(self, chat_id: ChatId) -> bool:
-        """Show memory stack health summary."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            info = stack.status()
-            wings = info.get("wing_distribution", {})
-            wing_str = ", ".join(f"{w}: {n}" for w, n in sorted(wings.items(), key=lambda x: -x[1]))
-            lines = [
-                "Memory Stack Status:",
-                f"  Chunks: {info.get('total_chunks', 0)} ({wing_str})",
-                f"  Messages: {info.get('total_messages', 0)}",
-                f"  Summaries: {info.get('total_summaries', 0)}",
-                f"  L0 identity: {info['L0_identity']['tokens']} tokens ({info['L0_identity']['agents']} agents, {info['L0_identity']['projects']} projects, {info['L0_identity']['wings']} wings)",
-                f"  L1 essential: last 7 days, top 15 items",
-            ]
-            self.reply(chat_id, "\n".join(lines))
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory status failed: {e}")
-        return True
-
-    def _memory_wakeup(self, query: str, chat_id: ChatId) -> bool:
-        """Generate L0+L1 wake-up context for a wing."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            parts = query.strip().split()
-            wing = parts[1] if len(parts) > 1 else None
-            text = stack.wake_up(wing=wing)
-            if len(text) > 4000:
-                text = text[:3997] + "..."
-            self.reply(chat_id, text)
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory wake-up failed: {e}")
-        return True
-
-    def _memory_recall(self, query: str, chat_id: ChatId) -> bool:
-        """On-demand L2 recall with optional --wing and --room filters."""
-        try:
-            from team_memory.memory_stack import MemoryStack
-            stack = MemoryStack()
-            wing = room = None
-            for part in query.split():
-                if part.startswith("--wing="):
-                    wing = part.split("=", 1)[1]
-                elif part.startswith("--room="):
-                    room = part.split("=", 1)[1]
-            text = stack.recall(wing=wing, room=room)
-            if len(text) > 4000:
-                text = text[:3997] + "..."
-            self.reply(chat_id, text)
-        except (KeyError, RuntimeError, OSError, ImportError) as e:
-            self.reply(chat_id, f"Memory recall failed: {e}")
-        return True
-
-    def _memory_search(self, query: str, chat_id: ChatId) -> bool:
-        """Full-text search across team chat memory with source links."""
-        self.reply(chat_id, "Searching memory...")
-
-        try:
-            from team_memory.search import search_memory
-            result = search_memory(query)
-        except (OSError, json.JSONDecodeError, KeyError) as e:
-            self.reply(chat_id, f"Memory search failed: {e}", outcome="Needs decision")
-            return True
-
-        answer = result.get("answer", "")
-        sources = result.get("results", [])
-
-        if not answer and not sources:
-            self.reply(chat_id, "No results found.")
-            return True
-
-        lines = [f"\U0001f9e0 {answer}" if answer else "\U0001f9e0 No direct answer found."]
-
-        if sources:
-            lines.append("")
-            import secrets
-            tc_token = secrets.token_urlsafe(32)
-            REWIND_TOKENS[tc_token] = {"name": "__team__", "expires_at": _clock.time() + REWIND_TIMEOUT}
-            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-
-            lines.append("\U0001f4ce Sources:")
-            for i, r in enumerate(sources[:3], 1):
-                chunk_lines = r.get("text", "").split("\n")
-                preview = "\n".join(chunk_lines[:2])
-                if len(preview) > 200:
-                    preview = preview[:197] + "..."
-                source_link = ""
-                chunk_id = r.get("_id", "")
-                if chunk_id.startswith("tg_"):
-                    parts = chunk_id.split("_")
-                    if len(parts) >= 2:
-                        try:
-                            first_msg_id = int(parts[1])
-                            page_info = _run_team_chat_query("page-for-msg", msg_id=first_msg_id)
-                            if page_info and page_info.get("page"):
-                                source_link = f"\n{base_url}/team-chat?token={tc_token}&page={page_info['page']}#msg-{first_msg_id}"
-                        except (ValueError, IndexError) as exc:
-                            _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
-                lines.append(f"{i}. {preview}{source_link}")
-
-        self.reply(chat_id, "\n".join(lines))
-        return True
-
-    def _memory_update(self, chat_id: int | str) -> bool:
-        """Run incremental ingest from latest export in ~/team/exports/."""
-        import glob as _glob
-        exports_dir = os.path.expanduser("~/team/exports")
-        zips = sorted(_glob.glob(os.path.join(exports_dir, "ChatExport_*.json.zip")))
-        if not zips:
-            self.reply(chat_id, f"No exports found in {exports_dir}/", outcome="Needs decision")
-            return True
-
-        latest = zips[-1]
-        self.reply(chat_id, f"Indexing from {os.path.basename(latest)}...")
-
-        try:
-            # Parse
-            parse_script = str(Path(__file__).parent / "team_memory" / "parse.py")
-            parsed_path = "/tmp/team-memory-parsed-full.jsonl"
-            r = _subprocess_runner.run(
-                [sys.executable, parse_script, "--zip", latest, "--out", parsed_path],
-                capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
-            if r.returncode != 0:
-                self.reply(chat_id, f"Parse failed: {r.stderr[:300]}", outcome="Needs decision")
-                return True
-
-            # Ingest (incremental)
-            ingest_script = str(Path(__file__).parent / "team_memory" / "ingest.py")
-            r = _subprocess_runner.run(
-                [sys.executable, ingest_script, parsed_path, "--incremental"],
-                capture_output=True, text=True, timeout=PENDING_TIMEOUT)
-            if r.returncode != 0:
-                self.reply(chat_id, f"Ingest failed: {r.stderr[:300]}", outcome="Needs decision")
-                return True
-
-            # Extract stats from output
-            lines = r.stdout.strip().split("\n")
-            summary = lines[-1] if lines else "Done"
-            self.reply(chat_id, f"Memory updated.\n{summary}")
-
-        except subprocess.TimeoutExpired:
-            self.reply(chat_id, "Memory update timed out.", outcome="Needs decision")
-        except (subprocess.SubprocessError, OSError) as e:
-            self.reply(chat_id, f"Memory update failed: {e}", outcome="Needs decision")
-        return True
 
 
     # ── Core Router ─────────────────────────────────────────────────
@@ -12804,7 +12626,6 @@ class CommandRouter:
             "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
             "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
             "/pr": lambda arg, cid, mid: self.cmd_pr_review(arg, cid),
-            "/memory": lambda arg, cid, mid: self.cmd_memory(arg, cid),
             "/teleport": lambda arg, cid, mid: self.cmd_teleport(arg, cid),
             "/teleport-check": lambda arg, cid, mid: self.cmd_teleport(arg, cid, check_only=True),
             "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),
@@ -14673,7 +14494,7 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     if not query_result:
         return ('<html><body style="background:#0b0d0b;color:#e5e5e0;font-family:system-ui;padding:40px">'
                 '<h1>Team chat not available</h1>'
-                '<p>Run <code>/memory update</code> to index the latest export.</p></body></html>')
+                '<p>Team chat data not indexed.</p></body></html>')
 
     messages = query_result.get("messages", [])
     if search_query:

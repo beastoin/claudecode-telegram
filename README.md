@@ -163,7 +163,6 @@ Every path a message takes through the system. This is the audit surface — che
 | `/relay <worker>` | Open public channel |
 | `/rewind <name>` | Open transcript viewer |
 | `/pr <url>` | PR review viewer |
-| `/memory <query>` | Search team chat memory |
 | `@name <msg>` | One-off message to named worker |
 
 Backend selection: `/hire codex-alice` (prefix) or `/hire alice --backend codex` (flag).
@@ -204,7 +203,6 @@ claudecode-telegram/
 ├── bridge.sh              # CLI wrapper, tunnel/webhook setup
 ├── hooks/                 # Claude Code hooks (stop, start, notification)
 ├── connectors/            # Gmail, GitHub polling integrations [SPEC-020]
-├── team_memory/           # /memory command — chat history search [SPEC.md inside]
 ├── tools/                 # PR review, indexers, pilot terminal viewer, git-hooks
 ├── skills/                # Claude skill definitions (bridge interaction guide)
 ├── tests/                 # Python test files
