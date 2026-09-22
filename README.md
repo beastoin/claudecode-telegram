@@ -73,7 +73,7 @@ export TELEGRAM_BOT_TOKEN='your-token-from-botfather'
 
 **Default port:** 8271 (prod). Override with `--port` or `PORT` env var. See [SPEC-023] for node isolation.
 
-**Full setup guide:** [docs/SETUP.md](docs/SETUP.md) — step-by-step for macOS and Linux with verification at each step.
+**Full setup guide:** [SETUP.md](SETUP.md) — step-by-step for macOS and Linux with verification at each step.
 
 ---
 
@@ -175,7 +175,7 @@ Backend selection: `/hire codex-alice` (prefix) or `/hire alice --backend codex`
 
 Always use `./bridge.sh stop` — never `pkill` or raw `kill`. [SPEC-024]
 
-Full shell reference and runtime flags: [docs/SETUP.md](docs/SETUP.md).
+Full shell reference and runtime flags: [SETUP.md](SETUP.md).
 
 ---
 
@@ -202,7 +202,9 @@ claudecode-telegram/
 ├── tools/                 # PR review, indexers, pilot terminal viewer
 ├── tests/                 # Python test files
 ├── experiments/           # Forge worker binary, STT service, MCP prototypes
-├── docs/                  # Setup guide, troubleshooting, security hardening
+├── SETUP.md               # Step-by-step install guide
+├── TROUBLESHOOTING.md     # Error recovery guide
+├── SECURITY.md            # Security hardening options
 ├── SPEC.md                # System design specs and changelog
 ├── AGENTS.md              # Agent rules, workflow, learnings
 ├── TEST.md                # Testing documentation
@@ -218,9 +220,9 @@ claudecode-telegram/
 | [SPEC.md](SPEC.md) | System design, architecture specs, changelog | Manager |
 | [AGENTS.md](AGENTS.md) | Agent rules, workflow, operational learnings | Agent |
 | [TEST.md](TEST.md) | Testing modes, env vars, test inventory | Agent |
-| [docs/SETUP.md](docs/SETUP.md) | Step-by-step install for macOS and Linux | Agent |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Error recovery guide | Agent |
-| [docs/SECURITY.md](docs/SECURITY.md) | Security hardening options | Agent |
+| [SETUP.md](SETUP.md) | Step-by-step install for macOS and Linux | Agent |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Error recovery guide | Agent |
+| [SECURITY.md](SECURITY.md) | Security hardening options | Agent |
 
 ---
 
