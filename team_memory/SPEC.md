@@ -287,35 +287,41 @@ TEMPORAL_DECAY = 0.05        # higher = faster decay
 
 **API Key**: Uses `ANTHROPIC_API_KEY` from environment (already set for bridge).
 
+## Memory Stack Subcommands
+
+4-layer memory system adding subcommands to `/memory`. CLI also available for direct testing.
+
+### CLI
+
+```bash
+python3 -m team_memory.memory_stack status           # chunk counts, wing distribution
+python3 -m team_memory.memory_stack wake-up           # L0 identity + L1 essential story
+python3 -m team_memory.memory_stack wake-up --wing=omi
+python3 -m team_memory.memory_stack recall --wing=omi --room=prs
+python3 -m team_memory.memory_stack search who merged PR 6377
+```
+
+### Telegram Subcommands
+
+| Command | What it does |
+|---------|-------------|
+| `/memory status` | Shows chunk counts, message counts, wing distribution |
+| `/memory wake-up [wing]` | L0+L1 wake-up text (truncated to 4000 chars) |
+| `/memory recall --wing=X [--room=Y]` | L2 on-demand retrieval, filtered by wing/room |
+| `/memory <query>` | Existing search (unchanged) |
+
 ## File Layout
 
 ```
 ~/claudecode-telegram/team_memory/
-  SPEC.md          # this file
+  SPEC.md          # this file (includes memory stack spec)
   __init__.py
   config.py        # paths, weights, model config
-  ingest.py        # Telegram JSON → ChromaDB (geni)
-  search.py        # semantic + BM25 + temporal + Haiku (lee)
-  parse.py         # Telegram export → cleaned JSONL (luck)
-  state.json       # incremental ingest state (last msg ID, boundary chunk)
+  memory_stack.py  # 4-layer stack module (status, wake-up, recall)
+  ingest.py        # Telegram JSON → ChromaDB
+  search.py        # semantic + BM25 + temporal + Haiku
+  parse.py         # Telegram export → cleaned JSONL
   db/              # ChromaDB persistent storage
-```
-
-## Bridge Integration
-
-Lee adds to bridge.py:
-```python
-# In command handler
-if command == '/memory':
-    from team_memory.search import search_memory
-    result = search_memory(query, agent=agent, days=days)
-    # result = {"answer": "...", "results": [...]}
-    reply = f"🧠 {result['answer']}\n\n📎 Sources:\n"
-    for i, r in enumerate(result['results'][:3], 1):
-        date = r['date'][:10]
-        snippet = r['text'][:100]
-        reply += f"{i}. [{date}] {snippet}...\n"
-    send_telegram(chat_id, reply)
 ```
 
 ## Phase 2: Planned Enhancements

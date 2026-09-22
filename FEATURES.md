@@ -1,4 +1,4 @@
-# claudecode-telegram Product Specification (v0.26.0)
+# claudecode-telegram Product Specification (v0.44.7)
 
 ## Overview
 - MUST provide a Telegram bot plus an HTTP bridge that routes manager messages to multiple workers and returns worker responses to Telegram.

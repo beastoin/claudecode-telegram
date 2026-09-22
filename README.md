@@ -204,11 +204,14 @@ claudecode-telegram/
 ├── bridge.sh              # CLI wrapper, tunnel/webhook setup
 ├── hooks/                 # Claude Code hooks (stop, start, notification)
 ├── connectors/            # Gmail, GitHub polling integrations [SPEC-020]
-├── tools/                 # PR review, indexers, pilot terminal viewer
+├── team_memory/           # /memory command — chat history search [SPEC.md inside]
+├── tools/                 # PR review, indexers, pilot terminal viewer, git-hooks
+├── skills/                # Claude skill definitions (bridge interaction guide)
 ├── tests/                 # Python test files
-├── experiments/           # Forge worker binary, STT service, MCP prototypes
+├── experiments/           # Forge worker binary, void microVM, MCP prototypes
 ├── SPEC.md                # System design specs and changelog
-├── AGENTS.md              # Agent rules, workflow, learnings
+├── FEATURES.md            # Behavioral spec (MUST requirements)
+├── AGENTS.md              # Agent workflow and operational learnings
 ├── TEST.md                # Testing documentation
 └── test.sh                # Automated acceptance tests (431 tests)
 ```
@@ -220,7 +223,8 @@ claudecode-telegram/
 | Doc | Purpose | Owner |
 |-----|---------|-------|
 | [SPEC.md](SPEC.md) | System design, architecture specs, changelog | Manager |
-| [AGENTS.md](AGENTS.md) | Agent rules, workflow, operational learnings | Agent |
+| [FEATURES.md](FEATURES.md) | Behavioral spec — MUST requirements | Manager |
+| [AGENTS.md](AGENTS.md) | Agent workflow and operational learnings | Agent |
 | [TEST.md](TEST.md) | Testing modes, env vars, test inventory | Agent |
 
 ---
