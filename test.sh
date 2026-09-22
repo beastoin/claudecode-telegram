@@ -19095,6 +19095,165 @@ print('OK')
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Learning Reminder Tests (Unit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_learning_reminder_response_threshold() {
+    info "Testing learning reminder fires after response threshold..."
+
+    if python3 -c "
+import bridge
+import time
+
+# Patch _clock and send_to_worker
+class FakeClock:
+    def time(self): return time.time()
+    def sleep(self, s): pass
+
+bridge._clock = FakeClock()
+sent = []
+bridge.send_to_worker = lambda name, text: (sent.append((name, text)), True)[1]
+
+# Reset state
+bridge.learning_reminders.state = {}
+bridge._reset_learning_reminder('testworker')
+
+# Simulate responses up to threshold
+for i in range(bridge.LEARNING_REMINDER_RESPONSE_THRESHOLD):
+    bridge._check_learning_reminder('testworker')
+
+# Wait for background thread to fire
+import threading
+for t in threading.enumerate():
+    if 'Thread' in t.name and t.daemon:
+        t.join(timeout=2)
+
+assert len(sent) >= 1, f'Expected reminder to fire, got {len(sent)} sends'
+assert sent[0][0] == 'testworker', f'Expected testworker, got {sent[0][0]}'
+assert 'Self-Learning' in sent[0][1] or 'learning' in sent[0][1].lower(), 'Expected learning reminder text'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "learning reminder fires after response threshold"
+    else
+        fail "learning reminder response threshold test failed"
+    fi
+}
+
+test_learning_reminder_anti_annoyance() {
+    info "Testing learning reminder anti-annoyance (suppressed while pending)..."
+
+    if python3 -c "
+import bridge
+import time
+
+class FakeClock:
+    def time(self): return time.time()
+    def sleep(self, s): pass
+
+bridge._clock = FakeClock()
+sent = []
+bridge.send_to_worker = lambda name, text: (sent.append((name, text)), True)[1]
+
+bridge.learning_reminders.state = {}
+bridge._reset_learning_reminder('testworker')
+
+# Fire once at threshold
+for i in range(bridge.LEARNING_REMINDER_RESPONSE_THRESHOLD):
+    bridge._check_learning_reminder('testworker')
+
+time.sleep(0.3)
+first_count = len(sent)
+assert first_count >= 1, 'First reminder should fire'
+
+# reminder_pending=True now. Send fewer than threshold responses.
+# These should NOT trigger another reminder.
+for i in range(bridge.LEARNING_REMINDER_RESPONSE_THRESHOLD - 2):
+    bridge._check_learning_reminder('testworker')
+
+time.sleep(0.3)
+assert len(sent) == first_count, f'Anti-annoyance failed: expected {first_count}, got {len(sent)}'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "learning reminder anti-annoyance works"
+    else
+        fail "learning reminder anti-annoyance test failed"
+    fi
+}
+
+test_learning_reminder_state_persistence() {
+    info "Testing learning reminder state persists to disk..."
+
+    if python3 -c "
+import bridge
+import tempfile
+import os
+import json
+
+# Use a temp dir for NODE_DIR
+tmpdir = tempfile.mkdtemp()
+bridge.NODE_DIR = tmpdir
+
+bridge.learning_reminders.state = {}
+bridge._reset_learning_reminder('alice')
+
+# Check file exists
+state_file = os.path.join(tmpdir, 'learning_reminders.json')
+assert os.path.exists(state_file), 'State file should exist'
+
+with open(state_file) as f:
+    data = json.load(f)
+assert 'alice' in data, 'alice should be in state'
+assert data['alice']['response_count'] == 0, 'Initial count should be 0'
+
+# Increment and save
+bridge._check_learning_reminder('alice')
+with open(state_file) as f:
+    data = json.load(f)
+assert data['alice']['response_count'] == 1, f'Count should be 1, got {data[\"alice\"][\"response_count\"]}'
+
+# Load into fresh state
+bridge.learning_reminders.state = {}
+bridge._load_learning_reminder_state()
+assert 'alice' in bridge.learning_reminders.state, 'alice should load from disk'
+assert bridge.learning_reminders.state['alice']['response_count'] == 1
+
+import shutil
+shutil.rmtree(tmpdir)
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "learning reminder state persists to disk"
+    else
+        fail "learning reminder state persistence test failed"
+    fi
+}
+
+test_learn_command_exists() {
+    info "Testing /learn command is registered and cmd_learn method exists..."
+
+    if python3 -c "
+import bridge
+
+# Verify cmd_learn method exists on CommandRouter
+assert hasattr(bridge.CommandRouter, 'cmd_learn'), 'CommandRouter should have cmd_learn method'
+
+# Verify /learn appears in the __init__ source (command registration)
+import inspect
+src = inspect.getsource(bridge.CommandRouter.__init__)
+assert '/learn' in src, '/learn should be in _commands dict'
+
+# Verify /learn is in BOT_COMMANDS for Telegram autocomplete
+cmd_names = [c['command'] for c in bridge.BOT_COMMANDS]
+assert 'learn' in cmd_names, 'learn should be in BOT_COMMANDS'
+
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "/learn command is registered"
+    else
+        fail "/learn command registration test failed"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Direct Mode Integration Tests (bridge running in DIRECT_MODE=1)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -23513,6 +23672,13 @@ run_unit_tests() {
     log "── Backend Registry Tests (Unit) ───────────────────────────────────────"
     run_test test_backend_registry_exists
     run_test test_get_registered_sessions_includes_noninteractive_workers
+    # Unit tests - Learning reminders
+    log ""
+    log "── Learning Reminder Tests (Unit) ──────────────────────────────────────"
+    run_test test_learning_reminder_response_threshold
+    run_test test_learning_reminder_anti_annoyance
+    run_test test_learning_reminder_state_persistence
+    run_test test_learn_command_exists
     # Unit tests - Worker naming
     log ""
     log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"

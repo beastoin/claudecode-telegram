@@ -60,6 +60,7 @@ First time? See the full **[Setup Guide](SETUP.md)** for step-by-step installati
 | `/relay <worker>` | Open public channel |
 | `/rewind <name>` | Open transcript viewer |
 | `/pr <url>` | PR review viewer |
+| `/learn [name]` | Trigger learning reflection |
 | `@name <msg>` | One-off message to named worker |
 
 **Backend selection:** `/hire codex-alice` (prefix) or `/hire alice --backend codex` (flag).

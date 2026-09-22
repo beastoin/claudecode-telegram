@@ -71,6 +71,7 @@ Spec IDs are stable references and may not appear in numeric order in the docume
 | SPEC-023 | Node isolation | Active | FB-003 | 2b6cd8f |
 | SPEC-024 | Process lifecycle safety (PID-based) | Active | AUDIT-002 | 2b6cd8f |
 | SPEC-025 | Dev-before-prod deployment | Active | AUDIT-002 | 2b6cd8f |
+| SPEC-026 | Learning reminders (periodic self-reflection) | Active | — | — |
 
 ## Superseded Specs
 
@@ -571,6 +572,27 @@ External connectors (Gmail, GitHub) poll third-party APIs and forward messages t
 3. Override `preflight_check()` and `poll_once()`.
 4. Add an env var for the sender filter. Require it to be non-empty (fail-closed).
 5. Wire it in `bridge.py` with `_connector_on_message(tag)`, `_connector_get_workers`, `_connector_on_alert(tag)`.
+
+## SPEC-026. Learning Reminders (Periodic Self-Reflection).
+
+Workers receive periodic nudges to reflect on what they learned and update their playbooks. Two triggers fire reminders:
+
+1. **Response threshold** — after every 15 worker responses (`LEARNING_REMINDER_RESPONSE_THRESHOLD`).
+2. **Idle timeout** — if a worker has responded at least twice but then goes silent for 6 hours (`LEARNING_REMINDER_IDLE_HOURS`). Checked by a timer every 30 minutes.
+
+**Anti-annoyance:** After a reminder fires, all triggers are suppressed until the worker responds (the `reminder_pending` flag). This prevents reminder spam.
+
+**State persistence:** Per-worker counters (`response_count`, `last_reminder_ts`, `last_response_ts`, `reminder_pending`) are persisted to `NODE_DIR/learning_reminders.json`. Bridge restarts don't reset progress.
+
+**Lifecycle hooks:**
+- `_reset_learning_reminder(name)` — called on hire and restart. Zeroes counters.
+- `_check_learning_reminder(name)` — called on every worker response. Increments counter, fires if threshold met.
+- `_scan_idle_workers()` — timer-based scan every 30 minutes for idle timeout.
+- `_seed_learning_reminder_state(names)` — called at startup to initialize any workers not already tracked.
+
+**Reminder text:** Read from `TEAM_DIR/learning-reminder.txt` if it exists (supports `{name}` substitution). Falls back to a hardcoded default covering what to capture, format ("When X, do Y, because Z"), where to write, and a 20-rule cap.
+
+**Manual trigger:** `/learn [name]` sends the reminder immediately to the focused worker (or a named worker).
 
 ---
 
