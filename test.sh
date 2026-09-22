@@ -19227,32 +19227,6 @@ print('OK')
     fi
 }
 
-test_learn_command_exists() {
-    info "Testing /learn command is registered and cmd_learn method exists..."
-
-    if python3 -c "
-import bridge
-
-# Verify cmd_learn method exists on CommandRouter
-assert hasattr(bridge.CommandRouter, 'cmd_learn'), 'CommandRouter should have cmd_learn method'
-
-# Verify /learn appears in the __init__ source (command registration)
-import inspect
-src = inspect.getsource(bridge.CommandRouter.__init__)
-assert '/learn' in src, '/learn should be in _commands dict'
-
-# Verify /learn is in BOT_COMMANDS for Telegram autocomplete
-cmd_names = [c['command'] for c in bridge.BOT_COMMANDS]
-assert 'learn' in cmd_names, 'learn should be in BOT_COMMANDS'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/learn command is registered"
-    else
-        fail "/learn command registration test failed"
-    fi
-}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Direct Mode Integration Tests (bridge running in DIRECT_MODE=1)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -23678,7 +23652,6 @@ run_unit_tests() {
     run_test test_learning_reminder_response_threshold
     run_test test_learning_reminder_anti_annoyance
     run_test test_learning_reminder_state_persistence
-    run_test test_learn_command_exists
     # Unit tests - Worker naming
     log ""
     log "── Worker Naming Tests (Unit) ──────────────────────────────────────────"

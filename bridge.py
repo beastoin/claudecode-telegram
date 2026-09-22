@@ -3649,7 +3649,6 @@ BOT_COMMANDS = [
     # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
-    {"command": "learn", "description": "Ask worker to reflect: /learn [name]"},
 ]
 
 BLOCKED_COMMANDS = [
@@ -12027,23 +12026,6 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_learn(self, arg: str, chat_id: ChatId) -> bool:
-        """Handle /learn — trigger learning reminder for focused (or named) worker."""
-        name = arg.strip().lower() if arg.strip() else state.get("active")
-        if not name:
-            self.reply(chat_id, "No focused worker. Usage: /learn [name]", outcome="Needs decision")
-            return True
-        registered = self.workers.get_registered_sessions()
-        if name not in registered:
-            self.reply(chat_id, f"Worker '{name}' not found.", outcome="Needs decision")
-            return True
-        reminder = _read_learning_reminder(name)
-        if send_to_worker(name, reminder):
-            self.reply(chat_id, f"Learning reminder sent to {name}.")
-        else:
-            self.reply(chat_id, f"Failed to send learning reminder to {name}.", outcome="Needs decision")
-        return True
-
     def cmd_channel(self, arg: str, chat_id: ChatId) -> bool:
         """Handle /ch and /channel commands.
 
@@ -12603,7 +12585,6 @@ class CommandRouter:
             "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),
             "/ch": lambda arg, cid, mid: self.cmd_channel(arg, cid),
             "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
-            "/learn": lambda arg, cid, mid: self.cmd_learn(arg, cid),
         }
 
     def reply(self, chat_id: ChatId, text: str, outcome: str | None = None) -> None:

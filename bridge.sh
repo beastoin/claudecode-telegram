@@ -1554,7 +1554,6 @@ TELEGRAM COMMANDS
   /progress         Detailed status of focused worker
   /pause            Interrupt active Claude
   /restart          Restart worker (--clean for fresh start)
-  /learn            Ask focused worker what they learned
   @name <msg>       One-off message to specific Claude
   <message>         Send to active Claude
 

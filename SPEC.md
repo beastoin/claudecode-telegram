@@ -592,8 +592,6 @@ Workers receive periodic nudges to reflect on what they learned and update their
 
 **Reminder text:** Read from `TEAM_DIR/learning-reminder.txt` if it exists (supports `{name}` substitution). Falls back to a hardcoded default covering what to capture, format ("When X, do Y, because Z"), where to write, and a 20-rule cap.
 
-**Manual trigger:** `/learn [name]` sends the reminder immediately to the focused worker (or a named worker).
-
 ---
 
 For version history, see [CHANGELOG.md](./CHANGELOG.md).
