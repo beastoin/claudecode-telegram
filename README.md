@@ -207,8 +207,8 @@ claudecode-telegram/
 ├── skills/                # Claude skill definitions (bridge interaction guide)
 ├── tests/                 # Python test files
 ├── experiments/           # Forge worker binary, void microVM, MCP prototypes
-├── SPEC.md                # System design specs and changelog
-├── FEATURES.md            # Behavioral spec (MUST requirements)
+├── SPEC.md                # System design specs (current state)
+├── CHANGELOG.md           # Version history
 ├── AGENTS.md              # Agent workflow and operational learnings
 ├── TEST.md                # Testing documentation
 └── test.sh                # Automated acceptance tests (431 tests)
@@ -220,8 +220,8 @@ claudecode-telegram/
 
 | Doc | Purpose | Owner |
 |-----|---------|-------|
-| [SPEC.md](SPEC.md) | System design, architecture specs, changelog | Manager |
-| [FEATURES.md](FEATURES.md) | Behavioral spec — MUST requirements | Manager |
+| [SPEC.md](SPEC.md) | System design, architecture specs (current state) | Manager |
+| [CHANGELOG.md](CHANGELOG.md) | Version history | Agent |
 | [AGENTS.md](AGENTS.md) | Agent workflow and operational learnings | Agent |
 | [TEST.md](TEST.md) | Testing modes, env vars, test inventory | Agent |
 
