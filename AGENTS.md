@@ -38,10 +38,15 @@ Do these three steps when you make changes that need a new version:
 | `bridge.sh` | CLI wrapper, tunnel/webhook setup |
 | `hooks/send-to-telegram.sh` | Claude Stop hook — sends responses to Telegram |
 | `test.sh` | Automated acceptance tests |
+| `README.md` | Product identity, architecture, message flow map |
 | `AGENTS.md` | Agent instructions, rules, learnings (this file) |
 | `CLAUDE.md` | Pointer to AGENTS.md |
-| `SPEC.md` | Design philosophy and changelog |
+| `SPEC.md` | Design specs and changelog |
 | `TEST.md` | Testing documentation |
+
+### Message Flow Map (README.md)
+
+The **Message Flow Map** in README.md is an audit surface. When you add, change, or remove any message path (inbound, outbound, worker-to-worker, connector, management, or error), update the corresponding row in the flow map table. The flow map must stay accurate — it is the first place someone looks to understand message behavior.
 
 ## Testing Requirements
 
