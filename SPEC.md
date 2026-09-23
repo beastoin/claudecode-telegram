@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.44.7
+> Version: 0.44.8
 
 ## Documentation Contract
 
@@ -277,7 +277,7 @@ Adding a machine: add an entry to `machines.json` with `ssh_target`, `bridge_bas
 All bridge logic lives in `bridge.py`. The architecture uses SOLID principles within a single file:
 
 - **AppContext** for dependency injection (subprocess, clock, urlopen)
-- **TypedDicts** and **NamedTuples** for data structures (31 TypedDicts, 5 NamedTuples)
+- **TypedDicts** and **NamedTuples** for data structures (58 TypedDicts, 9 NamedTuples)
 - **Service classes** for responsibilities (WorkerManager, TelegramAPI, CommandRouter)
 - **Protocols** for interfaces (Backend, SubprocessRunner, Clock)
 - **Registry dispatch** for extensible command routing

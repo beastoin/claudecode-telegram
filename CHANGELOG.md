@@ -1,5 +1,23 @@
 ## Changelog
 
+### v0.44.8 - Strong typing + solidity hardening
+
+**Type safety (58 TypedDicts, 9 NamedTuples, was 75+9 → consolidated):**
+- Zero `Any` usage (AST-verified), 100% function return type annotations
+- 28 json.loads casts use specific TypedDicts at trust boundaries
+- Consolidated from 75 → 58 TypedDicts: deleted 4 dead types, merged identical shapes, eliminated single-use ≤3-field endpoint bodies where `_str_field` already validates at runtime
+- Added WorkerStateEntry NamedTuple (replaces raw tuple)
+- Added endpoint body TypedDicts for complex shapes: HookResponseBody, ForgeRegisterBody, PrActionBody, HealthAlertBody, TelegramWebhookBody, NodeConfigDict
+- Safe field extractors (`_str_field`/`_int_field`/`_bool_field`) used consistently at HTTP trust boundaries
+
+**Solidity:**
+- All state file writes atomic (temp + os.replace) — 17 locations
+- All os.open/flock protected by try/finally — no fd leaks
+- Watchdog thread: explicit stop_event + Event.wait() for responsive shutdown
+- graceful_shutdown: cancels idle_scan_timer, media group timers, stops adapters and pipe readers
+- Popen handle leak fixed in transcript sync rsync
+- Channel members list validation at trust boundary
+
 ### v0.44.7 - Teleport preflight hardening
 
 **File locking on `~/.claude.json` writes:** Both local and remote `_ensure_workspace_trusted` now use `fcntl.flock(LOCK_EX)` to prevent concurrent writes from corrupting the JSON file. Tested with 10 concurrent threads.
