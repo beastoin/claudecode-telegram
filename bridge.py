@@ -180,7 +180,7 @@ class TelegramMessageDict(TypedDict, total=False):
     reply_to_message: "TelegramMessageDict"
     caption: str
     media_group_id: str
-    rich_message: dict[str, object]
+    rich_message: dict[str, str]  # {"markdown": str} — Telegram rich message block
 
 
 # Note: Telegram API uses "from" (a Python keyword), so we use functional TypedDict form.
@@ -400,8 +400,8 @@ class TelegramSendPayload(TypedDict, total=False):
     reaction: list[dict[str, str]]
     parse_mode: str
     reply_to_message_id: int
-    reply_markup: dict[str, object]
-    rich_message: dict[str, str]
+    reply_markup: dict[str, list[list[dict[str, str]]]]  # Telegram InlineKeyboardMarkup
+    rich_message: dict[str, str]  # {"markdown": str}
 
 
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
@@ -783,7 +783,7 @@ class TelegramWebhookBody(TypedDict, total=False):
     """Telegram webhook update body (wraps TelegramUpdate)."""
     update_id: int
     message: TelegramMessageDict
-    callback_query: dict[str, object]
+    callback_query: TelegramCallbackQuery
     edited_message: TelegramMessageDict
 
 
@@ -1189,6 +1189,9 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
     Use for fire-and-forget operations where failure is acceptable but
     should not be silent (aligns with 'fail loudly' philosophy).
     Returns the function result on success, None on failure.
+
+    Callable[..., object] is intentional: this is a generic wrapper that
+    accepts any callable signature (standard pattern for utility wrappers).
     """
     try:
         return func(*args, **kwargs)
@@ -2094,7 +2097,13 @@ class MarkdownToken(Protocol):
 
 
 class SubprocessRunner(Protocol):
-    """Abstraction over subprocess.run and subprocess.Popen for test injection."""
+    """Abstraction over subprocess.run and subprocess.Popen for test injection.
+
+    kwargs typing note: subprocess.run/Popen accept 20+ keyword arguments
+    (capture_output, text, cwd, env, timeout, stdin, stdout, stderr, check,
+    shell, etc.). Typing them precisely requires Unpack[TypedDict] (Python 3.12+).
+    Using **kwargs: object is the standard Protocol escape hatch for <3.12.
+    """
 
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command and wait for completion."""
@@ -2144,7 +2153,7 @@ class _RealClock:
 # Module-level defaults (overridable in tests by replacing these singletons)
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
-_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # Injectable for testing
+_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # Injectable for testing; Callable[...] wraps urlopen's complex overloaded signature
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16130,7 +16139,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Normalize targets: support "to" (string or list) or legacy "worker"
-        raw_to = data.get("to", data.get("worker", ""))
+        raw_to = data.get("to", _str_field(data, "worker"))
         if isinstance(raw_to, str):
             targets = [raw_to.strip()] if raw_to.strip() else []
         elif isinstance(raw_to, list):
@@ -17586,10 +17595,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         """
         try:
             data = cast(ForgeRegisterBody, json.loads(body)) if body else {}
-            name = data.get("Name", data.get("name", ""))
-            host = data.get("Host", data.get("host", ""))
-            version = data.get("Version", data.get("version", ""))
-            callback_url = data.get("CallbackURL", data.get("callback_url", data.get("callbackUrl", "")))
+            name = _str_field(data, "Name") or _str_field(data, "name")
+            host = _str_field(data, "Host") or _str_field(data, "host")
+            version = _str_field(data, "Version") or _str_field(data, "version")
+            callback_url = _str_field(data, "CallbackURL") or _str_field(data, "callback_url") or _str_field(data, "callbackUrl")
             tools = data.get("Tools", data.get("tools", {}))
             if name:
                 if callback_url:
@@ -17673,9 +17682,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
 
-        worker = str(data.get("worker", "")).strip()
-        message = data.get("message", data.get("text", ""))
-        sender = str(data.get("from", "system")).strip() or "system"
+        worker = _str_field(data, "worker").strip()
+        message = _str_field(data, "message") or _str_field(data, "text")
+        sender = _str_field(data, "from", "system").strip() or "system"
         if not worker:
             self._send_json(400, {"ok": False, "error": "Missing worker"})
             return
@@ -17704,8 +17713,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         """
         try:
             data = cast(HookResponseBody, json.loads(body))
-            session_name = data.get("session")
-            text = data.get("text", "")
+            session_name = _str_field(data, "session")
+            text = _str_field(data, "text")
 
             if not session_name or not text:
                 self.send_response(400)
@@ -17735,11 +17744,11 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             # Debug: log short messages to trace source of empty "name:" messages
             if len(text.strip()) <= 5:
                 source_ip = self.client_address[0] if self.client_address else "unknown"
-                hook_sid = data.get("session_id", "")
-                escape_flag = data.get("escape", False)
+                hook_sid = _str_field(data, "session_id")
+                escape_flag = _bool_field(data, "escape")
                 _log(_LOG_DEBUG, "hook", f"Hook response DEBUG: {session_name} -> chat {chat_id}, "
                      f"text={repr(text)}, len={len(text)}, "
-                     f"source={data.get('source', 'hook')}, "
+                     f"source={_str_field(data, 'source', 'hook')}, "
                      f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
                      f"escape={escape_flag}, ip={source_ip}")
 
@@ -17748,7 +17757,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             # Update session ID cache if provided (keeps VPS in sync with remote workers).
             # _cache_session_id stores the CWD alongside the session_id, so
             # get_claude_session_id will self-invalidate if the CWD changes later.
-            hook_sid = data.get("session_id", "")
+            hook_sid = _str_field(data, "session_id")
             if hook_sid:
                 _cache_session_id(session_name, hook_sid)
 
