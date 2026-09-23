@@ -3759,6 +3759,8 @@ class WorkerWatchdogState:
         self.last_resolved_ts: dict[str, float] = {}
         # Global watchdog lock
         self.lock: threading.Lock = threading.Lock()
+        # Stop event for clean shutdown
+        self.stop_event: threading.Event = threading.Event()
 
     def reset(self) -> None:
         """Reset all state (useful for testing)."""
@@ -7953,9 +7955,12 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 
 
 def watchdog_loop() -> None:
-    """Main watchdog loop — periodically probes all workers and fires alerts."""
+    """Main watchdog loop — periodically probes all workers and fires alerts.
+
+    Exits cleanly when watchdog.stop_event is set (by graceful_shutdown).
+    """
     _disk_check_counter = 0
-    while True:
+    while not watchdog.stop_event.is_set():
         try:
             now = _clock.time()
             registered = get_registered_sessions()
@@ -7983,7 +7988,8 @@ def watchdog_loop() -> None:
         except (subprocess.SubprocessError, ValueError, KeyError) as e:
             _log(_LOG_ERROR, "watchdog", f"Watchdog error: {e}")
 
-        _clock.sleep(WATCHDOG_INTERVAL)
+        # Use stop_event.wait() instead of sleep for responsive shutdown
+        watchdog.stop_event.wait(WATCHDOG_INTERVAL)
 
 
 def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
@@ -16445,8 +16451,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"ok": False, "error": "channel not found"})
                 return
 
-            added = channel_add_members(channel, data.get("add", []))
-            removed = channel_remove_members(channel, data.get("remove", []))
+            raw_add = data.get("add", [])
+            raw_remove = data.get("remove", [])
+            add_list: list[str] = raw_add if isinstance(raw_add, list) else []
+            remove_list: list[str] = raw_remove if isinstance(raw_remove, list) else []
+            added = channel_add_members(channel, add_list)
+            removed = channel_remove_members(channel, remove_list)
             current = list(channel["members"].keys())
 
         if added or removed:
@@ -18137,6 +18147,9 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
             print("GitHub connector stopped")
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+
+    # Signal watchdog thread to stop
+    watchdog.stop_event.set()
 
     # Cancel learning reminder idle scan timer
     if learning_reminders.idle_scan_timer is not None:
