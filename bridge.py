@@ -50,7 +50,8 @@ PostRouteHandler = Callable[["BridgeRequestHandler", bytes, re.Match[str] | None
 GetRouteHandler = Callable[["BridgeRequestHandler", ParseResult, re.Match[str] | None], None]
 
 # ── Safe JSON field accessors ────────────────────────────────────────────
-# After cast(dict[str, object], json.loads(...)), .get() returns object.
+# After cast(<TypedDict>, json.loads(...)), .get() returns the declared type.
+# For TypedDicts with total=False, .get() returns the field type | None.
 # These helpers narrow to concrete types so callers can .strip(), compare, etc.
 
 
@@ -655,7 +656,168 @@ class MentionRouteResult(TypedDict):
     status: str  # "sent", "offline", "unknown"
 
 
+# ── Endpoint body TypedDicts (HTTP POST payloads) ────────────────────
+
+class HookResponseBody(TypedDict, total=False):
+    """POST /response — Claude hook forwarding a response."""
+    session: str
+    text: str
+    source: str
+    escape: bool
+    session_id: str
+    name: str
+
+
+class NotifyBody(TypedDict, total=False):
+    """POST /notify — send a notification to Telegram."""
+    text: str
+    name: str
+    chat_id: int
+
+
+class HealthAlertBody(TypedDict, total=False):
+    """POST /health-alert — worker health alert."""
+    worker: str
+    issue: str
+    transcript_age: int
+    node: str
+
+
+class ForgeRegisterBody(TypedDict, total=False):
+    """POST /register — register a remote worker (packaged or forge)."""
+    Name: str
+    name: str
+    Host: str
+    host: str
+    Version: str
+    version: str
+    CallbackURL: str
+    callback_url: str
+    callbackUrl: str
+    Tools: dict[str, object]
+    tools: dict[str, object]
+    note: str
+    address: str
+    machine: str
+
+
+class SendEndpointBody(TypedDict, total=False):
+    """POST /send — send a message to a worker."""
+    worker: str
+    message: str
+    text: str
+
+
+class ConnectorsRestartBody(TypedDict, total=False):
+    """POST /connectors/restart — restart a connector."""
+    name: str
+
+
+class GuestRegisterBody(TypedDict, total=False):
+    """POST /guest/register — register a guest session."""
+    name: str
+
+
+class GuestSendBody(TypedDict, total=False):
+    """POST /guest/send — guest sends a message."""
+    text: str
+    to: str
+    worker: str
+
+
+class GuestReplyBody(TypedDict, total=False):
+    """POST /guest/reply — worker replies to guest."""
+    guest: str
+
+
+class ChannelCreateBody(TypedDict, total=False):
+    """POST /channels — create a channel."""
+    label: str
+    members: list[str]
+    include_manager: bool
+
+
+class ChannelMembersBody(TypedDict, total=False):
+    """POST /channels/<id>/members — add/remove members."""
+    add: list[str]
+    remove: list[str]
+
+
+class ChannelSendBody(TypedDict, total=False):
+    """POST /channels/<id>/send — send to channel."""
+    text: str
+
+
+class RelaySendBody(TypedDict, total=False):
+    """POST /relay/<id>/send — send to relay channel."""
+    text: str
+
+
+class RelayReplyBody(TypedDict, total=False):
+    """POST /relay/<id>/reply — reply in relay channel."""
+    text: str
+
+
+class PrCommentBody(TypedDict, total=False):
+    """POST /pr/comment or /pr/general-comment — PR review comment."""
+    token: str
+    owner: str
+    repo: str
+    pr_num: int
+    body: str
+    path: str
+    line: int
+    commit_id: str
+
+
+class PrMergeBody(TypedDict, total=False):
+    """POST /pr/merge — merge a PR."""
+    token: str
+    owner: str
+    repo: str
+    pr_num: int
+    merge_method: str
+
+
+class TelegramWebhookBody(TypedDict, total=False):
+    """Telegram webhook update body (wraps TelegramUpdate)."""
+    update_id: int
+    message: TelegramMessageDict
+    callback_query: dict[str, object]
+    edited_message: TelegramMessageDict
+
+
+class NodeConfigDict(TypedDict, total=False):
+    """Node configuration file shape (~/.config/claudecode-telegram/<node>.json)."""
+    admin_chat_id: int
+    tunnel: str
+    host: str
+    port: int
+    webhook_secret: str
+    connectors: dict[str, object]
+
+
+class ClaudeJsonDict(TypedDict, total=False):
+    """~/.claude.json trust settings."""
+    projects: dict[str, object]
+
+
+class TranscriptEventDict(TypedDict, total=False):
+    """Single line from a JSONL transcript file."""
+    type: str
+    subtype: str
+    role: str
+    message: dict[str, object]
+    timestamp: str
+
+
 # ── NamedTuple models for structured returns ──────────────────────────
+
+class WorkerStateEntry(NamedTuple):
+    """Worker state as tracked by watchdog: (status, reason, since_timestamp)."""
+    status: str
+    reason: str
+    since: float
 
 class ParsedWorkerTarget(NamedTuple):
     """Result of parsing 'name@host' or 'name' worker target."""
@@ -2234,7 +2396,7 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
         return {_implicit_local_machine().id: _implicit_local_machine()}
 
     try:
-        data = cast(dict[str, object], json.loads(config_path.read_text()))
+        data = cast(NodeConfigDict, json.loads(config_path.read_text()))
     except json.JSONDecodeError as e:
         raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
     except OSError as e:
@@ -3226,7 +3388,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
         if not line.strip():
             continue
         try:
-            ev = cast(dict[str, object], json.loads(line))
+            ev = cast(dict[str, object], json.loads(line))  # shape varies per event type
         except json.JSONDecodeError:
             continue
 
@@ -3563,7 +3725,7 @@ class WorkerWatchdogState:
     def __init__(self) -> None:
         # Worker probe state
         """Initialize worker watchdog counters, locks, and health maps."""
-        self.worker_states: dict[str, tuple[str, str, float]] = {}
+        self.worker_states: dict[str, WorkerStateEntry] = {}
         self.last_child_ts: dict[str, float] = {}
         self.last_seen_claude: dict[str, float] = {}
         self.last_hook_ts: dict[str, float] = {}
@@ -4005,8 +4167,10 @@ def save_last_chat_id(chat_id: ChatId) -> None:
     """Save last known chat ID to file for auto-notification on restart."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        LAST_CHAT_ID_FILE.write_text(str(chat_id))
-        LAST_CHAT_ID_FILE.chmod(0o600)
+        _tmp = LAST_CHAT_ID_FILE.with_suffix('.tmp')
+        _tmp.write_text(str(chat_id))
+        _tmp.chmod(0o600)
+        os.replace(str(_tmp), str(LAST_CHAT_ID_FILE))
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to save last_chat_id: {e}")
 
@@ -4027,8 +4191,10 @@ def save_last_active(name: str) -> None:
     """Save last active worker name to file for auto-focus on restart."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        LAST_ACTIVE_FILE.write_text(name)
-        LAST_ACTIVE_FILE.chmod(0o600)
+        _tmp = LAST_ACTIVE_FILE.with_suffix('.tmp')
+        _tmp.write_text(name)
+        _tmp.chmod(0o600)
+        os.replace(str(_tmp), str(LAST_ACTIVE_FILE))
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to save last_active: {e}")
 
@@ -4316,12 +4482,12 @@ class TelegramAPI:
         )
         try:
             with _urlopen(req, timeout=TIMEOUT_HTTP_API) as r:
-                return cast(dict[str, object], json.loads(r.read()))
+                return cast(TelegramApiResponseDict, json.loads(r.read()))
         except urllib.error.HTTPError as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
             try:
                 raw = e.read()
-                body = cast(dict[str, object], json.loads(raw))
+                body = cast(TelegramApiResponseDict, json.loads(raw))
                 return body  # Return error response so callers can inspect description
             except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, ValueError):
                 # Non-JSON error body (proxy, middlebox, empty) — return structured error
@@ -4512,7 +4678,7 @@ class TelegramTransport(MessageTransport):
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
             )
             with _urlopen(req, timeout=TIMEOUT_HTTP_UPLOAD) as r:
-                result = cast(dict[str, object], json.loads(r.read()))
+                result = cast(TelegramApiResponseDict, json.loads(r.read()))
                 if result.get("ok"):
                     _log(_LOG_INFO, "telegram", f"{api_method} sent: {fname}")
                     return True
@@ -4590,7 +4756,7 @@ class TelegramTransport(MessageTransport):
                 headers={"Content-Type": "application/json"}
             )
             with _urlopen(req, timeout=TIMEOUT_HTTP_DOWNLOAD) as r:
-                result = cast(dict[str, object], json.loads(r.read()))
+                result = cast(TelegramApiResponseDict, json.loads(r.read()))
                 if not result.get("ok"):
                     _log(_LOG_WARN, "bridge", f"getFile failed: {result}")
                     return None
@@ -5087,8 +5253,10 @@ def stop_pipe_reader(name: str) -> None:
         try:
             # Open in non-blocking write mode to unblock reader
             fd = os.open(str(pipe_path), os.O_WRONLY | os.O_NONBLOCK)
-            os.write(fd, b"\n")
-            os.close(fd)
+            try:
+                os.write(fd, b"\n")
+            finally:
+                os.close(fd)
         except OSError:
             pass  # intentional no-op: pipe may already be closed by reader
 
@@ -5145,7 +5313,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
         with _urlopen(req, timeout=timeout) as r:
-            result = cast(dict[str, object], json.loads(r.read()))
+            result = cast(TelegramApiResponseDict, json.loads(r.read()))
             text = result.get("text", "").strip()
             if text:
                 duration = result.get("audio_duration_s", "?")
@@ -6170,8 +6338,10 @@ def _read_session_file(name: str, filename: str) -> str | None:
                 # Cache locally for next read
                 try:
                     ensure_session_dir(name)
-                    f.write_text(val)
-                    f.chmod(0o600)
+                    _tmp = f.with_suffix('.tmp')
+                    _tmp.write_text(val)
+                    _tmp.chmod(0o600)
+                    os.replace(str(_tmp), str(f))
                 except OSError as exc:
                     _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
                 return val
@@ -6251,7 +6421,7 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, s
         if not line:
             continue
         try:
-            e = cast(dict[str, object], json.loads(line))
+            e = cast(dict[str, object], json.loads(line))  # shape varies per event type
             if event and e.get("event") != event:
                 continue
             entries.append(e)
@@ -6292,7 +6462,7 @@ def _ensure_workspace_trusted(
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 if target.exists():
-                    data = cast(dict[str, object], json.loads(target.read_text()))
+                    data = cast(ClaudeJsonDict, json.loads(target.read_text()))
                 else:
                     data = {}
                 projects = data.setdefault("projects", {})
@@ -6300,7 +6470,9 @@ def _ensure_workspace_trusted(
                 if entry.get("hasTrustDialogAccepted") is True:
                     return  # already trusted — skip rewrite
                 projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
-                target.write_text(json.dumps(data, indent=2))
+                _tmp = target.with_suffix('.tmp')
+                _tmp.write_text(json.dumps(data, indent=2))
+                os.replace(str(_tmp), str(target))
                 _log(_LOG_INFO, "trust", f"pre-trusted workspace: {cwd}")
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -6445,8 +6617,10 @@ def _cache_session_id(name: str, sid: str) -> None:
 
         if old_sid != sid:
             _log_session_event(name, sid, cwd, "cache")
-        id_file.write_text(f"{sid}\n{cwd}")
-        id_file.chmod(0o600)
+        _tmp = id_file.with_suffix('.tmp')
+        _tmp.write_text(f"{sid}\n{cwd}")
+        _tmp.chmod(0o600)
+        os.replace(str(_tmp), str(id_file))
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
 
@@ -6526,8 +6700,10 @@ def save_claude_session_cwd(name: str, cwd: str) -> None:
         cwd = os.path.expanduser(cwd)
     session_dir = ensure_session_dir(name)
     cwd_file = session_dir / "claude_session_cwd"
-    cwd_file.write_text(cwd)
-    cwd_file.chmod(0o600)
+    _tmp_cwd = cwd_file.with_suffix('.tmp')
+    _tmp_cwd.write_text(cwd)
+    _tmp_cwd.chmod(0o600)
+    os.replace(str(_tmp_cwd), str(cwd_file))
 
 
 
@@ -6573,10 +6749,14 @@ def set_pending(name: str, chat_id: ChatId) -> None:
     session_dir = ensure_session_dir(name)
     pending = session_dir / "pending"
     chat_id_file = session_dir / "chat_id"
-    pending.write_text(str(int(_clock.time())))
-    pending.chmod(0o600)
-    chat_id_file.write_text(str(chat_id))
-    chat_id_file.chmod(0o600)
+    _tmp_p = pending.with_suffix('.tmp')
+    _tmp_p.write_text(str(int(_clock.time())))
+    _tmp_p.chmod(0o600)
+    os.replace(str(_tmp_p), str(pending))
+    _tmp_c = chat_id_file.with_suffix('.tmp')
+    _tmp_c.write_text(str(chat_id))
+    _tmp_c.chmod(0o600)
+    os.replace(str(_tmp_c), str(chat_id_file))
     # Sync chat_id to remote host if worker is teleported.
     # The Stop hook reads chat_id locally — without this, responses from
     # teleported workers never reach Telegram.
@@ -7283,7 +7463,7 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
             host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode == 0 and r.stdout.strip():
             import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout))
+            data = cast(dict[str, object], _json.loads(r.stdout))  # iostat -xj output
             stats = data.get("sysstat", {}).get("hosts", [{}])[0].get("statistics", [])
             if len(stats) >= 2:
                 disks = stats[-1].get("disk", [])
@@ -7594,7 +7774,7 @@ def _probe_tailscale() -> None:
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode == 0:
             import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout))
+            data = cast(dict[str, object], _json.loads(r.stdout))  # tailscale status output
             is_up = data.get("BackendState") == "Running"
         else:
             is_up = False
@@ -7759,7 +7939,7 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
             since = prev[2]
         else:
             since = now
-        watchdog.worker_states[name] = (state, reason, since)
+        watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
     return since
 
 
@@ -9430,14 +9610,18 @@ class WorkerManager:
         ensure_session_dir(name)
         if chat_id:
             chat_id_file = get_chat_id_file(name)
-            chat_id_file.write_text(str(chat_id))
-            chat_id_file.chmod(0o600)
+            _tmp = chat_id_file.with_suffix('.tmp')
+            _tmp.write_text(str(chat_id))
+            _tmp.chmod(0o600)
+            os.replace(str(_tmp), str(chat_id_file))
         if not backend_obj.is_interactive:
             ensure_worker_pipe(name)
 
         if not backend_obj.is_interactive:
             backend_file = self.sessions_dir / name / "backend"
-            backend_file.write_text(backend)
+            _tmp_b = backend_file.with_suffix('.tmp')
+            _tmp_b.write_text(backend)
+            os.replace(str(_tmp_b), str(backend_file))
 
         if SANDBOX_ENABLED and backend_obj.is_interactive:
             if startup_cwd:
@@ -10359,7 +10543,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
             capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0:
-            data = cast(dict[str, object], json.loads(r.stdout))
+            data = cast(dict[str, object], json.loads(r.stdout))  # external tool output
             url = data.get("url", "")
             if url and "localhost" in url:
                 host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
@@ -10963,11 +11147,13 @@ class CommandRouter:
             # Write teleport state for crash recovery
             ensure_session_dir(name)
             state_file = SESSIONS_DIR / name / "teleport_state"
-            state_file.write_text(json.dumps({
+            _tmp_ts = state_file.with_suffix('.tmp')
+            _tmp_ts.write_text(json.dumps({
                 "phase": 1, "source_host": source_host,
                 "target_host": target_host, "target_cwd": target_cwd,
                 "started_at": int(_clock.time()),
             }))
+            os.replace(str(_tmp_ts), str(state_file))
 
             # ── PHASE 1: Stop and sync (reversible) ──
 
@@ -11009,11 +11195,13 @@ class CommandRouter:
 
             # ── PHASE 2: Commit ──
 
-            state_file.write_text(json.dumps({
+            _tmp_ts2 = state_file.with_suffix('.tmp')
+            _tmp_ts2.write_text(json.dumps({
                 "phase": 2, "source_host": source_host,
                 "target_host": target_host, "target_cwd": target_cwd,
                 "started_at": int(_clock.time()),
             }))
+            os.replace(str(_tmp_ts2), str(state_file))
 
             # Save remapped CWD BEFORE _start_worker_on_target so that
             # _sync_session_files_to_target copies the correct (remapped) path
@@ -11192,8 +11380,10 @@ class CommandRouter:
                 if gi_result.returncode == 0 and gi_result.stdout.strip():
                     fd, gitignore_tmpfile = tempfile.mkstemp(
                         prefix="rsync-gitignore-", suffix=".txt")
-                    os.write(fd, gi_result.stdout.encode())
-                    os.close(fd)
+                    try:
+                        os.write(fd, gi_result.stdout.encode())
+                    finally:
+                        os.close(fd)
                     cmd.extend(["--exclude-from", gitignore_tmpfile])
             except (ConnectionError, TimeoutError, OSError) as e:
                 _log(_LOG_WARN, "teleport", f"git ls-files failed, skipping gitignore excludes: {e}")
@@ -11340,12 +11530,16 @@ class CommandRouter:
                         settings_text = f.read()
                     settings_text = settings_text.replace(local_home, remote_home)
                     fd, tmp = tempfile.mkstemp(suffix=".json")
-                    os.write(fd, settings_text.encode())
-                    os.close(fd)
-                    _subprocess_runner.run(
-                        ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
-                        capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
-                    os.unlink(tmp)
+                    try:
+                        os.write(fd, settings_text.encode())
+                    finally:
+                        os.close(fd)
+                    try:
+                        _subprocess_runner.run(
+                            ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
+                            capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
+                    finally:
+                        os.unlink(tmp)
         except (subprocess.SubprocessError, OSError) as e:
             w = f"shared repo sync: {e}"
             warnings.append(w)
@@ -11529,8 +11723,8 @@ class CommandRouter:
             r = _remote_run(["cat", ".claude/.credentials.json"],
                              host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode == 0 and r.stdout.strip():
-                remote_data = cast(dict[str, object], json.loads(r.stdout))
-                local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))
+                remote_data = cast(dict[str, object], json.loads(r.stdout))  # OAuth credentials shape
+                local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))  # OAuth credentials shape
                 remote_oauth = remote_data.get("claudeAiOauth", {})
                 local_oauth = local_data.get("claudeAiOauth", {})
                 remote_refresh = remote_oauth.get("refreshToken", "")
@@ -13265,7 +13459,7 @@ class CommandRouter:
                     url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
                 with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                    cast(dict[str, object], _json.loads(resp.read()))
+                    cast(dict[str, object], _json.loads(resp.read()))  # bridge response, discarded
                 enabled.append(n)
                 session_names.append(session_name)
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -13285,7 +13479,7 @@ class CommandRouter:
                 data=payload, method="POST",
                 headers={"Content-Type": "application/json"})
             with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                cast(dict[str, object], _json.loads(resp.read()))
+                cast(dict[str, object], _json.loads(resp.read()))  # bridge response, discarded
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
@@ -13849,7 +14043,7 @@ def _run_team_chat_query(query_type: str, *,
     try:
         r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
-            return cast(dict[str, object], json.loads(r.stdout))
+            return cast(dict[str, object], json.loads(r.stdout))  # external tool output
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "bridge", f"Team chat query error: {e}")
     return None
@@ -13889,7 +14083,7 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
         else:
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
-            return cast(dict[str, object], json.loads(r.stdout))
+            return cast(dict[str, object], json.loads(r.stdout))  # external tool output
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
     return None
@@ -13921,29 +14115,35 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
             ["rsync", "-az", f"{host}:{remote_path}", str(local_tmp)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # Poll local file size while rsync runs
-        while proc.poll() is None:
-            _clock.sleep(DELAY_STARTUP)
-            try:
-                if local_tmp.exists() and remote_size > 0:
-                    local_size = local_tmp.stat().st_size
-                    pct = min(99, int(local_size * 100 / remote_size))
-                    with _TRANSCRIPT_SYNC_LOCK:
-                        _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)"
-                        _TRANSCRIPT_SYNC[key]["pct"] = pct
-            except (OSError, ValueError) as exc:
-                _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
+        try:
+            # Poll local file size while rsync runs
+            while proc.poll() is None:
+                _clock.sleep(DELAY_STARTUP)
+                try:
+                    if local_tmp.exists() and remote_size > 0:
+                        local_size = local_tmp.stat().st_size
+                        pct = min(99, int(local_size * 100 / remote_size))
+                        with _TRANSCRIPT_SYNC_LOCK:
+                            _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)"
+                            _TRANSCRIPT_SYNC[key]["pct"] = pct
+                except (OSError, ValueError) as exc:
+                    _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
 
-        if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
-            with _TRANSCRIPT_SYNC_LOCK:
-                _TRANSCRIPT_SYNC[key] = {"status": "done", "progress": "Ready", "path": str(local_tmp),
-                                         "started": _TRANSCRIPT_SYNC[key]["started"], "error": None}
-        else:
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            with _TRANSCRIPT_SYNC_LOCK:
-                _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
-                                         "started": _TRANSCRIPT_SYNC[key]["started"],
-                                         "path": None, "error": stderr[:200] or "rsync failed"}
+            if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
+                with _TRANSCRIPT_SYNC_LOCK:
+                    _TRANSCRIPT_SYNC[key] = {"status": "done", "progress": "Ready", "path": str(local_tmp),
+                                             "started": _TRANSCRIPT_SYNC[key]["started"], "error": None}
+            else:
+                stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                with _TRANSCRIPT_SYNC_LOCK:
+                    _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
+                                             "started": _TRANSCRIPT_SYNC[key]["started"],
+                                             "path": None, "error": stderr[:200] or "rsync failed"}
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
     except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
         with _TRANSCRIPT_SYNC_LOCK:
             _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
@@ -14018,7 +14218,7 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
             if not line:
                 continue
             try:
-                entry = cast(dict[str, object], json.loads(line))
+                entry = cast(TranscriptEntry, json.loads(line))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             etype = entry.get("type", "")
@@ -15483,7 +15683,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         page_entries = []
         for e in query_result.get("entries", []):
             try:
-                entry = cast(dict[str, object], json.loads(e["raw_json"]))
+                entry = cast(TranscriptEntry, json.loads(e["raw_json"]))
                 entry["_idx"] = e.get("idx", -1)
                 page_entries.append(entry)
             except (json.JSONDecodeError, KeyError):
@@ -15822,7 +16022,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_register(self, body: bytes = b"") -> None:
         """POST /guest — register as a temporary guest agent."""
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(GuestRegisterBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             data = {}
 
@@ -15919,7 +16119,7 @@ class Handler(BaseHTTPRequestHandler):
         if not guest:
             return
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(GuestSendBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16034,7 +16234,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_reply(self, body: bytes = b"") -> None:
         """POST /guest/reply — worker sends reply to a guest's inbox."""
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(GuestReplyBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16157,7 +16357,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_create(self, body: bytes = b"") -> None:
         """POST /channels — create a group channel."""
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(ChannelCreateBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16225,7 +16425,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/members — add/remove members."""
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(ChannelMembersBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16264,7 +16464,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/send — send message to channel (fan-out)."""
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(ChannelSendBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16506,7 +16706,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(RelaySendBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -16544,7 +16744,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(RelayReplyBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -16633,7 +16833,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_general_comment(self, body: bytes) -> None:
         """Post a general (non-inline) comment on a PR via GitHub API."""
         try:
-            data = cast(dict[str, object], json.loads(body))
+            data = cast(PrCommentBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -16706,7 +16906,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_merge(self, body: bytes) -> None:
         """Merge a PR via GitHub API."""
         try:
-            data = cast(dict[str, object], json.loads(body))
+            data = cast(PrMergeBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -16810,7 +17010,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_comment(self, body: bytes) -> None:
         """Post an inline comment on a PR via GitHub API + notify Telegram."""
         try:
-            data = cast(dict[str, object], json.loads(body))
+            data = cast(PrCommentBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -17248,7 +17448,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.end_headers()
         self.wfile.write(b"OK")
         try:
-            update = cast(dict[str, object], json.loads(body))
+            update = cast(TelegramWebhookBody, json.loads(body))
             update_types = [k for k in update.keys() if k != "update_id"]
             msg = update.get("message", {})
             text = msg.get("text", "") or msg.get("caption", "")
@@ -17280,7 +17480,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         teleported workers.
         """
         try:
-            data = cast(dict[str, object], json.loads(body))
+            data = cast(NotifyBody, json.loads(body))
             text = _str_field(data, "text")
             name = _str_field(data, "name")
 
@@ -17358,7 +17558,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Sends a one-time Telegram alert to admin so they can restart the worker.
         """
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(HealthAlertBody, json.loads(body)) if body else {}
             worker = _str_field(data, "worker", "unknown")
             issue = _str_field(data, "issue", "unknown")
             age = _int_field(data, "transcript_age")
@@ -17385,7 +17585,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Response: {"ok": true}
         """
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(ForgeRegisterBody, json.loads(body)) if body else {}
             name = data.get("Name", data.get("name", ""))
             host = data.get("Host", data.get("host", ""))
             version = data.get("Version", data.get("version", ""))
@@ -17407,8 +17607,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 if admin_chat_id is not None:
                     cid_file = get_chat_id_file(name)
                     if not cid_file.exists():
-                        cid_file.write_text(str(admin_chat_id))
-                        cid_file.chmod(0o600)
+                        _tmp_cid = cid_file.with_suffix('.tmp')
+                        _tmp_cid.write_text(str(admin_chat_id))
+                        _tmp_cid.chmod(0o600)
+                        os.replace(str(_tmp_cid), str(cid_file))
             tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
             conflict = False
             active_workers = []
@@ -17447,7 +17649,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Body: {"name": "gmail"} or {"name": "github"}
         """
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(ConnectorsRestartBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -17466,7 +17668,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         The "from" field (default "system") is prefixed to the message.
         """
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
+            data = cast(SendEndpointBody, json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -17501,7 +17703,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         FILE SUPPORT: Parses [[image:/path|caption]] (photos, animations) and [[file:/path|caption]] (documents, video, audio, voice, stickers) tags.
         """
         try:
-            data = cast(dict[str, object], json.loads(body))
+            data = cast(HookResponseBody, json.loads(body))
             session_name = data.get("session")
             text = data.get("text", "")
 
@@ -17518,8 +17720,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             elif admin_chat_id is not None:
                 chat_id = str(admin_chat_id)
                 ensure_session_dir(session_name)
-                chat_id_file.write_text(chat_id)
-                chat_id_file.chmod(0o600)
+                _tmp_hk = chat_id_file.with_suffix('.tmp')
+                _tmp_hk.write_text(chat_id)
+                _tmp_hk.chmod(0o600)
+                os.replace(str(_tmp_hk), str(chat_id_file))
                 _log(_LOG_INFO, "hook", f"Hook response: auto-created chat_id for session '{session_name}' from admin_chat_id")
             else:
                 _log(_LOG_WARN, "hook", f"Hook response: no chat_id for session '{session_name}'")
@@ -17924,6 +18128,24 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
             print("GitHub connector stopped")
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+
+    # Cancel learning reminder idle scan timer
+    if learning_reminders.idle_scan_timer is not None:
+        try:
+            learning_reminders.idle_scan_timer.cancel()
+        except (RuntimeError, OSError) as exc:
+            _log(_LOG_DEBUG, "shutdown:timer", f"{type(exc).__name__}: {exc}")
+
+    # Cancel pending media group timers
+    with media_groups.lock:
+        for _mg_id, _mg_entry in media_groups.buffer.items():
+            _mg_timer = _mg_entry.get("timer")
+            if _mg_timer is not None:
+                try:
+                    _mg_timer.cancel()
+                except (RuntimeError, OSError) as exc:
+                    _log(_LOG_DEBUG, "shutdown:media_timer", f"{type(exc).__name__}: {exc}")
+        media_groups.buffer.clear()
 
     # Stop tracked adapters
     with processes.adapter_pids_lock:
