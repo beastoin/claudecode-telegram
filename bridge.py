@@ -131,6 +131,8 @@ class TelegramVideo(TypedDict, total=False):
     width: int
     height: int
     duration: int
+    file_name: str
+    mime_type: str
     file_size: int
 
 
@@ -141,6 +143,8 @@ class TelegramAudio(TypedDict, total=False):
     duration: int
     performer: str
     title: str
+    file_name: str
+    mime_type: str
     file_size: int
 
 
@@ -150,6 +154,10 @@ class TelegramSticker(TypedDict, total=False):
     file_unique_id: str
     width: int
     height: int
+    emoji: str
+    type: str
+    is_animated: bool
+    is_video: bool
 
 
 class TelegramMessageDict(TypedDict, total=False):
@@ -169,6 +177,7 @@ class TelegramMessageDict(TypedDict, total=False):
     reply_to_message: "TelegramMessageDict"
     caption: str
     media_group_id: str
+    rich_message: dict[str, object]
 
 
 # Note: Telegram API uses "from" (a Python keyword), so we use functional TypedDict form.
@@ -608,6 +617,13 @@ class ConnectorMetadataDict(TypedDict, total=False):
     """Metadata passed to connector message handlers."""
     number: int
     repo: str
+
+
+class ConnectorAttachmentDict(TypedDict, total=False):
+    """A downloaded file attachment from a connector."""
+    path: str
+    filename: str
+    mimeType: str
 
 
 class ConnectorStatusDict(TypedDict, total=False):
@@ -1058,7 +1074,7 @@ class IncomingMessage:
     # Reply context (Telegram API reply_to_message JSON)
     reply_to: TelegramMessageDict | None = None
     # Raw message dict (for edge cases during migration)
-    raw_msg: TelegramMessageDict | None = None
+    raw_msg: TelegramMessageDict = field(default_factory=lambda: TelegramMessageDict())
 
     @classmethod
     def from_update(cls: type["IncomingMessage"], update: TelegramUpdate) -> "IncomingMessage":
@@ -2291,26 +2307,27 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
 def _machine_health(machine: Machine) -> MachineHealthDict:
     """Build a health status dict for a machine (disk, memory, IO, up/down)."""
     host_label = machine.ssh_target or "VPS"
-    health = {
-        "status": "up" if machine.is_local else "unknown",
-        "down_since": None,
-        "last_error": None,
-        "disk": host_health.disk_usage.get(host_label),
-        "memory": host_health.mem_usage.get(host_label),
-        "io": host_health.io_usage.get(host_label),
-    }
-    if machine.ssh_target:
-        if host_health.down.get(machine.ssh_target, False):
-            health["status"] = "down"
-            health["down_since"] = host_health.down_since.get(machine.ssh_target)
-            health["last_error"] = host_health.last_error.get(machine.ssh_target)
-        elif (
-            machine.ssh_target in host_health.ssh_failures
-            or machine.ssh_target in host_health.disk_usage
-            or machine.ssh_target in host_health.mem_usage
-            or machine.ssh_target in host_health.io_usage
-        ):
-            health["status"] = "up"
+    with watchdog.lock:
+        health = {
+            "status": "up" if machine.is_local else "unknown",
+            "down_since": None,
+            "last_error": None,
+            "disk": host_health.disk_usage.get(host_label),
+            "memory": host_health.mem_usage.get(host_label),
+            "io": host_health.io_usage.get(host_label),
+        }
+        if machine.ssh_target:
+            if host_health.down.get(machine.ssh_target, False):
+                health["status"] = "down"
+                health["down_since"] = host_health.down_since.get(machine.ssh_target)
+                health["last_error"] = host_health.last_error.get(machine.ssh_target)
+            elif (
+                machine.ssh_target in host_health.ssh_failures
+                or machine.ssh_target in host_health.disk_usage
+                or machine.ssh_target in host_health.mem_usage
+                or machine.ssh_target in host_health.io_usage
+            ):
+                health["status"] = "up"
     return health
 
 
@@ -2449,17 +2466,19 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
         _remote_run(["git", "-C", source_cwd, "add", "-A"],
                     host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
 
-        # Create stash commit (non-mutating — working tree untouched)
-        r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
-                        host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        stash_sha = r.stdout.strip() if r.returncode == 0 else ""
-
-        # Restore original index: reset, then re-stage originally staged files
-        _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-        if staged_files:
-            _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
+        try:
+            # Create stash commit (non-mutating — working tree untouched)
+            r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
+                            host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+            stash_sha = r.stdout.strip() if r.returncode == 0 else ""
+        finally:
+            # Restore original index: reset, then re-stage originally staged files.
+            # MUST run even on exception to avoid leaving the index dirty.
+            _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
                         host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
+            if staged_files:
+                _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
+                            host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
 
         # Determine what to push: stash commit if dirty, HEAD if clean
         push_sha = stash_sha if stash_sha else orig_sha
@@ -2687,7 +2706,11 @@ def _acquire_flock(tmux_name: str) -> int:
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
     import fcntl
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -3035,11 +3058,16 @@ def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
     except OSError:
         stderr_fh = None  # Fall back to DEVNULL if dir doesn't exist yet
 
-    proc = _subprocess_runner.popen(
-        ["python3", str(adapter_path), worker_name, text, bridge_url, str(sessions_dir)],
-        stdout=subprocess.DEVNULL,
-        stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
-    )
+    try:
+        proc = _subprocess_runner.popen(
+            ["python3", str(adapter_path), worker_name, text, bridge_url, str(sessions_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
+        )
+    except OSError:
+        if stderr_fh:
+            stderr_fh.close()
+        raise
     with processes.adapter_pids_lock:
         processes.adapter_pids[worker_name] = (proc, stderr_fh)
     return True
@@ -3073,11 +3101,16 @@ def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
     except OSError:
         stderr_fh = None
 
-    proc = _subprocess_runner.popen(
-        ["ssh", "-o", "ConnectTimeout=5", host, remote_cmd],
-        stdout=subprocess.DEVNULL,
-        stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
-    )
+    try:
+        proc = _subprocess_runner.popen(
+            ["ssh", "-o", "ConnectTimeout=5", host, remote_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
+        )
+    except OSError:
+        if stderr_fh:
+            stderr_fh.close()
+        raise
     with processes.adapter_pids_lock:
         processes.adapter_pids[worker_name] = (proc, stderr_fh)
     _log(_LOG_INFO, "adapter", f"Spawned remote adapter for '{worker_name}' on {host}")
@@ -3279,13 +3312,19 @@ def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
 # ── BridgeRuntimeState: typed in-memory state ──
 
 
+class _MentionSnapshot(NamedTuple):
+    """Immutable snapshot of MentionTracker for test save/restore."""
+    target: str | None
+    count: int
+    ts: float
+
+
 class MentionTracker:
     """Tracks consecutive @mentions for auto-focus.
 
-    Supports dict-style access for backward compatibility with code that
-    does ``_last_mention["target"]``, ``_last_mention["count"] += 1``, etc.
+    All access uses attribute style (``_last_mention.target``, etc.)
+    for proper type narrowing.
     """
-    _KEYS = ("target", "count", "ts")
 
     def __init__(self) -> None:
         """Initialize mention streak tracking (count and last timestamp)."""
@@ -3293,35 +3332,30 @@ class MentionTracker:
         self.count: int = 0
         self.ts: float = 0.0
 
-    def __getitem__(self, key: str) -> str | int | float | None:
-        """Get a value by key (dict-like access)."""
-        return getattr(self, key)
+    def snapshot(self) -> _MentionSnapshot:
+        """Capture current state for later restore (used in tests)."""
+        return _MentionSnapshot(target=self.target, count=self.count, ts=self.ts)
 
-    def __setitem__(self, key: str, value: str | int | float | None) -> None:
-        """Set a value by key (dict-like access)."""
-        setattr(self, key, value)
+    def restore(self, snap: _MentionSnapshot) -> None:
+        """Restore state from a snapshot (used in tests)."""
+        self.target = snap.target
+        self.count = snap.count
+        self.ts = snap.ts
 
-    def get(self, key: str, default: str | int | float | None = None) -> str | int | float | None:
-        """Get a value with optional default (dict-like access)."""
-        return getattr(self, key, default)
 
-    def keys(self) -> tuple[str, ...]:
-        """Return all keys (dict-like access)."""
-        return self._KEYS
-
-    def __iter__(self) -> Iterator[str]:
-        """Iterate over keys (dict-like access)."""
-        return iter(self._KEYS)
-
-    def update(self, other: dict[str, str | int | float | None]) -> None:
-        """Update from a mapping (dict-like access)."""
-        for k, v in other.items():
-            if k in self._KEYS:
-                setattr(self, k, v)
+class _StateSnapshot(NamedTuple):
+    """Immutable snapshot of BridgeRuntimeState for test save/restore."""
+    active: str | None
+    startup_notified: bool
+    tts_enabled: bool
 
 
 class BridgeRuntimeState:
-    """Typed in-memory state (RAM only — tmux IS persistence)."""
+    """Typed in-memory state (RAM only — tmux IS persistence).
+
+    All access uses attribute style (``state.active``, etc.)
+    for proper type narrowing.
+    """
     def __init__(self) -> None:
         """Initialize bridge runtime state (focus, TTS, admin, notifications)."""
         self.active: str | None = None
@@ -3329,45 +3363,19 @@ class BridgeRuntimeState:
         self.tts_enabled: bool = False
         self.mention: MentionTracker = MentionTracker()
 
-    # ── dict-compat layer (for state["active"] etc.) ──
-    _KEY_MAP = {"active": "active", "startup_notified": "startup_notified",
-                "tts_enabled": "tts_enabled"}
+    def snapshot(self) -> _StateSnapshot:
+        """Capture current state for later restore (used in tests)."""
+        return _StateSnapshot(
+            active=self.active,
+            startup_notified=self.startup_notified,
+            tts_enabled=self.tts_enabled,
+        )
 
-    def __getitem__(self, key: str) -> str | bool | None:
-        """Get a value by key (dict-like access)."""
-        attr = self._KEY_MAP.get(key)
-        if attr:
-            return getattr(self, attr)
-        raise KeyError(key)
-
-    def __setitem__(self, key: str, value: str | bool | None) -> None:
-        """Set a value by key (dict-like access)."""
-        attr = self._KEY_MAP.get(key)
-        if attr:
-            setattr(self, attr, value)
-        else:
-            raise KeyError(key)
-
-    def get(self, key: str, default: str | bool | None = None) -> str | bool | None:
-        """Get a value with optional default (dict-like access)."""
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-    def keys(self) -> list[str]:
-        """Return all keys (dict-like access)."""
-        return list(self._KEY_MAP.keys())
-
-    def __iter__(self) -> Iterator[str]:
-        """Iterate over keys (dict-like access)."""
-        return iter(self._KEY_MAP)
-
-    def update(self, other: dict[str, str | bool | None]) -> None:
-        """Update from a mapping (dict-like access)."""
-        for k, v in other.items():
-            if k in self._KEY_MAP:
-                setattr(self, self._KEY_MAP[k], v)
+    def restore(self, snap: _StateSnapshot) -> None:
+        """Restore state from a snapshot (used in tests)."""
+        self.active = snap.active
+        self.startup_notified = snap.startup_notified
+        self.tts_enabled = snap.tts_enabled
 
 
 state = BridgeRuntimeState()
@@ -3578,12 +3586,12 @@ watchdog = WorkerWatchdogState()
 class HostHealthState:
     """Tracks health metrics for all remote hosts (SSH, disk, CPU, memory, IO, worktrees, Tailscale).
 
-    Thread safety: all reads/writes to mutable dicts must be under self.lock.
+    Thread safety: all reads/writes to mutable dicts must be under watchdog.lock
+    (the canonical lock for all watchdog + host_health state).
     """
 
     def __init__(self) -> None:
         """Initialize per-host health metrics (SSH, disk, memory, IO, CPU, Tailscale)."""
-        self.lock: threading.Lock = threading.Lock()
         # SSH connectivity
         self.ssh_failures: dict[str, int] = {}
         self.down: dict[str, bool] = {}
@@ -3690,7 +3698,7 @@ def _read_learning_reminder(name: str) -> str:
     """Read learning reminder from file, substitute {name}. Falls back to hardcoded constant."""
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
-            text = open(_LEARNING_REMINDER_PATH).read().strip()
+            text = Path(_LEARNING_REMINDER_PATH).read_text().strip()
             if text:
                 return text.replace("{name}", name)
     except OSError as e:
@@ -4151,7 +4159,7 @@ def read_checkin_note() -> str:
     try:
         path = _CHECKIN_NOTE_PATH
         if os.path.isfile(path):
-            text = open(path).read().strip()
+            text = Path(path).read_text().strip()
             if text:
                 return text
     except OSError as e:
@@ -4591,9 +4599,9 @@ class TelegramTransport(MessageTransport):
                 _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK)
                 r = _subprocess_runner.run(
                     ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
-                    capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
+                    capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
                 if r.returncode != 0:
-                    _log(_LOG_ERROR, "bridge", f"rsync inbound failed (exit {r.returncode}): {host}:{remote_inbox}/ -> {r.stderr.decode(errors='replace').strip()}")
+                    _log(_LOG_ERROR, "bridge", f"rsync inbound failed (exit {r.returncode}): {host}:{remote_inbox}/ -> {r.stderr.strip()}")
             return str(local_path)
         except (subprocess.SubprocessError, OSError) as e:
             _log(_LOG_ERROR, "bridge", f"Download error: {e}")
@@ -5192,35 +5200,36 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     and returns (bytes, filename).  If no resize is needed, returns the
     original file bytes unchanged.
     """
+    photo_path = Path(photo_path)
     try:
         from PIL import Image
-        img = Image.open(photo_path)
-        w, h = img.size
-        needs_resize = (
-            w + h > TELEGRAM_PHOTO_MAX_SUM or
-            w > TELEGRAM_PHOTO_MAX_DIM or
-            h > TELEGRAM_PHOTO_MAX_DIM
-        )
-        if needs_resize:
-            # Scale proportionally so both constraints are satisfied
-            scale = min(
-                TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
-                TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
-                TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1),
+        with Image.open(photo_path) as img:
+            w, h = img.size
+            needs_resize = (
+                w + h > TELEGRAM_PHOTO_MAX_SUM or
+                w > TELEGRAM_PHOTO_MAX_DIM or
+                h > TELEGRAM_PHOTO_MAX_DIM
             )
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-            import io
-            buf = io.BytesIO()
-            fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
-            if fmt == "PNG" and img.mode not in ("RGBA", "P", "L", "LA"):
-                img = img.convert("RGBA")
-            elif fmt == "JPEG" and img.mode != "RGB":
-                img = img.convert("RGB")
-            img.save(buf, format=fmt)
-            _log(_LOG_INFO, "telegram", f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
-            return buf.getvalue(), photo_path.name
+            if needs_resize:
+                # Scale proportionally so both constraints are satisfied
+                scale = min(
+                    TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
+                    TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
+                    TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1),
+                )
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                resized = img.resize((new_w, new_h), Image.LANCZOS)
+                import io
+                buf = io.BytesIO()
+                fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
+                if fmt == "PNG" and resized.mode not in ("RGBA", "P", "L", "LA"):
+                    resized = resized.convert("RGBA")
+                elif fmt == "JPEG" and resized.mode != "RGB":
+                    resized = resized.convert("RGB")
+                resized.save(buf, format=fmt)
+                _log(_LOG_INFO, "telegram", f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
+                return buf.getvalue(), photo_path.name
         return photo_path.read_bytes(), photo_path.name
     except ImportError:
         return photo_path.read_bytes(), photo_path.name
@@ -7041,13 +7050,9 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         if usage is None:
             continue
 
-        with watchdog.lock:
-            host_health.disk_usage[host_label] = {**usage, "ts": now}
-
         # Two-tier: critical (95% or <5GB free), warning (85%), ok (below 85%)
         is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
         is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
-        prev_level = host_health.disk_alerted.get(host_label, False)  # False, "warning", "critical"
 
         if is_critical:
             current_level = "critical"
@@ -7056,44 +7061,42 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         else:
             current_level = False
 
-        # Escalation or new alert
-        if current_level and current_level != prev_level:
-            # Don't re-alert if downgrading from critical→warning (that's partial recovery)
-            if current_level == "critical" or not prev_level:
-                last_alert = host_health.disk_alert_ts.get(host_label, 0)
-                if now - last_alert >= DISK_ALERT_COOLDOWN:
-                    if current_level == "critical":
-                        alert_text = (
-                            f"🔴 Disk space CRITICAL: {host_label}\n"
-                            f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)\n"
-                            f"Action needed: clean up old files, worktrees, or logs"
-                        )
-                    else:
-                        alert_text = (
-                            f"⚠️ Disk space warning: {host_label}\n"
-                            f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)"
-                        )
-                    host_health.disk_alert_ts[host_label] = now
+        # Determine alert action under lock, send outside
+        alert_text: str | None = None
+        with watchdog.lock:
+            host_health.disk_usage[host_label] = {**usage, "ts": now}
+            prev_level = host_health.disk_alerted.get(host_label, False)
+
+            if current_level and current_level != prev_level:
+                if current_level == "critical" or not prev_level:
+                    last_alert = host_health.disk_alert_ts.get(host_label, 0)
+                    if now - last_alert >= DISK_ALERT_COOLDOWN:
+                        if current_level == "critical":
+                            alert_text = (
+                                f"🔴 Disk space CRITICAL: {host_label}\n"
+                                f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)\n"
+                                f"Action needed: clean up old files, worktrees, or logs"
+                            )
+                        else:
+                            alert_text = (
+                                f"⚠️ Disk space warning: {host_label}\n"
+                                f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)"
+                            )
+                        host_health.disk_alert_ts[host_label] = now
+                        host_health.disk_alerted[host_label] = current_level
+                else:
                     host_health.disk_alerted[host_label] = current_level
-                    if admin_chat_id:
-                        try:
-                            transport.send_text(admin_chat_id, alert_text)
-                            _log(_LOG_WARN, "watchdog", f"Disk alert: {alert_text.splitlines()[0]}")
-                        except (urllib.error.URLError, OSError, TimeoutError) as e:
-                            _log(_LOG_ERROR, "watchdog", f"Disk alert error: {e}")
-            else:
-                # Downgrade from critical to warning — just update state
-                host_health.disk_alerted[host_label] = current_level
-        elif not current_level and prev_level:
-            host_health.disk_alerted[host_label] = False
-            if admin_chat_id:
-                try:
-                    transport.send_text(
-                        admin_chat_id,
-                        f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
-                    )
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+            elif not current_level and prev_level:
+                host_health.disk_alerted[host_label] = False
+                alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
+
+        # Send alerts outside the lock
+        if alert_text and admin_chat_id:
+            try:
+                transport.send_text(admin_chat_id, alert_text)
+                _log(_LOG_WARN, "watchdog", f"Disk alert: {alert_text.splitlines()[0]}")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                _log(_LOG_ERROR, "watchdog", f"Disk alert error: {e}")
 
 
 def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
@@ -7207,42 +7210,37 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
         if usage is None:
             continue
 
+        is_critical = usage["pct"] >= MEM_ALERT_THRESHOLD_PCT or usage["avail_gb"] < MEM_ALERT_THRESHOLD_GB
+
+        alert_text = None
         with watchdog.lock:
             host_health.mem_usage[host_label] = {**usage, "ts": now}
+            was_alerted = host_health.mem_alerted.get(host_label, False)
 
-        is_critical = usage["pct"] >= MEM_ALERT_THRESHOLD_PCT or usage["avail_gb"] < MEM_ALERT_THRESHOLD_GB
-        was_alerted = host_health.mem_alerted.get(host_label, False)
-
-        if is_critical and not was_alerted:
-            last_alert = host_health.mem_alert_ts.get(host_label, 0)
-            if now - last_alert >= MEM_ALERT_COOLDOWN:
-                top_lines = ""
-                for p in usage.get("top_procs", [])[:3]:
-                    top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
-                alert_text = (
-                    f"🧠 Memory critical: {host_label}\n"
-                    f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)"
-                )
-                if top_lines:
-                    alert_text += f"\nTop consumers:{top_lines}"
-                host_health.mem_alert_ts[host_label] = now
-                host_health.mem_alerted[host_label] = True
-                if admin_chat_id:
-                    try:
-                        transport.send_text(admin_chat_id, alert_text)
-                        _log(_LOG_WARN, "watchdog", f"Memory alert: {alert_text.splitlines()[0]}")
-                    except (urllib.error.URLError, OSError, TimeoutError) as e:
-                        _log(_LOG_ERROR, "watchdog", f"Memory alert error: {e}")
-        elif not is_critical and was_alerted:
-            host_health.mem_alerted[host_label] = False
-            if admin_chat_id:
-                try:
-                    transport.send_text(
-                        admin_chat_id,
-                        f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
+            if is_critical and not was_alerted:
+                last_alert = host_health.mem_alert_ts.get(host_label, 0)
+                if now - last_alert >= MEM_ALERT_COOLDOWN:
+                    top_lines = ""
+                    for p in usage.get("top_procs", [])[:3]:
+                        top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+                    alert_text = (
+                        f"🧠 Memory critical: {host_label}\n"
+                        f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)"
                     )
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+                    if top_lines:
+                        alert_text += f"\nTop consumers:{top_lines}"
+                    host_health.mem_alert_ts[host_label] = now
+                    host_health.mem_alerted[host_label] = True
+            elif not is_critical and was_alerted:
+                host_health.mem_alerted[host_label] = False
+                alert_text = f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
+
+        if alert_text and admin_chat_id:
+            try:
+                transport.send_text(admin_chat_id, alert_text)
+                _log(_LOG_WARN, "watchdog", f"Memory alert: {alert_text.splitlines()[0]}")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                _log(_LOG_ERROR, "watchdog", f"Memory alert error: {e}")
 
 
 def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
@@ -7346,40 +7344,35 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
         if usage is None:
             continue
 
+        is_critical = usage["iowait_pct"] >= IO_ALERT_IOWAIT_PCT
+
+        alert_text = None
         with watchdog.lock:
             host_health.io_usage[host_label] = {**usage, "ts": now}
+            was_alerted = host_health.io_alerted.get(host_label, False)
 
-        is_critical = usage["iowait_pct"] >= IO_ALERT_IOWAIT_PCT
-        was_alerted = host_health.io_alerted.get(host_label, False)
-
-        if is_critical and not was_alerted:
-            last_alert = host_health.io_alert_ts.get(host_label, 0)
-            if now - last_alert >= IO_ALERT_COOLDOWN:
-                alert_text = (
-                    f"⚡ IO critical: {host_label}\n"
-                    f"IO wait: {usage['iowait_pct']}%\n"
-                    f"IOPS: {usage['read_iops']}r + {usage['write_iops']}w"
-                )
-                if usage["util_pct"]:
-                    alert_text += f" | disk util: {usage['util_pct']}%"
-                host_health.io_alert_ts[host_label] = now
-                host_health.io_alerted[host_label] = True
-                if admin_chat_id:
-                    try:
-                        transport.send_text(admin_chat_id, alert_text)
-                        _log(_LOG_WARN, "watchdog", f"IO alert: {alert_text.splitlines()[0]}")
-                    except (urllib.error.URLError, OSError, TimeoutError) as e:
-                        _log(_LOG_ERROR, "watchdog", f"IO alert error: {e}")
-        elif not is_critical and was_alerted:
-            host_health.io_alerted[host_label] = False
-            if admin_chat_id:
-                try:
-                    transport.send_text(
-                        admin_chat_id,
-                        f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
+            if is_critical and not was_alerted:
+                last_alert = host_health.io_alert_ts.get(host_label, 0)
+                if now - last_alert >= IO_ALERT_COOLDOWN:
+                    alert_text = (
+                        f"⚡ IO critical: {host_label}\n"
+                        f"IO wait: {usage['iowait_pct']}%\n"
+                        f"IOPS: {usage['read_iops']}r + {usage['write_iops']}w"
                     )
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+                    if usage["util_pct"]:
+                        alert_text += f" | disk util: {usage['util_pct']}%"
+                    host_health.io_alert_ts[host_label] = now
+                    host_health.io_alerted[host_label] = True
+            elif not is_critical and was_alerted:
+                host_health.io_alerted[host_label] = False
+                alert_text = f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
+
+        if alert_text and admin_chat_id:
+            try:
+                transport.send_text(admin_chat_id, alert_text)
+                _log(_LOG_WARN, "watchdog", f"IO alert: {alert_text.splitlines()[0]}")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                _log(_LOG_ERROR, "watchdog", f"IO alert error: {e}")
 
 
 def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[str, int | float | str]]:
@@ -7576,31 +7569,26 @@ def _probe_tailscale() -> None:
     except (subprocess.SubprocessError, OSError):
         is_up = False
 
-    if not is_up and not host_health.tailscale_down:
-        if now - host_health.tailscale_alert_ts >= INFRA_ALERT_COOLDOWN:
-            host_health.tailscale_down = True
-            host_health.tailscale_alert_ts = now
-            if admin_chat_id:
-                try:
-                    transport.send_text(
-                        admin_chat_id,
-                        "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\n"
-                        "Run: sudo tailscale up"
-                    )
-                    _log(_LOG_INFO, "watchdog", "[watchdog] Tailscale DOWN alert sent")
-                except (urllib.error.URLError, OSError, TimeoutError) as e:
-                    _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
-    elif is_up and host_health.tailscale_down:
-        host_health.tailscale_down = False
-        if admin_chat_id:
-            try:
-                transport.send_text(
-                    admin_chat_id,
-                    "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
+    alert_text = None
+    with watchdog.lock:
+        if not is_up and not host_health.tailscale_down:
+            if now - host_health.tailscale_alert_ts >= INFRA_ALERT_COOLDOWN:
+                host_health.tailscale_down = True
+                host_health.tailscale_alert_ts = now
+                alert_text = (
+                    "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\n"
+                    "Run: sudo tailscale up"
                 )
-                _log(_LOG_INFO, "watchdog", "[watchdog] Tailscale recovery alert sent")
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+        elif is_up and host_health.tailscale_down:
+            host_health.tailscale_down = False
+            alert_text = "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
+
+    if alert_text and admin_chat_id:
+        try:
+            transport.send_text(admin_chat_id, alert_text)
+            _log(_LOG_WARN, "watchdog", f"Tailscale: {alert_text.splitlines()[0]}")
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
 
 
 # (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
@@ -9131,10 +9119,10 @@ class WorkerManager:
                     if info.get(key):
                         registered[name][key] = info.get(key)
 
-        if state["active"] and state["active"] not in registered:
-            state["active"] = None
-        if registered and not state["active"]:
-            state["active"] = list(registered.keys())[0]
+        if state.active and state.active not in registered:
+            state.active = None
+        if registered and not state.active:
+            state.active = list(registered.keys())[0]
 
         # Update cache
         with self._sessions_cache_lock:
@@ -9447,7 +9435,7 @@ class WorkerManager:
         else:
             self.send(name, welcome)
 
-        state["active"] = name
+        state.active = name
         save_last_active(name)
         _registry_add(name, backend, chat_id)
         _reset_learning_reminder(name)
@@ -9496,8 +9484,8 @@ class WorkerManager:
         _registry_remove(name)
         self.invalidate_sessions_cache()
 
-        if state["active"] == name:
-            state["active"] = None
+        if state.active == name:
+            state.active = None
             self.get_registered_sessions()
 
         return True, None
@@ -10051,11 +10039,11 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     try:
         r = _subprocess_runner.run(
             ["rsync", "-az", f"{host}:{remote_path}", local_path],
-            capture_output=True, timeout=TIMEOUT_RSYNC)
+            capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
         if r.returncode == 0 and os.path.getsize(local_path) > 0:
             return local_path
         if r.returncode != 0:
-            _log(_LOG_ERROR, "bridge", f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.decode(errors='replace').strip()}")
+            _log(_LOG_ERROR, "bridge", f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.strip()}")
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_WARN, "bridge", f"Remote file fetch failed: {host}:{remote_path} -> {e}")
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -10314,7 +10302,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
     clean_text, images, files, speak_text = _parse_response_media(name, text)
 
     # Auto-TTS: use clean text when no explicit [[speak:...]] tag
-    if speak_text is None and TTS_ENDPOINT and state.get("tts_enabled", True):
+    if speak_text is None and TTS_ENDPOINT and state.tts_enabled:
         speak_text = clean_text
 
     # Debug: log very short text (helps trace empty "name:" messages)
@@ -10374,7 +10362,7 @@ def switch_session(name: str) -> tuple[bool, str | None]:
     if name not in registered:
         return False, f"Worker '{name}' not found"
 
-    state["active"] = name
+    state.active = name
     save_last_active(name)
     return True, None
 
@@ -11381,7 +11369,7 @@ class CommandRouter:
                          f"{source_host}:{remote_file}", local_file],
                         capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
 
-    def _run_teleport_preflight(self, target_host: str, worker_name: str, backend_name: str) -> tuple[bool, list[str]]:
+    def _run_teleport_preflight(self, target_host: str, worker_name: str, backend_name: str) -> list[str]:
         """Run team-defined preflight check scripts against target.
 
         Scripts live in agent-config/teleport-preflight.d/*.sh (team-managed)
@@ -11510,7 +11498,7 @@ class CommandRouter:
                              host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode == 0 and r.stdout.strip():
                 remote_data = cast(dict[str, object], json.loads(r.stdout))
-                local_data = cast(dict[str, object], json.loads(open(local_creds).read()))
+                local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))
                 remote_oauth = remote_data.get("claudeAiOauth", {})
                 local_oauth = local_data.get("claudeAiOauth", {})
                 remote_refresh = remote_oauth.get("refreshToken", "")
@@ -11750,11 +11738,11 @@ class CommandRouter:
 
     def cmd_pause(self, chat_id: ChatId) -> bool:
         """Handle the /pause command — send Ctrl-C to a worker."""
-        if not state["active"]:
+        if not state.active:
             self.reply(chat_id, "No one assigned.")
             return True
 
-        name = state["active"]
+        name = state.active
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if session:
@@ -11809,17 +11797,17 @@ class CommandRouter:
         if name_arg:
             name = name_arg
         else:
-            if not state["active"]:
+            if not state.active:
                 registered = self.workers.get_registered_sessions()
                 if len(registered) == 1:
                     name = next(iter(registered))
-                    state["active"] = name
+                    state.active = name
                     save_last_active(name)
                 else:
                     self.reply(chat_id, "No one assigned.")
                     return True
             else:
-                name = state["active"]
+                name = state.active
 
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
@@ -11832,7 +11820,7 @@ class CommandRouter:
             return True
 
         if name_arg:
-            state["active"] = name
+            state.active = name
             save_last_active(name)
 
         # Guard: skip restart if worker is already running (unless --force)
@@ -12071,7 +12059,7 @@ class CommandRouter:
 
         # Snapshot worker names now; sort alphabetically, focused worker last
         names = sorted(registered.keys())
-        active = state.get("active")
+        active = state.active
         if active and active in names:
             names.remove(active)
             names.append(active)
@@ -12556,7 +12544,7 @@ class CommandRouter:
             if reply_worker:
                 target = reply_worker
         if not target:
-            target = state["active"]
+            target = state.active
 
         # Download and route each item to the same target
         all_paths = []
@@ -12623,11 +12611,11 @@ class CommandRouter:
 
         self._route_media_message(full_text, caption, chat_id, msg_id, msg=first_msg)
 
-    def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> tuple[str | None, str | None]:
+    def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> str | None:
         """Determine which worker's inbox to download media into.
 
         Uses same priority as _route_media_message: @mentions > reply-to > active.
-        Returns the target worker name (or state["active"] as fallback).
+        Returns the target worker name (or state.active as fallback).
         """
         if caption:
             targets, _ = self.parse_at_mentions(caption)
@@ -12636,7 +12624,7 @@ class CommandRouter:
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
             return reply_worker
-        return state["active"]
+        return state.active
 
     def _route_media_message(self, media_text: str, caption: str, chat_id: int | str, msg_id: int, msg: TelegramMessageDict | None=None) -> None:
         """Route a media message, honoring @mentions in caption or reply-to context."""
@@ -12673,9 +12661,9 @@ class CommandRouter:
 
     def _reset_mention_streak(self) -> None:
         """Reset the @mention auto-focus streak tracker."""
-        _last_mention["target"] = None
-        _last_mention["count"] = 0
-        _last_mention["ts"] = 0
+        _last_mention.target = None
+        _last_mention.count = 0
+        _last_mention.ts = 0
 
     def _handle_mention_routing(self, targets: list[str], message: str,
                                 text: str, chat_id: int, msg_id: int,
@@ -12688,7 +12676,7 @@ class CommandRouter:
             target = targets[0]
             registered = self.workers.get_registered_sessions()
             if target in registered:
-                state["active"] = target
+                state.active = target
                 save_last_active(target)
             else:
                 self.reply(chat_id, f"Can't focus guest {target}.")
@@ -12727,14 +12715,14 @@ class CommandRouter:
         now = _clock.time()
         if len(targets) == 1 and targets[0] in registered:
             target = targets[0]
-            if _last_mention["target"] == target and now - _last_mention.get("ts", 0) <= 60:
-                _last_mention["count"] += 1
+            if _last_mention.target == target and now - _last_mention.ts <= 60:
+                _last_mention.count += 1
             else:
-                _last_mention["target"] = target
-                _last_mention["count"] = 1
-            _last_mention["ts"] = now
-            if _last_mention["count"] >= 2 and state["active"] != target:
-                state["active"] = target
+                _last_mention.target = target
+                _last_mention.count = 1
+            _last_mention.ts = now
+            if _last_mention.count >= 2 and state.active != target:
+                state.active = target
                 save_last_active(target)
                 self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
         else:
@@ -12907,7 +12895,7 @@ class CommandRouter:
         """Send the bridge startup notification to the admin chat."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
-        active = state["active"]
+        active = state.active
 
         lines = ["I'm online and ready."]
         if sessions:
@@ -13033,7 +13021,7 @@ class CommandRouter:
         if not self._check_admin(chat_id):
             return True
 
-        if not state["active"] and not self.parse_at_mentions(text)[0]:
+        if not state.active and not self.parse_at_mentions(text)[0]:
             self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
             return True
 
@@ -13121,8 +13109,8 @@ class CommandRouter:
             save_last_chat_id(chat_id)
             _log(_LOG_INFO, "admin", f"Admin registered: {chat_id}")
 
-        if not state["startup_notified"]:
-            state["startup_notified"] = True
+        if not state.startup_notified:
+            state.startup_notified = True
             self.send_startup_message(chat_id)
 
         if chat_id != admin_chat_id:
@@ -13133,8 +13121,8 @@ class CommandRouter:
 
         if text.startswith("/"):
             if self.handle_command(text, chat_id, msg_id):
-                _last_mention["target"] = None
-                _last_mention["count"] = 0
+                _last_mention.target = None
+                _last_mention.count = 0
                 return
 
         if re.match(r'^\s*@all(?:\s|[:,]|$)', text, re.IGNORECASE):
@@ -13200,8 +13188,8 @@ class CommandRouter:
         worker_name = cmd[1:]
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
-            prev_focus = state["active"]
-            state["active"] = worker_name
+            prev_focus = state.active
+            state.active = worker_name
             save_last_active(worker_name)
             if not arg:
                 return True
@@ -13427,7 +13415,7 @@ class CommandRouter:
                 "context_pct": context_pct,
             }
 
-        lines = format_team_lines(registered, state["active"], worker_live=worker_live)
+        lines = format_team_lines(registered, state.active, worker_live=worker_live)
         self.reply(chat_id, "\n".join(lines))
         return True
 
@@ -13442,11 +13430,11 @@ class CommandRouter:
                 self.reply(chat_id, f"Unknown worker: {target}. Check /team for who's available.")
                 return True
             name = target
-        elif not state["active"]:
+        elif not state.active:
             self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
             return True
         else:
-            name = state["active"]
+            name = state.active
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if not session:
@@ -13567,13 +13555,13 @@ class CommandRouter:
         """Toggle auto-TTS for worker responses. /voice on|off or /voice to show status."""
         arg = arg.strip().lower()
         if arg == "on":
-            state["tts_enabled"] = True
+            state.tts_enabled = True
             self.reply(chat_id, "Voice mode ON — responses include voice messages.")
         elif arg == "off":
-            state["tts_enabled"] = False
+            state.tts_enabled = False
             self.reply(chat_id, "Voice mode OFF — text only.")
         else:
-            status = "ON" if state["tts_enabled"] else "OFF"
+            status = "ON" if state.tts_enabled else "OFF"
             self.reply(chat_id, f"Voice mode: {status}\n/voice on — responses include voice\n/voice off — text only")
         return True
 
@@ -13633,7 +13621,7 @@ class CommandRouter:
         """Route a text message to the currently focused worker."""
         registered = self.workers.get_registered_sessions()
 
-        if not state["active"]:
+        if not state.active:
             if registered:
                 names = ", ".join(registered.keys())
                 self.reply(chat_id, f"No one assigned. Your team: {names}\nWho should I talk to?")
@@ -13642,7 +13630,7 @@ class CommandRouter:
                 self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
                 return
 
-        self.route_message(state["active"], text, chat_id, msg_id, one_off=False)
+        self.route_message(state.active, text, chat_id, msg_id, one_off=False)
 
     def route_to_all(self, text: str, chat_id: int | str, msg_id: int) -> None:
         """Broadcast a text message to all active workers."""
@@ -17942,7 +17930,7 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
 
     last_active = load_last_active()
     if last_active and last_active in registered:
-        state["active"] = last_active
+        state.active = last_active
         print(f"Restored last active worker: {last_active}")
     elif last_active:
         print(f"Last active worker '{last_active}' no longer exists")
@@ -18001,9 +17989,9 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
 
 def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
     """Send startup notification to admin via Telegram."""
-    state["startup_notified"] = True
+    state.startup_notified = True
     sessions = list(registered.keys())
-    active = state["active"]
+    active = state.active
 
     lines = ["I'm online and ready."]
     if sessions:
@@ -18180,9 +18168,9 @@ def _connector_export_github(number: int, repo: str) -> str | None:
     return None
 
 
-def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[str] | None, ConnectorMetadataDict | None], None]:
+def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[ConnectorAttachmentDict] | None, ConnectorMetadataDict | None], None]:
     """Create a message handler for a connector tag (Gmail/GitHub)."""
-    def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[str] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
+    def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[ConnectorAttachmentDict] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
         """Route connector message to Telegram admin and/or target workers."""
         if plain_text is None:
             plain_text = html_text

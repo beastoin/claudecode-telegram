@@ -1163,7 +1163,7 @@ import bridge
 
 # Set up state
 bridge.admin_chat_id = 12345
-bridge.state['active'] = 'testworker'
+bridge.state.active = 'testworker'
 
 # Track what gets routed
 routed_messages = []
@@ -1180,7 +1180,7 @@ class FakeRouter(bridge.CommandRouter):
     def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
         routed_messages.append(media_text)
     def _resolve_media_target(self, caption, msg):
-        return bridge.state['active']
+        return bridge.state.active
 
 router = FakeRouter()
 
@@ -1220,7 +1220,7 @@ from unittest.mock import patch, MagicMock
 import bridge
 
 bridge.admin_chat_id = 12345
-bridge.state['active'] = 'testworker'
+bridge.state.active = 'testworker'
 
 routed_messages = []
 
@@ -1236,7 +1236,7 @@ class FakeRouter(bridge.CommandRouter):
     def _route_media_message(self, media_text, caption, chat_id, msg_id, msg=None):
         routed_messages.append(media_text)
     def _resolve_media_target(self, caption, msg):
-        return bridge.state['active']
+        return bridge.state.active
 
 router = FakeRouter()
 
@@ -1376,7 +1376,7 @@ import bridge
 
 bridge.BOT_TOKEN = 'fake'
 bridge.admin_chat_id = 12345
-bridge.state['tts_enabled'] = True
+bridge.state.tts_enabled = True
 
 voice_sent = []
 api_calls = []
@@ -1461,7 +1461,7 @@ import bridge
 
 bridge.BOT_TOKEN = 'fake'
 bridge.admin_chat_id = 12345
-bridge.state['tts_enabled'] = True
+bridge.state.tts_enabled = True
 
 tts_calls = []
 
@@ -1516,7 +1516,7 @@ import bridge
 
 bridge.BOT_TOKEN = 'fake'
 bridge.admin_chat_id = 12345
-bridge.state['tts_enabled'] = True
+bridge.state.tts_enabled = True
 
 api_calls = []
 
@@ -1552,7 +1552,7 @@ import bridge
 
 bridge.BOT_TOKEN = 'fake'
 bridge.admin_chat_id = 12345
-bridge.state['tts_enabled'] = True
+bridge.state.tts_enabled = True
 
 # Test /voice off disables TTS
 tts_calls = []
@@ -1565,7 +1565,7 @@ def mock_telegram_api(method, data):
     return {'ok': True, 'result': {'message_id': 1}}
 
 # Disable TTS
-bridge.state['tts_enabled'] = False
+bridge.state.tts_enabled = False
 
 with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
      patch.object(bridge, 'send_voice', return_value=True), \
@@ -1577,7 +1577,7 @@ with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
 assert len(tts_calls) == 0, f'TTS should not be called when disabled, got {len(tts_calls)} calls'
 
 # Re-enable TTS
-bridge.state['tts_enabled'] = True
+bridge.state.tts_enabled = True
 
 with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
      patch.object(bridge, 'send_voice', return_value=True), \
@@ -4776,7 +4776,7 @@ session_dir = tmp / 'bob'
 session_dir.mkdir()
 (session_dir / 'claude_session_id').write_text('sess_123')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 calls = {}
 
@@ -4797,7 +4797,7 @@ router.cmd_restart(123, 'bob')
 
 assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
 assert calls.get('mode') == 'resume', 'expected resume mode, got %s' % calls
-assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
+assert bridge.state.active == 'bob', 'expected active bob, got %s' % bridge.state.active
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -4822,7 +4822,7 @@ session_dir = tmp / 'bob'
 session_dir.mkdir()
 (session_dir / 'claude_session_id').write_text('sess_123')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 def fake_restart(name, mode='relaunch'):
     return True, None
@@ -4906,7 +4906,7 @@ test_restart_clean_with_name() {
     if python3 -c "
 import bridge
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 calls = {}
 
@@ -4927,7 +4927,7 @@ router.cmd_restart(123, '--clean bob')
 
 assert calls.get('name') == 'bob', 'expected restart name bob, got %s' % calls
 assert calls.get('mode') == 'relaunch', 'expected relaunch mode, got %s' % calls
-assert bridge.state['active'] == 'bob', 'expected active bob, got %s' % bridge.state['active']
+assert bridge.state.active == 'bob', 'expected active bob, got %s' % bridge.state.active
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -4956,7 +4956,7 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'lee': {'tmux': 'claude-test-lee', 'backend': 'claude'},
     'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
 }
-bridge.state['active'] = 'lee'
+bridge.state.active = 'lee'
 
 class FakeTelegram:
     def __init__(self):
@@ -5014,7 +5014,7 @@ bridge.restart_claude = fake_restart
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'},
 }
-bridge.state['active'] = None
+bridge.state.active = None
 
 class FakeTelegram:
     def send_message(self, *a, **kw):
@@ -5062,7 +5062,7 @@ bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'bob': {'tmux': 'claude-test-bob', 'backend': 'claude'},
     'charlie': {'tmux': 'claude-test-charlie', 'backend': 'claude'},
 }
-bridge.state['active'] = None
+bridge.state.active = None
 
 class FakeTelegram:
     def __init__(self):
@@ -5318,7 +5318,7 @@ import bridge
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
     'alice': {'tmux': 'claude-test-alice', 'backend': 'claude'},
 }
-bridge.state['active'] = None
+bridge.state.active = None
 
 class FakeTelegram:
     def __init__(self):
@@ -5910,7 +5910,7 @@ bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
 session_dir = tmp / 'alice'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 prefix = bridge.TMUX_PREFIX
 bridge.worker_manager.scan_tmux_sessions = lambda: {}
@@ -6264,7 +6264,7 @@ assert pending_file.exists(), 'pending file should exist before pause'
 
 bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 class FakeTelegram:
     def send_message(self, *args, **kwargs):
@@ -6349,7 +6349,7 @@ bridge.processes.adapter_pids['alice'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before pause'
 
 bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 class FakeTelegram:
     def send_message(self, *args, **kwargs):
@@ -6394,7 +6394,7 @@ proc = subprocess.Popen(['sleep', '60'])
 bridge.processes.adapter_pids['bob'] = (proc, None)
 assert proc.poll() is None, 'adapter should be alive before end'
 
-bridge.state['active'] = 'bob'
+bridge.state.active = 'bob'
 ok, err = bridge.worker_manager.end('bob')
 
 assert proc.poll() is not None, 'adapter should be dead after end'
@@ -7104,8 +7104,8 @@ orig_sessions_dir = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
 orig_last_active = bridge.LAST_ACTIVE_FILE
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
-orig_mention = dict(bridge._last_mention)
+orig_state = bridge.state.snapshot()
+orig_mention = bridge._last_mention.snapshot()
 
 # Override paths
 bridge.SESSIONS_DIR = sessions_dir
@@ -7135,68 +7135,68 @@ def make_msg(text):
     return {'update_id': 1, 'message': {'message_id': 1, 'chat': {'id': 123}, 'text': text}}
 
 # Reset state
-bridge.state['active'] = 'bob'
-bridge.state['startup_notified'] = True
-bridge._last_mention['target'] = None
-bridge._last_mention['count'] = 0
+bridge.state.active = 'bob'
+bridge.state.startup_notified = True
+bridge._last_mention.target = None
+bridge._last_mention.count = 0
 mock_api.sent.clear()
 
 # Test 1: First @alice mention — no focus switch
 router.handle_message(make_msg('@alice do task 1'))
-assert bridge.state['active'] == 'bob', f'T1: should stay bob, got {bridge.state[\"active\"]}'
-assert bridge._last_mention['target'] == 'alice', f'T1: tracker target should be alice'
-assert bridge._last_mention['count'] == 1, f'T1: count should be 1, got {bridge._last_mention[\"count\"]}'
+assert bridge.state.active == 'bob', f'T1: should stay bob, got {bridge.state.active}'
+assert bridge._last_mention.target == 'alice', f'T1: tracker target should be alice'
+assert bridge._last_mention.count == 1, f'T1: count should be 1, got {bridge._last_mention.count}'
 
 # Test 2: Second @alice mention — auto-focus switches to alice
 router.handle_message(make_msg('@alice do task 2'))
-assert bridge.state['active'] == 'alice', f'T2: should switch to alice, got {bridge.state[\"active\"]}'
+assert bridge.state.active == 'alice', f'T2: should switch to alice, got {bridge.state.active}'
 assert any('Switched to alice' in s for s in mock_api.sent), f'T2: should notify auto-focus, sent: {mock_api.sent}'
 
 # Test 3: Third @alice mention — already focused, no duplicate notification
 mock_api.sent.clear()
 router.handle_message(make_msg('@alice do task 3'))
-assert bridge.state['active'] == 'alice', f'T3: should stay alice'
+assert bridge.state.active == 'alice', f'T3: should stay alice'
 assert not any('Switched to' in s for s in mock_api.sent), f'T3: should not re-notify when already focused'
 
 # Test 4: @bob then @alice — different workers, no focus switch
-bridge.state['active'] = 'bob'
-bridge._last_mention['target'] = None
-bridge._last_mention['count'] = 0
+bridge.state.active = 'bob'
+bridge._last_mention.target = None
+bridge._last_mention.count = 0
 mock_api.sent.clear()
 router.handle_message(make_msg('@bob do X'))
 router.handle_message(make_msg('@alice do Y'))
-assert bridge.state['active'] == 'bob', f'T4: should stay bob after different mentions'
-assert bridge._last_mention['target'] == 'alice', f'T4: tracker should be alice'
-assert bridge._last_mention['count'] == 1, f'T4: count should be 1'
+assert bridge.state.active == 'bob', f'T4: should stay bob after different mentions'
+assert bridge._last_mention.target == 'alice', f'T4: tracker should be alice'
+assert bridge._last_mention.count == 1, f'T4: count should be 1'
 
 # Test 5: @alice then plain message then @alice — streak reset, no focus
-bridge.state['active'] = 'bob'
-bridge._last_mention['target'] = None
-bridge._last_mention['count'] = 0
+bridge.state.active = 'bob'
+bridge._last_mention.target = None
+bridge._last_mention.count = 0
 mock_api.sent.clear()
 router.handle_message(make_msg('@alice do X'))
 router.handle_message(make_msg('just a plain message'))
 router.handle_message(make_msg('@alice do Y'))
-assert bridge.state['active'] == 'bob', f'T5: should stay bob, streak was reset'
-assert bridge._last_mention['count'] == 1, f'T5: count should be 1 after reset+mention'
+assert bridge.state.active == 'bob', f'T5: should stay bob, streak was reset'
+assert bridge._last_mention.count == 1, f'T5: count should be 1 after reset+mention'
 
 # Test 6: Multi-mention resets streak, no focus switch
-bridge.state['active'] = 'bob'
-bridge._last_mention['target'] = 'alice'
-bridge._last_mention['count'] = 1
+bridge.state.active = 'bob'
+bridge._last_mention.target = 'alice'
+bridge._last_mention.count = 1
 mock_api.sent.clear()
 router.handle_message(make_msg('@alice @bob do both'))
-assert bridge.state['active'] == 'bob', f'T6: multi-mention should not switch focus'
-assert bridge._last_mention['target'] is None, f'T6: multi-mention should reset target'
-assert bridge._last_mention['count'] == 0, f'T6: multi-mention should reset count'
+assert bridge.state.active == 'bob', f'T6: multi-mention should not switch focus'
+assert bridge._last_mention.target is None, f'T6: multi-mention should reset target'
+assert bridge._last_mention.count == 0, f'T6: multi-mention should reset count'
 
 # Restore originals
 bridge.SESSIONS_DIR = orig_sessions_dir
 bridge.NODE_DIR = orig_node_dir
 bridge.LAST_ACTIVE_FILE = orig_last_active
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
-bridge._last_mention.update(orig_mention)
+bridge.state.restore(orig_state)
+bridge._last_mention.restore(orig_mention)
 
 import shutil
 shutil.rmtree(tmpdir)
@@ -7353,12 +7353,12 @@ bridge.get_registered_sessions = lambda registered=None: {
     'bob': {'backend': 'claude'},
 }
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 
 # Switch to bob
 ok, err = bridge.switch_session('bob')
 assert ok, f'switch_session should succeed, got error: {err}'
-assert bridge.state['active'] == 'bob', f'Expected active=bob, got {bridge.state[\"active\"]}'
+assert bridge.state.active == 'bob', f'Expected active=bob, got {bridge.state.active}'
 
 # Verify file persistence
 assert bridge.LAST_ACTIVE_FILE.exists(), 'last_active file should exist'
@@ -7493,7 +7493,7 @@ worker_dir.mkdir()
 (worker_dir / 'chat_id').write_text('12345')
 (worker_dir / 'backend').write_text('claude')
 
-bridge.state['active'] = worker_name
+bridge.state.active = worker_name
 tmux_name = f'{bridge.TMUX_PREFIX}{worker_name}'
 
 router = bridge.command_router
@@ -7566,7 +7566,7 @@ for name in ['alice', 'bob']:
     (d / 'chat_id').write_text('12345')
     (d / 'backend').write_text('claude')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 orig_admin = bridge.admin_chat_id
 bridge.admin_chat_id = 12345
 
@@ -7652,7 +7652,7 @@ for name in ['alice', 'bob']:
     (d / 'chat_id').write_text('12345')
     (d / 'backend').write_text('claude')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 orig_admin = bridge.admin_chat_id
 bridge.admin_chat_id = 12345
 
@@ -7733,7 +7733,7 @@ for name in ['alice', 'bob']:
     (d / 'chat_id').write_text('12345')
     (d / 'backend').write_text('claude')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 orig_admin = bridge.admin_chat_id
 bridge.admin_chat_id = 12345
 
@@ -7821,7 +7821,7 @@ for name in ['alice', 'bob']:
     (d / 'chat_id').write_text('12345')
     (d / 'backend').write_text('claude')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 orig_admin = bridge.admin_chat_id
 bridge.admin_chat_id = 12345
 
@@ -7939,7 +7939,7 @@ for name in ['alice', 'bob']:
     (d / 'chat_id').write_text('12345')
     (d / 'backend').write_text('claude')
 
-bridge.state['active'] = 'alice'
+bridge.state.active = 'alice'
 orig_admin = bridge.admin_chat_id
 bridge.admin_chat_id = 12345
 
@@ -11757,7 +11757,7 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_bridge_url = bridge.BRIDGE_URL
 had_bridge_public_url = hasattr(bridge, 'BRIDGE_PUBLIC_URL')
 orig_bridge_public_url = getattr(bridge, 'BRIDGE_PUBLIC_URL', '')
@@ -11767,8 +11767,8 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 bridge.BRIDGE_URL = 'http://localhost:8080'
 bridge.BRIDGE_PUBLIC_URL = 'http://100.125.36.102:8080'
 
@@ -11827,7 +11827,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
 if had_bridge_public_url:
     bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
@@ -11922,7 +11922,7 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_bridge_url = bridge.BRIDGE_URL
 had_bridge_public_url = hasattr(bridge, 'BRIDGE_PUBLIC_URL')
 orig_bridge_public_url = getattr(bridge, 'BRIDGE_PUBLIC_URL', '')
@@ -11932,8 +11932,8 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 bridge.BRIDGE_URL = 'http://localhost:8080'
 bridge.BRIDGE_PUBLIC_URL = ''
 
@@ -11978,7 +11978,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
 if had_bridge_public_url:
     bridge.BRIDGE_PUBLIC_URL = orig_bridge_public_url
@@ -12011,15 +12011,15 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 
 bridge.NODE_DIR = Path(tmpdir)
 bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 
 # Set up mock workers with lee registered
 class MockWorkers:
@@ -12072,7 +12072,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 with bridge.watchdog.lock:
     bridge.watchdog.worker_states.pop('lee', None)
 
@@ -12160,7 +12160,7 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_bridge_url = bridge.BRIDGE_URL
 
 bridge.NODE_DIR = Path(tmpdir)
@@ -12168,8 +12168,8 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
 
 # Create session dir with state files
@@ -12267,7 +12267,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
 with bridge.watchdog.lock:
     bridge.watchdog.worker_states.pop('lee', None)
@@ -12421,7 +12421,7 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_bridge_url = bridge.BRIDGE_URL
 
 bridge.NODE_DIR = Path(tmpdir)
@@ -12429,8 +12429,8 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
 
 session_dir = bridge.SESSIONS_DIR / 'lee'
@@ -12497,7 +12497,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
 with bridge.watchdog.lock:
     bridge.watchdog.worker_states.pop('lee', None)
@@ -12526,7 +12526,7 @@ orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
 orig_admin = bridge.admin_chat_id
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_bridge_url = bridge.BRIDGE_URL
 
 bridge.NODE_DIR = Path(tmpdir)
@@ -12534,8 +12534,8 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge.SESSIONS_DIR = Path(tmpdir) / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
 bridge.admin_chat_id = 123
-bridge.state['startup_notified'] = True
-bridge.state['active'] = 'lee'
+bridge.state.startup_notified = True
+bridge.state.active = 'lee'
 bridge.BRIDGE_URL = 'https://test-tunnel.trycloudflare.com'
 
 session_dir = bridge.SESSIONS_DIR / 'lee'
@@ -12612,7 +12612,7 @@ bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
 bridge.admin_chat_id = orig_admin
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.BRIDGE_URL = orig_bridge_url
 with bridge.watchdog.lock:
     bridge.watchdog.worker_states.pop('lee', None)
@@ -13394,13 +13394,13 @@ class MockTelegramAPI:
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
 orig_registry = bridge.WORKER_REGISTRY_FILE
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_admin = bridge.admin_chat_id
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
 bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
 bridge.admin_chat_id = 123
-bridge.state['active'] = 'ren'
+bridge.state.active = 'ren'
 
 router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
 router.workers = MockWorkers()
@@ -13420,7 +13420,7 @@ assert any('back and ready' in r for r in replies), f'Should confirm restart, go
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
 bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.admin_chat_id = orig_admin
 import shutil
 shutil.rmtree(tmpdir)
@@ -13446,13 +13446,13 @@ tmp = Path(tmpdir)
 orig_node = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_sessions = bridge.SESSIONS_DIR
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 
 bridge.NODE_DIR = tmp
 bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.SESSIONS_DIR = tmp / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
-bridge.state['active'] = None
+bridge.state.active = None
 
 bridge._registry_add('ren', 'claude', 123, host='mac-mini')
 wm = bridge.WorkerManager(bridge.SESSIONS_DIR, 'claude-test-')
@@ -13511,7 +13511,7 @@ assert any(cmd[:3] == ['tmux', 'kill-session', '-t'] and host is None
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -15759,8 +15759,8 @@ orig_escape = bridge.tmux_send_escape
 def mock_escape(tmux_name, host=None):
     escape_calls.append({'tmux': tmux_name, 'host': host})
 
-orig_state = dict(bridge.state)
-bridge.state['active'] = 'ren'
+orig_state = bridge.state.snapshot()
+bridge.state.active = 'ren'
 
 class MockWorkers:
     tmux_prefix = 'claude-prod-'
@@ -15787,7 +15787,7 @@ assert escape_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {esc
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
 bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 import shutil
 shutil.rmtree(tmpdir)
 print('OK')
@@ -15821,11 +15821,11 @@ reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_c
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
 orig_registry = bridge.WORKER_REGISTRY_FILE
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
 bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
-bridge.state['active'] = 'ren'
+bridge.state.active = 'ren'
 
 icr_calls = []
 def mock_icr(tmux_name, host=None):
@@ -15863,7 +15863,7 @@ assert icr_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {icr_ca
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
 bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 import shutil
 shutil.rmtree(tmpdir)
 print('OK')
@@ -15897,12 +15897,12 @@ reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_c
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
 orig_registry = bridge.WORKER_REGISTRY_FILE
-orig_state = dict(bridge.state)
+orig_state = bridge.state.snapshot()
 orig_admin = bridge.admin_chat_id
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
 bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
-bridge.state['active'] = 'ren'
+bridge.state.active = 'ren'
 bridge.admin_chat_id = 123
 
 sir_calls = []
@@ -15954,7 +15954,7 @@ assert sir_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {sir_ca
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
 bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.update(orig_state)
+bridge.state.restore(orig_state)
 bridge.admin_chat_id = orig_admin
 import shutil
 shutil.rmtree(tmpdir)
