@@ -1994,10 +1994,15 @@ def _log(level: str, component: str, msg: str, *,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RemoteCache:
-    """Caches for remote host operations (tools, machines, home dirs)."""
+    """Caches for remote host operations (tools, machines, home dirs).
+
+    Thread safety: all reads/writes to mutable dicts must be under self.lock.
+    The lock is fine-grained (not held during network I/O).
+    """
 
     def __init__(self) -> None:
         """Initialize caches for SSH host resolution and machine config."""
+        self.lock: threading.Lock = threading.Lock()
         self.tools: dict[str, str] = {}     # host:tool -> absolute path
         self.machines: dict[str, "Machine"] | None = None
         self.machines_path: Path | None = None
@@ -2010,7 +2015,8 @@ remote_cache = RemoteCache()
 def _resolve_remote_tool(tool: str, host: str) -> str:
     """Discover absolute path of a tool on a remote host. Cached per host."""
     key = f"{host}:{tool}"
-    cached = remote_cache.tools.get(key)
+    with remote_cache.lock:
+        cached = remote_cache.tools.get(key)
     if cached:
         return cached
     probe = (
@@ -2025,7 +2031,8 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
         )
         found = r.stdout.strip()
         if found:
-            remote_cache.tools[key] = found
+            with remote_cache.lock:
+                remote_cache.tools[key] = found
             _log(_LOG_INFO, "bridge", f"discovered {tool} on {host}: {found}")
             return found
     except (subprocess.SubprocessError, OSError) as exc:
@@ -2275,10 +2282,11 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
 
 def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
     """Return the startup machine catalog."""
-    if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
-        remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
-        remote_cache.machines_path = MACHINES_CONFIG_FILE
-    return dict(remote_cache.machines)
+    with remote_cache.lock:
+        if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
+            remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
+            remote_cache.machines_path = MACHINES_CONFIG_FILE
+        return dict(remote_cache.machines)
 
 
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
@@ -6558,15 +6566,18 @@ def set_pending(name: str, chat_id: int | str) -> None:
 
 def _get_remote_home(host: str | None) -> str:
     """Get remote $HOME with caching (avoids SSH per message)."""
-    if host in remote_cache.home_dirs:
-        return remote_cache.home_dirs[host]
+    with remote_cache.lock:
+        cached = remote_cache.home_dirs.get(host or "")
+    if cached is not None:
+        return cached
     try:
         r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                         capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         home = r.stdout.strip() if r.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
         home = ""
-    remote_cache.home_dirs[host] = home
+    with remote_cache.lock:
+        remote_cache.home_dirs[host or ""] = home
     return home
 
 
@@ -18014,25 +18025,28 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
 _connector_message_log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
+_connector_log_lock: threading.Lock = threading.Lock()
 
 
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     """Log a connector message for debugging (capped at 20 per tag)."""
-    if tag not in _connector_message_log:
-        _connector_message_log[tag] = collections.deque(maxlen=20)
-    _connector_message_log[tag].append({
-        "ts": _clock.time(),
-        "html": html_text,
-        "plain": plain_text,
-        "targets": targets or [],
-    })
+    with _connector_log_lock:
+        if tag not in _connector_message_log:
+            _connector_message_log[tag] = collections.deque(maxlen=20)
+        _connector_message_log[tag].append({
+            "ts": _clock.time(),
+            "html": html_text,
+            "plain": plain_text,
+            "targets": targets or [],
+        })
 
 
 def _connector_render_html(tag: str, current_html: str) -> str:
     """Render HTML page with current message + recent history (rewind style)."""
     import html as html_mod
     esc = html_mod.escape
-    msgs = list(_connector_message_log.get(tag, []))
+    with _connector_log_lock:
+        msgs = list(_connector_message_log.get(tag, []))
     icon = "🔔" if tag == "github" else "📧"
     title = f"{tag.title()} Feed"
 
