@@ -694,8 +694,8 @@ class ForgeRegisterBody(TypedDict, total=False):
     CallbackURL: str
     callback_url: str
     callbackUrl: str
-    Tools: dict[str, object]
-    tools: dict[str, object]
+    Tools: dict[str, object]  # plugin config, shape varies per tool
+    tools: dict[str, object]  # plugin config, shape varies per tool
     note: str
     address: str
     machine: str
@@ -794,12 +794,12 @@ class NodeConfigDict(TypedDict, total=False):
     host: str
     port: int
     webhook_secret: str
-    connectors: dict[str, object]
+    connectors: dict[str, object]  # config varies per connector type
 
 
 class ClaudeJsonDict(TypedDict, total=False):
     """~/.claude.json trust settings."""
-    projects: dict[str, object]
+    projects: dict[str, object]  # nested project trust config, shape varies
 
 
 class TranscriptEventDict(TypedDict, total=False):
@@ -807,7 +807,7 @@ class TranscriptEventDict(TypedDict, total=False):
     type: str
     subtype: str
     role: str
-    message: dict[str, object]
+    message: dict[str, object]  # payload varies by event type
     timestamp: str
 
 
@@ -1959,7 +1959,7 @@ class WorkerRecord:
     callback_url: str = ""
     protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
     version: str = ""
-    tools: dict[str, object] | None = None
+    tools: dict[str, object] | None = None  # plugin config, shape varies per tool
     chat_id: int | None = None
     cwd: str = ""
     home_host: str = ""
@@ -2023,7 +2023,7 @@ class WorkerRegistryEntry:
     version: str = ""
     chat_id: int | None = None
     hire_time: int = 0
-    tools: dict[str, object] | None = None
+    tools: dict[str, object] | None = None  # plugin config, shape varies per tool
     home_host: str = ""
     home_cwd: str = ""
 
