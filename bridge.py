@@ -200,11 +200,6 @@ class TelegramUpdate(TypedDict, total=False):
     callback_query: TelegramCallbackQuery
 
 
-class RegistryData(TypedDict):
-    """Worker registry JSON shape."""
-    version: int
-    workers: dict[str, "RegistryWorkerDict"]
-
 
 class WorkerEndpointInfo(TypedDict, total=False):
     """Worker info returned by /workers endpoint."""
@@ -372,36 +367,12 @@ class CodexTranscriptEntry(TypedDict, total=False):
     timestamp: str
 
 
-class TopMemProcEntry(TypedDict, total=False):
-    """Process entry from _get_top_mem_procs."""
-    pid: str
-    rss_gb: float
-    pct: str
-    cmd: str
-
-
 class CpuHogEntry(TypedDict, total=False):
     """Process entry from _get_cpu_hogs."""
     pid: int
     cpu: float
     etime_min: int
     cmd: str
-
-
-class TelegramSendPayload(TypedDict, total=False):
-    """Payload dict for Telegram Bot API send methods."""
-    chat_id: int
-    text: str
-    photo: str
-    document: str
-    animation: str
-    action: str
-    message_id: int
-    reaction: list[dict[str, str]]
-    parse_mode: str
-    reply_to_message_id: int
-    reply_markup: dict[str, list[list[dict[str, str]]]]  # Telegram InlineKeyboardMarkup
-    rich_message: dict[str, str]  # {"markdown": str}
 
 
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
@@ -668,12 +639,6 @@ class HookResponseBody(TypedDict, total=False):
     name: str
 
 
-class NotifyBody(TypedDict, total=False):
-    """POST /notify — send a notification to Telegram."""
-    text: str
-    name: str
-    chat_id: int
-
 
 class HealthAlertBody(TypedDict, total=False):
     """POST /health-alert — worker health alert."""
@@ -701,65 +666,15 @@ class ForgeRegisterBody(TypedDict, total=False):
     machine: str
 
 
-class SendEndpointBody(TypedDict, total=False):
-    """POST /send — send a message to a worker."""
-    worker: str
-    message: str
-    text: str
 
 
-class ConnectorsRestartBody(TypedDict, total=False):
-    """POST /connectors/restart — restart a connector."""
-    name: str
 
 
-class GuestRegisterBody(TypedDict, total=False):
-    """POST /guest/register — register a guest session."""
-    name: str
 
 
-class GuestSendBody(TypedDict, total=False):
-    """POST /guest/send — guest sends a message."""
-    text: str
-    to: str
-    worker: str
 
-
-class GuestReplyBody(TypedDict, total=False):
-    """POST /guest/reply — worker replies to guest."""
-    guest: str
-
-
-class ChannelCreateBody(TypedDict, total=False):
-    """POST /channels — create a channel."""
-    label: str
-    members: list[str]
-    include_manager: bool
-
-
-class ChannelMembersBody(TypedDict, total=False):
-    """POST /channels/<id>/members — add/remove members."""
-    add: list[str]
-    remove: list[str]
-
-
-class ChannelSendBody(TypedDict, total=False):
-    """POST /channels/<id>/send — send to channel."""
-    text: str
-
-
-class RelaySendBody(TypedDict, total=False):
-    """POST /relay/<id>/send — send to relay channel."""
-    text: str
-
-
-class RelayReplyBody(TypedDict, total=False):
-    """POST /relay/<id>/reply — reply in relay channel."""
-    text: str
-
-
-class PrCommentBody(TypedDict, total=False):
-    """POST /pr/comment or /pr/general-comment — PR review comment."""
+class PrActionBody(TypedDict, total=False):
+    """POST /pr/* — PR review comment, merge, or general comment."""
     token: str
     owner: str
     repo: str
@@ -768,14 +683,6 @@ class PrCommentBody(TypedDict, total=False):
     path: str
     line: int
     commit_id: str
-
-
-class PrMergeBody(TypedDict, total=False):
-    """POST /pr/merge — merge a PR."""
-    token: str
-    owner: str
-    repo: str
-    pr_num: int
     merge_method: str
 
 
@@ -796,19 +703,6 @@ class NodeConfigDict(TypedDict, total=False):
     webhook_secret: str
     connectors: dict[str, object]  # config varies per connector type
 
-
-class ClaudeJsonDict(TypedDict, total=False):
-    """~/.claude.json trust settings."""
-    projects: dict[str, object]  # nested project trust config, shape varies
-
-
-class TranscriptEventDict(TypedDict, total=False):
-    """Single line from a JSONL transcript file."""
-    type: str
-    subtype: str
-    role: str
-    message: dict[str, object]  # payload varies by event type
-    timestamp: str
 
 
 # ── NamedTuple models for structured returns ──────────────────────────
@@ -6473,7 +6367,7 @@ def _ensure_workspace_trusted(
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 if target.exists():
-                    data = cast(ClaudeJsonDict, json.loads(target.read_text()))
+                    data = cast(dict[str, object], json.loads(target.read_text()))  # body: {projects}
                 else:
                     data = {}
                 projects = data.setdefault("projects", {})
@@ -16037,7 +15931,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_register(self, body: bytes = b"") -> None:
         """POST /guest — register as a temporary guest agent."""
         try:
-            data = cast(GuestRegisterBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
         except (json.JSONDecodeError, ValueError):
             data = {}
 
@@ -16134,7 +16028,7 @@ class Handler(BaseHTTPRequestHandler):
         if not guest:
             return
         try:
-            data = cast(GuestSendBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text, to, worker}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16249,7 +16143,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_reply(self, body: bytes = b"") -> None:
         """POST /guest/reply — worker sends reply to a guest's inbox."""
         try:
-            data = cast(GuestReplyBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {guest}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16372,7 +16266,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_create(self, body: bytes = b"") -> None:
         """POST /channels — create a group channel."""
         try:
-            data = cast(ChannelCreateBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {label, members, include_manager}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16440,7 +16334,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/members — add/remove members."""
         try:
-            data = cast(ChannelMembersBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {add, remove}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16483,7 +16377,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
         """POST /channels/{id}/send — send message to channel (fan-out)."""
         try:
-            data = cast(ChannelSendBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -16725,7 +16619,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(RelaySendBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -16763,7 +16657,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(RelayReplyBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -16852,7 +16746,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_general_comment(self, body: bytes) -> None:
         """Post a general (non-inline) comment on a PR via GitHub API."""
         try:
-            data = cast(PrCommentBody, json.loads(body))
+            data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -16925,7 +16819,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_merge(self, body: bytes) -> None:
         """Merge a PR via GitHub API."""
         try:
-            data = cast(PrMergeBody, json.loads(body))
+            data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -17029,7 +16923,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_pr_comment(self, body: bytes) -> None:
         """Post an inline comment on a PR via GitHub API + notify Telegram."""
         try:
-            data = cast(PrCommentBody, json.loads(body))
+            data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
@@ -17499,7 +17393,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         teleported workers.
         """
         try:
-            data = cast(NotifyBody, json.loads(body))
+            data = cast(dict[str, object], json.loads(body))  # body: {text, name, chat_id}
             text = _str_field(data, "text")
             name = _str_field(data, "name")
 
@@ -17668,7 +17562,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         Body: {"name": "gmail"} or {"name": "github"}
         """
         try:
-            data = cast(ConnectorsRestartBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -17687,7 +17581,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         The "from" field (default "system") is prefixed to the message.
         """
         try:
-            data = cast(SendEndpointBody, json.loads(body)) if body else {}
+            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {worker, message, text}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
