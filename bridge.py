@@ -43,9 +43,11 @@ class TelegramApiResponseDict(TypedDict, total=False):
 
 TelegramApiResponse = TelegramApiResponseDict | None
 
-# Handler type for EndpointRouter — handlers are lambdas adapting dispatch
-# to concrete method signatures; the router itself is method-agnostic.
-RouteHandler = Callable[..., None]
+# Handler type for EndpointRouter — all handlers receive (request, payload, match).
+# POST handlers get bytes payload; GET/DELETE handlers get ParseResult.
+# match is None for exact-path registrations, re.Match for pattern registrations.
+PostRouteHandler = Callable[["BridgeRequestHandler", bytes, re.Match[str] | None], None]
+GetRouteHandler = Callable[["BridgeRequestHandler", ParseResult, re.Match[str] | None], None]
 
 # ── Safe JSON field accessors ────────────────────────────────────────────
 # After cast(dict[str, object], json.loads(...)), .get() returns object.
@@ -246,6 +248,19 @@ class IoUsageDict(TypedDict, total=False):
     ts: float
 
 
+class WorktreeItemDict(TypedDict):
+    """Single worktree entry in worktree usage probe."""
+    path: str
+    size_gb: float
+
+
+class WorktreeUsageDict(TypedDict):
+    """Worktree usage probe result for a host."""
+    total_gb: float
+    items: list[WorktreeItemDict]
+    ts: float
+
+
 class RewindTokenEntry(TypedDict):
     """Shape of entries in REWIND_TOKENS."""
     name: str
@@ -303,7 +318,7 @@ class HealthSummaryDict(TypedDict, total=False):
     mem: MemUsageDict | None
     io: IoUsageDict | None
     cpu_hogs: list[dict[str, str | float]]
-    worktrees: dict[str, float] | None
+    worktrees: WorktreeUsageDict | None
 
 
 class MachineHealthDict(TypedDict, total=False):
@@ -668,9 +683,15 @@ class AuthorDetection(NamedTuple):
     display_text: str
 
 
-class RouteResolution(NamedTuple):
-    """Result of resolving an HTTP route to its handler."""
-    handler: RouteHandler | None
+class PostRouteResolution(NamedTuple):
+    """Result of resolving a POST route to its handler."""
+    handler: PostRouteHandler | None
+    match: re.Match[str] | None
+
+
+class GetRouteResolution(NamedTuple):
+    """Result of resolving a GET/DELETE route to its handler."""
+    handler: GetRouteHandler | None
     match: re.Match[str] | None
 
 
@@ -3613,7 +3634,7 @@ class HostHealthState:
         self.cpu_hogs: dict[str, list[dict[str, str | float]]] = {}
         self.cpu_hog_alert_ts: dict[str, float] = {}
         # Worktrees
-        self.worktree_usage: dict[str, dict[str, float]] = {}
+        self.worktree_usage: dict[str, WorktreeUsageDict] = {}
         self.worktree_alert_ts: dict[str, float] = {}
         self.worktree_alerted: dict[str, bool] = {}
         # Memory
@@ -3980,7 +4001,7 @@ BLOCKED_COMMANDS = [
 # Persistence (last chat ID and last active worker survive restart)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_last_chat_id(chat_id: int | str) -> None:
+def save_last_chat_id(chat_id: ChatId) -> None:
     """Save last known chat ID to file for auto-notification on restart."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4755,37 +4776,37 @@ def download_telegram_file(file_id: str, session_name: str) -> str | None:
 # Backward-compat module-level media stubs.
 # Tests patch these (e.g. patch.object(bridge, 'send_voice', ...)).
 # Production code routes through transport.*; these stubs allow test mocking.
-def send_voice(chat_id: int | str, voice_path: str, caption: str | None = None) -> bool:
+def send_voice(chat_id: ChatId, voice_path: str, caption: str | None = None) -> bool:
     """Send a voice message to a Telegram chat."""
     return transport.send_voice(chat_id, voice_path, caption)
 
 
-def send_photo(chat_id: int | str, photo_path: str, caption: str | None = None) -> bool:
+def send_photo(chat_id: ChatId, photo_path: str, caption: str | None = None) -> bool:
     """Send a photo to a Telegram chat."""
     return transport.send_photo(chat_id, photo_path, caption)
 
 
-def send_animation(chat_id: int | str, animation_path: str, caption: str | None = None) -> bool:
+def send_animation(chat_id: ChatId, animation_path: str, caption: str | None = None) -> bool:
     """Send an animation (GIF/MP4) to a Telegram chat."""
     return transport.send_animation(chat_id, animation_path, caption)
 
 
-def send_document(chat_id: int | str, doc_path: str, caption: str | None = None) -> bool:
+def send_document(chat_id: ChatId, doc_path: str, caption: str | None = None) -> bool:
     """Send a document file to a Telegram chat."""
     return transport.send_document(chat_id, doc_path, caption)
 
 
-def send_video(chat_id: int | str, video_path: str, caption: str | None = None) -> bool:
+def send_video(chat_id: ChatId, video_path: str, caption: str | None = None) -> bool:
     """Send a video to a Telegram chat."""
     return transport.send_video(chat_id, video_path, caption)
 
 
-def send_audio(chat_id: int | str, audio_path: str, caption: str | None = None) -> bool:
+def send_audio(chat_id: ChatId, audio_path: str, caption: str | None = None) -> bool:
     """Send an audio file to a Telegram chat."""
     return transport.send_audio(chat_id, audio_path, caption)
 
 
-def send_sticker(chat_id: int | str, sticker_path: str) -> bool:
+def send_sticker(chat_id: ChatId, sticker_path: str) -> bool:
     """Send a sticker to a Telegram chat."""
     return transport.send_sticker(chat_id, sticker_path)
 
@@ -6547,7 +6568,7 @@ def _get_pending_lock(name: str) -> threading.Lock:
         return processes.pending_locks[name]
 
 
-def set_pending(name: str, chat_id: int | str) -> None:
+def set_pending(name: str, chat_id: ChatId) -> None:
     """Mark session as having a pending request with secure permissions (0o600)."""
     session_dir = ensure_session_dir(name)
     pending = session_dir / "pending"
@@ -6618,7 +6639,7 @@ def clear_pending(name: str) -> None:
     pending = session_dir / "pending"
     try:
         pending.unlink()
-    except FileNotFoundError as exc:
+    except OSError as exc:
         _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
 
 
@@ -6641,7 +6662,7 @@ def is_pending(name: str) -> bool:
         return False
 
 
-def try_set_pending(name: str, chat_id: int | str) -> bool:
+def try_set_pending(name: str, chat_id: ChatId) -> bool:
     """Atomic check+set: returns True if pending was set, False if already pending."""
     with _get_pending_lock(name):
         if is_pending(name):
@@ -13598,7 +13619,7 @@ class CommandRouter:
             f"Team storage: {SESSIONS_DIR.parent}",
             "",
             "Team state",
-            f"Focused worker: {state['active'] or '(none)'}",
+            f"Focused worker: {state.active or '(none)'}",
             f"Workers: {team_list}",
         ]
 
@@ -15613,61 +15634,69 @@ class EndpointRouter:
 
     def __init__(self) -> None:
         """Initialize per-method route tables."""
-        self._post_exact: dict[str, RouteHandler] = {}
-        self._post_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
-        self._get_exact: dict[str, RouteHandler] = {}
-        self._get_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
-        self._delete_exact: dict[str, RouteHandler] = {}
-        self._delete_patterns: list[tuple[re.Pattern[str], RouteHandler]] = []
+        self._post_exact: dict[str, PostRouteHandler] = {}
+        self._post_patterns: list[tuple[re.Pattern[str], PostRouteHandler]] = []
+        self._get_exact: dict[str, GetRouteHandler] = {}
+        self._get_patterns: list[tuple[re.Pattern[str], GetRouteHandler]] = []
+        self._delete_exact: dict[str, GetRouteHandler] = {}
+        self._delete_patterns: list[tuple[re.Pattern[str], GetRouteHandler]] = []
 
-    def post(self, path: str, handler: RouteHandler) -> None:
+    def post(self, path: str, handler: PostRouteHandler) -> None:
         """Register a POST handler for an exact path."""
         self._post_exact[path] = handler
 
-    def post_pattern(self, pattern: str, handler: RouteHandler) -> None:
+    def post_pattern(self, pattern: str, handler: PostRouteHandler) -> None:
         """Register a POST handler for a regex path pattern."""
         self._post_patterns.append((re.compile(pattern), handler))
 
-    def get(self, path: str, handler: RouteHandler) -> None:
+    def get(self, path: str, handler: GetRouteHandler) -> None:
         """Register a GET handler for an exact path."""
         self._get_exact[path] = handler
 
-    def get_pattern(self, pattern: str, handler: RouteHandler) -> None:
+    def get_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
         """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
-    def delete(self, path: str, handler: RouteHandler) -> None:
+    def delete(self, path: str, handler: GetRouteHandler) -> None:
         """Register a DELETE handler for an exact path."""
         self._delete_exact[path] = handler
 
-    def delete_pattern(self, pattern: str, handler: RouteHandler) -> None:
+    def delete_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
         """Register a DELETE handler for a regex path pattern."""
         self._delete_patterns.append((re.compile(pattern), handler))
 
-    def _resolve(self, exact: dict[str, RouteHandler],
-                 patterns: list[tuple[re.Pattern[str], RouteHandler]],
-                 path: str) -> RouteResolution:
-        """Resolve a path against exact then pattern tables."""
-        handler = exact.get(path)
+    def resolve_post(self, path: str) -> PostRouteResolution:
+        """Find handler for POST path. Returns PostRouteResolution(handler, match)."""
+        handler = self._post_exact.get(path)
         if handler:
-            return RouteResolution(handler, None)
-        for regex, pat_handler in patterns:
+            return PostRouteResolution(handler, None)
+        for regex, pat_handler in self._post_patterns:
             match = regex.match(path)
             if match:
-                return RouteResolution(pat_handler, match)
-        return RouteResolution(None, None)
+                return PostRouteResolution(pat_handler, match)
+        return PostRouteResolution(None, None)
 
-    def resolve_post(self, path: str) -> RouteResolution:
-        """Find handler for POST path. Returns RouteResolution(handler, match)."""
-        return self._resolve(self._post_exact, self._post_patterns, path)
+    def resolve_get(self, path: str) -> GetRouteResolution:
+        """Find handler for GET path. Returns GetRouteResolution(handler, match)."""
+        handler = self._get_exact.get(path)
+        if handler:
+            return GetRouteResolution(handler, None)
+        for regex, pat_handler in self._get_patterns:
+            match = regex.match(path)
+            if match:
+                return GetRouteResolution(pat_handler, match)
+        return GetRouteResolution(None, None)
 
-    def resolve_get(self, path: str) -> RouteResolution:
-        """Find handler for GET path. Returns RouteResolution(handler, match)."""
-        return self._resolve(self._get_exact, self._get_patterns, path)
-
-    def resolve_delete(self, path: str) -> RouteResolution:
-        """Find handler for DELETE path. Returns RouteResolution(handler, match)."""
-        return self._resolve(self._delete_exact, self._delete_patterns, path)
+    def resolve_delete(self, path: str) -> GetRouteResolution:
+        """Find handler for DELETE path. Returns GetRouteResolution(handler, match)."""
+        handler = self._delete_exact.get(path)
+        if handler:
+            return GetRouteResolution(handler, None)
+        for regex, pat_handler in self._delete_patterns:
+            match = regex.match(path)
+            if match:
+                return GetRouteResolution(pat_handler, match)
+        return GetRouteResolution(None, None)
 
 
 # Singleton endpoint router — populated after Handler class is defined
@@ -17193,10 +17222,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         handler, match = _endpoint_router.resolve_post(parsed.path)
         if handler:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            if match:
-                handler(self, body, match)
-            else:
-                handler(self, body)
+            handler(self, body, match)
             return
 
         # Only accept Telegram webhook on root path — 404 for unknown POST paths
@@ -17573,10 +17599,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_get(parsed.path)
         if handler:
-            if match:
-                handler(self, parsed, match)
-            else:
-                handler(self, parsed)
+            handler(self, parsed, match)
             return
 
         # API index (also serves as health check — returns 200)
@@ -17595,10 +17618,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_delete(parsed.path)
         if handler:
-            if match:
-                handler(self, parsed, match)
-            else:
-                handler(self, parsed)
+            handler(self, parsed, match)
             return
         self._send_unknown_endpoint("DELETE", parsed.path)
 
@@ -17793,24 +17813,23 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 def _setup_endpoint_routes() -> None:
     """Register all POST and GET endpoints in the endpoint router.
 
-    Called once at module load time. Pattern handlers receive
-    (handler_instance, body, re_match); exact handlers receive
-    (handler_instance, body).
+    Called once at module load time. All handlers receive
+    (handler_instance, payload, match) — match is None for exact paths.
     """
     r = _endpoint_router
 
-    # POST endpoints (exact match)
-    r.post("/response", lambda h, b: h.handle_hook_response(b))
-    r.post("/notify", lambda h, b: h.handle_notify(b))
-    r.post("/send", lambda h, b: h.handle_send_endpoint(b))
-    r.post("/pr-comment", lambda h, b: h.handle_pr_comment(b))
-    r.post("/pr-general-comment", lambda h, b: h.handle_pr_general_comment(b))
-    r.post("/pr-merge", lambda h, b: h.handle_pr_merge(b))
-    r.post("/register", lambda h, b: h.handle_forge_register(b))
-    r.post("/guest", lambda h, b: h.handle_guest_register(b))
-    r.post("/channels", lambda h, b: h.handle_channel_create(b))
-    r.post("/health-alert", lambda h, b: h.handle_health_alert(b))
-    r.post("/connectors/restart", lambda h, b: h.handle_connectors_restart(b))
+    # POST endpoints (exact match — match is always None)
+    r.post("/response", lambda h, b, _m: h.handle_hook_response(b))
+    r.post("/notify", lambda h, b, _m: h.handle_notify(b))
+    r.post("/send", lambda h, b, _m: h.handle_send_endpoint(b))
+    r.post("/pr-comment", lambda h, b, _m: h.handle_pr_comment(b))
+    r.post("/pr-general-comment", lambda h, b, _m: h.handle_pr_general_comment(b))
+    r.post("/pr-merge", lambda h, b, _m: h.handle_pr_merge(b))
+    r.post("/register", lambda h, b, _m: h.handle_forge_register(b))
+    r.post("/guest", lambda h, b, _m: h.handle_guest_register(b))
+    r.post("/channels", lambda h, b, _m: h.handle_channel_create(b))
+    r.post("/health-alert", lambda h, b, _m: h.handle_health_alert(b))
+    r.post("/connectors/restart", lambda h, b, _m: h.handle_connectors_restart(b))
 
     # POST endpoints (prefix/pattern match)
     r.post_pattern(r'^/guest/send', lambda h, b, m: h.handle_guest_send(b))
@@ -17832,16 +17851,16 @@ def _setup_endpoint_routes() -> None:
         lambda h, b, m: h.handle_relay_reply(m.group(1), b)
     )
 
-    # GET endpoints (exact match) — handler signature: (handler_instance, parsed)
-    r.get("/guests", lambda h, p: h.handle_guests_list())
-    r.get("/workers", lambda h, p: h.handle_workers_endpoint(p))
-    r.get("/machines", lambda h, p: h.handle_machines_endpoint(p))
-    r.get("/checkin", lambda h, p: h.handle_checkin_endpoint(p))
-    r.get("/health/workers", lambda h, p: h.handle_health_workers_endpoint())
-    r.get("/connectors", lambda h, p: h.handle_connectors_status())
-    r.get("/channels", lambda h, p: h.handle_channels_list(p))
-    r.get("/pr-file-content", lambda h, p: h.handle_pr_file_content(p))
-    r.get("/pr-keepalive", lambda h, p: h.handle_pr_keepalive(p))
+    # GET endpoints (exact match — match is always None)
+    r.get("/guests", lambda h, p, _m: h.handle_guests_list())
+    r.get("/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
+    r.get("/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
+    r.get("/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
+    r.get("/health/workers", lambda h, p, _m: h.handle_health_workers_endpoint())
+    r.get("/connectors", lambda h, p, _m: h.handle_connectors_status())
+    r.get("/channels", lambda h, p, _m: h.handle_channels_list(p))
+    r.get("/pr-file-content", lambda h, p, _m: h.handle_pr_file_content(p))
+    r.get("/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
 
     # GET endpoints (pattern match) — order matters for prefix collisions
     r.get_pattern(r'^/guest/inbox', lambda h, p, m: h.handle_guest_inbox(p))
@@ -17860,7 +17879,7 @@ def _setup_endpoint_routes() -> None:
     r.get_pattern(r'^/pr-review/', lambda h, p, m: h.handle_pr_review_endpoint(p))
 
     # DELETE endpoints
-    r.delete("/guest", lambda h, p: h.handle_guest_disconnect(p))
+    r.delete("/guest", lambda h, p, _m: h.handle_guest_disconnect(p))
     r.delete_pattern(
         r'^/channels/([^/]+)$',
         lambda h, p, m: h.handle_channel_delete(m.group(1))
@@ -17905,6 +17924,24 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
             print("GitHub connector stopped")
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+
+    # Stop tracked adapters
+    with processes.adapter_pids_lock:
+        adapter_names = list(processes.adapter_pids.keys())
+    for name in adapter_names:
+        try:
+            kill_adapter(name)
+        except (OSError, ProcessLookupError) as exc:
+            _log(_LOG_DEBUG, "shutdown:adapter", f"{type(exc).__name__}: {exc}")
+
+    # Stop pipe readers
+    with processes.pipe_readers_lock:
+        pipe_names = list(processes.pipe_readers.keys())
+    for name in pipe_names:
+        try:
+            stop_pipe_reader(name)
+        except OSError as exc:
+            _log(_LOG_DEBUG, "shutdown:pipe", f"{type(exc).__name__}: {exc}")
 
     send_shutdown_message()
     sys.exit(0)
@@ -17974,7 +18011,7 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
     print(f"Hook endpoint: http://localhost:{PORT}/response")
-    print(f"Active: {state['active'] or 'none'}")
+    print(f"Active: {state.active or 'none'}")
     print(f"Sessions: {list(registered.keys()) or 'none'}")
     if WEBHOOK_SECRET:
         print("Webhook verification: enabled")
