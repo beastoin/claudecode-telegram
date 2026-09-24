@@ -70,8 +70,8 @@ fi
 
 # Extract bridge session name from prefix pattern
 BRIDGE_SESSION=""
-if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
-    BRIDGE_SESSION="${SESSION_NAME#${TMUX_PREFIX}}"
+if [[ "$SESSION_NAME" == "${TMUX_PREFIX}"* ]]; then
+    BRIDGE_SESSION="${SESSION_NAME#"${TMUX_PREFIX}"}"
 fi
 
 # Not our session - exit silently
@@ -81,15 +81,21 @@ fi
 SESSION_DIR="$SESSIONS_DIR/$BRIDGE_SESSION"
 SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
 if [ -n "$SESSION_ID" ] && [ -d "$SESSION_DIR" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    # Atomic write: tmp file + mv (crash-safe)
     SESSION_ID_FILE="$SESSION_DIR/claude_session_id"
-    echo "$SESSION_ID" > "$SESSION_ID_FILE"
-    chmod 600 "$SESSION_ID_FILE"
+    _tmpid=$(mktemp "$SESSION_DIR/.session_id.XXXXXX")
+    echo "$SESSION_ID" > "$_tmpid"
+    chmod 600 "$_tmpid"
+    mv -f "$_tmpid" "$SESSION_ID_FILE"
+
     CWD_FILE="$SESSION_DIR/claude_session_cwd"
     if [ ! -f "$CWD_FILE" ]; then
         PANE_CWD=$(tmux display-message -t "$SESSION_NAME" -p '#{pane_current_path}' 2>/dev/null || true)
         if [ -n "$PANE_CWD" ]; then
-            echo "$PANE_CWD" > "$CWD_FILE"
-            chmod 600 "$CWD_FILE"
+            _tmpcwd=$(mktemp "$SESSION_DIR/.session_cwd.XXXXXX")
+            echo "$PANE_CWD" > "$_tmpcwd"
+            chmod 600 "$_tmpcwd"
+            mv -f "$_tmpcwd" "$CWD_FILE"
         fi
     fi
 fi
@@ -246,6 +252,8 @@ fi
 
 # Forward to bridge (non-blocking with timeout)
 TMPFILE=$(mktemp)
+# Cleanup on unexpected exit (background subshell also cleans up on success)
+trap 'rm -f "$TMPFILE"' EXIT
 echo "$TEXT" > "$TMPFILE"
 
 # Run forward in background with 5s timeout, then cleanup

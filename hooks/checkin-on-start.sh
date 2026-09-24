@@ -42,8 +42,8 @@ BRIDGE_PORT="${_tmux_port:-${PORT:-}}"
 # Extract worker name from session
 # ─────────────────────────────────────────────────────────────────────────────
 WORKER_NAME=""
-if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
-    WORKER_NAME="${SESSION_NAME#${TMUX_PREFIX}}"
+if [[ "$SESSION_NAME" == "${TMUX_PREFIX}"* ]]; then
+    WORKER_NAME="${SESSION_NAME#"${TMUX_PREFIX}"}"
 fi
 [ -z "$WORKER_NAME" ] && exit 0
 
