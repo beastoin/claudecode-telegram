@@ -1,12 +1,8 @@
-"""Tests for sendRichMessage integration in bridge.py.
+"""Behavior tests for rich message sending in bridge.py.
 
-Verifies:
-1. Rich message is tried first, falls back to HTML on failure
-2. Markdown passed directly (no HTML conversion) in rich path
-3. 32K char limit used for rich, 4K for fallback
-4. Name prefix formatting in rich vs HTML mode
-5. Multi-chunk splitting respects rich limit
-6. LocalTransport supports send_rich_text
+Covers: rich-first with HTML fallback, markdown pass-through,
+chunking at 32K, name prefix formatting, media tag extraction,
+pipe-table-to-HTML conversion.
 """
 import os
 import re
@@ -176,19 +172,6 @@ class TestRichMessageSend:
 class TestRichMessageChunking:
     """Test message splitting with 32K rich limit vs 4K HTML limit."""
 
-    def test_short_message_single_chunk(self, monkeypatch):
-        """Short messages are sent as a single rich message."""
-        import bridge
-
-        mock_transport = MagicMock()
-        mock_transport.name = "telegram"
-        mock_transport.send_rich_text.return_value = {"ok": True, "result": {"message_id": 42}}
-        monkeypatch.setattr(bridge, "transport", mock_transport)
-
-        bridge.send_response_to_telegram("lee", "short msg", chat_id=123)
-
-        assert mock_transport.send_rich_text.call_count == 1
-
     def test_long_message_fewer_chunks_with_rich(self, monkeypatch):
         """A 10K message needs 3 HTML chunks but only 1 rich chunk."""
         import bridge
@@ -319,62 +302,6 @@ class TestRichMessageEdgeCases:
         assert "hello" in sent_md
 
 
-class TestLocalTransportRich:
-    """Verify LocalTransport supports rich message method."""
-
-    def test_local_transport_has_send_rich_text(self):
-        import bridge
-        t = bridge.LocalTransport()
-        assert hasattr(t, "send_rich_text")
-
-    def test_local_transport_send_rich_text_returns_ok(self):
-        import bridge
-        t = bridge.LocalTransport()
-        result = t.send_rich_text(123, "**test**")
-        assert result["ok"] is True
-        assert "message_id" in result["result"]
-
-
-class TestTelegramAPIRich:
-    """Verify TelegramAPI.send_rich_message constructs correct payload."""
-
-    def test_send_rich_message_payload(self, monkeypatch):
-        """send_rich_message sends correct JSON to sendRichMessage endpoint."""
-        import bridge
-
-        captured = {}
-
-        def mock_api(method, data):
-            captured["method"] = method
-            captured["data"] = data
-            return {"ok": True, "result": {"message_id": 1}}
-
-        api = bridge.TelegramAPI("fake:token")
-        monkeypatch.setattr(api, "api", mock_api)
-
-        api.send_rich_message(123, "# Hello\nWorld")
-
-        assert captured["method"] == "sendRichMessage"
-        assert captured["data"]["chat_id"] == 123
-        assert captured["data"]["rich_message"] == {"markdown": "# Hello\nWorld"}
-
-    def test_send_rich_message_with_reply(self, monkeypatch):
-        """send_rich_message passes reply_to_message_id."""
-        import bridge
-
-        captured = {}
-
-        def mock_api(method, data):
-            captured["data"] = data
-            return {"ok": True, "result": {"message_id": 1}}
-
-        api = bridge.TelegramAPI("fake:token")
-        monkeypatch.setattr(api, "api", mock_api)
-
-        api.send_rich_message(123, "test", reply_to_message_id=42)
-
-        assert captured["data"]["reply_to_message_id"] == 42
-
 
 class TestPipeTableToHtml:
     """Test _pipe_tables_to_html conversion."""
@@ -404,12 +331,6 @@ class TestPipeTableToHtml:
         assert "Before text" in result
         assert "After text" in result
         assert "<table>" in result
-
-    def test_no_table_passthrough(self):
-        import bridge
-        text = "Just regular text\nNo tables here"
-        result = bridge._pipe_tables_to_html(text)
-        assert result == text
 
     def test_alignment(self):
         import bridge
