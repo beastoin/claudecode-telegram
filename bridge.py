@@ -74,6 +74,12 @@ def _int_field(d: dict[str, object], key: str, default: int = 0) -> int:
     return default
 
 
+def _dict_field(d: dict[str, object], key: str) -> dict[str, object]:
+    """Extract a dict field, returning empty dict if missing or wrong type."""
+    val = d.get(key)
+    return val if isinstance(val, dict) else {}
+
+
 def _bool_field(d: dict[str, object], key: str, default: bool = False) -> bool:
     """Extract a bool field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
@@ -3093,11 +3099,186 @@ class ClaudeBackend:
         return is_process_running(tmux_name, "claude")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Codex adapter (was hooks/codex-tmux-adapter.py — merged into bridge)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _codex_session_id_path(worker_name: str, sessions_dir: Path) -> Path:
+    """Path to the file storing codex session ID."""
+    return sessions_dir / worker_name / "codex_session_id"
+
+
+def _codex_load_session_id(worker_name: str, sessions_dir: Path) -> str:
+    """Load saved codex session ID for worker. Returns '' if none."""
+    p = _codex_session_id_path(worker_name, sessions_dir)
+    if p.exists():
+        return p.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str) -> None:
+    """Atomically save codex session ID for worker (tmp + rename)."""
+    target = _codex_session_id_path(worker_name, sessions_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd: int = -1
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".session_id_")
+        os.write(fd, session_id.encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        os.replace(tmp_path, str(target))
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        raise
+
+
+def _codex_parse_jsonl(output: str) -> tuple[str, str]:
+    """Parse JSONL output from codex exec --json.
+
+    Returns (response_text, thread_id).
+    """
+    response_parts: list[str] = []
+    thread_id: str = ""
+
+    for line in output.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            event: dict[str, object] = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        event_type = _str_field(event, "type")
+        if event_type == "thread.started":
+            thread_id = _str_field(event, "thread_id")
+        elif event_type == "item.completed":
+            item = _dict_field(event, "item")
+            if _str_field(item, "type") == "agent_message":
+                text = _str_field(item, "text")
+                if text:
+                    response_parts.append(text)
+
+    return "\n".join(response_parts).strip(), thread_id
+
+
+def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[str, str, int]:
+    """Run codex exec and return (response, session_id, returncode)."""
+    cmd: list[str] = ["codex", "exec", "--json", "--yolo"]
+    if workdir:
+        cmd.extend(["-C", workdir])
+    if session_id and not session_id.startswith("-"):
+        cmd.extend(["resume", session_id, "-"])
+    else:
+        cmd.append("-")
+
+    try:
+        result = subprocess.run(cmd, input=message, capture_output=True, text=True)
+        response, new_session_id = _codex_parse_jsonl(result.stdout)
+        if result.returncode != 0 and not response:
+            stderr = (result.stderr or "").strip()
+            response = stderr or "Codex exec failed."
+        return response, new_session_id or session_id, result.returncode
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Error: {e}", session_id, 1
+
+
+def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool:
+    """Send codex response to bridge (raw text, no escaping)."""
+    try:
+        payload: dict[str, str | bool] = {
+            "session": session_name, "text": text,
+            "source": "codex", "escape": True,
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{bridge_url}/response", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with _urlopen(req, timeout=5) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError) as e:
+        _log(_LOG_WARN, "codex", f"Failed to send to bridge: {e}")
+        return False
+
+
+def _codex_adapter_thread(worker_name: str, text: str,
+                          bridge_url: str, sessions_dir: Path) -> None:
+    """Thread target: run codex for a worker and forward response to bridge."""
+    try:
+        session_id = _codex_load_session_id(worker_name, sessions_dir)
+        response, new_session_id, _rc = _codex_run(text, session_id)
+
+        if new_session_id:
+            _codex_save_session_id(worker_name, sessions_dir, new_session_id)
+
+        if response:
+            _codex_send_to_bridge(worker_name, response, bridge_url)
+    except Exception as e:
+        _log(_LOG_ERROR, "codex", f"Adapter thread for '{worker_name}' failed: {e}")
+
+
+def _codex_adapter_remote(worker_name: str, text: str,
+                          bridge_url: str, sessions_dir: Path, host: str) -> None:
+    """Thread target: run codex on a remote host via SSH, parse output locally."""
+    try:
+        # Load session_id from remote
+        remote_sessions = _remap_sessions_dir(host)
+        sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"
+        session_id = ""
+        try:
+            r = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", host, "cat", sid_file],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                session_id = r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        # Build codex command
+        cmd_parts = ["codex", "exec", "--json", "--yolo"]
+        if session_id and not session_id.startswith("-"):
+            cmd_parts.extend(["resume", session_id, "-"])
+        else:
+            cmd_parts.append("-")
+
+        # SSH + run codex with message on stdin
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", host] + cmd_parts
+        result = subprocess.run(ssh_cmd, input=text, capture_output=True, text=True)
+        response, new_session_id = _codex_parse_jsonl(result.stdout)
+
+        if result.returncode != 0 and not response:
+            response = (result.stderr or "").strip() or "Codex exec failed."
+
+        # Save session_id on remote
+        if new_session_id:
+            try:
+                subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=5", host,
+                     "mkdir", "-p", f"{remote_sessions}/{worker_name}",
+                     "&&", "echo", shlex.quote(new_session_id), ">", sid_file],
+                    timeout=10, capture_output=True,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+        # POST response to bridge (use public URL for remote)
+        if response:
+            target_url = BRIDGE_PUBLIC_URL or bridge_url
+            _codex_send_to_bridge(worker_name, response, target_url)
+
+    except Exception as e:
+        _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
+
+
 class CodexBackend:
     """OpenAI Codex CLI - non-interactive mode."""
     name = "codex"
     binary = "codex"
     is_interactive = False
+    is_exec = True
 
     def start_cmd(self, resume_id: str = "") -> str:
         """Start cmd."""
@@ -3105,9 +3286,22 @@ class CodexBackend:
 
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
-        """Send."""
-        adapter = Path(__file__).parent / "hooks" / "codex-tmux-adapter.py"
-        return _spawn_adapter(adapter, worker_name, text, bridge_url, sessions_dir)
+        """Send message to codex worker — runs in a background thread."""
+        host = get_worker_host(worker_name)
+        if host:
+            t = threading.Thread(
+                target=_codex_adapter_remote,
+                args=(worker_name, text, bridge_url, sessions_dir, host),
+                daemon=True,
+            )
+        else:
+            t = threading.Thread(
+                target=_codex_adapter_thread,
+                args=(worker_name, text, bridge_url, sessions_dir),
+                daemon=True,
+            )
+        t.start()
+        return True
 
     def is_online(self, tmux_name: str) -> bool:
         """Is online."""
@@ -3135,80 +3329,8 @@ class ProcessRegistry:
 processes = ProcessRegistry()
 
 
-def _spawn_adapter(adapter_path: Path, worker_name: str, text: str,
-                   bridge_url: str, sessions_dir: Path) -> bool:
-    """Spawn an adapter process with stderr logged to per-worker file."""
-    host = get_worker_host(worker_name)
-    if host:
-        return _spawn_adapter_remote(adapter_path, worker_name, text, bridge_url, sessions_dir, host)
-    if not adapter_path.exists():
-        _log(_LOG_ERROR, "adapter", f"Adapter not found: {adapter_path}")
-        return False
-
-    # Open per-worker log file for adapter stderr (append mode)
-    log_file = sessions_dir / worker_name / "adapter.log"
-    try:
-        stderr_fh = open(log_file, "a")
-    except OSError:
-        stderr_fh = None  # Fall back to DEVNULL if dir doesn't exist yet
-
-    try:
-        proc = _subprocess_runner.popen(
-            ["python3", str(adapter_path), worker_name, text, bridge_url, str(sessions_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
-        )
-    except OSError:
-        if stderr_fh:
-            stderr_fh.close()
-        raise
-    with processes.adapter_pids_lock:
-        processes.adapter_pids[worker_name] = (proc, stderr_fh)
-    return True
-
-
-def _spawn_adapter_remote(adapter_path: Path, worker_name: str, text: str,
-                          bridge_url: str, sessions_dir: Path, host: str) -> bool:
-    """Spawn an adapter on a remote host via SSH for teleported workers."""
-    remote_home = _get_remote_home(host)
-    if not remote_home:
-        _log(_LOG_WARN, "bridge", f"Cannot determine remote $HOME for {host}, adapter spawn failed")
-        return False
-
-    local_home = os.path.expanduser("~")
-    remote_adapter = str(adapter_path)
-    if remote_adapter.startswith(local_home):
-        remote_adapter = remote_home + remote_adapter[len(local_home):]
-
-    remote_sessions = _remap_sessions_dir(host)
-    remote_bridge_url = BRIDGE_PUBLIC_URL or bridge_url
-
-    remote_cmd = (
-        f"python3 {shlex.quote(remote_adapter)} "
-        f"{shlex.quote(worker_name)} {shlex.quote(text)} "
-        f"{shlex.quote(remote_bridge_url)} {shlex.quote(remote_sessions)}"
-    )
-
-    log_file = sessions_dir / worker_name / "adapter.log"
-    try:
-        stderr_fh = open(log_file, "a")
-    except OSError:
-        stderr_fh = None
-
-    try:
-        proc = _subprocess_runner.popen(
-            ["ssh", "-o", "ConnectTimeout=5", host, remote_cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_fh if stderr_fh else subprocess.DEVNULL
-        )
-    except OSError:
-        if stderr_fh:
-            stderr_fh.close()
-        raise
-    with processes.adapter_pids_lock:
-        processes.adapter_pids[worker_name] = (proc, stderr_fh)
-    _log(_LOG_INFO, "adapter", f"Spawned remote adapter for '{worker_name}' on {host}")
-    return True
+# _spawn_adapter and _spawn_adapter_remote removed — codex adapter is now
+# inline in bridge.py (see _codex_adapter_thread / _codex_adapter_remote above CodexBackend).
 
 
 def kill_adapter(name: str) -> None:

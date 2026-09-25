@@ -40,8 +40,9 @@ CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$CLAUDE_DIR/settings.json}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 NODES_DIR="$CLAUDE_DIR/telegram/nodes"
-HOOK_SCRIPT="send-to-telegram.sh"
-CHECKIN_HOOK_SCRIPT="checkin-on-start.sh"
+HOOK_SCRIPT="hooks.sh"
+# Legacy names (for uninstall cleanup of old files)
+LEGACY_HOOK_FILES="send-to-telegram.sh checkin-on-start.sh on-tool-failure.sh forward-to-bridge.py"
 
 # CLI flags
 VERBOSE=false
@@ -494,7 +495,7 @@ cmd_run() {
     log ""
 
     # 1. Install hooks if needed (single hook for all nodes, reads env at runtime)
-    if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] || [[ ! -f "$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT" ]]; then
+    if [[ ! -f "$HOOKS_DIR/$HOOK_SCRIPT" ]]; then
         log "Installing hooks..."
         FORCE=true cmd_hook_install >/dev/null 2>&1 || true
         success "Hooks installed"
@@ -1352,97 +1353,37 @@ cmd_hook_install() {
         exit 1
     fi
 
-    # Just copy the hook (reads env vars at runtime, set by bridge)
+    # Copy the single hook script (dispatches all events via subcommand)
     cp "$src" "$dst" && chmod 755 "$dst"
     success "Hook installed: $dst"
 
-    # Also copy helper script
-    local helper_src="$SCRIPT_DIR/hooks/forward-to-bridge.py"
-    local helper_dst="$HOOKS_DIR/forward-to-bridge.py"
-    if [[ -f "$helper_src" ]]; then
-        cp "$helper_src" "$helper_dst" && chmod 755 "$helper_dst"
-    fi
-
-    # Copy checkin hook (SessionStart - re-injects instructions after compact/resume)
-    local checkin_src="$SCRIPT_DIR/hooks/$CHECKIN_HOOK_SCRIPT"
-    local checkin_dst="$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT"
-    if [[ -f "$checkin_src" ]]; then
-        cp "$checkin_src" "$checkin_dst" && chmod 755 "$checkin_dst"
-        success "Checkin hook installed: $checkin_dst"
-    fi
-
-    # Copy tool failure hook (PostToolUseFailure - POISONED detection via signal file)
-    local failure_hook_src="$SCRIPT_DIR/hooks/on-tool-failure.sh"
-    local failure_hook_dst="$HOOKS_DIR/on-tool-failure.sh"
-    if [[ -f "$failure_hook_src" ]]; then
-        cp "$failure_hook_src" "$failure_hook_dst" && chmod 755 "$failure_hook_dst"
-        success "Tool failure hook installed: $failure_hook_dst"
-    fi
+    # Clean up legacy separate hook files
+    for legacy in $LEGACY_HOOK_FILES; do
+        rm -f "$HOOKS_DIR/$legacy"
+    done
 
     mkdir -p "$CLAUDE_DIR"
-    local hook_cmd="$HOME/.claude/hooks/$HOOK_SCRIPT"
-    local checkin_cmd="$HOME/.claude/hooks/$CHECKIN_HOOK_SCRIPT"
-    local failure_cmd="$HOME/.claude/hooks/on-tool-failure.sh"
+    local hook_base="$HOME/.claude/hooks/$HOOK_SCRIPT"
 
-    # Add to settings.json
-    # Claude Code hooks structure: hooks.<Event>[].hooks[] (matcher group with hooks array)
-    if [[ -f "$SETTINGS_FILE" ]]; then
-        if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
-            log "$(dim "Stop hook already in settings.json")"
-        elif check_cmd jq; then
-            if jq -e '.hooks.Stop[0].hooks' "$SETTINGS_FILE" >/dev/null 2>&1; then
-                jq --arg cmd "$hook_cmd" \
-                    '.hooks.Stop[0].hooks += [{"type":"command","command":$cmd}]' \
-                    "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                    && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            else
-                jq --arg cmd "$hook_cmd" \
-                    '.hooks.Stop = [{"hooks":[{"type":"command","command":$cmd}]}]' \
-                    "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                    && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            fi
-            success "Updated settings.json (Stop hook)"
+    # Write settings.json — all three hook events point to the same script
+    if check_cmd jq; then
+        local hooks_json
+        hooks_json=$(jq -n --arg h "$hook_base" '{
+            Stop: [{hooks: [{type: "command", command: ($h + " stop")}]}],
+            SessionStart: [{matcher: "compact|resume|init|start", hooks: [{type: "command", command: ($h + " start")}]}],
+            PostToolUseFailure: [{hooks: [{type: "command", command: ($h + " tool-failure")}]}]
+        }')
+
+        if [[ -f "$SETTINGS_FILE" ]]; then
+            jq --argjson hooks "$hooks_json" '.hooks = $hooks' \
+                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
         else
-            warn "Install jq to auto-update settings.json"
+            jq -n --argjson hooks "$hooks_json" '{hooks: $hooks}' > "$SETTINGS_FILE"
         fi
-
-        # Add PostToolUseFailure hook for POISONED detection
-        if grep -q "on-tool-failure.sh" "$SETTINGS_FILE" 2>/dev/null; then
-            log "$(dim "PostToolUseFailure hook already in settings.json")"
-        elif check_cmd jq; then
-            jq --arg cmd "$failure_cmd" \
-                '.hooks.PostToolUseFailure = [{"hooks":[{"type":"command","command":$cmd}]}]' \
-                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            success "Updated settings.json (PostToolUseFailure hook)"
-        fi
-
-        # Add SessionStart hook for checkin (compact/resume)
-        if grep -q "$CHECKIN_HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
-            log "$(dim "SessionStart hook already in settings.json")"
-        elif check_cmd jq; then
-            jq --arg cmd "$checkin_cmd" \
-                '.hooks.SessionStart = [{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":$cmd}]}]' \
-                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            success "Updated settings.json (SessionStart hook)"
-        fi
+        success "Updated settings.json (all hooks → $HOOK_SCRIPT)"
     else
-        if check_cmd jq; then
-            # Create with all hooks using jq for proper escaping
-            jq -n --arg stop "$hook_cmd" --arg checkin "$checkin_cmd" --arg failure "$failure_cmd" '{
-                hooks: {
-                    Stop: [{hooks: [{type: "command", command: $stop}]}],
-                    SessionStart: [{matcher: "compact|resume|init|start", hooks: [{type: "command", command: $checkin}]}],
-                    PostToolUseFailure: [{hooks: [{type: "command", command: $failure}]}]
-                }
-            }' > "$SETTINGS_FILE"
-        else
-            cat > "$SETTINGS_FILE" << EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"$hook_cmd"}]}],"SessionStart":[{"matcher":"compact|resume|init|start","hooks":[{"type":"command","command":"$checkin_cmd"}]}],"PostToolUseFailure":[{"hooks":[{"type":"command","command":"$failure_cmd"}]}]}}
-EOF
-        fi
-        success "Created settings.json"
+        warn "Install jq to auto-update settings.json"
     fi
 
     log ""
@@ -1450,12 +1391,10 @@ EOF
 }
 
 cmd_hook_uninstall() {
-    local hook_file="$HOOKS_DIR/$HOOK_SCRIPT"
-    local checkin_file="$HOOKS_DIR/$CHECKIN_HOOK_SCRIPT"
-
     log "Uninstalling hooks..."
 
-    # Remove hook files
+    # Remove main hook script
+    local hook_file="$HOOKS_DIR/$HOOK_SCRIPT"
     if [[ -f "$hook_file" ]]; then
         rm -f "$hook_file"
         success "Removed: $hook_file"
@@ -1463,34 +1402,17 @@ cmd_hook_uninstall() {
         log "$(dim "Hook file not found: $hook_file")"
     fi
 
-    if [[ -f "$checkin_file" ]]; then
-        rm -f "$checkin_file"
-        success "Removed: $checkin_file"
-    fi
+    # Remove legacy separate hook files
+    for legacy in $LEGACY_HOOK_FILES; do
+        rm -f "$HOOKS_DIR/$legacy"
+    done
 
-    # Remove helper
-    rm -f "$HOOKS_DIR/forward-to-bridge.py"
-
-    # Remove from settings.json
+    # Remove all hook entries from settings.json
     if [[ -f "$SETTINGS_FILE" ]] && check_cmd jq; then
-        if grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
-            jq --arg hook "$HOOK_SCRIPT" '
-                .hooks.Stop[0].hooks = [.hooks.Stop[0].hooks[] | select(.command | contains($hook) | not)]
-            ' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            success "Removed Stop hook from settings.json"
-        else
-            log "$(dim "Stop hook not in settings.json")"
-        fi
-
-        if grep -q "$CHECKIN_HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null; then
-            jq 'del(.hooks.SessionStart)' \
-                "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
-                && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-            success "Removed SessionStart hook from settings.json"
-        else
-            log "$(dim "SessionStart hook not in settings.json")"
-        fi
+        jq 'del(.hooks.Stop, .hooks.SessionStart, .hooks.PostToolUseFailure)' \
+            "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" \
+            && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+        success "Removed hooks from settings.json"
     fi
 
     return 0
