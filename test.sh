@@ -6676,7 +6676,7 @@ test_on_tool_failure_hook_script() {
     # Simulate PostToolUseFailure payload via the hook script
     # The hook reads stdin and extracts tool_name
     local hook_script
-    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks/hooks.sh"
+    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks.sh"
 
     # Run hook in the tmux session context (so tmux display-message works)
     echo '{"tool_name": "Bash", "error": "Command failed"}' | \
@@ -8729,7 +8729,7 @@ test_hook_env_validation() {
 
     # Test 1: Missing TMUX_PREFIX
     local result
-    result=$(echo "$mock_input" | TMUX_PREFIX="" SESSIONS_DIR="/tmp" PORT="8080" bash "$SCRIPT_DIR/hooks/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="" SESSIONS_DIR="/tmp" PORT="8080" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
 
     # Hook should exit silently (exit 0) but with error message to stderr
     if echo "$result" | grep -q "Missing TMUX_PREFIX" || [[ -z "$result" ]]; then
@@ -8739,7 +8739,7 @@ test_hook_env_validation() {
     fi
 
     # Test 2: Missing SESSIONS_DIR
-    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="" PORT="8080" bash "$SCRIPT_DIR/hooks/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="" PORT="8080" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
 
     if echo "$result" | grep -q "Missing SESSIONS_DIR" || [[ -z "$result" ]]; then
         success "Hook exits when SESSIONS_DIR missing"
@@ -8748,7 +8748,7 @@ test_hook_env_validation() {
     fi
 
     # Test 3: Missing both BRIDGE_URL and PORT
-    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="/tmp" PORT="" BRIDGE_URL="" bash "$SCRIPT_DIR/hooks/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="/tmp" PORT="" BRIDGE_URL="" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
 
     if echo "$result" | grep -q "Missing BRIDGE_URL and PORT" || [[ -z "$result" ]]; then
         success "Hook exits when both BRIDGE_URL and PORT missing"
@@ -8872,7 +8872,7 @@ test_checkin_hook_env_validation() {
 
     # Test 1: Missing TMUX_PREFIX - hook should exit silently
     local result exit_code
-    result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/hooks/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
     if [[ -z "$result" ]]; then
         success "Checkin hook exits silently when TMUX_PREFIX missing"
     else
@@ -8880,7 +8880,7 @@ test_checkin_hook_env_validation() {
     fi
 
     # Test 2: Missing both BRIDGE_URL and PORT - hook should exit silently
-    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="" PORT="" bash "$SCRIPT_DIR/hooks/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="" PORT="" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
     if [[ -z "$result" ]]; then
         success "Checkin hook exits silently when BRIDGE_URL and PORT missing"
     else
@@ -8913,7 +8913,7 @@ test_checkin_hook_calls_endpoint() {
 
     # Run the hook with valid env vars pointing to our test bridge
     local result
-    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="http://localhost:$PORT" bash "$SCRIPT_DIR/hooks/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="http://localhost:$PORT" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
 
     if [[ -n "$result" ]] && echo "$result" | grep -qi -e "RECEIVING\|SENDING\|MESSAGING\|worker\|instruction"; then
         success "Checkin hook returns bridge instructions"

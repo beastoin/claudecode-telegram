@@ -1340,7 +1340,7 @@ cmd_hook_install() {
         esac
     done
 
-    local src="$SCRIPT_DIR/hooks/$HOOK_SCRIPT"
+    local src="$SCRIPT_DIR/$HOOK_SCRIPT"
     local dst="$HOOKS_DIR/$HOOK_SCRIPT"
 
     [[ -f "$src" ]] || { error "Hook script not found: $src"; exit 1; }
