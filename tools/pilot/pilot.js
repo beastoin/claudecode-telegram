@@ -43,6 +43,41 @@ function refreshSessionTimer(sessionName) {
   }, PILOT_TIMEOUT_MS));
 }
 
+const GRID_STATE_FILE = '/tmp/claudecode-telegram/pilot-grid-sessions.json';
+
+function persistGridSessions() {
+  try {
+    const data = {};
+    for (const [slug, gs] of GRID_SESSIONS) {
+      data[slug] = { sessions: gs.sessions, createdAt: gs.createdAt, expiresAt: gs.expiresAt };
+    }
+    const dir = path.dirname(GRID_STATE_FILE);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(GRID_STATE_FILE, JSON.stringify(data));
+  } catch { /* best effort */ }
+}
+
+function restoreGridSessions() {
+  try {
+    if (!fs.existsSync(GRID_STATE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(GRID_STATE_FILE, 'utf-8'));
+    const now = Date.now();
+    let restored = 0;
+    for (const [slug, gs] of Object.entries(data)) {
+      if (gs.expiresAt <= now) continue; // already expired
+      const remaining = gs.expiresAt - now;
+      const timer = setTimeout(() => {
+        console.log(`[pilot] grid session '${slug}' expired`);
+        GRID_SESSIONS.delete(slug);
+        persistGridSessions();
+      }, remaining);
+      GRID_SESSIONS.set(slug, { sessions: gs.sessions, createdAt: gs.createdAt, expiresAt: gs.expiresAt, timer });
+      restored++;
+    }
+    if (restored) console.log(`[pilot] restored ${restored} grid session(s) from disk`);
+  } catch { /* first run or corrupt file */ }
+}
+
 function createGridSession(slug, sessionNames, ttlMs) {
   const existing = GRID_SESSIONS.get(slug);
   if (existing && existing.timer) clearTimeout(existing.timer);
@@ -51,8 +86,10 @@ function createGridSession(slug, sessionNames, ttlMs) {
   const timer = setTimeout(() => {
     console.log(`[pilot] grid session '${slug}' expired`);
     GRID_SESSIONS.delete(slug);
+    persistGridSessions();
   }, ttlMs);
   GRID_SESSIONS.set(slug, { sessions: sessionNames, createdAt: now, expiresAt, timer });
+  persistGridSessions();
   return { slug, expiresAt };
 }
 
@@ -61,6 +98,7 @@ function getGridSession(slug) {
   if (!gs) return null;
   if (Date.now() >= gs.expiresAt) {
     GRID_SESSIONS.delete(slug);
+    persistGridSessions();
     return null;
   }
   return gs;
@@ -484,8 +522,9 @@ function renderIndexPage({ sessions, token, enabledCount }) {
 </html>`;
 }
 
-function renderSessionPage({ sessionName, token, readonly, embed }) {
+function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) {
   const hideChrome = embed ? 'display:none !important;' : '';
+  const hideBar = (embed || hideheader) ? 'display:none !important;' : '';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -523,7 +562,7 @@ function renderSessionPage({ sessionName, token, readonly, embed }) {
         padding: 10px 12px;
         background: var(--panel);
         border-bottom: 1px solid var(--line);
-        ${hideChrome}
+        ${hideBar}
       }
       .back {
         color: var(--text);
@@ -1328,13 +1367,16 @@ function renderGridPage({ token, slug, gridSession }) {
       var sep = tokenQuery ? '&' : '?';
       if (opts && opts.readonly) { url += sep + 'readonly=1'; sep = '&'; }
       if (opts && opts.embed) { url += sep + 'embed=1'; sep = '&'; }
+      if (opts && opts.hideheader) { url += sep + 'hideheader=1'; sep = '&'; }
       return url;
     }
 
     function buildGrid() {
       if (!sessions.length) {
-        gridContainer.innerHTML = '<div class="empty-state">' +
-          'No sessions enabled.<br>Use /pilot name1 name2 in Telegram.</div>';
+        var msg = filterSessions
+          ? 'Sessions expired. Reconnecting...<br><small>Or run /pilot again in Telegram.</small>'
+          : 'No sessions enabled.<br>Use /pilot name1 name2 in Telegram.';
+        gridContainer.innerHTML = '<div class="empty-state">' + msg + '</div>';
         workerCountEl.textContent = '';
         return;
       }
@@ -1343,7 +1385,7 @@ function renderGridPage({ token, slug, gridSession }) {
         workerCountEl.textContent = extractWorkerName(sessions[0].name);
         gridContainer.className = 'solo';
         gridContainer.innerHTML =
-          '<iframe src="' + escapeHtml(sessionUrl(sessions[0].name, { embed: true })) + '"></iframe>';
+          '<iframe src="' + escapeHtml(sessionUrl(sessions[0].name, { hideheader: true })) + '"></iframe>';
         return;
       }
 
@@ -1439,6 +1481,11 @@ function renderGridPage({ token, slug, gridSession }) {
     (async function init() {
       try {
         await loadEnabledSessions();
+        if (!sessions.length && filterSessions) {
+          // Sessions not enabled yet (pilot restart or idle expiry) — re-enable immediately
+          await keepAlive();
+          await loadEnabledSessions();
+        }
         buildGrid();
         setInterval(loadEnabledSessions, 15000);
         setInterval(keepAlive, 60000); // re-enable expired sessions every 60s
@@ -1671,6 +1718,7 @@ try {
         token: getTokenForTemplates(urlObj),
         readonly: urlObj.searchParams.get('readonly') === '1',
         embed: urlObj.searchParams.get('embed') === '1',
+        hideheader: urlObj.searchParams.get('hideheader') === '1',
       })
     );
     return;
@@ -1915,6 +1963,7 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+restoreGridSessions();
 httpServer.listen(PORT, () => {
   console.log(`pilot listening on http://localhost:${PORT}`);
 });
