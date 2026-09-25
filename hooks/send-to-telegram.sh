@@ -252,8 +252,6 @@ fi
 
 # Forward to bridge (non-blocking with timeout)
 TMPFILE=$(mktemp)
-# Cleanup on unexpected exit (background subshell also cleans up on success)
-trap 'rm -f "$TMPFILE"' EXIT
 echo "$TEXT" > "$TMPFILE"
 
 # Run forward in background with 5s timeout, then cleanup
