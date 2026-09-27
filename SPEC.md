@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.44.8
+> Version: 0.44.9
 
 ## Documentation Contract
 
@@ -317,12 +317,13 @@ Required fields match the SDD: `ssh_target`, `bridge_base_url`, `home_root`, `os
 
 **Status:** Available (tmux send-keys + named pipes)
 
-**Design:** The bridge provides discovery only. Workers communicate directly with each other. Manager tools may use `POST /send` to reach workers. The bridge does not route worker-to-worker messages.
+**Design:** The bridge provides discovery only. Workers communicate directly with each other via p2p (tmux/pipe). `POST /response` is reserved for a worker's own hook output to Telegram — it validates that the payload's `source` matches `session` and rejects misuse with a helpful error.
 
 This means:
 - **No manager visibility:** Private worker-to-worker conversations stay private.
 - **Direct P2P communication:** Workers talk to each other without the bridge.
 - **Protocol flexibility:** Each worker advertises how to reach it (tmux, pipe, etc.).
+- **Response isolation:** `/response` accepts worker output only when the payload identifies the same `source` and `session`; source/session mismatches are rejected.
 
 **Current state:**
 - **tmux backends (interactive):** Workers use `flock /tmp/claudecode-telegram/<node>/locks/<session>.lock sh -c 'echo "message" | tmux load-buffer - && tmux paste-buffer -p -r -t claude-<node>-<worker> && sleep 0.05 && tmux send-keys -t claude-<node>-<worker> Enter'`

@@ -4251,7 +4251,7 @@ test_response_with_image_tags() {
 
     # Test response with image tag (image won't exist, but parsing should work)
     local result body
-    body='{"session":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}'
+    body='{"session":"imageresponsetest","source":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}'
     result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
@@ -4290,7 +4290,7 @@ test_response_endpoint() {
 
     # Simulate hook calling /response endpoint
     local result body
-    body='{"session":"responsetest","text":"Test response from hook"}'
+    body='{"session":"responsetest","source":"responsetest","text":"Test response from hook"}'
     result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
@@ -4404,7 +4404,7 @@ test_response_without_pending() {
 
     # Simulate hook calling /response endpoint
     local result body
-    body='{"session":"nopendingtest","text":"Test without pending"}'
+    body='{"session":"nopendingtest","source":"nopendingtest","text":"Test without pending"}'
     result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
     if [[ "$result" == "OK" ]]; then
@@ -6202,6 +6202,25 @@ finally:
         success "send_example uses paste-buffer for tmux workers"
     else
         fail "send_example paste-buffer test failed"
+    fi
+}
+
+test_checkin_instructions_warn_against_response_misuse() {
+    info "Testing checkin instructions warn against /response for w2w..."
+
+    if python3 -c "
+import sys; sys.path.insert(0, '.')
+import bridge
+
+welcome = bridge.worker_manager._build_welcome('finn', bridge.get_backend('claude'))
+assert 'send_example' in welcome, welcome
+assert 'Never use POST /response to message another worker' in welcome, welcome
+assert 'http_send_example' not in welcome, 'should not advertise http_send_example — maximize p2p'
+print('OK')
+" 2>/dev/null | grep -q "OK"; then
+        success "checkin instructions warn against /response, steer to p2p"
+    else
+        fail "checkin instructions should warn against /response and use p2p"
     fi
 }
 
@@ -8402,7 +8421,7 @@ test_response_endpoint_missing_fields() {
 test_response_endpoint_no_chat_id() {
     info "Testing /response endpoint with non-existent session..."
 
-    local body='{"session":"nonexistent_session_xyz","text":"Test"}'
+    local body='{"session":"nonexistent_session_xyz","source":"nonexistent_session_xyz","text":"Test"}'
     local result
     result=$(hook_curl "http://localhost:$PORT/response" "$body")
 
@@ -8418,6 +8437,36 @@ test_response_endpoint_no_chat_id() {
         else
             fail "/response should return 404 for unknown session"
         fi
+    fi
+}
+
+test_response_endpoint_rejects_worker_misroute() {
+    info "Testing /response rejects worker-to-worker misroutes..."
+
+    local result http_code
+    result=$(hook_curl "http://localhost:$PORT/response" \
+        '{"session":"sui","source":"finn","text":"Hey sui, can you check this?"}')
+
+    if echo "$result" | grep -q "Source/session mismatch" && echo "$result" | grep -q "POST /send"; then
+        success "/response rejects source/session mismatch"
+    else
+        fail "/response should reject source/session mismatch: $result"
+    fi
+
+    http_code=$(hook_curl_code "http://localhost:$PORT/response" \
+        '{"session":"sui","source":"finn","text":"Hey sui"}')
+    if [[ "$http_code" == "403" ]]; then
+        success "/response mismatch returns 403"
+    else
+        fail "/response mismatch should return 403, got $http_code"
+    fi
+
+    result=$(hook_curl "http://localhost:$PORT/response" \
+        '{"session":"sui","text":"Hey sui"}')
+    if echo "$result" | grep -q "Missing source" && echo "$result" | grep -q "POST /send"; then
+        success "/response rejects missing source"
+    else
+        fail "/response should reject missing source: $result"
     fi
 }
 
@@ -11686,7 +11735,7 @@ print('OK')
     fi
 }
 
-test_workers_callback_worker_http_send_example() {
+test_workers_callback_worker_send_example() {
     info "Testing callback workers appear in /workers with HTTP send_example..."
 
     if python3 -c "
@@ -18975,14 +19024,14 @@ test_hooks_forward_to_bridge_payload() {
     local payload_no_sid payload_with_sid
 
     payload_no_sid=$(jq -n --arg s "test-session" --arg t "**bold** text" \
-        '{session: $s, text: $t}')
+        '{session: $s, text: $t, source: $s}')
 
     payload_with_sid=$(jq -n --arg s "test-session" --arg t "**bold** text" --arg sid "sess_123" \
-        '{session: $s, text: $t, session_id: $sid}')
+        '{session: $s, text: $t, source: $s, session_id: $sid}')
 
     # Verify structure
-    if echo "$payload_no_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and (.session_id // null) == null' >/dev/null 2>&1 &&
-       echo "$payload_with_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and .session_id == "sess_123"' >/dev/null 2>&1; then
+    if echo "$payload_no_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and .source == "test-session" and (.session_id // null) == null' >/dev/null 2>&1 &&
+       echo "$payload_with_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and .source == "test-session" and .session_id == "sess_123"' >/dev/null 2>&1; then
         success "hooks.sh _forward_to_bridge builds correct JSON payload"
     else
         fail "hooks.sh _forward_to_bridge payload incorrect: no_sid=$payload_no_sid with_sid=$payload_with_sid"
@@ -23754,7 +23803,7 @@ run_unit_tests() {
     run_test test_workers_from_caller_local_to_remote_peer
     run_test test_workers_no_from_backward_compat
     run_test test_workers_from_includes_machine_id
-    run_test test_workers_callback_worker_http_send_example
+    run_test test_workers_callback_worker_send_example
     run_test test_teleport_preflight_uses_public_url
     run_test test_teleport_remote_worker_gets_public_url
     run_test test_teleport_preflight_rejects_without_public_url
@@ -23921,6 +23970,7 @@ run_unit_tests() {
     run_test test_slow_paste_render_enter_delivered
     run_test test_tmux_send_uses_flock
     run_test test_send_example_uses_paste_buffer
+    run_test test_checkin_instructions_warn_against_response_misuse
     run_test test_concurrent_sends_no_interleave
     run_test test_flock_per_session_isolation
     run_test test_flock_node_namespaced
@@ -24125,6 +24175,7 @@ run_integration_tests() {
     run_test test_health_endpoint
     run_test test_response_endpoint_missing_fields
     run_test test_response_endpoint_no_chat_id
+    run_test test_response_endpoint_rejects_worker_misroute
     run_test test_notify_endpoint_missing_text
     run_test test_checkin_endpoint
     run_test test_checkin_note

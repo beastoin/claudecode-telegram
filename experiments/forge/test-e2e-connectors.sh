@@ -422,7 +422,7 @@ echo "121604706" > "$SESSION_DIR/chat_id"
 UNIQUE_RESP="BRIDGE_RESP_$(date +%s%N)"
 RESP_RESULT=$(curl -sf -X POST "http://127.0.0.1:$BRIDGE_PORT/response" \
     -H "Content-Type: application/json" \
-    -d "{\"text\":\"$UNIQUE_RESP\",\"session\":\"$BRIDGE_SESSION\"}" 2>/dev/null || echo "FAIL")
+    -d "{\"text\":\"$UNIQUE_RESP\",\"session\":\"$BRIDGE_SESSION\",\"source\":\"$BRIDGE_SESSION\"}" 2>/dev/null || echo "FAIL")
 assert "bridge: response endpoint accepted POST" test "$RESP_RESULT" = "OK"
 
 sleep 0.5
@@ -433,7 +433,7 @@ assert_contains "bridge: LocalTransport logged outbound (proves response→Teleg
 # --- NEGATIVE: /response with unknown session → bridge must not crash ---
 UNKNOWN_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$BRIDGE_PORT/response" \
     -H "Content-Type: application/json" \
-    -d "{\"text\":\"test\",\"session\":\"nonexistent-session-999\"}" 2>/dev/null || echo "000")
+    -d "{\"text\":\"test\",\"session\":\"nonexistent-session-999\",\"source\":\"nonexistent-session-999\"}" 2>/dev/null || echo "000")
 TOTAL=$((TOTAL + 1))
 # Bridge should still be alive regardless of response code
 if wait_for_http "http://127.0.0.1:$BRIDGE_PORT/" 3; then

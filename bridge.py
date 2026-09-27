@@ -640,9 +640,14 @@ class HookResponseBody(TypedDict, total=False):
     session: str
     text: str
     source: str
+    backend: str
     escape: bool
     session_id: str
     name: str
+    worker: str
+    to: str
+    target: str
+    message: str
 
 
 
@@ -889,8 +894,8 @@ API_ENDPOINTS = {
     "GET /transcript/<name>/updates": "Poll for new transcript entries (returns {total, new})",
     "GET /team-chat": "Team Telegram chat viewer (requires rewind token)",
     "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
-    "POST /send": "Send a prompt to a worker: {worker, message, from (default: system)}",
-    "POST /response": "Hook: send Claude response to Telegram",
+    "POST /send": "Send a prompt to a worker: {worker, message, from}; worker-to-worker HTTP path",
+    "POST /response": "Hook only: publish this worker's own response to Telegram",
     "POST /notify": "Send notification to all admin chats",
     "POST /health-alert": "Hook: JSONL health alert (stale transcript detection)",
     "POST /register": "Forge/callback worker registration (name, host, version, tools, callback_url)",
@@ -3189,7 +3194,7 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
     try:
         payload: dict[str, str | bool] = {
             "session": session_name, "text": text,
-            "source": "codex", "escape": True,
+            "source": session_name, "backend": "codex", "escape": True,
         }
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -9562,7 +9567,7 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
-            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. "
+            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. Never use POST /response to message another worker; /response only publishes your own worker output to Telegram. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
@@ -17728,6 +17733,31 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             "error": None if delivered else "Worker not found or not reachable",
         })
 
+    def _validate_response_source(self, data: HookResponseBody, session_name: str) -> str:
+        """Return an error string when /response looks like worker messaging."""
+        raw = cast(dict[str, object], data)
+        messaging_fields = [key for key in ("worker", "to", "target", "message", "from") if key in raw]
+        if messaging_fields:
+            return (
+                "POST /response is hook-only and cannot address workers. "
+                f"Unexpected messaging fields: {', '.join(messaging_fields)}. "
+                "Use POST /send with {worker, from, message}."
+            )
+
+        source = _str_field(data, "source").strip()
+        if not source:
+            return (
+                "Missing source. POST /response is hook-only; worker output must identify "
+                "its own source. To message another worker, use POST /send."
+            )
+        if source != session_name:
+            return (
+                f"Source/session mismatch: source={source!r}, session={session_name!r}. "
+                "POST /response only accepts a worker's own output. To message another "
+                "worker, use POST /send."
+            )
+        return ""
+
     def handle_hook_response(self, body: bytes = b"") -> None:
         """Handle response forwarded from Claude hook.
 
@@ -17746,6 +17776,12 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(b"Missing session or text")
+                return
+
+            source_error = self._validate_response_source(data, session_name)
+            if source_error:
+                _log(_LOG_WARN, "hook", f"Rejected /response for {session_name}: {source_error}")
+                self._send_text(403, source_error)
                 return
 
             # Get chat_id from session's file, fall back to admin_chat_id

@@ -269,10 +269,10 @@ _forward_to_bridge() {
     local payload
     if [ -n "$session_id" ]; then
         payload=$(jq -n --arg s "$session" --arg t "$text" --arg sid "$session_id" \
-            '{session: $s, text: $t, session_id: $sid}')
+            '{session: $s, text: $t, source: $s, session_id: $sid}')
     else
         payload=$(jq -n --arg s "$session" --arg t "$text" \
-            '{session: $s, text: $t}')
+            '{session: $s, text: $t, source: $s}')
     fi
 
     ${timeout_cmd:+$timeout_cmd 10} curl -s -m 10 -X POST "$endpoint" \

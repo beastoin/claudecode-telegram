@@ -485,6 +485,9 @@ func TestHTTPTransport_SendMessagePostsResponsePayload(t *testing.T) {
 	if payload["source"] != "worker-forge" {
 		t.Fatalf("payload[source] = %q, want worker-forge", payload["source"])
 	}
+	if payload["session"] != "worker-forge" {
+		t.Fatalf("payload[session] = %q, want worker-forge", payload["session"])
+	}
 }
 
 func TestHTTPTransport_SendMessageIncludesWorkerMessageType(t *testing.T) {

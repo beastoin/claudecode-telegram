@@ -138,9 +138,10 @@ func (h *HTTPTransport) SendMessage(ctx context.Context, msg WorkerMessage) erro
 	}
 
 	body, err := json.Marshal(map[string]string{
-		"type":   msg.Type,
-		"text":   msg.Text,
-		"source": h.source(),
+		"type":    msg.Type,
+		"text":    msg.Text,
+		"session": h.source(),
+		"source":  h.source(),
 	})
 	if err != nil {
 		return err

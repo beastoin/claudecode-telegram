@@ -1,5 +1,13 @@
 ## Changelog
 
+### v0.44.9 - Worker messaging misroute guardrails
+
+**Guard `/response` against worker-addressing:** `/response` now requires a `source` field matching `session` and rejects payloads that look like worker messaging (fields like `worker`, `to`, `from`). Source/session mismatches (e.g. `source=finn`, `session=sui`) return 403 with a helpful error. hooks.sh now sends `source=$session` so legitimate hook calls pass validation. Codex adapter fixed to use `source=session_name` instead of `source="codex"`.
+
+**Agent-facing instructions:** Welcome text now warns workers to never use POST /response to message another worker — use the `send_example` from `/workers` instead (direct p2p tmux/pipe).
+
+**Tests:** Added coverage for `/response` source validation, checkin instructions, and misroute rejection.
+
 ### v0.44.8 - Strong typing + solidity hardening
 
 **Type safety (58 TypedDicts, 9 NamedTuples, was 75+9 → consolidated):**
