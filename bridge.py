@@ -28,10 +28,11 @@ from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
+from collections.abc import Iterable, Mapping
+from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
 
 # ── Type aliases for clarity ────────────────────────────────────────────
-ChatId = int
+ChatId = int | str
 MessageId = int
 ParseMode = Literal["HTML", "MarkdownV2"] | None
 class TelegramApiResponseDict(TypedDict, total=False):
@@ -46,8 +47,8 @@ TelegramApiResponse = TelegramApiResponseDict | None
 # Handler type for EndpointRouter — all handlers receive (request, payload, match).
 # POST handlers get bytes payload; GET/DELETE handlers get ParseResult.
 # match is None for exact-path registrations, re.Match for pattern registrations.
-PostRouteHandler = Callable[["BridgeRequestHandler", bytes, re.Match[str] | None], None]
-GetRouteHandler = Callable[["BridgeRequestHandler", ParseResult, re.Match[str] | None], None]
+PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]
+GetRouteHandler = Callable[["Handler", ParseResult, re.Match[str] | None], None]
 
 # ── Safe JSON field accessors ────────────────────────────────────────────
 # After cast(<TypedDict>, json.loads(...)), .get() returns the declared type.
@@ -55,13 +56,13 @@ GetRouteHandler = Callable[["BridgeRequestHandler", ParseResult, re.Match[str] |
 # These helpers narrow to concrete types so callers can .strip(), compare, etc.
 
 
-def _str_field(d: dict[str, object], key: str, default: str = "") -> str:
+def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
     """Extract a string field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     return str(val) if val is not None else default
 
 
-def _int_field(d: dict[str, object], key: str, default: int = 0) -> int:
+def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     """Extract an int field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     if isinstance(val, int):
@@ -74,13 +75,13 @@ def _int_field(d: dict[str, object], key: str, default: int = 0) -> int:
     return default
 
 
-def _dict_field(d: dict[str, object], key: str) -> dict[str, object]:
+def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
     """Extract a dict field, returning empty dict if missing or wrong type."""
     val = d.get(key)
     return val if isinstance(val, dict) else {}
 
 
-def _bool_field(d: dict[str, object], key: str, default: bool = False) -> bool:
+def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     """Extract a bool field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     return bool(val)
@@ -233,11 +234,11 @@ class DiskUsageDict(TypedDict, total=False):
 
 class MemUsageDict(TypedDict, total=False):
     """Memory usage probe result from _check_mem_usage."""
-    pct: int
+    pct: int | float
     used_gb: float
     total_gb: float
     avail_gb: float
-    top_procs: list[str]
+    top_procs: list[dict[str, object]]
     ts: float
 
 
@@ -319,7 +320,7 @@ class HealthSummaryDict(TypedDict, total=False):
     disk: DiskUsageDict | None
     mem: MemUsageDict | None
     io: IoUsageDict | None
-    cpu_hogs: list[dict[str, str | float]]
+    cpu_hogs: list["CpuHogEntry"]
     worktrees: WorktreeUsageDict | None
 
 
@@ -406,6 +407,8 @@ GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
     "sender": str,
     "text": str,
     "ts": int,
+    "to": str,
+    "channel": str,
 }, total=False)
 """Shape of a guest inbox message in storage."""
 
@@ -479,6 +482,11 @@ class TmuxSessionDict(TypedDict, total=False):
     tmux: str
     backend: str
     host: str           # optional — present only for remote sessions
+    protocol: str       # optional — relay protocol version
+    callback_url: str   # optional — callback URL for relay workers
+    version: str        # optional — bridge version
+    activity: str       # optional — current activity
+    context_pct: str    # optional — context usage percentage
 
 
 class WorkerSessionDict(TypedDict, total=False):
@@ -500,8 +508,8 @@ class RegistryWorkerDict(TypedDict, total=False):
     chat_id: int | None
     hire_time: int
     host: str           # optional
-    home_host: str      # optional — preserved across re-registrations
-    home_cwd: str       # optional — preserved across re-registrations
+    home_host: str | None  # optional — preserved across re-registrations
+    home_cwd: str | None   # optional — preserved across re-registrations
     protocol: str       # optional — "http" for callback workers
     callback_url: str   # optional — for callback workers
     version: str        # optional — for callback workers
@@ -521,10 +529,11 @@ class TranscriptSyncState(TypedDict, total=False):
     """Shape of transcript background sync tracking entry."""
     status: str     # "syncing", "done", "error"
     progress: str
-    error: str
-    path: str
+    error: str | None
+    path: str | None
     started: float
     pct: int
+    remote_size: int
 
 
 class TranscriptMessageUsage(TypedDict, total=False):
@@ -596,6 +605,10 @@ class TeamChatMessageDict(TypedDict, total=False):
     text: str
     timestamp: str
     reply_to: int | None
+    idx: int
+    photo: str
+    file: str
+    file_name: str
 
 
 class ConnectorMessageLogEntry(TypedDict):
@@ -764,11 +777,11 @@ class GetRouteResolution(NamedTuple):
 
 try:
     from connectors import GmailConnector, GitHubConnector
-    GMAIL_IMPORT_ERROR = None
-    GITHUB_IMPORT_ERROR = None
+    GMAIL_IMPORT_ERROR: ImportError | None = None
+    GITHUB_IMPORT_ERROR: ImportError | None = None
 except ImportError as e:
-    GmailConnector = None
-    GitHubConnector = None
+    GmailConnector = None  # type: ignore[assignment,misc]
+    GitHubConnector = None  # type: ignore[assignment,misc]
     GMAIL_IMPORT_ERROR = e
     GITHUB_IMPORT_ERROR = e
 
@@ -858,8 +871,8 @@ if not BRIDGE_PUBLIC_URL:
             text=True, timeout=3).stdout.strip()  # noqa: direct call — runs before constants init
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
-    except (subprocess.SubprocessError, OSError) as exc:
-        _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+    except (subprocess.SubprocessError, OSError):
+        pass  # Tailscale not available — non-critical probe
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = "0.0.0.0"
 # BRIDGE_SSH_TARGET: ssh alias that remote machines use to reach the bridge host.
@@ -1088,7 +1101,7 @@ class AppContext:
             self.bridge_url = f"http://localhost:{self.port}"
 
 
-def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:
+def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
     """Call func(*args, **kwargs) and log on failure instead of crashing.
 
     Use for fire-and-forget operations where failure is acceptable but
@@ -1283,11 +1296,11 @@ class GuestInboxMessage:
 class ChannelMember:
     """A member of a group channel."""
     key: str          # "manager", "worker:name", "guest:name"
-    type: str         # "manager", "worker", "guest"
+    type: str         # "manager", "worker", "guest"  # noqa: A003 — shadows builtin
     name: str = ""    # display name (empty for manager)
 
     @classmethod
-    def from_dict(cls: type["ChannelMember"], key: str, data: ChannelMemberDict) -> "ChannelMember":
+    def from_dict(cls, key: str, data: ChannelMemberDict) -> "ChannelMember":
         """Construct an instance from a plain dictionary."""
         return cls(key=key, type=data["type"], name=data.get("name", ""))
 
@@ -1329,7 +1342,7 @@ class RelayMessage:
             id=d.get("message_id", ""),
             sender=d.get("from", d.get("sender", "")),
             text=d.get("text", ""),
-            ts=d.get("ts", 0),
+            ts=int(d.get("ts", 0)),
             sender_name=d.get("sender_name", ""),
         )
 
@@ -1365,7 +1378,7 @@ def _guest_save() -> None:
                 guest = dict(v)
                 # Convert set to list for JSON
                 if isinstance(guest.get("notified_workers"), set):
-                    guest["notified_workers"] = list(guest["notified_workers"])
+                    guest["notified_workers"] = list(cast("set[str] | list[str]", guest.get("notified_workers", [])))
                 active_guests[k] = guest
         active_names = {guest["name"] for guest in active_guests.values()}
         active_inboxes = {k: v for k, v in guest_store.inboxes.items() if k in active_names}
@@ -1547,7 +1560,7 @@ def channel_new(channel_id: str, label: str, created_by: str,
         "expires_at_unix": now + ttl,
         "seq": 0,
         "created_by": created_by,
-        "members": member_dict,
+        "members": cast(dict[str, ChannelMemberDict], member_dict),
         "messages": [],
     }
 
@@ -1590,10 +1603,10 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
         "text": text,
         "ts": int(_clock.time()),
     }
-    channel["messages"].append(msg)
+    channel["messages"].append(cast(ChannelMessageDict, msg))
     if len(channel["messages"]) > CHANNEL_MSG_CAP:
         channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
-    return msg
+    return cast(ChannelMessageDict, msg)
 
 
 def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
@@ -1700,7 +1713,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
         "reply_token": reply_token,
         "messages": [],
     }
-    return channel, guest_token, reply_token
+    return cast(RelayChannelDict, channel), guest_token, reply_token
 
 
 def _relay_base_url() -> str:
@@ -1808,11 +1821,12 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
         "text": text,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
     }
+    relay_msg = cast(RelayMessageDict, msg)
     with relay_store.lock:
-        channel["messages"].append(msg)
+        channel["messages"].append(relay_msg)
         _relay_save()
 
-    return envelope, msg
+    return envelope, relay_msg
 
 
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
@@ -1831,10 +1845,11 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
         "text": text,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
     }
+    relay_msg = cast(RelayMessageDict, msg)
     with relay_store.lock:
-        channel["messages"].append(msg)
+        channel["messages"].append(relay_msg)
         _relay_save()
-    return msg
+    return relay_msg
 
 
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
@@ -1954,8 +1969,8 @@ class WorkerRegistryEntry:
             chat_id=data.get("chat_id"),
             hire_time=data.get("hire_time", 0),
             tools=data.get("tools"),
-            home_host=data.get("home_host", ""),
-            home_cwd=data.get("home_cwd", ""),
+            home_host=data.get("home_host") or "",
+            home_cwd=data.get("home_cwd") or "",
         )
 
 
@@ -2034,13 +2049,13 @@ class Clock(Protocol):
 class _RealSubprocessRunner:
     """Production subprocess runner — delegates to subprocess.run/Popen."""
 
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:  # type: ignore[no-any-return]
         """Execute a subprocess command via the real subprocess module."""
-        return subprocess.run(args, **kwargs)
+        return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:  # type: ignore[no-any-return]
         """Spawn a subprocess without waiting, via the real subprocess module."""
-        return subprocess.Popen(args, **kwargs)
+        return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
 
 class _RealClock:
@@ -2056,9 +2071,9 @@ class _RealClock:
 
 
 # Module-level defaults (overridable in tests by replacing these singletons)
-_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
+_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()  # type: ignore[explicit-any]
 _clock: Clock = _RealClock()
-_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # Injectable for testing; Callable[...] wraps urlopen's complex overloaded signature
+_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]  # Injectable for testing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2072,7 +2087,7 @@ _LOG_INFO: str = "INFO"
 _LOG_DEBUG: str = "DEBUG"
 
 
-def _log(level: str, component: str, msg: str, *,
+def _log(level: str, component: str, msg: str | Path, *,
          exc: BaseException | None = None) -> None:
     """Emit a structured log line to stderr.
 
@@ -2152,7 +2167,8 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
         if tool in ("tmux", "claude"):
             cmd[0] = _resolve_remote_tool(tool, host)
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
-        timeout_val = kwargs.get("timeout", 10)
+        _tv = kwargs.get("timeout", 10)
+        timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10  # type: ignore[call-overload]
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     # Default timeout: prevent unbounded subprocess hangs that block bridge threads.
     # Hot-path callers should pass explicit shorter timeouts (3s probes, 5s sends).
@@ -2180,9 +2196,12 @@ def _extract_msg_text(msg: TelegramMessageDict) -> str:
     text = msg.get("text") or msg.get("caption") or ""
     if not text:
         rich = msg.get("rich_message")
-        if rich and isinstance(rich.get("blocks"), list):
+        blocks = rich.get("blocks") if rich else None
+        if isinstance(blocks, list):
             parts = []
-            for b in rich["blocks"]:
+            for b in blocks:
+                if not isinstance(b, dict):
+                    continue
                 bt = b.get("text")
                 if not bt:
                     continue
@@ -2413,7 +2432,7 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
     """Build a health status dict for a machine (disk, memory, IO, up/down)."""
     host_label = machine.ssh_target or "VPS"
     with watchdog.lock:
-        health = {
+        health: MachineHealthDict = {
             "status": "up" if machine.is_local else "unknown",
             "down_since": None,
             "last_error": None,
@@ -2433,7 +2452,7 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
                 or machine.ssh_target in host_health.io_usage
             ):
                 health["status"] = "up"
-    return health
+    return cast(MachineHealthDict, health)
 
 
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
@@ -2751,7 +2770,7 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
         return None
 
 
-def _registry_update_teleport(name: str, host: str, home_host: str, home_cwd: str) -> None:
+def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
     """Update registry with teleport location info."""
     with watchdog.lock:
         data = _load_registry()
@@ -3050,7 +3069,7 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
         except ValueError:
             cpu = 0.0
         state = parts[2]
-        stats[pid] = {"cpu": cpu, "state": state}
+        stats[pid] = cast(ProcStatsEntry, {"cpu": cpu, "state": state})
     return stats
 
 
@@ -3313,7 +3332,7 @@ class CodexBackend:
         return tmux_exists(tmux_name)
 
 
-BACKENDS = {
+BACKENDS: dict[str, Backend] = {
     "claude": ClaudeBackend(),
     "codex": CodexBackend(),
 }
@@ -3422,29 +3441,31 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
         except json.JSONDecodeError:
             continue
 
-        ev_type = ev.get("type", "")
-        payload = ev.get("payload", {})
-        ts = ev.get("timestamp", "")
+        ev_type = str(ev.get("type", ""))
+        raw_payload = ev.get("payload", {})
+        payload = cast(dict[str, object], raw_payload) if isinstance(raw_payload, dict) else {}
+        ts = str(ev.get("timestamp", ""))
 
         if ev_type == "response_item":
-            item_type = payload.get("type", "")
+            item_type = str(payload.get("type", ""))
             if item_type == "message":
-                role = payload.get("role", "assistant")
-                text_parts = []
-                for c in payload.get("content", []):
-                    if c.get("type") in ("output_text", "input_text") and c.get("text"):
-                        text_parts.append(c["text"])
+                role = str(payload.get("role", "assistant"))
+                text_parts: list[str] = []
+                raw_content = payload.get("content", [])
+                for c in cast(list[dict[str, object]], raw_content) if isinstance(raw_content, list) else []:
+                    if isinstance(c, dict) and c.get("type") in ("output_text", "input_text") and c.get("text"):
+                        text_parts.append(str(c["text"]))
                 text = "\n".join(text_parts).strip()
                 if text and role != "developer":
                     messages.append({"role": role, "text": text, "timestamp": ts})
             elif item_type == "function_call":
-                name = payload.get("name", "")
+                name = str(payload.get("name", ""))
                 messages.append({"role": "tool_use", "text": f"[{name}]", "timestamp": ts})
             elif item_type == "function_call_output":
-                output = payload.get("output", "")
+                output = str(payload.get("output", ""))
                 if output:
                     messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
-    return messages
+    return cast(list[CodexTranscriptEntry], messages)
 
 
 def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
@@ -3494,7 +3515,7 @@ def _read_noninteractive_activity(worker_name: str) -> str:
 
 def get_backend(name: str) -> Backend:
     """Look up a backend class by name."""
-    return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
+    return cast(Backend, BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND]))
 
 
 def is_valid_backend(name: str) -> bool:
@@ -3536,7 +3557,7 @@ def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
 class _MentionSnapshot(NamedTuple):
     """Immutable snapshot of MentionTracker for test save/restore."""
     target: str | None
-    count: int
+    mention_count: int
     ts: float
 
 
@@ -3555,12 +3576,12 @@ class MentionTracker:
 
     def snapshot(self) -> _MentionSnapshot:
         """Capture current state for later restore (used in tests)."""
-        return _MentionSnapshot(target=self.target, count=self.count, ts=self.ts)
+        return _MentionSnapshot(target=self.target, mention_count=self.count, ts=self.ts)
 
     def restore(self, snap: _MentionSnapshot) -> None:
         """Restore state from a snapshot (used in tests)."""
         self.target = snap.target
-        self.count = snap.count
+        self.count = snap.mention_count
         self.ts = snap.ts
 
 
@@ -3697,10 +3718,10 @@ class CpuHog:
     def from_dict(cls: type["CpuHog"], d: CpuHogEntry) -> "CpuHog":
         """Construct an instance from a plain dictionary."""
         return cls(
-            pid=d.get("pid", 0),
-            cpu_pct=d.get("cpu_pct", d.get("cpu", 0.0)),
-            command=d.get("command", d.get("cmd", "")),
-            user=d.get("user", ""),
+            pid=int(d.get("pid", 0)),
+            cpu_pct=float(cast(float, d.get("cpu_pct", d.get("cpu", 0.0)))),
+            command=str(d.get("command", d.get("cmd", ""))),
+            user=str(d.get("user", "")),
         )
 
 
@@ -3715,9 +3736,9 @@ class WorktreeItem:
     def from_dict(cls: type["WorktreeItem"], d: dict[str, str | float]) -> "WorktreeItem":
         """Construct an instance from a plain dictionary."""
         return cls(
-            path=d.get("path", ""),
-            size_mb=d.get("size_mb", 0.0),
-            worker=d.get("worker", ""),
+            path=str(d.get("path", "")),
+            size_mb=float(d.get("size_mb", 0.0)),
+            worker=str(d.get("worker", "")),
         )
 
 
@@ -3760,7 +3781,7 @@ class WorkerWatchdogState:
         self.last_seen_claude: dict[str, float] = {}
         self.last_hook_ts: dict[str, float] = {}
         self.last_alert_ts: dict[str, float] = {}
-        self.alert_msg_ids: dict[str, int] = {}
+        self.alert_msg_ids: dict[str, tuple[int, str]] = {}
         self.idle_streak: dict[str, int] = {}
         self.prev_worker_states: dict[str, str] = {}
         self.consecutive_probe_failures: dict[str, int] = {}
@@ -3785,7 +3806,7 @@ class WorkerWatchdogState:
 
     def reset(self) -> None:
         """Reset all state (useful for testing)."""
-        self.__init__()
+        self.__init__()  # type: ignore[misc]
 
     def clear_worker(self, name: str) -> None:
         """Remove all tracking state for a worker."""
@@ -3825,7 +3846,7 @@ class HostHealthState:
         self.disk_alert_ts: dict[str, float] = {}
         self.disk_alerted: dict[str, str | bool] = {}
         # CPU hogs
-        self.cpu_hogs: dict[str, list[dict[str, str | float]]] = {}
+        self.cpu_hogs: dict[str, list[CpuHogEntry]] = {}
         self.cpu_hog_alert_ts: dict[str, float] = {}
         # Worktrees
         self.worktree_usage: dict[str, WorktreeUsageDict] = {}
@@ -3845,7 +3866,7 @@ class HostHealthState:
 
     def reset(self) -> None:
         """Reset all state (useful for testing)."""
-        self.__init__()
+        self.__init__()  # type: ignore[misc]
 
     def to_health_summary(self, host: str) -> HealthSummaryDict:
         """Return a typed summary dict for a single host."""
@@ -3974,7 +3995,7 @@ def _load_learning_reminder_state() -> None:
             with learning_reminders.lock:
                 for name, st in data.items():
                     if isinstance(st, dict) and "response_count" in st:
-                        learning_reminders.state[name] = st
+                        learning_reminders.state[name] = cast(ReminderState, st)
             _log(_LOG_INFO, "worker", f"Learning reminder state loaded: {len(data)} workers")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state load error: {e}")
@@ -4051,7 +4072,7 @@ def _scan_idle_workers() -> None:
         _schedule_idle_scan()
 
 
-def _seed_learning_reminder_state(worker_names: list[str]) -> None:
+def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
     """Initialize state for workers not already tracked (from disk or previous session)."""
     with learning_reminders.lock:
         changed = False
@@ -4195,8 +4216,10 @@ BLOCKED_COMMANDS = [
 # Persistence (last chat ID and last active worker survive restart)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_last_chat_id(chat_id: ChatId) -> None:
+def save_last_chat_id(chat_id: ChatId | None) -> None:
     """Save last known chat ID to file for auto-notification on restart."""
+    if chat_id is None:
+        return
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         _tmp = LAST_CHAT_ID_FILE.with_suffix('.tmp')
@@ -4308,7 +4331,7 @@ def _registry_add(name: str, backend: str, chat_id: int | None = None,
         })
         if host:
             entry["host"] = host
-        data["workers"][name] = entry
+        data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
 
 
@@ -4319,7 +4342,7 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
         data = _load_registry()
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
-        entry = {
+        entry: dict[str, object] = {
             "backend": DEFAULT_BACKEND,
             "protocol": "http",
             "callback_url": callback_url.rstrip("/"),
@@ -4332,7 +4355,7 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
             entry["version"] = version
         if isinstance(tools, dict):
             entry["tools"] = tools
-        data["workers"][name] = entry
+        data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
 
 
@@ -4369,8 +4392,8 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
         return
     if not registered:
         return
-    data = {"version": 1, "workers": {}}
-    for name, session in registered.items():
+    data: RegistryFileDict = {"version": 1, "workers": {}}
+    for name, session in registered.items():  # type: ignore[index]
         backend = normalize_backend(session.get("backend"))
         data["workers"][name] = {
             "backend": backend,
@@ -4503,7 +4526,7 @@ class TelegramAPI:
         """Initialize Telegram Bot API client with the given token."""
         self.token: str = token
 
-    def api(self, method: str, data: dict[str, object]) -> TelegramApiResponse:
+    def api(self, method: str, data: Mapping[str, object] | dict[str, object]) -> TelegramApiResponse:
         """Make a raw Telegram Bot API call and return the response."""
         if not self.token:
             return None
@@ -4635,7 +4658,7 @@ class TelegramTransport(MessageTransport):
         if not ok:
             _log(_LOG_WARN, "telegram", validated)
             return False
-        mime = "video/mp4" if validated.suffix.lower() == ".mp4" else "image/gif"
+        mime = "video/mp4" if Path(validated).suffix.lower() == ".mp4" else "image/gif"
         return self._send_media_multipart(
             chat_id, validated, "animation", "sendAnimation", caption,
             mime_type=mime,
@@ -4654,7 +4677,7 @@ class TelegramTransport(MessageTransport):
             chat_id, validated, "document", "sendDocument", caption,
         )
 
-    def _send_media_multipart(self, chat_id: ChatId, file_path: Path,
+    def _send_media_multipart(self, chat_id: ChatId, file_path: Path | str,
                               field_name: str, api_method: str,
                               caption: str | None = None,
                               file_data: bytes | None = None,
@@ -4678,6 +4701,7 @@ class TelegramTransport(MessageTransport):
         """
         if not BOT_TOKEN:
             return False
+        file_path = Path(file_path)
         data = file_data if file_data is not None else file_path.read_bytes()
         fname = filename or file_path.name
         ctype = mime_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
@@ -4792,12 +4816,13 @@ class TelegramTransport(MessageTransport):
                 if not result.get("ok"):
                     _log(_LOG_WARN, "bridge", f"getFile failed: {result}")
                     return None
-                file_info = result.get("result", {})
+                _file_result = result.get("result", {})
+                file_info = _file_result if isinstance(_file_result, dict) else {}
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "bridge", f"getFile error: {e}")
             return None
-        file_path = file_info.get("file_path")
-        file_size = file_info.get("file_size", 0)
+        file_path = str(file_info.get("file_path", ""))
+        file_size = int(file_info.get("file_size", 0))
         if not file_path:
             _log(_LOG_WARN, "telegram", "No file_path in response")
             return None
@@ -4824,11 +4849,11 @@ class TelegramTransport(MessageTransport):
                 remote_inbox = str(inbox)
                 _remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK)
                 _remote_run(["chmod", "700", remote_inbox], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK)
-                r = _subprocess_runner.run(
+                rsync_result = _subprocess_runner.run(
                     ["rsync", "-az", str(local_path), f"{host}:{remote_inbox}/"],
                     capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-                if r.returncode != 0:
-                    _log(_LOG_ERROR, "bridge", f"rsync inbound failed (exit {r.returncode}): {host}:{remote_inbox}/ -> {r.stderr.strip()}")
+                if rsync_result.returncode != 0:
+                    _log(_LOG_ERROR, "bridge", f"rsync inbound failed (exit {rsync_result.returncode}): {host}:{remote_inbox}/ -> {rsync_result.stderr.strip()}")
             return str(local_path)
         except (subprocess.SubprocessError, OSError) as e:
             _log(_LOG_ERROR, "bridge", f"Download error: {e}")
@@ -4947,11 +4972,11 @@ def _init_transport() -> MessageTransport:
 transport = _init_transport()
 
 
-def telegram_api(method: str, data: dict[str, object]) -> TelegramApiResponse:
+def telegram_api(method: str, data: Mapping[str, object]) -> TelegramApiResponse:
     """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
     if TRANSPORT_MODE == "local":
         _log(_LOG_INFO, "local-transport", f"telegram_api {method} {str(data)[:100]}")
-        return {"ok": True, "result": {"message_id": 1}}
+        return {"ok": True, "result": {"message_id": 1}}  # type: ignore[arg-type]
     if isinstance(transport, TelegramTransport):
         return transport._api.api(method, data)
     return None
@@ -4963,11 +4988,13 @@ def send_telegram_message(chat_id: ChatId, text: str,
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
 
-def download_telegram_file(file_id: str, session_name: str) -> str | None:
+def download_telegram_file(file_id: str, session_name: str | None) -> str | None:
     """Download a Telegram file to the session inbox.
     Tests can patch bridge.download_telegram_file to intercept file downloads.
     Delegates to transport.download_file() internally.
     """
+    if session_name is None:
+        return None
     return transport.download_file(file_id, session_name)
 
 
@@ -5346,9 +5373,9 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         )
         with _urlopen(req, timeout=timeout) as r:
             result = cast(TelegramApiResponseDict, json.loads(r.read()))
-            text = result.get("text", "").strip()
+            text = str(result.get("text", "")).strip()
             if text:
-                duration = result.get("audio_duration_s", "?")
+                duration = str(result.get("audio_duration_s", "?"))
                 _log(_LOG_INFO, "stt", f"STT transcribed: {len(text)} chars from {duration}s audio")
                 return text
             return None
@@ -5448,7 +5475,7 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                 )
                 new_w = int(w * scale)
                 new_h = int(h * scale)
-                resized = img.resize((new_w, new_h), Image.LANCZOS)
+                resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 import io
                 buf = io.BytesIO()
                 fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
@@ -5544,7 +5571,7 @@ CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 
-def _split_protected_segments(text: str, pattern: str) -> list[tuple]:
+def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple]:
     """Split text into (segment, is_protected) based on regex matches."""
     segments = []
     last = 0
@@ -5573,7 +5600,7 @@ def _collapse_excess_newlines(text: str) -> str:
     return "".join(output)
 
 
-def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str, str]]]:
+def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str | None, str]]]:
     """Parse media tags, skipping escaped tags and code spans.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -5614,7 +5641,7 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
     return clean_text, items
 
 
-def parse_image_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+def parse_image_tags(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     """Parse [[image:/path|caption]] tags from text.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -5622,7 +5649,7 @@ def parse_image_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
     return _parse_media_tags(text, "image", validate_photo_path)
 
 
-def parse_file_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+def parse_file_tags(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     """Parse [[file:/path|caption]] tags from text.
 
     Returns (clean_text, [(path, caption), ...]).
@@ -5920,11 +5947,11 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "paragraph_close":
             if not in_table:
                 result.append("\n")
-        elif tok.type == "inline":
+        elif tok.type == "inline":  # type: ignore[arg-type]
             if in_table:
-                table_row.append(_render_md_inline_plain(tok.children or []))
+                table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))  # type: ignore[arg-type]
             else:
-                result.append(_render_md_inline_html(tok.children or [], rejected_open_tags))
+                result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
 
         # Headings -> bold
         elif tok.type == "heading_open":
@@ -6087,7 +6114,7 @@ def _pipe_tables_to_html(text: str) -> str:
 
             # Parse alignment from separator
             aligns = []
-            for cell in _parse_row(lines[i + 1]):
+            for cell in (_parse_row(lines[i + 1]) or []):
                 cell = cell.strip()
                 if cell.startswith(':') and cell.endswith(':'):
                     aligns.append(' style="text-align:center"')
@@ -6098,7 +6125,7 @@ def _pipe_tables_to_html(text: str) -> str:
 
             html = ['<table>']
             html.append('<tr>')
-            for j, h in enumerate(headers):
+            for j, h in enumerate(headers or []):
                 align = aligns[j] if j < len(aligns) else ''
                 html.append(f'<th{align}>{_cell_md(h)}</th>')
             html.append('</tr>')
@@ -6107,7 +6134,7 @@ def _pipe_tables_to_html(text: str) -> str:
             while i < len(lines) and '|' in lines[i] and lines[i].strip().startswith('|'):
                 cells = _parse_row(lines[i])
                 html.append('<tr>')
-                for j, cell in enumerate(cells):
+                for j, cell in enumerate(cells or []):
                     align = aligns[j] if j < len(aligns) else ''
                     html.append(f'<td{align}>{_cell_md(cell)}</td>')
                 html.append('</tr>')
@@ -6156,17 +6183,17 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     TRACKED_TAGS = frozenset(('b', 'i', 's', 'u', 'code', 'pre', 'a',
                               'strong', 'em', 'del', 'ins', 'strike', 'blockquote'))
 
-    def _closing_tags(stack: list[str]) -> str:
+    def _closing_tags(stack: list[tuple[str, str]]) -> str:
         """Generate closing tags for all open tags (reverse order)."""
         return "".join(f"</{tag}>" for tag, _ in reversed(stack))
 
-    def _opening_tags(stack: list[str]) -> str:
+    def _opening_tags(stack: list[tuple[str, str]]) -> str:
         """Generate opening tags for all open tags (original order)."""
         return "".join(full for _, full in stack)
 
-    def _scan_tags(text: str) -> list[str]:
+    def _scan_tags(text: str) -> list[tuple[str, str]]:
         """Return the tag stack state after scanning text."""
-        stack = []
+        stack: list[tuple[str, str]] = []
         for m in TAG_RE.finditer(text):
             is_close = m.group(1) == '/'
             tag_name = m.group(2).lower()
@@ -6181,7 +6208,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
                 stack.append((tag_name, m.group(0)))
         return stack
 
-    def _find_split(text: str, budget: int) -> str:
+    def _find_split(text: str, budget: int) -> int:
         """Find best split point within budget chars.
 
         Priority: blank line → newline → space → hard cut.
@@ -6207,7 +6234,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
 
     chunks = []
     remaining = text
-    carry_stack = []  # Tags open from previous chunk
+    carry_stack: list[tuple[str, str]] = []  # Tags open from previous chunk
 
     while remaining:
         prefix = _opening_tags(carry_stack)
@@ -6443,7 +6470,7 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
 
 
-def get_session_history(name: str, event: str | None = None) -> list[dict[str, str]]:
+def get_session_history(name: str, event: str | None = None) -> list[dict[str, object]]:
     """Read the session audit log for a worker. Optional event filter."""
     f = get_session_dir(name) / "session_history.jsonl"
     if not f.exists():
@@ -6497,8 +6524,10 @@ def _ensure_workspace_trusted(
                     data = cast(dict[str, object], json.loads(target.read_text()))  # body: {projects}
                 else:
                     data = {}
-                projects = data.setdefault("projects", {})
-                entry = projects.get(cwd, {})
+                _projects_raw = data.setdefault("projects", {})
+                projects = _projects_raw if isinstance(_projects_raw, dict) else {}
+                _entry_raw = projects.get(cwd, {})
+                entry = _entry_raw if isinstance(_entry_raw, dict) else {}
                 if entry.get("hasTrustDialogAccepted") is True:
                     return  # already trusted — skip rewrite
                 projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
@@ -6513,7 +6542,7 @@ def _ensure_workspace_trusted(
 
 
 def _ensure_workspace_trusted_remote(
-    cwd: str,
+    cwd: str | None,
     host: str | None,
 ) -> None:
     """Pre-trust *cwd* on a remote (or local) machine's ``~/.claude.json``.
@@ -6584,8 +6613,8 @@ def _build_teleport_context(
     name: str,
     source_host: str | None,
     target_host: str,
-    source_cwd: str,
-    session_id: str,
+    source_cwd: str | None,
+    session_id: str | None,
 ) -> str:
     """Build context message injected into a worker after cross-machine teleport.
 
@@ -7172,7 +7201,8 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         result = transport.send_text(admin_chat_id, text)
         if result and result.get("ok"):
             _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
-            msg_id = result.get("result", {}).get("message_id")
+            _res = result.get("result", {})
+            msg_id = _res.get("message_id") if isinstance(_res, dict) else None
             with watchdog.lock:
                 watchdog.last_alert_ts[name] = now
                 if msg_id:
@@ -7288,8 +7318,8 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
             continue
 
         host_label = host or "VPS"
-        is_mac = host and "mac" in host.lower()
-        usage = _check_disk_usage_macos(host) if is_mac else _check_disk_usage(host)
+        is_mac = bool(host and "mac" in host.lower())
+        usage = _check_disk_usage_macos(host) if is_mac and host else _check_disk_usage(host)
 
         if usage is None:
             continue
@@ -7298,6 +7328,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
         is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
 
+        current_level: str | bool
         if is_critical:
             current_level = "critical"
         elif is_warning:
@@ -7368,7 +7399,8 @@ def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
         avail_gb = avail / (1024**3)
         pct = int((used / total) * 100) if total > 0 else 0
         top_procs = _get_top_mem_procs(host)
-        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+        _mem_result: MemUsageDict = {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+        return _mem_result
     except (ValueError, KeyError):
         return None
 
@@ -7408,12 +7440,13 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
         avail_gb = avail / (1024**3)
         pct = int((used / total) * 100) if total > 0 else 0
         top_procs = _get_top_mem_procs(host)
-        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+        _mem_result: MemUsageDict = {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+        return _mem_result
     except (ValueError, KeyError):
         return None
 
 
-def _get_top_mem_procs(host: str | None = None) -> list[dict[str, str | float]]:
+def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
     """Get top 5 memory-consuming processes on a host."""
     try:
         r = _remote_run(
@@ -7427,12 +7460,12 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict[str, str | float]]:
             parts = line.split(None, 10)
             if len(parts) >= 11:
                 rss_kb = int(parts[5])
-                procs.append({
+                procs.append(cast(dict[str, object], {
                     "pid": parts[1],
                     "rss_gb": round(rss_kb / (1024 * 1024), 1),
                     "pct": parts[3],
                     "cmd": parts[10][:80],
-                })
+                }))
         return procs
     except (ValueError, KeyError):
         return []
@@ -7448,8 +7481,8 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
             continue
 
         host_label = host or "VPS"
-        is_mac = host and "mac" in host.lower()
-        usage = _check_mem_usage_macos(host) if is_mac else _check_mem_usage(host)
+        is_mac = bool(host and "mac" in host.lower())
+        usage = _check_mem_usage_macos(host) if is_mac and host else _check_mem_usage(host)
 
         if usage is None:
             continue
@@ -7496,9 +7529,13 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
         if r.returncode == 0 and r.stdout.strip():
             import json as _json
             data = cast(dict[str, object], _json.loads(r.stdout))  # iostat -xj output
-            stats = data.get("sysstat", {}).get("hosts", [{}])[0].get("statistics", [])
-            if len(stats) >= 2:
-                disks = stats[-1].get("disk", [])
+            _sysstat = data.get("sysstat", {})
+            _hosts = _sysstat.get("hosts", [{}]) if isinstance(_sysstat, dict) else [{}]
+            _host0 = _hosts[0] if isinstance(_hosts, list) and _hosts else {}
+            stats = _host0.get("statistics", []) if isinstance(_host0, dict) else []
+            if isinstance(stats, list) and len(stats) >= 2:
+                _last_stat = stats[-1]
+                disks = _last_stat.get("disk", []) if isinstance(_last_stat, dict) else []
                 total_r_iops = sum(d.get("r/s", 0) for d in disks)
                 total_w_iops = sum(d.get("w/s", 0) for d in disks)
                 max_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0)
@@ -7582,8 +7619,8 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
             continue
 
         host_label = host or "VPS"
-        is_mac = host and "mac" in host.lower()
-        usage = _check_io_usage_macos(host) if is_mac else _check_io_usage(host)
+        is_mac = bool(host and "mac" in host.lower())
+        usage = _check_io_usage_macos(host) if is_mac and host else _check_io_usage(host)
 
         if usage is None:
             continue
@@ -7619,7 +7656,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                 _log(_LOG_ERROR, "watchdog", f"IO alert error: {e}")
 
 
-def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[str, int | float | str]]:
+def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
     """Get processes using >CPU_HOG_THRESHOLD_PCT CPU on a host. Returns [{pid, cpu, etime_min, cmd}]."""
     try:
         if is_mac:
@@ -7629,7 +7666,7 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[dict[st
         r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0:
             return []
-        hogs = []
+        hogs: list[CpuHogEntry] = []
         for line in r.stdout.strip().splitlines()[1:]:
             parts = line.split(None, 3)
             if len(parts) < 4:
@@ -7683,7 +7720,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
             continue
 
         host_label = host or "VPS"
-        is_mac = host and "mac" in host.lower()
+        is_mac = bool(host and "mac" in host.lower())
         hogs = _get_cpu_hogs(host, is_mac=is_mac)
 
         # Filter: only processes running > CPU_HOG_DURATION_MIN minutes
@@ -7743,7 +7780,7 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
             if r.returncode != 0 or not r.stdout.strip():
                 continue
 
-            items = []
+            items: list[WorktreeItemDict] = []
             total_bytes = 0
             for line in r.stdout.strip().splitlines():
                 parts = line.split(None, 1)
@@ -8087,7 +8124,7 @@ def _watchdog_collect_worker_pids(
         if not tmux_exists:
             continue
 
-        if backend.is_interactive:
+        if backend.is_interactive and pane_pid:
             claude_pid = _get_claude_pid(pane_pid, host=host)
             if claude_pid:
                 claude_pids[name] = claude_pid
@@ -8101,13 +8138,13 @@ def _watchdog_collect_worker_pids(
     return claude_pids, tmux_present, backend_info
 
 
-def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, dict[str, float]]:
+def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
     """Gather CPU stats for all claude PIDs, grouped by host."""
     pids_by_host: dict[str | None, list[str]] = {}
     for name, pid in claude_pids.items():
         host = get_worker_host(name)
         pids_by_host.setdefault(host, []).append(pid)
-    stats: dict[str, dict[str, float]] = {}
+    stats: dict[str, ProcStatsEntry] = {}  # type: ignore[arg-type]
     for host, pids in pids_by_host.items():
         stats.update(_ps_stats(pids, host=host))
     return stats
@@ -8118,7 +8155,7 @@ def _watchdog_evaluate_workers(
     tmux_present: dict[str, bool],
     claude_pids: dict[str, str],
     backend_info: dict[str, Backend],
-    stats: dict[str, dict[str, float]],
+    stats: dict[str, ProcStatsEntry],
     probe_failed: bool,
     failed_hosts: set[str],
     now: float
@@ -8193,7 +8230,7 @@ def _watchdog_evaluate_workers(
         if not is_interactive:
             last_seen_claude = None
 
-        state_args = dict(
+        worker_state, reason = compute_state(
             tmux_exists=tmux_exists,
             claude_pid=claude_pid,
             pending=pending,
@@ -8208,7 +8245,15 @@ def _watchdog_evaluate_workers(
             is_interactive=is_interactive,
             adapter_alive=adapter_alive,
         )
-        worker_state, reason = compute_state(**state_args)
+        state_args: dict[str, bool | str | int | float | None] = dict(
+            tmux_exists=tmux_exists, claude_pid=claude_pid,
+            pending=pending, pending_ts=pending_ts,
+            pending_age=pending_age, children=children,
+            last_child_ts=last_child_ts, cpu=cpu,
+            last_hook_ts=last_hook_ts, last_seen_claude=last_seen_claude,
+            now=now, is_interactive=is_interactive,
+            adapter_alive=adapter_alive,
+        )
 
         worker_state, reason = _watchdog_refine_state(
             name, tmux_name, worker_state, reason, state_args,
@@ -8274,7 +8319,22 @@ def _watchdog_refine_state(
                         _handle_watchdog_transition(name, "READY", "idle (auto-cleared stale pending)", since, now=now)
                         return "READY", "idle (auto-cleared stale pending)"
             poisoned_reason = _detect_poisoned(name, tmux_name)
-            worker_state, reason = compute_state(**state_args, poisoned_reason=poisoned_reason)
+            worker_state, reason = compute_state(
+                tmux_exists=bool(state_args.get("tmux_exists")),
+                claude_pid=cast(str | None, state_args.get("claude_pid")),
+                pending=bool(state_args.get("pending")),
+                pending_ts=cast(int | None, state_args.get("pending_ts")),
+                pending_age=float(cast(float, state_args.get("pending_age", 0.0))),
+                children=int(cast(int, state_args.get("children", 0))),
+                last_child_ts=float(cast(float, state_args.get("last_child_ts", 0.0))),
+                cpu=float(cast(float, state_args.get("cpu", 0.0))),
+                last_hook_ts=cast(float | None, state_args.get("last_hook_ts")),
+                last_seen_claude=cast(float | None, state_args.get("last_seen_claude")),
+                now=float(cast(float, state_args.get("now", 0.0))),
+                is_interactive=bool(state_args.get("is_interactive", True)),
+                adapter_alive=bool(state_args.get("adapter_alive")),
+                poisoned_reason=poisoned_reason,
+            )
         reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
     elif worker_state == "POISONED":
         streak = watchdog.idle_streak.get(name, 0)
@@ -8300,15 +8360,15 @@ def _watchdog_refine_state(
 
 
 def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
-    """Remove watchdog state for workers no longer in the registry."""
+    """Remove watchdog state for workers no longer in the registry."""  # type: ignore[list-item]
     with watchdog.lock:
-        stale_dicts = [
+        stale_dicts: list[dict[str, object]] = cast(list[dict[str, object]], [
             watchdog.worker_states, watchdog.last_child_ts,
             watchdog.last_seen_claude, watchdog.last_hook_ts,
             watchdog.prev_worker_states, watchdog.last_alert_ts,
             watchdog.idle_streak, watchdog.idle_child_baseline,
             watchdog.prev_children, watchdog.last_activity_ts,
-        ]
+        ])
         for d in stale_dicts:
             for name in list(d.keys()):
                 if name not in registered_names:
@@ -8431,7 +8491,7 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
 def _format_watchdog_status(name: str,
                             pending_lookup: Callable[[str], bool] | None = None,
-                            state_snapshot: dict[str, tuple[str, str, float]] | None = None) -> str:
+                            state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
     """Format a human-readable watchdog status line for one worker."""
     if pending_lookup is None:
         pending_lookup = is_pending
@@ -8523,7 +8583,7 @@ def format_team_lines(
     registered: dict[str, TmuxSessionDict],
     active: str | None,
     pending_lookup: Callable[[str], bool] | None = None,
-    worker_live: dict[str, TmuxSessionDict] | None = None
+    worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None
 ) -> list[str]:
     """Format /team response lines with attention, activity, and context."""
     if pending_lookup is None:
@@ -8549,14 +8609,14 @@ def format_team_lines(
         live = worker_live.get(name, {})
         backend = normalize_backend(live.get("backend") or session.get("backend"))
 
-        raw_activity = (live.get("activity") or "").strip()
+        raw_activity = str(live.get("activity") or "").strip()
         if not raw_activity or raw_activity == "Unknown":
             raw_activity = watchdog_status
         activity = _normalize_activity(raw_activity)
         if len(activity) > 42:
             activity = activity[:39].rstrip() + "..."
 
-        context_pct = (live.get("context_pct") or "").strip()
+        context_pct = str(live.get("context_pct") or "").strip()
         icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
         counts[icon] += 1
 
@@ -9034,11 +9094,11 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     if not options:
         return None
 
-    return {
+    return cast(QuestionDetails, {
         "header": header,
         "options": options,
         "selected_num": selected_num,
-    }
+    })
 
 
 def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
@@ -9138,7 +9198,7 @@ def format_progress_lines(
     return status
 
 
-def get_worker_backend(name: str, session: RegistryWorkerDict | None = None) -> str:
+def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     """Get backend for a worker.
 
     Priority: backend file (canonical) > session dict (cache) > default.
@@ -9152,7 +9212,7 @@ def get_worker_backend(name: str, session: RegistryWorkerDict | None = None) -> 
         return normalize_backend(backend_file.read_text().strip())
     # Fall back to session dict (cache from registry/tmux)
     if session and session.get("backend"):
-        return normalize_backend(session.get("backend"))
+        return normalize_backend(str(session.get("backend")))
     return DEFAULT_BACKEND
 
 
@@ -9253,7 +9313,7 @@ class WorkerManager:
     def scan_tmux_sessions(self) -> dict[str, TmuxSessionDict]:
         """Scan tmux for claude-* sessions (local + remote machines)."""
         self._sync_paths()
-        registered = {}
+        registered: dict[str, TmuxSessionDict] = {}
 
         # Scan local tmux
         try:
@@ -9314,7 +9374,7 @@ class WorkerManager:
     # host on SSH timeout.  With 4+ calls per message routing path, this delays
     # routing by 40+ seconds and effectively drops messages.
     _sessions_cache = None
-    _sessions_cache_ts = 0
+    _sessions_cache_ts: float = 0
     _sessions_cache_lock = threading.Lock()
     _SESSIONS_CACHE_TTL = 15  # seconds
 
@@ -9354,10 +9414,11 @@ class WorkerManager:
         registry = _load_registry()
         for name, info in registry.get("workers", {}).items():
             if name not in registered:
-                entry = {"backend": info.get("backend", DEFAULT_BACKEND)}
+                entry: TmuxSessionDict = {"backend": str(info.get("backend", DEFAULT_BACKEND))}
                 for key in ("protocol", "callback_url", "host", "version"):
-                    if info.get(key):
-                        entry[key] = info.get(key)
+                    val = info.get(key)
+                    if val:
+                        entry[key] = str(val)  # type: ignore[literal-required]
                 # Teleported workers: inject tmux name so they don't appear as "exited"
                 if info.get("host") and not info.get("callback_url"):
                     entry["tmux"] = f"{self.tmux_prefix}{name}"
@@ -9365,7 +9426,7 @@ class WorkerManager:
             else:
                 for key in ("protocol", "callback_url", "host", "version"):
                     if info.get(key):
-                        registered[name][key] = info.get(key)
+                        registered[name][key] = info.get(key)  # type: ignore[literal-required,typeddict-item]
 
         if state.active and state.active not in registered:
             state.active = None
@@ -9413,7 +9474,7 @@ class WorkerManager:
 
         return backend.is_online(tmux_name)
 
-    def send(self, name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
+    def send(self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None) -> bool:
         """Send message to worker using backend registry."""
         self._sync_paths()
         if not session:
@@ -9440,7 +9501,7 @@ class WorkerManager:
         is None, the bridge's own perspective is used (legacy behavior).
         """
         self._sync_paths()
-        workers = []
+        workers: list[WorkerEndpointInfo] = []
         registered = self.get_registered_sessions()
         caller_host = get_worker_host(caller_from) if caller_from else None
         for name, info in registered.items():
@@ -9455,14 +9516,14 @@ class WorkerManager:
                     f"-H 'Content-Type: application/json' "
                     f"--data-raw {shlex.quote(payload)}"
                 )
-                workers.append({
+                workers.append(cast(WorkerEndpointInfo, {
                     "name": name,
                     "machine": info.get("host", "") or BRIDGE_SSH_TARGET,
                     "protocol": "http",
                     "address": msg_url,
                     "send_example": send_example,
                     "note": "HTTP callback worker. POST JSON with from/text. Always set from to your worker name.",
-                })
+                }))
                 continue
 
             backend_name = get_worker_backend(name, info)
@@ -9475,48 +9536,48 @@ class WorkerManager:
                     pipe_path = ensure_worker_pipe(name)
                     pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
                     send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
-                    workers.append({
+                    workers.append(cast(WorkerEndpointInfo, {
                         "name": name,
                         "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "pipe",
                         "address": str(pipe_path),
                         "send_example": send_example,
                         "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
-                    })
+                    }))
                 else:
-                    workers.append({
+                    workers.append(cast(WorkerEndpointInfo, {
                         "name": name,
                         "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "none",
                         "address": "",
                         "status": "exited",
                         "note": f"Worker exited. Use /restart {name} to bring back.",
-                    })
+                    }))
                 continue
 
             if not backend.is_interactive:
                 if peer_host:
                     # Non-interactive remote workers use SSH-based adapter spawning
                     # Worker-to-worker pipes don't work remotely, but bridge send does
-                    workers.append({
+                    workers.append(cast(WorkerEndpointInfo, {
                         "name": name,
                         "machine": peer_host,
                         "protocol": "adapter",
                         "address": f"{peer_host}:{info.get('tmux', '')}",
                         "note": f"Non-interactive ({backend_name}) on {peer_host}. Use @{name} from Telegram or bridge API.",
-                    })
+                    }))
                 else:
                     pipe_path = ensure_worker_pipe(name)
                     pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
                     send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
-                    workers.append({
+                    workers.append(cast(WorkerEndpointInfo, {
                         "name": name,
                         "machine": peer_host or BRIDGE_SSH_TARGET,
                         "protocol": "pipe",
                         "address": str(pipe_path),
                         "send_example": send_example,
                         "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
-                    })
+                    }))
             else:
                 tmux_name = info.get("tmux")
                 tmux_cmd = (
@@ -9534,14 +9595,14 @@ class WorkerManager:
                     note = f"On bridge host (cross-machine from caller). Uses SSH + paste-buffer -p. Always prefix your name."
                 else:
                     note = "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
-                workers.append({
+                workers.append(cast(WorkerEndpointInfo, {
                     "name": name,
                     "machine": peer_host or BRIDGE_SSH_TARGET,
                     "protocol": "tmux",
                     "address": f"{peer_host}:{tmux_name}" if peer_host else tmux_name,
                     "send_example": send_example,
                     "note": note,
-                })
+                }))
         return workers
 
     def _wrap_for_caller(self, cmd: str, peer_host: str | None, caller_host: str | None) -> str:
@@ -9598,7 +9659,7 @@ class WorkerManager:
 
         return welcome
 
-    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> tuple[bool, str | None]:
+    def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
         """Create a new worker instance."""
         self._sync_paths()
         if not is_valid_backend(backend):
@@ -9687,9 +9748,9 @@ class WorkerManager:
         else:
             self.send(name, welcome)
 
-        state.active = name
+        state.active = name  # type: ignore[arg-type]
         save_last_active(name)
-        _registry_add(name, backend, chat_id)
+        _registry_add(name, backend, chat_id)  # type: ignore[arg-type]
         _reset_learning_reminder(name)
 
         if not backend_obj.is_interactive:
@@ -9824,8 +9885,8 @@ class WorkerManager:
         session_dir = self.sessions_dir / name
         if mode == "resume":
             resume_id = (get_claude_session_id(name, authoritative=False) or
-                         get_claude_session_id(name, authoritative=True))
-            resume_cwd = get_claude_session_cwd(name)
+                         get_claude_session_id(name, authoritative=True) or "")
+            resume_cwd = get_claude_session_cwd(name) or ""
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
@@ -9987,8 +10048,8 @@ class WorkerManager:
         resume_cwd = ""
         if mode == "resume":
             resume_id = (get_claude_session_id(name, authoritative=False) or
-                         get_claude_session_id(name, authoritative=True))
-            resume_cwd = get_claude_session_cwd(name)
+                         get_claude_session_id(name, authoritative=True) or "")
+            resume_cwd = get_claude_session_cwd(name) or ""
         else:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -10079,7 +10140,7 @@ def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
     return worker_manager.is_online(name, session)
 
 
-def worker_set_pending(name: str, chat_id: int) -> None:
+def worker_set_pending(name: str, chat_id: ChatId) -> None:
     """Set pending state for worker."""
     set_pending(name, chat_id)
 
@@ -10312,8 +10373,11 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
     host = get_worker_host(name)
     if not host:
         return media_list
-    result = []
+    result: list[tuple[str | None, str]] = []
     for file_path, caption in media_list:
+        if not file_path:
+            result.append((file_path, caption))
+            continue
         local = _fetch_remote_file(host, file_path)
         if local:
             result.append((local, caption))
@@ -10331,7 +10395,7 @@ def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | N
     """
     host = get_worker_host(name)
     if host:
-        _accept_all = lambda p: (True, Path(p))
+        _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
         clean_text, images = _parse_media_tags(text, "image", _accept_all)
         clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
     else:
@@ -10384,7 +10448,8 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 reply_to=prev_msg_id if prev_msg_id else None
             )
             if result and result.get("ok"):
-                prev_msg_id = result.get("result", {}).get("message_id")
+                _rr = result.get("result", {})
+                prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
                 if len(rich_chunks) > 1:
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
                 else:
@@ -10428,7 +10493,8 @@ def _send_html_fallback_chunks(
             reply_to=prev_msg_id if prev_msg_id else None
         )
         if result and result.get("ok"):
-            prev_msg_id = result.get("result", {}).get("message_id")
+            _rr2 = result.get("result", {})
+            prev_msg_id = _rr2.get("message_id") if isinstance(_rr2, dict) else None
             _log(_LOG_INFO, "telegram", f"{log_prefix} sent (html fallback): {name} part {start_index + i + 1}/{total_chunks} -> Telegram OK")
         else:
             plain_text = re.sub(r'<[^>]+>', '', part)
@@ -10453,14 +10519,15 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
             reply_to=prev_msg_id if prev_msg_id else None
         )
         if result and result.get("ok"):
-            prev_msg_id = result.get("result", {}).get("message_id")
+            _rr3 = result.get("result", {})
+            prev_msg_id = _rr3.get("message_id") if isinstance(_rr3, dict) else None
             if len(formatted_parts) > 1:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
             else:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
-            desc = (result or {}).get("description", "")
-            error_code = (result or {}).get("error_code", 0)
+            desc = str((result or {}).get("description", ""))
+            error_code = int((result or {}).get("error_code", 0))
             if error_code == 400:
                 _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
                 plain_text = re.sub(r'<[^>]+>', '', part)
@@ -10470,7 +10537,7 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
                     reply_to=prev_msg_id if prev_msg_id else None
                 )
                 if result and result.get("ok"):
-                    prev_msg_id = result.get("result", {}).get("message_id")
+                    prev_msg_id = cast(int | None, _dict_field(result, "result").get("message_id"))
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (plain): {name} -> Telegram OK")
                 else:
                     _log(_LOG_WARN, "bridge", f"{log_prefix} failed (plain): {name} -> {result}")
@@ -10580,17 +10647,17 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
             capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0:
             data = cast(dict[str, object], json.loads(r.stdout))  # external tool output
-            url = data.get("url", "")
+            url = str(data.get("url", ""))
             if url and "localhost" in url:
                 host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
-                url = url.replace("localhost", host)
+                url = url.replace("localhost", str(host))
             return url or None
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "bridge", f"beast serve deploy failed for {slug}: {e}")
     return None
 
 
-def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: int | None = None) -> tuple[bool, str | None]:
+def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
     """Create a new worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
     return worker_manager.hire(name, backend, chat_id=chat_id)
@@ -11067,7 +11134,7 @@ class CommandRouter:
         ).start()
         return True
 
-    def _check_teleback_conflicts(self, name: str, remote_host: str, local_cwd: str) -> list[str]:
+    def _check_teleback_conflicts(self, name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
         """Check for working directory conflicts before teleback.
 
         Compares git status on both remote (where worker is) and local
@@ -11076,7 +11143,7 @@ class CommandRouter:
 
         Returns list of conflict descriptions, or empty list if clean.
         """
-        conflicts = []
+        conflicts: list[str] = []
         if not local_cwd or not remote_host:
             return conflicts
 
@@ -11154,7 +11221,7 @@ class CommandRouter:
             backend_name = get_worker_backend(name, session)
             source_host = get_worker_host(name)
 
-            source_cwd = get_claude_session_cwd(name)
+            source_cwd = get_claude_session_cwd(name) or ""
             _log(_LOG_INFO, "teleport", f"{name}: source_host={source_host}, source_cwd={source_cwd}, target_host={target_host}, target_cwd={target_cwd}")
             if not target_cwd:
                 target_cwd = source_cwd
@@ -11367,7 +11434,7 @@ class CommandRouter:
         return get_claude_session_id(name, authoritative=True) or session_id
 
     def _sync_working_directory(self, source_cwd: str, target_cwd: str,
-                                 source_host: str | None=None, target_host: str=None,
+                                 source_host: str | None=None, target_host: str | None=None,
                                  full: bool=False) -> bool:
         """Sync working directory from source to target.
 
@@ -11398,7 +11465,7 @@ class CommandRouter:
             source_cwd, target_cwd, source_host, target_host, full)
 
     def _rsync_working_directory(self, source_cwd: str, target_cwd: str,
-                                  source_host: str | None=None, target_host: str=None,
+                                  source_host: str | None=None, target_host: str | None=None,
                                   full: bool=False) -> bool:
         """rsync working directory from source to target (fallback path)."""
         _remote_run(["mkdir", "-p", target_cwd],
@@ -11447,7 +11514,7 @@ class CommandRouter:
                 os.unlink(gitignore_tmpfile)
 
     def _sync_session_transcript(self, session_id: str, source_cwd: str, target_cwd: str,
-                                  source_host: str | None=None, target_host: str=None) -> None:
+                                  source_host: str | None=None, target_host: str | None=None) -> None:
         """Sync Claude Code session transcript between machines."""
         if not session_id:
             return
@@ -11761,11 +11828,13 @@ class CommandRouter:
             if r.returncode == 0 and r.stdout.strip():
                 remote_data = cast(dict[str, object], json.loads(r.stdout))  # OAuth credentials shape
                 local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))  # OAuth credentials shape
-                remote_oauth = remote_data.get("claudeAiOauth", {})
-                local_oauth = local_data.get("claudeAiOauth", {})
-                remote_refresh = remote_oauth.get("refreshToken", "")
-                local_refresh = local_oauth.get("refreshToken", "")
-                remote_exp = remote_oauth.get("expiresAt", 0)
+                _ro = remote_data.get("claudeAiOauth", {})
+                remote_oauth = _ro if isinstance(_ro, dict) else {}
+                _lo = local_data.get("claudeAiOauth", {})
+                local_oauth = _lo if isinstance(_lo, dict) else {}
+                remote_refresh = str(remote_oauth.get("refreshToken", ""))
+                local_refresh = str(local_oauth.get("refreshToken", ""))
+                remote_exp = int(remote_oauth.get("expiresAt", 0))
                 now_ms = int(_clock.time() * 1000)
                 # Skip if target has a DIFFERENT refresh token that hasn't expired
                 if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
@@ -11788,8 +11857,8 @@ class CommandRouter:
                      host=target_host, capture_output=True)
         _log(_LOG_INFO, "creds", f"Synced credentials to {target_host}")
 
-    def _start_worker_on_target(self, name: str, target_host: str, target_cwd: str,
-                                 session_id: str, backend_name: str, skip_session_sync: bool=False) -> bool:
+    def _start_worker_on_target(self, name: str, target_host: str, target_cwd: str | None,
+                                 session_id: str | None, backend_name: str, skip_session_sync: bool=False) -> bool:
         """Create tmux session on target and start Claude Code with --resume."""
         tmux_name = f"{TMUX_PREFIX}{name}"
 
@@ -11852,7 +11921,7 @@ class CommandRouter:
 
         # Build and send start command
         backend = get_backend(backend_name)
-        cli_cmd = backend.start_cmd(session_id)
+        cli_cmd = backend.start_cmd(session_id or "")
 
         # Claude Code refuses --dangerously-skip-permissions as root
         if target_host:
@@ -11904,10 +11973,10 @@ class CommandRouter:
                 if cap.returncode == 0:
                     _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
         _log(_LOG_WARN, "teleport", f"verify FAILED after 30 attempts")
-        return False
+        return False  # type: ignore[arg-type]
 
-    def _teleport_rollback(self, name: str, tmux_name: str, source_host: str | None, source_cwd: str,
-                            session_id: str, backend_name: str, chat_id: int | str, reason: str) -> None:
+    def _teleport_rollback(self, name: str, tmux_name: str, source_host: str | None, source_cwd: str | None,
+                            session_id: str | None, backend_name: str, chat_id: ChatId | None, reason: str) -> None:
         """Roll back a failed teleport by restarting on source."""
         self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
         try:
@@ -11925,11 +11994,11 @@ class CommandRouter:
 
             # Restart Claude Code on source
             backend = get_backend(backend_name)
-            start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id)}'
+            start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
             if source_cwd:
-                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'
+                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'  # type: ignore[arg-type]
             _remote_run(
-                ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
+                ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],  # type: ignore[arg-type]
                 host=source_host, capture_output=True)
 
             self._teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
@@ -11942,8 +12011,10 @@ class CommandRouter:
         except OSError as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
-    def _teleport_notify(self, chat_id: int | str, text: str) -> None:
+    def _teleport_notify(self, chat_id: ChatId | None, text: str) -> None:
         """Send progress notification during teleport."""
+        if chat_id is None:
+            return
         try:
             transport.send_text(chat_id, text)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
@@ -12075,8 +12146,8 @@ class CommandRouter:
         session = registered.get(name)
         if name not in registered:
             if registered:
-                names = ", ".join(registered.keys())
-                self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names}")
+                names_str = ", ".join(registered.keys())
+                self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names_str}")
             else:
                 self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
@@ -12115,7 +12186,7 @@ class CommandRouter:
             with watchdog.restart_lock:
                 watchdog.restart_in_progress.pop(name, None)
 
-    def _do_restart(self, name: str, session: TmuxSessionDict, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
+    def _do_restart(self, name: str, session: TmuxSessionDict | None, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
         """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
@@ -12308,12 +12379,12 @@ class CommandRouter:
     def _cmd_restart_all(self, chat_id: int | str, clean: bool) -> bool:
         """Handle /restart-all command — sequentially restart all workers."""
         registered = self.workers.get_registered_sessions()
-        if not registered:
+        if not registered:  # type: ignore[has-type]
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
         with self._restart_all_lock:
-            if self._restart_all_running:
+            if self._restart_all_running:  # type: ignore[has-type]
                 self.reply(chat_id, "A /restart all is already running. Use /restart cancel to stop it.")
                 return True
             self._restart_all_running = True
@@ -12329,7 +12400,7 @@ class CommandRouter:
         mode = "relaunch" if clean else "resume"
         self.reply(chat_id, f"Restarting {len(names)} workers sequentially ({mode})...")
 
-        self._restart_all_thread = threading.Thread(
+        self._restart_all_thread: threading.Thread | None = threading.Thread(
             target=self._run_restart_all_sequence,
             args=(chat_id, names, mode),
             daemon=True,
@@ -12488,10 +12559,10 @@ class CommandRouter:
             workers = ch.get("workers", [ch["worker"]])
             lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
         lines.append(f"\nChannels: {len(ch_active)}")
-        for cid, ch in ch_active:
-            members = ", ".join(ch["members"].keys())
-            msg_count = len(ch.get("messages", []))
-            lines.append(f"  • {cid} ({ch['label']}) — {members} ({msg_count} msgs)")
+        for cid, chan in ch_active:
+            members_str = ", ".join(chan["members"].keys())
+            msg_count = len(chan.get("messages", []))
+            lines.append(f"  • {cid} ({chan['label']}) — {members_str} ({msg_count} msgs)")
         lines.append(f"\nGuests: {len(guest_active)}")
         for g in guest_active:
             inbox_count = len(guest_store.inboxes.get(g["name"], []))
@@ -12640,23 +12711,23 @@ class CommandRouter:
             else:
                 lines = []
                 for cid, channel in active:
-                    members = ", ".join(channel["members"].keys())
-                    lines.append(f"{cid} ({channel['label']}) — {members}")
+                    members_str = ", ".join(channel["members"].keys())
+                    lines.append(f"{cid} ({channel['label']}) — {members_str}")
                 self.reply(chat_id, "\n".join(lines))
             return True
 
         # Remaining commands: /channel <channel_id> <action>
         channel_id = subcmd
         with channel_store.lock:
-            channel = channel_store.channels.get(channel_id)
-        if not channel or channel_is_expired(channel):
+            found_channel: ChannelDict | None = channel_store.channels.get(channel_id)
+        if not found_channel or channel_is_expired(found_channel):
             self.reply(chat_id, f"Channel {channel_id} not found.", outcome="Needs decision")
             return True
 
         if len(parts) < 2:
             # Just show channel info
-            members = ", ".join(channel["members"].keys())
-            self.reply(chat_id, f"{channel_id} ({channel['label']})\nMembers: {members}\nMessages: {len(channel['messages'])}")
+            members_str = ", ".join(found_channel["members"].keys())
+            self.reply(chat_id, f"{channel_id} ({found_channel['label']})\nMembers: {members_str}\nMessages: {len(found_channel['messages'])}")
             return True
 
         action = parts[1].lower()
@@ -12669,8 +12740,8 @@ class CommandRouter:
             return True
 
         if action == "members":
-            members = ", ".join(channel["members"].keys())
-            self.reply(chat_id, f"{channel_id} members: {members}")
+            members_str = ", ".join(found_channel["members"].keys())
+            self.reply(chat_id, f"{channel_id} members: {members_str}")
             return True
 
         if action == "add":
@@ -12679,7 +12750,7 @@ class CommandRouter:
                 self.reply(chat_id, "Usage: /channel <id> add <member...>", outcome="Needs decision")
                 return True
             with channel_store.lock:
-                added = channel_add_members(channel, to_add)
+                added = channel_add_members(found_channel, to_add)
             if added:
                 self.reply(chat_id, f"{channel_id}: added {', '.join(added)}")
             else:
@@ -12692,7 +12763,7 @@ class CommandRouter:
                 self.reply(chat_id, "Usage: /channel <id> remove <member...>", outcome="Needs decision")
                 return True
             with channel_store.lock:
-                removed = channel_remove_members(channel, to_remove)
+                removed = channel_remove_members(found_channel, to_remove)
             if removed:
                 self.reply(chat_id, f"{channel_id}: removed {', '.join(removed)}")
             else:
@@ -12702,8 +12773,8 @@ class CommandRouter:
         # Default: send message to channel
         message_text = " ".join(parts[1:])
         with channel_store.lock:
-            msg = channel_append_message(channel, "manager", message_text)
-            members_snapshot = dict(channel["members"])
+            msg = channel_append_message(found_channel, "manager", message_text)
+            members_snapshot = dict(found_channel["members"])
         registered = get_registered_sessions()
         _fanout_channel_message(channel_id, "manager", message_text, msg,
                                      members_snapshot, registered)
@@ -12766,7 +12837,7 @@ class CommandRouter:
 
         return f"Manager forwarded {media_label}: {local_path}"
 
-    def _worker_from_reply(self, msg: TelegramMessageDict) -> str | None:
+    def _worker_from_reply(self, msg: TelegramMessageDict | None) -> str | None:
         """Extract worker name from a reply-to message's text prefix (e.g. 'bob:\\n...')."""
         reply_to = msg.get("reply_to_message") if msg else None
         if not reply_to:
@@ -12834,7 +12905,7 @@ class CommandRouter:
                 largest = max(photo, key=lambda p: p.get("file_size", 0))
                 file_id = largest.get("file_id")
                 media_type = "image"
-            elif doc_is_image:
+            elif doc_is_image and document:
                 file_id = document.get("file_id")
                 media_type = "image"
             elif document:
@@ -12888,16 +12959,16 @@ class CommandRouter:
             return reply_worker
         return state.active
 
-    def _route_media_message(self, media_text: str, caption: str, chat_id: int | str, msg_id: int, msg: TelegramMessageDict | None=None) -> None:
+    def _route_media_message(self, media_text: str, caption: str, chat_id: ChatId | None, msg_id: int | None, msg: TelegramMessageDict | None=None) -> None:
         """Route a media message, honoring @mentions in caption or reply-to context."""
         if caption:
             unknown_mentions = self.unknown_at_mentions(caption)
             if unknown_mentions:
                 self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
-                return
+                return  # type: ignore[arg-type]
             targets, _ = self.parse_at_mentions(caption)
             if targets:
-                statuses = []
+                statuses = []  # type: ignore[arg-type]
                 for name in targets:
                     statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
                 sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
@@ -12906,10 +12977,10 @@ class CommandRouter:
                 if offline:
                     parts = []
                     parts.append(f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline.")
-                    if sent_to:
+                    if sent_to:  # type: ignore[arg-type]
                         parts.append(f"Delivered to {', '.join(sent_to)}.")
                     self.reply(chat_id, " ".join(parts))
-                return
+                return  # type: ignore[arg-type]
         # Check reply-to: if replying to a worker's message, route to that worker
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
@@ -12928,7 +12999,7 @@ class CommandRouter:
         _last_mention.ts = 0
 
     def _handle_mention_routing(self, targets: list[str], message: str,
-                                text: str, chat_id: int, msg_id: int,
+                                text: str, chat_id: ChatId | None, msg_id: int | None,
                                 reply_to: TelegramMessageDict | None,
                                 reply_context: str,
                                 reply_context_ts: int | None) -> None:
@@ -12941,10 +13012,10 @@ class CommandRouter:
                 state.active = target
                 save_last_active(target)
             else:
-                self.reply(chat_id, f"Can't focus guest {target}.")
+                self.reply(chat_id, f"Can't focus guest {target}.")  # type: ignore[arg-type]
             self._reset_mention_streak()
             return
-
+  # type: ignore[arg-type]
         if reply_context:
             message = self.format_reply_context(message, reply_context, reply_context_ts)
 
@@ -13042,7 +13113,7 @@ class CommandRouter:
                 parts.append(f"@{name}.")
         return f"⚠️ Unknown: {' '.join(parts)}"
 
-    def _route_mention(self, name: str, message: str, chat_id: int | str, msg_id: int) -> MentionRouteResult | None:
+    def _route_mention(self, name: str, message: str, chat_id: ChatId | None, msg_id: int | None) -> MentionRouteResult | None:
         """Route a @mention to either a worker or a guest inbox. Workers win name collisions."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
@@ -13061,9 +13132,9 @@ class CommandRouter:
                 "text": message,
                 "ts": int(_clock.time()),
             }
-            with guest_store.lock:
+            with guest_store.lock:  # type: ignore[arg-type]
                 inbox = guest_store.inboxes.get(name, [])
-                guest_store.inboxes[name] = guest_inbox_append(inbox, msg_obj)
+                guest_store.inboxes[name] = guest_inbox_append(inbox, cast(GuestInboxMessageDict, msg_obj))
             return {"name": name, "status": "sent"}
 
         return {"name": name, "status": "unknown"}
@@ -13090,7 +13161,7 @@ class CommandRouter:
         ts = reply_msg.get("date")
         return text, ts
 
-    def format_reply_context(self, reply_text: str, context_text: str, context_ts: str | None = None) -> str:
+    def format_reply_context(self, reply_text: str, context_text: str, context_ts: int | None = None) -> str:
         """Format reply-to context for prepending to forwarded messages."""
         reply_text = (reply_text or "").strip()
         context_text = (context_text or "").strip()
@@ -13116,14 +13187,14 @@ class CommandRouter:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
         """Initialize command router with worker manager, transport, and dispatch table."""
         if transport is not None and not isinstance(transport, MessageTransport):
-            transport = _LegacyTransportAdapter(transport)
+            transport = _LegacyTransportAdapter(transport)  # type: ignore[no-redef]
         self.transport: MessageTransport | None = transport
-        self.workers: "WorkerManager" = workers
-        # Restart-all state
+        self.workers: "WorkerManager" = workers  # type: ignore[no-redef]
+        # Restart-all state  # type: ignore[no-redef]
         self._restart_all_lock: threading.Lock = threading.Lock()
-        self._restart_all_running: bool = False
+        self._restart_all_running: bool = False  # type: ignore[no-redef]
         self._restart_all_abort: threading.Event = threading.Event()
-        self._restart_all_thread: threading.Thread | None = None
+        self._restart_all_thread: threading.Thread | None = None  # type: ignore[no-redef]
 
         # Each handler takes (arg, chat_id, message_id) and returns True if handled.
         # To add a new command, add one line here. No dispatch changes needed.
@@ -13148,12 +13219,12 @@ class CommandRouter:
             "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
         }
 
-    def reply(self, chat_id: ChatId, text: str, outcome: str | None = None) -> None:
+    def reply(self, chat_id: ChatId | None, text: str, outcome: str | None = None) -> None:
         """Send a reply message to a chat via the transport."""
-        if self.transport is not None:
+        if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, text)
 
-    def send_startup_message(self, chat_id: ChatId) -> None:
+    def send_startup_message(self, chat_id: ChatId | None) -> None:
         """Send the bridge startup notification to the admin chat."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
@@ -13205,11 +13276,13 @@ class CommandRouter:
         if text and chat_id:
             self._route_text_message(incoming)
 
-    def _check_admin(self, chat_id: int) -> bool:
+    def _check_admin(self, chat_id: ChatId | None) -> bool:
         """Verify chat_id is admin, auto-learning if first contact. Returns True if allowed."""
         global admin_chat_id
+        if chat_id is None:
+            return False
         if admin_chat_id is None:
-            admin_chat_id = chat_id
+            admin_chat_id = chat_id  # type: ignore[assignment]
             return True
         return chat_id == admin_chat_id
 
@@ -13275,10 +13348,10 @@ class CommandRouter:
             elif incoming.video_note:
                 media_label = "video note"
             elif incoming.sticker:
-                media_label = "sticker"
+                media_label = "sticker"  # type: ignore[arg-type]
 
         if not file_id:
-            return False
+            return False  # type: ignore[arg-type]
 
         if not self._check_admin(chat_id):
             return True
@@ -13332,12 +13405,12 @@ class CommandRouter:
             title = incoming.audio.get("title", incoming.audio.get("file_name", "audio"))
             duration = incoming.audio.get("duration", 0)
             return f"Manager sent audio: {title} ({duration}s)\nPath: `{local_path}`"
-
+  # type: ignore[arg-type]
         if incoming.voice:
             duration = incoming.voice.get("duration", 0)
-            transcript = transcribe_voice(local_path)
+            transcript = transcribe_voice(local_path)  # type: ignore[arg-type]
             if transcript:
-                self.reply(chat_id, f"🎤 _{transcript}_", msg_id)
+                self.reply(chat_id, f"🎤 _{transcript}_")
                 routed = f"{text}\n\n{transcript}" if text else transcript
                 self._route_media_message(routed, text or transcript, chat_id, msg_id, msg=msg)
                 return None  # Already handled
@@ -13403,44 +13476,44 @@ class CommandRouter:
         if unknown_mentions:
             self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
             self._reset_mention_streak()
-            return
+            return  # type: ignore[arg-type]
 
         targets, message = self.parse_at_mentions(text)
-
+  # type: ignore[arg-type]
         if targets:
             self._handle_mention_routing(targets, message, text, chat_id, msg_id,
                                          reply_to, reply_context, reply_context_ts)
             return
 
-        # Reply-to worker message without @mention routes to that worker
+        # Reply-to worker message without @mention routes to that worker  # type: ignore[arg-type]
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
-            routed_text = text
+            routed_text = text  # type: ignore[arg-type]
             if reply_context:
                 routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
             self._reset_mention_streak()
             return
-
+  # type: ignore[arg-type]
         # No @mentions → route to focused worker
         self._reset_mention_streak()
-        routed_text = text
+        routed_text = text  # type: ignore[arg-type]
         if reply_context:
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
 
-    def handle_command(self, text: str, chat_id: int | str, msg_id: int) -> bool:
+    def handle_command(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> bool:
         """Parse and dispatch a slash command."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
         if "@" in cmd:
             cmd = cmd.split("@")[0]
-        arg = parts[1].strip() if len(parts) > 1 else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""  # type: ignore[arg-type]
 
         # Adding a new command = adding one entry to self._commands in __init__.
-        handler = self._commands.get(cmd)
+        handler = self._commands.get(cmd)  # type: ignore[arg-type]
         if handler:
-            return handler(arg, chat_id, msg_id)
+            return handler(arg, chat_id or 0, msg_id or 0)
 
         if cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
@@ -13451,11 +13524,11 @@ class CommandRouter:
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
             prev_focus = state.active
-            state.active = worker_name
+            state.active = worker_name  # type: ignore[union-attr, arg-type]
             save_last_active(worker_name)
             if not arg:
-                return True
-            if prev_focus != worker_name:
+                return True  # type: ignore[union-attr, arg-type]
+            if prev_focus != worker_name and self.transport and chat_id is not None:
                 self.transport.send_text(chat_id, f"Now talking to {worker_name.capitalize()}.")
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
             return True
@@ -13652,11 +13725,11 @@ class CommandRouter:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
-        worker_live = {}
+        worker_live: dict[str, dict[str, str | None]] = {}
         for name, session in registered.items():
             backend_name = get_worker_backend(name, session)
-            activity = None
-            context_pct = None
+            activity: str | None = None
+            context_pct: str | None = None
 
             tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
             host = get_worker_host(name)
@@ -13879,7 +13952,7 @@ class CommandRouter:
 
 
 
-    def route_to_active(self, text: str, chat_id: int | str, msg_id: int) -> None:
+    def route_to_active(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
         """Route a text message to the currently focused worker."""
         registered = self.workers.get_registered_sessions()
 
@@ -13894,7 +13967,7 @@ class CommandRouter:
 
         self.route_message(state.active, text, chat_id, msg_id, one_off=False)
 
-    def route_to_all(self, text: str, chat_id: int | str, msg_id: int) -> None:
+    def route_to_all(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
         """Broadcast a text message to all active workers."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
@@ -13912,7 +13985,7 @@ class CommandRouter:
         if not sent_to:
             self.reply(chat_id, "No one's online to share with.")
 
-    def route_message(self, session_name: str, text: str, chat_id: int | str, msg_id: int, one_off: bool=False) -> None:
+    def route_message(self, session_name: str, text: str, chat_id: ChatId | None, msg_id: int | None, one_off: bool=False) -> None:
         """Deliver a text message to a specific worker via tmux or pipe."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(session_name)
@@ -13945,23 +14018,23 @@ class CommandRouter:
                 details = _extract_question_details(raw_lines)
                 if details:
                     if _send_interactive_reply(tmux_name, shortcut, details, host=host):
-                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
+                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"  # type: ignore[arg-type]
                         self.reply(chat_id, f"{action}.")
                         return
-
+  # type: ignore[arg-type]
         # Non-interactive backpressure: atomic check+set to prevent races
-        if not backend.is_interactive and not try_set_pending(session_name, chat_id):
+        if not backend.is_interactive and chat_id is not None and not try_set_pending(session_name, chat_id):  # type: ignore[arg-type]
             self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
             return
 
         # Prefix manager messages so workers can distinguish from inter-worker messages.
         # Skip if text already has a "Manager sent ..." prefix (media messages).
         if not text.startswith("Manager sent "):
-            text = f"manager: {text}"
+            text = f"manager: {text}"  # type: ignore[arg-type]
 
         _log(_LOG_INFO, "dispatch", f"chat_id={chat_id} -> {session_name}: {text[:50]}...")
-
-        if backend.is_interactive:
+  # type: ignore[arg-type]
+        if backend.is_interactive and chat_id is not None:
             worker_set_pending(session_name, chat_id)
         threading.Thread(
             target=send_typing_loop,
@@ -13977,12 +14050,13 @@ class CommandRouter:
                 f"Could not send to {session_name.capitalize()}. Try /restart.",
                 outcome="Needs decision"
             )
-            return
+            return  # type: ignore[union-attr, arg-type]
 
         if msg_id and send_ok:
-            host = get_worker_host(session_name)
+            host = get_worker_host(session_name)  # type: ignore[union-attr, arg-type]
             if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host):
-                self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+                if self.transport and chat_id is not None:
+                    self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
 command_router = CommandRouter(transport, worker_manager)
@@ -14187,7 +14261,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                                      "path": None, "error": str(e)[:200]}
 
 
-def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None]:
+def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
     """Resolve transcript JSONL path for a worker (local or remote).
 
     Returns (transcript_path, sid, cwd) or (None, sid, cwd) if not found.
@@ -14241,7 +14315,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                 _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
 
     if transcript_path.exists():
-        return transcript_path, sid, cwd
+        return str(transcript_path), sid, cwd
     return None, sid, cwd
 
 
@@ -14406,9 +14480,9 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
     elif etype == "assistant" and role == "assistant":
         if isinstance(content, list):
             for item in content:
-                ct = item.get("type", "")
+                ct = str(item.get("type", ""))
                 if ct == "thinking":
-                    raw_thinking = item.get("thinking", "")
+                    raw_thinking = str(item.get("thinking", ""))
                     if raw_thinking and raw_thinking.strip():
                         tt = esc(raw_thinking[:3000])
                         if len(raw_thinking) > 3000:
@@ -14622,7 +14696,7 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             "duration": duration_str}
 
 
-def _render_transcript_loading(name: str, sid: str, token: str, sync_key: str) -> str:
+def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
     """Render a loading page while transcript syncs from remote host."""
     import html as html_mod
     esc = html_mod.escape
@@ -14861,13 +14935,13 @@ def _team_chat_html_messages(messages: list[TeamChatMessageDict], msg_by_id: dic
             else:
                 # Reply to message on another page — fetch text and link to its page
                 rinfo = reply_cache.get(reply_to)
-                if rinfo and rinfo.get("page"):
+                if isinstance(rinfo, dict) and rinfo.get("page"):
                     rpage = rinfo["page"]
                     rurl = f"{_url_prefix}page={rpage}&{qs_base}#msg-{reply_to}" if qs_base else f"{_url_prefix}page={rpage}#msg-{reply_to}"
-                    rsender = esc(rinfo.get("display_sender", ""))
+                    rsender = esc(rinfo.get("display_sender", ""))  # type: ignore[arg-type]
                     rtext_raw = rinfo.get("text", "")
-                    rtext = esc(rtext_raw[:120])
-                    if len(rtext_raw) > 120:
+                    rtext = esc(rtext_raw[:120])  # type: ignore[index]
+                    if len(rtext_raw) > 120:  # type: ignore[arg-type]
                         rtext += "..."
                     reply_html = (f'<a class="reply-ctx" href="{rurl}">'
                                   f'<span class="reply-name">{rsender}</span> {rtext}</a>')
@@ -14896,9 +14970,9 @@ def _team_chat_html_messages(messages: list[TeamChatMessageDict], msg_by_id: dic
 
         # Media rendering (photo / file)
         media_html = ""
-        photo = msg.get("photo", "")
-        file_path_val = msg.get("file", "")
-        file_name = msg.get("file_name", "")
+        photo = _str_field(msg, "photo")
+        file_path_val = _str_field(msg, "file")
+        file_name = _str_field(msg, "file_name")
         media_token = f"token={esc(token)}" if token else ""
         if photo:
             from urllib.parse import quote as _url_quote
@@ -15030,13 +15104,14 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
                 '<h1>Team chat not available</h1>'
                 '<p>Team chat data not indexed.</p></body></html>')
 
-    messages = query_result.get("messages", [])
+    _msgs_raw = query_result.get("messages", [])
+    messages: list[dict[str, object]] = _msgs_raw if isinstance(_msgs_raw, list) else []
     if search_query:
-        total = query_result.get("total_results", 0)
+        total = _int_field(query_result, "total_results")
     else:
-        total = query_result.get("total", 0)
-    total_pages = query_result.get("total_pages", 1)
-    page = query_result.get("page", 1)
+        total = _int_field(query_result, "total")
+    total_pages = _int_field(query_result, "total_pages", 1)
+    page = _int_field(query_result, "page", 1)
 
     # Pagination query string (needed by message blocks for reply/context links)
     qs_parts = []
@@ -15049,7 +15124,7 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     qs_base = "&".join(qs_parts)
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
-    def page_url(p: str) -> str:
+    def page_url(p: int | str) -> str:
         """Build a full URL for a transcript/PR page path."""
         parts = [f"page={p}"]
         if qs_base:
@@ -15068,12 +15143,12 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     reply_cache = {}
     if missing_reply_ids:
         for rid in missing_reply_ids:
-            r = _run_team_chat_query("msg-by-id", msg_id=rid)
+            r = _run_team_chat_query("msg-by-id", msg_id=rid)  # type: ignore[arg-type]
             if r and r.get("idx") is not None:
                 reply_cache[rid] = r
-
+  # type: ignore[arg-type]
     blocks_html = _team_chat_html_messages(
-        messages, msg_by_id, reply_cache, search_query,
+        messages, msg_by_id, reply_cache, search_query,  # type: ignore[arg-type]
         per_page, token, _url_prefix, qs_base, esc)
     # Pagination nav
     nav_html = ""
@@ -15666,7 +15741,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     host = get_worker_host(name)
     if host:
         cwd = get_claude_session_cwd(name) or ""
-        sid = session_id or get_claude_session_id(name, authoritative=True)
+        sid: str | None = session_id or get_claude_session_id(name, authoritative=True)
         if not sid:
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>No session found for {esc(name)}</h1></body></html>"
         remote_home = _get_remote_home(host) or ""
@@ -15717,7 +15792,8 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     else:
         # Reconstruct entry dicts from raw_json
         page_entries = []
-        for e in query_result.get("entries", []):
+        _entries_raw = query_result.get("entries", [])
+        for e in (_entries_raw if isinstance(_entries_raw, list) else []):
             try:
                 entry = cast(TranscriptEntry, json.loads(e["raw_json"]))
                 entry["_idx"] = e.get("idx", -1)
@@ -15726,23 +15802,23 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                 continue
 
         if search_query:
-            total = query_result.get("total_results", 0)
+            total = _int_field(query_result, "total_results")
         else:
-            total = query_result.get("total", 0)
-        total_pages = query_result.get("total_pages", 1)
-        page = query_result.get("page", 1)
+            total = _int_field(query_result, "total")
+        total_pages = _int_field(query_result, "total_pages", 1)
+        page = _int_field(query_result, "page", 1)
 
-        _empty_stats = {"n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0,
+        _empty_stats: TranscriptStatsDict = {"n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0,
                         "lines_del": 0, "lines_mod": 0, "n_files": 0, "model": "",
                         "version": "", "git_branch": "", "first_ts": "", "last_ts": "",
                         "input_tokens": 0, "output_tokens": 0, "duration": ""}
-        stats = stats_result if stats_result else _empty_stats
+        stats = cast(TranscriptStatsDict, stats_result) if stats_result else _empty_stats
 
     # File size of the transcript JSONL (local only)
     file_size_str = ""
     if not host:
         try:
-            file_size_bytes = os.path.getsize(transcript_path)
+            file_size_bytes = os.path.getsize(transcript_path)  # type: ignore[arg-type]
             if file_size_bytes >= 1_048_576:
                 file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
             elif file_size_bytes >= 1024:
@@ -15784,7 +15860,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         qs_parts.append(f"filter={esc(filter_mode)}")
     qs_base = "&".join(qs_parts)
 
-    def page_url(p: str) -> str:
+    def page_url(p: int | str) -> str:
         """Build a full URL for a transcript/PR page path."""
         parts = [f"page={p}"]
         if qs_base:
@@ -15844,12 +15920,12 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     if filter_mode == "prompts":
         _clear_qs = [p for p in _filt_qs]  # already excludes filter=prompts
         _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
-        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
+        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'  # type: ignore[arg-type]
 
     return (_transcript_html_head(name, esc)
-            + _transcript_html_nav(name, stats, prompts_filter_url, esc)
+            + _transcript_html_nav(name, stats, prompts_filter_url, esc)  # type: ignore[arg-type]
             + _transcript_html_entries(
-                page_entries, _tool_results, search_val,
+                page_entries, _tool_results, search_val,  # type: ignore[arg-type]
                 filter_banner, search_result, nav_html,
                 live_base_url, name, token, search_query, total, per_page,
                 page, total_pages, esc, session_id, filter_mode)
@@ -16083,14 +16159,14 @@ class Handler(BaseHTTPRequestHandler):
         expires_at_unix = now + GUEST_TTL
         expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_unix))
 
-        guest = {
+        guest = cast(GuestSessionDict, {
             "name": name,
             "token_hash": token_hash,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "expires_at": expires_at,
             "expires_at_unix": expires_at_unix,
             "notified_workers": set(),
-        }
+        })
 
         with guest_store.lock:
             guest_store.guests[token_hash] = guest
@@ -16196,12 +16272,12 @@ class Handler(BaseHTTPRequestHandler):
                     results.append({"target": target, "ok": False, "error": "channel not found"})
                     continue
                 with channel_store.lock:
-                    ch = channel_store.channels.get(ch_id)
-                    if from_member not in ch["members"]:
+                    target_ch: ChannelDict | None = channel_store.channels.get(ch_id)
+                    if not target_ch or from_member not in target_ch["members"]:
                         results.append({"target": target, "ok": False, "error": "not a member"})
                         continue
-                    msg = channel_append_message(ch, from_member, text)
-                    members_snapshot = dict(ch["members"])
+                    msg = channel_append_message(target_ch, from_member, text)
+                    members_snapshot = dict(target_ch["members"])
                 _fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
@@ -16247,12 +16323,15 @@ class Handler(BaseHTTPRequestHandler):
                 msg_id = f"gm_{secrets.token_hex(4)}"
                 with guest_store.lock:
                     inbox = guest_store.inboxes.get(guest_name, [])
-                    guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {
+                    guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {  # type: ignore[union-attr]
                         "id": msg_id, "from": guest_name, "to": worker,
                         "text": text, "ts": int(_clock.time()),
-                    })
-                    if worker not in guest.get("notified_workers", set()):
-                        guest.setdefault("notified_workers", set()).add(worker)
+                    })  # type: ignore[union-attr]
+                    notified = guest.get("notified_workers", set())
+                    if worker not in notified:
+                        if isinstance(notified, set):
+                            notified.add(worker)
+                        guest["notified_workers"] = notified  # type: ignore[typeddict-item]
                         try:
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
@@ -16761,12 +16840,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "channel not found"})
             return
 
-        workers = channel.get("workers", [channel["worker"]])
+        workers = channel.get("workers", [channel["worker"]])  # type: ignore[index]
         delivered = {}
         for w in workers:
-            delivered[w] = send_to_worker(w, envelope)
+            delivered[w] = send_to_worker(w, envelope)  # type: ignore[index]
         self._send_json(200, {
-            "message_id": msg["message_id"],
+            "message_id": msg["message_id"],  # type: ignore[index]
             "delivered": all(delivered.values()),
             "workers": delivered,
         })
@@ -17199,7 +17278,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 host = get_worker_host(name)
                 if host:
                     cwd = get_claude_session_cwd(name) or ""
-                    sid = session_id or get_claude_session_id(name)
+                    sid: str | None = session_id or get_claude_session_id(name)
                     if not sid:
                         self._send_json(200, {"total": 0, "new": 0})
                         return
@@ -17219,12 +17298,12 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 result = _run_transcript_query(jsonl_path, sid, "stats", host=host)
                 total = 0
                 if result:
-                    total = result.get("n_user", 0) + result.get("n_tool", 0)
+                    total = _int_field(result, "n_user") + _int_field(result, "n_tool")
                     # Use a more accurate total from entries query
                     count_result = _run_transcript_query(
                         jsonl_path, sid, "entries", host=host, page=1, per_page=1)
                     if count_result:
-                        total = count_result.get("total", total)
+                        total = _int_field(count_result, "total", total)
                 new_count = max(0, total - since)
                 self._send_json(200, {"total": total, "new": new_count})
                 return
@@ -17406,7 +17485,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     # ── Core HTTP Handler ─────────────────────────────────────────
 
-    def _send_json(self, status_code: int, data: dict[str, object]) -> None:
+    def _send_json(self, status_code: int, data: Mapping[str, object]) -> None:
         """Send a JSON response with proper Content-Type."""
         body = json.dumps(data).encode()
         self.send_response(status_code)
@@ -17533,7 +17612,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             # Parse media tags (support [[image:]] and [[file:]] in notifications)
             host = get_worker_host(name) if name else None
             if host:
-                _accept_all = lambda p: (True, Path(p))
+                _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
                 clean_text, images = _parse_media_tags(text, "image", _accept_all)
                 clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
             else:
@@ -18085,6 +18164,16 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
 # ── Endpoint registration ──
 
+def _mg(m: re.Match[str] | None, n: int = 1) -> str:
+    """Extract group from a regex match (guaranteed non-None in pattern routes)."""
+    return m.group(n) if m else ""
+
+
+def _mg2(m: re.Match[str] | None) -> str:
+    """Extract optional group 2 from a regex match."""
+    return m.group(2) if m else None  # type: ignore[return-value]
+
+
 def _setup_endpoint_routes() -> None:
     """Register all POST and GET endpoints in the endpoint router.
 
@@ -18111,19 +18200,19 @@ def _setup_endpoint_routes() -> None:
     r.post_pattern(r'^/guest/reply', lambda h, b, m: h.handle_guest_reply(b))
     r.post_pattern(
         r'^/channels/([^/]+)/members$',
-        lambda h, b, m: h.handle_channel_members(m.group(1), b)
+        lambda h, b, m: h.handle_channel_members(_mg(m), b)
     )
     r.post_pattern(
         r'^/channels/([^/]+)/send$',
-        lambda h, b, m: h.handle_channel_send(m.group(1), b)
+        lambda h, b, m: h.handle_channel_send(_mg(m), b)
     )
     r.post_pattern(
         r'^/v1/([^/]+)/send$',
-        lambda h, b, m: h.handle_relay_send(m.group(1), b)
+        lambda h, b, m: h.handle_relay_send(_mg(m), b)
     )
     r.post_pattern(
         r'^/v1/([^/]+)/reply$',
-        lambda h, b, m: h.handle_relay_reply(m.group(1), b)
+        lambda h, b, m: h.handle_relay_reply(_mg(m), b)
     )
 
     # GET endpoints (exact match — match is always None)
@@ -18142,11 +18231,11 @@ def _setup_endpoint_routes() -> None:
     r.get_pattern(r'^/guest/status', lambda h, p, m: h.handle_guest_status(p))
     r.get_pattern(
         r'^/v1/([^/]+)(?:/(.+))?$',
-        lambda h, p, m: h.handle_relay_get(m.group(1), m.group(2), p)
+        lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p)
     )
     r.get_pattern(
         r'^/channels/([^/]+)/messages$',
-        lambda h, p, m: h.handle_channel_messages(m.group(1), p)
+        lambda h, p, m: h.handle_channel_messages(_mg(m), p)
     )
     r.get_pattern(r'^/team-chat-media/', lambda h, p, m: h.handle_team_chat_media(p))
     r.get_pattern(r'^/team-chat', lambda h, p, m: h.handle_team_chat_endpoint(p))
@@ -18157,7 +18246,7 @@ def _setup_endpoint_routes() -> None:
     r.delete("/guest", lambda h, p, _m: h.handle_guest_disconnect(p))
     r.delete_pattern(
         r'^/channels/([^/]+)$',
-        lambda h, p, m: h.handle_channel_delete(m.group(1))
+        lambda h, p, m: h.handle_channel_delete(_mg(m))
     )
 
 
@@ -18508,7 +18597,7 @@ def _connector_export_github(number: int, repo: str) -> str | None:
                     url = line.strip().split()[-1].rstrip("/")
                     if "localhost" in url:
                         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
-                        url = url.replace("localhost", host)
+                        url = url.replace("localhost", host)  # type: ignore[arg-type]
                     return url
     except subprocess.SubprocessError as e:
         _log(_LOG_WARN, "github", f"export failed for #{number}: {e}")
@@ -18595,9 +18684,9 @@ def _start_connectors() -> tuple[object, object]:
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
-            on_message=_connector_on_message("gmail"),
+            on_message=_connector_on_message("gmail"),  # type: ignore[arg-type]
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("gmail"),
+            on_alert=_connector_on_alert("gmail"),  # type: ignore[arg-type]
         )
         gmail_inst.start()
         print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
@@ -18610,9 +18699,9 @@ def _start_connectors() -> tuple[object, object]:
             repo=GITHUB_REPO,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
-            on_message=_connector_on_message("github"),
+            on_message=_connector_on_message("github"),  # type: ignore[arg-type]
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("github"),
+            on_alert=_connector_on_alert("github"),  # type: ignore[arg-type]
             state_file=str(NODE_DIR / "github_state.json"),
         )
         github_inst.start()
@@ -18638,9 +18727,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
-            on_message=_connector_on_message("gmail"),
+            on_message=_connector_on_message("gmail"),  # type: ignore[arg-type]
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("gmail"),
+            on_alert=_connector_on_alert("gmail"),  # type: ignore[arg-type]
         )
         ok, msg = gmail_connector_instance.restart()
         if ok:
@@ -18660,9 +18749,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             repo=GITHUB_REPO,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
-            on_message=_connector_on_message("github"),
+            on_message=_connector_on_message("github"),  # type: ignore[arg-type]
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("github"),
+            on_alert=_connector_on_alert("github"),  # type: ignore[arg-type]
             state_file=str(NODE_DIR / "github_state.json"),
         )
         ok, msg = github_connector_instance.restart()
@@ -18676,19 +18765,19 @@ def _restart_connector(name: str) -> tuple[bool, str]:
         return False, f"Unknown connector: {name} (valid: gmail, github)"
 
 
-def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
+def _get_connectors_status() -> dict[str, ConnectorStatusDict]:  # type: ignore[assignment]
     """Return status dict for all connectors."""
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
         if gmail_connector_instance is not None:
-            result["gmail"] = gmail_connector_instance.status()
+            result["gmail"] = cast(ConnectorStatusDict, gmail_connector_instance.status())
         else:
-            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}
+            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}  # type: ignore[assignment]
     else:
         result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
     if GITHUB_ENABLED:
         if github_connector_instance is not None:
-            result["github"] = github_connector_instance.status()
+            result["github"] = cast(ConnectorStatusDict, github_connector_instance.status())
         else:
             result["github"] = {"name": "github", "running": False, "error": "not initialized"}
     else:
@@ -18734,9 +18823,9 @@ def main() -> None:
     _load_learning_reminder_state()
     _seed_learning_reminder_state(registered.keys())
     _schedule_idle_scan()
-    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
+    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")  # type: ignore[assignment]
 
-    gmail_connector_instance, github_connector_instance = _start_connectors()
+    gmail_connector_instance, github_connector_instance = _start_connectors()  # type: ignore[assignment]
 
     try:
         ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()
