@@ -4105,7 +4105,7 @@ def _send_learning_reminder(name: str, text: str) -> None:
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
-admin_chat_id = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
+admin_chat_id: ChatId | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
 # Persistence files (in node directory, survives restart)
 NODE_DIR = SESSIONS_DIR.parent  # ~/.claude/telegram/nodes/<node>
@@ -4314,7 +4314,7 @@ def _save_registry(data: RegistryFileDict) -> None:
         _log(_LOG_WARN, "worker", f"Failed to save worker registry: {e}")
 
 
-def _registry_add(name: str, backend: str, chat_id: int | None = None,
+def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
                    host: str | None = None) -> None:
     """Add a worker to the persistent registry (merge with existing entry)."""
     with watchdog.lock:
@@ -6347,7 +6347,7 @@ def get_chat_id_file(name: str) -> Path:
     return get_session_dir(name) / "chat_id"
 
 
-def get_manager_chat_id(name: str) -> int | None:
+def get_manager_chat_id(name: str) -> ChatId | None:
     """Resolve manager chat ID for worker notifications.
 
     Priority:
@@ -14938,10 +14938,10 @@ def _team_chat_html_messages(messages: list[TeamChatMessageDict], msg_by_id: dic
                 if isinstance(rinfo, dict) and rinfo.get("page"):
                     rpage = rinfo["page"]
                     rurl = f"{_url_prefix}page={rpage}&{qs_base}#msg-{reply_to}" if qs_base else f"{_url_prefix}page={rpage}#msg-{reply_to}"
-                    rsender = esc(rinfo.get("display_sender", ""))  # type: ignore[arg-type]
-                    rtext_raw = rinfo.get("text", "")
-                    rtext = esc(rtext_raw[:120])  # type: ignore[index]
-                    if len(rtext_raw) > 120:  # type: ignore[arg-type]
+                    rsender = esc(str(rinfo.get("display_sender", "")))
+                    rtext_raw = str(rinfo.get("text", ""))
+                    rtext = esc(rtext_raw[:120])
+                    if len(rtext_raw) > 120:
                         rtext += "..."
                     reply_html = (f'<a class="reply-ctx" href="{rurl}">'
                                   f'<span class="reply-name">{rsender}</span> {rtext}</a>')
@@ -15143,12 +15143,14 @@ def _render_team_chat_html(page: int | None = None, per_page: int = 50,
     reply_cache = {}
     if missing_reply_ids:
         for rid in missing_reply_ids:
-            r = _run_team_chat_query("msg-by-id", msg_id=rid)  # type: ignore[arg-type]
+            r = _run_team_chat_query("msg-by-id", msg_id=cast(int, rid))
             if r and r.get("idx") is not None:
                 reply_cache[rid] = r
   # type: ignore[arg-type]
     blocks_html = _team_chat_html_messages(
-        messages, msg_by_id, reply_cache, search_query,  # type: ignore[arg-type]
+        cast(list[TeamChatMessageDict], messages),
+        cast(dict[object, TeamChatMessageDict], msg_by_id),
+        reply_cache, search_query,
         per_page, token, _url_prefix, qs_base, esc)
     # Pagination nav
     nav_html = ""
@@ -15818,7 +15820,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     file_size_str = ""
     if not host:
         try:
-            file_size_bytes = os.path.getsize(transcript_path)  # type: ignore[arg-type]
+            file_size_bytes = os.path.getsize(transcript_path) if transcript_path else 0
             if file_size_bytes >= 1_048_576:
                 file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
             elif file_size_bytes >= 1024:
@@ -15829,18 +15831,18 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
     # Pre-index tool results by tool_use_id for merging into tool_use blocks
-    _tool_results = {}
+    _tool_results: dict[str, ToolResultDict] = {}
     for entry in page_entries:
         if entry.get("type") == "user":
             ct = entry.get("message", {}).get("content", [])
             if isinstance(ct, list):
                 for item in ct:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        tuid = item.get("tool_use_id", "")
+                        tuid: str = str(item.get("tool_use_id", ""))
                         rt = item.get("content", "")
                         if isinstance(rt, list):
-                            rt = "\n".join(r.get("text", "") for r in rt if isinstance(r, dict) and r.get("type") == "text")
-                        _tool_results[tuid] = {"content": str(rt), "is_error": bool(item.get("is_error"))}
+                            rt = "\n".join(str(r.get("text", "")) for r in rt if isinstance(r, dict) and r.get("type") == "text")
+                        _tool_results[tuid] = cast(ToolResultDict, {"content": str(rt), "is_error": bool(item.get("is_error"))})
 
 
     # When live_base_url is set (static snapshot), links point to bridge endpoint
@@ -18596,8 +18598,8 @@ def _connector_export_github(number: int, repo: str) -> str | None:
                 if "http" in line and ("localhost" in line or "serve" in line.lower()):
                     url = line.strip().split()[-1].rstrip("/")
                     if "localhost" in url:
-                        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
-                        url = url.replace("localhost", host)  # type: ignore[arg-type]
+                        host = (urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else None) or "157.180.48.254"
+                        url = url.replace("localhost", host)
                     return url
     except subprocess.SubprocessError as e:
         _log(_LOG_WARN, "github", f"export failed for #{number}: {e}")
