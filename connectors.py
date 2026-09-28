@@ -1355,14 +1355,14 @@ class GmailConnector(BaseConnector[GmailMessage]):
             reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
             plain_text += reply_hint
 
-        downloaded: list[Attachment] = []
+        downloaded_atts: list[Attachment] = []
         for att in attachments:
             path = self._download_attachment(msg_id, att)
             if path:
-                downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
+                downloaded_atts.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
                 print(f"[gmail] attachment: {att['filename']} -> {path}")
 
-        self.on_message(targets, html_text, plain_text, downloaded)
+        self.on_message(targets, html_text, plain_text, downloaded_atts)
         if not self.mark_as_read(msg_id):
             print(f"[gmail] Warning: failed to mark message {msg_id} as read")
 

@@ -1,5 +1,19 @@
 ## Changelog
 
+### v0.45.0 - mypy strict mode, zero errors
+
+**Static analysis:** Added mypy strict configuration (pyproject.toml) and fixed all 437 errors across bridge.py (18,748 lines) and connectors.py (1,793 lines). Zero errors remaining.
+
+**Key type fixes:**
+- Widened `_str_field`/`_int_field`/`_bool_field` to accept `Mapping[str, object]` (was `dict[str, object]`)
+- Widened `_log()` to accept `str | Path`, `_send_media_multipart()` to accept `Path | str`
+- Added `isinstance` guards and `cast()` calls at 50+ locations for proper type narrowing
+- Added missing fields to 5 TypedDicts: `TmuxSessionDict`, `GuestInboxMessageDict`, `TeamChatMessageDict`, `TranscriptSyncState`, `RegistryWorkerDict`
+- Fixed `ChatId` type alias: `int` → `int | str` (Telegram API accepts both)
+- Fixed `no-redef` error in connectors.py (duplicate `downloaded` variable)
+
+**Project metadata:** pyproject.toml requires-python bumped to `>=3.12` to match runtime.
+
 ### v0.44.9 - Worker messaging misroute guardrails
 
 **Guard `/response` against worker-addressing:** `/response` now requires a `source` field matching `session` and rejects payloads that look like worker messaging (fields like `worker`, `to`, `from`). Source/session mismatches (e.g. `source=finn`, `session=sui`) return 403 with a helpful error. hooks.sh now sends `source=$session` so legitimate hook calls pass validation. Codex adapter fixed to use `source=session_name` instead of `source="codex"`.
