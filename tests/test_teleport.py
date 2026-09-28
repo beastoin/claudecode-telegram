@@ -814,12 +814,13 @@ def test_restart_remote_remaps_cwd_home():
     from unittest.mock import patch, MagicMock
     import bridge
 
+    local_home = os.path.expanduser('~')
     tmpdir = tempfile.mkdtemp()
     sessions = Path(tmpdir) / 'sessions'
     sessions.mkdir()
     (sessions / 'x').mkdir()
-    # CWD has VPS path (the bug: stale VPS path synced to remote)
-    (sessions / 'x' / 'claude_session_cwd').write_text('/home/claude/claudecode-telegram')
+    # CWD has local home path (the bug: stale local path synced to remote)
+    (sessions / 'x' / 'claude_session_cwd').write_text(f'{local_home}/claudecode-telegram')
     (sessions / 'x' / 'claude_session_id').write_text('test-session-id')
 
     node_dir = Path(tmpdir) / 'node'
@@ -872,7 +873,7 @@ def test_restart_remote_remaps_cwd_home():
             'claude-prod-x', 'mac-mini', 'resume')
 
     assert ok, f'restart should succeed, got err={err}'
-    # CWD should be remapped from /home/claude/... to /Users/beastoinagents/...
+    # CWD should be remapped from local home to remote home
     actual_cwd = start_calls[0]['cwd']
     assert actual_cwd == '/Users/beastoinagents/claudecode-telegram', \
         f'CWD should be remapped to Mac Mini path, got: {actual_cwd!r}'
