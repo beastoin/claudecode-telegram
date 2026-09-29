@@ -24369,6 +24369,35 @@ main() {
 
     cd "$SCRIPT_DIR"
 
+    # Static analysis — catches type regressions before any tests run
+    log "── mypy strict check ──"
+    if command -v python3 &>/dev/null && python3 -m mypy --version &>/dev/null 2>&1; then
+        if python3 -m mypy bridge.py connectors.py --ignore-missing-imports 2>&1; then
+            success "mypy: zero errors"
+        else
+            fail "mypy: type errors found"
+        fi
+    else
+        log "  (skipped — mypy not installed)"
+    fi
+
+    # Pytest suite — runs all converted tests
+    log "── pytest suite ──"
+    if python3 -m pytest --version &>/dev/null 2>&1; then
+        local pytest_out
+        pytest_out=$(python3 -m pytest tests/ -q --timeout=30 2>&1) || true
+        local pytest_last
+        pytest_last=$(echo "$pytest_out" | tail -1)
+        if echo "$pytest_last" | grep -q "failed"; then
+            echo "$pytest_out" | tail -20
+            fail "pytest: $pytest_last"
+        else
+            success "pytest: $pytest_last"
+        fi
+    else
+        log "  (skipped — pytest not installed)"
+    fi
+
     # Always run unit and CLI tests
     run_unit_tests
     run_cli_tests
