@@ -1449,6 +1449,164 @@ cmd_hook_test() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Command: setup — interactive first-run wizard
+# ─────────────────────────────────────────────────────────────────────────────
+cmd_setup() {
+    echo ""
+    echo "$(bold "claudecode-telegram v${VERSION} — Setup")"
+    echo ""
+
+    # ── Step 1: Check prerequisites ──
+    echo "$(bold "Step 1/4") — Checking prerequisites"
+    echo ""
+
+    local missing=0 warnings=0
+
+    # Python 3.12+
+    if check_cmd python3; then
+        local pyver
+        pyver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "0.0")
+        local pymajor pyminor
+        pymajor=$(echo "$pyver" | cut -d. -f1)
+        pyminor=$(echo "$pyver" | cut -d. -f2)
+        if [[ "$pymajor" -ge 3 && "$pyminor" -ge 12 ]]; then
+            success "Python $pyver"
+        else
+            echo "$(red "✗") Python $pyver (need 3.12+)"
+            missing=$((missing + 1))
+        fi
+    else
+        echo "$(red "✗") Python not found"
+        hint "brew install python  (macOS) / apt install python3  (Linux)"
+        missing=$((missing + 1))
+    fi
+
+    # tmux
+    if check_cmd tmux; then
+        success "tmux $(tmux -V 2>/dev/null | head -1 | sed 's/tmux //')"
+    else
+        echo "$(red "✗") tmux not found"
+        hint "brew install tmux  (macOS) / apt install tmux  (Linux)"
+        missing=$((missing + 1))
+    fi
+
+    # Node.js (for Claude CLI)
+    if check_cmd node; then
+        success "Node.js $(node --version 2>/dev/null)"
+    else
+        echo "$(red "✗") Node.js not found"
+        hint "brew install node  (macOS) / see https://nodejs.org"
+        missing=$((missing + 1))
+    fi
+
+    # Claude CLI
+    if check_cmd claude; then
+        success "Claude CLI"
+    else
+        echo "$(red "✗") Claude CLI not found"
+        hint "npm install -g @anthropic-ai/claude-code"
+        missing=$((missing + 1))
+    fi
+
+    # cloudflared (optional)
+    if check_cmd cloudflared; then
+        success "cloudflared (tunnel)"
+    else
+        echo "$(yellow "○") cloudflared not found (optional — needed for public webhook)"
+        hint "brew install cloudflared  (or use --no-tunnel with your own URL)"
+        warnings=$((warnings + 1))
+    fi
+
+    echo ""
+
+    if [[ $missing -gt 0 ]]; then
+        error "Missing $missing required tool(s) — install them and re-run ./bridge.sh setup"
+        exit 4
+    fi
+
+    # ── Step 2: Bot token ──
+    echo "$(bold "Step 2/4") — Telegram bot token"
+    echo ""
+
+    local token=""
+    local node="${NODE_NAME:-prod}"
+    local env_file="$HOME/.config/claudecode-telegram/${node}.env"
+
+    # Check existing sources
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        token="$TELEGRAM_BOT_TOKEN"
+        success "Found in environment"
+    elif [[ -f "$env_file" ]]; then
+        # shellcheck disable=SC1090
+        source "$env_file" 2>/dev/null || true
+        token="${TELEGRAM_BOT_TOKEN:-}"
+        if [[ -n "$token" ]]; then
+            success "Found in $env_file"
+        fi
+    fi
+
+    if [[ -z "$token" ]]; then
+        echo "  No bot token found."
+        echo ""
+        echo "  $(dim "Get one from @BotFather on Telegram:")"
+        echo "  $(dim "1. Open Telegram → search @BotFather → /newbot")"
+        echo "  $(dim "2. Pick a name and username")"
+        echo "  $(dim "3. Copy the token (looks like 123456789:AAE...)")"
+        echo ""
+        printf "  Paste your bot token: "
+        read -r token
+        echo ""
+
+        if [[ -z "$token" ]]; then
+            error "No token provided"
+            exit 1
+        fi
+
+        # Validate token format
+        if ! echo "$token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+            error "Token doesn't look right (expected format: 123456789:AAE...)"
+            exit 1
+        fi
+    fi
+
+    # Save to config
+    mkdir -p "$(dirname "$env_file")"
+    echo "TELEGRAM_BOT_TOKEN=\"$token\"" > "$env_file"
+    chmod 600 "$env_file"
+    success "Token saved to $env_file"
+    echo ""
+
+    # ── Step 3: Install hooks ──
+    echo "$(bold "Step 3/4") — Installing Claude Code hooks"
+    echo ""
+    FORCE=true cmd_hook_install
+    echo ""
+
+    # ── Step 4: Ready ──
+    echo "$(bold "Step 4/4") — Ready!"
+    echo ""
+    echo "  $(green "Setup complete.") Start the bridge with:"
+    echo ""
+    echo "    $(bold "./bridge.sh run")"
+    echo ""
+    echo "  Then open Telegram and send $(bold "/hire myworker") to your bot."
+    echo ""
+
+    # Offer to start now
+    if [[ "${1:-}" == "--start" ]]; then
+        cmd_run
+    else
+        printf "  Start now? [Y/n] "
+        read -r answer
+        echo ""
+        if [[ -z "$answer" || "$answer" =~ ^[Yy] ]]; then
+            export TELEGRAM_BOT_TOKEN="$token"
+            cmd_run
+        fi
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Command: help
 # ─────────────────────────────────────────────────────────────────────────────
 cmd_help() {
@@ -1459,8 +1617,8 @@ USAGE
   ./bridge.sh [flags] <command> [args]
 
 QUICK START
-  export TELEGRAM_BOT_TOKEN='...'
-  ./bridge.sh run
+  ./bridge.sh setup              # Interactive wizard (first time)
+  ./bridge.sh run                # Start the bridge
 
 MULTI-NODE
   NODE_NAME=prod ./bridge.sh run     # Start prod node
@@ -1480,6 +1638,7 @@ TELEGRAM COMMANDS
   <message>         Send to active Claude
 
 SHELL COMMANDS
+  setup             Interactive first-run wizard
   run               Start bridge + tunnel + webhook
   restart           Restart (preserves tmux sessions)
   stop              Stop node (bridge, tunnel, sessions)
@@ -1696,6 +1855,7 @@ main() {
         stop)    cmd_stop;;
         clean)   cmd_clean;;
         status)  cmd_status;;
+        setup)   cmd_setup "$@";;
         webhook) cmd_webhook "$@";;
         hook)      cmd_hook "$@";;
         connector) cmd_connector "$@";;
