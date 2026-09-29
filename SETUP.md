@@ -137,9 +137,9 @@ tmux -V
 
 You should see output like: `tmux 3.4`.
 
-#### Step 5: Install Python 3
+#### Step 5: Install Python 3.12+
 
-The bridge is written in Python.
+The bridge is written in Python and requires version 3.12 or later.
 
 ```bash
 brew install python
@@ -151,7 +151,7 @@ Verification command:
 python3 --version
 ```
 
-You should see output like: `Python 3.11.x`.
+You should see output like: `Python 3.12.x` or higher.
 
 #### Step 6: Install jq
 

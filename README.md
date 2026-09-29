@@ -34,7 +34,7 @@ export TELEGRAM_BOT_TOKEN='your-token-from-botfather'
 ./bridge.sh run
 ```
 
-**Prerequisites:** Python 3, tmux, Node.js, cloudflared, Claude CLI authenticated.
+**Prerequisites:** Python 3.12+, tmux, Node.js, cloudflared, Claude CLI authenticated.
 
 First time? See the full **[Setup Guide](SETUP.md)** for step-by-step installation.
 
@@ -88,13 +88,12 @@ First time? See the full **[Setup Guide](SETUP.md)** for step-by-step installati
 claudecode-telegram/
 ├── bridge.py              # HTTP server, worker management, all endpoints
 ├── bridge.sh              # CLI wrapper, tunnel/webhook setup
-├── hooks/                 # Claude Code hooks (stop, start, notification)
-├── connectors/            # Gmail, GitHub polling integrations
+├── connectors.py          # Gmail, GitHub polling integrations
+├── hooks.sh               # Claude Code stop hook (sends replies to Telegram)
+├── tests/                 # pytest test suite (341 tests)
 ├── tools/                 # PR review, indexers, pilot terminal viewer
-├── skills/                # Claude skill definitions
-├── tests/                 # Python test files
-├── experiments/           # Forge worker binary, void microVM, MCP prototypes
-└── test.sh                # Automated acceptance tests
+├── test.sh                # Acceptance tests (mypy + pytest + bash + Go)
+└── pyproject.toml         # Project metadata, mypy strict config
 ```
 
 ---
@@ -111,7 +110,7 @@ claudecode-telegram/
 
 ---
 
-**Version:** 0.44.7 · **Tests:** 431 passing
+**Version:** 0.45.0 · **Tests:** 431 passing (341 pytest + bash + Go) · **mypy:** 0 errors
 
 ## Credits
 
