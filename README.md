@@ -29,16 +29,12 @@ The bridge is a Python HTTP server that receives Telegram webhooks and routes me
 ```bash
 git clone https://github.com/beastoin/claudecode-telegram.git
 cd claudecode-telegram
-./bridge.sh setup
+./install.sh
 ```
 
-That's it. The setup wizard checks your tools, asks for your bot token, installs hooks, and starts the bridge. Then send `/hire myworker` to your bot on Telegram.
-
-**What you need:** Python 3.12+, tmux, Node.js, Claude CLI (`npm install -g @anthropic-ai/claude-code`), and a Telegram bot token from [@BotFather](https://t.me/BotFather). The wizard checks all of these and tells you what's missing.
+The installer handles everything: installs Python 3.12+, tmux, Node.js, Claude CLI — asks for your bot token from [@BotFather](https://t.me/BotFather) — installs hooks — done. Then send `/hire myworker` to your bot on Telegram.
 
 **Already set up?** Just `./bridge.sh run`.
-
-> Need cloudflared for a public webhook? `brew install cloudflared` (macOS) — the bridge starts a tunnel automatically. Or use `--no-tunnel` with your own URL. See [SETUP.md](SETUP.md) for detailed troubleshooting.
 
 ---
 
