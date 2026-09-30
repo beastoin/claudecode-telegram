@@ -13676,8 +13676,8 @@ class CommandRouter:
 
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
 
-        # Run pr_review.py — pass full URL (with fragment) so it can highlight linked comment
-        script_path = Path(__file__).parent / "tools" / "pr_review.py"
+        # Run review.py — pass full URL (with fragment) so it can highlight linked comment
+        script_path = Path(__file__).parent / "tools" / "review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
             r = _subprocess_runner.run(
@@ -14071,9 +14071,11 @@ command_router = CommandRouter(transport, worker_manager)
 _TRANSCRIPT_SYNC: dict[str, TranscriptSyncState] = {}
 _TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
 
-# Path to indexer scripts (tools/ subdirectory)
-TRANSCRIPT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "transcript_indexer.py")
-TEAM_CHAT_INDEX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "chat_indexer.py")
+# Path to indexer script (unified tools/indexer.py with transcript + chat subcommands)
+INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "indexer.py")
+# Legacy aliases — will be removed once all call sites are migrated
+TRANSCRIPT_INDEX_SCRIPT = INDEXER_SCRIPT
+TEAM_CHAT_INDEX_SCRIPT = INDEXER_SCRIPT
 TEAM_CHAT_JSONL = "/tmp/team-memory-parsed-full.jsonl"
 TEAM_CHAT_DB = "/tmp/team-chat-cache/team.db"
 TEAM_CHAT_MEDIA_DIR = os.path.expanduser("~/team/exports/chat-full")
@@ -14139,8 +14141,8 @@ def _run_team_chat_query(query_type: str, *,
                          per_page: int | None = None,
                          search: str | None = None,
                          msg_id: int | None = None) -> dict[str, object] | None:
-    """Run chat_indexer.py via subprocess. Returns parsed JSON dict or None on failure."""
-    cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT,
+    """Run indexer.py chat via subprocess. Returns parsed JSON dict or None on failure."""
+    cmd = ["python3", TEAM_CHAT_INDEX_SCRIPT, "chat",
            "--jsonl", TEAM_CHAT_JSONL,
            "--db", TEAM_CHAT_DB,
            "--query", query_type]
@@ -14168,15 +14170,15 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
                           search: str | None = None,
                           filter_mode: str | None = None,
                           sort: str | None = None) -> dict[str, object] | None:
-    """Run transcript_indexer.py locally or via SSH. Returns parsed JSON dict or None on failure."""
+    """Run indexer.py transcript locally or via SSH. Returns parsed JSON dict or None on failure."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = TRANSCRIPT_INDEX_SCRIPT
     if host:
         # Use script on remote host (deployed via scp/rsync)
         remote_home = _get_remote_home(host) or ""
         if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/tools/transcript_indexer.py"
-    cmd = ["python3", script_path, "--jsonl", str(jsonl_path),
+            script_path = f"{remote_home}/claudecode-telegram/tools/indexer.py"
+    cmd = ["python3", script_path, "transcript", "--jsonl", str(jsonl_path),
            "--db", db_path, "--query", query]
     if page is not None:
         cmd.extend(["--page", str(page)])
