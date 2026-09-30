@@ -1,4 +1,4 @@
-# Claude Code - Telegram
+# claudecode-telegram
 
 Run multiple AI workers from one Telegram chat.
 
@@ -27,14 +27,12 @@ The bridge is a Python HTTP server that receives Telegram webhooks and routes me
 ## Quick Start
 
 ```bash
-git clone https://github.com/beastoin/claudecode-telegram.git
-cd claudecode-telegram
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/beastoin/claudecode-telegram/main/install.sh | bash
 ```
 
-The installer handles everything: installs Python 3.12+, tmux, Node.js, Claude CLI — asks for your bot token from [@BotFather](https://t.me/BotFather) — installs hooks — done. Then send `/hire myworker` to your bot on Telegram.
+That's it. The installer clones the repo, installs Python 3.12+, tmux, Node.js, Claude CLI — asks for your bot token from [@BotFather](https://t.me/BotFather) — installs hooks — done. Then send `/hire myworker` to your bot on Telegram.
 
-**Already set up?** Just `./bridge.sh run`.
+**Already set up?** Just `cd claudecode-telegram && ./bridge.sh run`.
 
 ---
 
@@ -88,7 +86,7 @@ claudecode-telegram/
 ├── bridge.sh              # CLI wrapper, tunnel/webhook setup
 ├── connectors.py          # Gmail, GitHub polling integrations
 ├── hooks.sh               # Claude Code stop hook (sends replies to Telegram)
-├── tests/                 # pytest test suite (341 tests)
+├── tests/                 # pytest test suite (349 tests)
 ├── tools/                 # PR review, indexers, pilot terminal viewer
 ├── test.sh                # Acceptance tests (mypy + pytest + bash + Go)
 └── pyproject.toml         # Project metadata, mypy strict config
@@ -108,12 +106,14 @@ claudecode-telegram/
 
 ---
 
-**Version:** 0.45.0 · **Tests:** 431 passing (341 pytest + bash + Go) · **mypy:** 0 errors
+**Version:** 0.45.0 · **Tests:** 349 pytest + bash + Go · **mypy:** 0 errors
 
-## Credits
+---
 
-Original project by Han Xiao (hanxiao/claudecode-telegram).
+## Acknowledgments
+
+This project started as a fork of [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram) by Han Xiao, which provided the original single-session Telegram-to-Claude bridge concept. The project has since been rewritten and extended into a multi-worker, multi-machine, multi-backend team orchestration platform.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
