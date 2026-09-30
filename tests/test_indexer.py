@@ -310,3 +310,144 @@ def test_stats_on_empty_db(tmp_path):
     assert d["n_tool"] == 0
     assert d["duration"] == ""
     assert d["model"] == ""
+
+
+# ── Audit-driven additions ──────────────────────────────────────────────────
+
+
+def test_incremental_append(tmp_path):
+    """Appending lines to JSONL and re-indexing adds new entries without duplication."""
+    entries_initial = [
+        _make_entry("user", "First message", ts="2026-04-05T10:00:00Z"),
+        _make_entry("assistant", "First reply", ts="2026-04-05T10:01:00Z"),
+    ]
+    jsonl = tmp_path / "append.jsonl"
+    db = tmp_path / "append.db"
+    with open(jsonl, "w") as f:
+        for e in entries_initial:
+            f.write(json.dumps(e) + "\n")
+
+    cmd = [sys.executable, "tools/indexer.py", "transcript",
+           "--jsonl", str(jsonl), "--db", str(db), "--query", "entries"]
+    r1 = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    d1 = json.loads(r1.stdout)
+    assert d1["total"] == 2, f"Initial index: expected 2, got {d1['total']}"
+
+    # Append a third entry
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(_make_entry("user", "Appended message", ts="2026-04-05T10:02:00Z")) + "\n")
+
+    r2 = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    d2 = json.loads(r2.stdout)
+    assert d2["total"] == 3, f"After append: expected 3, got {d2['total']}"
+
+    # Verify no duplicates: search for original content returns exactly 1
+    r3 = subprocess.run([
+        sys.executable, "tools/indexer.py", "transcript",
+        "--jsonl", str(jsonl), "--db", str(db),
+        "--query", "search", "--search", "First message",
+    ], capture_output=True, text=True, cwd=os.getcwd())
+    d3 = json.loads(r3.stdout)
+    assert d3["total_results"] == 1, f"Original entry duplicated: got {d3['total_results']}"
+
+
+def test_pagination_default_last_page(tmp_path):
+    """Without --page, indexer returns the last page by default."""
+    # Create 12 entries; with per_page=5 that's 3 pages (5, 5, 2)
+    entries = [
+        _make_entry("user", f"Message number {i}", ts=f"2026-04-05T10:{i:02d}:00Z")
+        for i in range(12)
+    ]
+    jsonl = tmp_path / "pagination.jsonl"
+    db = tmp_path / "pagination.db"
+    with open(jsonl, "w") as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+
+    # No --page → should get page 3 (last page) with 2 entries
+    cmd = [sys.executable, "tools/indexer.py", "transcript",
+           "--jsonl", str(jsonl), "--db", str(db),
+           "--query", "entries", "--per-page", "5"]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    d = json.loads(r.stdout)
+    assert d["total"] == 12
+    assert d["total_pages"] == 3
+    assert d["page"] == 3, f"Default should be last page, got page {d['page']}"
+    assert len(d["entries"]) == 2, f"Last page should have 2 entries, got {len(d['entries'])}"
+
+    # Explicit --page 1 → should get first 5 entries
+    cmd_p1 = cmd + ["--page", "1"]
+    r_p1 = subprocess.run(cmd_p1, capture_output=True, text=True, cwd=os.getcwd())
+    d_p1 = json.loads(r_p1.stdout)
+    assert d_p1["page"] == 1
+    assert len(d_p1["entries"]) == 5
+
+
+def test_filter_prompts(tmp_path):
+    """--filter prompts returns only user text messages, not tool_use or system."""
+    entries = [
+        _make_entry("user", "Real user question"),
+        _make_entry("assistant", "Bot response"),
+        _make_entry("user", "Another user prompt", ts="2026-04-05T10:01:00Z"),
+        # tool_use content — structured, not plain text
+        {"type": "assistant", "timestamp": "2026-04-05T10:02:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"cmd": "ls"}},
+         ]}},
+        # tool_result — from system
+        {"type": "tool_result", "timestamp": "2026-04-05T10:03:00Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "content": "file.txt"},
+         ]}},
+    ]
+    jsonl = tmp_path / "prompts.jsonl"
+    db = tmp_path / "prompts.db"
+    with open(jsonl, "w") as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+
+    cmd = [sys.executable, "tools/indexer.py", "transcript",
+           "--jsonl", str(jsonl), "--db", str(db),
+           "--query", "entries", "--filter", "prompts"]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    d = json.loads(r.stdout)
+
+    # Should only get the 2 plain user prompts
+    assert d["total"] == 2, f"Filter prompts: expected 2, got {d['total']}"
+    for e in d["entries"]:
+        raw = json.loads(e["raw_json"])
+        assert raw["type"] == "user", f"Non-user entry leaked through filter: {raw['type']}"
+        assert isinstance(raw["message"]["content"], str), \
+            f"Structured content leaked through filter: {raw['message']['content']}"
+
+
+def test_missing_file_graceful(tmp_path):
+    """Running indexer on a nonexistent JSONL returns empty result, no crash."""
+    db = tmp_path / "missing.db"
+    nonexistent = tmp_path / "does_not_exist.jsonl"
+
+    # entries query on missing file
+    cmd = [sys.executable, "tools/indexer.py", "transcript",
+           "--jsonl", str(nonexistent), "--db", str(db), "--query", "entries"]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    assert r.returncode == 0, f"Should not crash on missing file: {r.stderr}"
+    d = json.loads(r.stdout)
+    assert d["total"] == 0
+    assert d["entries"] == []
+
+    # stats query on missing file
+    cmd_stats = [sys.executable, "tools/indexer.py", "transcript",
+                 "--jsonl", str(nonexistent), "--db", str(db), "--query", "stats"]
+    r_stats = subprocess.run(cmd_stats, capture_output=True, text=True, cwd=os.getcwd())
+    assert r_stats.returncode == 0, f"Stats should not crash on missing file: {r_stats.stderr}"
+    d_stats = json.loads(r_stats.stdout)
+    assert d_stats["n_user"] == 0
+
+    # search query on missing file
+    cmd_search = [sys.executable, "tools/indexer.py", "transcript",
+                  "--jsonl", str(nonexistent), "--db", str(db),
+                  "--query", "search", "--search", "anything"]
+    r_search = subprocess.run(cmd_search, capture_output=True, text=True, cwd=os.getcwd())
+    assert r_search.returncode == 0, f"Search should not crash on missing file: {r_search.stderr}"
+    d_search = json.loads(r_search.stdout)
+    assert d_search["total_results"] == 0

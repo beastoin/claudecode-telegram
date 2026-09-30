@@ -380,6 +380,104 @@ describe("index page", () => {
   });
 });
 
+// ── Tests: WebSocket interactive input ──────────────────────────────────────
+
+describe("WebSocket interactive input", () => {
+  test("non-readonly mode delivers input to tmux", async () => {
+    await enableSession(BASE_URL, TEST_SESSION);
+    // Clear the pane first
+    execSync(`tmux send-keys -t ${TEST_SESSION} "clear" Enter`, { timeout: 3000 });
+    await Bun.sleep(300);
+
+    const marker = `PILOT_WS_INPUT_${Date.now()}`;
+    const { ws, opened } = await wsConnect(
+      `ws://127.0.0.1:${PORT}/ws?session=${TEST_SESSION}&cols=80&rows=24`
+    );
+    expect(opened).toBe(true);
+
+    // Send an echo command through the WS (non-readonly), then Enter
+    ws.send(`echo ${marker}\n`);
+    await Bun.sleep(1000);
+    ws.close();
+
+    // Verify the marker made it into tmux output
+    const pane = execSync(`tmux capture-pane -t ${TEST_SESSION} -p`, { encoding: "utf-8" });
+    expect(pane).toContain(marker);
+  });
+});
+
+// ── Tests: Auth enforcement on protected endpoints ─────────────────────────
+
+describe("auth enforcement on protected endpoints", () => {
+  test("/api/capture blocked without token", async () => {
+    await enableSession(AUTH_URL, TEST_SESSION, AUTH_TOKEN);
+    const r = await fetch(`${AUTH_URL}/api/capture?session=${TEST_SESSION}`);
+    expect(r.status).toBe(401);
+  });
+
+  test("/api/enabled blocked without token", async () => {
+    const r = await fetch(`${AUTH_URL}/api/enabled`);
+    expect(r.status).toBe(401);
+  });
+
+  test("/grid blocked without token", async () => {
+    const r = await fetch(`${AUTH_URL}/grid`);
+    expect(r.status).toBe(401);
+  });
+
+  test("/debug blocked without token", async () => {
+    const r = await fetch(`${AUTH_URL}/debug`);
+    expect(r.status).toBe(401);
+  });
+
+  test("WS upgrade blocked without token", async () => {
+    await enableSession(AUTH_URL, TEST_SESSION, AUTH_TOKEN);
+    // Attempt WS without token — should fail to connect
+    const { ws, opened, error, closed } = await wsConnect(
+      `ws://127.0.0.1:${AUTH_PORT}/ws?session=${TEST_SESSION}&cols=80&rows=24`
+    );
+    expect(opened).toBe(false);
+    // Connection should have been rejected (closed or errored)
+    if (ws.readyState === ws.OPEN) ws.close();
+  });
+
+  test("WS upgrade succeeds with valid token", async () => {
+    await enableSession(AUTH_URL, TEST_SESSION, AUTH_TOKEN);
+    const { ws, opened } = await wsConnect(
+      `ws://127.0.0.1:${AUTH_PORT}/ws?session=${TEST_SESSION}&cols=80&rows=24&token=${AUTH_TOKEN}`
+    );
+    expect(opened).toBe(true);
+    ws.close();
+  });
+});
+
+// ── Tests: Grid TTL expiry ─────────────────────────────────────────────────
+
+describe("grid TTL expiry", () => {
+  test("grid session disappears after TTL", async () => {
+    await enableSession(BASE_URL, TEST_SESSION);
+
+    // Create grid with 1-second TTL
+    const create = await fetch(`${BASE_URL}/api/grid-session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: "ttl-test-grid", sessions: [TEST_SESSION], ttl: 1 }),
+    });
+    expect(create.status).toBe(200);
+
+    // Immediately accessible
+    const before = await fetch(`${BASE_URL}/grid/ttl-test-grid`);
+    expect(before.status).toBe(200);
+
+    // Wait for expiry (1s TTL + margin)
+    await Bun.sleep(1500);
+
+    // Should be gone
+    const after = await fetch(`${BASE_URL}/grid/ttl-test-grid`);
+    expect(after.status).toBe(404);
+  });
+});
+
 // ── Tests: Method validation ────────────────────────────────────────────────
 
 describe("method validation", () => {

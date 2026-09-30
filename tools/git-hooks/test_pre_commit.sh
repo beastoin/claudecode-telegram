@@ -284,6 +284,95 @@ test_hook_handles_nested_directory_files() {
   [[ $rc -eq 0 ]] || { echo "Hook should handle nested dirs (exit $rc)"; return 1; }
 }
 
+test_hook_passes_on_trufflehog_crash() {
+  # BUG DOCUMENTATION: When trufflehog exits non-zero but NOT 183 (e.g. crash,
+  # segfault, bad args), the hook silently passes (fail-open). The hook only
+  # checks exit_code == 183, so any other failure falls through to exit 0.
+  # This test documents the current (buggy) fail-open behavior.
+  local tmp
+  tmp=$(mktemp -d)
+  trap "rm -rf '$tmp'" RETURN
+
+  init_repo "$tmp"
+  echo "AKIA1234567890ABCDEF" > "$tmp/secret.txt"
+  git -C "$tmp" add secret.txt
+
+  # Mock trufflehog that crashes with exit code 1 (not 183)
+  local mock
+  mock=$(make_mock_trufflehog "$tmp" 1 "trufflehog: segfault")
+
+  local output rc=0
+  output=$(cd "$tmp" && TRUFFLEHOG="$mock" bash "$HOOK" 2>&1) || rc=$?
+
+  # Current behavior: hook passes (exit 0) on non-183 errors — fail-open bug
+  [[ $rc -eq 0 ]] || { echo "Expected exit 0 (fail-open bug), got $rc"; return 1; }
+  # Hook should NOT show SECRET DETECTED since exit code wasn't 183
+  if echo "$output" | grep -q "SECRET DETECTED"; then
+    echo "Should not show SECRET DETECTED for non-183 exit"
+    return 1
+  fi
+}
+
+test_hook_handles_filenames_with_spaces() {
+  # Files with spaces in their names are staged and scanned correctly
+  local tmp
+  tmp=$(mktemp -d)
+  trap "rm -rf '$tmp'" RETURN
+
+  init_repo "$tmp"
+  echo "DB_PASSWORD=hunter2" > "$tmp/my config.env"
+  git -C "$tmp" add "my config.env"
+
+  # Mock that verifies the spaced filename exists in the scan directory
+  local script="$tmp/mock-trufflehog"
+  cat > "$script" <<'SCRIPT'
+#!/usr/bin/env bash
+scandir="$2"
+if [ -f "$scandir/my config.env" ]; then
+  exit 0
+fi
+# File not found — spaces broke the copy
+exit 183
+SCRIPT
+  chmod +x "$script"
+
+  local output rc=0
+  output=$(cd "$tmp" && TRUFFLEHOG="$script" bash "$HOOK" 2>&1) || rc=$?
+
+  [[ $rc -eq 0 ]] || { echo "Hook should handle filenames with spaces (exit $rc)"; return 1; }
+}
+
+test_hook_cleans_up_tmpdir() {
+  # After hook runs, the temporary staged-copy directory is removed
+  local tmp
+  tmp=$(mktemp -d)
+  trap "rm -rf '$tmp'" RETURN
+
+  init_repo "$tmp"
+  echo "clean file" > "$tmp/app.py"
+  git -C "$tmp" add app.py
+
+  # Mock that records the tmpdir path it receives
+  local script="$tmp/mock-trufflehog"
+  local scandir_log="$tmp/scandir.log"
+  cat > "$script" <<SCRIPT
+#!/usr/bin/env bash
+echo "\$2" > "$scandir_log"
+exit 0
+SCRIPT
+  chmod +x "$script"
+
+  cd "$tmp" && TRUFFLEHOG="$script" bash "$HOOK" >/dev/null 2>&1 || true
+
+  [[ -f "$scandir_log" ]] || { echo "Mock didn't record scandir"; return 1; }
+  local scandir
+  scandir=$(cat "$scandir_log")
+  if [ -d "$scandir" ]; then
+    echo "Tmpdir $scandir still exists — hook failed to clean up"
+    return 1
+  fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 echo "=== Pre-commit hook behavior tests ==="
@@ -297,6 +386,9 @@ run_test test_hook_respects_trufflehogignore
 run_test test_hook_no_trufflehogignore_no_exclude_flag
 run_test test_hook_scans_staged_content_not_working_tree
 run_test test_hook_handles_nested_directory_files
+run_test test_hook_passes_on_trufflehog_crash
+run_test test_hook_handles_filenames_with_spaces
+run_test test_hook_cleans_up_tmpdir
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

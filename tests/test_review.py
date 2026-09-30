@@ -423,3 +423,106 @@ def test_generate_html_commit_diffs():
     assert "abc123" in output  # Short SHA
     assert "Initial fix" in output
     assert "fix.py" in output
+
+
+# ── XSS escaping tests ─────────────────────────────────────────────────────
+
+
+def test_xss_escaping_in_title():
+    """Malicious PR title with script tag is HTML-escaped in <title> and <h1>."""
+    import re
+    xss_meta = dict(_MINI_META, title='<script>alert("xss")</script>')
+    output = generate_html(xss_meta, _MINI_FILES, 42, "owner", "repo")
+
+    # The <title> tag must contain the escaped version
+    title_match = re.search(r'<title>(.*?)</title>', output)
+    assert title_match, "Should have a <title> tag"
+    assert "<script>" not in title_match.group(1), \
+        "Raw <script> in <title> tag — XSS in title"
+    assert "&lt;script&gt;" in title_match.group(1), \
+        "Escaped script tag should appear in <title>"
+
+    # The <h1> heading must also escape it
+    h1_match = re.search(r'<h1>(.*?)</h1>', output, re.DOTALL)
+    assert h1_match, "Should have an <h1> tag"
+    assert "<script>alert" not in h1_match.group(1), \
+        "Raw <script> in <h1> — XSS in heading"
+
+
+@pytest.mark.xfail(reason="Known bug: filename not escaped in id/onclick/data-target/JS index")
+def test_xss_escaping_in_filename():
+    """Malicious filename must be HTML-escaped in all attribute contexts.
+
+    Currently fails: file_id, data-target, onclick, and fileIndex JSON embed
+    the raw filename without escaping. This test documents the bug.
+    """
+    xss_files = [
+        {
+            "filename": '<img src=x onerror=alert(1)>.js',
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "patch": "@@ -0,0 +1 @@\n+console.log('hi')"
+        },
+    ]
+    output = generate_html(_MINI_META, xss_files, 42, "owner", "repo")
+    # Check all attribute contexts for unescaped HTML
+    assert 'id="file-<img' not in output, "Unescaped HTML in id attribute"
+    assert "onerror=alert" not in output, "Unescaped event handler in filename"
+
+
+def test_xss_escaping_in_comment_body():
+    """Malicious comment body with script tag is HTML-escaped."""
+    xss_comments = [
+        {"id": 99, "user": "attacker",
+         "body": '<script>document.cookie</script>',
+         "created_at": "2026-01-01T00:00:00Z", "html_url": ""},
+    ]
+    output = generate_html(_MINI_META, _MINI_FILES, 42, "owner", "repo",
+                           comments=xss_comments)
+    assert "<script>document.cookie</script>" not in output, \
+        "Raw <script> in comment body must be escaped"
+    assert "&lt;script&gt;" in output
+
+
+# ── parse_patch edge case tests ─────────────────────────────────────────────
+
+
+def test_parse_patch_no_newline_at_eof():
+    """'No newline at end of file' marker is handled without crash."""
+    patch = (
+        "@@ -1,2 +1,2 @@\n"
+        "-old line\n"
+        "+new line\n"
+        "\\ No newline at end of file"
+    )
+    hunks = parse_patch(patch)
+    assert len(hunks) == 1
+    # The backslash line should be captured as context, not cause an error
+    lines = hunks[0]['lines']
+    assert len(lines) >= 2
+    # The actual diff lines are preserved
+    assert ('del', 'old line') in lines
+    assert ('add', 'new line') in lines
+
+
+def test_parse_patch_binary_file():
+    """Binary file diff (no @@ hunks) returns empty list — no crash."""
+    patch = "Binary files /dev/null and b/image.png differ"
+    hunks = parse_patch(patch)
+    # Binary patches have no @@ markers, so parse_patch returns empty
+    assert hunks == []
+
+
+# ── CLI invocation test ─────────────────────────────────────────────────────
+
+
+def test_cli_usage_no_args():
+    """Running review.py with no arguments exits with usage message."""
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(__file__), '..', 'tools', 'review.py')],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"
+    assert "Usage:" in result.stderr, "Should print usage to stderr"
