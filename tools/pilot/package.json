@@ -3,14 +3,21 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Web terminal for worker tmux sessions using ghostty-web",
-  "main": "pilot.js",
+  "main": "dist/pilot.js",
   "scripts": {
-    "start": "node pilot.js",
+    "build": "bun build src/pilot.ts --outdir dist --target node --format esm --external @lydell/node-pty --external ws --external ghostty-web",
+    "start": "node dist/pilot.js",
+    "dev": "bun src/pilot.ts",
     "test": "bash test_pilot.sh"
   },
   "dependencies": {
-    "ghostty-web": "^0.4.0",
     "@lydell/node-pty": "^1.0.1",
+    "ghostty-web": "^0.4.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2"
   }
 }

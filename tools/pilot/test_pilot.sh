@@ -50,9 +50,9 @@ start_server() {
 
   : >"${TEST_LOG}"
   if [[ -n "${token}" ]]; then
-    PORT="${TEST_PORT}" PILOT_TOKEN="${token}" node pilot.js >"${TEST_LOG}" 2>&1 &
+    PORT="${TEST_PORT}" PILOT_TOKEN="${token}" node dist/pilot.js >"${TEST_LOG}" 2>&1 &
   else
-    PORT="${TEST_PORT}" node pilot.js >"${TEST_LOG}" 2>&1 &
+    PORT="${TEST_PORT}" node dist/pilot.js >"${TEST_LOG}" 2>&1 &
   fi
   SERVER_PID="$!"
   wait_for_server "${token}"
