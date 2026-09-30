@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.45.0"
+VERSION="0.45.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1086,12 +1086,60 @@ show_node_status() {
     local hook_ok=false settings_ok=false token_ok=false bot_ok=false
     local bot_name="" bot_id="" webhook_url=""
     local claude_sessions=()
+    # Comprehensive failure tracking — every silent failure mode gets a flag
+    local bridge_http_ok=false  # bridge.py actually responding on port
+    local tunnel_alive=false    # cloudflared process running
+    local has_chat_id=false     # admin chat_id known (messages have a destination)
+    local has_inbound=false     # at least one inbound path (webhook or poll)
+    local pid_valid=false       # PID file points to actual bridge.py process
+    local pending_updates=0     # webhook queue depth (stuck = messages delayed)
+    local poll_running=false    # poll fallback process alive
 
     # Check if running
     if is_node_running "$node"; then
         running=true
         [[ -f "$node_dir/port" ]] && port=$(cat "$node_dir/port")
         [[ -f "$node_dir/tunnel_url" ]] && tunnel_url=$(cat "$node_dir/tunnel_url")
+    fi
+
+    # Validate PID actually belongs to bridge.py (not a recycled PID)
+    if $running; then
+        local pid_file; pid_file=$(get_node_pid_file "$node")
+        local wrapper_pid; wrapper_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [[ -n "$wrapper_pid" && -f "/proc/$wrapper_pid/cmdline" ]]; then
+            local cmdline; cmdline=$(tr '\0' ' ' < "/proc/$wrapper_pid/cmdline" 2>/dev/null || true)
+            if echo "$cmdline" | grep -qE 'bridge\.(sh|py)|python3'; then
+                pid_valid=true
+            fi
+        fi
+    fi
+
+    # Bridge HTTP liveness probe — is bridge.py actually accepting connections?
+    if $running && [[ -n "$port" ]]; then
+        local probe; probe=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null || echo "")
+        if [[ -n "$probe" ]] && echo "$probe" | grep -q '"workers"'; then
+            bridge_http_ok=true
+        fi
+    fi
+
+    # Check admin chat_id — without this, outbound messages have no destination
+    # bridge.py writes to NODE_DIR/last_chat_id (not sessions_dir)
+    if [[ -f "$node_dir/last_chat_id" ]]; then
+        local chat_id_val; chat_id_val=$(cat "$node_dir/last_chat_id" 2>/dev/null || echo "")
+        [[ -n "$chat_id_val" && "$chat_id_val" != "0" ]] && has_chat_id=true
+    fi
+
+    # Check tunnel process alive (when tunnel_url exists)
+    if [[ -n "$tunnel_url" && -f "$node_dir/tunnel.pid" ]]; then
+        local tun_pid; tun_pid=$(cat "$node_dir/tunnel.pid" 2>/dev/null || echo "")
+        if [[ -n "$tun_pid" ]] && kill -0 "$tun_pid" 2>/dev/null; then
+            tunnel_alive=true
+        fi
+    fi
+
+    # Check poll fallback process
+    if pgrep -af "getUpdates.*bot" 2>/dev/null | grep -q "localhost:${port:-0}"; then
+        poll_running=true
     fi
 
     # Find tmux sessions for this node
@@ -1104,34 +1152,58 @@ show_node_status() {
     [[ -f "$HOOKS_DIR/$HOOK_SCRIPT" ]] && hook_ok=true
     [[ -f "$SETTINGS_FILE" ]] && grep -q "$HOOK_SCRIPT" "$SETTINGS_FILE" 2>/dev/null && settings_ok=true
 
-    # Read bot info from saved files (set at node start) or fall back to env token
+    # Resolve token: source node env if TELEGRAM_BOT_TOKEN not already set
+    local status_token="${TELEGRAM_BOT_TOKEN:-}"
+    if [[ -z "$status_token" ]]; then
+        local env_file="$HOME/.config/claudecode-telegram/${node}.env"
+        if [[ -f "$env_file" ]]; then
+            status_token=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$env_file" | head -1 | cut -d= -f2- | tr -d '"' || true)
+        fi
+    fi
+
+    # Read cached bot info (display fallback when node is stopped)
     local saved_bot_id="" saved_bot_username=""
     [[ -f "$node_dir/bot_id" ]] && saved_bot_id=$(cat "$node_dir/bot_id")
     [[ -f "$node_dir/bot_username" ]] && saved_bot_username=$(cat "$node_dir/bot_username")
 
-    if [[ -n "$saved_bot_id" && -n "$saved_bot_username" ]]; then
+    # ALWAYS do a live getMe when we have a token — cached files can't detect
+    # a revoked/changed token, which silently breaks all Telegram communication
+    local token_live=false
+    if [[ -n "$status_token" ]]; then
         token_ok=true
-        bot_ok=true
-        bot_name="$saved_bot_username"
-        bot_id="$saved_bot_id"
-    elif [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        token_ok=true
-        local r; r=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getMe" "{}")
+        local r; r=$(telegram_api "$status_token" "getMe" "{}" 2>/dev/null || echo '{}')
         if echo "$r" | grep -q '"ok":true'; then
+            token_live=true
             bot_ok=true
             bot_name=$(echo "$r" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
             bot_id=$(echo "$r" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+        else
+            # Token exists but is invalid — critical: bridge can't send to Telegram
+            bot_ok=false
+            bot_name="${saved_bot_username:-unknown}"
+            bot_id="${saved_bot_id:-}"
         fi
+    elif [[ -n "$saved_bot_id" && -n "$saved_bot_username" ]]; then
+        # No token available, fall back to cached info (display only)
+        bot_name="$saved_bot_username"
+        bot_id="$saved_bot_id"
     fi
 
-    # Get actual webhook from Telegram API (not from local file)
-    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        local wr; wr=$(telegram_api "$TELEGRAM_BOT_TOKEN" "getWebhookInfo" "{}")
+    # Get actual webhook from Telegram API (only possible with a live token)
+    local webhook_error=""
+    if $token_live; then
+        local wr; wr=$(telegram_api "$status_token" "getWebhookInfo" "{}" 2>/dev/null || echo '{}')
         webhook_url=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-    elif [[ -n "$saved_bot_id" ]]; then
-        # No token available, can't check - show as unknown
-        webhook_url=""
+        webhook_error=$(echo "$wr" | grep -o '"last_error_message":"[^"]*"' | cut -d'"' -f4 || true)
+        pending_updates=$(echo "$wr" | grep -o '"pending_update_count":[0-9]*' | cut -d: -f2 || echo "0")
+        [[ -z "$pending_updates" ]] && pending_updates=0
     fi
+
+    # Determine if any inbound path exists
+    if [[ -n "$webhook_url" ]] && [[ -z "$webhook_error" || "$webhook_error" == "null" ]]; then
+        has_inbound=true
+    fi
+    $poll_running && has_inbound=true
 
     if $JSON_OUTPUT; then
         local sessions_json="[]"
@@ -1139,7 +1211,7 @@ show_node_status() {
             sessions_json=$(printf '%s\n' "${claude_sessions[@]}" | jq -R . | jq -s .)
         fi
         cat << EOF
-{"node":"$node","running":$running,"port":"$port","sessions":$sessions_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"bot":"$bot_name","webhook":"$webhook_url"}
+{"node":"$node","running":$running,"port":"$port","sessions":$sessions_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"token_live":$token_live,"bot":"$bot_name","bot_id":"$bot_id","webhook":"$webhook_url","webhook_error":"${webhook_error:-}","bridge_http":$bridge_http_ok,"pid_valid":$pid_valid,"has_chat_id":$has_chat_id,"tunnel_alive":$tunnel_alive,"poll_running":$poll_running,"pending_updates":$pending_updates,"has_inbound":$has_inbound}
 EOF
         return
     fi
@@ -1149,6 +1221,20 @@ EOF
     if $running; then
         log "  port:     $port"
         [[ -n "$tunnel_url" ]] && log "  tunnel:   $tunnel_url"
+
+        # Bridge HTTP liveness
+        if $bridge_http_ok; then
+            log "  bridge:   $(green "responding")"
+        else
+            log "  bridge:   $(red "NOT RESPONDING") — port $port not accepting HTTP"
+            log "            bridge.py may have crashed internally"
+            log "            fix: ./bridge.sh --node $node restart"
+        fi
+
+        # PID validation
+        if ! $pid_valid; then
+            log "  $(yellow "⚠ PID file may be stale (process is not bridge.sh/bridge.py)")"
+        fi
     fi
 
     # Get settings.json mtime for stale config detection
@@ -1214,27 +1300,108 @@ EOF
             log "  $(yellow "⚠ stale-hooks: restart Claude (/exit) to reload settings.json")"
         fi
     else
-        log "  sessions: $(yellow "none")"
+        if $running; then
+            log "  sessions: $(yellow "none") — bridge running but no workers to receive messages"
+        else
+            log "  sessions: $(yellow "none")"
+        fi
     fi
 
     $hook_ok && log "  hook:     $(green "installed")" || log "  hook:     $(yellow "not installed")"
-    if $bot_ok; then
+    if ! $settings_ok && $hook_ok; then
+        log "  settings: $(yellow "hook not registered in settings.json")"
+    fi
+    if $bot_ok && $token_live; then
         log "  bot:      $(green "online") (@$bot_name, id:$bot_id)"
+    elif $token_ok && ! $token_live; then
+        log "  bot:      $(red "TOKEN INVALID") — bridge CANNOT send to Telegram"
+        if [[ -n "$bot_name" ]]; then
+            log "            cached: @$bot_name (id:$bot_id) — stale, token no longer works"
+        fi
+        log "            fix: update token in ~/.config/claudecode-telegram/${node}.env and restart"
     elif $token_ok; then
         log "  bot:      $(red "error")"
     else
         log "  bot:      $(yellow "not configured")"
     fi
+
+    # Admin chat_id — without this, outbound messages silently drop
+    if $running; then
+        if $has_chat_id; then
+            log "  chat_id:  $(green "set")"
+        else
+            log "  chat_id:  $(red "MISSING") — bridge has no Telegram chat to send to"
+            log "            fix: send any message to bot from Telegram to register"
+        fi
+    fi
+
+    # Webhook status
     if [[ -n "$webhook_url" ]]; then
-        if [[ -n "$tunnel_url" && "$webhook_url" != "$tunnel_url" ]]; then
+        # Normalize: strip trailing /webhook for comparison (bridge accepts POST on /)
+        local norm_webhook="${webhook_url%/webhook}"
+        local norm_tunnel="${tunnel_url:-}"
+        if [[ -n "$tunnel_url" && "$norm_webhook" != "$norm_tunnel" ]]; then
             log "  webhook:  $(yellow "mismatch") (pointing to different URL)"
             log "            actual:   $webhook_url"
             log "            expected: $tunnel_url"
         else
             log "  webhook:  $(green "set")"
         fi
+        if [[ -n "$webhook_error" && "$webhook_error" != "null" ]]; then
+            log "  webhook:  $(red "last error: $webhook_error")"
+        fi
+        if [[ $pending_updates -gt 0 ]]; then
+            if [[ $pending_updates -gt 10 ]]; then
+                log "  webhook:  $(red "⚠ $pending_updates pending updates") — messages stuck in Telegram queue"
+            else
+                log "  webhook:  $(yellow "$pending_updates pending updates")"
+            fi
+        fi
     elif $token_ok; then
-        log "  webhook:  $(yellow "not set")"
+        if $poll_running; then
+            log "  webhook:  $(yellow "not set") (using poll fallback)"
+        else
+            log "  webhook:  $(yellow "not set")"
+        fi
+    fi
+
+    # Tunnel process health (when tunnel_url is configured)
+    if $running && [[ -n "$tunnel_url" ]]; then
+        if $tunnel_alive; then
+            log "  tunnel:   $(green "process alive")"
+        else
+            log "  tunnel:   $(red "PROCESS DEAD") — cloudflared not running"
+            log "            Telegram can't reach bridge. Webhook will fail."
+            if $poll_running; then
+                log "            poll fallback: $(green "active") (messages still arriving)"
+            else
+                log "            $(red "NO INBOUND PATH") — messages from Telegram are lost"
+                log "            fix: ./bridge.sh --node $node restart"
+            fi
+        fi
+    fi
+
+    # Poll fallback status
+    if $running && $poll_running; then
+        log "  polling:  $(green "active")"
+    fi
+
+    # Final health verdict — flag any combination that causes silent failure
+    if $running; then
+        if ! $has_inbound && $token_live; then
+            if [[ -z "$tunnel_url" ]] && ! $poll_running; then
+                log ""
+                log "  $(red "✘ NO INBOUND PATH — Telegram messages cannot reach this bridge")"
+                log "    Neither webhook nor poll fallback is active."
+                log "    fix: ./bridge.sh --node $node restart"
+            fi
+        fi
+        if ! $bridge_http_ok && $token_live; then
+            log ""
+            log "  $(red "✘ BRIDGE DEAD — HTTP server not responding on port $port")"
+            log "    Hooks and webhook will fail. Workers can't communicate."
+            log "    fix: ./bridge.sh --node $node restart"
+        fi
     fi
 }
 

@@ -1,5 +1,24 @@
 ## Changelog
 
+### v0.45.1 - Comprehensive bridge status health checks
+
+**Problem:** `bridge.sh status` showed "bot: online" using cached files even when the token was invalid/revoked, hiding a total silent outage. Token failure was one of many failure modes that status didn't catch.
+
+**Fix:** Rewrote `show_node_status()` to detect ALL silent failure modes:
+
+- **Token validation:** Live `getMe` API call every time (never trust cached `bot_id`/`bot_username` files). Shows `TOKEN INVALID` with fix instructions when token fails.
+- **Bridge HTTP liveness:** Probes `localhost:$port/health/workers` to verify bridge.py is actually accepting connections (catches internal crashes where PID file is stale).
+- **PID validation:** Verifies PID file points to an actual bridge.sh/bridge.py process, not a recycled PID.
+- **Admin chat_id:** Checks `last_chat_id` exists — without it, outbound messages silently drop.
+- **Tunnel process health:** Verifies cloudflared is actually running when `tunnel_url` is configured.
+- **Poll fallback detection:** Detects whether poll fallback process is alive.
+- **Webhook errors:** Shows `last_error_message` from Telegram's `getWebhookInfo` API.
+- **Pending updates:** Shows `pending_update_count` — messages stuck in Telegram's queue.
+- **Webhook URL normalization:** Strips `/webhook` suffix when comparing webhook URL to tunnel URL (bridge.py accepts POST on `/` root only).
+- **No inbound path verdict:** Final health check warns when neither webhook nor poll fallback is active.
+- **JSON output:** Added `token_live`, `bridge_http`, `pid_valid`, `has_chat_id`, `tunnel_alive`, `poll_running`, `pending_updates`, `has_inbound` fields.
+- **Token sourcing:** Sources token from node env file (`~/.config/claudecode-telegram/<node>.env`) when not in environment, so status works without manually exporting the token.
+
 ### v0.45.0 - mypy strict mode, zero errors
 
 **Static analysis:** Added mypy strict configuration (pyproject.toml) and fixed all 437 errors across bridge.py (18,748 lines) and connectors.py (1,793 lines). Zero errors remaining.
