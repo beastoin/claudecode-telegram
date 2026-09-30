@@ -996,7 +996,9 @@ if GMAIL_ENABLED and not GMAIL_FROM_FILTER.strip():
 
 GITHUB_ENABLED = os.environ.get("BRIDGE_GHPOLL_ENABLED", "0") == "1"
 GITHUB_POLL_INTERVAL = int(os.environ.get("BRIDGE_GHPOLL_INTERVAL", "60"))
-GITHUB_REPO = os.environ.get("BRIDGE_GHPOLL_REPO", "BasedHardware/omi")
+# Comma-separated list of repos: "owner/name,owner2/name2"
+_GITHUB_REPO_RAW = os.environ.get("BRIDGE_GHPOLL_REPO", "BasedHardware/omi")
+GITHUB_REPOS: list[str] = [r.strip() for r in _GITHUB_REPO_RAW.split(",") if r.strip()]
 GITHUB_FROM_USER = os.environ.get("BRIDGE_GHPOLL_USER", "beastoin")
 if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
     raise RuntimeError("BRIDGE_GHPOLL_USER must be set when BRIDGE_GHPOLL_ENABLED=1 (security: sender filter required)")
@@ -18698,7 +18700,7 @@ def _start_connectors() -> tuple[object, object]:
     github_inst = None
     if GITHUB_ENABLED and GitHubConnector is not None:
         github_inst = GitHubConnector(
-            repo=GITHUB_REPO,
+            repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
             on_message=_connector_on_message("github"),  # type: ignore[arg-type]
@@ -18707,7 +18709,8 @@ def _start_connectors() -> tuple[object, object]:
             state_file=str(NODE_DIR / "github_state.json"),
         )
         github_inst.start()
-        print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {GITHUB_REPO}")
+        repos_str = ", ".join(GITHUB_REPOS)
+        print(f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {repos_str}")
     elif GITHUB_ENABLED and GitHubConnector is None:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
 
@@ -18748,7 +18751,7 @@ def _restart_connector(name: str) -> tuple[bool, str]:
         if github_connector_instance is not None:
             github_connector_instance.stop()
         github_connector_instance = GitHubConnector(
-            repo=GITHUB_REPO,
+            repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
             on_message=_connector_on_message("github"),  # type: ignore[arg-type]

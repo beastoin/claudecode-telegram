@@ -1138,3 +1138,78 @@ class TestGitHubAlerts:
             gc.poll_once()
         gc.on_alert.assert_called_once()
         assert "Recovered" in gc.on_alert.call_args[0][0]
+
+
+# --- Multi-repo support ---
+
+class TestGitHubMultiRepo:
+    def test_single_repo_string_accepted(self):
+        gc = make_github_connector(repo="BasedHardware/omi")
+        assert gc.repos == ["BasedHardware/omi"]
+
+    def test_multi_repo_list_accepted(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        assert gc.repos == ["BasedHardware/omi", "beastoin/agent-swift"]
+
+    def test_empty_repo_list_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="at least one repo"):
+            make_github_connector(repo=[])
+
+    def test_invalid_repo_in_list_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="owner/name"):
+            make_github_connector(repo=["BasedHardware/omi", "not-valid"])
+
+    def test_status_returns_repos_list(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        status = gc.status()
+        assert status["repos"] == ["BasedHardware/omi", "beastoin/agent-swift"]
+
+    def test_multi_repo_polls_all(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"], from_user="beastoin")
+        gc._last_poll_time = "2026-05-26T00:00:00Z"
+        omi_comment = make_comment(user="beastoin", body="omi note", comment_id=10,
+                                   issue_url="https://api.github.com/repos/BasedHardware/omi/issues/100",
+                                   html_url="https://github.com/BasedHardware/omi/issues/100#issuecomment-10")
+        swift_comment = {
+            "id": 20,
+            "user": {"login": "beastoin"},
+            "body": "swift note",
+            "issue_url": "https://api.github.com/repos/beastoin/agent-swift/issues/1",
+            "html_url": "https://github.com/beastoin/agent-swift/issues/1#issuecomment-20",
+            "created_at": "2026-05-26T10:00:00Z",
+        }
+        with patch.object(gc, "_get_all_comments", return_value=([omi_comment, swift_comment], True)):
+            gc.poll_once()
+        assert gc.on_message.call_count == 2
+
+    def test_extract_repo_from_comment(self):
+        # API URL
+        comment = make_comment(issue_url="https://api.github.com/repos/beastoin/agent-swift/issues/5")
+        assert GitHubConnector._extract_repo_from_comment(comment) == "beastoin/agent-swift"
+        # HTML URL
+        comment2 = {"html_url": "https://github.com/BasedHardware/omi/pull/200#discussion_r2"}
+        assert GitHubConnector._extract_repo_from_comment(comment2) == "BasedHardware/omi"
+        # No URL
+        assert GitHubConnector._extract_repo_from_comment({}) == ""
+
+    def test_reply_hint_uses_comment_repo(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"],
+                                   from_user="beastoin",
+                                   get_registered_workers=lambda: {"mon"})
+        comment = {
+            "id": 30,
+            "user": {"login": "beastoin"},
+            "body": "@mon check this",
+            "issue_url": "https://api.github.com/repos/beastoin/agent-swift/issues/5",
+            "html_url": "https://github.com/beastoin/agent-swift/issues/5#issuecomment-30",
+            "created_at": "2026-09-30T10:00:00Z",
+        }
+        gc._process_comment(comment)
+        gc.on_message.assert_called_once()
+        _, _, plain, _ = gc.on_message.call_args[0]
+        assert "beastoin/agent-swift" in plain
+        # Metadata should also have the correct repo
+        metadata = gc.on_message.call_args[1].get("metadata", {})
+        assert metadata.get("repo") == "beastoin/agent-swift"

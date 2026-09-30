@@ -180,7 +180,7 @@ class GithubStatus(TypedDict):
     poll_interval: int
     consecutive_failures: int
     alert_sent: bool
-    repo: str
+    repos: list[str]
     last_poll_time: Optional[str]
     seen_ids_count: int
 
@@ -1458,7 +1458,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def __init__(
         self,
-        repo: str,
+        repo: str | list[str],
         from_user: str,
         poll_interval: int,
         on_message: MessageCallback,
@@ -1475,28 +1475,37 @@ class GitHubConnector(BaseConnector[GithubComment]):
             on_alert=on_alert,
         )
         self.gh_bin: str = gh_bin or "gh"
-        if not _REPO_PATTERN.match(repo):
-            raise ValueError(f"github: repo must be 'owner/name' format, got: {repo!r}")
-        self.repo: str = repo
+        # Accept single repo string or list of repos
+        if isinstance(repo, str):
+            repos = [repo]
+        else:
+            repos = list(repo)
+        if not repos:
+            raise ValueError("github: at least one repo required")
+        for r in repos:
+            if not _REPO_PATTERN.match(r):
+                raise ValueError(f"github: repo must be 'owner/name' format, got: {r!r}")
+        self.repos: list[str] = repos
         self._state_file: str = state_file
         self._last_poll_time: Optional[str] = None
         self._seen_ids: set[int] = set()
 
     def preflight_check(self) -> tuple[bool, str]:
-        try:
-            result = subprocess.run(
-                [self.gh_bin, "api", f"/repos/{self.repo}", "--jq", ".id"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return False, f"gh api failed: {result.stderr.strip()}"
-            return True, "OK"
-        except subprocess.TimeoutExpired:
-            return False, "gh api timed out during preflight"
-        except FileNotFoundError:
-            return False, f"gh binary not found: {self.gh_bin}"
-        except OSError as e:
-            return False, f"gh error: {e}"
+        for repo in self.repos:
+            try:
+                result = subprocess.run(
+                    [self.gh_bin, "api", f"/repos/{repo}", "--jq", ".id"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode != 0:
+                    return False, f"gh api failed for {repo}: {result.stderr.strip()}"
+            except subprocess.TimeoutExpired:
+                return False, f"gh api timed out during preflight for {repo}"
+            except FileNotFoundError:
+                return False, f"gh binary not found: {self.gh_bin}"
+            except OSError as e:
+                return False, f"gh error: {e}"
+        return True, "OK"
 
     def status(self) -> GithubStatus:
         with self._lock:
@@ -1507,7 +1516,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 poll_interval=self.poll_interval,
                 consecutive_failures=self._consecutive_failures,
                 alert_sent=self._alert_sent,
-                repo=self.repo,
+                repos=self.repos,
                 last_poll_time=self._last_poll_time,
                 seen_ids_count=len(self._seen_ids),
             )
@@ -1569,7 +1578,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
             self._save_state()
         with self._lock:
             poll_time = self._last_poll_time
-        print(f"[github] Started (interval={self.poll_interval}s, repo={self.repo}, user={self.sender_filter}, since={poll_time})")
+        repos_str = ", ".join(self.repos)
+        print(f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})")
 
     # -- GitHub API --
 
@@ -1592,21 +1602,28 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def _get_all_comments(self, since: str) -> tuple[Optional[list[GithubComment]], bool]:
         """Returns (comments, is_complete). is_complete=False means partial fetch."""
-        issue_raw = self._gh_api(
-            f"/repos/{self.repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
-        )
-        pr_raw = self._gh_api(
-            f"/repos/{self.repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
-        )
-        if issue_raw is None and pr_raw is None:
+        all_raws: list[Optional[str]] = []
+        any_success = False
+        is_complete = True
+        for repo in self.repos:
+            issue_raw = self._gh_api(
+                f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
+            )
+            pr_raw = self._gh_api(
+                f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
+            )
+            if issue_raw is not None or pr_raw is not None:
+                any_success = True
+            if issue_raw is None or pr_raw is None:
+                is_complete = False
+                failed = "issues" if issue_raw is None else "pulls"
+                print(f"[github] Partial fetch for {repo} — {failed} comments failed")
+            all_raws.extend([issue_raw, pr_raw])
+        if not any_success:
             return None, False
-        is_complete: bool = issue_raw is not None and pr_raw is not None
-        if not is_complete:
-            failed = "issues" if issue_raw is None else "pulls"
-            print(f"[github] Partial fetch — {failed} comments failed, processing available data")
         seen: set[int] = set()
         merged: list[GithubComment] = []
-        for raw in [issue_raw, pr_raw]:
+        for raw in all_raws:
             if not raw:
                 continue
             comments = _safe_json_loads_list(raw)
@@ -1711,6 +1728,23 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     # -- Comment processing --
 
+    @staticmethod
+    def _extract_repo_from_comment(comment: GithubComment) -> str:
+        """Extract owner/name from a comment's issue_url or html_url."""
+        for key in ("issue_url", "pull_request_url", "html_url"):
+            url = comment.get(key)
+            if not isinstance(url, str):
+                continue
+            # API URLs: https://api.github.com/repos/owner/name/issues/123
+            m = re.search(r'/repos/([^/]+/[^/]+)/', url)
+            if m:
+                return m.group(1)
+            # HTML URLs: https://github.com/owner/name/issues/123
+            m = re.search(r'github\.com/([^/]+/[^/]+)/', url)
+            if m:
+                return m.group(1)
+        return ""
+
     def _process_comment(self, comment: GithubComment) -> None:
         cid = comment.get("id", 0)
         if not isinstance(cid, int) or isinstance(cid, bool) or cid == 0:
@@ -1735,14 +1769,16 @@ class GitHubConnector(BaseConnector[GithubComment]):
             html_text, plain_text = self.format_comment(cleaned, context)
         else:
             html_text, plain_text = self.format_comment(body, context)
+        # Extract repo from comment URL (works across multi-repo polling)
+        comment_repo = self._extract_repo_from_comment(comment) or (self.repos[0] if self.repos else "")
         if targets and context["number"]:
             num = context["number"]
             # Shell-safe: quote interpolated values
-            safe_repo = self.repo.replace("'", "'\\''")
+            safe_repo = comment_repo.replace("'", "'\\''")
             reply_hint = f"\n\nView: beast github show {num} --repo '{safe_repo}'"
             reply_hint += f"\nReply: beast github comment {num} --repo '{safe_repo}' --body 'your reply'"
             plain_text += reply_hint
-        metadata = ConnectorMetadata(number=context["number"], repo=self.repo, comment_id=cid)
+        metadata = ConnectorMetadata(number=context["number"], repo=comment_repo, comment_id=cid)
         self.on_message(targets, html_text, plain_text, [], metadata=metadata)
         # Mark seen AFTER successful delivery
         with self._lock:
