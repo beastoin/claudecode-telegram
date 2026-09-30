@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.45.1"
+VERSION="0.45.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1206,12 +1206,23 @@ show_node_status() {
     $poll_running && has_inbound=true
 
     if $JSON_OUTPUT; then
-        local sessions_json="[]"
-        if [[ ${#claude_sessions[@]} -gt 0 ]]; then
-            sessions_json=$(printf '%s\n' "${claude_sessions[@]}" | jq -R . | jq -s .)
+        # Include all workers from bridge API (single source of truth)
+        local workers_json="[]"
+        if $bridge_http_ok; then
+            workers_json=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(json.dumps(sorted(d.get('workers', {}).keys())))
+except: print('[]')
+" 2>/dev/null || echo "[]")
+        fi
+        # Fall back to local tmux sessions if bridge API unavailable
+        if [[ "$workers_json" == "[]" ]] && [[ ${#claude_sessions[@]} -gt 0 ]]; then
+            workers_json=$(printf '%s\n' "${claude_sessions[@]}" | sed "s/^${tmux_prefix}//" | jq -R . | jq -s .)
         fi
         cat << EOF
-{"node":"$node","running":$running,"port":"$port","sessions":$sessions_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"token_live":$token_live,"bot":"$bot_name","bot_id":"$bot_id","webhook":"$webhook_url","webhook_error":"${webhook_error:-}","bridge_http":$bridge_http_ok,"pid_valid":$pid_valid,"has_chat_id":$has_chat_id,"tunnel_alive":$tunnel_alive,"poll_running":$poll_running,"pending_updates":$pending_updates,"has_inbound":$has_inbound}
+{"node":"$node","running":$running,"port":"$port","sessions":$workers_json,"hook":$hook_ok,"settings":$settings_ok,"token":$token_ok,"token_live":$token_live,"bot":"$bot_name","bot_id":"$bot_id","webhook":"$webhook_url","webhook_error":"${webhook_error:-}","bridge_http":$bridge_http_ok,"pid_valid":$pid_valid,"has_chat_id":$has_chat_id,"tunnel_alive":$tunnel_alive,"poll_running":$poll_running,"pending_updates":$pending_updates,"has_inbound":$has_inbound}
 EOF
         return
     fi
@@ -1243,53 +1254,99 @@ EOF
         settings_mtime=$(stat -c %Y "$SETTINGS_FILE" 2>/dev/null || stat -f %m "$SETTINGS_FILE" 2>/dev/null || echo 0)
     fi
 
-    if [[ ${#claude_sessions[@]} -gt 0 ]]; then
-        log "  sessions: $(green "${#claude_sessions[@]} running")"
+    # Get all workers from bridge API (single source of truth for all machines)
+    local all_workers="" all_worker_names=()
+    if $bridge_http_ok; then
+        all_workers=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null || echo "")
+        if [[ -n "$all_workers" ]]; then
+            while IFS= read -r wname; do
+                [[ -n "$wname" ]] && all_worker_names+=("$wname")
+            done < <(echo "$all_workers" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for name in sorted(d.get('workers', {}).keys()):
+        print(name)
+except: pass
+" 2>/dev/null || true)
+        fi
+    fi
+
+    # Fall back to local tmux sessions if bridge API unavailable
+    if [[ ${#all_worker_names[@]} -eq 0 ]]; then
+        for s in "${claude_sessions[@]}"; do
+            all_worker_names+=("${s#${tmux_prefix}}")
+        done
+    fi
+
+    # Build local tmux session lookup for per-worker checks
+    local -A local_tmux=()
+    for s in "${claude_sessions[@]}"; do
+        local_tmux["${s#${tmux_prefix}}"]="$s"
+    done
+
+    if [[ ${#all_worker_names[@]} -gt 0 ]]; then
+        log "  sessions: $(green "${#all_worker_names[@]} running")"
+
         local env_mismatch=false
         local stale_config=false
-        for s in "${claude_sessions[@]}"; do
-            local session_name="${s#${tmux_prefix}}"
+        for wname in "${all_worker_names[@]}"; do
             local issues=""
+            local tmux_session="${local_tmux[$wname]:-}"
 
-            # Check tmux env vars match node config
-            if $running; then
+            # Get worker state from bridge API
+            local wstate=""
+            if [[ -n "$all_workers" ]]; then
+                wstate=$(echo "$all_workers" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    w = d.get('workers', {}).get('$wname', {})
+    print(w.get('state', ''))
+except: pass
+" 2>/dev/null || true)
+            fi
+
+            # Non-READY state is an issue for any worker (local or remote)
+            if [[ -n "$wstate" && "$wstate" != "READY" ]]; then
+                issues+="$(echo "$wstate" | tr '[:upper:]' '[:lower:]') "
+            fi
+
+            # Detailed checks for workers with local tmux sessions
+            if [[ -n "$tmux_session" ]] && $running; then
                 local tmux_port tmux_dir tmux_prefix_env tmux_bridge_url
-                tmux_port=$(tmux show-environment -t "$s" PORT 2>/dev/null | cut -d= -f2- || true)
-                tmux_dir=$(tmux show-environment -t "$s" SESSIONS_DIR 2>/dev/null | cut -d= -f2- || true)
-                tmux_prefix_env=$(tmux show-environment -t "$s" TMUX_PREFIX 2>/dev/null | cut -d= -f2- || true)
-                tmux_bridge_url=$(tmux show-environment -t "$s" BRIDGE_URL 2>/dev/null | cut -d= -f2- || true)
+                tmux_port=$(tmux show-environment -t "$tmux_session" PORT 2>/dev/null | cut -d= -f2- || true)
+                tmux_dir=$(tmux show-environment -t "$tmux_session" SESSIONS_DIR 2>/dev/null | cut -d= -f2- || true)
+                tmux_prefix_env=$(tmux show-environment -t "$tmux_session" TMUX_PREFIX 2>/dev/null | cut -d= -f2- || true)
+                tmux_bridge_url=$(tmux show-environment -t "$tmux_session" BRIDGE_URL 2>/dev/null | cut -d= -f2- || true)
 
                 [[ -n "$tmux_port" && "$tmux_port" != "$port" ]] && issues+="port "
                 [[ -n "$tmux_dir" && "$tmux_dir" != "$sessions_dir" ]] && issues+="dir "
                 [[ -n "$tmux_prefix_env" && "$tmux_prefix_env" != "$tmux_prefix" ]] && issues+="prefix "
-                # BRIDGE_URL must contain the node's port (catches cross-node env overwrites)
                 if [[ -n "$tmux_bridge_url" && -n "$port" && ! "$tmux_bridge_url" =~ ":${port}" ]]; then
                     issues+="bridge_url "
                 fi
+                [[ -n "$(echo "$issues" | grep -oE 'port|dir|prefix|bridge_url')" ]] && env_mismatch=true
 
-                if [[ -n "$issues" ]]; then
-                    env_mismatch=true
+                # Check if Claude started before settings.json was modified
+                local pane_pid claude_pid claude_start=0
+                pane_pid=$(tmux display-message -t "$tmux_session" -p '#{pane_pid}' 2>/dev/null || echo "")
+                if [[ -n "$pane_pid" ]]; then
+                    claude_pid=$(pgrep -P "$pane_pid" -f "claude" 2>/dev/null | head -1 || true)
+                    if [[ -n "$claude_pid" ]]; then
+                        claude_start=$(stat -c %Y "/proc/$claude_pid" 2>/dev/null || echo 0)
+                    fi
                 fi
-            fi
-
-            # Check if Claude started before settings.json was modified
-            local pane_pid claude_pid claude_start=0
-            pane_pid=$(tmux display-message -t "$s" -p '#{pane_pid}' 2>/dev/null || echo "")
-            if [[ -n "$pane_pid" ]]; then
-                claude_pid=$(pgrep -P "$pane_pid" -f "claude" 2>/dev/null | head -1 || true)
-                if [[ -n "$claude_pid" ]]; then
-                    claude_start=$(stat -c %Y "/proc/$claude_pid" 2>/dev/null || echo 0)
+                if [[ $settings_mtime -gt 0 && $claude_start -gt 0 && $settings_mtime -gt $claude_start ]]; then
+                    issues+="stale-hooks "
+                    stale_config=true
                 fi
-            fi
-            if [[ $settings_mtime -gt 0 && $claude_start -gt 0 && $settings_mtime -gt $claude_start ]]; then
-                issues+="stale-hooks "
-                stale_config=true
             fi
 
             if [[ -n "$issues" ]]; then
-                log "            - ${session_name} $(red "[${issues% }]")"
+                log "            - ${wname} $(red "[${issues% }]")"
             else
-                log "            - ${session_name}"
+                log "            - ${wname}"
             fi
         done
 

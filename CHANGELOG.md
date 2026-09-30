@@ -1,5 +1,16 @@
 ## Changelog
 
+### v0.45.2 - Unified worker display in status
+
+**Problem:** `bridge.sh status` displayed local and remote workers differently — local workers showed `- aki [stale-hooks]` while remote workers showed `- finn @remote`. Inconsistent format made it harder to scan.
+
+**Fix:** Unified all workers through the bridge API as single source of truth:
+
+- **Single worker list:** All workers (local + remote) from bridge `/health/workers` API, displayed identically.
+- **Uniform annotations:** Both local and remote workers use the same `[issue]` bracket format. Remote workers show their state (`[waiting]`, `[busy_tool]`) the same way local workers show issues (`[stale-hooks]`, `[port]`).
+- **Graceful fallback:** Falls back to local tmux sessions if bridge API is unavailable.
+- **JSON output updated:** `sessions` field in `--json` output now includes all workers, not just local tmux sessions.
+
 ### v0.45.1 - Comprehensive bridge status health checks
 
 **Problem:** `bridge.sh status` showed "bot: online" using cached files even when the token was invalid/revoked, hiding a total silent outage. Token failure was one of many failure modes that status didn't catch.
