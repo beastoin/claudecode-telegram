@@ -23774,6 +23774,36 @@ main() {
         log "  (skipped — pytest not installed)"
     fi
 
+    # Bun test suite — TS tool behavior tests
+    log "── bun test suite (pilot) ──"
+    if command -v bun &>/dev/null; then
+        local bun_out
+        bun_out=$(cd tools/pilot && bun test pilot_behavior.test.ts 2>&1) || true
+        local bun_last
+        bun_last=$(echo "$bun_out" | tail -1)
+        if echo "$bun_out" | grep -q "fail"; then
+            echo "$bun_out" | tail -20
+            fail "bun test (pilot): $bun_last"
+        else
+            success "bun test (pilot): $bun_last"
+        fi
+    else
+        log "  (skipped — bun not installed)"
+    fi
+
+    # Bash tool tests — pre-commit hook
+    log "── bash tests (pre-commit hook) ──"
+    local bash_out
+    bash_out=$(bash tools/git-hooks/test_pre_commit.sh 2>&1) || true
+    local bash_last
+    bash_last=$(echo "$bash_out" | tail -1)
+    if echo "$bash_out" | grep -q "failed"; then
+        echo "$bash_out" | tail -20
+        fail "bash tests (pre-commit): $bash_last"
+    else
+        success "bash tests (pre-commit): $bash_last"
+    fi
+
     # Always run unit and CLI tests
     run_unit_tests
     run_cli_tests
