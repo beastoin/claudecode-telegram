@@ -489,28 +489,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="JSONL transcript indexer with SQLite FTS5",
     )
+    sub = parser.add_subparsers(dest="mode", required=True)
 
-    # Shared args — on main parser for backward compat (old callers pass
-    # --jsonl/--db directly without a subcommand)
-    parser.add_argument("--jsonl", required=True, help="Path to JSONL file")
-    parser.add_argument("--db", required=True, help="Path to SQLite database")
-    parser.add_argument("--page", type=int, default=None, help="Page number (default: last)")
-    parser.add_argument("--per-page", type=int, default=50, help="Items per page")
-    parser.add_argument("--search", type=str, default="", help="Search term")
-    parser.add_argument("--query", required=True,
-                        choices=["entries", "search", "stats", "entries+stats", "search+stats"])
-    parser.add_argument("--filter", type=str, default="", dest="filter_mode",
-                        help="Filter mode (e.g., 'prompts')")
-    parser.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"])
+    # Shared args
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--jsonl", required=True, help="Path to JSONL file")
+    shared.add_argument("--db", required=True, help="Path to SQLite database")
+    shared.add_argument("--page", type=int, default=None, help="Page number (default: last)")
+    shared.add_argument("--per-page", type=int, default=50, help="Items per page")
+    shared.add_argument("--search", type=str, default="", help="Search term")
 
-    # Optional subcommand — ignored (kept for backward compat with callers
-    # that pass "transcript" as first arg). Defaults to transcript behavior.
-    parser.add_argument("mode", nargs="?", default="transcript",
-                        choices=["transcript"],
-                        help="Subcommand (default: transcript)")
+    # Transcript subcommand
+    t = sub.add_parser("transcript", parents=[shared], help="Index Claude transcripts")
+    t.add_argument("--query", required=True,
+                   choices=["entries", "search", "stats", "entries+stats", "search+stats"])
+    t.add_argument("--filter", type=str, default="", dest="filter_mode",
+                   help="Filter mode (e.g., 'prompts')")
+    t.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"])
 
     args = parser.parse_args()
-    _run_transcript(args)
+
+    if args.mode == "transcript":
+        _run_transcript(args)
 
 
 if __name__ == "__main__":
