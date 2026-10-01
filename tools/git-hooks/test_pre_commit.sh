@@ -284,11 +284,9 @@ test_hook_handles_nested_directory_files() {
   [[ $rc -eq 0 ]] || { echo "Hook should handle nested dirs (exit $rc)"; return 1; }
 }
 
-test_hook_passes_on_trufflehog_crash() {
-  # BUG DOCUMENTATION: When trufflehog exits non-zero but NOT 183 (e.g. crash,
-  # segfault, bad args), the hook silently passes (fail-open). The hook only
-  # checks exit_code == 183, so any other failure falls through to exit 0.
-  # This test documents the current (buggy) fail-open behavior.
+test_hook_blocks_on_trufflehog_crash() {
+  # When trufflehog exits non-zero but NOT 183 (e.g. crash, segfault, bad args),
+  # the hook blocks the commit (fail-closed) to avoid silently passing secrets.
   local tmp
   tmp=$(mktemp -d)
   trap "rm -rf '$tmp'" RETURN
@@ -304,13 +302,10 @@ test_hook_passes_on_trufflehog_crash() {
   local output rc=0
   output=$(cd "$tmp" && TRUFFLEHOG="$mock" bash "$HOOK" 2>&1) || rc=$?
 
-  # Current behavior: hook passes (exit 0) on non-183 errors — fail-open bug
-  [[ $rc -eq 0 ]] || { echo "Expected exit 0 (fail-open bug), got $rc"; return 1; }
-  # Hook should NOT show SECRET DETECTED since exit code wasn't 183
-  if echo "$output" | grep -q "SECRET DETECTED"; then
-    echo "Should not show SECRET DETECTED for non-183 exit"
-    return 1
-  fi
+  # Fail-closed: hook blocks commit on any non-zero trufflehog exit
+  [[ $rc -eq 1 ]] || { echo "Expected exit 1 (fail-closed), got $rc"; return 1; }
+  echo "$output" | grep -q "fail-closed" || { echo "Expected 'fail-closed' message"; return 1; }
+  echo "$output" | grep -q "commit blocked" || { echo "Expected 'commit blocked'"; return 1; }
 }
 
 test_hook_handles_filenames_with_spaces() {
@@ -386,7 +381,7 @@ run_test test_hook_respects_trufflehogignore
 run_test test_hook_no_trufflehogignore_no_exclude_flag
 run_test test_hook_scans_staged_content_not_working_tree
 run_test test_hook_handles_nested_directory_files
-run_test test_hook_passes_on_trufflehog_crash
+run_test test_hook_blocks_on_trufflehog_crash
 run_test test_hook_handles_filenames_with_spaces
 run_test test_hook_cleans_up_tmpdir
 

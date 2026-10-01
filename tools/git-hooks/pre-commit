@@ -52,4 +52,10 @@ if [ "${exit_code:-0}" -eq 183 ]; then
   echo "Bypass (emergency only): git commit --no-verify"
   echo ""
   exit 1
+elif [ "${exit_code:-0}" -ne 0 ]; then
+  echo ""
+  echo "[pre-commit] trufflehog exited with code $exit_code — commit blocked (fail-closed)"
+  echo "  Scanner may have crashed. Investigate, or bypass: git commit --no-verify"
+  echo ""
+  exit 1
 fi
