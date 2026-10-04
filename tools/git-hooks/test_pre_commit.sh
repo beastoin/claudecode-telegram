@@ -83,7 +83,7 @@ SCRIPT
 }
 
 run_hook() {
-  local repo="$1"
+  local _repo="$1"  # unused; kept for readability (first arg is the repo dir)
   shift
   local env_args=()
   while [[ $# -gt 0 ]]; do
@@ -111,6 +111,7 @@ test_hook_skips_when_trufflehog_missing() {
   # When trufflehog binary doesn't exist, hook warns and allows commit
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -129,6 +130,7 @@ test_hook_passes_with_no_staged_files() {
   # When nothing is staged, hook exits 0 immediately
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -149,6 +151,7 @@ test_hook_passes_clean_file() {
   # When trufflehog finds no secrets (exit 0), commit is allowed
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -169,6 +172,7 @@ test_hook_blocks_on_secret_detected() {
   # When trufflehog exits 183, commit is blocked with clear error
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -194,6 +198,7 @@ test_hook_respects_trufflehogignore() {
   # When .trufflehogignore exists, --exclude-paths flag is passed
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -216,6 +221,7 @@ test_hook_no_trufflehogignore_no_exclude_flag() {
   # When .trufflehogignore does NOT exist, --exclude-paths is NOT passed
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -240,6 +246,7 @@ test_hook_scans_staged_content_not_working_tree() {
   # Hook scans git-staged version, not the dirty working tree
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -266,6 +273,7 @@ test_hook_handles_nested_directory_files() {
   # Hook correctly copies files in subdirectories via mkdir -p
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -289,6 +297,7 @@ test_hook_blocks_on_trufflehog_crash() {
   # the hook blocks the commit (fail-closed) to avoid silently passing secrets.
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -312,6 +321,7 @@ test_hook_handles_filenames_with_spaces() {
   # Files with spaces in their names are staged and scanned correctly
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"
@@ -341,6 +351,7 @@ test_hook_cleans_up_tmpdir() {
   # After hook runs, the temporary staged-copy directory is removed
   local tmp
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # intentional: expand $tmp now, not at signal time
   trap "rm -rf '$tmp'" RETURN
 
   init_repo "$tmp"

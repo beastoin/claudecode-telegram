@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate a self-contained HTML PR review page from GitHub API data."""
 
+from __future__ import annotations
+
 import base64
 import json
 import html
@@ -12,6 +14,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Iterable
 
 CACHE_DB = os.environ.get("PR_CACHE_DB", "/tmp/pr-review-cache.db")
 USER_PROFILE_TTL = 86400  # 24 hours
@@ -20,13 +23,13 @@ USER_PROFILE_TTL = 86400  # 24 hours
 class PRCache:
     """SQLite cache for PR review data. One DB for all PRs."""
 
-    def __init__(self, db_path=None):
+    def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or CACHE_DB
         self.conn = sqlite3.connect(self.db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
 
-    def _create_tables(self):
+    def _create_tables(self) -> None:
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS pr_meta (
                 pr_key TEXT PRIMARY KEY,
@@ -68,13 +71,13 @@ class PRCache:
             );
         """)
 
-    def clear_pr(self, pr_key):
+    def clear_pr(self, pr_key: str) -> None:
         """Clear all cached data for a specific PR."""
         for table in ("pr_meta", "pr_files", "pr_commits", "pr_comments", "pr_reviews"):
             self.conn.execute(f"DELETE FROM {table} WHERE pr_key=?", (pr_key,))
         self.conn.commit()
 
-    def get_meta(self, pr_key):
+    def get_meta(self, pr_key: str) -> dict[str, object] | None:
         row = self.conn.execute(
             "SELECT data, head_sha, comment_count, review_count, commit_count "
             "FROM pr_meta WHERE pr_key=?", (pr_key,)).fetchone()
@@ -88,42 +91,42 @@ class PRCache:
             "commit_count": row[4],
         }
 
-    def set_meta(self, pr_key, meta, comment_count, review_count, commit_count):
+    def set_meta(self, pr_key: str, meta: dict[str, object], comment_count: int, review_count: int, commit_count: int) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO pr_meta VALUES (?,?,?,?,?,?,?)",
             (pr_key, json.dumps(meta), meta.get("head_sha", ""),
              comment_count, review_count, commit_count, time.time()))
         self.conn.commit()
 
-    def get_files(self, pr_key, head_sha):
+    def get_files(self, pr_key: str, head_sha: str) -> list[dict[str, object]] | None:
         row = self.conn.execute(
             "SELECT data FROM pr_files WHERE pr_key=? AND head_sha=?",
             (pr_key, head_sha)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def set_files(self, pr_key, head_sha, files):
+    def set_files(self, pr_key: str, head_sha: str, files: list[dict[str, object]]) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO pr_files VALUES (?,?,?)",
             (pr_key, head_sha, json.dumps(files)))
         self.conn.commit()
 
-    def get_commits(self, pr_key):
+    def get_commits(self, pr_key: str) -> dict[str, dict[str, object]]:
         rows = self.conn.execute(
             "SELECT sha, data FROM pr_commits WHERE pr_key=?", (pr_key,)).fetchall()
         return {r[0]: json.loads(r[1]) for r in rows}
 
-    def set_commit(self, pr_key, sha, commit_data):
+    def set_commit(self, pr_key: str, sha: str, commit_data: dict[str, object]) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO pr_commits VALUES (?,?,?)",
             (pr_key, sha, json.dumps(commit_data)))
         self.conn.commit()
 
-    def get_comments(self, pr_key):
+    def get_comments(self, pr_key: str) -> list[dict[str, object]]:
         rows = self.conn.execute(
             "SELECT data FROM pr_comments WHERE pr_key=? ORDER BY id", (pr_key,)).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def set_comments(self, pr_key, comments):
+    def set_comments(self, pr_key: str, comments: list[dict[str, object]]) -> None:
         self.conn.execute("DELETE FROM pr_comments WHERE pr_key=?", (pr_key,))
         for c in comments:
             self.conn.execute(
@@ -131,12 +134,12 @@ class PRCache:
                 (pr_key, c.get("id", 0), json.dumps(c)))
         self.conn.commit()
 
-    def get_reviews(self, pr_key):
+    def get_reviews(self, pr_key: str) -> list[dict[str, object]]:
         rows = self.conn.execute(
             "SELECT data FROM pr_reviews WHERE pr_key=? ORDER BY id", (pr_key,)).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def set_reviews(self, pr_key, reviews):
+    def set_reviews(self, pr_key: str, reviews: list[dict[str, object]]) -> None:
         self.conn.execute("DELETE FROM pr_reviews WHERE pr_key=?", (pr_key,))
         for r in reviews:
             self.conn.execute(
@@ -144,7 +147,7 @@ class PRCache:
                 (pr_key, r.get("id", 0), json.dumps(r)))
         self.conn.commit()
 
-    def get_user_profile(self, username):
+    def get_user_profile(self, username: str) -> dict[str, object] | None:
         row = self.conn.execute(
             "SELECT data, fetched_at FROM user_profiles WHERE username=?",
             (username,)).fetchone()
@@ -154,17 +157,20 @@ class PRCache:
             return None  # expired
         return json.loads(row[0])
 
-    def set_user_profile(self, username, profile):
+    def set_user_profile(self, username: str, profile: dict[str, object]) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO user_profiles VALUES (?,?,?)",
             (username, json.dumps(profile), time.time()))
         self.conn.commit()
 
-    def close(self):
+    def close(self) -> None:
         self.conn.close()
 
 
-def fetch_pr_cached(owner, repo, pr_num, cache=None, fresh=False):
+def fetch_pr_cached(
+    owner: str, repo: str, pr_num: int,
+    cache: PRCache | None = None, fresh: bool = False,
+) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], dict[str, dict[str, object]]]:
     """Fetch PR data with SQLite caching. Returns (meta, files, comments, reviews, commits, user_profiles).
 
     Strategy:
@@ -284,7 +290,7 @@ def fetch_pr_cached(owner, repo, pr_num, cache=None, fresh=False):
     return meta, files, comments, reviews, commits, user_profiles
 
 
-def fetch_user_info(usernames):
+def fetch_user_info(usernames: Iterable[str]) -> dict[str, dict[str, object]]:
     """Fetch GitHub user profiles for a list of usernames. Returns dict of username -> info."""
     profiles = {}
     for username in set(usernames):
@@ -304,7 +310,7 @@ def fetch_user_info(usernames):
     return profiles
 
 
-def fetch_pr_reviews(owner, repo, pr_num):
+def fetch_pr_reviews(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     """Fetch PR reviews (approve/request changes/comment)."""
     reviews = []
     try:
@@ -323,7 +329,7 @@ def fetch_pr_reviews(owner, repo, pr_num):
     return reviews
 
 
-def fetch_pr_comments(owner, repo, pr_num):
+def fetch_pr_comments(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     """Fetch all PR comments (issue comments + review comments)."""
     comments = []
 
@@ -363,7 +369,7 @@ def fetch_pr_comments(owner, repo, pr_num):
     return comments
 
 
-def _fetch_commit_list(owner, repo, pr_num):
+def _fetch_commit_list(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     """Fetch PR commit list (metadata only, no file patches)."""
     commits = []
     try:
@@ -387,7 +393,7 @@ def _fetch_commit_list(owner, repo, pr_num):
     return commits
 
 
-def _fetch_commit_files_single(owner, repo, c):
+def _fetch_commit_files_single(owner: str, repo: str, c: dict[str, object]) -> None:
     """Fetch file patches for a single commit."""
     try:
         r = subprocess.run(
@@ -402,7 +408,7 @@ def _fetch_commit_files_single(owner, repo, c):
         c['files'] = []
 
 
-def fetch_pr_commits(owner, repo, pr_num):
+def fetch_pr_commits(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     """Fetch PR commits with their file patches (non-cached path)."""
     commits = _fetch_commit_list(owner, repo, pr_num)
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -410,7 +416,7 @@ def fetch_pr_commits(owner, repo, pr_num):
     return commits
 
 
-def fetch_pr_meta(owner, repo, pr_num):
+def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
     """Fetch only PR metadata (1 API call)."""
     meta_raw = subprocess.run(
         ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}",
@@ -442,7 +448,7 @@ def fetch_pr_meta(owner, repo, pr_num):
     return meta
 
 
-def fetch_pr_files(owner, repo, pr_num):
+def fetch_pr_files(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     """Fetch PR file patches."""
     files_raw = subprocess.run(
         ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}/files",
@@ -467,7 +473,7 @@ def fetch_pr_files(owner, repo, pr_num):
     return files
 
 
-def fetch_pr_data(owner, repo, pr_num):
+def fetch_pr_data(owner: str, repo: str, pr_num: int) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Fetch PR metadata and file patches via gh CLI (non-cached path)."""
     meta = fetch_pr_meta(owner, repo, pr_num)
     files = fetch_pr_files(owner, repo, pr_num)
@@ -475,7 +481,7 @@ def fetch_pr_data(owner, repo, pr_num):
 
 
 
-def _fetch_full_diff(owner, repo, pr_num):
+def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
     """Fetch the full unified diff for a PR."""
     try:
         r = subprocess.run(
@@ -489,7 +495,7 @@ def _fetch_full_diff(owner, repo, pr_num):
     return None
 
 
-def _parse_full_diff(diff_text):
+def _parse_full_diff(diff_text: str) -> dict[str, str]:
     """Parse a full unified diff into per-file patches."""
     patches = {}
     current_file = None
@@ -517,7 +523,7 @@ def _parse_full_diff(diff_text):
     return patches
 
 
-def parse_patch(patch_text):
+def parse_patch(patch_text: str | None) -> list[dict[str, object]]:
     """Parse unified diff patch into structured hunks."""
     if not patch_text:
         return []
@@ -554,15 +560,22 @@ def parse_patch(patch_text):
 
 
 
-def generate_html(meta, files, pr_num, owner, repo, comments=None, reviews=None,
-                   user_profiles=None, highlight_comment_id=None, commits=None):
+def generate_html(
+    meta: dict[str, object], files: list[dict[str, object]],
+    pr_num: int, owner: str, repo: str,
+    comments: list[dict[str, object]] | None = None,
+    reviews: list[dict[str, object]] | None = None,
+    user_profiles: dict[str, dict[str, object]] | None = None,
+    highlight_comment_id: str | int | None = None,
+    commits: list[dict[str, object]] | None = None,
+) -> str:
     """Generate self-contained HTML review page with transcript-style layout."""
     comments = comments or []
     reviews = reviews or []
     commits = commits or []
     user_profiles = user_profiles or {}
 
-    def _user_badge(username):
+    def _user_badge(username: str) -> str:
         """Generate a user badge with avatar and profile info."""
         p = user_profiles.get(username, {})
         if not p:
@@ -1762,7 +1775,7 @@ async function doMerge() {{
     return page_html
 
 
-def _fetch_file_context(owner, repo, path, line, ref, context=3):
+def _fetch_file_context(owner: str, repo: str, path: str, line: int, ref: str, context: int = 3) -> tuple[str | None, str]:
     """Fetch file from GitHub and return ±context lines around target line."""
     try:
         r = subprocess.run(
@@ -1786,7 +1799,7 @@ def _fetch_file_context(owner, repo, path, line, ref, context=3):
         return None, ref[:12]
 
 
-def _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha):
+def _format_comment_with_context(comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None, short_sha: str) -> str:
     """Build a rich comment message with file context."""
     parts = [f"PR #{pr_num} comment on {path}:{line} (ref {short_sha})"]
     if context_snippet:
@@ -1796,7 +1809,7 @@ def _format_comment_with_context(comment_body, pr_num, path, line, context_snipp
     return '\n'.join(parts)
 
 
-def _notify_telegram(comment_body, pr_num, path, line, context_snippet=None, short_sha=""):
+def _notify_telegram(comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = "") -> None:
     """Send PR comment notification to Telegram via bridge's /notify endpoint."""
     bridge_url = os.environ.get("BRIDGE_URL", "http://localhost:8271")
     text = f"\U0001f4ac " + _format_comment_with_context(
@@ -1813,7 +1826,7 @@ def _notify_telegram(comment_body, pr_num, path, line, context_snippet=None, sho
         print(f"[pr-comment] Telegram notify failed: {e}")
 
 
-def _route_mentions_to_workers(comment_body, pr_num, path, line, context_snippet=None, short_sha=""):
+def _route_mentions_to_workers(comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = "") -> None:
     """Parse @mentions and send the comment to targeted workers via tmux."""
     tmux_prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
     mentions = re.findall(r'@(\w+)', comment_body)
@@ -1863,7 +1876,7 @@ def _route_mentions_to_workers(comment_body, pr_num, path, line, context_snippet
             print(f"[pr-comment] Failed to route to @{mention}: {e}")
 
 
-def main():
+def main() -> None:
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <pr_url_or_number> [--port PORT]", file=sys.stderr)
         sys.exit(1)
@@ -1920,10 +1933,10 @@ def main():
         base_handler = http.server.SimpleHTTPRequestHandler
 
         class PRHandler(base_handler):
-            def log_message(self, fmt, *args):
+            def log_message(self, fmt: str, *args: object) -> None:
                 pass
 
-            def do_POST(self):
+            def do_POST(self) -> None:
                 if self.path == '/pr-comment':
                     length = int(self.headers.get('Content-Length', 0))
                     body = self.rfile.read(length)
@@ -1989,7 +2002,7 @@ def main():
                     self.send_response(404)
                     self.end_headers()
 
-            def do_GET(self):
+            def do_GET(self) -> None:
                 parsed = urlparse(self.path)
                 if parsed.path == '/pr-file-content':
                     params = parse_qs(parsed.query)

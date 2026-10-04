@@ -31,6 +31,7 @@ WORKER_NAME="triassic-4"
 
 # Load test credentials
 if [[ -f ~/.config/claudecode-telegram/test.env ]]; then
+    # shellcheck source=/dev/null
     source ~/.config/claudecode-telegram/test.env
 fi
 TEST_BOT_TOKEN="${TEST_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
@@ -85,7 +86,7 @@ skip_test() {
 # Wait for text to appear in tmux pane (up to N seconds)
 wait_for_tmux() {
     local session="$1" expected="$2" timeout="${3:-10}"
-    for i in $(seq 1 $((timeout * 5))); do
+    for _i in $(seq 1 $((timeout * 5))); do
         if tmux capture-pane -t "$session" -p 2>/dev/null | grep -qF "$expected"; then
             return 0
         fi
@@ -97,7 +98,7 @@ wait_for_tmux() {
 # Wait for a file to appear (ready signal instead of fixed sleep)
 wait_for_file() {
     local path="$1" timeout="${2:-10}"
-    for i in $(seq 1 $((timeout * 5))); do
+    for _i in $(seq 1 $((timeout * 5))); do
         [[ -e "$path" ]] && return 0
         sleep 0.2
     done
@@ -107,7 +108,7 @@ wait_for_file() {
 # Wait for HTTP endpoint to respond (ready signal instead of fixed sleep)
 wait_for_http() {
     local url="$1" timeout="${2:-10}"
-    for i in $(seq 1 $((timeout * 5))); do
+    for _i in $(seq 1 $((timeout * 5))); do
         curl -sf "$url" >/dev/null 2>&1 && return 0
         sleep 0.2
     done
@@ -337,7 +338,7 @@ HOME="$RUNTIME_HOME" \
 WORKER_PID=$!
 
 # Ready-wait: tmux session must exist (Runtime started)
-for i in $(seq 1 50); do
+for _i in $(seq 1 50); do
     tmux has-session -t "${TEST_TMUX_PREFIX}${WORKER_NAME}" 2>/dev/null && break
     sleep 0.2
 done

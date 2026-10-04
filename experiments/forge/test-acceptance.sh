@@ -147,7 +147,7 @@ BRIDGE_PORT_CHECK=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0))
 TRANSPORT=local PORT="$BRIDGE_PORT_CHECK" SESSIONS_DIR="$TEST_DIR/sessions-check" TMUX_PREFIX="claude-forgetest-" NODE_NAME="" PYTHONUNBUFFERED=1 \
 python3 "$BRIDGE_DIR/bridge.py" > /dev/null 2>&1 &
 CHECK_BRIDGE_PID=$!
-for i in $(seq 1 40); do curl -sf "http://127.0.0.1:$BRIDGE_PORT_CHECK/" >/dev/null 2>&1 && break; sleep 0.1; done
+for _i in $(seq 1 40); do curl -sf "http://127.0.0.1:$BRIDGE_PORT_CHECK/" >/dev/null 2>&1 && break; sleep 0.1; done
 
 CHECK_OUTPUT=$(HOME="$TEST_DIR/check-home" "$MON_BIN" --check --bridge-url "http://127.0.0.1:$BRIDGE_PORT_CHECK" --identity "$AGE_KEY_FILE" 2>&1 || true)
 kill "$CHECK_BRIDGE_PID" 2>/dev/null || true
@@ -191,7 +191,7 @@ PYTHONUNBUFFERED=1 \
 python3 "$BRIDGE_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 
-for i in $(seq 1 40); do
+for _i in $(seq 1 40); do
     if curl -sf "http://127.0.0.1:$BRIDGE_PORT/" >/dev/null 2>&1; then
         break
     fi

@@ -437,6 +437,7 @@ cmd_run() {
     local env_file="$HOME/.config/claudecode-telegram/${node}.env"
     if [[ -f "$env_file" ]]; then
         set -a
+        # shellcheck source=/dev/null
         source "$env_file"
         set +a
         log "Loaded env from $env_file"
@@ -1057,7 +1058,8 @@ cmd_status() {
         # Warn if multiple nodes running with same bot_id
         for bid in "${!bot_nodes[@]}"; do
             local nodes="${bot_nodes[$bid]}"
-            local count=$(echo "$nodes" | wc -w)
+            local count
+            count=$(echo "$nodes" | wc -w)
             if [[ $count -gt 1 ]]; then
                 log "$(red "⚠ CONFLICT: $count nodes running with same bot (id:$bid)")"
                 log "  Running: ${nodes% }"
@@ -1227,7 +1229,7 @@ EOF
         return
     fi
 
-    log "$(bold "Node: $node") $(if $running; then echo "$(green "[running]")"; else echo "$(yellow "[stopped]")"; fi)"
+    log "$(bold "Node: $node") $(if $running; then green "[running]"; else yellow "[stopped]"; fi)"
 
     if $running; then
         log "  port:     $port"
@@ -1275,14 +1277,14 @@ except: pass
     # Fall back to local tmux sessions if bridge API unavailable
     if [[ ${#all_worker_names[@]} -eq 0 ]]; then
         for s in "${claude_sessions[@]}"; do
-            all_worker_names+=("${s#${tmux_prefix}}")
+            all_worker_names+=("${s#"${tmux_prefix}"}")
         done
     fi
 
     # Build local tmux session lookup for per-worker checks
     local -A local_tmux=()
     for s in "${claude_sessions[@]}"; do
-        local_tmux["${s#${tmux_prefix}}"]="$s"
+        local_tmux["${s#"${tmux_prefix}"}"]="$s"
     done
 
     if [[ ${#all_worker_names[@]} -gt 0 ]]; then
@@ -1323,10 +1325,10 @@ except: pass
                 [[ -n "$tmux_port" && "$tmux_port" != "$port" ]] && issues+="port "
                 [[ -n "$tmux_dir" && "$tmux_dir" != "$sessions_dir" ]] && issues+="dir "
                 [[ -n "$tmux_prefix_env" && "$tmux_prefix_env" != "$tmux_prefix" ]] && issues+="prefix "
-                if [[ -n "$tmux_bridge_url" && -n "$port" && ! "$tmux_bridge_url" =~ ":${port}" ]]; then
+                if [[ -n "$tmux_bridge_url" && -n "$port" && ! "$tmux_bridge_url" =~ :${port} ]]; then
                     issues+="bridge_url "
                 fi
-                [[ -n "$(echo "$issues" | grep -oE 'port|dir|prefix|bridge_url')" ]] && env_mismatch=true
+                echo "$issues" | grep -qE 'port|dir|prefix|bridge_url' && env_mismatch=true
 
                 # Check if Claude started before settings.json was modified
                 local pane_pid claude_pid claude_start=0
@@ -1364,7 +1366,7 @@ except: pass
         fi
     fi
 
-    $hook_ok && log "  hook:     $(green "installed")" || log "  hook:     $(yellow "not installed")"
+    if $hook_ok; then log "  hook:     $(green "installed")"; else log "  hook:     $(yellow "not installed")"; fi
     if ! $settings_ok && $hook_ok; then
         log "  settings: $(yellow "hook not registered in settings.json")"
     fi
@@ -1534,7 +1536,7 @@ cmd_webhook_delete() {
     fi
 
     local r; r=$(telegram_api "$token" "deleteWebhook" "{}")
-    echo "$r" | grep -q '"ok":true' && success "Webhook deleted" || { error "Failed"; exit 1; }
+    if echo "$r" | grep -q '"ok":true'; then success "Webhook deleted"; else error "Failed"; exit 1; fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1669,7 +1671,7 @@ cmd_hook_test() {
     log "Sending test to chat $chat_id (node: $node)..."
 
     local r; r=$(telegram_api "$token" "sendMessage" "{\"chat_id\":\"$chat_id\",\"text\":\"Test OK from node $node!\"}")
-    echo "$r" | grep -q '"ok":true' && success "Message sent" || { error "Failed"; exit 1; }
+    if echo "$r" | grep -q '"ok":true'; then success "Message sent"; else error "Failed"; exit 1; fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1677,7 +1679,7 @@ cmd_hook_test() {
 # ─────────────────────────────────────────────────────────────────────────────
 cmd_setup() {
     echo ""
-    echo "$(bold "claudecode-telegram v${VERSION} — Setup")"
+    bold "claudecode-telegram v${VERSION} — Setup"
     echo ""
 
     # ── Step 1: Check prerequisites ──
@@ -1949,8 +1951,7 @@ cmd_connector() {
     case "$subcmd" in
         status)
             local result
-            result=$(curl -sf "http://127.0.0.1:$port/connectors" 2>&1)
-            if [[ $? -ne 0 ]]; then
+            if ! result=$(curl -sf "http://127.0.0.1:$port/connectors" 2>&1); then
                 error "Failed to reach bridge connectors endpoint"
                 return 1
             fi
@@ -1995,10 +1996,9 @@ for name, info in data.items():
 
             log "Restarting $name connector..."
             local result
-            result=$(curl -sf -X POST "http://127.0.0.1:$port/connectors/restart" \
+            if ! result=$(curl -sf -X POST "http://127.0.0.1:$port/connectors/restart" \
                 -H "Content-Type: application/json" \
-                -d "{\"name\": \"$name\"}" 2>&1)
-            if [[ $? -ne 0 ]]; then
+                -d "{\"name\": \"$name\"}" 2>&1); then
                 error "Failed to restart $name connector"
                 echo "$result"
                 return 1
@@ -2038,6 +2038,7 @@ main() {
     # Global flag parsing
     # ─────────────────────────────────────────────────────────────────────────────
     while [[ $# -gt 0 ]]; do
+        # shellcheck source=/dev/null
         case "$1" in
             --env-file=*) set -a; source "${1#*=}"; set +a; shift;;
             --env-file)   set -a; source "$2"; set +a; shift 2;;

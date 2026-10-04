@@ -172,7 +172,11 @@ step "Step 2/5 — Getting claudecode-telegram"
 if [ -d "$INSTALL_DIR/.git" ]; then
     ok "Already cloned at $INSTALL_DIR"
     cd "$INSTALL_DIR"
-    git pull --ff-only origin main 2>/dev/null && ok "Updated to latest" || warn "Could not pull latest (working changes?)"
+    if git pull --ff-only origin main 2>/dev/null; then
+        ok "Updated to latest"
+    else
+        warn "Could not pull latest (working changes?)"
+    fi
 elif [ -f "$INSTALL_DIR/bridge.sh" ]; then
     # We're already in the repo (script run locally)
     ok "Using existing directory: $INSTALL_DIR"

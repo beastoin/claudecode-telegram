@@ -161,7 +161,7 @@ PYEOF
 MOCK_PID=$!
 
 # Wait for mock to be ready
-for i in $(seq 1 20); do
+for _i in $(seq 1 20); do
     if curl -sf "http://127.0.0.1:$MOCK_PORT/" >/dev/null 2>&1; then
         break
     fi

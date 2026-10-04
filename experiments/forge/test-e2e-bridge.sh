@@ -139,7 +139,7 @@ python3 "$BRIDGE_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 
 # Wait for bridge to be ready
-for i in $(seq 1 40); do
+for _i in $(seq 1 40); do
     if curl -sf "http://127.0.0.1:$BRIDGE_PORT/" >/dev/null 2>&1; then
         break
     fi

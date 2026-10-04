@@ -69,7 +69,7 @@ fi
 # Extract bridge session name from prefix pattern
 BRIDGE_SESSION=""
 if [[ "$SESSION_NAME" == ${TMUX_PREFIX}* ]]; then
-    BRIDGE_SESSION="${SESSION_NAME#${TMUX_PREFIX}}"
+    BRIDGE_SESSION="${SESSION_NAME#"${TMUX_PREFIX}"}"
 fi
 
 # Not our session - exit silently
@@ -111,9 +111,11 @@ LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: 
 
 # Extract text from transcript (with retry for race condition)
 extract_from_transcript() {
-    local tmp=$(mktemp)
+    local tmp
+    tmp=$(mktemp)
     cat "$TRANSCRIPT_PATH" > "$tmp" 2>/dev/null
-    local lines=$(tail -n "+$LAST_USER_LINE" "$tmp" | grep '"type":"assistant"') || { rm -f "$tmp"; return 1; }
+    local lines
+    lines=$(tail -n "+$LAST_USER_LINE" "$tmp" | grep '"type":"assistant"') || { rm -f "$tmp"; return 1; }
     TEXT=$(echo "$lines" | jq -rs '[.[].message.content[] | select(.type == "text") | .text | select(. != "(no content)")] | join("\n\n")') || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     [ -n "$TEXT" ] && [ "$TEXT" != "null" ]
@@ -121,7 +123,7 @@ extract_from_transcript() {
 
 # Try transcript extraction first (10 attempts × 500ms = 5s max)
 TEXT=""
-for attempt in $(seq 1 10); do
+for _attempt in $(seq 1 10); do
     if extract_from_transcript; then
         break
     fi

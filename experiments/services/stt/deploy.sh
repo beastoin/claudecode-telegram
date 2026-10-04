@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2029,SC2088
 # Deploy STT server to Mac Mini.
 #
 # Prerequisites on target host:

@@ -94,7 +94,7 @@ start() {
     echo "  void-streamd PID: $(cat "$PID_DIR/streamd.pid")"
 
     # Wait for streamd to be ready
-    for i in $(seq 1 20); do
+    for _i in $(seq 1 20); do
         if curl -sf "http://127.0.0.1:$STREAMD_PORT/health" >/dev/null 2>&1; then
             break
         fi
@@ -102,7 +102,7 @@ start() {
     done
 
     # Record child process PIDs started by streamd.
-    for i in $(seq 1 20); do
+    for _i in $(seq 1 20); do
         capture_new_pid "Xvfb $DISPLAY_NUM" "$xvfb_before" "$PID_DIR/xvfb.pid"
         capture_new_pid "ffmpeg.*x11grab.*$DISPLAY_NUM" "$ffmpeg_before" "$PID_DIR/ffmpeg.pid"
         if [ -f "$PID_DIR/xvfb.pid" ] && [ -f "$PID_DIR/ffmpeg.pid" ]; then

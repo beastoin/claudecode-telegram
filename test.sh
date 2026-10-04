@@ -13,6 +13,7 @@
 # Tests run isolated using --node test with separate port (8295),
 # prefix (claude-test-), and PID file. Safe to run while production is active.
 #
+# shellcheck disable=SC2015  # A && B || C is safe here — success/fail are echo wrappers that never fail
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +42,7 @@ export SESSIONS_DIR="$TEST_SESSION_DIR"
 
 # Create stub binaries for backends not installed (needed for binary check)
 TEST_BIN_DIR="$(mktemp -d)"
+# shellcheck disable=SC2043  # Single-item loop: kept for easy extension
 for bin_name in codex; do
     if ! command -v "$bin_name" &>/dev/null; then
         printf '#!/bin/sh\necho "stub"\n' > "$TEST_BIN_DIR/$bin_name"
@@ -752,7 +754,8 @@ test_cli_flags_and_commands() {
     fi
 
     # --env-file flag
-    local tmp_env=$(mktemp)
+    local tmp_env
+    tmp_env=$(mktemp)
     echo "TEST_VAR=hello" > "$tmp_env"
     if ! ./bridge.sh --env-file="$tmp_env" --help 2>/dev/null | grep -qi "usage"; then
         fail "CLI --env-file flag failed"
@@ -1028,7 +1031,7 @@ test_cli_webhook_commands() {
     if [[ -n "$saved_webhook_url" ]]; then
         sleep 2  # avoid Telegram rate limit on rapid setWebhook calls
         local restore_ok=false
-        for attempt in 1 2 3; do
+        for _attempt in 1 2 3; do
             if curl -s -X POST "https://api.telegram.org/bot${TEST_BOT_TOKEN}/setWebhook" \
                 -d "url=${saved_webhook_url}" 2>/dev/null | grep -q '"ok":true'; then
                 restore_ok=true
@@ -2362,6 +2365,7 @@ print('OK')
 test_tindex_missing_file() {
     info "Testing indexer.py handles missing JSONL..."
     if result=$(python3 tools/indexer.py transcript --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2379,8 +2383,10 @@ print('OK')
 
 test_tindex_empty_file() {
     info "Testing indexer.py handles empty JSONL..."
-    local tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2396,7 +2402,8 @@ print('OK')
 
 test_tindex_basic_indexing() {
     info "Testing indexer.py indexes entries into SQLite..."
-    local tmp=$(mktemp /tmp/tindex-basic-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-basic-XXXX.jsonl)
     local db="/tmp/test-tindex-basic.db"
     python3 -c "
 import json
@@ -2410,6 +2417,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json, sqlite3
 d = json.load(sys.stdin)
@@ -2436,7 +2444,8 @@ print('OK')
 
 test_tindex_skips_noise() {
     info "Testing indexer.py skips noise entry types..."
-    local tmp=$(mktemp /tmp/tindex-noise-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-noise-XXXX.jsonl)
     local db="/tmp/test-tindex-noise.db"
     python3 -c "
 import json
@@ -2454,6 +2463,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2472,7 +2482,8 @@ print('OK')
 
 test_tindex_plain_text_extraction() {
     info "Testing indexer.py extracts searchable plain text..."
-    local tmp=$(mktemp /tmp/tindex-text-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-text-XXXX.jsonl)
     local db="/tmp/test-tindex-text.db"
     python3 -c "
 import json
@@ -2486,6 +2497,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    # shellcheck disable=SC2015
     python3 -c "
 import sqlite3
 db = sqlite3.connect('$db')
@@ -2501,7 +2513,8 @@ print('OK')
 
 test_tindex_incremental() {
     info "Testing indexer.py indexes only new bytes..."
-    local tmp=$(mktemp /tmp/tindex-incr-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-incr-XXXX.jsonl)
     local db="/tmp/test-tindex-incr.db"
     python3 -c "
 import json
@@ -2529,6 +2542,7 @@ with open('$tmp', 'a') as f:
 "
     # Re-index (incremental)
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2545,7 +2559,8 @@ print('OK')
 
 test_tindex_no_reindex_unchanged() {
     info "Testing indexer.py skips reindex when file unchanged..."
-    local tmp=$(mktemp /tmp/tindex-noop-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-noop-XXXX.jsonl)
     local db="/tmp/test-tindex-noop.db"
     python3 -c "
 import json
@@ -2553,14 +2568,12 @@ with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
     python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
-    # Get db mtime
-    local mtime1=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     sleep 1
     # Run again — should skip indexing
     python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
-    local mtime2=$(stat -c %Y "$db" 2>/dev/null || stat -f %m "$db" 2>/dev/null)
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2575,7 +2588,8 @@ print('OK')
 
 test_tindex_pagination() {
     info "Testing indexer.py pagination..."
-    local tmp=$(mktemp /tmp/tindex-page-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-page-XXXX.jsonl)
     local db="/tmp/test-tindex-page.db"
     python3 -c "
 import json
@@ -2586,6 +2600,7 @@ with open('$tmp', 'w') as f:
 "
     # Default (no --page) should be last page
     result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
+    # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2597,6 +2612,7 @@ print('OK1')
 " 2>/dev/null | grep -q "OK1" || { fail "Pagination default-last-page failed"; rm -f "$tmp" "$db"; return; }
     # Explicit page 1
     result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
+    # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2607,6 +2623,7 @@ print('OK2')
 " 2>/dev/null | grep -q "OK2" || { fail "Pagination page-1 failed"; rm -f "$tmp" "$db"; return; }
     # Page 2
     result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
+    # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2620,7 +2637,8 @@ print('OK3')
 
 test_tindex_fts5_search() {
     info "Testing indexer.py FTS5 search with BM25 ranking..."
-    local tmp=$(mktemp /tmp/tindex-search-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-search-XXXX.jsonl)
     local db="/tmp/test-tindex-search.db"
     python3 -c "
 import json
@@ -2634,6 +2652,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2651,7 +2670,8 @@ print('OK')
 
 test_tindex_search_no_results() {
     info "Testing indexer.py search with no matches..."
-    local tmp=$(mktemp /tmp/tindex-nores-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-nores-XXXX.jsonl)
     local db="/tmp/test-tindex-nores.db"
     python3 -c "
 import json
@@ -2659,6 +2679,7 @@ with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2674,7 +2695,8 @@ print('OK')
 
 test_tindex_filter_prompts() {
     info "Testing indexer.py prompts filter..."
-    local tmp=$(mktemp /tmp/tindex-filter-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-filter-XXXX.jsonl)
     local db="/tmp/test-tindex-filter.db"
     python3 -c "
 import json
@@ -2691,6 +2713,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -2708,7 +2731,8 @@ print('OK')
 
 test_tindex_stats() {
     info "Testing indexer.py stats query..."
-    local tmp=$(mktemp /tmp/tindex-stats-XXXX.jsonl)
+    local tmp
+    tmp=$(mktemp /tmp/tindex-stats-XXXX.jsonl)
     local db="/tmp/test-tindex-stats.db"
     python3 -c "
 import json
@@ -2723,6 +2747,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
+        # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -3513,7 +3538,7 @@ test_incoming_document_e2e() {
     local inbox_dir="/tmp/claudecode-telegram/docrecv/inbox"
     if ls "$inbox_dir"/*.txt 2>/dev/null; then
         success "Incoming document downloaded to inbox"
-        ls -la "$inbox_dir"/ 2>/dev/null | head -3
+        find "$inbox_dir"/ -maxdepth 1 -printf "%M %s %f\n" 2>/dev/null | head -3
     else
         # Check bridge log for download attempt
         if grep -q "Downloaded file" "$BRIDGE_LOG" 2>/dev/null; then
@@ -3594,7 +3619,7 @@ PYEOF
     local inbox_dir="$TEST_SESSION_DIR/imgrecv/inbox"
     if ls "$inbox_dir"/*.png 2>/dev/null || ls "$inbox_dir"/*.jpg 2>/dev/null; then
         success "Incoming image downloaded to inbox"
-        ls -la "$inbox_dir"/ 2>/dev/null | head -3
+        find "$inbox_dir"/ -maxdepth 1 -printf "%M %s %f\n" 2>/dev/null | head -3
     else
         # Check bridge log for download attempt
         if grep -q "Downloaded file" "$BRIDGE_LOG" 2>/dev/null; then
@@ -8153,7 +8178,8 @@ test_hook_env_validation() {
     info "Testing hook fails when required env vars missing..."
 
     # Create a mock transcript for the hook
-    local tmp_transcript=$(mktemp)
+    local tmp_transcript
+    tmp_transcript=$(mktemp)
     echo '{"type":"user","message":{"content":[{"type":"text","text":"test"}]}}' > "$tmp_transcript"
     echo '{"type":"assistant","message":{"content":[{"type":"text","text":"response"}]}}' >> "$tmp_transcript"
 
@@ -8217,7 +8243,8 @@ test_hook_extract_from_transcript() {
     info "Testing hook extracts assistant response from JSONL transcript..."
 
     # Source only the extract function from the hook
-    local tmp_transcript=$(mktemp)
+    local tmp_transcript
+    tmp_transcript=$(mktemp)
 
     # Test 1: Single assistant response after user message
     echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}' > "$tmp_transcript"
@@ -8241,6 +8268,7 @@ test_hook_extract_from_transcript() {
 
     # Test 2: Multiple assistant messages after last user message
     echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"old question"}]}}' > "$tmp_transcript"
+    # shellcheck disable=SC2129
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old answer"}]}}' >> "$tmp_transcript"
     echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"new question"}]}}' >> "$tmp_transcript"
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first part"}]}}' >> "$tmp_transcript"
@@ -8285,6 +8313,7 @@ test_hook_extract_from_transcript() {
 
     # Test 5: Large file with metadata lines (simulates real transcript)
     echo '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"q"}]}}' > "$tmp_transcript"
+    # shellcheck disable=SC2129
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]}}' >> "$tmp_transcript"
     echo '{"type":"last-prompt"}' >> "$tmp_transcript"
     echo '{"type":"ai-title"}' >> "$tmp_transcript"
@@ -8318,7 +8347,7 @@ test_checkin_hook_env_validation() {
     done
 
     # Test 1: Missing TMUX_PREFIX - hook should exit silently
-    local result exit_code
+    local result
     result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
     if [[ -z "$result" ]]; then
         success "Checkin hook exits silently when TMUX_PREFIX missing"
@@ -18709,6 +18738,7 @@ send_direct_mode_message() {
         }'
 }
 
+# shellcheck disable=SC2329  # Invoked indirectly via test name
 send_direct_mode_reply() {
     local text="$1"
     local reply_text="$2"
@@ -19697,6 +19727,7 @@ test_checkin_endpoint() {
     local result
     result=$(curl -s "http://localhost:$PORT/checkin")
 
+    # shellcheck disable=SC2181
     if [[ $? -eq 0 ]] && [[ -n "$result" ]]; then
         success "/checkin endpoint returns content"
     else
@@ -19706,6 +19737,7 @@ test_checkin_endpoint() {
 
     # Test with worker name parameter
     result=$(curl -s "http://localhost:$PORT/checkin?name=testworker")
+    # shellcheck disable=SC2181
     if [[ $? -eq 0 ]] && [[ -n "$result" ]]; then
         success "/checkin?name=testworker returns personalized content"
     else
@@ -19842,6 +19874,7 @@ test_health_workers_endpoint() {
     local result
     result=$(curl -s "http://localhost:$PORT/health/workers")
 
+    # shellcheck disable=SC2181
     if [[ $? -eq 0 ]] && echo "$result" | python3 -c "import sys, json; d = json.load(sys.stdin); assert 'workers' in d" 2>/dev/null; then
         success "/health/workers returns JSON with workers key"
     else
@@ -19855,6 +19888,7 @@ test_machines_endpoint() {
     local result
     result=$(curl -s "http://localhost:$PORT/machines")
 
+    # shellcheck disable=SC2181
     if [[ $? -eq 0 ]] && echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -23031,6 +23065,7 @@ run_forge_go_tests() {
 
     ((tests_run++)) || true
     info "Running: cd experiments/forge && go test $go_test_flags ./..."
+    # shellcheck disable=SC2086  # Intentional word splitting for go test flags
     if (cd "$SCRIPT_DIR/experiments/forge" && go test $go_test_flags ./... 2>&1); then
         success "Forge Go tests passed"
     else

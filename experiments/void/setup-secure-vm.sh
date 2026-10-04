@@ -4707,6 +4707,7 @@ cmd_build() {
   if ((DRY_RUN)); then
     printf "[dry-run] patch libkrunfw Makefile: remove explicit \$(MAKEFLAGS)\n" >&2
   else
+    # shellcheck disable=SC2016  # $(MAKE) is a Makefile variable, not shell
     sed -i 's/\$(MAKE) \$(MAKEFLAGS)/\$(MAKE)/g' "${libkrunfw_dir}/Makefile"
   fi
 
@@ -5284,7 +5285,7 @@ cmd_grant() {
     else
       # Scan for any IPC dirs
       local d
-      for d in "${RUN_ROOT}"/vm-ipc.${VM_NAME}.*; do
+      for d in "${RUN_ROOT}/vm-ipc.${VM_NAME}."*; do
         [[ -d "$d" ]] || continue
         run chmod 0770 "$d" "$d/requests" "$d/responses"
         if command_exists setfacl; then
@@ -5363,8 +5364,8 @@ cmd_status() {
   if [[ -n "$ipc_dir" && -d "$ipc_dir" ]]; then
     echo "=== IPC ==="
     echo "ipc_dir=${ipc_dir}"
-    echo "pending_requests=$(ls "${ipc_dir}/requests/"*.json 2>/dev/null | wc -l)"
-    echo "stored_responses=$(ls "${ipc_dir}/responses/"*.json 2>/dev/null | wc -l)"
+    echo "pending_requests=$(find "${ipc_dir}/requests/" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
+    echo "stored_responses=$(find "${ipc_dir}/responses/" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
     if [[ -f "${ipc_dir}/ipc.key" ]]; then
       echo "ipc_key=present ($(wc -c < "${ipc_dir}/ipc.key" 2>/dev/null || echo 0) bytes)"
     else

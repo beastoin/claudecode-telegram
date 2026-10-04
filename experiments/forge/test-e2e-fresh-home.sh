@@ -181,7 +181,7 @@ PYTHONUNBUFFERED=1 \
 python3 "$BRIDGE_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
 BRIDGE_PID=$!
 
-for i in $(seq 1 40); do
+for _i in $(seq 1 40); do
     if curl -sf "http://127.0.0.1:$BRIDGE_PORT/" >/dev/null 2>&1; then
         break
     fi
@@ -196,7 +196,7 @@ echo "=== Step 5: Run worker (empty HOME) ==="
 FRESH_HOME="$TEST_DIR/fresh-home"
 mkdir -p "$FRESH_HOME"
 # Verify it's truly empty
-assert "HOME starts empty" test "$(ls -A "$FRESH_HOME" | wc -l)" -eq 0
+assert "HOME starts empty" test "$(find "$FRESH_HOME" -maxdepth 1 -mindepth 1 | wc -l)" -eq 0
 
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 

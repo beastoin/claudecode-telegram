@@ -24,7 +24,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Sequence
 from urllib.request import Request
 
 import bridge
@@ -37,7 +38,7 @@ import bridge
 class FakeClock:
     """Deterministic clock.  Starts at a fixed epoch, advance manually."""
 
-    def __init__(self, start: float = 1_700_000_000.0):
+    def __init__(self, start: float = 1_700_000_000.0) -> None:
         self.now = start
 
     def time(self) -> float:
@@ -53,17 +54,22 @@ class FakeClock:
 class FakeHTTPResponse:
     """Minimal urllib response stand-in."""
 
-    def __init__(self, body: bytes = b'{"ok":true,"result":{}}', status: int = 200):
+    def __init__(self, body: bytes = b'{"ok":true,"result":{}}', status: int = 200) -> None:
         self._body = body
         self.status = status
 
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self):
+    def __enter__(self) -> FakeHTTPResponse:
         return self
 
-    def __exit__(self, *a):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         pass
 
 
@@ -78,7 +84,7 @@ class CapturedRequest:
 class FakeTelegram:
     """Captures urlopen calls instead of hitting the Telegram API."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.requests: list[CapturedRequest] = []
         self.response_body = b'{"ok":true,"result":{}}'
         self.response_status = 200
@@ -110,6 +116,35 @@ class FakeTelegram:
         self.requests.clear()
 
 
+class FakePopen:
+    """Minimal subprocess.Popen stand-in.  Always reports success."""
+
+    pid: int = 99999
+    returncode: int = 0
+
+    def __init__(self) -> None:
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO(b"")
+        self.stderr = io.BytesIO(b"")
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def communicate(
+        self, input: bytes | None = None, timeout: float | None = None,
+    ) -> tuple[bytes, bytes]:
+        return b"", b""
+
+    def kill(self) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+
 class FakeSubprocessRunner:
     """Captures subprocess.run / Popen calls.
 
@@ -117,15 +152,15 @@ class FakeSubprocessRunner:
     Register custom responses with `stub(args_prefix, result)`.
     """
 
-    def __init__(self):
-        self.calls: list[dict] = []
-        self._stubs: list[tuple[list[str], subprocess.CompletedProcess]] = []
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._stubs: list[tuple[list[str], subprocess.CompletedProcess[bytes]]] = []
 
-    def stub(self, args_prefix: list[str], result: subprocess.CompletedProcess) -> None:
+    def stub(self, args_prefix: list[str], result: subprocess.CompletedProcess[bytes]) -> None:
         """Register a canned response for calls whose args start with *args_prefix*."""
         self._stubs.append((args_prefix, result))
 
-    def run(self, args, **kwargs) -> subprocess.CompletedProcess:
+    def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         self.calls.append({"args": args, "kwargs": kwargs})
         # Check stubs (most-recently-added wins)
         for prefix, result in reversed(self._stubs):
@@ -133,21 +168,8 @@ class FakeSubprocessRunner:
                 return result
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
-    def popen(self, args, **kwargs):
+    def popen(self, args: Sequence[str], **kwargs: object) -> FakePopen:
         self.calls.append({"args": args, "kwargs": kwargs, "popen": True})
-
-        class FakePopen:
-            pid = 99999
-            returncode = 0
-            stdin = io.BytesIO()
-            stdout = io.BytesIO(b"")
-            stderr = io.BytesIO(b"")
-            def poll(self): return 0
-            def wait(self, timeout=None): return 0
-            def communicate(self, input=None, timeout=None): return b"", b""
-            def kill(self): pass
-            def terminate(self): pass
-
         return FakePopen()
 
 
@@ -197,7 +219,7 @@ class BridgeHarness:
             assert bridge.get_claude_session_cwd("alice") == "/home/claude/project-a"
     """
 
-    def __init__(self, *, tmux_prefix: str = "claude-test-"):
+    def __init__(self, *, tmux_prefix: str = "claude-test-") -> None:
         self.root = Path(tempfile.mkdtemp(prefix="bridge-test-"))
         self.sessions_dir = self.root / "sessions"
         self.node_dir = self.root / "node"
@@ -223,7 +245,12 @@ class BridgeHarness:
         self._patch("_subprocess_runner", self.subprocess)
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         for attr, value in reversed(list(self._saved.items())):
             setattr(bridge, attr, value)
         shutil.rmtree(self.root, ignore_errors=True)
