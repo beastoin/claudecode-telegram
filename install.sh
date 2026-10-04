@@ -2,8 +2,8 @@
 #
 # install.sh — One-command setup for claudecode-telegram
 #
-# Installs system dependencies, clones the repo, then delegates to
-# bridge.sh setup for token, hooks, and readiness checks.
+# Downloads a release tarball, installs system dependencies, then delegates
+# to bridge.sh setup for token, hooks, and readiness checks.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/beastoin/claudecode-telegram/main/install.sh | bash
@@ -16,6 +16,7 @@ set -euo pipefail
 
 readonly GREEN='\033[0;32m' RED='\033[0;31m' YELLOW='\033[0;33m'
 readonly BOLD='\033[1m' DIM='\033[2m' NC='\033[0m'
+readonly REPO="beastoin/claudecode-telegram"
 
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 fail() { echo -e "${RED}✗${NC} $*" >&2; }
@@ -120,7 +121,6 @@ main() {
 
   install_pkg tmux
   install_pkg node node nodejs
-  install_pkg git
 
   # Claude CLI
   if ! command -v claude &>/dev/null; then
@@ -133,25 +133,49 @@ main() {
 
   echo ""
 
-  # ── Step 2: Clone or update repo ─────────────────────────────────────────
+  # ── Step 2: Download release ─────────────────────────────────────────────
   echo -e "${BOLD}Step 2/2${NC} — Getting claudecode-telegram"
   echo ""
 
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    ok "Already cloned at $INSTALL_DIR"
-    cd "$INSTALL_DIR"
-    if git pull --ff-only origin main 2>/dev/null; then
-      ok "Updated to latest"
+  if [[ -f "$INSTALL_DIR/bridge.sh" ]]; then
+    # Already installed — update in place
+    if [[ -d "$INSTALL_DIR/.git" ]] && command -v git &>/dev/null; then
+      cd "$INSTALL_DIR"
+      if git pull --ff-only origin main 2>/dev/null; then
+        ok "Updated via git pull"
+      else
+        warn "Could not pull latest (working changes?)"
+      fi
     else
-      warn "Could not pull latest (working changes?)"
+      ok "Using existing install at $INSTALL_DIR"
+      cd "$INSTALL_DIR"
     fi
-  elif [[ -f "$INSTALL_DIR/bridge.sh" ]]; then
-    ok "Using existing directory: $INSTALL_DIR"
-    cd "$INSTALL_DIR"
   else
-    info "git clone https://github.com/beastoin/claudecode-telegram.git $INSTALL_DIR"
-    git clone https://github.com/beastoin/claudecode-telegram.git "$INSTALL_DIR"
-    ok "Cloned to $INSTALL_DIR"
+    # Fresh install — download tarball (no git required)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+    local tarball_url="https://github.com/${REPO}/archive/refs/heads/main.tar.gz"
+    info "Downloading from $tarball_url"
+
+    local n=0
+    until [[ "$n" -ge 3 ]]; do
+      curl -C - --retry 3 -sfLo "$tmp_dir/release.tar.gz" "$tarball_url" && break
+      n=$((n + 1))
+      sleep 5
+    done
+
+    if [[ ! -f "$tmp_dir/release.tar.gz" ]]; then
+      fail "Download failed after 3 attempts"
+      exit 1
+    fi
+
+    tar -xf "$tmp_dir/release.tar.gz" -C "$tmp_dir"
+    mkdir -p "$INSTALL_DIR"
+    # GitHub archives extract to repo-branch/ — move contents to install dir
+    mv "$tmp_dir"/claudecode-telegram-main/* "$INSTALL_DIR/"
+    ok "Downloaded to $INSTALL_DIR"
     cd "$INSTALL_DIR"
   fi
 
