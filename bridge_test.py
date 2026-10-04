@@ -1,7 +1,7 @@
 """Bridge test harness — ready objects for behavior tests.
 
 Usage:
-    from bridge_testkit import BridgeHarness
+    from bridge_test import BridgeHarness
     import bridge
 
     def test_something():
