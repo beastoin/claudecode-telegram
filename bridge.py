@@ -4108,6 +4108,54 @@ class MediaGroupState:
 media_groups = MediaGroupState()
 _MEDIA_GROUP_WAIT: float = 0.8  # seconds to wait for all items in a group
 
+
+# ── Voice transcript confirmation ─────────────────────────────
+# When the manager sends a voice message, we transcribe it and show a preview
+# with Send/Edit buttons instead of routing immediately.
+
+class PendingVoiceTranscript(TypedDict):
+    """A voice transcript waiting for manager confirmation."""
+    transcript: str
+    target_worker: str
+    chat_id: int
+    caption: str          # original caption (if any)
+    created: float        # time.time() for TTL
+
+_VOICE_CONFIRM_TTL: float = 300.0  # 5 minutes
+
+# msg_id → PendingVoiceTranscript
+_pending_voice: dict[int, PendingVoiceTranscript] = {}
+_pending_voice_lock = threading.Lock()
+
+
+def _store_pending_voice(msg_id: int, transcript: str, target_worker: str,
+                         chat_id: int, caption: str) -> None:
+    """Store a voice transcript pending manager confirmation."""
+    with _pending_voice_lock:
+        # Expire old entries
+        now = _clock.time()
+        expired = [k for k, v in _pending_voice.items()
+                   if now - v["created"] > _VOICE_CONFIRM_TTL]
+        for k in expired:
+            del _pending_voice[k]
+        _pending_voice[msg_id] = {
+            "transcript": transcript,
+            "target_worker": target_worker,
+            "chat_id": chat_id,
+            "caption": caption,
+            "created": now,
+        }
+
+
+def _pop_pending_voice(msg_id: int) -> PendingVoiceTranscript | None:
+    """Remove and return a pending voice transcript, or None if expired/missing."""
+    with _pending_voice_lock:
+        entry = _pending_voice.pop(msg_id, None)
+        if entry and _clock.time() - entry["created"] > _VOICE_CONFIRM_TTL:
+            return None  # Expired
+        return entry
+
+
 # ── Typed token stores ───────────────────────────────────────
 
 @dataclass
@@ -13076,10 +13124,10 @@ class CommandRouter:
             duration = incoming.voice.get("duration", 0)
             transcript = transcribe_voice(local_path)  # type: ignore[arg-type]
             if transcript:
-                self.reply(chat_id, f"🎤 _{transcript}_")
-                routed = f"{text}\n\n{transcript}" if text else transcript
-                self._route_media_message(routed, text or transcript, chat_id, msg_id, msg=msg)
-                return None  # Already handled
+                target = state.active or ""
+                if chat_id is not None:
+                    self._send_voice_preview(chat_id, transcript, target, text or "")
+                return None  # Handled — waiting for manager confirmation
             return f"Manager sent voice message: ({duration}s)\nPath: `{local_path}`"
 
         if incoming.video:
@@ -13096,6 +13144,144 @@ class CommandRouter:
             return f"Manager sent sticker: {emoji}\nPath: {local_path}"
 
         return f"Manager sent media: {local_path}"
+
+    # ── Voice transcript confirmation ──────────────────────────────────
+
+    def _send_voice_preview(self, chat_id: ChatId, transcript: str,
+                            target_worker: str, caption: str) -> None:
+        """Send a voice transcript preview with Send/Edit buttons."""
+        preview_text = f"🎤 {transcript}"
+        if target_worker:
+            preview_text += f"\n\n→ {target_worker}"
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ Send", "callback_data": f"voice_send"},
+                {"text": "✏️ Edit", "callback_data": f"voice_edit"},
+                {"text": "❌", "callback_data": f"voice_drop"},
+            ]]
+        }
+        result = telegram_api("sendMessage", {
+            "chat_id": chat_id,
+            "text": preview_text,
+            "reply_markup": keyboard,
+        })
+        if result and result.get("ok"):
+            sent_msg = cast(dict[str, object], result.get("result", {}))
+            sent_msg_id = _int_field(sent_msg, "message_id")
+            if sent_msg_id:
+                _store_pending_voice(
+                    sent_msg_id, transcript, target_worker,
+                    int(chat_id), caption,
+                )
+
+    def handle_callback_query(self, callback: TelegramCallbackQuery) -> None:
+        """Handle inline keyboard button presses (voice transcript confirmation)."""
+        cb_id = callback.get("id", "")
+        data = callback.get("data", "")
+        cb_msg = callback.get("message")
+        if not cb_msg:
+            telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
+            return
+
+        msg_id = cb_msg.get("message_id", 0)
+        chat_id = cb_msg.get("chat", {}).get("id")
+        if not chat_id:
+            telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
+            return
+
+        pending = _pop_pending_voice(msg_id)
+
+        if data == "voice_send":
+            if not pending:
+                telegram_api("answerCallbackQuery", {
+                    "callback_query_id": cb_id,
+                    "text": "Expired — send a new voice message.",
+                })
+                return
+            # Route transcript to the worker
+            transcript = pending["transcript"]
+            target = pending["target_worker"]
+            caption = pending["caption"]
+            routed = f"{caption}\n\n{transcript}" if caption else transcript
+            if target:
+                self.route_message(target, routed, chat_id, None, one_off=False)
+            # Update the message to show it was sent
+            telegram_api("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": f"🎤 {transcript}\n\n✅ Sent to {target}",
+            })
+            telegram_api("answerCallbackQuery", {
+                "callback_query_id": cb_id,
+                "text": f"Sent to {target}",
+            })
+
+        elif data == "voice_edit":
+            if not pending:
+                telegram_api("answerCallbackQuery", {
+                    "callback_query_id": cb_id,
+                    "text": "Expired — send a new voice message.",
+                })
+                return
+            # Put it back so the reply can find it
+            _store_pending_voice(
+                msg_id, pending["transcript"], pending["target_worker"],
+                pending["chat_id"], pending["caption"],
+            )
+            # Update message to prompt for edit
+            telegram_api("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": f"🎤 {pending['transcript']}\n\n✏️ Reply to this message with your edit.",
+            })
+            telegram_api("answerCallbackQuery", {
+                "callback_query_id": cb_id,
+            })
+
+        elif data == "voice_drop":
+            # Remove keyboard, mark as dropped
+            drop_text = pending["transcript"] if pending else "(expired)"
+            telegram_api("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": f"🎤 {drop_text}\n\n❌ Dropped",
+            })
+            telegram_api("answerCallbackQuery", {
+                "callback_query_id": cb_id,
+                "text": "Dropped",
+            })
+
+        else:
+            telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
+
+    def _check_voice_reply(self, msg: TelegramMessageDict, text: str,
+                           chat_id: ChatId) -> bool:
+        """Check if this message is a reply to a pending voice transcript.
+
+        If so, route the edited text to the target worker and return True.
+        """
+        reply_to = msg.get("reply_to_message")
+        if not reply_to:
+            return False
+        reply_msg_id = reply_to.get("message_id", 0)
+        if not reply_msg_id:
+            return False
+        pending = _pop_pending_voice(reply_msg_id)
+        if not pending:
+            return False
+        # The manager replied with edited text — route it to the worker
+        target = pending["target_worker"]
+        caption = pending["caption"]
+        routed = f"{caption}\n\n{text}" if caption else text
+        if target:
+            self.route_message(target, routed, chat_id, None, one_off=False)
+        # Update the original preview message
+        telegram_api("editMessageText", {
+            "chat_id": int(chat_id),
+            "message_id": reply_msg_id,
+            "text": f"🎤 {pending['transcript']}\n✏️ {text}\n\n✅ Sent to {target}",
+        })
+        return True
 
     def _route_text_message(self, incoming: 'IncomingMessage') -> None:
         """Route a text-only message: commands, @mentions, reply-to, or active worker."""
@@ -13119,6 +13305,10 @@ class CommandRouter:
             return
 
         save_last_chat_id(chat_id)
+
+        # Check if this is a reply to a pending voice transcript (edit flow)
+        if chat_id is not None and self._check_voice_reply(msg, text, chat_id):
+            return
 
         if text.startswith("/"):
             if self.handle_command(text, chat_id, msg_id):
@@ -16437,7 +16627,19 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             msg = update.get("message", {})
             text = msg.get("text", "") or msg.get("caption", "")
             _log(_LOG_INFO, "webhook", f"update_id={update.get('update_id')}, types={update_types}, text={repr(text[:50]) if text else '(none)'}")
-            if "message" in update:
+            if "callback_query" in update:
+                cb = update["callback_query"]
+                def _safe_callback(callback: TelegramCallbackQuery) -> None:
+                    try:
+                        command_router.handle_callback_query(callback)
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                        _log(_LOG_ERROR, "webhook", f"callback_query CRASH: {exc}", exc=exc)
+                threading.Thread(
+                    target=_safe_callback,
+                    args=(cb,),
+                    daemon=True,
+                ).start()
+            elif "message" in update:
                 def _safe_handle(upd: TelegramUpdate) -> None:
                     """Handle a Telegram update in a thread, logging errors instead of crashing."""
                     try:
