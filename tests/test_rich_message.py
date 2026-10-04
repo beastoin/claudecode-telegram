@@ -285,24 +285,6 @@ class TestRichMessageEdgeCases:
         assert "<b>" in html_text
         assert "bold text" in html_text
 
-    def test_speak_tag_extracted_before_rich_send(self, monkeypatch):
-        """[[speak:...]] tags are removed before sending to Telegram."""
-        import bridge
-
-        mock_transport = MagicMock()
-        mock_transport.name = "telegram"
-        mock_transport.send_rich_text.return_value = {"ok": True, "result": {"message_id": 42}}
-        monkeypatch.setattr(bridge, "transport", mock_transport)
-        monkeypatch.setattr(bridge, "TTS_ENDPOINT", "")
-
-        bridge.send_response_to_telegram("lee", "hello [[speak:custom voice]]", chat_id=123)
-
-        sent_md = mock_transport.send_rich_text.call_args[0][1]
-        assert "[[speak:" not in sent_md
-        assert "hello" in sent_md
-
-
-
 class TestPipeTableToHtml:
     """Test _pipe_tables_to_html conversion."""
 

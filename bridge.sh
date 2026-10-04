@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.45.3"
+VERSION="0.46.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -651,7 +651,7 @@ cmd_run() {
     log ""
     log "$(bold "Ready!") Send /hire <name> to your bot to create a Claude instance"
     log ""
-    log "$(bold "Commands:") /hire /focus /team /progress /pause /restart /end"
+    log "$(bold "Commands:") /hire /focus /team /restart /end"
     log "$(dim "Ctrl+C to stop")"
     if [[ -n "$tunnel_pid" ]]; then
         log "$(dim "Tunnel watchdog: enabled (auto-restart on failure)")"
@@ -1857,8 +1857,6 @@ TELEGRAM COMMANDS
   /focus <name>     Switch active Claude
   /team             List all instances
   /end <name>       Stop and remove instance
-  /progress         Detailed status of focused worker
-  /pause            Interrupt active Claude
   /restart          Restart worker (--clean for fresh start)
   @name <msg>       One-off message to specific Claude
   <message>         Send to active Claude

@@ -107,22 +107,6 @@ def test_team_output_includes_backend():
     assert "backend=claude" in text, f"expected claude backend in team output: {text}"
 
 
-def test_progress_output_includes_backend():
-    from bridge import format_progress_lines
-
-    lines = format_progress_lines(
-        name="alice",
-        pending=False,
-        backend="codex",
-        online=True,
-        ready=True,
-        mode="tmux",
-    )
-
-    text = "\n".join(lines)
-    assert "codex" in text, f"expected backend name in progress output: {text}"
-
-
 def test_worker_send_uses_backend():
     import bridge
 

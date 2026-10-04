@@ -1,5 +1,14 @@
 ## Changelog
 
+### v0.46.0 - Remove unused commands: /pause, /progress, /channel, /voice
+
+**Removed:**
+- `/pause` command — handler, dispatch, COMMANDS entry, RESERVED_NAMES entry.
+- `/progress [name]` command — handler, `format_progress_lines()` helper, dispatch, COMMANDS entry, RESERVED_NAMES entry.
+- `/channel` and `/ch` Telegram commands — the command handler and dispatch entries. Channel infrastructure (ChannelStore, channel_new, channel_create_id, HTTP /channels endpoints) stays — used by /relay.
+- `/voice on|off` command — handler, dispatch, COMMANDS entry, `tts_enabled` state variable, `synthesize_speech()`, `_send_response_tts()`, auto-TTS in `send_response_to_telegram()`, `[[speak:...]]` tag parsing, TTS_ENDPOINT/TTS_VOICE/TTS_TIMEOUT/TTS_CHUNKED_THRESHOLD constants. Voice transcription (STT) and `send_voice()` stay — used for incoming voice messages.
+- All related tests from both pytest and test.sh (~730 lines of tests removed).
+
 ### v0.45.3 - Remove /rewind team, tools cleanup
 
 **Removed:**

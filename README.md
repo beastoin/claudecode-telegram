@@ -44,14 +44,10 @@ That's it. The installer clones the repo, installs Python 3.12+, tmux, Node.js, 
 | `/focus <name>` | Set which worker gets messages |
 | `/team` | List all workers with health state |
 | `/end <name>` | Remove a worker |
-| `/pause` | Interrupt focused worker |
 | `/restart [name]` | Restart worker (resume context) |
 | `/teleport <name> <host>` | Move worker to another machine |
 | `/teleback <name>` | Bring teleported worker back |
-| `/progress [name]` | Check worker status |
-| `/channel create <label> <members>` | Create a worker channel |
 | `/settings` | Show bridge configuration |
-| `/voice on\|off` | Toggle voice replies |
 | `/pilot <name>` | Toggle web terminal viewer |
 | `/relay <worker>` | Open public channel |
 | `/rewind <name>` | Open transcript viewer |
@@ -98,7 +94,6 @@ claudecode-telegram/
 
 | Doc | Purpose |
 |-----|---------|
-| [SETUP.md](SETUP.md) | Full installation and troubleshooting guide |
 | [SPEC.md](SPEC.md) | System design and architecture specs |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 | [AGENTS.md](AGENTS.md) | Agent workflow, message flow map, and operational learnings |

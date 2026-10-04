@@ -873,15 +873,9 @@ MACHINES_CONFIG_FILE = Path(os.environ.get(
 ))
 PERSISTENCE_NOTE = "They'll stay on your team."
 
-# Voice mode: STT (speech-to-text) and TTS (text-to-speech) endpoints
-# STT: transcribe incoming voice messages so workers can read them
-# TTS: generate voice from worker text responses (explicit [[speak]] tag)
+# Voice mode: STT (speech-to-text) — transcribe incoming voice messages so workers can read them
 STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
-TTS_ENDPOINT = os.environ.get("TTS_ENDPOINT", "http://100.126.187.125:10111/synthesize")
-TTS_VOICE = os.environ.get("TTS_VOICE", "Serena")
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))  # seconds, fail-open
-TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "60"))  # seconds, TTS runs in background thread
-TTS_CHUNKED_THRESHOLD = 200  # chars: above this, use /synthesize/chunked endpoint
 
 # API endpoint registry — used by index, 404 handler, and worker instructions.
 # Update this when adding new endpoints.
@@ -3578,7 +3572,6 @@ class _StateSnapshot(NamedTuple):
     """Immutable snapshot of BridgeRuntimeState for test save/restore."""
     active: str | None
     startup_notified: bool
-    tts_enabled: bool
 
 
 class BridgeRuntimeState:
@@ -3588,10 +3581,9 @@ class BridgeRuntimeState:
     for proper type narrowing.
     """
     def __init__(self) -> None:
-        """Initialize bridge runtime state (focus, TTS, admin, notifications)."""
+        """Initialize bridge runtime state (focus, admin, notifications)."""
         self.active: str | None = None
         self.startup_notified: bool = False
-        self.tts_enabled: bool = False
         self.mention: MentionTracker = MentionTracker()
 
     def snapshot(self) -> _StateSnapshot:
@@ -3599,14 +3591,12 @@ class BridgeRuntimeState:
         return _StateSnapshot(
             active=self.active,
             startup_notified=self.startup_notified,
-            tts_enabled=self.tts_enabled,
         )
 
     def restore(self, snap: _StateSnapshot) -> None:
         """Restore state from a snapshot (used in tests)."""
         self.active = snap.active
         self.startup_notified = snap.startup_notified
-        self.tts_enabled = snap.tts_enabled
 
 
 state = BridgeRuntimeState()
@@ -4175,11 +4165,8 @@ BOT_COMMANDS = [
     # Daily commands (frequency-first, natural workflow order)
     {"command": "team", "description": "Show your team"},
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
-    {"command": "progress", "description": "Check focused worker status"},
-    {"command": "pause", "description": "Pause focused worker"},
     {"command": "restart", "description": "Restart worker (--clean for fresh)"},
     # Occasional
-    {"command": "voice", "description": "Toggle voice replies: /voice on|off"},
     {"command": "settings", "description": "Show settings"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     {"command": "relay", "description": "Open public channel: /relay <worker>"},
@@ -4409,7 +4396,7 @@ def read_checkin_note() -> str:
 # Reserved names that cannot be used as worker names (would clash with commands)
 RESERVED_NAMES = {
     # Bridge commands
-    "team", "focus", "progress", "pause", "restart", "settings", "hire", "end",
+    "team", "focus", "restart", "settings", "hire", "end",
     # Special
     "all", "cancel", "start", "help",
 }
@@ -5370,66 +5357,6 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             return None
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"STT error (fail-open): {e}")
-        return None
-
-
-def synthesize_speech(text: str, voice: str | None = None, language: str = "en") -> str | None:
-    """Synthesize speech from text via TTS endpoint. Returns OGG file path or None.
-
-    Fail-open: any error returns None so caller can skip voice and send text only.
-    """
-    if not TTS_ENDPOINT:
-        return None
-    if not text or not text.strip():
-        return None
-    if voice is None:
-        voice = TTS_VOICE
-
-    try:
-        # Strip HTML tags for clean speech
-        clean = re.sub(r'<[^>]+>', '', text)
-        clean = clean.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-        clean = clean.strip()
-        if not clean:
-            return None
-
-        payload = json.dumps({
-            "text": clean[:5000],  # API limit
-            "voice": voice,
-            "language": language,
-            "format": "ogg",
-        }).encode()
-
-        # Use chunked endpoint for longer text (splits into sentences server-side)
-        endpoint = TTS_ENDPOINT
-        if len(clean) > TTS_CHUNKED_THRESHOLD and TTS_ENDPOINT:
-            chunked_url = TTS_ENDPOINT.rstrip('/') + '/chunked'
-            # Only use chunked if it looks like /synthesize base
-            if '/synthesize' in TTS_ENDPOINT:
-                endpoint = chunked_url
-
-        req = urllib.request.Request(
-            endpoint,
-            data=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        with _urlopen(req, timeout=TTS_TIMEOUT) as r:
-            audio_data = r.read()
-            if not audio_data:
-                return None
-
-            # Write to temp file
-            tmp_path = Path(tempfile.gettempdir()) / f"tts_{uuid.uuid4().hex}.ogg"
-            tmp_path.write_bytes(audio_data)
-            tmp_path.chmod(0o600)
-
-            duration = r.headers.get("X-Audio-Duration", "?")
-            proc_time = r.headers.get("X-Processing-Time", "?")
-            mode = "chunked" if endpoint != TTS_ENDPOINT else "single"
-            _log(_LOG_INFO, "tts", f"TTS synthesized ({mode}): {len(clean)} chars -> {duration}s audio in {proc_time}s")
-            return str(tmp_path)
-    except (urllib.error.URLError, TimeoutError, TypeError, OSError, KeyError) as e:
-        _log(_LOG_ERROR, "bridge", f"TTS error (fail-open): {e}")
         return None
 
 
@@ -9133,60 +9060,6 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
     return False
 
 
-def format_progress_lines(
-    name: str,
-    pending: bool,
-    backend: str,
-    online: bool,
-    ready: bool,
-    mode: str,
-    resume_line: str | None = None,
-    continuity_line: str | None = None,
-    needs_attention: str | None = None,
-    activity: str | None = None,
-    context_pct: str | None = None,
-    question_details: QuestionDetails | None = None
-) -> list[str]:
-    """Format /progress response lines (manager-friendly)."""
-    status = []
-
-    # Header with name + context%
-    watchdog_status = _format_watchdog_status(name)
-    ctx = f" · context {context_pct}" if context_pct else ""
-    status.append(f"{name.capitalize()} ({backend}) — {watchdog_status}{ctx}")
-
-    # Activity line (what they're doing right now)
-    if activity:
-        status.append(f"Doing: {activity}")
-    elif not online:
-        status.append("Doing: Offline")
-    elif pending:
-        status.append("Doing: Working on a request")
-
-    # Rich question details (when at interactive prompt)
-    if question_details and question_details.get("options"):
-        opts = question_details["options"]
-        if question_details.get("header"):
-            status.append(f"\n{question_details['header']}")
-        for o in opts:
-            marker = "\u2794 " if o.get("selected") else "  "
-            status.append(f"{marker}{o['num']}. {o['label']}")
-        max_num = max(o["num"] for o in opts)
-        status.append(f"\nReply 1-{max_num} to pick, \"skip\" to cancel")
-
-    # Blockers / attention
-    if needs_attention:
-        status.append(f"Blocker: {needs_attention}")
-
-    # Session info (non-interactive backends only)
-    if continuity_line:
-        status.append(continuity_line)
-    elif resume_line:
-        status.append(resume_line)
-
-    return status
-
-
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     """Get backend for a worker.
 
@@ -10376,10 +10249,10 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
     return result
 
 
-def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]], str | None]:
-    """Parse media tags and speak tag from response text.
+def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
+    """Parse media tags from response text.
 
-    Returns (clean_text, images, files, speak_text).
+    Returns (clean_text, images, files).
     For teleported workers, skips local file existence checks during parsing.
     """
     host = get_worker_host(name)
@@ -10391,21 +10264,11 @@ def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | N
         clean_text, images = parse_image_tags(text)
         clean_text, files = parse_file_tags(clean_text)
 
-    # Extract explicit [[speak:custom text]] tag
-    speak_text: str | None = None
-    speak_match = re.search(r'\[\[speak(?::([^\]]*))?\]\]', clean_text)
-    if speak_match:
-        custom = speak_match.group(1)
-        clean_text = clean_text[:speak_match.start()] + clean_text[speak_match.end():]
-        clean_text = clean_text.strip()
-        if custom is not None and custom.strip():
-            speak_text = custom.strip()
-
     # Fetch remote files to local temp paths for teleported workers
     images = _localize_media(name, images)
     files = _localize_media(name, files)
 
-    return clean_text, images, files, speak_text
+    return clean_text, images, files
 
 
 def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
@@ -10577,41 +10440,13 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
             transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
 
-def _send_response_tts(name: str, speak_text: str, chat_id: int) -> None:
-    """Synthesize TTS audio and send voice messages in a background thread."""
-    paragraphs = [p.strip() for p in speak_text.split('\n\n') if p.strip()]
-    if not paragraphs:
-        paragraphs = [speak_text]
-
-    def _tts_worker() -> None:
-        """Synthesize and send TTS voice messages for each paragraph."""
-        try:
-            for i, para in enumerate(paragraphs):
-                _log(_LOG_INFO, "tts", f"TTS starting: {len(para)} chars for {name} (part {i+1}/{len(paragraphs)})")
-                voice_path = synthesize_speech(para)
-                if voice_path:
-                    send_voice(chat_id, voice_path, caption=f"{name}:")
-                    try:
-                        os.unlink(voice_path)
-                    except OSError as exc:
-                        _log(_LOG_DEBUG, "cleanup:_tts_worker", f"{type(exc).__name__}: {exc}")
-        except OSError as e:
-            _log(_LOG_ERROR, "bridge", f"TTS thread error: {e}")
-
-    threading.Thread(target=_tts_worker, daemon=True).start()
-
-
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
-    """Send a worker response to Telegram — text, media, and TTS.
+    """Send a worker response to Telegram — text and media.
 
     Orchestrates: media parsing → text sending (rich/HTML/plain fallback) →
-    image/file delivery → optional TTS synthesis.
+    image/file delivery.
     """
-    clean_text, images, files, speak_text = _parse_response_media(name, text)
-
-    # Auto-TTS: use clean text when no explicit [[speak:...]] tag
-    if speak_text is None and TTS_ENDPOINT and state.tts_enabled:
-        speak_text = clean_text
+    clean_text, images, files = _parse_response_media(name, text)
 
     # Debug: log very short text (helps trace empty "name:" messages)
     if clean_text and len(clean_text.strip()) <= 5:
@@ -10622,10 +10457,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
 
     _send_response_media(name, images, files, chat_id)
-
-    # TTS: skip for messages >1000 chars
-    if speak_text is not None and speak_text and len(speak_text) <= 1000:
-        _send_response_tts(name, speak_text, chat_id)
 
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
@@ -12058,30 +11889,6 @@ class CommandRouter:
             self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
         return True
 
-    def cmd_pause(self, chat_id: ChatId) -> bool:
-        """Handle the /pause command — send Ctrl-C to a worker."""
-        if not state.active:
-            self.reply(chat_id, "No one assigned.")
-            return True
-
-        name = state.active
-        registered = self.workers.get_registered_sessions()
-        session = registered.get(name)
-        if session:
-            backend_name = get_worker_backend(name, session)
-            backend = get_backend(backend_name)
-            if not backend.is_interactive:
-                kill_adapter(name)
-                clear_pending(name)
-                self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
-                return True
-            host = get_worker_host(name)
-            tmux_send_escape(session["tmux"], host=host)
-            clear_pending(name)
-
-        self.reply(chat_id, f"{name.capitalize()} is paused. I'll pick up where we left off.")
-        return True
-
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
         """Handle the /restart command — restart a worker session."""
         args = (args or "").strip()
@@ -12647,131 +12454,6 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-    def cmd_channel(self, arg: str, chat_id: ChatId) -> bool:
-        """Handle /ch and /channel commands.
-
-        /ch create <label> <member1> <member2> ...
-        /ch <id> <message>
-        /ch <id> add <member1> ...
-        /ch <id> remove <member1> ...
-        /ch <id> members
-        /ch list
-        /ch <id> close
-        """
-        if not arg:
-            self.reply(chat_id,
-                "Usage:\n"
-                "/ch create <label> <members...>\n"
-                "/ch <id> <message>\n"
-                "/ch <id> add <member...>\n"
-                "/ch <id> remove <member...>\n"
-                "/ch <id> members\n"
-                "/ch <id> close\n"
-                "/ch list",
-                outcome="Needs decision")
-            return True
-
-        parts = arg.strip().split()
-        subcmd = parts[0].lower()
-
-        if subcmd == "create":
-            if len(parts) < 2:
-                self.reply(chat_id, "Usage: /ch create <label> [member1 member2 ...]", outcome="Needs decision")
-                return True
-            label = parts[1]
-            members = parts[2:] if len(parts) > 2 else []
-            members.append("manager")
-            channel_id = channel_create_id(label)
-            channel = channel_new(channel_id, label, "manager", members)
-            with channel_store.lock:
-                channel_store.channels[channel_id] = channel
-                _channel_save()
-            member_str = ", ".join(channel["members"].keys())
-            self.reply(chat_id,
-                f"\U0001f4e2 Channel {channel_id} ({label})\nMembers: {member_str}")
-            return True
-
-        if subcmd == "list":
-            with channel_store.lock:
-                active = [(cid, channel) for cid, channel in channel_store.channels.items()
-                          if not channel_is_expired(channel)]
-            if not active:
-                self.reply(chat_id, "No active channels.")
-            else:
-                lines = []
-                for cid, channel in active:
-                    members_str = ", ".join(channel["members"].keys())
-                    lines.append(f"{cid} ({channel['label']}) — {members_str}")
-                self.reply(chat_id, "\n".join(lines))
-            return True
-
-        # Remaining commands: /channel <channel_id> <action>
-        channel_id = subcmd
-        with channel_store.lock:
-            found_channel: ChannelDict | None = channel_store.channels.get(channel_id)
-        if not found_channel or channel_is_expired(found_channel):
-            self.reply(chat_id, f"Channel {channel_id} not found.", outcome="Needs decision")
-            return True
-
-        if len(parts) < 2:
-            # Just show channel info
-            members_str = ", ".join(found_channel["members"].keys())
-            self.reply(chat_id, f"{channel_id} ({found_channel['label']})\nMembers: {members_str}\nMessages: {len(found_channel['messages'])}")
-            return True
-
-        action = parts[1].lower()
-
-        if action == "close":
-            with channel_store.lock:
-                channel_store.channels.pop(channel_id, None)
-                _channel_save()
-            self.reply(chat_id, f"\U0001f4e2 Channel {channel_id} closed.")
-            return True
-
-        if action == "members":
-            members_str = ", ".join(found_channel["members"].keys())
-            self.reply(chat_id, f"{channel_id} members: {members_str}")
-            return True
-
-        if action == "add":
-            to_add = parts[2:]
-            if not to_add:
-                self.reply(chat_id, "Usage: /channel <id> add <member...>", outcome="Needs decision")
-                return True
-            with channel_store.lock:
-                added = channel_add_members(found_channel, to_add)
-            if added:
-                self.reply(chat_id, f"{channel_id}: added {', '.join(added)}")
-            else:
-                self.reply(chat_id, f"No new members to add.")
-            return True
-
-        if action == "remove":
-            to_remove = parts[2:]
-            if not to_remove:
-                self.reply(chat_id, "Usage: /channel <id> remove <member...>", outcome="Needs decision")
-                return True
-            with channel_store.lock:
-                removed = channel_remove_members(found_channel, to_remove)
-            if removed:
-                self.reply(chat_id, f"{channel_id}: removed {', '.join(removed)}")
-            else:
-                self.reply(chat_id, f"No members to remove.")
-            return True
-
-        # Default: send message to channel
-        message_text = " ".join(parts[1:])
-        with channel_store.lock:
-            msg = channel_append_message(found_channel, "manager", message_text)
-            members_snapshot = dict(found_channel["members"])
-        registered = get_registered_sessions()
-        _fanout_channel_message(channel_id, "manager", message_text, msg,
-                                     members_snapshot, registered)
-        self.reply(chat_id, f"[{channel_id}] Sent.")
-        return True
-
-
-
     # ── Media Routing ──────────────────────────────────────────────────
 
     def _extract_reply_media(self, reply_to: TelegramMessageDict, target_worker: str) -> str | None:
@@ -13192,11 +12874,8 @@ class CommandRouter:
             "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),
             "/team": lambda arg, cid, mid: self.cmd_team(cid),
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),
-            "/progress": lambda arg, cid, mid: self.cmd_progress(cid, arg),
-            "/pause": lambda arg, cid, mid: self.cmd_pause(cid),
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),
             "/settings": lambda arg, cid, mid: self.cmd_settings(cid),
-            "/voice": lambda arg, cid, mid: self.cmd_voice(arg, cid),
             "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),
             "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
             "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
@@ -13204,8 +12883,6 @@ class CommandRouter:
             "/teleport": lambda arg, cid, mid: self.cmd_teleport(arg, cid),
             "/teleport-check": lambda arg, cid, mid: self.cmd_teleport(arg, cid, check_only=True),
             "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),
-            "/ch": lambda arg, cid, mid: self.cmd_channel(arg, cid),
-            "/channel": lambda arg, cid, mid: self.cmd_channel(arg, cid),
         }
 
     def reply(self, chat_id: ChatId | None, text: str, outcome: str | None = None) -> None:
@@ -13724,110 +13401,6 @@ class CommandRouter:
         return True
 
 
-    def cmd_progress(self, chat_id: ChatId, arg: str = "") -> bool:
-        # If a name is given, show that worker's progress
-        """Handle the /progress command — show current worker activity."""
-        if arg:
-            target = arg.strip().lower().lstrip("@")
-            registered = self.workers.get_registered_sessions()
-            if target not in registered:
-                self.reply(chat_id, f"Unknown worker: {target}. Check /team for who's available.")
-                return True
-            name = target
-        elif not state.active:
-            self.reply(chat_id, "No one assigned. Who should I talk to? Use /team or /focus <name>.")
-            return True
-        else:
-            name = state.active
-        registered = self.workers.get_registered_sessions()
-        session = registered.get(name)
-        if not session:
-            self.reply(chat_id, "Can't find them. Check /team for who's available.")
-            return True
-
-        pending = is_pending(name)
-        backend_name = get_worker_backend(name, session)
-        backend = get_backend(backend_name)
-        online = False
-        ready = False
-        needs_attention = None
-        mode = "tmux"
-
-        tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
-        host = get_worker_host(name)
-        is_tmux_alive = "tmux" in session and tmux_exists(tmux_name, host=host)
-        if not is_tmux_alive:
-            # Worker exited (tmux gone, in registry only)
-            online = False
-            ready = False
-            mode = f"{backend_name} (exited)"
-            needs_attention = "Session exited. Use /restart to bring back."
-        elif not backend.is_interactive:
-            # Non-interactive: online = tmux exists, ready = always (stateless)
-            online = True
-            ready = True
-            mode = f"{backend_name} (non-interactive)"
-        else:
-            online = True
-            claude_running = is_claude_running(tmux_name, host=host)
-            ready = claude_running
-            if not claude_running:
-                needs_attention = "Not running. Use /restart."
-
-        resume_line = None
-        continuity_line = None
-
-        if not backend.is_interactive:
-            # Non-interactive: show Continuity (thread) + In-flight
-            session_id, source = get_any_session_id(name)
-            if session_id:
-                continuity_line = "Continuity: on"
-            else:
-                continuity_line = "Continuity: off (next message starts new thread)"
-        else:
-            # Interactive: show Resume
-            resume_id = get_claude_session_id(name)
-            if resume_id:
-                resume_line = "Resume: available"
-            else:
-                resume_line = "Resume: not available"
-
-        # Read live activity from tmux pane (or adapter status for non-interactive)
-        activity = None
-        context_pct = None
-        raw_lines = None
-        if is_tmux_alive and ready:
-            if backend.is_interactive:
-                activity, context_pct, raw_lines = _read_tmux_activity(tmux_name, host=host)
-            else:
-                activity = _read_noninteractive_activity(name)
-
-        # Extract question details if at interactive prompt
-        question_details = None
-        if raw_lines and activity and "Waiting for" in activity:
-            question_details = _extract_question_details(raw_lines)
-
-        status = format_progress_lines(
-            name=name,
-            pending=pending,
-            backend=backend_name,
-            online=online,
-            ready=ready,
-            mode=mode,
-            resume_line=resume_line,
-            continuity_line=continuity_line,
-            needs_attention=needs_attention,
-            activity=activity,
-            context_pct=context_pct,
-            question_details=question_details
-        )
-
-        self.reply(chat_id, "\n".join(status))
-        return True
-
-
-
-
     # ── Remote Restart ──────────────────────────────────────────────
 
 
@@ -13854,20 +13427,6 @@ class CommandRouter:
 
 
 
-
-    def cmd_voice(self, arg: str, chat_id: ChatId) -> bool:
-        """Toggle auto-TTS for worker responses. /voice on|off or /voice to show status."""
-        arg = arg.strip().lower()
-        if arg == "on":
-            state.tts_enabled = True
-            self.reply(chat_id, "Voice mode ON — responses include voice messages.")
-        elif arg == "off":
-            state.tts_enabled = False
-            self.reply(chat_id, "Voice mode OFF — text only.")
-        else:
-            status = "ON" if state.tts_enabled else "OFF"
-            self.reply(chat_id, f"Voice mode: {status}\n/voice on — responses include voice\n/voice off — text only")
-        return True
 
     def cmd_settings(self, chat_id: ChatId) -> bool:
         """Handle the /settings command — show bridge configuration."""

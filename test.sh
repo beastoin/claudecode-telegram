@@ -1270,333 +1270,13 @@ print('OK')
     fi
 }
 
-test_synthesize_speech_success() {
-    info "Testing synthesize_speech returns file path on success..."
-    if python3 -c "
-import sys, os, tempfile
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock
-import bridge
 
-# Mock urllib to return audio bytes
-mock_response = MagicMock()
-mock_response.read.return_value = b'OggS fake audio data'
-mock_response.headers = {'X-Audio-Duration': '3.5', 'X-Processing-Time': '2.1'}
-mock_response.__enter__ = lambda s: s
-mock_response.__exit__ = MagicMock(return_value=False)
 
-with patch('bridge._urlopen', return_value=mock_response):
-    result = bridge.synthesize_speech('Hello world')
 
-assert result is not None, 'Expected file path, got None'
-assert os.path.exists(result), f'File does not exist: {result}'
-assert result.endswith('.ogg'), f'Expected .ogg file, got: {result}'
 
-# Verify content
-with open(result, 'rb') as f:
-    content = f.read()
-assert content == b'OggS fake audio data', f'Unexpected content'
 
-os.unlink(result)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "synthesize_speech returns file path on success"
-    else
-        fail "synthesize_speech success test failed"
-    fi
-}
 
-test_synthesize_speech_timeout_returns_none() {
-    info "Testing synthesize_speech returns None on timeout..."
-    if python3 -c "
-import sys, os
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch
-import bridge
 
-with patch('bridge._urlopen', side_effect=TimeoutError('timeout')):
-    result = bridge.synthesize_speech('Hello world')
-
-assert result is None, f'Expected None, got {result!r}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "synthesize_speech returns None on timeout"
-    else
-        fail "synthesize_speech timeout test failed"
-    fi
-}
-
-test_synthesize_speech_uses_chunked_for_long_text() {
-    info "Testing synthesize_speech uses /synthesize/chunked for text >200 chars..."
-    if python3 -c "
-import sys, os, tempfile
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock, call
-import bridge
-
-# Save original
-orig_threshold = bridge.TTS_CHUNKED_THRESHOLD
-
-# Mock urllib to capture which URL is called
-mock_response = MagicMock()
-mock_response.read.return_value = b'OggS fake audio data'
-mock_response.headers = {'X-Audio-Duration': '10.0', 'X-Processing-Time': '5.0'}
-mock_response.__enter__ = lambda s: s
-mock_response.__exit__ = MagicMock(return_value=False)
-
-# Short text: should use base /synthesize endpoint
-bridge.TTS_CHUNKED_THRESHOLD = 200
-with patch('bridge._urlopen', return_value=mock_response) as mock_url:
-    result = bridge.synthesize_speech('Short text')
-    called_url = mock_url.call_args[0][0].full_url
-    assert '/synthesize/chunked' not in called_url, f'Short text used chunked: {called_url}'
-    os.unlink(result)
-
-# Long text: should use /synthesize/chunked endpoint
-long_text = 'This is a test sentence. ' * 20  # ~500 chars
-with patch('bridge._urlopen', return_value=mock_response) as mock_url:
-    result = bridge.synthesize_speech(long_text)
-    called_url = mock_url.call_args[0][0].full_url
-    assert '/synthesize/chunked' in called_url, f'Long text did not use chunked: {called_url}'
-    os.unlink(result)
-
-bridge.TTS_CHUNKED_THRESHOLD = orig_threshold
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "synthesize_speech uses chunked for long text"
-    else
-        fail "synthesize_speech chunked routing test failed"
-    fi
-}
-
-test_auto_tts_sends_voice_with_response() {
-    info "Testing auto-TTS sends voice message alongside text..."
-    if python3 -c "
-import sys, os, time
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock, call
-import bridge
-
-bridge.BOT_TOKEN = 'fake'
-bridge.admin_chat_id = 12345
-bridge.state.tts_enabled = True
-
-voice_sent = []
-api_calls = []
-
-def mock_send_voice(chat_id, path, caption=None):
-    voice_sent.append((chat_id, path, caption))
-    return True
-
-def mock_telegram_api(method, data):
-    api_calls.append(method)
-    return {'ok': True, 'result': {'message_id': 1}}
-
-response_text = 'Here is my answer to your question.'
-
-with patch.object(bridge, 'send_voice', side_effect=mock_send_voice), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'synthesize_speech', return_value='/tmp/voice.ogg') as mock_tts, \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', response_text, 12345)
-    time.sleep(0.5)  # TTS runs in background thread
-
-# Text should be sent (via sendRichMessage or sendMessage)
-assert len(api_calls) >= 1, f'Expected at least 1 API call, got {len(api_calls)}'
-
-# Voice should be auto-synthesized (no [[speak]] needed)
-mock_tts.assert_called_once()
-assert len(voice_sent) == 1, f'Expected 1 voice sent, got {len(voice_sent)}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Auto-TTS sends voice alongside text"
-    else
-        fail "Auto-TTS test failed"
-    fi
-}
-
-test_speak_tag_custom_text() {
-    info "Testing [[speak:custom text]] overrides auto-TTS with custom text..."
-    if python3 -c "
-import sys, os, time
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock
-import bridge
-
-bridge.BOT_TOKEN = 'fake'
-bridge.admin_chat_id = 12345
-
-tts_calls = []
-
-def mock_tts(text, **kwargs):
-    tts_calls.append(text)
-    return '/tmp/voice.ogg'
-
-def mock_telegram_api(method, data):
-    return {'ok': True, 'result': {'message_id': 1}}
-
-response_text = 'Complex technical explanation with code.\n\n[[speak:Here is the short summary]]'
-
-with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
-     patch.object(bridge, 'send_voice', return_value=True), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', response_text, 12345)
-    time.sleep(0.3)
-
-assert len(tts_calls) == 1, f'Expected 1 TTS call, got {len(tts_calls)}'
-assert tts_calls[0] == 'Here is the short summary', f'TTS called with wrong text: {tts_calls[0]!r}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "[[speak:custom text]] overrides auto-TTS"
-    else
-        fail "[[speak:custom text]] test failed"
-    fi
-}
-
-test_auto_tts_skips_long_messages() {
-    info "Testing auto-TTS skips messages >1000 chars and splits paragraphs..."
-    if python3 -c "
-import sys, os, time
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock
-import bridge
-
-bridge.BOT_TOKEN = 'fake'
-bridge.admin_chat_id = 12345
-bridge.state.tts_enabled = True
-
-tts_calls = []
-
-def mock_tts(text, **kwargs):
-    tts_calls.append(text)
-    return '/tmp/voice.ogg'
-
-def mock_telegram_api(method, data):
-    return {'ok': True, 'result': {'message_id': 1}}
-
-# Multi-paragraph text under 1000 chars — should split into separate TTS calls
-tts_calls.clear()
-multi_para = 'First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph.'
-with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
-     patch.object(bridge, 'send_voice', return_value=True), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', multi_para, 12345)
-    time.sleep(0.5)
-
-assert len(tts_calls) == 3, f'Expected 3 TTS calls (one per paragraph), got {len(tts_calls)}: {tts_calls}'
-assert tts_calls[0] == 'First paragraph here.', f'Wrong para 1: {tts_calls[0]!r}'
-assert tts_calls[1] == 'Second paragraph here.', f'Wrong para 2: {tts_calls[1]!r}'
-assert tts_calls[2] == 'Third paragraph.', f'Wrong para 3: {tts_calls[2]!r}'
-
-# Long text (>1000 chars) — TTS should be skipped entirely
-tts_calls.clear()
-long_text = 'A' * 1001
-with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
-     patch.object(bridge, 'send_voice', return_value=True), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', long_text, 12345)
-    time.sleep(0.3)
-
-assert len(tts_calls) == 0, f'Expected 0 TTS calls for >1000 char text, got {len(tts_calls)}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Auto-TTS skips >1000 chars and splits paragraphs"
-    else
-        fail "Auto-TTS paragraph split test failed"
-    fi
-}
-
-test_auto_tts_failure_still_sends_text() {
-    info "Testing auto-TTS failure still sends text..."
-    if python3 -c "
-import sys, os, time
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock
-import bridge
-
-bridge.BOT_TOKEN = 'fake'
-bridge.admin_chat_id = 12345
-bridge.state.tts_enabled = True
-
-api_calls = []
-
-def mock_telegram_api(method, data):
-    api_calls.append(method)
-    return {'ok': True, 'result': {'message_id': 1}}
-
-response_text = 'Important information.'
-
-with patch.object(bridge, 'synthesize_speech', return_value=None), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', response_text, 12345)
-    time.sleep(0.3)
-
-# Text should still be sent even when TTS fails (via sendRichMessage or sendMessage)
-assert len(api_calls) >= 1, f'Expected text to be sent, got {len(api_calls)}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Auto-TTS failure still sends text"
-    else
-        fail "Auto-TTS failure test failed"
-    fi
-}
-
-test_voice_toggle_command() {
-    info "Testing /voice on|off toggles auto-TTS..."
-    if python3 -c "
-import sys, os, time
-sys.path.insert(0, os.getcwd())
-from unittest.mock import patch, MagicMock
-import bridge
-
-bridge.BOT_TOKEN = 'fake'
-bridge.admin_chat_id = 12345
-bridge.state.tts_enabled = True
-
-# Test /voice off disables TTS
-tts_calls = []
-
-def mock_tts(text, **kwargs):
-    tts_calls.append(text)
-    return '/tmp/voice.ogg'
-
-def mock_telegram_api(method, data):
-    return {'ok': True, 'result': {'message_id': 1}}
-
-# Disable TTS
-bridge.state.tts_enabled = False
-
-with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
-     patch.object(bridge, 'send_voice', return_value=True), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', 'Hello text only', 12345)
-    time.sleep(0.3)
-
-assert len(tts_calls) == 0, f'TTS should not be called when disabled, got {len(tts_calls)} calls'
-
-# Re-enable TTS
-bridge.state.tts_enabled = True
-
-with patch.object(bridge, 'synthesize_speech', side_effect=mock_tts), \
-     patch.object(bridge, 'send_voice', return_value=True), \
-     patch.object(bridge, 'telegram_api', side_effect=mock_telegram_api), \
-     patch.object(bridge, 'get_worker_host', return_value=None):
-    bridge.send_response_to_telegram('testworker', 'Hello with voice', 12345)
-    time.sleep(0.3)
-
-assert len(tts_calls) == 1, f'TTS should be called when enabled, got {len(tts_calls)} calls'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/voice on|off toggles auto-TTS"
-    else
-        fail "/voice toggle test failed"
-    fi
-}
 
 test_transcript_renders_html() {
     info "Testing _render_transcript_html produces valid HTML..."
@@ -4027,31 +3707,6 @@ print('OK')
     fi
 }
 
-test_progress_output_includes_backend() {
-    info "Testing /progress output includes backend..."
-
-    if python3 -c "
-from bridge import format_progress_lines
-
-lines = format_progress_lines(
-    name='alice',
-    pending=False,
-    backend='codex',
-    online=True,
-    ready=True,
-    mode='tmux'
-)
-
-text = '\\n'.join(lines)
-assert 'codex' in text, f'expected backend name in progress output: {text}'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/progress output includes backend"
-    else
-        fail "/progress backend output test failed"
-    fi
-}
 
 
 test_worker_send_uses_backend() {
@@ -4811,47 +4466,6 @@ print('OK')
     fi
 }
 
-test_progress_continuity_for_noninteractive() {
-    info "Testing /progress shows Continuity for non-interactive backends..."
-
-    if python3 -c "
-from bridge import format_progress_lines
-
-# Non-interactive with continuity line
-lines = format_progress_lines(
-    name='alice',
-    pending=True,
-    backend='codex',
-    online=True,
-    ready=True,
-    mode='codex (non-interactive)',
-    continuity_line='Continuity: on (codex thread abc12345...)'
-)
-text = '\\n'.join(lines)
-assert 'Continuity: on' in text, f'Expected Continuity line: {text}'
-assert 'Resume' not in text, f'Should not have Resume for non-interactive: {text}'
-
-# Interactive with resume line
-lines = format_progress_lines(
-    name='bob',
-    pending=False,
-    backend='claude',
-    online=True,
-    ready=True,
-    mode='tmux',
-    resume_line='Resume: available (session abc12345...)'
-)
-text = '\\n'.join(lines)
-assert 'Resume: available' in text, f'Expected Resume line: {text}'
-assert 'Continuity' not in text, f'Should not have Continuity for interactive: {text}'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/progress shows Continuity for non-interactive"
-    else
-        fail "/progress Continuity test failed"
-    fi
-}
 
 test_extract_worker_activity() {
     info "Testing _extract_activity parses tmux output signals..."
@@ -5136,28 +4750,6 @@ lines = ['❯']
 details = _extract_question_details(lines)
 assert details is None, f'Idle should have no details, got: {details}'
 
-# Rich progress includes options
-from bridge import format_progress_lines
-q_details = {
-    'header': 'Pick a color',
-    'options': [
-        {'num': 1, 'label': 'Red', 'selected': True},
-        {'num': 2, 'label': 'Blue', 'selected': False},
-        {'num': 3, 'label': 'Green', 'selected': False},
-    ],
-    'selected_num': 1,
-}
-lines = format_progress_lines(
-    name='kelvin', pending=False, backend='claude',
-    online=True, ready=True, mode='tmux',
-    activity='Waiting for input: Pick a color',
-    question_details=q_details,
-)
-joined = '\n'.join(lines)
-assert 'Red' in joined, f'Missing Red in: {joined}'
-assert 'Blue' in joined, f'Missing Blue in: {joined}'
-assert '1-3' in joined, f'Missing reply hint in: {joined}'
-assert 'skip' in joined.lower(), f'Missing skip hint in: {joined}'
 " 2>&1; then
         success "_extract_activity detects interactive prompts + rich details"
     else
@@ -5290,32 +4882,6 @@ bridge.watchdog.worker_states.pop('testbot', None)
     fi
 }
 
-test_progress_shows_activity() {
-    info "Testing /progress output includes activity line..."
-
-    if python3 -c "
-from bridge import format_progress_lines
-
-lines = format_progress_lines(
-    name='alice',
-    pending=True,
-    backend='claude',
-    online=True,
-    ready=True,
-    mode='tmux',
-    activity='Running unit tests (3/14 passed)'
-)
-
-text = '\\n'.join(lines)
-assert 'Running unit tests' in text, f'Expected activity in progress output: {text}'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/progress output includes activity"
-    else
-        fail "/progress activity output test failed"
-    fi
-}
 
 test_noninteractive_backpressure() {
     info "Testing non-interactive backpressure rejects while busy..."
@@ -5682,48 +5248,6 @@ print('OK')
     fi
 }
 
-test_codex_pause_clears_pending() {
-    info "Testing codex /pause clears pending without tmux..."
-
-    if python3 -c "
-import tempfile
-from pathlib import Path
-import bridge
-
-tmp = Path(tempfile.mkdtemp())
-bridge.SESSIONS_DIR = tmp
-bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
-bridge.worker_manager.sessions_dir = tmp
-bridge.worker_manager.scan_tmux_sessions = lambda: {}
-
-session_dir = tmp / 'alice'
-session_dir.mkdir()
-(session_dir / 'backend').write_text('codex')
-
-bridge.set_pending('alice', 12345)
-pending_file = bridge.get_pending_file('alice')
-assert pending_file.exists(), 'pending file should exist before pause'
-
-bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
-
-bridge.state.active = 'alice'
-
-class FakeTelegram:
-    def send_message(self, *args, **kwargs):
-        return {'ok': True}
-
-router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
-router.cmd_pause(12345)
-
-assert not pending_file.exists(), 'pending file should be cleared for codex pause'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Codex /pause clears pending"
-    else
-        fail "Codex /pause test failed"
-    fi
-}
 
 test_adapter_pid_tracking() {
     info "Testing adapter PID stored and kill_adapter terminates it..."
@@ -5765,52 +5289,6 @@ print('OK')
     fi
 }
 
-test_pause_kills_adapter() {
-    info "Testing /pause kills inflight adapter for codex worker..."
-
-    if python3 -c "
-import subprocess, tempfile, time
-from pathlib import Path
-import bridge
-
-tmp = Path(tempfile.mkdtemp())
-bridge.SESSIONS_DIR = tmp
-bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
-bridge.worker_manager.sessions_dir = tmp
-bridge.worker_manager.scan_tmux_sessions = lambda: {}
-
-session_dir = tmp / 'alice'
-session_dir.mkdir()
-(session_dir / 'backend').write_text('codex')
-
-bridge.set_pending('alice', 12345)
-
-# Simulate an inflight adapter
-proc = subprocess.Popen(['sleep', '60'])
-bridge.processes.adapter_pids['alice'] = (proc, None)
-assert proc.poll() is None, 'adapter should be alive before pause'
-
-bridge.tmux_send_escape = lambda *_: (_ for _ in ()).throw(AssertionError('tmux should not be used'))
-bridge.state.active = 'alice'
-
-class FakeTelegram:
-    def send_message(self, *args, **kwargs):
-        return {'ok': True}
-
-router = bridge.CommandRouter(FakeTelegram(), bridge.worker_manager)
-router.cmd_pause(12345)
-
-assert proc.poll() is not None, 'adapter should be dead after pause'
-assert 'alice' not in bridge.processes.adapter_pids, 'PID entry should be removed'
-assert not bridge.get_pending_file('alice').exists(), 'pending should be cleared'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/pause kills inflight adapter"
-    else
-        fail "/pause kills inflight adapter test failed"
-    fi
-}
 
 test_end_kills_adapter() {
     info "Testing /end kills inflight adapter for codex worker..."
@@ -14440,43 +13918,6 @@ print('OK')
     fi
 }
 
-test_progress_noninteractive_shows_adapter_activity() {
-    info "Testing /progress shows adapter activity for non-interactive workers..."
-
-    if python3 -c "
-from unittest.mock import patch, MagicMock
-import bridge
-import time
-
-# Test format_progress_lines with adapter-specific info
-lines = bridge.format_progress_lines(
-    name='alice',
-    pending=True,
-    backend='codex',
-    online=True,
-    ready=True,
-    mode='codex (non-interactive)',
-    resume_line=None,
-    continuity_line='Continuity: on',
-    needs_attention=None,
-    activity='adapter running (15s)',
-    context_pct=None,
-    question_details=None,
-)
-text = '\n'.join(lines)
-assert 'adapter running' in text, f'expected adapter activity in progress: {text}'
-assert 'codex' in text, f'expected codex backend in progress: {text}'
-
-# Test that cmd_progress reads adapter status for non-interactive
-# The activity field should show 'adapter running (Xs)' when adapter is alive
-# or 'idle (last response Xm ago)' when adapter is done
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/progress shows adapter activity for non-interactive workers"
-    else
-        fail "/progress should show adapter activity for non-interactive"
-    fi
-}
 
 test_codex_native_transcript_parsing() {
     info "Testing codex native JSONL transcript parsing..."
@@ -14546,54 +13987,6 @@ print('OK')
     fi
 }
 
-test_codex_progress_shows_last_response_time() {
-    info "Testing /progress shows last response time for idle codex workers..."
-
-    if python3 -c "
-import time, tempfile, shutil, os
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import bridge
-
-tmpdir = tempfile.mkdtemp()
-tmp = Path(tmpdir)
-orig_sessions = bridge.SESSIONS_DIR
-bridge.SESSIONS_DIR = tmp
-
-# Create worker with no codex transcript
-worker_dir = tmp / 'alice'
-worker_dir.mkdir()
-
-# No adapter running, no transcript
-with patch.dict(bridge.processes.adapter_pids, {}, clear=True):
-    activity = bridge._read_noninteractive_activity('alice')
-assert activity == 'idle', f'expected idle with no transcript: {activity}'
-
-# With adapter running
-mock_proc = MagicMock()
-mock_proc.poll.return_value = None
-with patch.dict(bridge.processes.adapter_pids, {'alice': (mock_proc, None)}):
-    activity = bridge._read_noninteractive_activity('alice')
-assert activity == 'adapter running', f'expected adapter running: {activity}'
-
-# With recent transcript file
-transcript = tmp / 'test.jsonl'
-transcript.write_text('{}')
-os.utime(transcript, (time.time() - 120, time.time() - 120))  # 2 min ago
-with patch.dict(bridge.processes.adapter_pids, {}, clear=True), \
-     patch.object(bridge, '_find_codex_transcript', return_value=str(transcript)):
-    activity = bridge._read_noninteractive_activity('alice')
-assert '2m ago' in activity, f'expected 2m ago in activity: {activity}'
-
-bridge.SESSIONS_DIR = orig_sessions
-shutil.rmtree(tmpdir, ignore_errors=True)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/progress shows last response time for idle codex workers"
-    else
-        fail "/progress should show last response time for idle codex"
-    fi
-}
 
 test_codex_rewind_reads_native_transcript() {
     info "Testing /rewind reads codex native transcript via session ID lookup..."
@@ -15191,152 +14584,7 @@ print('OK')
     fi
 }
 
-test_phase2_cmd_pause_passes_host() {
-    info "Testing cmd_pause passes host to tmux_send_escape for teleported workers..."
 
-    if python3 -c "
-import json, tempfile, os
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import bridge
-
-tmpdir = tempfile.mkdtemp()
-node_dir = Path(tmpdir) / 'node'
-node_dir.mkdir()
-sessions = Path(tmpdir) / 'sessions'
-sessions.mkdir()
-(sessions / 'ren').mkdir()
-(sessions / 'ren' / 'chat_id').write_text('123')
-
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
-(node_dir / 'workers.json').write_text(json.dumps(reg))
-
-orig_sessions = bridge.SESSIONS_DIR
-orig_node_dir = bridge.NODE_DIR
-orig_registry = bridge.WORKER_REGISTRY_FILE
-bridge.SESSIONS_DIR = sessions
-bridge.NODE_DIR = node_dir
-bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
-
-escape_calls = []
-orig_escape = bridge.tmux_send_escape
-def mock_escape(tmux_name, host=None):
-    escape_calls.append({'tmux': tmux_name, 'host': host})
-
-orig_state = bridge.state.snapshot()
-bridge.state.active = 'ren'
-
-class MockWorkers:
-    tmux_prefix = 'claude-prod-'
-    sessions_dir = sessions
-    def _sync_paths(self): pass
-    def get_registered_sessions(self, *a):
-        return {'ren': {'tmux': 'claude-prod-ren'}}
-
-class MockTelegramAPI:
-    def send_message(self, *a, **k): pass
-
-router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
-router.workers = MockWorkers()
-
-def mock_reply(self, chat_id, text, **kwargs): pass
-
-with patch('bridge.tmux_send_escape', side_effect=mock_escape), \
-     patch.object(bridge.CommandRouter, 'reply', mock_reply):
-    router.cmd_pause(123)
-
-assert len(escape_calls) == 1, f'Expected 1 tmux_send_escape call, got {escape_calls}'
-assert escape_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {escape_calls[0][\"host\"]}'
-
-bridge.SESSIONS_DIR = orig_sessions
-bridge.NODE_DIR = orig_node_dir
-bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.restore(orig_state)
-import shutil
-shutil.rmtree(tmpdir)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "cmd_pause passes host to tmux_send_escape"
-    else
-        fail "cmd_pause should pass host to tmux_send_escape"
-    fi
-}
-
-test_phase2_cmd_progress_passes_host() {
-    info "Testing cmd_progress passes host to is_claude_running for teleported workers..."
-
-    if python3 -c "
-import json, tempfile, os
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import bridge
-
-tmpdir = tempfile.mkdtemp()
-node_dir = Path(tmpdir) / 'node'
-node_dir.mkdir()
-sessions = Path(tmpdir) / 'sessions'
-sessions.mkdir()
-(sessions / 'ren').mkdir()
-(sessions / 'ren' / 'chat_id').write_text('123')
-
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
-(node_dir / 'workers.json').write_text(json.dumps(reg))
-
-orig_sessions = bridge.SESSIONS_DIR
-orig_node_dir = bridge.NODE_DIR
-orig_registry = bridge.WORKER_REGISTRY_FILE
-orig_state = bridge.state.snapshot()
-bridge.SESSIONS_DIR = sessions
-bridge.NODE_DIR = node_dir
-bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
-bridge.state.active = 'ren'
-
-icr_calls = []
-def mock_icr(tmux_name, host=None):
-    icr_calls.append({'tmux': tmux_name, 'host': host})
-    return True
-
-class MockWorkers:
-    tmux_prefix = 'claude-prod-'
-    sessions_dir = sessions
-    def _sync_paths(self): pass
-    def get_registered_sessions(self, *a):
-        return {'ren': {'tmux': 'claude-prod-ren'}}
-
-class MockTelegramAPI:
-    def send_message(self, *a, **k): pass
-
-router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
-router.workers = MockWorkers()
-
-def mock_reply(self, chat_id, text, **kwargs): pass
-
-with patch('bridge.is_claude_running', side_effect=mock_icr), \
-     patch('bridge.tmux_exists', return_value=True), \
-     patch('bridge._read_tmux_activity', return_value=('Working', '50%', None)), \
-     patch('bridge.get_worker_backend', return_value='claude'), \
-     patch('bridge.is_pending', return_value=False), \
-     patch('bridge.get_any_session_id', return_value=(None, None)), \
-     patch('bridge.get_claude_session_id', return_value=None), \
-     patch.object(bridge.CommandRouter, 'reply', mock_reply):
-    router.cmd_progress(123)
-
-assert len(icr_calls) >= 1, f'Expected is_claude_running call, got {icr_calls}'
-assert icr_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {icr_calls[0][\"host\"]}'
-
-bridge.SESSIONS_DIR = orig_sessions
-bridge.NODE_DIR = orig_node_dir
-bridge.WORKER_REGISTRY_FILE = orig_registry
-bridge.state.restore(orig_state)
-import shutil
-shutil.rmtree(tmpdir)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "cmd_progress passes host to is_claude_running"
-    else
-        fail "cmd_progress should pass host to is_claude_running"
-    fi
-}
 
 test_phase2_interactive_reply_passes_host() {
     info "Testing interactive reply routing passes host to _send_interactive_reply..."
@@ -19429,36 +18677,6 @@ test_direct_mode_reply_context() {
     send_direct_mode_message "/end contextworker" >/dev/null 2>&1 || true
 }
 
-test_direct_mode_e2e_pause() {
-    info "Testing direct mode E2E /pause command..."
-
-    if ! check_claude_available; then
-        info "Skipping (claude CLI not available)"
-        return 0
-    fi
-
-    # Clean up and create worker
-    send_direct_mode_message "/end pauseworker" >/dev/null 2>&1 || true
-    sleep 0.3
-
-    send_direct_mode_message "/hire pauseworker" >/dev/null
-    wait_for_direct_worker "pauseworker"
-    send_direct_mode_message "/focus pauseworker" >/dev/null
-    sleep 0.2
-
-    # Send /pause
-    local result
-    result=$(send_direct_mode_message "/pause")
-
-    if [[ "$result" == "OK" ]]; then
-        success "/pause: Command accepted in direct mode"
-    else
-        fail "/pause: Command failed: $result"
-    fi
-
-    # Cleanup
-    send_direct_mode_message "/end pauseworker" >/dev/null 2>&1 || true
-}
 
 test_direct_mode_e2e_restart() {
     info "Testing direct mode E2E /restart --clean command..."
@@ -19532,36 +18750,6 @@ test_direct_mode_e2e_settings() {
     fi
 }
 
-test_direct_mode_e2e_progress() {
-    info "Testing direct mode E2E /progress command..."
-
-    if ! check_claude_available; then
-        info "Skipping (claude CLI not available)"
-        return 0
-    fi
-
-    # Clean up and create worker
-    send_direct_mode_message "/end progressworker" >/dev/null 2>&1 || true
-    sleep 0.3
-
-    send_direct_mode_message "/hire progressworker" >/dev/null
-    wait_for_direct_worker "progressworker"
-    send_direct_mode_message "/focus progressworker" >/dev/null
-    sleep 0.2
-
-    # Send /progress
-    local result
-    result=$(send_direct_mode_message "/progress")
-
-    if [[ "$result" == "OK" ]]; then
-        success "/progress: Command works in direct mode"
-    else
-        fail "/progress: Command failed: $result"
-    fi
-
-    # Cleanup
-    send_direct_mode_message "/end progressworker" >/dev/null 2>&1 || true
-}
 
 test_worker_to_worker_pipe_direct() {
     info "Testing worker-to-worker pipe communication in direct mode..."
@@ -22584,27 +21772,6 @@ print('OK')
     fi
 }
 
-test_channel_telegram_cmd() {
-    info "Testing /ch create via Telegram..."
-    send_message "/ch create review-test worker:testbot1 manager" >/dev/null 2>&1
-    sleep 1
-
-    # Check that a channel was created with the label
-    local response
-    response=$(curl -s "http://localhost:$PORT/channels")
-    if echo "$response" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-channels = d.get('channels', [])
-labels = [c['label'] for c in channels]
-assert 'review-test' in labels, f'review-test not found in {labels}'
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/ch create via Telegram works"
-    else
-        fail "/ch create via Telegram failed: $response"
-    fi
-}
 
 test_channel_guest_fanout() {
     info "Testing channel message fans out to guest inbox..."
@@ -23111,7 +22278,6 @@ run_unit_tests() {
     run_test test_relaunch_binary_check
     run_test test_claude_start_cmd
     run_test test_team_output_includes_backend
-    run_test test_progress_output_includes_backend
     run_test test_worker_send_uses_backend
     run_test test_backend_env_metadata
     run_test test_codex_end_cleans_session
@@ -23129,9 +22295,7 @@ run_unit_tests() {
     run_test test_restart_all_no_workers
     run_test test_restart_stale_session_auto_recovery
     run_test test_restart_all_rejects_duplicate
-    run_test test_codex_pause_clears_pending
     run_test test_adapter_pid_tracking
-    run_test test_pause_kills_adapter
     run_test test_end_kills_adapter
     run_test test_end_clears_pending
     run_test test_codex_parse_jsonl
@@ -23162,12 +22326,10 @@ run_unit_tests() {
     run_test test_media_group_routes_all_photos_to_mentioned_worker
     run_test test_reply_with_mention_forwards_replied_media
     run_test test_get_any_session_id
-    run_test test_progress_continuity_for_noninteractive
     run_test test_extract_worker_activity
     run_test test_activity_detects_interactive_prompt
     run_test test_activity_detects_plan_approval
     run_test test_watchdog_waiting_input_state
-    run_test test_progress_shows_activity
     run_test test_noninteractive_backpressure
     run_test test_get_workers_includes_codex
     run_test test_pipe_forwarding_to_codex
@@ -23295,10 +22457,8 @@ run_unit_tests() {
     run_test test_codex_session_id_persistence
     # Codex backend full support
     run_test test_codex_backend_send_spawns_thread
-    run_test test_progress_noninteractive_shows_adapter_activity
     run_test test_codex_native_transcript_parsing
     run_test test_codex_restart_readiness_check
-    run_test test_codex_progress_shows_last_response_time
     run_test test_codex_rewind_reads_native_transcript
     run_test test_workers_remote_noninteractive_warns
     run_test test_check_adapter_log_teleported_reads_remote
@@ -23321,8 +22481,6 @@ run_unit_tests() {
     log ""
     log "── Call Site Host Propagation Tests (Phase 2) ──────────────────────────"
     run_test test_phase2_cmd_team_passes_host
-    run_test test_phase2_cmd_pause_passes_host
-    run_test test_phase2_cmd_progress_passes_host
     run_test test_phase2_interactive_reply_passes_host
     run_test test_phase2_checkin_passes_host
     run_test test_phase2_watchdog_capture_pane_passes_host
@@ -23439,14 +22597,6 @@ run_unit_tests() {
     run_test test_voice_message_includes_transcript
     run_test test_voice_message_fallback_without_transcript
     run_test test_reply_forwarded_voice_gets_transcribed
-    run_test test_synthesize_speech_success
-    run_test test_synthesize_speech_timeout_returns_none
-    run_test test_synthesize_speech_uses_chunked_for_long_text
-    run_test test_auto_tts_sends_voice_with_response
-    run_test test_speak_tag_custom_text
-    run_test test_auto_tts_skips_long_messages
-    run_test test_auto_tts_failure_still_sends_text
-    run_test test_voice_toggle_command
     # Unit tests - Transcript Viewer
     log ""
     log "── Transcript Viewer Tests (Unit) ──────────────────────────────────────"
@@ -23717,7 +22867,6 @@ run_integration_tests() {
     run_test test_channel_nonmember_rejected
     run_test test_channel_delete_endpoint
     run_test test_channel_list_endpoint
-    run_test test_channel_telegram_cmd
     run_test test_channel_guest_fanout
 
     # Relay Guideline Link Tests (Integration)

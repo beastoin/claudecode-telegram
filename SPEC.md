@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.45.3
+> Version: 0.46.0
 
 ## Documentation Contract
 
@@ -182,7 +182,7 @@ fix the bug              → active session (currently frontend)
 
 - 👀 means the message reached the worker.
 - The worker reply is the confirmation: `worker_name: response`.
-- The bridge sends text replies only for errors and state commands (`/hire`, `/end`, `/focus`, `/team`, `/progress`).
+- The bridge sends text replies only for errors and state commands (`/hire`, `/end`, `/focus`, `/team`).
 - Regular messages and `@mentions` are silent.
 - The manager wants a clean chat. The emoji gives instant feedback.
 - The bridge speaks only when no worker reply will come.
@@ -243,7 +243,7 @@ The hook POSTs extracted text to `{BRIDGE_URL}/response`. It also writes `claude
 [ ! -f "$CHAT_ID_FILE" ] && exit
 ```
 
-The `pending` file is used for the busy indicator in `/team` and `/progress`. It is not a send gate (changed in v0.6.2 to enable proactive messaging).
+The `pending` file is used for the busy indicator in `/team`. It is not a send gate (changed in v0.6.2 to enable proactive messaging).
 
 ## SPEC-017. Why Single Chat? [FB-001]
 
