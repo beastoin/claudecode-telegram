@@ -1,4 +1,4 @@
-"""Behavior tests for tools/review.py — PR review page generator.
+"""Behavior tests for review.py — PR review page generator.
 
 Tests the cache layer (PRCache), diff parser (parse_patch), and HTML
 generation (generate_html) without any GitHub API calls.
@@ -521,7 +521,7 @@ def test_cli_usage_no_args():
     """Running review.py with no arguments exits with usage message."""
     import subprocess
     result = subprocess.run(
-        [sys.executable, os.path.join(os.path.dirname(__file__), '..', 'tools', 'review.py')],
+        [sys.executable, os.path.join(os.path.dirname(__file__), '..', 'review.py')],
         capture_output=True, text=True,
     )
     assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"

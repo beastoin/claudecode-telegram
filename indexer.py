@@ -6,7 +6,7 @@ for fast pagination, BM25 search, and domain-specific queries.
 Designed to run locally or via SSH from the bridge.
 
 Usage:
-    python3 tools/indexer.py transcript --jsonl <path> --db <path> --query entries
+    python3 indexer.py transcript --jsonl <path> --db <path> --query entries
 
 Python 3.9+ compatible. No external dependencies.
 """

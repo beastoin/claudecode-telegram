@@ -13321,7 +13321,7 @@ class CommandRouter:
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
 
         # Run review.py — pass full URL (with fragment) so it can highlight linked comment
-        script_path = Path(__file__).parent / "tools" / "review.py"
+        script_path = Path(__file__).parent / "review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
             r = _subprocess_runner.run(
@@ -13597,8 +13597,8 @@ command_router = CommandRouter(transport, worker_manager)
 _TRANSCRIPT_SYNC: dict[str, TranscriptSyncState] = {}
 _TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
 
-# Path to indexer script (tools/indexer.py — transcript subcommand)
-INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "indexer.py")
+# Path to indexer script (indexer.py — transcript subcommand)
+INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indexer.py")
 
 
 def _run_transcript_query(jsonl_path: str, sid: str, query: str,
@@ -13615,7 +13615,7 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
         # Use script on remote host (deployed via scp/rsync)
         remote_home = _get_remote_home(host) or ""
         if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/tools/indexer.py"
+            script_path = f"{remote_home}/claudecode-telegram/indexer.py"
     cmd = ["python3", script_path, "transcript", "--jsonl", str(jsonl_path),
            "--db", db_path, "--query", query]
     if page is not None:

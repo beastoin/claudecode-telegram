@@ -13,13 +13,13 @@
 
 **Removed:**
 - `/rewind team` command and all team chat viewer code (HTML renderer, HTTP handlers, constants, TypedDict).
-- Team chat indexer from `tools/indexer.py` — now transcript-only.
+- Team chat indexer from `indexer.py` — now transcript-only.
 - All team chat tests from pytest and test.sh.
 - `_render_md_to_html`, `_render_csv_to_html` helpers (only used by team chat).
 - Legacy `TRANSCRIPT_INDEX_SCRIPT` alias — all call sites use `INDEXER_SCRIPT` directly.
 
 **Cleaned up:**
-- `tools/indexer.py`: removed `ChatSearchResult`, `MessagesResult`, `MsgLookupResult` types, chat subcommand, `_run_chat` CLI handler.
+- `indexer.py`: removed `ChatSearchResult`, `MessagesResult`, `MsgLookupResult` types, chat subcommand, `_run_chat` CLI handler.
 - `tests/test_workers.py`: removed 8 team chat tests and unused `urlparse` import.
 - `tests/test_transcript.py`: removed 10 chat indexer tests.
 

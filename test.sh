@@ -203,7 +203,7 @@ hook_curl_code() {
 start_test_pilot() {
     lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
     sleep 0.2
-    PORT="$TEST_PILOT_PORT" node "$SCRIPT_DIR/tools/pilot/pilot.js" > "$PILOT_LOG" 2>&1 &
+    PORT="$TEST_PILOT_PORT" node "$SCRIPT_DIR/pilot/pilot.js" > "$PILOT_LOG" 2>&1 &
     PILOT_PID=$!
     if wait_for_port "$TEST_PILOT_PORT"; then
         return 0
@@ -2044,7 +2044,7 @@ print('OK')
 
 test_tindex_missing_file() {
     info "Testing indexer.py handles missing JSONL..."
-    if result=$(python3 tools/indexer.py transcript --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2065,7 +2065,7 @@ test_tindex_empty_file() {
     info "Testing indexer.py handles empty JSONL..."
     local tmp
     tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2096,7 +2096,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json, sqlite3
@@ -2142,7 +2142,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2176,7 +2176,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # shellcheck disable=SC2015
     python3 -c "
 import sqlite3
@@ -2208,7 +2208,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # First index
-    python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Append 2 more entries
     python3 -c "
 import json
@@ -2221,7 +2221,7 @@ with open('$tmp', 'a') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Re-index (incremental)
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2247,12 +2247,12 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     sleep 1
     # Run again — should skip indexing
-    python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2279,7 +2279,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Default (no --page) should be last page
-    result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
+    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2291,7 +2291,7 @@ assert len(d['entries']) == 20, f'Last page should have 20 entries, got {len(d[\
 print('OK1')
 " 2>/dev/null | grep -q "OK1" || { fail "Pagination default-last-page failed"; rm -f "$tmp" "$db"; return; }
     # Explicit page 1
-    result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
+    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2302,7 +2302,7 @@ assert json.loads(d['entries'][0]['raw_json'])['message']['content'] == 'Message
 print('OK2')
 " 2>/dev/null | grep -q "OK2" || { fail "Pagination page-1 failed"; rm -f "$tmp" "$db"; return; }
     # Page 2
-    result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
+    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2331,7 +2331,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2358,7 +2358,7 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2392,7 +2392,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2426,7 +2426,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 tools/indexer.py transcript --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
+    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -22962,7 +22962,7 @@ main() {
     log "── bun test suite (pilot) ──"
     if command -v bun &>/dev/null; then
         local bun_out
-        bun_out=$(cd tools/pilot && bun test pilot_behavior.test.ts 2>&1) || true
+        bun_out=$(cd pilot && bun test pilot_behavior.test.ts 2>&1) || true
         local bun_last
         bun_last=$(echo "$bun_out" | tail -1)
         if echo "$bun_out" | grep -q "fail"; then
@@ -22978,7 +22978,7 @@ main() {
     # Bash tool tests — pre-commit hook
     log "── bash tests (pre-commit hook) ──"
     local bash_out
-    bash_out=$(bash tools/git-hooks/test_pre_commit.sh 2>&1) || true
+    bash_out=$(bash refs/git-hooks/test_pre_commit.sh 2>&1) || true
     local bash_last
     bash_last=$(echo "$bash_out" | tail -1)
     if echo "$bash_out" | grep -q "failed"; then

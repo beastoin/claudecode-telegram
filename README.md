@@ -82,8 +82,10 @@ claudecode-telegram/
 ├── bridge.sh              # CLI wrapper, tunnel/webhook setup
 ├── connectors.py          # Gmail, GitHub polling integrations
 ├── hooks.sh               # Claude Code stop hook (sends replies to Telegram)
-├── tests/                 # pytest test suite (349 tests)
-├── tools/                 # PR review, indexers, pilot terminal viewer
+├── review.py              # PR review page generator
+├── indexer.py             # JSONL transcript indexer (SQLite FTS5)
+├── tests/                 # pytest test suite
+├── pilot/                 # Terminal viewer (Node.js, separate server)
 ├── test.sh                # Acceptance tests (mypy + pytest + bash + Go)
 └── pyproject.toml         # Project metadata, mypy strict config
 ```

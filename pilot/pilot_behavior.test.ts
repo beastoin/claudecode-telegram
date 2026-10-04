@@ -2,7 +2,7 @@
  * Behavior tests for pilot server — the terminal session sharing server.
  *
  * Tests HTTP + WebSocket server that exposes tmux sessions in a browser.
- * Run: bun test tools/pilot/test_pilot_behavior.ts
+ * Run: bun test pilot/pilot_behavior.test.ts
  *
  * Requires: bun, node (for ws), tmux
  */

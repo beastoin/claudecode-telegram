@@ -1,4 +1,4 @@
-"""Behavior tests for tools/indexer.py — covers gaps not in test_transcript.py.
+"""Behavior tests for indexer.py — covers gaps not in test_transcript.py.
 
 Focuses on edge cases: FTS5 special-char handling, compound queries,
 incremental reindex triggers, unicode search, and duration formatting.
@@ -21,7 +21,7 @@ def _run_indexer(tmp_path, jsonl_name, entries, query, **extra_args):
             f.write(json.dumps(e) + "\n")
 
     cmd = [
-        sys.executable, "tools/indexer.py", "transcript",
+        sys.executable, "indexer.py", "transcript",
         "--jsonl", str(tmp), "--db", str(db), "--query", query,
     ]
     for k, v in extra_args.items():
@@ -167,7 +167,7 @@ def test_incremental_reindex_on_file_shrink(tmp_path):
             f.write(json.dumps(e) + "\n")
 
     # First index: 5 entries
-    cmd = [sys.executable, "tools/indexer.py", "transcript",
+    cmd = [sys.executable, "indexer.py", "transcript",
            "--jsonl", str(tmp), "--db", str(db), "--query", "entries"]
     r1 = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
     d1 = json.loads(r1.stdout)
@@ -199,7 +199,7 @@ def test_incremental_reindex_on_path_change(tmp_path):
     with open(path_a, "w") as f:
         for e in entries_a:
             f.write(json.dumps(e) + "\n")
-    cmd_a = [sys.executable, "tools/indexer.py", "transcript",
+    cmd_a = [sys.executable, "indexer.py", "transcript",
              "--jsonl", str(path_a), "--db", str(db), "--query", "entries"]
     r1 = subprocess.run(cmd_a, capture_output=True, text=True, cwd=os.getcwd())
     d1 = json.loads(r1.stdout)
@@ -210,7 +210,7 @@ def test_incremental_reindex_on_path_change(tmp_path):
     with open(path_b, "w") as f:
         for e in entries_b:
             f.write(json.dumps(e) + "\n")
-    cmd_b = [sys.executable, "tools/indexer.py", "transcript",
+    cmd_b = [sys.executable, "indexer.py", "transcript",
              "--jsonl", str(path_b), "--db", str(db), "--query", "entries"]
     r2 = subprocess.run(cmd_b, capture_output=True, text=True, cwd=os.getcwd())
     d2 = json.loads(r2.stdout)
@@ -327,7 +327,7 @@ def test_incremental_append(tmp_path):
         for e in entries_initial:
             f.write(json.dumps(e) + "\n")
 
-    cmd = [sys.executable, "tools/indexer.py", "transcript",
+    cmd = [sys.executable, "indexer.py", "transcript",
            "--jsonl", str(jsonl), "--db", str(db), "--query", "entries"]
     r1 = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
     d1 = json.loads(r1.stdout)
@@ -343,7 +343,7 @@ def test_incremental_append(tmp_path):
 
     # Verify no duplicates: search for original content returns exactly 1
     r3 = subprocess.run([
-        sys.executable, "tools/indexer.py", "transcript",
+        sys.executable, "indexer.py", "transcript",
         "--jsonl", str(jsonl), "--db", str(db),
         "--query", "search", "--search", "First message",
     ], capture_output=True, text=True, cwd=os.getcwd())
@@ -365,7 +365,7 @@ def test_pagination_default_last_page(tmp_path):
             f.write(json.dumps(e) + "\n")
 
     # No --page → should get page 3 (last page) with 2 entries
-    cmd = [sys.executable, "tools/indexer.py", "transcript",
+    cmd = [sys.executable, "indexer.py", "transcript",
            "--jsonl", str(jsonl), "--db", str(db),
            "--query", "entries", "--per-page", "5"]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
@@ -406,7 +406,7 @@ def test_filter_prompts(tmp_path):
         for e in entries:
             f.write(json.dumps(e) + "\n")
 
-    cmd = [sys.executable, "tools/indexer.py", "transcript",
+    cmd = [sys.executable, "indexer.py", "transcript",
            "--jsonl", str(jsonl), "--db", str(db),
            "--query", "entries", "--filter", "prompts"]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
@@ -427,7 +427,7 @@ def test_missing_file_graceful(tmp_path):
     nonexistent = tmp_path / "does_not_exist.jsonl"
 
     # entries query on missing file
-    cmd = [sys.executable, "tools/indexer.py", "transcript",
+    cmd = [sys.executable, "indexer.py", "transcript",
            "--jsonl", str(nonexistent), "--db", str(db), "--query", "entries"]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
     assert r.returncode == 0, f"Should not crash on missing file: {r.stderr}"
@@ -436,7 +436,7 @@ def test_missing_file_graceful(tmp_path):
     assert d["entries"] == []
 
     # stats query on missing file
-    cmd_stats = [sys.executable, "tools/indexer.py", "transcript",
+    cmd_stats = [sys.executable, "indexer.py", "transcript",
                  "--jsonl", str(nonexistent), "--db", str(db), "--query", "stats"]
     r_stats = subprocess.run(cmd_stats, capture_output=True, text=True, cwd=os.getcwd())
     assert r_stats.returncode == 0, f"Stats should not crash on missing file: {r_stats.stderr}"
@@ -444,7 +444,7 @@ def test_missing_file_graceful(tmp_path):
     assert d_stats["n_user"] == 0
 
     # search query on missing file
-    cmd_search = [sys.executable, "tools/indexer.py", "transcript",
+    cmd_search = [sys.executable, "indexer.py", "transcript",
                   "--jsonl", str(nonexistent), "--db", str(db),
                   "--query", "search", "--search", "anything"]
     r_search = subprocess.run(cmd_search, capture_output=True, text=True, cwd=os.getcwd())

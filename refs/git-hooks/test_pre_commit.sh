@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Behavior tests for tools/git-hooks/pre-commit secret scanner.
-# Run: bash tools/git-hooks/test_pre_commit.sh
+# Behavior tests for refs/git-hooks/pre-commit secret scanner.
+# Run: bash refs/git-hooks/test_pre_commit.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

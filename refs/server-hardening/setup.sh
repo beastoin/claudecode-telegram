@@ -12,7 +12,7 @@
 # It does NOT restart SSH. You will not lose your connection.
 #
 # Usage:
-#   sudo bash tools/server-hardening/setup.sh
+#   sudo bash refs/server-hardening/setup.sh
 
 set -euo pipefail
 

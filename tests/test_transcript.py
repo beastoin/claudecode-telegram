@@ -518,7 +518,7 @@ def test_tindex_missing_file(tmp_path):
 
     db = tmp_path / "test-tindex-missing.db"
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", "/nonexistent/path.jsonl",
+        [sys.executable, "indexer.py", "transcript", "--jsonl", "/nonexistent/path.jsonl",
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -537,7 +537,7 @@ def test_tindex_empty_file(tmp_path):
     tmp.write_text("")
     db = tmp_path / "test-tindex-empty.db"
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -562,7 +562,7 @@ def test_tindex_basic_indexing(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -601,7 +601,7 @@ def test_tindex_skips_noise(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -629,7 +629,7 @@ def test_tindex_plain_text_extraction(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -657,7 +657,7 @@ def test_tindex_incremental(tmp_path):
 
     # First index
     subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -672,7 +672,7 @@ def test_tindex_incremental(tmp_path):
 
     # Re-index (incremental)
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -692,20 +692,20 @@ def test_tindex_no_reindex_unchanged(tmp_path):
     tmp.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 
     subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
     time.sleep(1)
     # Run again — should skip indexing
     subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -726,7 +726,7 @@ def test_tindex_pagination(tmp_path):
 
     # Default (no --page) should be last page
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -738,7 +738,7 @@ def test_tindex_pagination(tmp_path):
 
     # Explicit page 1
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--page", "1", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -749,7 +749,7 @@ def test_tindex_pagination(tmp_path):
 
     # Page 2
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--page", "2", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -774,7 +774,7 @@ def test_tindex_fts5_search(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "search", "--search", "teleport"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -794,7 +794,7 @@ def test_tindex_search_no_results(tmp_path):
     tmp.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "search", "--search", "xyznonexistent"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -822,7 +822,7 @@ def test_tindex_filter_prompts(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--filter", "prompts"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -850,7 +850,7 @@ def test_tindex_stats(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "tools/indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "stats"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )

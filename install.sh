@@ -187,4 +187,7 @@ main() {
   exec ./bridge.sh setup --start
 }
 
-main "$@"
+# Run main only when executed directly (not when sourced for testing).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
