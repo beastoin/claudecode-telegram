@@ -21,22 +21,16 @@ A bridge between Telegram and AI coding assistants. You message your bot, the bo
 ## How it works
 
 ```
-                    ┌─────────────────────────────────────┐
-                    │            bridge.py                 │
-Telegram ─webhook─► │  control plane: routing, workers,   │ ─tmux─► Claude sessions
-                    │  health, machines, connectors        │
-                    └──────────┬──────────────────┬────────┘
-                               │                  │
-                    ┌──────────▼──────┐  ┌────────▼────────┐
-                    │  claudecode.py  │  │  telegram.py     │
-                    │  runtime: tmux, │  │  human interface: │
-                    │  backends, SSH  │  │  formatting, API  │
-                    └──────────┬──────┘  └─────────────────┘
-                               │
-                    claudecode.sh (hook) ── POST /response ──► bridge.py ──► Telegram
+Telegram ──webhook──► bridge.py ──tmux──► Claude worker sessions
+                         │                       │
+                         │                       │ hook fires on stop
+                         │                       ▼
+                         │◄──── POST /response ──── claudecode.sh
 ```
 
-Three Python modules, each owning its layer. The bridge is an HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer, `workers.json` tracks registration.
+The bridge is a Python HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer, `workers.json` tracks registration.
+
+Three modules, each owning a layer: **bridge.py** (control plane — routing, workers, health, machines), **claudecode.py** (runtime — tmux, backends, sessions, SSH), **telegram.py** (human interface — formatting, transport, parsing).
 
 ---
 
