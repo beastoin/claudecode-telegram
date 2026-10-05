@@ -1,5 +1,24 @@
 ## Changelog
 
+### v0.47.0 - Three-layer reorg: bridge / claudecode / telegram
+
+**Architecture:** Enforced the 3-layer model — each Python file cleanly owns its layer:
+- **bridge.py** = Control plane (orchestration, features, routing, monitoring, machines, health)
+- **claudecode.py** = Runtime primitives (tmux, backends, sessions, SSH, pipes)
+- **telegram.py** = Human interface (formatting, transport, parsing)
+
+**Moved to bridge.py (~1,025 lines from claudecode.py):**
+- Machine catalog: `WorkerRecord`, `Machine`, `MachineConfigError`, `get_worker_host`, `load_machines_config`, `get_machine_catalog`, `get_machines`, and 5 helpers.
+- Health monitoring: `HostHealthState`, `_detect_poisoned`, `_check_hook_failure_signal`, `_clear_hook_failures`, `_read_noninteractive_activity`.
+- Activity extraction: `_extract_activity`, `_read_tmux_activity`, all 12 `_activity_from_*` functions, `_extract_question_details`, `_send_interactive_reply`.
+- Feature glue: `_ensure_bare_repo`, `parse_hire_args`.
+
+**Renamed:** `hooks.sh` → `claudecode.sh` across repo, VPS, and Mac Mini (settings.json, bridge.sh, test.sh, SPEC.md, AGENTS.md, README.md). Cleaned 5 stale legacy hooks from Mac Mini.
+
+**Removed:** All backward-compat shims — `__getattr__` forwarding in claudecode.py, `LEGACY_HOOK_FILES` cleanup loops in bridge.sh, 5 deprecated function aliases.
+
+**Result:** claudecode.py 2,737 → 1,712 lines. bridge.py 13,878 → 14,944 lines. telegram.py unchanged at 2,165 lines. All 439 tests pass.
+
 ### v0.46.0 - Remove unused commands: /pause, /progress, /channel, /voice
 
 **Removed:**

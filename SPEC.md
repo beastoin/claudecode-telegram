@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.46.0
+> Version: 0.47.0
 
 ## Documentation Contract
 
