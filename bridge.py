@@ -1473,21 +1473,1087 @@ class LearningReminderState:
         self.idle_scan_timer: threading.Timer | None = None
 
 
+class HostHealthState:
+    """Tracks health metrics for all remote hosts (SSH, disk, CPU, memory, IO, worktrees, Tailscale).
+
+    Thread safety: all reads/writes to mutable dicts must be under watchdog.lock
+    (the canonical lock for all watchdog + host_health state).
+    """
+
+    def __init__(self) -> None:
+        """Initialize per-host health metrics (SSH, disk, memory, IO, CPU, Tailscale)."""
+        # SSH connectivity
+        self.ssh_failures: dict[str, int] = {}
+        self.down: dict[str, bool] = {}
+        self.down_since: dict[str, float] = {}
+        self.last_error: dict[str, str] = {}
+        # Disk
+        self.disk_usage: dict[str, DiskUsageDict] = {}
+        self.disk_alert_ts: dict[str, float] = {}
+        self.disk_alerted: dict[str, str | bool] = {}
+        # CPU hogs
+        self.cpu_hogs: dict[str, list[CpuHogEntry]] = {}
+        self.cpu_hog_alert_ts: dict[str, float] = {}
+        # Worktrees
+        self.worktree_usage: dict[str, WorktreeUsageDict] = {}
+        self.worktree_alert_ts: dict[str, float] = {}
+        self.worktree_alerted: dict[str, bool] = {}
+        # Memory
+        self.mem_usage: dict[str, MemUsageDict] = {}
+        self.mem_alert_ts: dict[str, float] = {}
+        self.mem_alerted: dict[str, bool] = {}
+        # IO
+        self.io_usage: dict[str, IoUsageDict] = {}
+        self.io_alert_ts: dict[str, float] = {}
+        self.io_alerted: dict[str, bool] = {}
+        # Infra / Tailscale
+        self.tailscale_down: bool = False
+        self.tailscale_alert_ts: float = 0.0
+
+    def reset(self) -> None:
+        """Reset all state (useful for testing)."""
+        self.__init__()  # type: ignore[misc]
+
+    def to_health_summary(self, host: str) -> HealthSummaryDict:
+        """Return a typed summary dict for a single host."""
+        return HealthSummaryDict(
+            ssh_down=self.down.get(host, False),
+            ssh_down_since=self.down_since.get(host),
+            disk=self.disk_usage.get(host),
+            mem=self.mem_usage.get(host),
+            io=self.io_usage.get(host),
+            cpu_hogs=self.cpu_hogs.get(host, []),
+            worktrees=self.worktree_usage.get(host),
+        )
 
 
 from claudecode import *  # noqa: F401,F403
 from claudecode import (  # underscore names excluded from * import
-    _acquire_flock, _activity_from_spinner, _cache_session_id, _capture_pane_text,
-    _check_hook_failure_signal, _clear_hook_failures, _codex_load_session_id, _codex_save_session_id,
-    _codex_session_id_path, _coerce_optional_str, _detect_os_family, _detect_poisoned,
-    _ensure_bare_repo, _ensure_workspace_trusted, _extract_activity, _extract_context_pct,
-    _extract_question_details, _forward_pipe_message, _get_remote_home, _get_tmux_send_lock,
-    _implicit_local_machine, _is_git_repo, _log_session_event, _machine_access,
-    _machine_for_worker_host, _machine_health, _project_slug, _read_noninteractive_activity,
-    _read_tmux_activity, _release_flock, _remote_run, _resolve_remote_tool,
-    _scan_latest_session_id, _send_interactive_reply, _tmux_pane_pids, _validate_machine_id,
+    _acquire_flock, _cache_session_id, _capture_pane_text,
+    _codex_load_session_id, _codex_save_session_id,
+    _codex_session_id_path, _detect_os_family,
+    _ensure_workspace_trusted, _find_codex_transcript, _forward_pipe_message,
+    _get_remote_home, _get_tmux_send_lock,
+    _INTERACTIVE_CONTENT, _INTERACTIVE_FOOTERS,
+    _is_git_repo, _LEARNING_REMINDER_TEXT, _log_session_event, _project_slug,
+    _release_flock, _remote_run, _resolve_remote_tool,
+    _scan_latest_session_id, _tmux_pane_pids,
     _which_binary,
 )
+
+
+
+# ── Machine catalog, health monitoring, activity extraction (from claudecode.py) ──
+
+# ── Moved from claudecode.py: machine catalog, health monitoring, activity extraction ──
+
+
+
+
+# ── WorkerRecord: normalized worker data model ──
+
+@dataclass
+class WorkerRecord:
+    """Normalized worker representation — single typed object for all sources."""
+    name: str
+    backend: str = "claude"
+    host: str | None = None
+    tmux_name: str = ""
+    callback_url: str = ""
+    protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
+    version: str = ""
+    tools: dict[str, object] | None = None  # plugin config, shape varies per tool
+    chat_id: int | None = None
+    cwd: str = ""
+    home_host: str = ""
+    home_cwd: str = ""
+
+    @property
+    def is_remote(self) -> bool:
+        """Worker lives on a different machine from the bridge."""
+        return bool(self.host)
+
+    @property
+    def is_callback(self) -> bool:
+        """Worker uses HTTP callback protocol (e.g., forge/packaged workers)."""
+        return bool(self.callback_url)
+
+    @property
+    def is_interactive(self) -> bool:
+        """Worker uses an interactive CLI (tmux-based send)."""
+        # Defer to Backend for the canonical answer
+        return self.backend == "claude"
+
+    def to_session_dict(self) -> WorkerSessionDict:
+        """Convert back to legacy session dict for backward compatibility."""
+        result: WorkerSessionDict = {"backend": self.backend}
+        if self.tmux_name:
+            result["tmux"] = self.tmux_name
+        if self.host:
+            result["host"] = self.host
+        if self.callback_url:
+            result["callback_url"] = self.callback_url
+            result["protocol"] = "http"
+        if self.version:
+            result["version"] = self.version
+        return result
+
+    @classmethod
+    def from_session_dict(cls: type["WorkerRecord"], name: str, session: WorkerSessionDict, tmux_prefix: str = "") -> "WorkerRecord":
+        """Create from legacy session dict (as returned by get_registered_sessions)."""
+        return cls(
+            name=name,
+            backend=session.get("backend", "claude"),
+            host=session.get("host"),
+            tmux_name=session.get("tmux", f"{tmux_prefix}{name}" if tmux_prefix else ""),
+            callback_url=session.get("callback_url", ""),
+            protocol=session.get("protocol", ""),
+            version=session.get("version", ""),
+        )
+
+
+
+
+def get_worker_host(name: str) -> str | None:
+    """Get the SSH host for a worker from the persistent registry, or None if local."""
+    registry = _load_registry()
+    worker = registry.get("workers", {}).get(name, {})
+    return worker.get("host")
+
+
+
+
+class MachineConfigError(ValueError):
+    """Invalid machines.json configuration."""
+
+
+
+
+@dataclass(frozen=True)
+class Machine:
+    """Static machine catalog entry.
+
+    This matches SDD-host-awareness.md Phase 0. Optional metadata is read-only
+    decoration for operators and does not affect worker routing yet.
+    """
+    id: str
+    ssh_target: str | None
+    bridge_base_url: str
+    home_root: str
+    os_family: str
+    display_name: str = ""
+    tailscale_ip: str = ""
+    role: str = ""
+    configured: bool = True
+
+    @property
+    def is_local(self) -> bool:
+        """Check whether this machine is the local bridge host."""
+        return self.ssh_target is None
+
+    def public_dict(self) -> MachinePublicDict:
+        """Return a sanitized dictionary safe for API responses."""
+        return {
+            "id": self.id,
+            "display_name": self.display_name or self.id,
+            "ssh_target": self.ssh_target,
+            "bridge_base_url": self.bridge_base_url,
+            "home_root": self.home_root,
+            "os_family": self.os_family,
+            "tailscale_ip": self.tailscale_ip,
+            "role": self.role,
+            "configured": self.configured,
+        }
+
+
+
+
+def _validate_machine_id(machine_id: str) -> str:
+    """Validate and return a machine id (alphanumeric + dash/underscore)."""
+    if not isinstance(machine_id, str) or not machine_id:
+        raise MachineConfigError("machine id must be a non-empty string")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", machine_id):
+        raise MachineConfigError(f"invalid machine id: {machine_id!r}")
+    return machine_id
+
+
+
+
+def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
+    """Coerce a config value to str, allowing None (→ empty string)."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
+    return value
+
+
+
+
+def _implicit_local_machine() -> Machine:
+    """Create a Machine for the local host when no machines.json exists."""
+    return Machine(
+        id=BRIDGE_SSH_TARGET or "vps",
+        ssh_target=None,
+        bridge_base_url=BRIDGE_URL,
+        home_root=str(Path.home()),
+        os_family=_detect_os_family(),
+        display_name=(BRIDGE_SSH_TARGET or "vps").upper(),
+        role="bridge",
+        configured=False,
+    )
+
+
+
+
+def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
+    """Load the static machine catalog.
+
+    Missing file is allowed and yields one implicit local bridge machine for
+    backward compatibility. Malformed operator config fails loudly.
+    """
+    config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
+    if not config_path.exists():
+        return {_implicit_local_machine().id: _implicit_local_machine()}
+
+    try:
+        data = cast(NodeConfigDict, json.loads(config_path.read_text()))
+    except json.JSONDecodeError as e:
+        raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
+    except OSError as e:
+        raise MachineConfigError(f"{config_path}: cannot read: {e}") from e
+
+    if not isinstance(data, dict):
+        raise MachineConfigError(f"{config_path}: root must be an object")
+    if data.get("version") != 1:
+        raise MachineConfigError(f"{config_path}: version must be 1")
+    raw_machines = data.get("machines")
+    if not isinstance(raw_machines, dict) or not raw_machines:
+        raise MachineConfigError(f"{config_path}: machines must be a non-empty object")
+
+    machines: dict[str, Machine] = {}
+    ssh_targets: dict[str, str] = {}
+    local_count = 0
+    for raw_id, raw in raw_machines.items():
+        machine_id = _validate_machine_id(raw_id)
+        if not isinstance(raw, dict):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} must be an object")
+
+        missing = [k for k in ("ssh_target", "bridge_base_url", "home_root", "os_family") if k not in raw]
+        if missing:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} missing {', '.join(missing)}")
+
+        ssh_target = raw.get("ssh_target")
+        if ssh_target is not None and not isinstance(ssh_target, str):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target must be string or null")
+        if ssh_target == "":
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target cannot be empty")
+        if ssh_target is None:
+            local_count += 1
+        elif ssh_target in ssh_targets:
+            raise MachineConfigError(
+                f"{config_path}: ssh_target {ssh_target!r} used by both "
+                f"{ssh_targets[ssh_target]!r} and {machine_id!r}"
+            )
+        else:
+            ssh_targets[ssh_target] = machine_id
+
+        bridge_base_url = _coerce_optional_str(raw.get("bridge_base_url"), "bridge_base_url", machine_id).rstrip("/")
+        home_root = _coerce_optional_str(raw.get("home_root"), "home_root", machine_id).rstrip("/")
+        os_family = _coerce_optional_str(raw.get("os_family"), "os_family", machine_id)
+        if not bridge_base_url:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} bridge_base_url cannot be empty")
+        if not home_root.startswith("/"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} home_root must be absolute")
+        if os_family not in ("linux", "darwin"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} os_family must be linux or darwin")
+
+        machines[machine_id] = Machine(
+            id=machine_id,
+            ssh_target=ssh_target,
+            bridge_base_url=bridge_base_url,
+            home_root=home_root,
+            os_family=os_family,
+            display_name=_coerce_optional_str(raw.get("display_name", machine_id), "display_name", machine_id),
+            tailscale_ip=_coerce_optional_str(raw.get("tailscale_ip", ""), "tailscale_ip", machine_id),
+            role=_coerce_optional_str(raw.get("role", ""), "role", machine_id),
+        )
+
+    if local_count != 1:
+        raise MachineConfigError(f"{config_path}: exactly one local machine with ssh_target=null is required")
+    return machines
+
+
+
+
+def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
+    """Return the startup machine catalog."""
+    with remote_cache.lock:
+        if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
+            remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
+            remote_cache.machines_path = MACHINES_CONFIG_FILE
+        return dict(remote_cache.machines)
+
+
+
+
+def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
+    """Look up the Machine for a worker's ssh_target, creating an ad-hoc entry if needed."""
+    if host is None:
+        for machine in machines.values():
+            if machine.is_local:
+                return machine
+        return _implicit_local_machine()
+    for machine in machines.values():
+        if machine.ssh_target == host:
+            return machine
+    machine_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", host).strip("-") or "unknown"
+    return Machine(
+        id=machine_id,
+        ssh_target=host,
+        bridge_base_url=BRIDGE_PUBLIC_URL or "",
+        home_root="",
+        os_family="",
+        display_name=host,
+        role="worker-host",
+        configured=False,
+    )
+
+
+
+
+def _machine_health(machine: Machine) -> MachineHealthDict:
+    """Build a health status dict for a machine (disk, memory, IO, up/down)."""
+    host_label = machine.ssh_target or "VPS"
+    with watchdog.lock:
+        health: MachineHealthDict = {
+            "status": "up" if machine.is_local else "unknown",
+            "down_since": None,
+            "last_error": None,
+            "disk": host_health.disk_usage.get(host_label),
+            "memory": host_health.mem_usage.get(host_label),
+            "io": host_health.io_usage.get(host_label),
+        }
+        if machine.ssh_target:
+            if host_health.down.get(machine.ssh_target, False):
+                health["status"] = "down"
+                health["down_since"] = host_health.down_since.get(machine.ssh_target)
+                health["last_error"] = host_health.last_error.get(machine.ssh_target)
+            elif (
+                machine.ssh_target in host_health.ssh_failures
+                or machine.ssh_target in host_health.disk_usage
+                or machine.ssh_target in host_health.mem_usage
+                or machine.ssh_target in host_health.io_usage
+            ):
+                health["status"] = "up"
+    return cast(MachineHealthDict, health)
+
+
+
+
+def _machine_access(machine: Machine, caller_host: str | None) -> str:
+    """Return the access command for reaching a machine ('local' or 'ssh <host>')."""
+    target_host = machine.ssh_target
+    if caller_host == target_host:
+        return "local"
+    if target_host is None:
+        return f"ssh {BRIDGE_SSH_TARGET}"
+    return f"ssh {target_host}"
+
+
+
+
+def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
+    """Return configured machines plus derived workers, access, and health."""
+    machines = get_machine_catalog()
+    registered = get_registered_sessions()
+    caller_info = registered.get(caller_from, {}) if caller_from else {}
+    caller_host = caller_info.get("host") if caller_info else (get_worker_host(caller_from) if caller_from else None)
+
+    rows: dict[str, MachinePublicDict] = {}
+    for machine in machines.values():
+        row = machine.public_dict()
+        row["access"] = _machine_access(machine, caller_host)
+        row["workers"] = []
+        row["worker_count"] = 0
+        row["health"] = _machine_health(machine)
+        rows[machine.id] = row
+
+    for name, info in registered.items():
+        host = info.get("host") if "host" in info else get_worker_host(name)
+        machine = _machine_for_worker_host(host, machines)
+        if machine.id not in rows:
+            row = machine.public_dict()
+            row["access"] = _machine_access(machine, caller_host)
+            row["workers"] = []
+            row["worker_count"] = 0
+            row["health"] = _machine_health(machine)
+            rows[machine.id] = row
+
+        worker_entry = {
+            "name": name,
+            "backend": info.get("backend", DEFAULT_BACKEND),
+            "status": "online" if info.get("tmux") or info.get("callback_url") else "exited",
+        }
+        rows[machine.id]["workers"].append(worker_entry)
+        rows[machine.id]["worker_count"] += 1
+
+    return {
+        "version": 1,
+        "config_path": str(MACHINES_CONFIG_FILE),
+        "caller": caller_from or None,
+        "machines": list(rows.values()),
+    }
+
+
+
+
+def _ensure_bare_repo(project_name: str) -> str:
+    """Create bare repo at GIT_SERVER_DIR/<project>.git if missing. Returns path."""
+    bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
+    if not os.path.isdir(bare_path):
+        os.makedirs(GIT_SERVER_DIR, exist_ok=True)
+        _subprocess_runner.run(
+            ["git", "init", "--bare", bare_path],
+            capture_output=True, text=True, check=True, timeout=TIMEOUT_REMOTE_CMD)
+    return bare_path
+
+
+
+
+def _read_noninteractive_activity(worker_name: str) -> str:
+    """Return human-readable activity string for a non-interactive worker."""
+    with processes.adapter_pids_lock:
+        entry = processes.adapter_pids.get(worker_name)
+    if entry:
+        proc, _ = entry
+        if proc.poll() is None:
+            return "adapter running"
+
+    host = get_worker_host(worker_name)
+    path = _find_codex_transcript(worker_name, host=host)
+    if path:
+        try:
+            if host:
+                r = _remote_run(["stat", "-c", "%Y", path], host=host,
+                                capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+                if r.returncode == 0:
+                    mtime = float(r.stdout.strip())
+                    age = int(_clock.time() - mtime)
+                else:
+                    age = -1
+            else:
+                mtime = os.path.getmtime(path)
+                age = int(_clock.time() - mtime)
+            if age >= 0:
+                if age < 60:
+                    return f"idle (last response {age}s ago)"
+                elif age < 3600:
+                    return f"idle (last response {age // 60}m ago)"
+                else:
+                    return f"idle (last response {age // 3600}h ago)"
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+    return "idle"
+
+
+
+
+
+def _check_hook_failure_signal(name: str) -> str | None:
+    """Check hook-written failure signal file for recent tool failures.
+
+    PostToolUseFailure hook appends lines: "<epoch> <tool_name>"
+    Returns reason string if >= HOOK_FAILURE_THRESHOLD recent failures, else None.
+    For teleported workers, reads the file from the remote host.
+    """
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+
+    if host:
+        try:
+            r = _remote_run(["cat", signal_path], host=host,
+                            capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0:
+                return None
+            raw = r.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            return None
+    else:
+        signal_file = Path(signal_path)
+        if not signal_file.exists():
+            return None
+        try:
+            raw = signal_file.read_text().strip()
+        except OSError:
+            return None
+
+    if not raw:
+        return None
+    lines = raw.splitlines()
+
+    cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW
+    recent = 0
+    for line in lines:
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            ts = int(parts[0])
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent += 1
+
+    if recent >= HOOK_FAILURE_THRESHOLD:
+        return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
+    return None
+
+
+
+
+def _clear_hook_failures(name: str) -> None:
+    """Remove hook failure signal file for a worker (on restart/clean).
+    For teleported workers, removes the file on the remote host.
+    """
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+    if host:
+        try:
+            _remote_run(["rm", "-f", signal_path], host=host,
+                        capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+        except (subprocess.SubprocessError, OSError) as exc:
+            _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+    else:
+        try:
+            Path(signal_path).unlink(missing_ok=True)
+        except OSError as exc:
+            _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+
+
+
+
+def _detect_poisoned(name: str, tmux_name: str) -> str | None:
+    """Check if a worker session is poisoned (crashed/stuck). Returns reason or None."""
+    # Primary: check hook-written failure signal file
+    hook_reason = _check_hook_failure_signal(name)
+    if hook_reason:
+        return hook_reason
+
+    # Fallback: regex-based pane/log scanning
+    backend_name = get_worker_backend(name)
+    backend = get_backend(backend_name)
+    host = get_worker_host(name)
+    text_parts = []
+    if backend.is_interactive:
+        text_parts.append(_capture_pane_text(tmux_name, host=host))
+    else:
+        text_parts.append(_check_adapter_log(name))
+    combined = "\n".join([part for part in text_parts if part])
+    if not combined:
+        return None
+    for pattern in POISON_PATTERNS:
+        if len(pattern.findall(combined)) >= 3:
+            return pattern.pattern
+    return None
+
+
+
+
+def parse_hire_args(raw: str) -> tuple[str, str]:
+    """Parse /hire arguments and return (name, backend).
+
+    Supports:
+    - /hire alice                    -> (alice, claude)
+    - /hire alice --backend codex    -> (alice, codex)
+    - /hire alice --codex            -> (alice, codex)  [legacy]
+    - /hire codex-alice              -> (alice, codex)  [prefix syntax]
+    """
+    parts = [p for p in (raw or "").split() if p]
+    backend = DEFAULT_BACKEND
+    name_parts = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--backend" and i + 1 < len(parts):
+            backend = parts[i + 1]
+            i += 2
+            continue
+        elif part == "--codex":
+            # Legacy support
+            backend = "codex"
+        elif part.startswith("--"):
+            # Skip unknown flags
+            pass  # intentional no-op: skip unknown flag
+        else:
+            name_parts.append(part)
+        i += 1
+
+    if len(name_parts) != 1:
+        return "", backend
+
+    name = name_parts[0]
+
+    # Check for backend prefix syntax (e.g., codex-alice)
+    for backend_name in list_backends():
+        prefix = f"{backend_name}-"
+        if name.startswith(prefix):
+            backend = backend_name
+            name = name[len(prefix):]
+            break
+
+    # Validate backend
+    if not is_valid_backend(backend):
+        # Return invalid backend so caller can show error
+        return name, backend
+
+    return name, backend
+
+
+
+
+def _activity_from_spinner(stripped: list[str]) -> str | None:
+    """Detect active thinking spinner (priority 1).
+
+    Claude Code cycles through various Unicode chars as spinner frames.
+    ✻ is ALSO a spinner frame — distinguish by "…" presence.
+    "✻ Verbing… (49m)" = active; "✻ Thought for 5s" = completed (no "…").
+    """
+    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
+    for raw in reversed(stripped):
+        first = raw[0] if raw else ""
+        if first == "✻" and "…" not in raw and "..." not in raw:
+            continue  # Past tense completed thinking (no ellipsis = done)
+        if first not in _ACTIVE_SPINNER_CHARS:
+            continue
+        # "· Compacting conversation… (5m 26s · thought for 5s)" → verb + duration
+        match = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
+        if match:
+            verb = match.group(1).strip()
+            dur = match.group(2).split('·')[0].strip()
+            return f"{verb} ({dur})"
+        # Fallback: "· Verb…" or "· Verb" without duration
+        verb_match = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
+        if verb_match:
+            verb = verb_match.group(1).strip()
+            dur_match = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
+            return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
+    return None
+
+
+
+
+def _activity_from_tool(stripped: list[str]) -> str | None:
+    """Detect actively running tool (priority 2).
+
+    Matches "● ToolName(...)" followed by "⎿ Running…" within 5 lines.
+    Also handles MCP tools: "● mcp__server__tool(".
+    """
+    last_running_tool = None
+    for i, raw in enumerate(stripped):
+        tool_match = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
+        if not tool_match:
+            continue
+        tool = tool_match.group(1)
+        for j in range(i + 1, min(i + 6, len(stripped))):
+            line = stripped[j]
+            if not line:
+                continue
+            if line.startswith("⎿"):
+                if "Running" in line and "background" not in line:
+                    last_running_tool = tool
+                break
+    if last_running_tool:
+        # Shorten MCP tool names: mcp__figma__get_file → figma.get_file
+        if last_running_tool.startswith("mcp__"):
+            parts = last_running_tool.split("__")
+            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
+        return f"Running {last_running_tool}"
+    return None
+
+
+
+
+def _activity_from_rate_limit(stripped: list[str]) -> str | None:
+    """Detect rate limiting or connection errors (priority 3)."""
+    for raw in reversed(stripped):
+        lower = raw.lower()
+        if "rate limit" in lower:
+            return "Rate limited — waiting to retry"
+        if "connection error" in lower and "retrying" in lower:
+            return "Connection error — retrying"
+        if lower.startswith("retrying") or "retrying in" in lower:
+            return "Retrying API request"
+    return None
+
+
+
+
+def _activity_from_interactive(stripped: list[str]) -> str | None:
+    """Detect interactive prompts — TUI selection/question UI (priority 3b/3c).
+
+    Checks footer lines (shared with _extract_question_details) and content
+    patterns. Must run BEFORE the ❯ prompt check because ❯ in these states
+    is a SELECTION CURSOR, not the text input prompt.
+    """
+    # 3b. Footer-based detection
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                for question_line in stripped:
+                    if "☐" in question_line:
+                        question = question_line.replace("☐", "").strip()
+                        if question:
+                            return f"Waiting for input: {question}"
+                return "Waiting for user input"
+
+    # 3c. Content-based detection (plan approval, tool permission)
+    for raw in stripped:
+        for pattern in _INTERACTIVE_CONTENT:
+            if pattern in raw:
+                if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
+                    return "Waiting for plan approval"
+                if "plan mode" in raw.lower():
+                    return "Waiting for plan mode decision"
+                if raw.startswith("Allow "):
+                    return "Waiting for tool permission"
+                return "Waiting for user input"
+    return None
+
+
+
+
+def _activity_from_prompt(stripped: list[str]) -> str | None:
+    """Detect prompt/mode bars — ❯ idle, ⏸ plan mode (priority 4).
+
+    Bottom-bar elements are informational, not blocking.
+    "bypass permissions on" means permissions ARE being bypassed.
+    """
+    last_prompt_idx = None
+    last_plan_bar_idx = None
+    for i, raw in enumerate(stripped):
+        if raw.startswith("❯"):
+            last_prompt_idx = i
+        if raw.startswith("⏸"):
+            last_plan_bar_idx = i
+
+    # ⏸ plan mode bar (persistent at bottom, only if no prompt after it)
+    if last_plan_bar_idx is not None:
+        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
+            return "In plan mode"
+
+    # Prompt present = ready (text after ❯ is auto-suggestion hint)
+    if last_prompt_idx is not None:
+        return "Ready"
+    return None
+
+
+
+
+def _activity_from_editor(stripped: list[str]) -> str | None:
+    """Detect external editor mode (priority 5)."""
+    for raw in reversed(stripped):
+        if "Save and close editor to continue" in raw:
+            return "Waiting for external editor"
+    return None
+
+
+
+
+def _activity_from_hooks(stripped: list[str]) -> str | None:
+    """Detect system hook execution (priority 6)."""
+    for raw in reversed(stripped):
+        if "Running SessionStart" in raw:
+            return "Running SessionStart hooks"
+        if "Running PreCompact" in raw:
+            return "Running PreCompact hooks"
+    return None
+
+
+
+
+def _activity_from_confirmation(stripped: list[str]) -> str | None:
+    """Detect confirmation prompts — plan approval, team lead (priority 7)."""
+    for raw in reversed(stripped):
+        if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
+            return "Waiting for plan approval"
+        if "Exit plan mode?" in raw or "Entering plan mode" in raw:
+            return "In plan mode"
+        if "Waiting for team lead" in raw:
+            return "Waiting for team lead approval"
+    return None
+
+
+
+
+def _activity_from_tasks(stripped: list[str]) -> str | None:
+    """Detect task progress checklist (priority 8)."""
+    done = 0
+    total = 0
+    for raw in stripped:
+        line = raw.lstrip()
+        if line.startswith("✔") or line.startswith("✅"):
+            done += 1
+            total += 1
+        elif line.startswith("◻"):
+            total += 1
+    if total >= 2:
+        return f"Tasks ({done}/{total} done)"
+    return None
+
+
+
+
+def _is_output_block_end(text: str) -> bool:
+    """Detect if a tmux line signals the end of a Claude output block."""
+    trimmed = text.lstrip()
+    if trimmed.startswith("Context left until auto-compact:"):
+        return True
+    return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
+
+
+
+
+def _activity_from_output_block(stripped: list[str]) -> str | None:
+    """Extract last non-tool ● output block summary (priority 9)."""
+    for i in range(len(stripped) - 1, -1, -1):
+        raw = stripped[i]
+        if not raw.startswith("●"):
+            continue
+        # Skip tool calls (● CapitalWord( or ● mcp__server__tool()
+        if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw):
+            continue
+        parts: list[str] = []
+        head = re.sub(r'^●\s*', '', raw).strip()
+        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
+            parts.append(head)
+        j = i + 1
+        while j < len(stripped):
+            nxt = stripped[j]
+            if _is_output_block_end(nxt):
+                break
+            text = nxt.strip()
+            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"):
+                parts.append(text)
+            j += 1
+        if parts:
+            msg = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+            if len(msg) > 120:
+                msg = msg[:117].rstrip() + "..."
+            return msg
+    return None
+
+
+
+
+def _activity_from_error(stripped: list[str]) -> str | None:
+    """Detect standalone error lines (priority 10)."""
+    for raw in reversed(stripped):
+        if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
+            lower = raw.lower()
+            if lower.startswith("error"):
+                tail = raw[len("Error"):].lstrip(": ").strip()
+                return f"Error: {tail}" if tail else "Error"
+            return f"Error: {raw[:60]}"
+    return None
+
+
+
+
+def _extract_activity(lines: list[str]) -> str:
+    """Extract a 1-line activity summary from tmux pane output.
+
+    Based on Claude Code v2.1.59 (repo d6ab0ea, 2026-02-26).
+    Scans for Claude Code UI signals in priority order.
+    Each check is a focused helper returning str | None.
+    """
+    if not lines:
+        return "Active"
+
+    stripped = [line.strip() for line in lines if line.strip()]
+    if not stripped:
+        return "Idle"
+
+    # Priority cascade — first match wins
+    _CHECKS: list[_ActivityCheck] = [
+        _activity_from_spinner,       # 1. Active thinking spinner
+        _activity_from_tool,          # 2. Tool actively running
+        _activity_from_rate_limit,    # 3. Rate limiting / connection errors
+        _activity_from_interactive,   # 3b/3c. Interactive prompts
+        _activity_from_prompt,        # 4. Prompt + mode bars
+        _activity_from_editor,        # 5. Editor mode
+        _activity_from_hooks,         # 6. Hook execution
+        _activity_from_confirmation,  # 7. Confirmation prompts
+        _activity_from_tasks,         # 8. Task progress
+        _activity_from_output_block,  # 9. Last ● output block
+        _activity_from_error,         # 10. Standalone error
+    ]
+    for check in _CHECKS:
+        result = check(stripped)
+        if result is not None:
+            return result
+
+    return "Active"
+
+
+
+
+def _extract_context_pct(lines: list[str]) -> str | None:
+    """Extract context % from tmux output if present."""
+    for line in reversed(lines):
+        m = re.search(r'Context left.*?(\d+)%', line)
+        if m:
+            return f"{m.group(1)}%"
+    return None
+
+
+
+
+def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
+    """Read tmux pane and extract activity summary + context% + raw lines.
+
+    Returns TmuxActivityResult(activity, context_pct, raw_lines).
+    When host is set, reads from a remote tmux session via SSH.
+    """
+    try:
+        if host:
+            proc = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            )
+        else:
+            proc = _subprocess_runner.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
+            )
+        if proc.returncode != 0:
+            return TmuxActivityResult("Unknown", None, None)
+        lines = proc.stdout.split("\n")
+        tail = lines[-40:]
+        return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
+    except (subprocess.SubprocessError, OSError):
+        return TmuxActivityResult("Unknown", None, None)
+
+
+
+
+def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
+    """Extract interactive question details from tmux pane output.
+
+    Returns dict with:
+      header: str — question title from ☐ line (or "")
+      options: list of {num: int, label: str, selected: bool}
+      selected_num: int — currently selected option number (or 0)
+    Returns None if no interactive prompt detected.
+    """
+    if not lines:
+        return None
+
+    stripped = [l.strip() for l in lines if l.strip()]
+    if not stripped:
+        return None
+
+    # If the idle ❯ prompt appears in the last few lines, the dialog was
+    # already dismissed — it's just still visible in scrollback above.
+    tail = stripped[-5:]
+    if any(line == "❯" for line in tail):
+        return None
+
+    # Check for interactive footer or content patterns
+    has_interactive = False
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                has_interactive = True
+                break
+        if has_interactive:
+            break
+    if not has_interactive:
+        for raw in stripped:
+            for pattern in _INTERACTIVE_CONTENT:
+                if pattern in raw:
+                    has_interactive = True
+                    break
+            if has_interactive:
+                break
+    if not has_interactive:
+        return None
+
+    # Extract header (☐ line)
+    header = ""
+    for raw in stripped:
+        if "☐" in raw:
+            header = raw.replace("☐", "").strip()
+            break
+
+    # Extract options: lines matching "❯? N. Label" or "  N. Label"
+    # Option lines start with optional ❯, then number + dot
+    options = []
+    selected_num = 0
+    opt_re = re.compile(r'^(❯)?\s*(\d+)\.\s+(.+)')
+    for raw in stripped:
+        m = opt_re.match(raw)
+        if m:
+            is_selected = m.group(1) == "❯"
+            num = int(m.group(2))
+            label = m.group(3).strip()
+            options.append({"num": num, "label": label, "selected": is_selected})
+            if is_selected:
+                selected_num = num
+
+    if not options:
+        return None
+
+    return cast(QuestionDetails, {
+        "header": header,
+        "options": options,
+        "selected_num": selected_num,
+    })
+
+
+
+
+def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
+    """Handle manager's reply to an interactive prompt via keystroke navigation.
+
+    reply: "1"-"9" for option selection, "skip"/"cancel" for Escape.
+    details: from _extract_question_details().
+    Returns True if handled, False if not applicable.
+    """
+    reply = reply.strip().lower()
+
+    if reply in ("skip", "cancel", "esc"):
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=TIMEOUT_TMUX_SEND)
+        return True
+
+    if reply.isdigit():
+        target_num = int(reply)
+        # Find target option index and current selected index
+        option_nums = [o["num"] for o in details["options"]]
+        if target_num not in option_nums:
+            return False
+
+        target_idx = option_nums.index(target_num)
+        current_idx = 0
+        for i, o in enumerate(details["options"]):
+            if o["selected"]:
+                current_idx = i
+                break
+
+        diff = target_idx - current_idx
+        keys = []
+        if diff > 0:
+            keys = ["Down"] * diff
+        elif diff < 0:
+            keys = ["Up"] * abs(diff)
+        keys.append("Enter")
+
+        for key in keys:
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host, timeout=TIMEOUT_TMUX_SEND)
+            _clock.sleep(DELAY_BRIEF)
+        return True
+
+    return False
 
 
 # ── Control plane functions (moved from claudecode.py) ───────────────

@@ -908,7 +908,7 @@ class TelegramTransport(MessageTransport):
                 local_path.write_bytes(content)
                 local_path.chmod(0o600)
             _log(_LOG_INFO, "telegram", f"Downloaded file: {local_path}")
-            host = _cc.get_worker_host(session_name)
+            host = _br.get_worker_host(session_name)
             if host:
                 remote_inbox = str(inbox)
                 _cc._remote_run(["mkdir", "-p", remote_inbox], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK)
