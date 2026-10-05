@@ -1,10 +1,6 @@
 # claudecode-telegram
 
-Run multiple AI workers from one Telegram chat.
-
-A bridge between Telegram and AI coding assistants. You message your bot, the bot routes tasks to workers on your machines, workers reply back in Telegram.
-
-**Glossary:** A **worker** is an AI coding session running in tmux. The **manager** is the human who messages the bot. The **focused worker** (set by `/focus`) receives bare messages. The **bridge** (`bridge.py`) routes everything between Telegram and workers.
+Manage multiple AI coding workers from a single Telegram chat. Message your bot, it routes to workers on your machines, they reply back in Telegram.
 
 <table>
 <tr>
