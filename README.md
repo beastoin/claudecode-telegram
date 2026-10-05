@@ -6,12 +6,12 @@ A bridge between Telegram and AI coding assistants. You message your bot, the bo
 
 <table>
 <tr>
-<td><img width="320" alt="Worker chat" src="docs/images/screenshot-chat.webp" /></td>
-<td><img width="320" alt="Team status" src="docs/images/screenshot-team.webp" /></td>
-<td><img width="320" alt="Multi-worker" src="docs/images/screenshot-multi.webp" /></td>
+<td><img width="320" alt="Worker chat" src="https://github.com/user-attachments/assets/987c93d9-4f8c-43b3-8385-9c0259991f67" /></td>
+<td><img width="320" alt="Team status" src="https://github.com/user-attachments/assets/df3ab259-c505-46d7-99ae-c8f3e1284846" /></td>
+<td><img width="320" alt="Multi-worker" src="https://github.com/user-attachments/assets/97c06219-7ba1-47de-8c10-526ad5c2a208" /></td>
 </tr>
 <tr>
-<td colspan="2"><img width="640" alt="Terminal viewer" src="docs/images/screenshot-pilot.webp" /></td>
+<td colspan="2"><img width="640" alt="Terminal viewer" src="https://github.com/user-attachments/assets/f97c0de7-305e-418c-8426-a1ffb812507f" /></td>
 <td></td>
 </tr>
 </table>
