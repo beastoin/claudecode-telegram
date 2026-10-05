@@ -4,6 +4,8 @@ Run multiple AI workers from one Telegram chat.
 
 A bridge between Telegram and AI coding assistants. You message your bot, the bot routes tasks to workers on your machines, workers reply back in Telegram.
 
+**Glossary:** A **worker** is an AI coding session running in tmux. The **manager** is the human who messages the bot. The **focused worker** (set by `/focus`) receives bare messages. The **bridge** (`bridge.py`) routes everything between Telegram and workers.
+
 <table>
 <tr>
 <td><img width="320" alt="Worker chat" src="https://github.com/user-attachments/assets/987c93d9-4f8c-43b3-8385-9c0259991f67" /></td>
@@ -28,7 +30,9 @@ Telegram ──webhook──► bridge.py ──tmux──► Claude worker sess
                          │◄──── POST /response ──── claudecode.sh
 ```
 
-The bridge is a Python HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer.
+The bridge is a Python HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. When a worker finishes thinking, a Claude Code hook (`claudecode.sh`) fires and posts the response back to the bridge, which sends it to Telegram. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer, and `workers.json` tracks which workers are registered.
+
+You can run multiple workers at once, each on different tasks. Switch between them with `/focus`, or send a one-off message with `@name`. Workers can also message each other directly. The bridge monitors worker health and detects stuck or erroring sessions automatically.
 
 ---
 
