@@ -30,9 +30,7 @@ Telegram ──webhook──► bridge.py ──tmux──► Claude worker sess
                          │◄──── POST /response ──── claudecode.sh
 ```
 
-The bridge is a Python HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. When a worker finishes thinking, a Claude Code hook (`claudecode.sh`) fires and posts the response back to the bridge, which sends it to Telegram. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer, and `workers.json` tracks which workers are registered.
-
-You can run multiple workers at once, each on different tasks. Switch between them with `/focus`, or send a one-off message with `@name`. Workers can also message each other directly. The bridge monitors worker health and detects stuck or erroring sessions automatically.
+The bridge is a Python HTTP server that receives Telegram webhooks and routes messages to tmux sessions running AI workers. Each worker is an independent Claude Code (or Codex) session. No database — tmux sessions are the persistence layer.
 
 ---
 
