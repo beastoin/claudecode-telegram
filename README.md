@@ -4,7 +4,15 @@ Run multiple AI workers from one Telegram chat.
 
 A bridge between Telegram and AI coding assistants. You message your bot, the bot routes tasks to workers on your machine, workers reply back in Telegram.
 
-<img width="400" alt="image" src="https://github.com/user-attachments/assets/a12cbdbf-cf18-4ba4-8645-08a3a359559a" />
+<img width="320" alt="image" src="https://github.com/user-attachments/assets/987c93d9-4f8c-43b3-8385-9c0259991f67" />
+
+<img width="320" alt="image" src="https://github.com/user-attachments/assets/df3ab259-c505-46d7-99ae-c8f3e1284846" />
+
+<img width="320" alt="image" src="https://github.com/user-attachments/assets/97c06219-7ba1-47de-8c10-526ad5c2a208" />
+
+<img width="640" alt="image" src="https://github.com/user-attachments/assets/f97c0de7-305e-418c-8426-a1ffb812507f" />
+
+
 
 **Glossary:** A **worker** is an AI coding session running in tmux. The **manager** is the human who messages the bot. The **focused worker** (set by `/focus`) receives bare messages. The **bridge** (`bridge.py`) routes everything between Telegram and workers.
 
