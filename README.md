@@ -4,14 +4,18 @@ Run multiple AI workers from one Telegram chat.
 
 A bridge between Telegram and AI coding assistants. You message your bot, the bot routes tasks to workers on your machine, workers reply back in Telegram.
 
-<img width="320" alt="image" src="https://github.com/user-attachments/assets/987c93d9-4f8c-43b3-8385-9c0259991f67" />
 
-<img width="320" alt="image" src="https://github.com/user-attachments/assets/df3ab259-c505-46d7-99ae-c8f3e1284846" />
-
-<img width="320" alt="image" src="https://github.com/user-attachments/assets/97c06219-7ba1-47de-8c10-526ad5c2a208" />
-
-<img width="640" alt="image" src="https://github.com/user-attachments/assets/f97c0de7-305e-418c-8426-a1ffb812507f" />
-
+<table>
+<tr>
+<td><img width="320" alt="image" src="https://github.com/user-attachments/assets/987c93d9-4f8c-43b3-8385-9c0259991f67" /></td>
+<td><img width="320" alt="image" src="https://github.com/user-attachments/assets/df3ab259-c505-46d7-99ae-c8f3e1284846" /></td>
+<td><img width="320" alt="image" src="https://github.com/user-attachments/assets/97c06219-7ba1-47de-8c10-526ad5c2a208" /></td>
+</tr>
+<tr>
+<td colspan="2"><img width="640" alt="image" src="https://github.com/user-attachments/assets/f97c0de7-305e-418c-8426-a1ffb812507f" /></td>
+<td></td>
+</tr>
+</table>   
 
 
 **Glossary:** A **worker** is an AI coding session running in tmux. The **manager** is the human who messages the bot. The **focused worker** (set by `/focus`) receives bare messages. The **bridge** (`bridge.py`) routes everything between Telegram and workers.
