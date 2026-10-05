@@ -41,8 +41,6 @@ HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 NODES_DIR="$CLAUDE_DIR/telegram/nodes"
 HOOK_SCRIPT="claudecode.sh"
-# Legacy names (for uninstall cleanup of old files)
-LEGACY_HOOK_FILES="hooks.sh send-to-telegram.sh checkin-on-start.sh on-tool-failure.sh forward-to-bridge.py"
 
 # CLI flags
 VERBOSE=false
@@ -1583,11 +1581,6 @@ cmd_hook_install() {
     cp "$src" "$dst" && chmod 755 "$dst"
     success "Hook installed: $dst"
 
-    # Clean up legacy separate hook files
-    for legacy in $LEGACY_HOOK_FILES; do
-        rm -f "$HOOKS_DIR/$legacy"
-    done
-
     mkdir -p "$CLAUDE_DIR"
     local hook_base="$HOME/.claude/hooks/$HOOK_SCRIPT"
 
@@ -1627,11 +1620,6 @@ cmd_hook_uninstall() {
     else
         log "$(dim "Hook file not found: $hook_file")"
     fi
-
-    # Remove legacy separate hook files
-    for legacy in $LEGACY_HOOK_FILES; do
-        rm -f "$HOOKS_DIR/$legacy"
-    done
 
     # Remove all hook entries from settings.json
     if [[ -f "$SETTINGS_FILE" ]] && check_cmd jq; then
