@@ -40,9 +40,9 @@ CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$CLAUDE_DIR/settings.json}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_SETTINGS_FILE"
 NODES_DIR="$CLAUDE_DIR/telegram/nodes"
-HOOK_SCRIPT="hooks.sh"
+HOOK_SCRIPT="claudecode.sh"
 # Legacy names (for uninstall cleanup of old files)
-LEGACY_HOOK_FILES="send-to-telegram.sh checkin-on-start.sh on-tool-failure.sh forward-to-bridge.py"
+LEGACY_HOOK_FILES="hooks.sh send-to-telegram.sh checkin-on-start.sh on-tool-failure.sh forward-to-bridge.py"
 
 # CLI flags
 VERBOSE=false

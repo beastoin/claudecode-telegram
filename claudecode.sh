@@ -1,7 +1,7 @@
 #!/bin/bash
 # Claude Code hooks — single entry point for all hook events
 #
-# Usage: hooks.sh <event> where event is: stop | start | tool-failure
+# Usage: claudecode.sh <event> where event is: stop | start | tool-failure
 #
 # SECURITY: This hook does NOT need the Telegram token. It extracts the
 # response and forwards to bridge via localhost HTTP. Bridge sends to Telegram.
@@ -352,7 +352,7 @@ case "${1:-}" in
     start)        hook_start ;;
     tool-failure) hook_tool_failure ;;
     *)
-        echo "Usage: hooks.sh <stop|start|tool-failure>" >&2
+        echo "Usage: claudecode.sh <stop|start|tool-failure>" >&2
         exit 1
         ;;
 esac

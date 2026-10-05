@@ -230,7 +230,7 @@ No silent failures. No retry loops that hide problems.
 
 ## SPEC-016. The Hook: Minimal and Defensive. [FB-001]
 
-The hook (`send-to-telegram.sh`) runs on every Claude stop event. It reads configuration from the tmux session environment:
+The hook (`claudecode.sh`) runs on every Claude stop event. It reads configuration from the tmux session environment:
 
 - `BRIDGE_URL` or `PORT` — where to send the response
 - `TMUX_PREFIX` — to derive the worker name

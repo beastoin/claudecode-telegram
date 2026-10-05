@@ -5574,7 +5574,7 @@ print('OK')
 }
 
 test_on_tool_failure_hook_script() {
-    info "Testing hooks.sh tool-failure writes signal file..."
+    info "Testing claudecode.sh tool-failure writes signal file..."
 
     # Create a tmux session to simulate a worker
     local test_session="${TMUX_PREFIX}hookscript"
@@ -5596,7 +5596,7 @@ test_on_tool_failure_hook_script() {
     # Simulate PostToolUseFailure payload via the hook script
     # The hook reads stdin and extracts tool_name
     local hook_script
-    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks.sh"
+    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claudecode.sh"
 
     # Run hook in the tmux session context (so tmux display-message works)
     echo '{"tool_name": "Bash", "error": "Command failed"}' | \
@@ -5609,7 +5609,7 @@ test_on_tool_failure_hook_script() {
         local content
         content=$(cat "$failures_file")
         if echo "$content" | grep -q "Bash"; then
-            success "hooks.sh tool-failure writes signal file correctly"
+            success "claudecode.sh tool-failure writes signal file correctly"
         else
             fail "Signal file exists but no Bash entry: $content"
         fi
@@ -7606,24 +7606,24 @@ test_cli_hook_install_uninstall() {
     # Test hook install (with force to overwrite if exists)
     # Override CLAUDE_DIR too — it may be inherited from parent env
     if HOME="$temp_home" CLAUDE_DIR="$temp_home/.claude" CLAUDE_SETTINGS_FILE="$temp_home/.claude/settings.json" TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" ./bridge.sh hook install --force 2>/dev/null; then
-        if [[ -f "$temp_home/.claude/hooks/hooks.sh" ]]; then
-            success "CLI hook install creates hooks.sh"
+        if [[ -f "$temp_home/.claude/hooks/claudecode.sh" ]]; then
+            success "CLI hook install creates claudecode.sh"
         else
-            fail "hooks.sh file not created"
+            fail "claudecode.sh file not created"
         fi
     else
         fail "CLI hook install failed"
     fi
 
-    # Test hooks are in settings.json (all events point to hooks.sh with subcommands)
+    # Test hooks are in settings.json (all events point to claudecode.sh with subcommands)
     if [[ -f "$temp_home/.claude/settings.json" ]]; then
-        if grep -q "hooks.sh stop" "$temp_home/.claude/settings.json"; then
-            success "Stop hook registered in settings.json (hooks.sh stop)"
+        if grep -q "claudecode.sh stop" "$temp_home/.claude/settings.json"; then
+            success "Stop hook registered in settings.json (claudecode.sh stop)"
         else
             fail "Stop hook not in settings.json"
         fi
-        if grep -q "hooks.sh start" "$temp_home/.claude/settings.json"; then
-            success "SessionStart hook registered in settings.json (hooks.sh start)"
+        if grep -q "claudecode.sh start" "$temp_home/.claude/settings.json"; then
+            success "SessionStart hook registered in settings.json (claudecode.sh start)"
         else
             fail "SessionStart hook not in settings.json"
         fi
@@ -7638,8 +7638,8 @@ test_cli_hook_install_uninstall() {
         else
             fail "PostToolUseFailure hook not in settings.json"
         fi
-        if grep -q "hooks.sh tool-failure" "$temp_home/.claude/settings.json"; then
-            success "PostToolUseFailure hook points to hooks.sh tool-failure"
+        if grep -q "claudecode.sh tool-failure" "$temp_home/.claude/settings.json"; then
+            success "PostToolUseFailure hook points to claudecode.sh tool-failure"
         else
             fail "PostToolUseFailure hook script path missing"
         fi
@@ -7680,7 +7680,7 @@ test_hook_env_validation() {
 
     # Test 1: Missing TMUX_PREFIX
     local result
-    result=$(echo "$mock_input" | TMUX_PREFIX="" SESSIONS_DIR="/tmp" PORT="8080" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="" SESSIONS_DIR="/tmp" PORT="8080" bash "$SCRIPT_DIR/claudecode.sh" stop 2>&1) || true
 
     # Hook should exit silently (exit 0) but with error message to stderr
     if echo "$result" | grep -q "Missing TMUX_PREFIX" || [[ -z "$result" ]]; then
@@ -7690,7 +7690,7 @@ test_hook_env_validation() {
     fi
 
     # Test 2: Missing SESSIONS_DIR
-    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="" PORT="8080" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="" PORT="8080" bash "$SCRIPT_DIR/claudecode.sh" stop 2>&1) || true
 
     if echo "$result" | grep -q "Missing SESSIONS_DIR" || [[ -z "$result" ]]; then
         success "Hook exits when SESSIONS_DIR missing"
@@ -7699,7 +7699,7 @@ test_hook_env_validation() {
     fi
 
     # Test 3: Missing both BRIDGE_URL and PORT
-    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="/tmp" PORT="" BRIDGE_URL="" bash "$SCRIPT_DIR/hooks.sh" stop 2>&1) || true
+    result=$(echo "$mock_input" | TMUX_PREFIX="claude-test-" SESSIONS_DIR="/tmp" PORT="" BRIDGE_URL="" bash "$SCRIPT_DIR/claudecode.sh" stop 2>&1) || true
 
     if echo "$result" | grep -q "Missing BRIDGE_URL and PORT" || [[ -z "$result" ]]; then
         success "Hook exits when both BRIDGE_URL and PORT missing"
@@ -7826,7 +7826,7 @@ test_checkin_hook_env_validation() {
 
     # Test 1: Missing TMUX_PREFIX - hook should exit silently
     local result
-    result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="" BRIDGE_URL="http://localhost:8080" bash "$SCRIPT_DIR/claudecode.sh" start 2>&1) || true
     if [[ -z "$result" ]]; then
         success "Checkin hook exits silently when TMUX_PREFIX missing"
     else
@@ -7834,7 +7834,7 @@ test_checkin_hook_env_validation() {
     fi
 
     # Test 2: Missing both BRIDGE_URL and PORT - hook should exit silently
-    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="" PORT="" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="" PORT="" bash "$SCRIPT_DIR/claudecode.sh" start 2>&1) || true
     if [[ -z "$result" ]]; then
         success "Checkin hook exits silently when BRIDGE_URL and PORT missing"
     else
@@ -7867,7 +7867,7 @@ test_checkin_hook_calls_endpoint() {
 
     # Run the hook with valid env vars pointing to our test bridge
     local result
-    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="http://localhost:$PORT" bash "$SCRIPT_DIR/hooks.sh" start 2>&1) || true
+    result=$(TMUX_PREFIX="claude-test-" BRIDGE_URL="http://localhost:$PORT" bash "$SCRIPT_DIR/claudecode.sh" start 2>&1) || true
 
     if [[ -n "$result" ]] && echo "$result" | grep -qi -e "RECEIVING\|SENDING\|MESSAGING\|worker\|instruction"; then
         success "Checkin hook returns bridge instructions"
@@ -17691,9 +17691,9 @@ print('OK')
     fi
 }
 
-# Test hooks.sh _forward_to_bridge builds correct JSON via jq
+# Test claudecode.sh _forward_to_bridge builds correct JSON via jq
 test_hooks_forward_to_bridge_payload() {
-    info "Testing hooks.sh _forward_to_bridge builds correct JSON payload..."
+    info "Testing claudecode.sh _forward_to_bridge builds correct JSON payload..."
 
     # Just test that jq produces correct JSON (no HTTP needed)
     local payload_no_sid payload_with_sid
@@ -17707,9 +17707,9 @@ test_hooks_forward_to_bridge_payload() {
     # Verify structure
     if echo "$payload_no_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and .source == "test-session" and (.session_id // null) == null' >/dev/null 2>&1 &&
        echo "$payload_with_sid" | jq -e '.text == "**bold** text" and .session == "test-session" and .source == "test-session" and .session_id == "sess_123"' >/dev/null 2>&1; then
-        success "hooks.sh _forward_to_bridge builds correct JSON payload"
+        success "claudecode.sh _forward_to_bridge builds correct JSON payload"
     else
-        fail "hooks.sh _forward_to_bridge payload incorrect: no_sid=$payload_no_sid with_sid=$payload_with_sid"
+        fail "claudecode.sh _forward_to_bridge payload incorrect: no_sid=$payload_no_sid with_sid=$payload_with_sid"
     fi
 }
 

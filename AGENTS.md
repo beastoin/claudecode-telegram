@@ -60,7 +60,7 @@ Every path a message takes through the system. Check here before changing any me
 
 | Flow | Trigger | Behavior |
 |------|---------|----------|
-| Worker reply | Claude stop hook fires | `send-to-telegram.sh` → `POST /response` → `name: <text>` in Telegram |
+| Worker reply | Claude stop hook fires | `claudecode.sh stop` → `POST /response` → `name: <text>` in Telegram |
 | Media tags | `[[image:/path\|caption]]` in output | Hook sends raw text; bridge parses and sends via `sendPhoto`/`sendDocument` |
 | Long reply | Output > 4096 chars | Bridge splits into multiple messages, preserves code blocks |
 | Proactive message | Worker outputs without pending request | Hook sends if `chat_id` file exists |
