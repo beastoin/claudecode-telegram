@@ -157,16 +157,20 @@ def test_codex_end_cleans_session():
     from pathlib import Path
     import bridge
 
+    import json
     tmp = Path(tempfile.mkdtemp())
     bridge.SESSIONS_DIR = tmp
     bridge.WORKER_PIPE_ROOT = tmp / "pipes"
+    bridge.WORKER_REGISTRY_FILE = tmp / "workers.json"
+    # Register codex worker in registry (source of truth for backend)
+    (tmp / "workers.json").write_text(json.dumps({
+        "workers": {"alice": {"backend": "codex", "tmux": "claude-test-alice"}}
+    }))
     bridge.worker_manager.scan_tmux_sessions = lambda: {}
-    bridge._sync_worker_manager()
     bridge._sync_worker_manager()
 
     session_dir = tmp / "alice"
     session_dir.mkdir()
-    (session_dir / "backend").write_text("codex")
     (session_dir / "codex_session_id").write_text("thread_123")
 
     # Create pipe to verify cleanup
@@ -176,7 +180,6 @@ def test_codex_end_cleans_session():
 
     ok, err = bridge.kill_session("alice")
     assert ok is True, f"expected ok, got err: {err}"
-    assert not (session_dir / "backend").exists(), "backend file should be removed"
     assert not (session_dir / "codex_session_id").exists(), "session id should be removed"
     assert not pipe_path.exists(), "pipe should be removed"
 
@@ -219,7 +222,8 @@ def test_codex_relaunch_clears_session_id():
 
 
 def test_get_workers_includes_codex():
-    import tempfile
+    """Codex workers registered in workers.json appear in get_workers."""
+    import tempfile, json
     from pathlib import Path
     import bridge
 
@@ -227,12 +231,12 @@ def test_get_workers_includes_codex():
     bridge.SESSIONS_DIR = tmp
     bridge.WORKER_PIPE_ROOT = tmp / "pipes"
     bridge.WORKER_REGISTRY_FILE = tmp / "workers.json"
+    # Register alice as codex in the registry
+    (tmp / "workers.json").write_text(json.dumps({
+        "workers": {"alice": {"backend": "codex", "tmux": "claude-test-alice"}}
+    }))
     bridge.worker_manager.scan_tmux_sessions = lambda: {}
     bridge._sync_worker_manager()
-
-    session_dir = tmp / "alice"
-    session_dir.mkdir()
-    (session_dir / "backend").write_text("codex")
 
     bridge.ensure_worker_pipe("alice")
     workers = bridge.get_workers()
@@ -243,38 +247,29 @@ def test_get_workers_includes_codex():
     assert item["protocol"] == "pipe", f"expected pipe protocol, got {item}"
 
 
-def test_backend_file_is_canonical():
-    import sys
-    import tempfile
+def test_backend_registry_is_canonical():
+    """workers.json registry is the source of truth for backend type."""
+    import tempfile, json
     from pathlib import Path
     import bridge
 
-    sys.path.insert(0, ".")
-
     tmp = Path(tempfile.mkdtemp())
     bridge.SESSIONS_DIR = tmp
+    bridge.WORKER_REGISTRY_FILE = tmp / "workers.json"
 
-    # Simulate drift: backend file says 'codex', but session dict says 'claude'
-    session_dir = tmp / "drifted"
-    session_dir.mkdir()
-    (session_dir / "backend").write_text("codex")
+    # Register alice as codex in the registry
+    (tmp / "workers.json").write_text(json.dumps({
+        "workers": {"alice": {"backend": "codex"}}
+    }))
 
     # get_worker_backend with a session dict that says 'claude'
-    # Backend FILE must take priority over session dict when both exist
-    result_with_session = bridge.get_worker_backend("drifted", {"backend": "claude"})
+    # Registry must win when session dict is absent
+    result_registry = bridge.get_worker_backend("alice")
+    assert result_registry == "codex", f"registry lookup: expected codex, got {result_registry}"
 
-    # get_worker_backend without session dict — must use file
-    result_file_only = bridge.get_worker_backend("drifted")
-
-    # Both should return 'codex' (file is canonical)
-    # Currently session dict wins — this test documents the priority
-    assert result_file_only == "codex", f"file-only: expected codex, got {result_file_only}"
-
-    # Session dict currently overrides file — this is the drift bug.
-    # After fix, file should win. For now, document the current behavior:
-    assert result_with_session == "codex", (
-        f"Backend file must be canonical over session dict, got {result_with_session}"
-    )
+    # Session dict takes priority when provided (it comes from the registry anyway)
+    result_with_session = bridge.get_worker_backend("alice", {"backend": "codex"})
+    assert result_with_session == "codex", f"session dict: expected codex, got {result_with_session}"
 
 
 def test_pipe_forwarding_to_codex():

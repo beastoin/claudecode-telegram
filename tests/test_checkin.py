@@ -87,11 +87,12 @@ def test_checkin_cwd_change_logs_event():
     sessions.mkdir()
     worker_dir = sessions / 'cwdworker'
     worker_dir.mkdir()
-    (worker_dir / 'claude_session_cwd').write_text('/home/claude/old-project')
     (worker_dir / 'claude_session_id').write_text('old-sid-123')
 
     orig = bridge.SESSIONS_DIR
     bridge.SESSIONS_DIR = sessions
+    # Seed RAM CWD cache (no more claude_session_cwd file)
+    bridge._set_worker_cwd('cwdworker', '/home/claude/old-project')
     try:
         # Simulate the checkin CWD change logic from the handler
         old_cwd = bridge.get_claude_session_cwd('cwdworker')

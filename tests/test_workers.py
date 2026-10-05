@@ -447,8 +447,8 @@ def test_restart_clears_session_id_on_cwd_mismatch(tmp_path):
         worker_dir = bridge.SESSIONS_DIR / 'cwdmismatch'
         worker_dir.mkdir()
 
-        # Session_id bound to project-a
-        (worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+        # Session_id bound to project-a (CWD stored in RAM)
+        bridge._set_worker_cwd('cwdmismatch', '/home/claude/project-a')
         bridge._cache_session_id('cwdmismatch', 'sid-proj-a')
 
         # CWD changes

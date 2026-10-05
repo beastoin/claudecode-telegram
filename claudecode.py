@@ -1382,25 +1382,29 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
 
 
 def get_claude_session_cwd(name: str) -> str | None:
-    """Read and return the current working directory for a worker session."""
-    import bridge
-    cwd = bridge._read_session_file(name, "claude_session_cwd")
-    if cwd:
-        cwd = os.path.expanduser(cwd)
-    return cwd
+    """Get the current working directory for a worker.
 
+    Derives from RAM hint (set by save_claude_session_cwd / checkin),
+    NOT from a file. tmux pane_current_path is the upstream source of truth;
+    callers that need live data should read tmux directly via _get_tmux_pane_cwd.
+    """
+    import bridge
+    cwd = bridge._get_worker_cwd(name)
+    if cwd:
+        return os.path.expanduser(cwd)
+    return None
 
 
 def save_claude_session_cwd(name: str, cwd: str) -> None:
-    """Persist a worker's current working directory to disk."""
+    """Cache a worker's CWD in RAM (no file persistence).
+
+    The source of truth is tmux pane_current_path. This RAM hint is used
+    by _get_startup_cwd for restart/teleport flows.
+    """
+    import bridge
     if cwd:
         cwd = os.path.expanduser(cwd)
-    session_dir = ensure_session_dir(name)
-    cwd_file = session_dir / "claude_session_cwd"
-    _tmp_cwd = cwd_file.with_suffix('.tmp')
-    _tmp_cwd.write_text(cwd)
-    _tmp_cwd.chmod(0o600)
-    os.replace(str(_tmp_cwd), str(cwd_file))
+    bridge._set_worker_cwd(name, cwd)
 
 
 
@@ -1596,18 +1600,18 @@ _INTERACTIVE_CONTENT = [
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     """Get backend for a worker.
 
-    Priority: backend file (canonical) > session dict (cache) > default.
-    The backend file in SESSIONS_DIR/<name>/backend is the single source of
-    truth, written at hire time. Session dict may drift if registry or RAM
-    state gets stale.
+    Source of truth: workers.json registry (via session dict).
+    The per-worker backend file has been removed — backend is set on /hire
+    and stored in the registry only (no duplication).
     """
-    # Backend file is canonical — check it first
-    backend_file = SESSIONS_DIR / name / "backend"
-    if backend_file.exists():
-        return normalize_backend(backend_file.read_text().strip())
-    # Fall back to session dict (cache from registry/tmux)
     if session and session.get("backend"):
         return normalize_backend(str(session.get("backend")))
+    # Fall back to registry lookup
+    import bridge
+    registry = bridge._load_registry()
+    entry = registry.get("workers", {}).get(name, {})
+    if entry.get("backend"):
+        return normalize_backend(str(entry["backend"]))
     return DEFAULT_BACKEND
 
 

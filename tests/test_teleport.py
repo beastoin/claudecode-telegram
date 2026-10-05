@@ -741,7 +741,8 @@ def test_restart_remote_validates_session_exists():
     sessions.mkdir()
     (sessions / 'ren').mkdir()
     (sessions / 'ren' / 'claude_session_id').write_text('stale-session-id')
-    (sessions / 'ren' / 'claude_session_cwd').write_text('/Users/beastoinagents/omi/omi-ren')
+    # Seed RAM CWD cache (no more claude_session_cwd file)
+    bridge._set_worker_cwd('ren', '/Users/beastoinagents/omi/omi-ren')
 
     node_dir = Path(tmpdir) / 'node'
     node_dir.mkdir()
@@ -819,8 +820,8 @@ def test_restart_remote_remaps_cwd_home():
     sessions = Path(tmpdir) / 'sessions'
     sessions.mkdir()
     (sessions / 'x').mkdir()
-    # CWD has local home path (the bug: stale local path synced to remote)
-    (sessions / 'x' / 'claude_session_cwd').write_text(f'{local_home}/claudecode-telegram')
+    # Seed RAM CWD cache — CWD has local home path (the bug: stale local path synced to remote)
+    bridge._set_worker_cwd('x', f'{local_home}/claudecode-telegram')
     (sessions / 'x' / 'claude_session_id').write_text('test-session-id')
 
     node_dir = Path(tmpdir) / 'node'
@@ -1193,24 +1194,13 @@ def test_session_helpers_read_remote_files():
 
     calls = []
 
-    def mock_remote(cmd, host=None, **kwargs):
-        calls.append((cmd, host))
-        if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
-            return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
-        if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_cwd'):
-            return MagicMock(returncode=0, stdout='/Users/beastoinagents/omi\n', stderr='')
-        return MagicMock(returncode=1, stdout='', stderr='missing')
+    # CWD is now RAM-only — test save/get round-trip
+    bridge.save_claude_session_cwd('ren', '/Users/beastoinagents/omi')
+    scwd = bridge.get_claude_session_cwd('ren')
+    assert scwd == '/Users/beastoinagents/omi', f'expected RAM cwd, got {scwd!r}'
 
-    with patch('bridge._remote_run', side_effect=mock_remote):
-        scwd = bridge.get_claude_session_cwd('ren')
-        assert scwd == '/Users/beastoinagents/omi', f'expected remote cwd, got {scwd!r}'
-
-    assert any(host == 'mac-mini' and cmd[0] == 'cat' for cmd, host in calls), f'remote cat missing: {calls}'
-
-    # Local worker: reads local cache directly
-    local_dir = bridge.SESSIONS_DIR / 'lee'
-    local_dir.mkdir()
-    (local_dir / 'claude_session_cwd').write_text('/tmp/local')
+    # Local worker: RAM cache works the same way
+    bridge.save_claude_session_cwd('lee', '/tmp/local')
     assert bridge.get_claude_session_cwd('lee') == '/tmp/local'
 
     bridge.NODE_DIR = orig_node

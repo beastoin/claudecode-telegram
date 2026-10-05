@@ -2991,11 +2991,12 @@ def _new_reminder_state() -> ReminderState:
 
 
 def _learning_reminder_state_file() -> str | None:
-    """Path to persistent state file (NODE_DIR/learning_reminders.json)."""
-    try:
-        return os.path.join(str(NODE_DIR), "learning_reminders.json")
-    except NameError:
-        return None
+    """Deprecated — learning reminder state is now RAM-only.
+
+    Returns None unconditionally so save/load are no-ops.
+    Harmless to reset on bridge restart (worst case: a duplicate reminder).
+    """
+    return None
 
 
 
@@ -3905,8 +3906,8 @@ class WorkerManager:
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
             candidate = normalize_cwd(_get_worker_cwd(name))
-        if not candidate:
-            candidate = normalize_cwd(get_claude_session_cwd(name))
+        # claude_session_cwd file removed — tmux pane_current_path is the source of truth.
+        # On restart, tmux session is usually still alive; _get_tmux_pane_cwd covers it.
         if candidate:
             if os.path.isdir(candidate):
                 return candidate
@@ -4020,16 +4021,11 @@ class WorkerManager:
             # Cache miss or expired — do the full scan (outside the lock)
             registered = self.scan_tmux_sessions()
 
-        # Fallback: pick up non-interactive workers with backend file but orphaned tmux
-        if self.sessions_dir.exists():
-            for session_dir in self.sessions_dir.iterdir():
-                if session_dir.is_dir():
-                    backend_file = session_dir / "backend"
-                    if backend_file.exists():
-                        name = session_dir.name
-                        if name not in registered:
-                            backend = backend_file.read_text().strip()
-                            registered[name] = {"backend": backend}
+        # Fallback: pick up non-interactive workers from registry but orphaned tmux
+        registry = _load_registry()
+        for rname, rentry in registry.get("workers", {}).items():
+            if rname not in registered and rentry.get("backend") != "claude":
+                registered[rname] = {"backend": rentry.get("backend", "codex")}
 
         # Merge persistent registry: workers in registry but not in tmux
         # appear with no "tmux" key (same pattern as non-interactive fallback above).
@@ -4315,11 +4311,6 @@ class WorkerManager:
         if startup_cwd:
             self._cd_tmux_to_cwd(tmux_name, startup_cwd)
 
-        # After tmux new-session succeeds, capture the pane's cwd
-        pane_cwd = self._get_tmux_pane_cwd(tmux_name) or startup_cwd
-        if pane_cwd:
-            save_claude_session_cwd(name, pane_cwd)
-
         export_hook_env(tmux_name, backend)
         self._clock.sleep(DELAY_TMUX_SEND)
 
@@ -4338,11 +4329,7 @@ class WorkerManager:
         if not backend_obj.is_interactive:
             ensure_worker_pipe(name)
 
-        if not backend_obj.is_interactive:
-            backend_file = self.sessions_dir / name / "backend"
-            _tmp_b = backend_file.with_suffix('.tmp')
-            _tmp_b.write_text(backend)
-            os.replace(str(_tmp_b), str(backend_file))
+        # Backend stored in workers.json registry only (no per-worker file)
 
         if SANDBOX_ENABLED and backend_obj.is_interactive:
             if startup_cwd:
@@ -4400,10 +4387,7 @@ class WorkerManager:
         if not backend.is_interactive:
             kill_adapter(name)
             session_dir = self.sessions_dir / name
-            backend_file = session_dir / "backend"
             try:
-                if backend_file.exists():
-                    backend_file.unlink()
                 for session_id_file in session_dir.glob("*_session_id"):
                     session_id_file.unlink()
             except OSError as e:
@@ -4511,14 +4495,14 @@ class WorkerManager:
         if mode == "resume":
             resume_id = (get_claude_session_id(name, authoritative=False) or
                          get_claude_session_id(name, authoritative=True) or "")
-            resume_cwd = get_claude_session_cwd(name) or ""
+            resume_cwd = ""
+            # CWD derived from tmux pane_current_path via _get_startup_cwd
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd:
-            save_claude_session_cwd(name, startup_cwd)
             _ensure_workspace_trusted(startup_cwd)
         return resume_id, startup_cwd
 
@@ -4676,7 +4660,8 @@ class WorkerManager:
         if mode == "resume":
             resume_id = (get_claude_session_id(name, authoritative=False) or
                          get_claude_session_id(name, authoritative=True) or "")
-            resume_cwd = get_claude_session_cwd(name) or ""
+            resume_cwd = ""
+            # CWD derived from tmux pane_current_path via _get_startup_cwd
         else:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -4684,7 +4669,6 @@ class WorkerManager:
                 session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd:
-            save_claude_session_cwd(name, startup_cwd)
             _ensure_workspace_trusted(startup_cwd)
 
         if SANDBOX_ENABLED and backend.is_interactive:
@@ -8763,7 +8747,7 @@ class CommandRouter:
         remote_session_dir = f"{target_sessions_dir}/{name}"
         _remote_run(["mkdir", "-p", remote_session_dir],
                      host=target_host, capture_output=True)
-        for fname in ["chat_id", "claude_session_id", "claude_session_cwd"]:
+        for fname in ["chat_id", "claude_session_id"]:
             local_file = local_session_dir / fname
             if local_file.exists():
                 _subprocess_runner.run(

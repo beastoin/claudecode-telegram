@@ -317,16 +317,17 @@ def test_send_to_worker_uses_backend_registry():
     bridge.CodexBackend.send = fake_codex_send
     bridge.BACKENDS["codex"] = bridge.CodexBackend()
 
-    # Create temp sessions dir with a codex worker
+    # Create temp sessions dir with a codex worker in registry
+    import json
     tmp = Path(tempfile.mkdtemp())
     bridge.SESSIONS_DIR = tmp
+    bridge.WORKER_REGISTRY_FILE = tmp / "workers.json"
+    (tmp / "workers.json").write_text(json.dumps({
+        "workers": {"testcodex": {"backend": "codex", "tmux": "claude-test-testcodex"}}
+    }))
     bridge.worker_manager.scan_tmux_sessions = lambda: {}
     bridge._sync_worker_manager()
     bridge.worker_manager.invalidate_sessions_cache()
-
-    session_dir = tmp / "testcodex"
-    session_dir.mkdir()
-    (session_dir / "backend").write_text("codex")
 
     try:
         # Call send_to_worker
@@ -374,22 +375,22 @@ def test_backend_registry_exists():
 
 
 def test_get_registered_sessions_includes_noninteractive_workers():
-    """get_registered_sessions includes non-interactive workers."""
-    import tempfile
+    """get_registered_sessions includes non-interactive workers from registry."""
+    import tempfile, json
     from pathlib import Path
     import bridge
 
-    # Create temp sessions dir
+    # Create temp sessions dir and registry
     tmp = Path(tempfile.mkdtemp())
     bridge.SESSIONS_DIR = tmp
+    bridge.WORKER_REGISTRY_FILE = tmp / "workers.json"
+    # Register codex worker in workers.json (source of truth for backend)
+    (tmp / "workers.json").write_text(json.dumps({
+        "workers": {"myworker": {"backend": "codex", "tmux": "claude-test-myworker"}}
+    }))
     bridge.worker_manager.scan_tmux_sessions = lambda: {}  # No tmux sessions
     bridge._sync_worker_manager()
     bridge.worker_manager.invalidate_sessions_cache()
-
-    # Create a non-interactive worker (like codex)
-    session_dir = tmp / "myworker"
-    session_dir.mkdir()
-    (session_dir / "backend").write_text("codex")
 
     # get_registered_sessions should include non-interactive worker
     result = bridge.get_registered_sessions()
