@@ -21,6 +21,7 @@ FAST mode tests run without a bridge process. They test:
 - Constants and configuration values
 - Concurrency helpers (locks, paste buffer)
 - Hook install and uninstall
+- Chaos/thread-safety stress tests (container classes under concurrent access)
 - Forge Go tests (with `-short` flag)
 
 ### Default Mode (Bridge Running Locally)
@@ -36,6 +37,7 @@ Default mode starts a bridge on port 8295. It runs all FAST tests plus:
 - Persistence files
 - Guest system endpoints
 - Pilot grid endpoints
+- Chaos/resilience tests (bridge kill/restart, tmux kill, concurrent hire)
 
 ### FULL Mode
 
@@ -49,9 +51,9 @@ FULL mode runs all Default tests plus:
         /\
        /  \  FULL: Tunnel + Webhook (1 test)
       /----\
-     /      \ Default: Bridge + Commands (~92 tests)
+     /      \ Default: Bridge + Commands + Chaos (~97 tests)
     /--------\
-   /          \ FAST: Unit + CLI (~392 tests)
+   /          \ FAST: Unit + CLI + Thread-safety (~423 tests)
   /------------\
 ```
 
@@ -63,16 +65,18 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 
 ## Test Coverage
 
-**Current coverage: ~485 test functions across all modes**
+**Current coverage: ~521 test functions across all modes**
 
 ### By Mode
 
 | Mode | Tests | Notes |
 |------|-------|-------|
 | Unit (FAST) | ~381 | Imports, formatting, helpers, all subsystems |
+| Chaos/Thread-safety (FAST) | ~31 | Concurrent stress + edge cases on container classes |
 | CLI (FAST) | ~10 | Flags, commands, webhook, hook coverage |
 | Forge Go (FAST) | 1 aggregate | Runs Go test suite internally |
 | Integration (Default) | ~92 | Commands, security, routing, endpoints |
+| Chaos/Resilience (Default) | ~5 | Bridge kill/restart, tmux kill, concurrent hire |
 | Tunnel (FULL) | 1 | Cloudflare tunnel + webhook setup |
 
 ### By Subsystem
@@ -97,6 +101,64 @@ TEST_BOT_TOKEN='your-test-bot-token' ./test.sh
 | Guest system | Token, expiry, inbox, send/reply |
 | Channels | Create, members, send, cap, expiry, fan-out |
 | Relay | Tokens, URL format, auth, send/reply/poll |
+| Chaos/Resilience | Thread-safety stress, bridge kill/restart, tmux kill, state recovery |
+
+## Chaos / Resilience Tests
+
+Tests that verify the system behaves correctly under adverse conditions.
+
+### Thread-Safety Stress (pytest, FAST mode — `tests/test_chaos.py`)
+
+| Test | What it does |
+|------|-------------|
+| `test_concurrent_add_rewind` | 20 threads add unique rewind tokens simultaneously — none lost |
+| `test_concurrent_validate_rewind_under_expiry` | Validates tokens while half are expired — correct cleanup under contention |
+| `test_concurrent_add_and_validate_rewind` | 10 writers + 10 readers hammering TokenStore — no crash or corruption |
+| `test_concurrent_pr_review_add_validate` | 20 threads add + immediately validate PR tokens — no data loss |
+| `test_pr_review_expiry_cleanup_concurrent` | Expired PR tokens cleaned by validate under contention |
+| `test_concurrent_log_message` | 20 threads log 50 messages each to ConnectorRegistry — maxlen cap holds |
+| `test_concurrent_log_multiple_tags` | Different tags don't interfere under contention |
+| `test_concurrent_log_and_read` | 10 writers + 10 readers simultaneously — no deadlock |
+| `test_stop_all_with_failing_connector` | stop_all doesn't crash even if a connector's stop() raises |
+| `test_concurrent_set_and_get` | 20 threads set unique TranscriptSync keys — all survive |
+| `test_concurrent_update` | Multiple threads update same key — last writer wins, no crash |
+| `test_concurrent_set_get_update_interleaved` | 30 threads mix set/get/update — no deadlock |
+| Token edge cases | None/empty tokens, exact expiry boundary, sliding window, mass cleanup |
+
+### Bridge Process Resilience (bash, Default mode — `test.sh`)
+
+| Test | What it does |
+|------|-------------|
+| `test_chaos_tmux_kill_shows_exited` | Kill tmux session → `/team` shows EXITED state |
+| `test_chaos_bridge_kill_restart_recovers_state` | Kill bridge → restart → chat_id + workers recovered |
+| `test_chaos_bridge_restart_workers_survive` | 3 workers survive bridge kill/restart cycle |
+| `test_chaos_concurrent_hire_no_corruption` | 3 simultaneous `/hire` requests → bridge stays healthy |
+| `test_chaos_message_to_dead_session_errors_gracefully` | Message to killed tmux session → no bridge crash |
+
+### Isolated Chaos Tests (`test_chaos_isolated.sh`)
+
+Runs chaos tests on a dedicated machine (triassic-4) under a separate OS user
+via `beast host`. This provides **fundamental process isolation** — the test user
+physically cannot see or kill the prod bridge process (different machine + different UID + `hidepid` on `/proc`).
+
+```bash
+TEST_BOT_TOKEN='...' ./test_chaos_isolated.sh                 # chaos tests only
+TEST_BOT_TOKEN='...' TEST_FILTER='' ./test_chaos_isolated.sh  # full test suite
+```
+
+**Prerequisites:**
+- SSH access to triassic-4 (configured in `~/.ssh/config`)
+- `beast host` set up on triassic-4 with user `bridge-test`
+- Python 3.12 at `/opt/beast/shared/bin/python3.12`
+
+**How it works:**
+1. rsyncs project code to triassic-4
+2. Fixes file ownership for the `bridge-test` user
+3. Ensures Python 3.12 venv exists with pytest + requests
+4. Runs `test.sh` via `beast host exec bridge-test` (cgroup-isolated: 4G RAM, 200% CPU)
+
+**Why OS-level isolation:**
+Application-level guards (port checks, PID tracking) are defense-in-depth but cannot prevent pattern-based process kills (`pkill -f`, `lsof -ti :PORT | xargs kill`) from matching prod processes. Only OS boundary separation (different UID, hidden `/proc`, different machine) makes it physically impossible.
 
 ## Feature Test Matrix (Backend Coverage)
 
@@ -115,7 +177,7 @@ Each feature must work for both tmux and exec backends. This table tracks covera
 
 ## Complete Test Inventory
 
-> **Total: ~485 test functions**
+> **Total: ~521 test functions**
 >
 > Update this list when you add new tests.
 

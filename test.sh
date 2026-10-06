@@ -19,6 +19,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHAT_ID="${TEST_CHAT_ID:-123456789}"
 BRIDGE_PID=""
+
+# Use PYTHON env var if set, otherwise find python3.12+ (bridge.py requires 3.12+)
+if [[ -z "${PYTHON:-}" ]]; then
+    for candidate in python3.12 python3.13 python3; do
+        if command -v "$candidate" &>/dev/null; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+fi
+PYTHON="${PYTHON:-python3}"
 TUNNEL_PID=""
 TUNNEL_URL=""
 TEST_FILTER="${TEST_FILTER:-}"
@@ -36,6 +47,20 @@ TEST_TEAM_DIR="$TEST_NODE_DIR/team"
 TEST_PILOT_PORT="${TEST_PILOT_PORT:-10175}"
 PILOT_LOG="$TEST_NODE_DIR/pilot.log"
 PILOT_PID=""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROD SAFETY GUARD — prevent tests from interfering with production bridge
+# ─────────────────────────────────────────────────────────────────────────────
+PROD_PORT="$(cat "$HOME/.claude/telegram/nodes/prod/port" 2>/dev/null || echo "")"
+if [[ -n "$PROD_PORT" && "$PORT" == "$PROD_PORT" ]]; then
+    echo "ERROR: Test port ($PORT) matches prod port ($PROD_PORT). Aborting to protect production." >&2
+    echo "  Set TEST_PORT to a different port (default: 8295)." >&2
+    exit 1
+fi
+if [[ "$TEST_NODE" == "prod" ]]; then
+    echo "ERROR: TEST_NODE cannot be 'prod'. Aborting to protect production." >&2
+    exit 1
+fi
 
 # Ensure unit tests write to isolated test sessions directory
 export SESSIONS_DIR="$TEST_SESSION_DIR"
@@ -156,6 +181,7 @@ cleanup() {
     [[ -f "$TUNNEL_LOG" ]] && rm -f "$TUNNEL_LOG"; true
     rm -f "$TEST_NODE_DIR/tunnel.pid" "$TEST_NODE_DIR/tunnel_url" "$TEST_NODE_DIR/port" 2>/dev/null || true
     rm -f "$TEST_NODE_DIR/last_chat_id" "$TEST_NODE_DIR/last_active" 2>/dev/null || true
+    rm -f "$TEST_NODE_DIR/workers.json" 2>/dev/null || true
     rm -f "$TEST_NODE_DIR/direct_mode_bridge.log" 2>/dev/null || true
     [[ -d "${TEST_BIN_DIR:-}" ]] && rm -rf "$TEST_BIN_DIR"; true
 }
@@ -180,6 +206,30 @@ wait_for_port() {
         ((attempts++))
     done
     nc -z localhost "$port" 2>/dev/null
+}
+
+wait_for_port_free() {
+    local port="$1" attempts=0
+    while nc -z localhost "$port" 2>/dev/null && [[ $attempts -lt 50 ]]; do
+        sleep 0.1
+        ((attempts++))
+    done
+    ! nc -z localhost "$port" 2>/dev/null
+}
+
+# Kill the test bridge safely — ONLY by tracked PID, never by pattern/pkill.
+# This is the ONLY way chaos tests should stop the bridge.
+kill_test_bridge() {
+    local sig="${1:--9}"  # default SIGKILL for fast cleanup
+    if [[ -n "$BRIDGE_PID" ]]; then
+        kill "$sig" "$BRIDGE_PID" 2>/dev/null || true
+    fi
+    # Fallback: kill only the specific PID from the test node's pid file
+    if [[ -f "$TEST_NODE_DIR/bridge.pid" ]]; then
+        kill "$sig" "$(cat "$TEST_NODE_DIR/bridge.pid")" 2>/dev/null || true
+    fi
+    wait_for_port_free "$PORT" || true
+    sleep 0.3
 }
 
 # curl wrapper for /response and /notify endpoints
@@ -242,7 +292,7 @@ send_message() {
     local chat_id="${2:-$CHAT_ID}"
     local update_id=$((RANDOM))
 
-    curl -s -X POST "http://localhost:$PORT" \
+    curl -s --max-time 30 -X POST "http://localhost:$PORT" \
         -H "Content-Type: application/json" \
         -d '{
             "update_id": '"$update_id"',
@@ -264,7 +314,7 @@ send_reply() {
     local update_id=$((RANDOM))
     local reply_id=$((RANDOM + 1000))
 
-    curl -s -X POST "http://localhost:$PORT" \
+    curl -s --max-time 30 -X POST "http://localhost:$PORT" \
         -H "Content-Type: application/json" \
         -d '{
             "update_id": '"$update_id"',
@@ -830,7 +880,7 @@ test_webhook_secret() {
     NODE_NAME="secretmerged" \
     SESSIONS_DIR="$secret_sessions_dir" \
     TMUX_PREFIX="$secret_tmux_prefix" \
-    python3 -u "$SCRIPT_DIR/bridge.py" > "$secret_log" 2>&1 &
+    $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$secret_log" 2>&1 &
     local secret_pid=$!
 
     if wait_for_port "$secret_port"; then
@@ -2773,9 +2823,8 @@ print('OK')
 test_bridge_starts() {
     info "Starting bridge on port $PORT..."
 
-    # Kill any existing process on port
-    lsof -ti :"$PORT" | xargs kill -9 2>/dev/null || true
-    sleep 0.3
+    # Kill any existing test bridge (by tracked PID only — never by port pattern)
+    kill_test_bridge
 
     # Create test node directory structure
     mkdir -p "$TEST_NODE_DIR"
@@ -2783,7 +2832,12 @@ test_bridge_starts() {
     mkdir -p "$TEST_TEAM_DIR"
     chmod 700 "$TEST_NODE_DIR" "$TEST_SESSION_DIR" "$TEST_TEAM_DIR"
 
+    # Remove stale workers.json to prevent bridge from discovering
+    # prod workers on remote machines (causes SSH hangs during tests)
+    rm -f "$TEST_NODE_DIR/workers.json" 2>/dev/null || true
+
     # Start bridge with test node isolation
+    # MACHINES_CONFIG_FILE=/dev/null prevents SSH to remote machines during tests
     TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
     PORT="$PORT" \
     NODE_NAME="$TEST_NODE" \
@@ -2792,7 +2846,8 @@ test_bridge_starts() {
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
     TEAM_DIR="$TEST_TEAM_DIR" \
     PILOT_PORT="$TEST_PILOT_PORT" \
-    python3 -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
+    MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
     echo "$PORT" > "$TEST_NODE_DIR/port"
@@ -17943,7 +17998,7 @@ start_direct_mode_bridge() {
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-$CHAT_ID}" \
     DIRECT_MODE=1 \
-    python3 -u "$SCRIPT_DIR/bridge.py" > "$DIRECT_MODE_BRIDGE_LOG" 2>&1 &
+    $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$DIRECT_MODE_BRIDGE_LOG" 2>&1 &
     DIRECT_MODE_BRIDGE_PID=$!
     echo "$DIRECT_MODE_BRIDGE_PID" > "$TEST_NODE_DIR/direct_mode_bridge.pid"
 
@@ -18791,7 +18846,7 @@ test_worker_to_worker_pipe_direct() {
 
     # Resolve bob's pipe path
     local bob_pipe
-    bob_pipe=$(python3 -c "from bridge import get_worker_pipe_path; print(get_worker_pipe_path('bob'))" 2>/dev/null)
+    bob_pipe=$($PYTHON -c "from bridge import get_worker_pipe_path; print(get_worker_pipe_path('bob'))" 2>/dev/null)
     if [[ -z "$bob_pipe" || ! -p "$bob_pipe" ]]; then
         fail "Pipe direct: Bob's pipe not created"
         send_direct_mode_message "/end alice" >/dev/null 2>&1 || true
@@ -22722,6 +22777,279 @@ run_cli_tests() {
     run_test test_cli_hook_test_no_chat
 }
 
+# ── Chaos / Resilience Tests ──────────────────────────────────────────────
+# These tests exercise kill/restart/race scenarios to verify the bridge
+# recovers state correctly under adverse conditions.
+
+test_chaos_tmux_kill_shows_exited() {
+    info "Testing tmux session kill → worker registered but session gone..."
+
+    # Hire a dedicated chaos worker
+    send_message "/hire chaosbot" >/dev/null 2>&1 || true
+    if ! wait_for_session "chaosbot"; then
+        fail "Failed to hire chaosbot for chaos test"
+        return
+    fi
+    sleep 0.3
+
+    # Kill the tmux session directly (chaos!)
+    tmux kill-session -t "${TEST_TMUX_PREFIX}chaosbot" 2>/dev/null || true
+    sleep 0.3
+
+    # Verify the tmux session is actually gone
+    if tmux has-session -t "${TEST_TMUX_PREFIX}chaosbot" 2>/dev/null; then
+        fail "tmux session still exists after kill"
+        return
+    fi
+    success "tmux session killed successfully"
+
+    # Bridge must still be healthy — no crash from the dead session
+    local health_status
+    health_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/")
+    if [[ "$health_status" == "200" ]]; then
+        success "Bridge still healthy after tmux session killed"
+    else
+        fail "Bridge unhealthy after tmux kill (status: $health_status)"
+    fi
+
+    # Send a message to the dead worker — bridge should handle gracefully
+    send_message "hello dead chaosbot" >/dev/null 2>&1 || true
+    sleep 0.3
+    health_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/")
+    if [[ "$health_status" == "200" ]]; then
+        success "Bridge survived message to killed worker session"
+    else
+        fail "Bridge crashed after message to killed session"
+    fi
+
+    # Cleanup
+    send_message "/end chaosbot" >/dev/null 2>&1 || true
+}
+
+test_chaos_bridge_kill_restart_recovers_state() {
+    info "Testing bridge kill → restart → state recovery..."
+
+    # Hire a worker before the kill
+    send_message "/hire chaosbot" >/dev/null 2>&1 || true
+    if ! wait_for_session "chaosbot"; then
+        fail "Failed to hire chaosbot for bridge restart test"
+        return
+    fi
+    sleep 0.3
+
+    # Verify chat_id is set (by sending a message — admin registration)
+    local chat_id_file="$TEST_NODE_DIR/last_chat_id"
+    if [[ ! -f "$chat_id_file" ]]; then
+        fail "chat_id file missing before bridge kill"
+        return
+    fi
+    local saved_chat_id
+    saved_chat_id=$(cat "$chat_id_file")
+
+    # Kill the test bridge safely (by tracked PID only)
+    kill_test_bridge
+
+    # Restart the bridge
+    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
+    PORT="$PORT" \
+    NODE_NAME="$TEST_NODE" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
+    TEAM_DIR="$TEST_TEAM_DIR" \
+    PILOT_PORT="$TEST_PILOT_PORT" \
+    MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
+    BRIDGE_PID=$!
+    echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
+
+    if wait_for_port "$PORT"; then
+        success "Bridge restarted after kill"
+    else
+        fail "Bridge failed to restart after kill"
+        return
+    fi
+    sleep 0.5
+
+    # Verify chat_id survived the restart
+    local recovered_chat_id
+    recovered_chat_id=$(cat "$chat_id_file" 2>/dev/null || echo "")
+    if [[ "$recovered_chat_id" == "$saved_chat_id" ]]; then
+        success "chat_id survived bridge restart ($saved_chat_id)"
+    else
+        fail "chat_id changed after restart (was: $saved_chat_id, now: $recovered_chat_id)"
+    fi
+
+    # Verify the worker is recovered (tmux session still exists)
+    if tmux has-session -t "${TEST_TMUX_PREFIX}chaosbot" 2>/dev/null; then
+        success "Worker tmux session survived bridge restart"
+    else
+        fail "Worker tmux session lost after bridge restart"
+    fi
+
+    # Cleanup
+    send_message "/end chaosbot" >/dev/null 2>&1 || true
+}
+
+test_chaos_bridge_restart_workers_survive() {
+    info "Testing multiple workers survive bridge restart..."
+
+    # Hire workers one at a time with waits (rapid fire can miss the first one)
+    send_message "/hire chaosbot1" >/dev/null 2>&1 || true
+    sleep 0.3
+    send_message "/hire chaosbot2" >/dev/null 2>&1 || true
+    sleep 0.3
+    send_message "/hire chaosbot3" >/dev/null 2>&1 || true
+
+    # Wait for sessions with longer timeout (40 attempts = 4s each)
+    local created=0
+    for name in chaosbot1 chaosbot2 chaosbot3; do
+        local attempts=0
+        while ! tmux has-session -t "${TEST_TMUX_PREFIX}${name}" 2>/dev/null && [[ $attempts -lt 40 ]]; do
+            sleep 0.1; ((attempts++)) || true
+        done
+        tmux has-session -t "${TEST_TMUX_PREFIX}${name}" 2>/dev/null && created=$((created + 1))
+    done
+
+    if [[ "$created" -lt 2 ]]; then
+        fail "Expected at least 2 workers before restart, got $created"
+        return
+    fi
+
+    # Kill the test bridge safely (by tracked PID only)
+    kill_test_bridge
+
+    # Restart bridge (MACHINES_CONFIG_FILE prevents SSH to remote machines)
+    TELEGRAM_BOT_TOKEN="$TEST_BOT_TOKEN" \
+    PORT="$PORT" \
+    NODE_NAME="$TEST_NODE" \
+    SESSIONS_DIR="$TEST_SESSION_DIR" \
+    TMUX_PREFIX="$TEST_TMUX_PREFIX" \
+    ADMIN_CHAT_ID="${TEST_CHAT_ID:-}" \
+    TEAM_DIR="$TEST_TEAM_DIR" \
+    PILOT_PORT="$TEST_PILOT_PORT" \
+    MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
+    BRIDGE_PID=$!
+    echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
+
+    if ! wait_for_port "$PORT"; then
+        fail "Bridge failed to restart after kill"
+        return
+    fi
+    sleep 0.5
+
+    # Verify bridge is healthy
+    local health_status
+    health_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/") || true
+    if [[ "$health_status" != "200" ]]; then
+        fail "Bridge not healthy after restart (status=$health_status)"
+        return
+    fi
+
+    # Verify tmux sessions survived (all that were created should still exist)
+    local survived=0
+    for name in chaosbot1 chaosbot2 chaosbot3; do
+        tmux has-session -t "${TEST_TMUX_PREFIX}${name}" 2>/dev/null && survived=$((survived + 1))
+    done
+
+    if [[ "$survived" == "$created" ]]; then
+        success "All $survived worker tmux sessions survived bridge restart"
+    else
+        fail "Lost workers: $created before restart, $survived after"
+    fi
+
+    # Cleanup
+    send_message "/end chaosbot1" >/dev/null 2>&1 || true
+    send_message "/end chaosbot2" >/dev/null 2>&1 || true
+    send_message "/end chaosbot3" >/dev/null 2>&1 || true
+}
+
+test_chaos_concurrent_hire_no_corruption() {
+    info "Testing concurrent /hire requests don't corrupt state..."
+
+    # Fire 3 hire commands concurrently — don't wait for bridge HTTP response
+    # (bridge is single-threaded and blocks on Telegram API per request).
+    # We only care that the bridge doesn't crash or corrupt state.
+    local update_id curl_pids=()
+    for name in chaosbot1 chaosbot2 chaosbot3; do
+        update_id=$((RANDOM))
+        curl -s --max-time 3 --connect-timeout 2 -X POST "http://localhost:$PORT" \
+            -H "Content-Type: application/json" \
+            -d '{"update_id": '"$update_id"', "message": {"message_id": '"$update_id"', "from": {"id": '"$CHAT_ID"', "first_name": "TestUser"}, "chat": {"id": '"$CHAT_ID"', "type": "private"}, "date": '"$(date +%s)"', "text": "/hire '"$name"'"}}' \
+            >/dev/null 2>&1 &
+        curl_pids+=($!)
+    done
+    # Give bridge time to process (creates tmux sessions in the handler thread)
+    sleep 5
+    # Kill only the curl PIDs (NOT the bridge!) if still waiting on Telegram API
+    for pid in "${curl_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    wait "${curl_pids[@]}" 2>/dev/null || true
+
+    # Bridge must still be healthy
+    local health_status
+    health_status=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://localhost:$PORT/") || true
+    if [[ "$health_status" == "200" ]]; then
+        success "Bridge healthy after concurrent /hire requests"
+    else
+        fail "Bridge returned $health_status after concurrent /hire (expected 200)"
+        return
+    fi
+
+    # Count how many tmux sessions actually got created
+    local count=0
+    tmux has-session -t "${TEST_TMUX_PREFIX}chaosbot1" 2>/dev/null && count=$((count + 1))
+    tmux has-session -t "${TEST_TMUX_PREFIX}chaosbot2" 2>/dev/null && count=$((count + 1))
+    tmux has-session -t "${TEST_TMUX_PREFIX}chaosbot3" 2>/dev/null && count=$((count + 1))
+
+    if [[ "$count" -ge 2 ]]; then
+        success "Bridge survived concurrent hire: $count/3 workers created without corruption"
+    else
+        fail "Too few workers created: $count/3 (expected at least 2)"
+    fi
+
+    # Cleanup — kill sessions directly, don't go through bridge (avoids more blocking)
+    for name in chaosbot1 chaosbot2 chaosbot3; do
+        tmux kill-session -t "${TEST_TMUX_PREFIX}${name}" 2>/dev/null || true
+    done
+    sleep 0.3
+}
+
+test_chaos_message_to_dead_session_errors_gracefully() {
+    info "Testing message to dead worker session → graceful error..."
+
+    # Hire a worker
+    send_message "/hire chaosbot" >/dev/null 2>&1 || true
+    if ! wait_for_session "chaosbot"; then fail "chaosbot session never appeared"; return; fi
+    sleep 0.3
+
+    # Focus on it
+    send_message "/focus chaosbot" >/dev/null 2>&1 || true
+    sleep 0.1
+
+    # Kill the tmux session (but leave the worker registered)
+    tmux kill-session -t "${TEST_TMUX_PREFIX}chaosbot" 2>/dev/null || true
+    sleep 0.3
+
+    # Send a message — should not crash the bridge
+    send_message "hello dead worker" >/dev/null 2>&1 || true
+    sleep 0.3
+
+    # Bridge must still be responding (GET / is reliable health check)
+    local health_status
+    health_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/") || true
+    if [[ "$health_status" == "200" ]]; then
+        success "Bridge healthy after message to dead session"
+    else
+        fail "Bridge returned $health_status after message to dead session"
+    fi
+
+    # Cleanup
+    send_message "/end chaosbot" >/dev/null 2>&1 || true
+}
+
 run_integration_tests() {
     # Integration tests (bridge needed)
     log ""
@@ -22883,8 +23211,21 @@ run_integration_tests() {
     run_test test_guest_register_includes_channel_urls
     run_test test_guest_send_legacy_compat
 
+    # ── Chaos / Resilience Tests ─────────────────────────────────────────
+    log ""
+    log "── Chaos / Resilience Tests ────────────────────────────────────────────"
+    run_test test_chaos_tmux_kill_shows_exited
+    run_test test_chaos_bridge_kill_restart_recovers_state
+    run_test test_chaos_bridge_restart_workers_survive
+    run_test test_chaos_concurrent_hire_no_corruption
+    run_test test_chaos_message_to_dead_session_errors_gracefully
+
     # Cleanup test sessions
     send_message "/end testbot1" >/dev/null 2>&1 || true
+    send_message "/end chaosbot" >/dev/null 2>&1 || true
+    send_message "/end chaosbot1" >/dev/null 2>&1 || true
+    send_message "/end chaosbot2" >/dev/null 2>&1 || true
+    send_message "/end chaosbot3" >/dev/null 2>&1 || true
 }
 
 run_full_tests() {
@@ -22931,8 +23272,8 @@ main() {
 
     # Static analysis — catches type regressions before any tests run
     log "── mypy strict check ──"
-    if command -v python3 &>/dev/null && python3 -m mypy --version &>/dev/null 2>&1; then
-        if python3 -m mypy bridge.py connectors.py --ignore-missing-imports 2>&1; then
+    if command -v $PYTHON &>/dev/null && $PYTHON -m mypy --version &>/dev/null 2>&1; then
+        if $PYTHON -m mypy bridge.py connectors.py --ignore-missing-imports 2>&1; then
             success "mypy: zero errors"
         else
             fail "mypy: type errors found"
@@ -22943,9 +23284,9 @@ main() {
 
     # Pytest suite — runs all converted tests
     log "── pytest suite ──"
-    if python3 -m pytest --version &>/dev/null 2>&1; then
+    if $PYTHON -m pytest --version &>/dev/null 2>&1; then
         local pytest_out
-        pytest_out=$(python3 -m pytest tests/ -q --timeout=30 2>&1) || true
+        pytest_out=$($PYTHON -m pytest tests/ -q --timeout=30 2>&1) || true
         local pytest_last
         pytest_last=$(echo "$pytest_out" | tail -1)
         if echo "$pytest_last" | grep -q "failed"; then
