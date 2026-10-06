@@ -4552,9 +4552,47 @@ class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-gmail_connector_instance = None  # initialized in main()
+class ConnectorRegistry:
+    """Thread-safe registry for external connectors (Gmail, GitHub).
 
-github_connector_instance = None  # initialized in main()
+    Groups connector instances with their message log and lock —
+    ensures the lock always guards its data.
+    """
+    def __init__(self) -> None:
+        self.gmail: Any = None
+        self.github: Any = None
+        self._log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
+        self._lock: threading.Lock = threading.Lock()
+
+    def stop_all(self) -> None:
+        """Stop all running connectors."""
+        for name, inst in [("gmail", self.gmail), ("github", self.github)]:
+            if inst is not None:
+                try:
+                    inst.stop()
+                    print(f"{name.title()} connector stopped")
+                except (RuntimeError, OSError) as exc:
+                    _log(_LOG_DEBUG, f"shutdown:{name}", f"{type(exc).__name__}: {exc}")
+
+    def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
+        """Log a connector message for debugging (capped at 20 per tag)."""
+        with self._lock:
+            if tag not in self._log:
+                self._log[tag] = collections.deque(maxlen=20)
+            self._log[tag].append({
+                "ts": _clock.time(),
+                "html": html_text,
+                "plain": plain_text,
+                "targets": targets or [],
+            })
+
+    def get_log(self, tag: str) -> list[ConnectorMessageLogEntry]:
+        """Return a snapshot of recent messages for a connector tag."""
+        with self._lock:
+            return list(self._log.get(tag, []))
+
+
+connectors = ConnectorRegistry()
 
 tunnel_manager: _tunnel_mod.TunnelManager | None = None  # initialized in main()
 
@@ -5570,9 +5608,64 @@ class PrReviewToken:
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
 
-_token_maps_lock: threading.Lock = threading.Lock()
-
 REWIND_TIMEOUT: int = 24 * 60 * 60  # 24 hours (sliding window)
+PR_REVIEW_EXTEND: int = 300  # seconds to extend PR review token on each access
+
+
+class TokenStore:
+    """Thread-safe store for access tokens (rewind, PR review).
+
+    Groups the token dicts with their lock — all expiry checking and
+    cleanup happen inside the class so callers never handle the lock.
+    """
+    def __init__(self) -> None:
+        self._lock: threading.Lock = threading.Lock()
+
+    def add_rewind(self, token: str, name: str, timeout: int = REWIND_TIMEOUT) -> None:
+        """Register a rewind token for a worker session."""
+        with self._lock:
+            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
+
+    def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
+        """Check a rewind token, clean expired, optionally extend, return entry or None."""
+        if not token:
+            return None
+        now = _clock.time()
+        with self._lock:
+            expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
+            for k in expired:
+                del REWIND_TOKENS[k]
+            entry = REWIND_TOKENS.get(token)
+            if entry and extend:
+                entry["expires_at"] = now + REWIND_TIMEOUT
+            return entry
+
+    def add_pr_review(self, token: str, pr_num: int, owner: str, repo: str) -> None:
+        """Register a PR review token."""
+        with self._lock:
+            PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo,
+                                       "expires_at": _clock.time() + PR_REVIEW_EXTEND}
+
+    def validate_pr_review(self, token: str | None, extend: bool = True) -> PrReviewTokenEntry | None:
+        """Check a PR review token. Returns entry or None. Optionally extends expiry."""
+        if not token:
+            return None
+        now = _clock.time()
+        with self._lock:
+            expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
+            for k in expired:
+                del PR_REVIEW_TOKENS[k]
+            if token not in PR_REVIEW_TOKENS:
+                return None
+            entry = PR_REVIEW_TOKENS[token]
+            if entry.get("expires_at", 0) <= now:
+                return None
+            if extend:
+                entry["expires_at"] = now + PR_REVIEW_EXTEND
+            return entry
+
+
+tokens = TokenStore()
 
 
 
@@ -9884,8 +9977,7 @@ class CommandRouter:
         import secrets
         token = secrets.token_urlsafe(32)
         base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-        with _token_maps_lock:
-            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + REWIND_TIMEOUT}
+        tokens.add_rewind(token, name)
         url = f"{base_url}/transcript/{name}?token={token}"
         try:
             # Pass live_base_url so pagination/search links point to the bridge
@@ -9948,8 +10040,7 @@ class CommandRouter:
         else:
             import secrets
             token = secrets.token_urlsafe(32)
-            with _token_maps_lock:
-                PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo, "expires_at": _clock.time() + 300}
+            tokens.add_pr_review(token, pr_num, owner, repo)
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
             url = f"{base_url}/pr-review/{pr_num}?token={token}"
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
@@ -10203,9 +10294,38 @@ command_router = CommandRouter(transport, worker_manager)
 # ============================================================
 
 # Background transcript sync tracking: {key: {status, progress, error, path, started}}
-_TRANSCRIPT_SYNC: dict[str, TranscriptSyncState] = {}
+class TranscriptSyncRegistry:
+    """Thread-safe registry for background transcript syncs.
 
-_TRANSCRIPT_SYNC_LOCK: threading.Lock = threading.Lock()
+    Groups the sync state dict with its lock — ensures thread-safe
+    access without caller needing to manage the lock.
+    """
+    def __init__(self) -> None:
+        self._state: dict[str, TranscriptSyncState] = {}
+        self._lock: threading.Lock = threading.Lock()
+
+    def get(self, key: str) -> TranscriptSyncState | None:
+        with self._lock:
+            return self._state.get(key)
+
+    def set(self, key: str, value: TranscriptSyncState) -> None:
+        with self._lock:
+            self._state[key] = value
+
+    def update(self, key: str, **fields: object) -> None:
+        """Update specific fields of an existing sync entry."""
+        with self._lock:
+            if key in self._state:
+                self._state[key].update(fields)  # type: ignore[typeddict-item]
+
+    def get_started(self, key: str) -> float:
+        """Get the 'started' timestamp for a sync key (0 if not found)."""
+        with self._lock:
+            entry = self._state.get(key, {})
+            return entry.get("started", 0)  # type: ignore[return-value]
+
+
+_transcript_sync = TranscriptSyncRegistry()
 
 
 # Path to indexer script (indexer.py — transcript subcommand)
@@ -10257,9 +10377,8 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
     """Background thread: rsync transcript from remote host with progress tracking."""
     try:
-        with _TRANSCRIPT_SYNC_LOCK:
-            _TRANSCRIPT_SYNC[key] = {"status": "syncing", "progress": "Connecting to remote host...",
-                                     "started": _clock.time(), "path": None, "error": None}
+        _transcript_sync.set(key, {"status": "syncing", "progress": "Connecting to remote host...",
+                                   "started": _clock.time(), "path": None, "error": None})
         # First get remote file size for progress
         r = _subprocess_runner.run(["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
                            capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -10267,13 +10386,11 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
         if r.returncode == 0 and r.stdout.strip().isdigit():
             remote_size = int(r.stdout.strip())
 
-        with _TRANSCRIPT_SYNC_LOCK:
-            if remote_size > 0:
-                size_mb = remote_size / 1_048_576
-                _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing transcript ({size_mb:.1f} MB)..."
-                _TRANSCRIPT_SYNC[key]["remote_size"] = remote_size
-            else:
-                _TRANSCRIPT_SYNC[key]["progress"] = "Syncing transcript..."
+        if remote_size > 0:
+            size_mb = remote_size / 1_048_576
+            _transcript_sync.update(key, progress=f"Syncing transcript ({size_mb:.1f} MB)...", remote_size=remote_size)
+        else:
+            _transcript_sync.update(key, progress="Syncing transcript...")
 
         # Run rsync with --progress (we poll local file size for progress)
         proc = _subprocess_runner.popen(
@@ -10288,32 +10405,29 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                     if local_tmp.exists() and remote_size > 0:
                         local_size = local_tmp.stat().st_size
                         pct = min(99, int(local_size * 100 / remote_size))
-                        with _TRANSCRIPT_SYNC_LOCK:
-                            _TRANSCRIPT_SYNC[key]["progress"] = f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)"
-                            _TRANSCRIPT_SYNC[key]["pct"] = pct
+                        _transcript_sync.update(key,
+                            progress=f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)",
+                            pct=pct)
                 except (OSError, ValueError) as exc:
                     _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
 
             if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
-                with _TRANSCRIPT_SYNC_LOCK:
-                    _TRANSCRIPT_SYNC[key] = {"status": "done", "progress": "Ready", "path": str(local_tmp),
-                                             "started": _TRANSCRIPT_SYNC[key]["started"], "error": None}
+                _transcript_sync.set(key, {"status": "done", "progress": "Ready", "path": str(local_tmp),
+                                           "started": _transcript_sync.get_started(key), "error": None})
             else:
                 stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-                with _TRANSCRIPT_SYNC_LOCK:
-                    _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
-                                             "started": _TRANSCRIPT_SYNC[key]["started"],
-                                             "path": None, "error": stderr[:200] or "rsync failed"}
+                _transcript_sync.set(key, {"status": "error", "progress": "Sync failed",
+                                           "started": _transcript_sync.get_started(key),
+                                           "path": None, "error": stderr[:200] or "rsync failed"})
         finally:
             if proc.stdout:
                 proc.stdout.close()
             if proc.stderr:
                 proc.stderr.close()
     except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
-        with _TRANSCRIPT_SYNC_LOCK:
-            _TRANSCRIPT_SYNC[key] = {"status": "error", "progress": "Sync failed",
-                                     "started": _TRANSCRIPT_SYNC.get(key, {}).get("started", 0),
-                                     "path": None, "error": str(e)[:200]}
+        _transcript_sync.set(key, {"status": "error", "progress": "Sync failed",
+                                   "started": _transcript_sync.get_started(key),
+                                   "path": None, "error": str(e)[:200]})
 
 
 
@@ -10349,8 +10463,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                     sync_key = f"{name}:{sid}"
 
                     # Check if sync already completed
-                    with _TRANSCRIPT_SYNC_LOCK:
-                        sync_info = _TRANSCRIPT_SYNC.get(sync_key)
+                    sync_info = _transcript_sync.get(sync_key)
                     if sync_info and sync_info["status"] == "done" and local_tmp.exists():
                         transcript_path = local_tmp
                     elif sync_info and sync_info["status"] == "syncing":
@@ -10769,8 +10882,7 @@ def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key:
     """Render a loading page while transcript syncs from remote host."""
     import html as html_mod
     esc = html_mod.escape
-    with _TRANSCRIPT_SYNC_LOCK:
-        info = _TRANSCRIPT_SYNC.get(sync_key, {})
+    info = _transcript_sync.get(sync_key) or {}
     status = info.get("status", "syncing")
     progress = esc(info.get("progress", "Starting sync..."))
     pct = info.get("pct", 0)
@@ -12528,13 +12640,10 @@ class Handler(BaseHTTPRequestHandler):
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
-        now = _clock.time()
-        with _token_maps_lock:
-            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
-                self.send_response(403)
-                self.end_headers()
-                return
-            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        if not tokens.validate_pr_review(token):
+            self.send_response(403)
+            self.end_headers()
+            return
 
         owner = params.get("owner", [None])[0]
         repo = params.get("repo", [None])[0]
@@ -12574,13 +12683,10 @@ class Handler(BaseHTTPRequestHandler):
         """Extend PR review token expiry on client activity."""
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
-        now = _clock.time()
-        with _token_maps_lock:
-            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token]["expires_at"] <= now:
-                self.send_response(403)
-                self.end_headers()
-                return
-            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        if not tokens.validate_pr_review(token):
+            self.send_response(403)
+            self.end_headers()
+            return
         self.send_response(204)
         self.end_headers()
 
@@ -12595,14 +12701,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         token = _str_field(data, "token")
-        now = _clock.time()
-        with _token_maps_lock:
-            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Token expired")
-                return
-            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        if not tokens.validate_pr_review(token):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired")
+            return
 
         owner = _str_field(data, "owner")
         repo = _str_field(data, "repo")
@@ -12668,14 +12771,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         token = _str_field(data, "token")
-        now = _clock.time()
-        with _token_maps_lock:
-            if not token or token not in PR_REVIEW_TOKENS or PR_REVIEW_TOKENS[token].get("expires_at", 0) <= now:
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Token expired")
-                return
-            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        if not tokens.validate_pr_review(token):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired")
+            return
 
         owner = _str_field(data, "owner")
         repo = _str_field(data, "repo")
@@ -12733,22 +12833,16 @@ class Handler(BaseHTTPRequestHandler):
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
-        # Cleanup expired tokens
-        now = _clock.time()
-        with _token_maps_lock:
-            expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del PR_REVIEW_TOKENS[k]
+        # Validate token (also cleans up expired tokens)
+        info = tokens.validate_pr_review(token)
+        if not info:
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>")
+            return
 
-            if not token or token not in PR_REVIEW_TOKENS:
-                self.send_response(403)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>")
-                return
-
-            info = PR_REVIEW_TOKENS[token]
-            pr_num = info["pr_num"]
+        pr_num = info["pr_num"]
         html_path = f"/tmp/pr-review-{pr_num}.html"
 
         if not os.path.exists(html_path):
@@ -12772,18 +12866,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         token = _str_field(data, "token")
-        now = _clock.time()
-        with _token_maps_lock:
-            expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del PR_REVIEW_TOKENS[k]
-            if not token or token not in PR_REVIEW_TOKENS:
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Token expired - reload the PR review page")
-                return
-            # Extend token expiry on use
-            PR_REVIEW_TOKENS[token]["expires_at"] = now + 300
+        if not tokens.validate_pr_review(token):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Token expired - reload the PR review page")
+            return
 
         owner = _str_field(data, "owner")
         repo = _str_field(data, "repo")
@@ -12866,15 +12953,10 @@ class Handler(BaseHTTPRequestHandler):
         """
         try:
             query_params = parse_qs(parsed.query)
-            # Token auth — clean up expired tokens first
-            now = _clock.time()
+            # Token auth — clean up expired, validate, extend sliding window
             token = query_params.get("token", [None])[0]
-            with _token_maps_lock:
-                expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
-                for k in expired:
-                    del REWIND_TOKENS[k]
-                if not token or token not in REWIND_TOKENS:
-                    body = """<!DOCTYPE html><html><head><meta charset="utf-8">
+            if not tokens.validate_rewind(token):
+                body = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Session Expired</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;
@@ -12889,14 +12971,12 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 <p>This link has expired or is invalid.</p>
 <p>Send <code>/rewind &lt;name&gt;</code> in Telegram to get a fresh 5-minute link.</p>
 </div></body></html>""".encode("utf-8")
-                    self.send_response(403)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                # Refresh token expiry on each valid interaction (sliding window)
-                REWIND_TOKENS[token]["expires_at"] = now + REWIND_TIMEOUT
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
             parts = parsed.path.rstrip("/").split("/")
             # /transcript/<name>
@@ -13781,19 +13861,7 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
 
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
 
-    if gmail_connector_instance is not None:
-        try:
-            gmail_connector_instance.stop()
-            print("Gmail connector stopped")
-        except (RuntimeError, OSError) as exc:
-            _log(_LOG_DEBUG, "io:graceful_shutdown", f"{type(exc).__name__}: {exc}")
-
-    if github_connector_instance is not None:
-        try:
-            github_connector_instance.stop()
-            print("GitHub connector stopped")
-        except (RuntimeError, OSError) as exc:
-            _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+    connectors.stop_all()
 
     # Stop tunnel manager
     if tunnel_manager is not None:
@@ -13965,23 +14033,9 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
 
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
-_connector_message_log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
-
-_connector_log_lock: threading.Lock = threading.Lock()
-
-
-
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     """Log a connector message for debugging (capped at 20 per tag)."""
-    with _connector_log_lock:
-        if tag not in _connector_message_log:
-            _connector_message_log[tag] = collections.deque(maxlen=20)
-        _connector_message_log[tag].append({
-            "ts": _clock.time(),
-            "html": html_text,
-            "plain": plain_text,
-            "targets": targets or [],
-        })
+    connectors.log_message(tag, html_text, plain_text, targets)
 
 
 
@@ -13989,8 +14043,7 @@ def _connector_render_html(tag: str, current_html: str) -> str:
     """Render HTML page with current message + recent history (rewind style)."""
     import html as html_mod
     esc = html_mod.escape
-    with _connector_log_lock:
-        msgs = list(_connector_message_log.get(tag, []))
+    msgs = connectors.get_log(tag)
     icon = "🔔" if tag == "github" else "📧"
     title = f"{tag.title()} Feed"
 
@@ -14244,16 +14297,14 @@ def _start_connectors() -> tuple[object, object]:
 
 def _restart_connector(name: str) -> tuple[bool, str]:
     """Hot-restart a connector by name. Returns (ok, message)."""
-    global gmail_connector_instance, github_connector_instance
-
     if name == "gmail":
         if not GMAIL_ENABLED:
             return False, "Gmail connector not enabled (GMAIL_ENABLED=0)"
         if GmailConnector is None:
             return False, f"Gmail connector import failed: {GMAIL_IMPORT_ERROR}"
-        if gmail_connector_instance is not None:
-            gmail_connector_instance.stop()
-        gmail_connector_instance = GmailConnector(
+        if connectors.gmail is not None:
+            connectors.gmail.stop()
+        connectors.gmail = GmailConnector(
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
@@ -14261,7 +14312,7 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             get_registered_workers=_connector_get_workers,
             on_alert=_connector_on_alert("gmail"),  # type: ignore[arg-type]
         )
-        ok, msg = gmail_connector_instance.restart()
+        ok, msg = connectors.gmail.restart()
         if ok:
             print(f"Gmail connector restarted: {msg}")
         else:
@@ -14273,9 +14324,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             return False, "GitHub connector not enabled (BRIDGE_GHPOLL_ENABLED=0)"
         if GitHubConnector is None:
             return False, f"GitHub connector import failed: {GITHUB_IMPORT_ERROR}"
-        if github_connector_instance is not None:
-            github_connector_instance.stop()
-        github_connector_instance = GitHubConnector(
+        if connectors.github is not None:
+            connectors.github.stop()
+        connectors.github = GitHubConnector(
             repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
@@ -14284,7 +14335,7 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             on_alert=_connector_on_alert("github"),  # type: ignore[arg-type]
             state_file=str(NODE_DIR / "github_state.json"),
         )
-        ok, msg = github_connector_instance.restart()
+        ok, msg = connectors.github.restart()
         if ok:
             print(f"GitHub connector restarted: {msg}")
         else:
@@ -14300,15 +14351,15 @@ def _get_connectors_status() -> dict[str, ConnectorStatusDict]:  # type: ignore[
     """Return status dict for all connectors."""
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
-        if gmail_connector_instance is not None:
-            result["gmail"] = cast(ConnectorStatusDict, gmail_connector_instance.status())
+        if connectors.gmail is not None:
+            result["gmail"] = cast(ConnectorStatusDict, connectors.gmail.status())
         else:
             result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}  # type: ignore[assignment]
     else:
         result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
     if GITHUB_ENABLED:
-        if github_connector_instance is not None:
-            result["github"] = cast(ConnectorStatusDict, github_connector_instance.status())
+        if connectors.github is not None:
+            result["github"] = cast(ConnectorStatusDict, connectors.github.status())
         else:
             result["github"] = {"name": "github", "running": False, "error": "not initialized"}
     else:
@@ -14323,7 +14374,7 @@ def main() -> None:
     Orchestrates: validation → signal setup → session discovery →
     state restoration → startup logging → notification → background services.
     """
-    global admin_chat_id, gmail_connector_instance, github_connector_instance, tunnel_manager
+    global admin_chat_id, tunnel_manager
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
         _log(_LOG_ERROR, "telegram", "Error: TELEGRAM_BOT_TOKEN not set")
@@ -14357,7 +14408,7 @@ def main() -> None:
     _schedule_idle_scan()
     print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")  # type: ignore[assignment]
 
-    gmail_connector_instance, github_connector_instance = _start_connectors()  # type: ignore[assignment]
+    connectors.gmail, connectors.github = _start_connectors()  # type: ignore[assignment]
 
     # Create HTTP server (binds port immediately)
     server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
