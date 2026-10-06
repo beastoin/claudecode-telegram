@@ -170,6 +170,12 @@ cleanup() {
     [[ -n "$BRIDGE_PID" ]] && kill "$BRIDGE_PID" 2>/dev/null; true
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null; true
     [[ -n "$PILOT_PID" ]] && kill "$PILOT_PID" 2>/dev/null; true
+    # Kill orphaned cloudflared children from the test bridge (root cause of tunnel flap).
+    # Safe: matches on test port ($PORT), never prod port.
+    if [[ -f "$TEST_NODE_DIR/tunnel.pid" ]]; then
+        kill "$(cat "$TEST_NODE_DIR/tunnel.pid")" 2>/dev/null || true
+        rm -f "$TEST_NODE_DIR/tunnel.pid"
+    fi
     lsof -ti :"$TEST_PILOT_PORT" | xargs kill -9 2>/dev/null || true
     # Kill any test sessions we created (using test prefix)
     tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${TEST_TMUX_PREFIX}" | while read -r session; do
@@ -219,14 +225,26 @@ wait_for_port_free() {
 
 # Kill the test bridge safely — ONLY by tracked PID, never by pattern/pkill.
 # This is the ONLY way chaos tests should stop the bridge.
+# Also kills cloudflared children so they don't become orphans on SIGKILL.
 kill_test_bridge() {
     local sig="${1:--9}"  # default SIGKILL for fast cleanup
+    local bridge_pid=""
     if [[ -n "$BRIDGE_PID" ]]; then
-        kill "$sig" "$BRIDGE_PID" 2>/dev/null || true
+        bridge_pid="$BRIDGE_PID"
+    elif [[ -f "$TEST_NODE_DIR/bridge.pid" ]]; then
+        bridge_pid="$(cat "$TEST_NODE_DIR/bridge.pid")"
     fi
-    # Fallback: kill only the specific PID from the test node's pid file
-    if [[ -f "$TEST_NODE_DIR/bridge.pid" ]]; then
-        kill "$sig" "$(cat "$TEST_NODE_DIR/bridge.pid")" 2>/dev/null || true
+    if [[ -n "$bridge_pid" ]]; then
+        # Kill cloudflared children FIRST (they become orphans on SIGKILL)
+        for child in $(pgrep -P "$bridge_pid" 2>/dev/null); do
+            kill "$sig" "$child" 2>/dev/null || true
+        done
+        kill "$sig" "$bridge_pid" 2>/dev/null || true
+    fi
+    # Also kill any cloudflared pointing at the TEST port (not prod)
+    if [[ -f "$TEST_NODE_DIR/tunnel.pid" ]]; then
+        kill "$(cat "$TEST_NODE_DIR/tunnel.pid")" 2>/dev/null || true
+        rm -f "$TEST_NODE_DIR/tunnel.pid"
     fi
     wait_for_port_free "$PORT" || true
     sleep 0.3

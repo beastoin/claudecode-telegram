@@ -107,6 +107,7 @@ class TunnelManager:
         if self._config.mode == "none":
             _log(_LOG_INFO, "tunnel", "Tunnel disabled (mode=none)")
             return
+        self._kill_stale_tunnel()
         self._stop_event.clear()
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_loop, name="tunnel-watchdog", daemon=True,
@@ -235,8 +236,10 @@ class TunnelManager:
                         self._save_tunnel_url(new_url)
                         _log(_LOG_INFO, "tunnel", f"Tunnel restarted: {new_url}")
 
+                        # Stop polling BEFORE setting webhook to avoid 409
+                        # (getUpdates and webhook can't coexist)
+                        self._stop_poll_fallback()
                         if self._set_webhook_with_retry(new_url):
-                            self._stop_poll_fallback()
                             self._state = TunnelState.RUNNING
                             self._on_notify("✅ Tunnel reconnected")
                         else:
@@ -369,18 +372,27 @@ class TunnelManager:
                 _log(_LOG_INFO, "tunnel", "Webhook configured")
                 return True
 
+        # All retries exhausted — delete webhook to prevent partial registration
+        # from blocking getUpdates (409 Conflict) when falling back to polling.
+        self._tg_delete_webhook()
         return False
 
     def _periodic_webhook_check(self) -> None:
         """Check webhook health and fix if stale. Called every ~60s."""
         if self._polling_active:
-            # While polling, try to restore webhook
+            # While polling, try to restore webhook.
+            # Must stop polling FIRST — setWebhook + getUpdates can't coexist
+            # or Telegram returns 409 Conflict on getUpdates.
+            self._stop_poll_fallback()
             resp = self._tg_set_webhook(self._tunnel_url, secret_token=self._webhook_secret)
             if resp.get("ok"):
-                self._stop_poll_fallback()
                 self._state = TunnelState.RUNNING
                 _log(_LOG_INFO, "tunnel", "Webhook restored, poll fallback stopped")
                 self._on_notify("✅ Webhook restored (DNS resolved)")
+            else:
+                # setWebhook failed — clean up and resume polling
+                self._tg_delete_webhook()
+                self._start_poll_fallback()
         else:
             # Verify webhook points to our URL
             info = self._tg_get_webhook_info()
@@ -490,6 +502,24 @@ class TunnelManager:
     def _save_tunnel_url(self, url: str) -> None:
         try:
             (self._node_dir / "tunnel_url").write_text(url)
+        except OSError:
+            pass
+
+    def _kill_stale_tunnel(self) -> None:
+        """Kill any orphaned cloudflared from a previous crash/SIGKILL."""
+        pid_file = self._node_dir / "tunnel.pid"
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            return
+        try:
+            import os
+            os.kill(pid, 9)
+            _log(_LOG_WARN, "tunnel", f"Killed stale cloudflared (pid={pid})")
+        except (OSError, ProcessLookupError):
+            pass  # already dead
+        try:
+            pid_file.unlink()
         except OSError:
             pass
 
