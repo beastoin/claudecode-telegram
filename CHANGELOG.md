@@ -1,5 +1,35 @@
 ## Changelog
 
+### v0.48.0 - Tunnel lifecycle migration to Python
+
+**Architecture:** Migrated tunnel management (cloudflared, webhook, poll fallback, watchdog) from bridge.sh (~250 lines bash) into a new Python module with full DI seams.
+
+**New module: tunnel.py**
+- `TunnelManager` class: thread-based watchdog managing cloudflared quick-tunnel lifecycle, Telegram webhook registration with retry, getUpdates poll fallback, and health monitoring.
+- `TunnelState` enum: STOPPED → STARTING → RUNNING / POLL_FALLBACK / RESTARTING / FAILED.
+- All external calls go through injectable seams: `SubprocessRunner` (cloudflared), `Clock` (time/sleep), `urlopen` (HTTP). No network calls in tests.
+- Independent of telegram.py — uses inline Telegram Bot API calls via injected urlopen.
+- Dependency graph: `core.py → tunnel.py → bridge.py`.
+
+**core.py additions:**
+- `TunnelConfig` frozen dataclass: mode (auto/provided/none), provided_url, cloudflared_binary, startup_timeout, max_restart_attempts, backoff, watchdog_interval, webhook_retry_delays, poll settings.
+- `_build_tunnel_config()`: constructs config from `TUNNEL_MODE` and `TUNNEL_URL` env vars.
+
+**telegram.py additions:**
+- Webhook management methods on `TelegramAPI`: `set_webhook()`, `delete_webhook()`, `get_webhook_info()`, `get_me()`.
+
+**bridge.py wiring:**
+- `main()` creates and starts `TunnelManager` after HTTP server binds port.
+- Poll fallback forwards updates through `command_router.handle_message()`.
+- `graceful_shutdown()` stops tunnel manager cleanly.
+
+**bridge.sh simplification:**
+- `cmd_run()` reduced by ~240 lines: removed bash tunnel startup, webhook registration, watchdog loop, and poll fallback subprocess.
+- Now exports `TUNNEL_MODE`/`TUNNEL_URL` env vars and runs bridge.py in foreground.
+- Bash tunnel functions (`start_tunnel`, `wait_for_tunnel_url`, `restart_tunnel_with_retry`, `is_tunnel_alive`, `is_tunnel_reachable`, `start_poll_fallback`, `stop_poll_fallback`) kept for backward compat but no longer called by `cmd_run`.
+
+**Tests:** 20 new behavior tests in `tests/tunnel_test.py` covering all modes, URL extraction, health checks, webhook retry, poll fallback, restart with backoff, file persistence, and port wait. tunnel added to import independence tests. 468 tests pass.
+
 ### v0.47.0 - Three-layer reorg: bridge / claudecode / telegram
 
 **Architecture:** Enforced the 3-layer model — each Python file cleanly owns its layer:

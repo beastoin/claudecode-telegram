@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.47.0"
+VERSION="0.48.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -468,6 +468,8 @@ cmd_run() {
     check_cmd tmux || { error "tmux not installed"; hint "brew install tmux"; exit 4; }
     check_cmd python3 || { error "python3 not installed"; exit 4; }
 
+    # cloudflared check: Python's TunnelManager handles this at runtime,
+    # but pre-check here gives a clearer error message on startup.
     if ! $no_tunnel && [[ -z "$tunnel_url" ]]; then
         check_cmd cloudflared || { error "cloudflared not installed"; hint "brew install cloudflared (or use --no-tunnel)"; exit 4; }
     fi
@@ -537,113 +539,17 @@ cmd_run() {
 
     local bridge_log="$node_dir/bridge.log"
 
-    # No-tunnel mode: just run bridge in foreground
+    # Set tunnel mode env vars for Python's TunnelManager
     if $no_tunnel; then
+        export TUNNEL_MODE="none"
         log "$(dim "No tunnel (use external tunnel or local testing)")"
-        log "$(dim "Ctrl+C to stop")"
-        exec python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
-    fi
-
-    local tunnel_pid=""
-    local tunnel_log=""
-    local polling_active=false
-
-    # Start tunnel (or use provided URL)
-    if [[ -n "$tunnel_url" ]]; then
-        log "$(dim "Using provided tunnel URL")"
-        success "Tunnel: $tunnel_url"
+    elif [[ -n "$tunnel_url" ]]; then
+        export TUNNEL_MODE="provided"
+        export TUNNEL_URL="$tunnel_url"
+        log "$(dim "Using provided tunnel URL: $tunnel_url")"
     else
-        log "Starting tunnel..."
-        tunnel_log="$node_dir/tunnel.log"
-        tunnel_pid=$(start_tunnel "$port" "$tunnel_log")
-        echo "$tunnel_pid" > "$node_dir/tunnel.pid"
-
-        tunnel_url=$(wait_for_tunnel_url "$tunnel_log" 30)
-
-        if [[ -z "$tunnel_url" ]]; then
-            warn "Could not get tunnel URL — starting with poll fallback"
-            kill "$tunnel_pid" 2>/dev/null || true
-            tunnel_pid=""
-
-            # Start bridge first so poll fallback can forward to it
-            python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
-            local bridge_pid=$!
-            echo "$bridge_pid" > "$node_dir/bridge.pid"
-            echo "$port" > "$node_dir/port"
-            sleep 2
-
-            start_poll_fallback "$token" "$port"
-            polling_active=true
-        else
-            success "Tunnel: $tunnel_url"
-            echo "$tunnel_url" > "$node_dir/tunnel_url"
-            sleep 3
-        fi
-    fi
-
-    # Start bridge server in background (skip if already started in poll fallback path)
-    if [[ -z "${bridge_pid:-}" ]]; then
-        python3 -u "$SCRIPT_DIR/bridge.py" >> "$bridge_log" 2>&1 &
-        local bridge_pid=$!
-        echo "$bridge_pid" > "$node_dir/bridge.pid"
-        echo "$port" > "$node_dir/port"
-    fi
-
-    # Wait for bridge to bind to port before setting webhook.
-    # Without this, the tunnel forwards traffic to a port that isn't listening yet,
-    # Telegram gets 502, stops retrying, and messages go dark.
-    log "Waiting for bridge to bind to port $port..."
-    local _bwait=0
-    while ! ss -tlnp 2>/dev/null | grep -q ":$port "; do
-        sleep 1
-        _bwait=$((_bwait + 1))
-        if [[ $_bwait -ge 30 ]]; then
-            warn "Bridge did not bind to port $port within 30s"
-            break
-        fi
-    done
-    [[ $_bwait -lt 30 ]] && log "$(dim "Bridge ready on port $port (${_bwait}s)")"
-
-    # Save bot info for status command
-    local bot_info; bot_info=$(telegram_api "$token" "getMe" "{}")
-    if echo "$bot_info" | grep -q '"ok":true'; then
-        echo "$bot_info" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 > "$node_dir/bot_id"
-        echo "$bot_info" | grep -o '"username":"[^"]*"' | head -1 | cut -d'"' -f4 > "$node_dir/bot_username"
-    fi
-
-    # Set webhook (skip if in poll fallback mode — no tunnel)
-    if [[ -n "$tunnel_url" ]]; then
-        local current_webhook=""
-        local wr; wr=$(telegram_api "$token" "getWebhookInfo" "{}")
-        current_webhook=$(echo "$wr" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-
-        if [[ "$current_webhook" == "$tunnel_url" ]]; then
-            log "$(dim "Webhook already configured")"
-            success "Webhook: $tunnel_url"
-        else
-            log "Setting webhook..."
-            local r ok=false
-
-            for delay in 0 1 2 5 15 30 60; do
-                [[ $delay -gt 0 ]] && { log "Webhook not ready, retrying in ${delay}s..."; sleep "$delay"; }
-                r=$(telegram_set_webhook "$token" "$tunnel_url")
-                if echo "$r" | grep -q '"ok":true'; then
-                    ok=true
-                    break
-                fi
-            done
-
-            log ""
-            if $ok; then
-                success "Webhook configured"
-            else
-                warn "Webhook DNS not ready yet — falling back to poll mode"
-                start_poll_fallback "$token" "$port"
-                polling_active=true
-            fi
-        fi
-    else
-        success "Running in poll fallback mode (no tunnel)"
+        export TUNNEL_MODE="auto"
+        log "$(dim "Tunnel: auto (cloudflared quick-tunnel)")"
     fi
 
     log ""
@@ -651,9 +557,6 @@ cmd_run() {
     log ""
     log "$(bold "Commands:") /hire /focus /team /restart /end"
     log "$(dim "Ctrl+C to stop")"
-    if [[ -n "$tunnel_pid" ]]; then
-        log "$(dim "Tunnel watchdog: enabled (auto-restart on failure)")"
-    fi
     log ""
 
     # Write main PID file
@@ -661,124 +564,21 @@ cmd_run() {
     chmod 600 "$pid_file"
     log "$(dim "PID: $$ ($pid_file)")"
 
+    echo "$port" > "$node_dir/port"
+
     # Cleanup on exit
     cleanup_and_exit() {
         log ""
         log "Shutting down node '${node:-unknown}'..."
-        stop_poll_fallback
-        [[ -n "${tunnel_pid:-}" ]] && kill "$tunnel_pid" 2>/dev/null || true
-        [[ -n "${bridge_pid:-}" ]] && kill "$bridge_pid" 2>/dev/null || true
         [[ -n "${pid_file:-}" ]] && rm -f "$pid_file"
         [[ -n "${node_dir:-}" ]] && rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
         exit 0
     }
     trap cleanup_and_exit EXIT INT TERM
 
-    # 5. Watchdog loop
-    local webhook_check_counter=0
-    # polling_active may already be true if tunnel failed on startup
-    while true; do
-        if ! kill -0 "$bridge_pid" 2>/dev/null; then
-            error "Bridge died unexpectedly"
-            exit 1
-        fi
-
-        if [[ -n "$tunnel_pid" ]]; then
-            local tunnel_problem=""
-            if ! is_tunnel_alive "$tunnel_pid"; then
-                tunnel_problem="process died"
-            elif ! is_tunnel_reachable "$tunnel_url"; then
-                tunnel_problem="unreachable"
-                kill "$tunnel_pid" 2>/dev/null || true
-            fi
-
-            if [[ -n "$tunnel_problem" ]]; then
-                warn "Tunnel $tunnel_problem, restarting..."
-                bridge_notify "$port" "⚠️ Tunnel connection lost. Reconnecting..."
-
-                local new_url
-                new_url=$(restart_tunnel_with_retry "$port" "$node_dir" 3)
-
-                if [[ -z "$new_url" ]]; then
-                    warn "Tunnel restart failed after 3 attempts"
-                    if ! $polling_active; then
-                        bridge_notify "$port" "⚠️ Tunnel dead. Switching to poll fallback..."
-                        start_poll_fallback "$token" "$port"
-                        polling_active=true
-                    fi
-                    sleep 10
-                    continue
-                fi
-
-                tunnel_pid=$(cat "$node_dir/tunnel.pid")
-                tunnel_url="$new_url"
-                echo "$tunnel_url" > "$node_dir/tunnel_url"
-                success "Tunnel restarted: $tunnel_url"
-
-                local webhook_ok=false
-                local webhook_response=""
-                for delay in 0 5 15 30; do
-                    [[ $delay -gt 0 ]] && { log "Waiting ${delay}s for DNS..."; sleep "$delay"; }
-                    webhook_response=$(telegram_set_webhook "$token" "$tunnel_url")
-                    if echo "$webhook_response" | grep -q '"ok":true'; then
-                        webhook_ok=true
-                        break
-                    fi
-                    log "Webhook attempt failed: $webhook_response"
-                done
-
-                if $webhook_ok; then
-                    if $polling_active; then
-                        stop_poll_fallback
-                        polling_active=false
-                    fi
-                    success "Webhook updated"
-                    bridge_notify "$port" "✅ Tunnel reconnected"
-                else
-                    warn "Webhook DNS not ready yet"
-                    if ! $polling_active; then
-                        start_poll_fallback "$token" "$port"
-                        polling_active=true
-                        bridge_notify "$port" "📡 Using poll fallback while DNS propagates..."
-                    fi
-                fi
-            fi
-
-            # Health-check poll process (every cycle when active)
-            if $polling_active && [[ -n "$_poll_fallback_pid" ]] && ! kill -0 "$_poll_fallback_pid" 2>/dev/null; then
-                warn "Poll fallback process died, restarting..."
-                _poll_fallback_pid=""
-                start_poll_fallback "$token" "$port"
-            fi
-
-            # Periodic check (every ~60s = 6 x 10s sleep cycles)
-            webhook_check_counter=$(( (webhook_check_counter + 1) % 6 ))
-            if [[ $webhook_check_counter -eq 0 ]]; then
-                if $polling_active; then
-                    # Try to restore webhook while polling covers us
-                    local wh_resp; wh_resp=$(telegram_set_webhook "$token" "$tunnel_url" 2>/dev/null || true)
-                    if echo "$wh_resp" | grep -q '"ok":true'; then
-                        stop_poll_fallback
-                        polling_active=false
-                        success "Webhook restored, poll fallback stopped"
-                        bridge_notify "$port" "✅ Webhook restored (DNS resolved)"
-                    fi
-                else
-                    local wh_info; wh_info=$(telegram_api "$token" "getWebhookInfo" "{}" 2>/dev/null || true)
-                    local wh_url; wh_url=$(echo "$wh_info" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
-                    if [[ -z "$wh_url" || "$wh_url" != *"$tunnel_url"* ]]; then
-                        local wh_resp; wh_resp=$(telegram_set_webhook "$token" "$tunnel_url" 2>/dev/null || true)
-                        if echo "$wh_resp" | grep -q '"ok":true'; then
-                            success "Webhook re-registered (was stale/empty)"
-                            bridge_notify "$port" "✅ Webhook re-registered"
-                        fi
-                    fi
-                fi
-            fi
-        fi
-
-        sleep 10
-    done
+    # Run bridge in foreground — Python's TunnelManager handles
+    # cloudflared, webhook, poll fallback, and watchdog internally.
+    python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
