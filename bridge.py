@@ -81,6 +81,9 @@ from telegram import (
     format_team_lines as _format_team_lines_pure,
 )
 
+import tunnel as _tunnel_mod
+from core import _build_tunnel_config
+
 from claudecode import *  # noqa: F401,F403
 from claudecode import (  # underscore names excluded from * import
     _acquire_flock, _cache_session_id, _capture_pane_text,
@@ -4552,6 +4555,8 @@ class ReuseAddrServer(ThreadingHTTPServer):
 gmail_connector_instance = None  # initialized in main()
 
 github_connector_instance = None  # initialized in main()
+
+tunnel_manager: _tunnel_mod.TunnelManager | None = None  # initialized in main()
 
 if not BRIDGE_PUBLIC_URL:
     try:
@@ -13790,6 +13795,14 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
+    # Stop tunnel manager
+    if tunnel_manager is not None:
+        try:
+            tunnel_manager.stop()
+            print("Tunnel manager stopped")
+        except (RuntimeError, OSError) as exc:
+            _log(_LOG_DEBUG, "shutdown:tunnel", f"{type(exc).__name__}: {exc}")
+
     # Signal watchdog thread to stop
     watchdog.stop_event.set()
 
@@ -14310,7 +14323,7 @@ def main() -> None:
     Orchestrates: validation → signal setup → session discovery →
     state restoration → startup logging → notification → background services.
     """
-    global admin_chat_id, gmail_connector_instance, github_connector_instance
+    global admin_chat_id, gmail_connector_instance, github_connector_instance, tunnel_manager
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
         _log(_LOG_ERROR, "telegram", "Error: TELEGRAM_BOT_TOKEN not set")
@@ -14346,8 +14359,45 @@ def main() -> None:
 
     gmail_connector_instance, github_connector_instance = _start_connectors()  # type: ignore[assignment]
 
+    # Create HTTP server (binds port immediately)
+    server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
+
+    # Start tunnel manager — its watchdog thread detects the bound port
+    # and handles cloudflared, webhook registration, and poll fallback.
+    tunnel_config = _build_tunnel_config()
+    if tunnel_config.mode != "none" and BOT_TOKEN:
+        def _tunnel_on_update(update: dict[str, Any]) -> None:
+            """Forward polled updates to the command router (poll fallback path)."""
+            if "message" in update:
+                def _safe_handle(upd: dict[str, Any]) -> None:
+                    try:
+                        command_router.handle_message(upd)
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                        _log(_LOG_ERROR, "tunnel:poll", f"handle_message CRASH: {exc}", exc=exc)
+                threading.Thread(target=_safe_handle, args=(update,), daemon=True).start()
+
+        def _tunnel_on_notify(msg: str) -> None:
+            """Send tunnel status notifications to admin chat."""
+            if admin_chat_id:
+                try:
+                    transport.send_text(admin_chat_id, msg)
+                except Exception:
+                    pass
+
+        tunnel_manager = _tunnel_mod.TunnelManager(
+            config=tunnel_config,
+            bot_token=BOT_TOKEN,
+            port=PORT,
+            node_dir=NODE_DIR,
+            webhook_secret=WEBHOOK_SECRET,
+            on_update=_tunnel_on_update,
+            on_notify=_tunnel_on_notify,
+        )
+        tunnel_manager.start()
+        _log(_LOG_INFO, "tunnel", f"Tunnel manager started (mode={tunnel_config.mode})")
+
     try:
-        ReuseAddrServer((BRIDGE_BIND, PORT), Handler).serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

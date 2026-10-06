@@ -328,6 +328,45 @@ class MediaConfig:
     photo_max_dim: int = 5000
 
 
+@dataclass(frozen=True)
+class TunnelConfig:
+    """Tunnel lifecycle configuration (immutable)."""
+    mode: Literal["auto", "provided", "none"] = "auto"
+    provided_url: str = ""
+    cloudflared_binary: str = "cloudflared"
+    startup_timeout: int = 60
+    max_restart_attempts: int = 3
+    initial_backoff: int = 5
+    watchdog_interval: int = 10
+    reachability_timeout: int = 10
+    webhook_retry_delays: tuple[int, ...] = (0, 5, 15, 30)
+    webhook_check_cycles: int = 6  # check every N watchdog cycles (~60s)
+    poll_timeout: int = 30
+    poll_error_delay: int = 2
+    port_wait_timeout: int = 30
+
+
+# ── Tunnel env vars ────────────────────────────────────────────────────
+
+TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "auto")
+TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
+
+def _build_tunnel_config() -> TunnelConfig:
+    """Build TunnelConfig from environment variables."""
+    mode: Literal["auto", "provided", "none"]
+    tunnel_url = TUNNEL_URL
+    raw = TUNNEL_MODE.lower()
+    if raw == "none":
+        mode = "none"
+    elif tunnel_url:
+        mode = "provided"
+    elif raw == "provided":
+        mode = "provided"
+    else:
+        mode = "auto"
+    return TunnelConfig(mode=mode, provided_url=tunnel_url)
+
+
 _wd_cfg = WatchdogConfig()
 _res_cfg = ResourceAlertConfig()
 

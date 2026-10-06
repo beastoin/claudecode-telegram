@@ -15,7 +15,7 @@ import pytest
 
 
 # Each module that must be independently importable.
-INDEPENDENT_MODULES = ["core", "telegram", "claudecode"]
+INDEPENDENT_MODULES = ["core", "telegram", "claudecode", "tunnel"]
 
 
 @pytest.mark.parametrize("module", INDEPENDENT_MODULES)

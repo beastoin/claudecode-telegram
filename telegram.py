@@ -810,6 +810,26 @@ class TelegramAPI:
         """Send a chat action indicator (typing, uploading, etc.)."""
         return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
 
+    # ── Webhook management ────────────────────────────────────────────
+    def set_webhook(self, url: str, secret_token: str = "") -> TelegramApiResponse:
+        """Set the webhook URL for receiving updates."""
+        payload: dict[str, object] = {"url": url}
+        if secret_token:
+            payload["secret_token"] = secret_token
+        return self.api("setWebhook", payload)
+
+    def delete_webhook(self) -> TelegramApiResponse:
+        """Delete the current webhook (switches to getUpdates mode)."""
+        return self.api("deleteWebhook", {})
+
+    def get_webhook_info(self) -> TelegramApiResponse:
+        """Get current webhook status and URL."""
+        return self.api("getWebhookInfo", {})
+
+    def get_me(self) -> TelegramApiResponse:
+        """Get basic info about the bot."""
+        return self.api("getMe", {})
+
 
 
 class TelegramTransport(MessageTransport):
