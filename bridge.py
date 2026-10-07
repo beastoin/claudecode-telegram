@@ -9461,7 +9461,7 @@ class CommandRouter:
             "/team": lambda arg, cid, mid: self.cmd_team(cid),
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),
-            "/settings": lambda arg, cid, mid: self.cmd_settings(cid),
+            "/status": lambda arg, cid, mid: self.cmd_status(cid),
             "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),
             "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
             "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
@@ -10010,36 +10010,111 @@ class CommandRouter:
 
 
 
-    def cmd_settings(self, chat_id: ChatId) -> bool:
-        """Handle the /settings command — show bridge configuration."""
-        def redact(s: str) -> str:
-            """Redact sensitive tokens/keys from a string for display."""
-            if not s:
-                return "(not set)"
-            if len(s) <= 8:
-                return "***"
-            return s[:4] + "..." + s[-4:]
+    def cmd_status(self, chat_id: ChatId) -> bool:
+        """Handle the /status command — rich bridge status dashboard."""
+        import time as _time
 
         registered = self.workers.get_registered_sessions()
-        team_list = ", ".join(registered.keys()) if registered else "(none)"
-        lines = [
-            f"claudecode-telegram v{VERSION}",
-            PERSISTENCE_NOTE,
-            "",
-            f"Bot token: {redact(BOT_TOKEN)}",
-            f"Admin: {admin_chat_id or '(auto-learn)'}",
-            f"Webhook verification: {redact(WEBHOOK_SECRET) if WEBHOOK_SECRET else '(disabled)'}",
-            f"Team storage: {SESSIONS_DIR.parent}",
-            "",
-            "Team state",
-            f"Focused worker: {state.active or '(none)'}",
-            f"Workers: {team_list}",
-        ]
 
+        # ── Bridge info ──
+        pid = os.getpid()
+        try:
+            proc_start = os.stat(f"/proc/{pid}").st_mtime
+            uptime_sec = int(_time.time() - proc_start)
+            days, rem = divmod(uptime_sec, 86400)
+            hours, rem = divmod(rem, 3600)
+            mins, _ = divmod(rem, 60)
+            if days > 0:
+                uptime_str = f"{days}d {hours}h {mins}m"
+            elif hours > 0:
+                uptime_str = f"{hours}h {mins}m"
+            else:
+                uptime_str = f"{mins}m"
+        except (OSError, ValueError):
+            uptime_str = "unknown"
+
+        lines = [f"<b>claudecode-telegram v{VERSION}</b>"]
+        lines.append(f"⏱ Uptime: {uptime_str}  •  Bind: <code>{BRIDGE_BIND}:{PORT}</code>")
+
+        # ── Connectivity ──
         lines.append("")
-        lines.append("Execution: direct (--dangerously-skip-permissions)")
+        lines.append("<b>📡 Connectivity</b>")
+        tm_status = tunnel_manager.status() if tunnel_manager else {}
+        poll_active = tm_status.get("polling_active", False)
+        tunnel_url = tm_status.get("tunnel_url", "")
+        if tunnel_url:
+            lines.append(f"  ✅ Webhook: {tunnel_url}")
+        elif poll_active:
+            lines.append("  ✅ Poll: active (getUpdates)")
+        else:
+            lines.append("  ❌ No inbound — messages can't reach bridge")
 
-        self.reply(chat_id, "\n".join(lines))
+        if BRIDGE_BIND == "0.0.0.0":
+            lines.append("  ⚠️ Bound to 0.0.0.0 — exposed on all interfaces!")
+        elif BRIDGE_BIND not in ("127.0.0.1", "localhost", "::1"):
+            lines.append(f"  🔒 Tailscale-only ({BRIDGE_BIND})")
+
+        # ── Team summary ──
+        lines.append("")
+        lines.append("<b>👥 Team</b>")
+        if registered:
+            online = 0
+            busy = 0
+            offline = 0
+            for name, session in registered.items():
+                if self.workers.is_online(name, session):
+                    # Check watchdog state for busy/idle
+                    wd = watchdog.worker_states.get(name)
+                    if wd and wd.state == "BUSY":
+                        busy += 1
+                    else:
+                        online += 1
+                else:
+                    offline += 1
+            total = len(registered)
+            parts = []
+            if busy:
+                parts.append(f"🔴 {busy} busy")
+            if online:
+                parts.append(f"🟢 {online} idle")
+            if offline:
+                parts.append(f"⚫ {offline} offline")
+            lines.append(f"  {total} workers: {', '.join(parts)}")
+            lines.append(f"  Focus: <b>{state.active or '(none)'}</b>")
+        else:
+            lines.append("  No workers — /hire &lt;name&gt; to start")
+
+        # ── Machines ──
+        lines.append("")
+        lines.append("<b>🖥 Machines</b>")
+        machine_workers: dict[str, list[str]] = {}
+        for name in registered:
+            host = get_worker_host(name)
+            machine_workers.setdefault(host or "local", []).append(name)
+        if machine_workers:
+            for machine, workers in sorted(machine_workers.items()):
+                lines.append(f"  {machine}: {len(workers)} workers")
+        else:
+            lines.append("  (none)")
+
+        # ── Connectors ──
+        conn_status = _get_connectors_status()
+        if conn_status:
+            lines.append("")
+            lines.append("<b>🔌 Connectors</b>")
+            for name, info in conn_status.items():
+                running = info.get("running", False)
+                failures = info.get("consecutive_failures", 0)
+                if running and failures == 0:
+                    icon = "✅"
+                elif running:
+                    icon = "⚠️"
+                else:
+                    icon = "❌"
+                lines.append(f"  {icon} {name}")
+
+        if self.transport is not None and chat_id is not None:
+            self.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
         return True
 
 

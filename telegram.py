@@ -559,7 +559,7 @@ BOT_COMMANDS = [
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
     {"command": "restart", "description": "Restart worker (--clean for fresh)"},
     # Occasional
-    {"command": "settings", "description": "Show settings"},
+    {"command": "status", "description": "Bridge status dashboard"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     {"command": "relay", "description": "Open public channel: /relay <worker>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
