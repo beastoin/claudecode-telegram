@@ -724,6 +724,17 @@ cmd_restart() {
         local main_pid
         main_pid=$(cat "$pid_file")
         if kill "$main_pid" 2>/dev/null; then
+            # Wait for process to actually exit (up to 5s)
+            local exit_waited=0
+            while kill -0 "$main_pid" 2>/dev/null && [[ $exit_waited -lt 5 ]]; do
+                sleep 1
+                ((exit_waited++))
+            done
+            # Force kill if still alive
+            if kill -0 "$main_pid" 2>/dev/null; then
+                kill -9 "$main_pid" 2>/dev/null
+                sleep 1
+            fi
             success "Main process stopped (PID $main_pid)"
             rm -f "$pid_file"
         fi

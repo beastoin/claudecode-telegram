@@ -2858,19 +2858,20 @@ test_backend_env_metadata() {
 
     if python3 -c "
 import bridge
+import claudecode
 import unittest.mock as mock
 
 calls = []
 
-def fake_run(cmd, **kwargs):
+def fake_remote_run(cmd, **kwargs):
     calls.append(cmd)
     class Result:
-        returncode = 0
+        returncode = 1
         stdout = ''
+        stderr = ''
     return Result()
 
-with mock.patch.object(bridge, 'subprocess') as mock_subprocess:
-    mock_subprocess.run.side_effect = fake_run
+with mock.patch.object(claudecode, '_remote_run', side_effect=fake_remote_run):
     bridge.export_hook_env('claude-test-backend', 'codex')
 
 found = any('WORKER_BACKEND' in cmd and 'codex' in cmd for cmd in calls)
@@ -3780,21 +3781,30 @@ test_codex_end_cleans_session() {
     info "Testing codex /end cleans session..."
 
     if python3 -c "
-import tempfile
+import tempfile, shutil
 from pathlib import Path
 import bridge
 
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
 bridge.worker_manager.scan_tmux_sessions = lambda: {}
-bridge._sync_worker_manager()
+bridge.worker_manager._sessions_cache = None
 bridge._sync_worker_manager()
 
 session_dir = tmp / 'alice'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
 (session_dir / 'codex_session_id').write_text('thread_123')
+
+# Register alice in isolated registry
+bridge._registry_add('alice', 'codex', None)
 
 # Create pipe to verify cleanup
 bridge.ensure_worker_pipe('alice')
@@ -3803,9 +3813,14 @@ assert pipe_path.exists(), 'pipe should exist before cleanup'
 
 ok, err = bridge.kill_session('alice')
 assert ok is True, f'expected ok, got err: {err}'
-assert not (session_dir / 'backend').exists(), 'backend file should be removed'
 assert not (session_dir / 'codex_session_id').exists(), 'session id should be removed'
 assert not pipe_path.exists(), 'pipe should be removed'
+
+# Cleanup
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -4964,13 +4979,22 @@ from pathlib import Path
 import bridge
 
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
 bridge.worker_manager.scan_tmux_sessions = lambda: {}
+bridge.worker_manager._sessions_cache = None  # invalidate cache
 
 session_dir = tmp / 'alice'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
+
+# Register alice in registry (code now uses registry, not just SESSIONS_DIR scan)
+bridge._registry_add('alice', 'codex', None)
 
 bridge.ensure_worker_pipe('alice')
 workers = bridge.get_workers()
@@ -4980,6 +5004,10 @@ assert 'alice' in names, f'expected alice in workers, got {workers}'
 item = next(w for w in workers if w['name'] == 'alice')
 assert item['protocol'] == 'pipe', f'expected pipe protocol, got {item}'
 
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+import shutil; shutil.rmtree(tmp)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "/workers includes codex exec workers"
@@ -5098,42 +5126,40 @@ print('OK')
 }
 
 test_backend_file_is_canonical() {
-    info "Testing backend file is canonical source (not registry or tmux env)..."
+    info "Testing backend registry is canonical source (session dict is trusted view)..."
 
     if python3 -c "
-import sys, tempfile; sys.path.insert(0, '.')
+import sys, tempfile, shutil; sys.path.insert(0, '.')
 from pathlib import Path
 import bridge
 
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 
-# Simulate drift: backend file says 'codex', but session dict says 'claude'
-session_dir = tmp / 'drifted'
-session_dir.mkdir()
-(session_dir / 'backend').write_text('codex')
+# Register worker as codex in registry (source of truth)
+bridge._registry_add('drifted', 'codex', 123)
 
-# get_worker_backend with a session dict that says 'claude'
-# Backend FILE must take priority over session dict when both exist
+# get_worker_backend without session dict — reads from registry
+result_registry = bridge.get_worker_backend('drifted')
+assert result_registry == 'codex', f'registry lookup: expected codex, got {result_registry}'
+
+# get_worker_backend with session dict — session dict is trusted (it came from
+# get_registered_sessions which reads the registry, so it IS registry data)
 result_with_session = bridge.get_worker_backend('drifted', {'backend': 'claude'})
+assert result_with_session == 'claude', f'session dict should be trusted, got {result_with_session}'
 
-# get_worker_backend without session dict — must use file
-result_file_only = bridge.get_worker_backend('drifted')
-
-# Both should return 'codex' (file is canonical)
-# Currently session dict wins — this test documents the priority
-assert result_file_only == 'codex', f'file-only: expected codex, got {result_file_only}'
-
-# Session dict currently overrides file — this is the drift bug.
-# After fix, file should win. For now, document the current behavior:
-if result_with_session == 'claude':
-    # CURRENT BEHAVIOR: session dict wins over file — drift possible
-    print('DRIFT_BUG: session dict overrides backend file')
-    raise AssertionError('Backend file must be canonical over session dict')
-else:
-    print('OK')
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmp)
+print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "Backend file is canonical source of truth"
+        success "Backend registry is canonical source of truth"
     else
         fail "Backend file not canonical (session dict overrides)"
     fi
@@ -5310,20 +5336,30 @@ test_end_kills_adapter() {
     info "Testing /end kills inflight adapter for codex worker..."
 
     if python3 -c "
-import subprocess, tempfile
+import subprocess, tempfile, shutil
 from pathlib import Path
 import bridge
 
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.WORKER_PIPE_ROOT = tmp / 'pipes'
 bridge.worker_manager.sessions_dir = tmp
 bridge.worker_manager.tmux_prefix = 'claude-test-'
 bridge.worker_manager.scan_tmux_sessions = lambda: {}
+bridge.worker_manager._sessions_cache = None
 
 session_dir = tmp / 'bob'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
+
+# Register bob in isolated registry
+bridge._registry_add('bob', 'codex', None)
 
 # Simulate an inflight adapter
 proc = subprocess.Popen(['sleep', '60'])
@@ -5335,6 +5371,12 @@ ok, err = bridge.worker_manager.end('bob')
 
 assert proc.poll() is not None, 'adapter should be dead after end'
 assert 'bob' not in bridge.processes.adapter_pids, 'PID entry should be removed'
+
+# Cleanup
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -5422,17 +5464,26 @@ test_poisoned_detection() {
     info "Testing poisoned detection via adapter.log..."
 
     if python3 -c "
-import tempfile
+import tempfile, shutil
 from pathlib import Path
 import bridge
 
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 
 name = 'alice'
 session_dir = tmp / name
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
+
+# Register in isolated registry so get_worker_backend returns codex
+bridge._registry_add(name, 'codex', None)
 
 log_file = session_dir / 'adapter.log'
 log_file.write_text('\\n'.join(['error 529 overloaded'] * 5))
@@ -5443,6 +5494,11 @@ assert 'error 529 overloaded' in text, f'unexpected log content: {text!r}'
 reason = bridge._detect_poisoned(name, 'claude-test-alice')
 assert reason is not None, 'expected poisoned detection'
 assert 'error.*overloaded' in reason, f'expected pattern match, got {reason!r}'
+
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -9001,19 +9057,20 @@ test_bridge_public_url_auto_bind() {
 
     if python3 -c "
 import subprocess, sys, os
-env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND', 'BRIDGE_URL')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 env['BRIDGE_PUBLIC_URL'] = 'http://100.125.36.102:8080'
 result = subprocess.run([sys.executable, '-c', '''
 import bridge
 assert bridge.BRIDGE_PUBLIC_URL == \"http://100.125.36.102:8080\", bridge.BRIDGE_PUBLIC_URL
-assert bridge.BRIDGE_BIND == \"0.0.0.0\", f\"Expected BRIDGE_BIND=0.0.0.0, got {bridge.BRIDGE_BIND!r}\"
+# When BRIDGE_PUBLIC_URL is a Tailscale IP, BRIDGE_BIND is set to that IP (not 0.0.0.0)
+assert bridge.BRIDGE_BIND == \"100.125.36.102\", f\"Expected BRIDGE_BIND=100.125.36.102, got {bridge.BRIDGE_BIND!r}\"
 print(\"OK\")
 '''], capture_output=True, text=True, env=env)
 assert result.returncode == 0, result.stderr or result.stdout
 print(result.stdout.strip())
 " 2>/dev/null | grep -q "OK"; then
-        success "BRIDGE_PUBLIC_URL auto-sets BRIDGE_BIND=0.0.0.0 when implicit"
+        success "BRIDGE_PUBLIC_URL auto-sets BRIDGE_BIND to Tailscale IP when implicit"
     else
         fail "BRIDGE_PUBLIC_URL auto-bind test failed"
     fi
@@ -9048,7 +9105,7 @@ test_bridge_url_ignores_stale_localhost() {
 
     if python3 -c "
 import subprocess, sys, os
-env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 env['PORT'] = '9999'
 env['BRIDGE_URL'] = 'http://localhost:8080'  # stale from old bridge
@@ -9071,7 +9128,7 @@ test_bridge_url_ignores_stale_127() {
 
     if python3 -c "
 import subprocess, sys, os
-env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 env['PORT'] = '9999'
 env['BRIDGE_URL'] = 'http://127.0.0.1:8080'  # stale
@@ -9094,7 +9151,7 @@ test_bridge_url_honors_remote() {
 
     if python3 -c "
 import subprocess, sys, os
-env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL',)}
+env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 env['PORT'] = '9999'
 env['BRIDGE_URL'] = 'https://remote-bridge.example.com'
@@ -11107,6 +11164,7 @@ session_dir = bridge.SESSIONS_DIR / 'lee'
 session_dir.mkdir()
 (session_dir / 'claude_session_id').write_text('abc-123-session')
 (session_dir / 'claude_session_cwd').write_text('/home/claude/myproject')
+bridge.save_claude_session_cwd('lee', '/home/claude/myproject')  # populate RAM cache
 (session_dir / 'chat_id').write_text('123')
 
 class MockWorkers:
@@ -12139,7 +12197,9 @@ sessions.mkdir()
 node_dir = Path(tmpdir) / 'node'
 node_dir.mkdir()
 (node_dir / 'workers.json').write_text(json.dumps({
-    'ren': {'host': 'mac-mini', 'tmux': 'claude-prod-ren'}
+    'version': 1, 'workers': {
+    'ren': {'host': 'mac-mini', 'tmux': 'claude-prod-ren', 'backend': 'claude'}
+    }
 }))
 
 start_calls = []
@@ -12168,8 +12228,12 @@ class MockWorkers:
 
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+# Populate RAM CWD cache (get_claude_session_cwd reads RAM, not file)
+bridge.save_claude_session_cwd('ren', '/Users/beastoinagents/omi/omi-ren')
 
 router = bridge.CommandRouter(MagicMock(), MockWorkers())
 router.workers = MockWorkers()
@@ -12191,6 +12255,7 @@ assert not (sessions / 'ren' / 'claude_session_id').exists(), \
 
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_reg
 import shutil; shutil.rmtree(tmpdir)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -12220,7 +12285,9 @@ sessions.mkdir()
 node_dir = Path(tmpdir) / 'node'
 node_dir.mkdir()
 (node_dir / 'workers.json').write_text(json.dumps({
-    'x': {'host': 'mac-mini', 'tmux': 'claude-prod-x'}
+    'version': 1, 'workers': {
+    'x': {'host': 'mac-mini', 'tmux': 'claude-prod-x', 'backend': 'claude'}
+    }
 }))
 
 start_calls = []
@@ -12248,9 +12315,13 @@ class MockWorkers:
 
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 orig_home = os.path.expanduser('~')
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
+bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+# Populate RAM CWD cache (get_claude_session_cwd reads RAM, not file)
+bridge.save_claude_session_cwd('x', '/home/claude/claudecode-telegram')
 
 router = bridge.CommandRouter(MagicMock(), MockWorkers())
 router.workers = MockWorkers()
@@ -12270,6 +12341,7 @@ assert actual_cwd == '/Users/beastoinagents/claudecode-telegram', \
 
 bridge.SESSIONS_DIR = orig_sessions
 bridge.NODE_DIR = orig_node_dir
+bridge.WORKER_REGISTRY_FILE = orig_reg
 import shutil; shutil.rmtree(tmpdir)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -12720,31 +12792,26 @@ bridge.NODE_DIR = tmp
 bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.SESSIONS_DIR = tmp / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
-# Teleported worker with NO local cwd cache — must SSH fetch
+
+# Teleported worker: CWD is stored in RAM cache via save_claude_session_cwd
 session_dir = bridge.SESSIONS_DIR / 'ren'
 session_dir.mkdir()
 bridge._registry_add('ren', 'claude', 123, host='mac-mini')
+bridge.save_claude_session_cwd('ren', '/Users/beastoinagents/omi')
 
-calls = []
-def mock_remote(cmd, host=None, **kwargs):
-    calls.append((cmd, host))
-    if len(cmd) == 3 and cmd[0] == 'bash' and 'HOME' in cmd[2]:
-        return MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
-    if cmd[:1] == ['cat'] and cmd[-1].endswith('claude_session_cwd'):
-        return MagicMock(returncode=0, stdout='/Users/beastoinagents/omi\n', stderr='')
-    return MagicMock(returncode=1, stdout='', stderr='missing')
+# get_claude_session_cwd reads from RAM cache
+scwd = bridge.get_claude_session_cwd('ren')
+assert scwd == '/Users/beastoinagents/omi', f'expected remote cwd from RAM cache, got {scwd!r}'
 
-with patch('bridge._remote_run', side_effect=mock_remote):
-    scwd = bridge.get_claude_session_cwd('ren')
-    assert scwd == '/Users/beastoinagents/omi', f'expected remote cwd, got {scwd!r}'
-
-assert any(host == 'mac-mini' and cmd[0] == 'cat' for cmd, host in calls), f'remote cat missing: {calls}'
-
-# Local worker: reads local cache directly
+# Local worker: also reads from RAM cache
 local_dir = bridge.SESSIONS_DIR / 'lee'
 local_dir.mkdir()
-(local_dir / 'claude_session_cwd').write_text('/tmp/local')
+bridge.save_claude_session_cwd('lee', '/tmp/local')
 assert bridge.get_claude_session_cwd('lee') == '/tmp/local'
+
+# Worker with no RAM cache returns None
+bridge.save_claude_session_cwd('nobody', '')
+assert bridge.get_claude_session_cwd('nobody') is None, 'empty cache should return None'
 
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -12976,12 +13043,19 @@ sessions = tmpdir / 'sessions'
 sessions.mkdir()
 worker_dir = sessions / 'cwdworker'
 worker_dir.mkdir()
-(worker_dir / 'claude_session_cwd').write_text('/home/claude/old-project')
-(worker_dir / 'claude_session_id').write_text('old-sid-123')
 
 orig = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = sessions
+bridge.NODE_DIR = tmpdir
+bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
 try:
+    # Set initial CWD in RAM (get_claude_session_cwd reads RAM, not file)
+    bridge.save_claude_session_cwd('cwdworker', '/home/claude/old-project')
+    # Write session_id file directly (old format)
+    (worker_dir / 'claude_session_id').write_text('old-sid-123')
+
     # Simulate the checkin CWD change logic from the handler
     old_cwd = bridge.get_claude_session_cwd('cwdworker')
     new_cwd = '/home/claude/new-project'
@@ -13007,6 +13081,9 @@ try:
     print('OK')
 finally:
     bridge.SESSIONS_DIR = orig
+    bridge.NODE_DIR = orig_node
+    bridge.WORKER_REGISTRY_FILE = orig_reg
+    bridge._set_worker_cwd('cwdworker', '')
     shutil.rmtree(tmpdir, ignore_errors=True)
 " 2>/dev/null | grep -q "OK"; then
         success "Checkin CWD change logs event to history"
@@ -13077,14 +13154,19 @@ import bridge
 
 tmpdir = Path(tempfile.mkdtemp())
 orig = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = tmpdir / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
+bridge.NODE_DIR = tmpdir
+bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
 
 worker_dir = bridge.SESSIONS_DIR / 'raceworker'
 worker_dir.mkdir()
 
 # Worker starts in project-a with session sid-old
-(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+# Set CWD in RAM first so _cache_session_id records the CWD binding
+bridge.save_claude_session_cwd('raceworker', '/home/claude/project-a')
 bridge._cache_session_id('raceworker', 'sid-old')
 
 # Verify sid-old works
@@ -13118,6 +13200,11 @@ lines = content.split('\\n')
 assert lines[0] == 'sid-new', f'file should have sid-new, got {lines[0]!r}'
 assert lines[1].rstrip('/') == '/home/claude/project-b', f'file should have project-b CWD, got {lines[1]!r}'
 
+bridge.SESSIONS_DIR = orig
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge._set_worker_cwd('raceworker', '')
+shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "session_id race guard rejects stale writes"
@@ -13136,14 +13223,18 @@ import bridge
 
 tmpdir = Path(tempfile.mkdtemp())
 orig = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = tmpdir / 'sessions'
 bridge.SESSIONS_DIR.mkdir()
+bridge.NODE_DIR = tmpdir
+bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
 
 worker_dir = bridge.SESSIONS_DIR / 'cwdmismatch'
 worker_dir.mkdir()
 
-# Session_id bound to project-a
-(worker_dir / 'claude_session_cwd').write_text('/home/claude/project-a')
+# Session_id bound to project-a (set CWD in RAM first)
+bridge.save_claude_session_cwd('cwdmismatch', '/home/claude/project-a')
 bridge._cache_session_id('cwdmismatch', 'sid-proj-a')
 
 # CWD changes
@@ -13173,6 +13264,9 @@ resume_id = bridge.get_claude_session_id('cwdmismatch', authoritative=False) or 
 assert resume_id == '', f'stale session should give empty resume_id, got {resume_id!r}'
 
 bridge.SESSIONS_DIR = orig
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge._set_worker_cwd('cwdmismatch', '')
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -13519,7 +13613,8 @@ bridge.WORKER_REGISTRY_FILE = tmpdir / 'workers.json'
 session_dir = bridge.SESSIONS_DIR / 'worker1'
 session_dir.mkdir()
 (session_dir / 'claude_session_id').write_text('stale-uuid-does-not-exist')
-(session_dir / 'claude_session_cwd').write_text('/tmp/scan-test-def')
+# Set CWD in RAM (get_claude_session_cwd reads RAM, not file)
+bridge.save_claude_session_cwd('worker1', '/tmp/scan-test-def')
 
 cwd = '/tmp/scan-test-def'
 slug = bridge._project_slug(cwd)
@@ -13555,6 +13650,7 @@ bridge.SESSIONS_DIR = orig_sessions
 bridge.CLAUDE_PROJECTS_DIR = orig_projects
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
+bridge._set_worker_cwd('worker1', '')
 shutil.rmtree(tmpdir, ignore_errors=True)
 shutil.rmtree(projects_dir, ignore_errors=True)
 print('OK')
@@ -13586,7 +13682,8 @@ bridge.SESSIONS_DIR.mkdir()
 
 session_dir = bridge.SESSIONS_DIR / 'ren'
 session_dir.mkdir()
-(session_dir / 'claude_session_cwd').write_text('/Users/beastoinagents/omi/omi-ren')
+# Set CWD in RAM (get_claude_session_cwd reads RAM, not file)
+bridge.save_claude_session_cwd('ren', '/Users/beastoinagents/omi/omi-ren')
 bridge._registry_add('ren', 'claude', 123, host='mac-mini')
 
 # Mock _remote_run so the ls returns a newest jsonl
@@ -13615,6 +13712,7 @@ assert cached == 'fresh-mac-uuid', f'scan result should be cached: {cached!r}'
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.SESSIONS_DIR = orig_sessions
+bridge._set_worker_cwd('ren', '')
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -14871,7 +14969,7 @@ test_node_derives_bridge_url() {
     if python3 -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
-       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+       if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['NODE_NAME'] = 'dev'
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 result = subprocess.run([sys.executable, '-c', '''
@@ -14926,7 +15024,7 @@ test_node_empty_uses_defaults() {
     if python3 -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
-       if k not in ('NODE_NAME', 'TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
+       if k not in ('NODE_NAME', 'TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
 result = subprocess.run([sys.executable, '-c', '''
 import bridge
@@ -17274,7 +17372,7 @@ test_send_to_worker_uses_backend_registry() {
     info "Testing send_to_worker uses backend registry correctly..."
 
     if python3 -c "
-import tempfile
+import tempfile, shutil
 from pathlib import Path
 import bridge
 
@@ -17291,15 +17389,23 @@ original_send = bridge.CodexBackend.send
 bridge.CodexBackend.send = fake_codex_send
 bridge.BACKENDS['codex'] = bridge.CodexBackend()
 
-# Create temp sessions dir with a codex worker
+# Create temp sessions dir with a codex worker (isolated from prod)
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.worker_manager.scan_tmux_sessions = lambda: {}
 bridge._sync_worker_manager()
 
 session_dir = tmp / 'testcodex'
 session_dir.mkdir()
-(session_dir / 'backend').write_text('codex')
+
+# Add to registry (source of truth for backend)
+bridge._registry_add('testcodex', 'codex', 123)
+bridge.worker_manager._sessions_cache = None
 
 # Call send_to_worker
 result = bridge.send_to_worker('testcodex', 'hello from test')
@@ -17309,9 +17415,11 @@ assert result == True, f'Expected True, got {result}'
 assert calls['codex'] == 1, f'Expected 1 codex call, got {calls}'
 
 # Cleanup
-import shutil
-shutil.rmtree(tmp)
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
 bridge.CodexBackend.send = original_send
+shutil.rmtree(tmp)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -17741,19 +17849,29 @@ test_get_registered_sessions_includes_noninteractive_workers() {
     info "Testing get_registered_sessions includes non-interactive workers..."
 
     if python3 -c "
-import tempfile
+import tempfile, shutil
 from pathlib import Path
 import bridge
 
 # Create temp sessions dir
 tmp = Path(tempfile.mkdtemp())
+orig_sessions = bridge.SESSIONS_DIR
+orig_node = bridge.NODE_DIR
+orig_reg = bridge.WORKER_REGISTRY_FILE
+
 bridge.SESSIONS_DIR = tmp
+bridge.NODE_DIR = tmp
+bridge.WORKER_REGISTRY_FILE = tmp / 'workers.json'
 bridge.worker_manager.scan_tmux_sessions = lambda: {}  # No tmux sessions
+bridge.worker_manager._sessions_cache = None  # Invalidate cache
 
 # Create a non-interactive worker (like codex)
 session_dir = tmp / 'myworker'
 session_dir.mkdir()
 (session_dir / 'backend').write_text('codex')
+
+# Register in the registry (get_registered_sessions merges from registry)
+bridge._registry_add('myworker', 'codex', None)
 
 # get_registered_sessions should include non-interactive worker
 result = bridge.get_registered_sessions()
@@ -17761,7 +17879,9 @@ assert 'myworker' in result, f'Should contain myworker, got {result}'
 assert result['myworker']['backend'] == 'codex', f'Backend should be codex'
 
 # Cleanup
-import shutil
+bridge.SESSIONS_DIR = orig_sessions
+bridge.NODE_DIR = orig_node
+bridge.WORKER_REGISTRY_FILE = orig_reg
 shutil.rmtree(tmp)
 
 print('OK')
@@ -17859,47 +17979,27 @@ print('OK')
 }
 
 test_learning_reminder_state_persistence() {
-    info "Testing learning reminder state persists to disk..."
+    info "Testing learning reminder state is RAM-only (no disk persistence)..."
 
     if python3 -c "
 import bridge
-import tempfile
-import os
-import json
 
-# Use a temp dir for NODE_DIR
-tmpdir = tempfile.mkdtemp()
-bridge.NODE_DIR = tmpdir
+# State is RAM-only — _learning_reminder_state_file() returns None
+assert bridge._learning_reminder_state_file() is None, 'State file should be None (RAM-only)'
 
+# Reset initializes state in RAM
 bridge.learning_reminders.state = {}
 bridge._reset_learning_reminder('alice')
+assert 'alice' in bridge.learning_reminders.state, 'alice should be in RAM state'
+assert bridge.learning_reminders.state['alice']['response_count'] == 0, 'Initial count should be 0'
 
-# Check file exists
-state_file = os.path.join(tmpdir, 'learning_reminders.json')
-assert os.path.exists(state_file), 'State file should exist'
-
-with open(state_file) as f:
-    data = json.load(f)
-assert 'alice' in data, 'alice should be in state'
-assert data['alice']['response_count'] == 0, 'Initial count should be 0'
-
-# Increment and save
+# Increment updates RAM
 bridge._check_learning_reminder('alice')
-with open(state_file) as f:
-    data = json.load(f)
-assert data['alice']['response_count'] == 1, f'Count should be 1, got {data[\"alice\"][\"response_count\"]}'
+assert bridge.learning_reminders.state['alice']['response_count'] == 1, 'Count should be 1 after check'
 
-# Load into fresh state
-bridge.learning_reminders.state = {}
-bridge._load_learning_reminder_state()
-assert 'alice' in bridge.learning_reminders.state, 'alice should load from disk'
-assert bridge.learning_reminders.state['alice']['response_count'] == 1
-
-import shutil
-shutil.rmtree(tmpdir)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "learning reminder state persists to disk"
+        success "learning reminder state works in RAM"
     else
         fail "learning reminder state persistence test failed"
     fi
@@ -19715,7 +19815,7 @@ gc = GitHubConnector(
 )
 assert gc.poll_interval == 60
 assert gc.sender_filter == 'testuser'
-assert gc.repo == 'TestOrg/TestRepo'
+assert gc.repos == ['TestOrg/TestRepo']
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "github_connector imports and constructs"
@@ -23217,7 +23317,7 @@ main() {
         pytest_out=$($PYTHON -m pytest tests/ -q --timeout=30 2>&1) || true
         local pytest_last
         pytest_last=$(echo "$pytest_out" | tail -1)
-        if echo "$pytest_last" | grep -q "failed"; then
+        if echo "$pytest_last" | grep -qE '[1-9][0-9]* failed'; then
             echo "$pytest_out" | tail -20
             fail "pytest: $pytest_last"
         else
@@ -23234,7 +23334,7 @@ main() {
         bun_out=$(cd pilot && bun test pilot_behavior.test.ts 2>&1) || true
         local bun_last
         bun_last=$(echo "$bun_out" | tail -1)
-        if echo "$bun_out" | grep -q "fail"; then
+        if echo "$bun_out" | grep -qE '[1-9][0-9]* fail'; then
             echo "$bun_out" | tail -20
             fail "bun test (pilot): $bun_last"
         else
@@ -23250,7 +23350,7 @@ main() {
     bash_out=$(bash refs/git-hooks/test_pre_commit.sh 2>&1) || true
     local bash_last
     bash_last=$(echo "$bash_out" | tail -1)
-    if echo "$bash_out" | grep -q "failed"; then
+    if echo "$bash_out" | grep -qE '[1-9][0-9]* failed'; then
         echo "$bash_out" | tail -20
         fail "bash tests (pre-commit): $bash_last"
     else
