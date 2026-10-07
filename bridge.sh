@@ -545,10 +545,15 @@ cmd_run() {
 
     echo "$port" > "$node_dir/port"
 
-    # Cleanup on exit
+    # Cleanup on exit — kill python child so it doesn't orphan
+    _bridge_child_pid=""
     cleanup_and_exit() {
         log ""
         log "Shutting down node '${node:-unknown}'..."
+        if [[ -n "$_bridge_child_pid" ]]; then
+            kill "$_bridge_child_pid" 2>/dev/null
+            wait "$_bridge_child_pid" 2>/dev/null
+        fi
         [[ -n "${pid_file:-}" ]] && rm -f "$pid_file"
         [[ -n "${node_dir:-}" ]] && rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
         exit 0
@@ -557,7 +562,9 @@ cmd_run() {
 
     # Run bridge in foreground — Python's TunnelManager handles
     # cloudflared, webhook, poll fallback, and watchdog internally.
-    python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log"
+    python3 -u "$SCRIPT_DIR/bridge.py" 2>&1 | tee -a "$bridge_log" &
+    _bridge_child_pid=$!
+    wait "$_bridge_child_pid"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
