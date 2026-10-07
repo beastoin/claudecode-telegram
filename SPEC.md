@@ -593,57 +593,58 @@ Workers receive periodic nudges to reflect on what they learned and update their
 
 **Reminder text:** Read from `TEAM_DIR/learning-reminder.txt` if it exists (supports `{name}` substitution). Falls back to a hardcoded default covering what to capture, format ("When X, do Y, because Z"), where to write, and a 20-rule cap.
 
-## SPEC-030. HTTP API Security Model.
+## SPEC-030. Security Model.
 
-The bridge HTTP API security model has four trust boundaries and four endpoint tiers. Designed through adversarial debate (Claude + Codex, 4 rounds).
+The bridge is an internal coordination tool, not a public API. Security matches the actual threat model: single manager, same-user workers, private network.
+
+### Architecture
+
+```
+Poll mode (default):    Bridge → api.telegram.org/getUpdates
+                        No inbound surface. Nothing listens publicly.
+
+Tunnel mode (opt-in):   Telegram → Cloudflare tunnel → 127.0.0.1:8271
+                        Only POST / (webhook) reaches the bridge.
+```
 
 ### Trust Boundaries
 
-| # | Boundary | Mechanism | What it protects |
-|---|----------|-----------|------------------|
-| 1 | **Network** | `BRIDGE_BIND=127.0.0.1` (default) | All API endpoints from external access |
-| 2 | **Telegram** | `admin_chat_id` allowlist | External user identity (single admin) |
-| 3 | **Webhook** | `TELEGRAM_WEBHOOK_SECRET` | Webhook origin verification |
-| 4 | **Guest/Relay** | `secrets.token_urlsafe(32)` tokens | Temporary external agent sessions |
+| Boundary | Mechanism | Status |
+|----------|-----------|--------|
+| **Network** | `BRIDGE_BIND=127.0.0.1` (default) | ✅ Active |
+| **Inbound** | Poll mode default — no public listener | ✅ Active (v0.50.0) |
+| **Telegram identity** | `admin_chat_id` allowlist | ✅ Active |
+| **Webhook origin** | `TELEGRAM_WEBHOOK_SECRET` header check | ✅ Available, optional |
+| **Guest/Relay tokens** | `secrets.token_urlsafe(32)` + SHA-256 | ✅ Active |
+| **Worker source** | `/outputs` validates `source` against registered workers | ✅ Active |
 
-### Endpoint Tiers
+### What's Protected and How
 
-**Admin** (HMAC required even on localhost — admin secret never in worker/hook env):
-- `POST /workers` (registration)
-- `POST /connectors/restarts`
-- `POST /notifications`
-- `POST /alerts` (triggers Telegram sends)
-- `DELETE /guests`
-
-**Worker** (localhost only, consistency-checked):
-- `POST /outputs` — source must be a registered worker with matching tmux `BRIDGE_SESSION`
-- `POST /messages` — `from` field verified against registered workers
-
-**Public-local** (localhost, read-only):
-- `GET /health/*`, `GET /workers`, `GET /checkin`, `GET /transcript/*`, `GET /tools/review/*`, `GET /connectors`, `GET /`
-
-**External** (when `BRIDGE_BIND` != loopback):
-- `GET /health/*` — unauthenticated (health probes only)
-- Everything else — HMAC required
-- Worker-tier endpoints (`/outputs`, `/messages`) stay localhost-only even with HMAC
-
-### Defenses
-
-| Defense | Detail |
-|---------|--------|
-| **Body size** | 4MB default, configurable. Telegram attachments: check `file_size` before download, stream with hard byte cap |
-| **Rate limits** | `/outputs`: 10/s per worker. `/messages`: 5/s per source. Admin: 1/s global. Return `429`, don't block threads |
-| **External binding** | Refuse startup without `BRIDGE_API_SECRET` when `BRIDGE_BIND` != `127.0.0.1`/`::1` |
-| **HMAC signing** | `HMAC(secret, method + path + query + timestamp + nonce + body_sha256)`, constant-time compare, short TTL nonce cache |
-| **Source consistency** | `/outputs` validates source against registered workers + tmux `BRIDGE_SESSION` env |
-| **Proxy headers** | Ignore `X-Forwarded-For` unless `BRIDGE_TRUSTED_PROXY` configured |
-| **Route classification** | Classify endpoint tier first, then apply locality/HMAC/rate/body checks (fail-closed) |
+| Endpoint | Protection | Why sufficient |
+|----------|-----------|----------------|
+| Telegram commands | `admin_chat_id` check — unknown chat_ids silently rejected | Only manager controls workers |
+| `POST /outputs` | Localhost-only + source consistency (must be registered worker) | Workers are our own Claude Code instances |
+| `POST /messages` | Localhost-only + `from` field verified | Same-user, same-machine |
+| `GET /workers`, `/checkin` | Localhost-only, read-only | No mutation, no sensitive data |
+| `GET /health/*` | Unauthenticated, read-only | Monitoring probes |
+| Webhook (`POST /`) | `TELEGRAM_WEBHOOK_SECRET` when tunnel active | Prevents fake updates via tunnel URL |
+| Guest sessions | Token + SHA-256 hash | Temporary, scoped, revocable |
 
 ### Explicit Non-Goals
 
-- **Same-user local worker isolation**: Workers run under the same OS user. A confused worker could call any localhost endpoint. Accepted residual risk — workers are our own Claude Code instances, not adversaries.
-- **Per-worker capability tokens**: Adds ceremony without defending against the actual threat model (confused LLM, not malicious actor).
-- **TLS termination**: Handled by reverse proxy if needed.
+- **HMAC/mTLS on localhost endpoints**: Workers run as the same OS user. If a process can read one secret, it can read all. Token ceremony adds complexity without isolation.
+- **Per-role auth tokens**: Same reasoning — no OS-level boundary between "worker token" and "admin token".
+- **Webhook proxy on separate port**: The bridge already rejects non-webhook paths with 404. Proxy adds a process for the same result.
+- **TLS termination**: Handled by reverse proxy or Cloudflare tunnel if needed.
+
+### Remote Workers
+
+Remote workers (Mac Mini) access the bridge via SSH tunnel:
+```
+ssh vps -L 127.0.0.1:8271:127.0.0.1:8271   # port forward
+curl http://127.0.0.1:8271/outputs           # hits bridge via SSH
+```
+No Tailscale port exposure. SSH keys provide the authentication layer.
 
 ---
 
