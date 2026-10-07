@@ -288,9 +288,12 @@ telegram_set_webhook() {
 
 bridge_notify() {
     local port="$1" message="$2"
-    local body
+    local body host
     body=$(printf '{"text":"%s"}' "$message")
-    curl -s -X POST "http://localhost:$port/notifications" \
+    # Use BRIDGE_PUBLIC_URL host if set (bridge may bind Tailscale IP, not localhost)
+    host=$(echo "${BRIDGE_PUBLIC_URL:-}" | sed -E 's|https?://([^:/]+).*|\1|')
+    host="${host:-localhost}"
+    curl -s -X POST "http://${host}:$port/notifications" \
         -H "Content-Type: application/json" \
         -d "$body" >/dev/null 2>&1 || true
 }
@@ -891,8 +894,18 @@ show_node_status() {
     fi
 
     # Bridge HTTP liveness probe — is bridge.py actually accepting connections?
+    # Try BRIDGE_PUBLIC_URL first (bridge may bind Tailscale IP, not localhost).
+    local bridge_host="localhost"
     if $running && [[ -n "$port" ]]; then
-        local probe; probe=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null || echo "")
+        local probe=""
+        if [[ -n "${BRIDGE_PUBLIC_URL:-}" ]]; then
+            bridge_host=$(echo "$BRIDGE_PUBLIC_URL" | sed -E 's|https?://([^:/]+).*|\1|')
+            probe=$(curl -sf --max-time 3 "http://${bridge_host}:$port/health/workers" 2>/dev/null || echo "")
+        fi
+        if [[ -z "$probe" ]]; then
+            bridge_host="localhost"
+            probe=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null || echo "")
+        fi
         if [[ -n "$probe" ]] && echo "$probe" | grep -q '"workers"'; then
             bridge_http_ok=true
         fi
@@ -916,7 +929,7 @@ show_node_status() {
     # Check poll fallback via bridge health endpoint (internal Python thread)
     if $bridge_http_ok; then
         local tunnel_health
-        tunnel_health=$(curl -sf --max-time 3 "http://localhost:$port/health/tunnel" 2>/dev/null || echo '{}')
+        tunnel_health=$(curl -sf --max-time 3 "http://${bridge_host}:$port/health/tunnel" 2>/dev/null || echo '{}')
         if echo "$tunnel_health" | grep -q '"polling_active": true\|"polling_active":true'; then
             poll_running=true
         fi
@@ -993,7 +1006,7 @@ show_node_status() {
         # Include all workers from bridge API (single source of truth)
         local workers_json="[]"
         if $bridge_http_ok; then
-            workers_json=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null | python3 -c "
+            workers_json=$(curl -sf --max-time 3 "http://${bridge_host}:$port/health/workers" 2>/dev/null | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -1041,7 +1054,7 @@ EOF
     # Get all workers from bridge API (single source of truth for all machines)
     local all_workers="" all_worker_names=()
     if $bridge_http_ok; then
-        all_workers=$(curl -sf --max-time 3 "http://localhost:$port/health/workers" 2>/dev/null || echo "")
+        all_workers=$(curl -sf --max-time 3 "http://${bridge_host}:$port/health/workers" 2>/dev/null || echo "")
         if [[ -n "$all_workers" ]]; then
             while IFS= read -r wname; do
                 [[ -n "$wname" ]] && all_worker_names+=("$wname")
