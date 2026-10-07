@@ -642,7 +642,7 @@ _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 # ── Config dataclasses (frozen, immutable defaults) ──────────────────
 
 @dataclass(frozen=True)
-class WatchdogConfig:
+class WatchdogConfig:  # type: ignore[no-redef]
     """Watchdog timing and threshold configuration (immutable)."""
     interval: int = 4
     start_grace: int = 30
@@ -659,7 +659,7 @@ class WatchdogConfig:
 
 
 @dataclass(frozen=True)
-class ResourceAlertConfig:
+class ResourceAlertConfig:  # type: ignore[no-redef]
     """Resource monitoring thresholds and cooldowns (immutable)."""
     disk_warn_pct: int = 85
     disk_alert_pct: int = 95
@@ -680,7 +680,7 @@ class ResourceAlertConfig:
 
 
 @dataclass(frozen=True)
-class MediaConfig:
+class MediaConfig:  # type: ignore[no-redef]
     """Media handling limits and extension sets (immutable)."""
     max_file_size: int = 50 * 1024 * 1024
     photo_max_sum: int = 10000
@@ -713,7 +713,7 @@ ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 # ── AppContext: injectable configuration ──
 
 @dataclass
-class AppContext:
+class AppContext:  # type: ignore[no-redef]
     """Injectable application configuration — replaces scattered module globals."""
     bot_token: str = ""
     port: int = 8270
@@ -742,7 +742,7 @@ class AppContext:
 
 
 
-def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
+def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[no-redef,explicit-any]
     """Call func(*args, **kwargs) and log on failure instead of crashing.
 
     Use for fire-and-forget operations where failure is acceptable but
@@ -760,7 +760,7 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
 
 
 
-def _build_app_context() -> AppContext:
+def _build_app_context() -> AppContext:  # type: ignore[no-redef]
     """Build AppContext from current module globals (bridge between old and new)."""
     return AppContext(
         bot_token=BOT_TOKEN,
@@ -782,7 +782,7 @@ def _build_app_context() -> AppContext:
 
 
 
-def get_app_context() -> AppContext:
+def get_app_context() -> AppContext:  # type: ignore[no-redef]
     """Get the singleton AppContext. Built on first call from module globals."""
     global _app_context
     if _app_context is None:
@@ -793,7 +793,7 @@ def get_app_context() -> AppContext:
 
 # ── Injectable testing seams ──
 
-class MarkdownToken(Protocol):
+class MarkdownToken(Protocol):  # type: ignore[no-redef]
     """Protocol for markdown-it-py inline tokens."""
     type: str
     content: str
@@ -802,7 +802,7 @@ class MarkdownToken(Protocol):
 
 
 
-class SubprocessRunner(Protocol):
+class SubprocessRunner(Protocol):  # type: ignore[no-redef]
     """Abstraction over subprocess.run and subprocess.Popen for test injection.
 
     kwargs typing note: subprocess.run/Popen accept 20+ keyword arguments
@@ -821,7 +821,7 @@ class SubprocessRunner(Protocol):
 
 
 
-class Clock(Protocol):
+class Clock(Protocol):  # type: ignore[no-redef]
     """Abstraction over time for deterministic testing."""
 
     def time(self) -> float:
@@ -834,20 +834,20 @@ class Clock(Protocol):
 
 
 
-class _RealSubprocessRunner:
+class _RealSubprocessRunner:  # type: ignore[no-redef]
     """Production subprocess runner — delegates to subprocess.run/Popen."""
 
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:  # type: ignore[no-any-return]
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         """Execute a subprocess command via the real subprocess module."""
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:  # type: ignore[no-any-return]
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         """Spawn a subprocess without waiting, via the real subprocess module."""
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
 
 
-class _RealClock:
+class _RealClock:  # type: ignore[no-redef]
     """Production clock — delegates to the time module."""
 
     def time(self) -> float:
@@ -861,11 +861,11 @@ class _RealClock:
 
 
 # Module-level defaults (overridable in tests by replacing these singletons)
-_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()  # type: ignore[explicit-any]
+_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()  # type: ignore[no-redef]
 
-_clock: Clock = _RealClock()
+_clock: Clock = _RealClock()  # type: ignore[no-redef]
 
-_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]  # Injectable for testing
+_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[no-redef,explicit-any]  # Injectable for testing
 
 
 
@@ -874,17 +874,17 @@ _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # ty
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Severity levels for structured log output.
-_LOG_ERROR: str = "ERROR"
+_LOG_ERROR: str = "ERROR"  # type: ignore[no-redef]
 
-_LOG_WARN: str = "WARN"
+_LOG_WARN: str = "WARN"  # type: ignore[no-redef]
 
-_LOG_INFO: str = "INFO"
+_LOG_INFO: str = "INFO"  # type: ignore[no-redef]
 
-_LOG_DEBUG: str = "DEBUG"
+_LOG_DEBUG: str = "DEBUG"  # type: ignore[no-redef]
 
 
 
-def _log(level: str, component: str, msg: str | Path, *,
+def _log(level: str, component: str, msg: str | Path, *,  # type: ignore[no-redef]
          exc: BaseException | None = None) -> None:
     """Emit a structured log line to stderr.
 
@@ -903,9 +903,9 @@ def _log(level: str, component: str, msg: str | Path, *,
 # ── Watchdog & health monitoring constants ────────────────────────────
 _res_cfg = ResourceAlertConfig()
 
-RESTART_COOLDOWN: int = _wd_cfg.restart_cooldown
+RESTART_COOLDOWN: int = _wd_cfg.restart_cooldown  # type: ignore[no-redef]
 
-HOST_DOWN_THRESHOLD: int = _wd_cfg.host_down_threshold
+HOST_DOWN_THRESHOLD: int = _wd_cfg.host_down_threshold  # type: ignore[no-redef]
 
 
 DISK_WARN_THRESHOLD_PCT = _res_cfg.disk_warn_pct
@@ -949,10 +949,10 @@ NODE_DIR = SESSIONS_DIR.parent  # ~/.claude/telegram/nodes/<node>
 
 # Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
-admin_chat_id: ChatId | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
+admin_chat_id: ChatId | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None  # type: ignore[no-redef]
 
 # Singleton AppContext — lazily built on first access
-_app_context: AppContext | None = None
+_app_context: AppContext | None = None  # type: ignore[no-redef]
 
 # ── End of shared types/constants ─────────────────────────────────────
 # telegram.py and claudecode.py imported at top of file (no circular deps).
@@ -1323,7 +1323,7 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
                 or machine.ssh_target in host_health.io_usage
             ):
                 health["status"] = "up"
-    return cast(MachineHealthDict, health)
+    return health
 
 
 
@@ -1852,7 +1852,7 @@ def _extract_activity(lines: list[str]) -> str:
         return "Idle"
 
     # Priority cascade — first match wins
-    _CHECKS: list[_ActivityCheck] = [
+    _CHECKS: list[Callable[[list[str]], str | None]] = [
         _activity_from_spinner,       # 1. Active thinking spinner
         _activity_from_tool,          # 2. Tool actively running
         _activity_from_rate_limit,    # 3. Rate limiting / connection errors
@@ -1866,7 +1866,7 @@ def _extract_activity(lines: list[str]) -> str:
         _activity_from_error,         # 10. Standalone error
     ]
     for check in _CHECKS:
-        result = check(stripped)
+        result: str | None = check(stripped)
         if result is not None:
             return result
 
@@ -2757,7 +2757,7 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
     if not registered:
         return
     data: RegistryFileDict = {"version": 1, "workers": {}}
-    for name, session in registered.items():  # type: ignore[index]
+    for name, session in registered.items():
         backend = normalize_backend(session.get("backend"))
         data["workers"][name] = {
             "backend": backend,
@@ -2830,6 +2830,7 @@ def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     is rendered from that caller's machine perspective.
     """
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.get_workers(caller_from=caller_from)
 
 
@@ -3278,7 +3279,7 @@ def _format_watchdog_status(name: str,
     )
 
 
-def format_team_lines(
+def format_team_lines(  # type: ignore[no-redef]
     registered: dict[str, TmuxSessionDict],
     active: str | None,
     pending_lookup: Callable[[str], bool] | None = None,
@@ -3512,7 +3513,7 @@ class WorkerManager:
                 for key in ("protocol", "callback_url", "host", "version"):
                     val = info.get(key)
                     if val:
-                        entry[key] = str(val)  # type: ignore[literal-required]
+                        entry[key] = str(val)
                 # Teleported workers: inject tmux name so they don't appear as "exited"
                 if info.get("host") and not info.get("callback_url"):
                     entry["tmux"] = f"{self.tmux_prefix}{name}"
@@ -3520,7 +3521,7 @@ class WorkerManager:
             else:
                 for key in ("protocol", "callback_url", "host", "version"):
                     if info.get(key):
-                        registered[name][key] = info.get(key)  # type: ignore[literal-required,typeddict-item]
+                        registered[name][key] = info.get(key)  # type: ignore[literal-required]
 
         if state.active and state.active not in registered:
             state.active = None
@@ -3823,10 +3824,10 @@ class WorkerManager:
         else:
             self.send(name, welcome)
 
-        state.active = name  # type: ignore[arg-type]
+        state.active = name
         import telegram as _tg
         _tg.save_last_active(name)
-        _registry_add(name, backend, chat_id)  # type: ignore[arg-type]
+        _registry_add(name, backend, chat_id)
         _reset_learning_reminder(name)
 
         if not backend_obj.is_interactive:
@@ -4179,6 +4180,7 @@ class WorkerManager:
 
 def _sync_worker_manager() -> None:
     """Sync the global worker_manager instance with current module globals."""
+    assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
 
@@ -4192,6 +4194,7 @@ def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
         session: Session dict from get_registered_sessions() (optional, avoids re-lookup)
     """
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.is_online(name, session)
 
 
@@ -4219,6 +4222,7 @@ def worker_send(name: str, message: str, chat_id: int | None = None, session: Tm
         True if send succeeded
     """
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.send(name, message, chat_id, session)
 
 
@@ -4228,6 +4232,7 @@ def worker_send(name: str, message: str, chat_id: int | None = None, session: Tm
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
     """Scan tmux for registered sessions."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.scan_tmux_sessions()
 
 
@@ -4237,6 +4242,7 @@ def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
     """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.get_registered_sessions(registered)
 
 
@@ -4251,6 +4257,7 @@ def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
     """Send a message to a worker using the appropriate backend."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.send(name, message, chat_id)
 
 
@@ -4258,7 +4265,7 @@ def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
 # ── Control plane singletons ────────────────────────────────────────────
 # WorkerManager instantiation (class is defined above).
 # SESSIONS_DIR and TMUX_PREFIX come from claudecode via star import.
-worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)
+worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)  # type: ignore[assignment]
 
 
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -4456,8 +4463,9 @@ class ConnectorRegistry:
     ensures the lock always guards its data.
     """
     def __init__(self) -> None:
-        self.gmail: Any = None
-        self.github: Any = None
+        from typing import Any as _Any
+        self.gmail: _Any = None  # type: ignore[explicit-any]
+        self.github: _Any = None  # type: ignore[explicit-any]
         self._log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
         self._lock: threading.Lock = threading.Lock()
 
@@ -4534,7 +4542,7 @@ if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
 
 
 # Singleton context — built lazily after all globals are initialized
-_app_context: AppContext | None = None
+_app_context: AppContext | None = None  # type: ignore[no-redef]
 
 
 
@@ -6507,7 +6515,7 @@ def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcSta
     for name, pid in claude_pids.items():
         host = get_worker_host(name)
         pids_by_host.setdefault(host, []).append(pid)
-    stats: dict[str, ProcStatsEntry] = {}  # type: ignore[arg-type]
+    stats: dict[str, ProcStatsEntry] = {}
     for host, pids in pids_by_host.items():
         stats.update(_ps_stats(pids, host=host))
     return stats
@@ -6728,7 +6736,7 @@ def _watchdog_refine_state(
 
 
 def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
-    """Remove watchdog state for workers no longer in the registry."""  # type: ignore[list-item]
+    """Remove watchdog state for workers no longer in the registry."""
     with watchdog.lock:
         stale_dicts: list[dict[str, object]] = cast(list[dict[str, object]], [
             watchdog.worker_states, watchdog.last_child_ts,
@@ -6749,7 +6757,7 @@ def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
 
 def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
     """Run periodic resource checks (disk, memory, IO, CPU, worktrees, Tailscale)."""
-    checks = [
+    checks: list[tuple[str, Callable[[], None]]] = [
         ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
         ("Memory", lambda: _probe_mem_all_hosts(remote_hosts)),
         ("IO", lambda: _probe_io_all_hosts(remote_hosts)),
@@ -7052,6 +7060,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
     """Create a new worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.hire(name, backend, chat_id=chat_id)
 
 
@@ -7059,6 +7068,7 @@ def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | 
 def kill_session(name: str) -> tuple[bool, str | None]:
     """Kill a worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.end(name)
 
 
@@ -7066,6 +7076,7 @@ def kill_session(name: str) -> tuple[bool, str | None]:
 def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
     """Restart claude in an existing tmux session. Returns (success, error_message)."""
     _sync_worker_manager()
+    assert worker_manager is not None
     return worker_manager.restart(name, mode=mode)
 
 
@@ -8378,7 +8389,7 @@ class CommandRouter:
                 if cap.returncode == 0:
                     _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
         _log(_LOG_WARN, "teleport", f"verify FAILED after 30 attempts")
-        return False  # type: ignore[arg-type]
+        return False
 
     def _teleport_rollback(self, name: str, tmux_name: str, source_host: str | None, source_cwd: str | None,
                             session_id: str | None, backend_name: str, chat_id: ChatId | None, reason: str) -> None:
@@ -8401,9 +8412,9 @@ class CommandRouter:
             backend = get_backend(backend_name)
             start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
             if source_cwd:
-                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'  # type: ignore[arg-type]
+                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'
             _remote_run(
-                ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],  # type: ignore[arg-type]
+                ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
                 host=source_host, capture_output=True)
 
             self._teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
@@ -8760,7 +8771,7 @@ class CommandRouter:
     def _cmd_restart_all(self, chat_id: int | str, clean: bool) -> bool:
         """Handle /restart-all command — sequentially restart all workers."""
         registered = self.workers.get_registered_sessions()
-        if not registered:  # type: ignore[has-type]
+        if not registered:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
@@ -8804,6 +8815,7 @@ class CommandRouter:
                 host = get_worker_host(name)
                 if host:
                     _sync_worker_manager()
+                    assert worker_manager is not None
                     reg = worker_manager.get_registered_sessions()
                     session = reg.get(name, {})
                     backend_name = get_worker_backend(name, session)
@@ -9222,10 +9234,10 @@ class CommandRouter:
             unknown_mentions = self.unknown_at_mentions(caption)
             if unknown_mentions:
                 self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
-                return  # type: ignore[arg-type]
+                return
             targets, _ = self.parse_at_mentions(caption)
             if targets:
-                statuses = []  # type: ignore[arg-type]
+                statuses = []
                 for name in targets:
                     statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
                 sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
@@ -9234,10 +9246,10 @@ class CommandRouter:
                 if offline:
                     parts = []
                     parts.append(f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline.")
-                    if sent_to:  # type: ignore[arg-type]
+                    if sent_to:
                         parts.append(f"Delivered to {', '.join(sent_to)}.")
                     self.reply(chat_id, " ".join(parts))
-                return  # type: ignore[arg-type]
+                return
         # Check reply-to: if replying to a worker's message, route to that worker
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
@@ -9269,10 +9281,9 @@ class CommandRouter:
                 state.active = target
                 save_last_active(target)
             else:
-                self.reply(chat_id, f"Can't focus guest {target}.")  # type: ignore[arg-type]
+                self.reply(chat_id, f"Can't focus guest {target}.")
             self._reset_mention_streak()
             return
-  # type: ignore[arg-type]
         if reply_context:
             message = self.format_reply_context(message, reply_context, reply_context_ts)
 
@@ -9389,7 +9400,7 @@ class CommandRouter:
                 "text": message,
                 "ts": int(_clock.time()),
             }
-            with guest_store.lock:  # type: ignore[arg-type]
+            with guest_store.lock:
                 inbox = guest_store.inboxes.get(name, [])
                 guest_store.inboxes[name] = guest_inbox_append(inbox, cast(GuestInboxMessageDict, msg_obj))
             return {"name": name, "status": "sent"}
@@ -9444,9 +9455,9 @@ class CommandRouter:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
         """Initialize command router with worker manager, transport, and dispatch table."""
         if transport is not None and not isinstance(transport, MessageTransport):
-            transport = _LegacyTransportAdapter(transport)  # type: ignore[no-redef]
+            transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
-        self.workers: "WorkerManager" = workers  # type: ignore[no-redef]
+        self.workers: "WorkerManager" = workers
         # Restart-all state  # type: ignore[no-redef]
         self._restart_all_lock: threading.Lock = threading.Lock()
         self._restart_all_running: bool = False  # type: ignore[no-redef]
@@ -9599,10 +9610,10 @@ class CommandRouter:
             elif incoming.video_note:
                 media_label = "video note"
             elif incoming.sticker:
-                media_label = "sticker"  # type: ignore[arg-type]
+                media_label = "sticker"
 
         if not file_id:
-            return False  # type: ignore[arg-type]
+            return False
 
         if not self._check_admin(chat_id):
             return True
@@ -9656,10 +9667,9 @@ class CommandRouter:
             title = incoming.audio.get("title", incoming.audio.get("file_name", "audio"))
             duration = incoming.audio.get("duration", 0)
             return f"Manager sent audio: {title} ({duration}s)\nPath: `{local_path}`"
-  # type: ignore[arg-type]
         if incoming.voice:
             duration = incoming.voice.get("duration", 0)
-            transcript = transcribe_voice(local_path)  # type: ignore[arg-type]
+            transcript = transcribe_voice(local_path)
             if transcript:
                 self.reply(chat_id, f"🎤 _{transcript}_")
                 routed = f"{text}\n\n{transcript}" if text else transcript
@@ -9727,10 +9737,9 @@ class CommandRouter:
         if unknown_mentions:
             self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
             self._reset_mention_streak()
-            return  # type: ignore[arg-type]
+            return
 
         targets, message = self.parse_at_mentions(text)
-  # type: ignore[arg-type]
         if targets:
             self._handle_mention_routing(targets, message, text, chat_id, msg_id,
                                          reply_to, reply_context, reply_context_ts)
@@ -9739,16 +9748,15 @@ class CommandRouter:
         # Reply-to worker message without @mention routes to that worker  # type: ignore[arg-type]
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
-            routed_text = text  # type: ignore[arg-type]
+            routed_text = text
             if reply_context:
                 routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
             self._reset_mention_streak()
             return
-  # type: ignore[arg-type]
         # No @mentions → route to focused worker
         self._reset_mention_streak()
-        routed_text = text  # type: ignore[arg-type]
+        routed_text = text
         if reply_context:
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
@@ -9759,10 +9767,10 @@ class CommandRouter:
         cmd = parts[0].lower()
         if "@" in cmd:
             cmd = cmd.split("@")[0]
-        arg = parts[1].strip() if len(parts) > 1 else ""  # type: ignore[arg-type]
+        arg = parts[1].strip() if len(parts) > 1 else ""
 
         # Adding a new command = adding one entry to self._commands in __init__.
-        handler = self._commands.get(cmd)  # type: ignore[arg-type]
+        handler = self._commands.get(cmd)
         if handler:
             return handler(arg, chat_id or 0, msg_id or 0)
 
@@ -9775,10 +9783,10 @@ class CommandRouter:
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
             prev_focus = state.active
-            state.active = worker_name  # type: ignore[union-attr, arg-type]
+            state.active = worker_name
             save_last_active(worker_name)
             if not arg:
-                return True  # type: ignore[union-attr, arg-type]
+                return True
             if prev_focus != worker_name and self.transport and chat_id is not None:
                 self.transport.send_text(chat_id, f"Now talking to {worker_name.capitalize()}.")
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
@@ -9798,6 +9806,7 @@ class CommandRouter:
         import urllib.request, json as _json
         from urllib.parse import urlparse, quote as _urlquote
         if "all" in names:
+            assert worker_manager is not None
             registered = worker_manager.scan_tmux_sessions()
             registry = _load_registry()
             for rname, rinfo in registry.get("workers", {}).items():
@@ -10066,7 +10075,7 @@ class CommandRouter:
                 if self.workers.is_online(name, session):
                     # Check watchdog state for busy/idle
                     wd = watchdog.worker_states.get(name)
-                    if wd and wd.state == "BUSY":
+                    if wd and wd.status == "BUSY":
                         busy += 1
                     else:
                         online += 1
@@ -10189,25 +10198,24 @@ class CommandRouter:
                 details = _extract_question_details(raw_lines)
                 if details:
                     if _send_interactive_reply(tmux_name, shortcut, details, host=host):
-                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"  # type: ignore[arg-type]
+                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
                         self.reply(chat_id, f"{action}.")
                         return
-  # type: ignore[arg-type]
         # Non-interactive backpressure: atomic check+set to prevent races
-        if not backend.is_interactive and chat_id is not None and not try_set_pending(session_name, chat_id):  # type: ignore[arg-type]
+        if not backend.is_interactive and chat_id is not None and not try_set_pending(session_name, chat_id):
             self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
             return
 
         # Prefix manager messages so workers can distinguish from inter-worker messages.
         # Skip if text already has a "Manager sent ..." prefix (media messages).
         if not text.startswith("Manager sent "):
-            text = f"manager: {text}"  # type: ignore[arg-type]
+            text = f"manager: {text}"
 
         _log(_LOG_INFO, "dispatch", f"chat_id={chat_id} -> {session_name}: {text[:50]}...")
-  # type: ignore[arg-type]
         if backend.is_interactive and chat_id is not None:
             worker_set_pending(session_name, chat_id)
-        _task_pool.submit(send_typing_loop, chat_id, session_name)
+        if chat_id is not None:
+            _task_pool.submit(send_typing_loop, chat_id, session_name)
 
         send_ok = self.workers.send(session_name, text, chat_id, session)
         if not send_ok:
@@ -10217,16 +10225,17 @@ class CommandRouter:
                 f"Could not send to {session_name.capitalize()}. Try /restart.",
                 outcome="Needs decision"
             )
-            return  # type: ignore[union-attr, arg-type]
+            return
 
         if msg_id and send_ok:
-            host = get_worker_host(session_name)  # type: ignore[union-attr, arg-type]
+            host = get_worker_host(session_name)
             if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host):
                 if self.transport and chat_id is not None:
                     self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
 
+assert worker_manager is not None
 command_router = CommandRouter(transport, worker_manager)
 
 
@@ -10257,13 +10266,13 @@ class TranscriptSyncRegistry:
         """Update specific fields of an existing sync entry."""
         with self._lock:
             if key in self._state:
-                self._state[key].update(fields)  # type: ignore[typeddict-item]
+                self._state[key].update(fields)
 
     def get_started(self, key: str) -> float:
         """Get the 'started' timestamp for a sync key (0 if not found)."""
         with self._lock:
             entry = self._state.get(key, {})
-            return entry.get("started", 0)  # type: ignore[return-value]
+            return entry.get("started", 0)
 
 
 _transcript_sync = TranscriptSyncRegistry()
@@ -10384,6 +10393,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
         host = get_worker_host(name)
         tmux_name = f"{TMUX_PREFIX}{name}"
         try:
+            assert worker_manager is not None
             cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
         except Exception:
             pass
@@ -11611,12 +11621,12 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     if filter_mode == "prompts":
         _clear_qs = [p for p in _filt_qs]  # already excludes filter=prompts
         _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
-        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'  # type: ignore[arg-type]
+        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
 
     return (_transcript_html_head(name, esc)
-            + _transcript_html_nav(name, stats, prompts_filter_url, esc)  # type: ignore[arg-type]
+            + _transcript_html_nav(name, stats, prompts_filter_url, esc)
             + _transcript_html_entries(
-                page_entries, _tool_results, search_val,  # type: ignore[arg-type]
+                page_entries, _tool_results, search_val,
                 filter_banner, search_result, nav_html,
                 live_base_url, name, token, search_query, total, per_page,
                 page, total_pages, esc, session_id, filter_mode)
@@ -12018,15 +12028,15 @@ class Handler(BaseHTTPRequestHandler):
                 msg_id = f"gm_{secrets.token_hex(4)}"
                 with guest_store.lock:
                     inbox = guest_store.inboxes.get(guest_name, [])
-                    guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {  # type: ignore[union-attr]
+                    guest_store.inboxes[guest_name] = guest_inbox_append(inbox, {
                         "id": msg_id, "from": guest_name, "to": worker,
                         "text": text, "ts": int(_clock.time()),
-                    })  # type: ignore[union-attr]
+                    })
                     notified = guest.get("notified_workers", set())
                     if worker not in notified:
                         if isinstance(notified, set):
                             notified.add(worker)
-                        guest["notified_workers"] = notified  # type: ignore[typeddict-item]
+                        guest["notified_workers"] = notified
                         try:
                             if admin_chat_id:
                                 send_telegram_message(admin_chat_id,
@@ -12535,12 +12545,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "channel not found"})
             return
 
-        workers = channel.get("workers", [channel["worker"]])  # type: ignore[index]
+        workers = channel.get("workers", [channel["worker"]])
         delivered = {}
         for w in workers:
-            delivered[w] = send_to_worker(w, envelope)  # type: ignore[index]
+            delivered[w] = send_to_worker(w, envelope)
         self._send_json(200, {
-            "message_id": msg["message_id"],  # type: ignore[index]
+            "message_id": msg["message_id"],
             "delivered": all(delivered.values()),
             "workers": delivered,
         })
@@ -13736,7 +13746,7 @@ def _mg(m: re.Match[str] | None, n: int = 1) -> str:
 
 def _mg2(m: re.Match[str] | None) -> str:
     """Extract optional group 2 from a regex match."""
-    return m.group(2) if m else None  # type: ignore[return-value]
+    return m.group(2) if m else None
 
 
 
@@ -14241,9 +14251,9 @@ def _start_connectors() -> tuple[object, object]:
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
-            on_message=_connector_on_message("gmail"),  # type: ignore[arg-type]
+            on_message=_connector_on_message("gmail"),
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("gmail"),  # type: ignore[arg-type]
+            on_alert=_connector_on_alert("gmail"),
         )
         gmail_inst.start()
         print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
@@ -14256,9 +14266,9 @@ def _start_connectors() -> tuple[object, object]:
             repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
-            on_message=_connector_on_message("github"),  # type: ignore[arg-type]
+            on_message=_connector_on_message("github"),
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("github"),  # type: ignore[arg-type]
+            on_alert=_connector_on_alert("github"),
             state_file=str(NODE_DIR / "github_state.json"),
         )
         github_inst.start()
@@ -14284,9 +14294,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
             poll_interval=GMAIL_POLL_INTERVAL,
-            on_message=_connector_on_message("gmail"),  # type: ignore[arg-type]
+            on_message=_connector_on_message("gmail"),
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("gmail"),  # type: ignore[arg-type]
+            on_alert=_connector_on_alert("gmail"),
         )
         ok, msg = connectors.gmail.restart()
         if ok:
@@ -14306,9 +14316,9 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
             poll_interval=GITHUB_POLL_INTERVAL,
-            on_message=_connector_on_message("github"),  # type: ignore[arg-type]
+            on_message=_connector_on_message("github"),
             get_registered_workers=_connector_get_workers,
-            on_alert=_connector_on_alert("github"),  # type: ignore[arg-type]
+            on_alert=_connector_on_alert("github"),
             state_file=str(NODE_DIR / "github_state.json"),
         )
         ok, msg = connectors.github.restart()
@@ -14323,14 +14333,14 @@ def _restart_connector(name: str) -> tuple[bool, str]:
 
 
 
-def _get_connectors_status() -> dict[str, ConnectorStatusDict]:  # type: ignore[assignment]
+def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     """Return status dict for all connectors."""
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
         if connectors.gmail is not None:
             result["gmail"] = cast(ConnectorStatusDict, connectors.gmail.status())
         else:
-            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}  # type: ignore[assignment]
+            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}
     else:
         result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
     if GITHUB_ENABLED:
@@ -14382,9 +14392,9 @@ def main() -> None:
     _load_learning_reminder_state()
     _seed_learning_reminder_state(registered.keys())
     _schedule_idle_scan()
-    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")  # type: ignore[assignment]
+    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
 
-    connectors.gmail, connectors.github = _start_connectors()  # type: ignore[assignment]
+    connectors.gmail, connectors.github = _start_connectors()
 
     # Create HTTP server (binds port immediately)
     server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
@@ -14399,7 +14409,7 @@ def main() -> None:
                 def _safe_handle(upd: dict[str, Any]) -> None:
                     try:
                         command_router.handle_message(upd)
-                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                    except Exception as exc:
                         _log(_LOG_ERROR, "tunnel:poll", f"handle_message CRASH: {exc}", exc=exc)
                 _message_pool.submit(_safe_handle, update)
 

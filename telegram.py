@@ -57,7 +57,12 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 from collections.abc import Iterable, Mapping
-from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, TYPE_CHECKING, cast, runtime_checkable
+from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, TYPE_CHECKING, cast, runtime_checkable
+
+
+class UrlOpenFn(Protocol):
+    """Callable that opens a URL request — matches urllib.request.urlopen signature."""
+    def __call__(self, req: urllib.request.Request, *, timeout: float) -> http.client.HTTPResponse: ...
 
 
 # ── Telegram domain types (owned by this module) ─────────────────────
@@ -1228,7 +1233,7 @@ def telegram_api(method: str, data: Mapping[str, object]) -> TelegramApiResponse
     """Low-level Telegram API call. Tests can mock this to intercept all outbound calls."""
     if TRANSPORT_MODE == "local":
         _log(_LOG_INFO, "local-transport", f"telegram_api {method} {str(data)[:100]}")
-        return {"ok": True, "result": {"message_id": 1}}  # type: ignore[arg-type]
+        return {"ok": True, "result": {"message_id": 1}}
     if isinstance(transport, TelegramTransport):
         return transport._api.api(method, data)
     return None
@@ -1559,7 +1564,7 @@ INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 
 
-def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple]:
+def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple[str, bool]]:
     """Split text into (segment, is_protected) based on regex matches."""
     segments = []
     last = 0
@@ -1948,9 +1953,9 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "paragraph_close":
             if not in_table:
                 result.append("\n")
-        elif tok.type == "inline":  # type: ignore[arg-type]
+        elif tok.type == "inline":
             if in_table:
-                table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))  # type: ignore[arg-type]
+                table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))
             else:
                 result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
 
@@ -2389,9 +2394,9 @@ class TunnelManager:
         bind_host: str = "",
         subprocess_runner: SubprocessRunner | None = None,
         clock: Clock | None = None,
-        urlopen: Callable[..., http.client.HTTPResponse] | None = None,
+        urlopen: "UrlOpenFn | None" = None,
         on_notify: Callable[[str], None] | None = None,
-        on_update: Callable[[dict[str, Any]], None] | None = None,
+        on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._config = config
         self._token = bot_token
@@ -2401,7 +2406,7 @@ class TunnelManager:
         self._webhook_secret = webhook_secret
         self._runner = subprocess_runner or _RealSubprocessRunner()
         self._clock = clock or _RealClock()
-        self._urlopen = urlopen or _urlopen
+        self._urlopen: UrlOpenFn = urlopen or cast(UrlOpenFn, _urlopen)
         self._on_notify = on_notify or (lambda _msg: None)
         self._on_update = on_update  # poll fallback forwards here
 
@@ -2467,30 +2472,31 @@ class TunnelManager:
 
     # ── Telegram API helpers (use injected urlopen) ────────────────────
 
-    def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, Any]:
+    def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
         """Call a Telegram Bot API method using the injected urlopen."""
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         data = json.dumps(payload or {}).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
             with self._urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read())  # type: ignore[no-any-return]
+                result: dict[str, object] = json.loads(resp.read())
+                return result
         except Exception:
             return {}
 
-    def _tg_set_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, Any]:
+    def _tg_set_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, object]:
         payload: dict[str, object] = {"url": webhook_url}
         if secret_token:
             payload["secret_token"] = secret_token
         return self._telegram_api("setWebhook", payload)
 
-    def _tg_delete_webhook(self) -> dict[str, Any]:
+    def _tg_delete_webhook(self) -> dict[str, object]:
         return self._telegram_api("deleteWebhook")
 
-    def _tg_get_webhook_info(self) -> dict[str, Any]:
+    def _tg_get_webhook_info(self) -> dict[str, object]:
         return self._telegram_api("getWebhookInfo")
 
-    def _tg_get_me(self) -> dict[str, Any]:
+    def _tg_get_me(self) -> dict[str, object]:
         return self._telegram_api("getMe")
 
     # ── Watchdog loop ─────────────────────────────────────────────────
@@ -2793,7 +2799,7 @@ class TunnelManager:
                     _log(_LOG_WARN, "tunnel:poll", f"Poll error: {exc}")
                     self._clock.sleep(self._config.poll_error_delay)
 
-    def _forward_to_localhost(self, update: dict[str, Any]) -> None:
+    def _forward_to_localhost(self, update: dict[str, object]) -> None:
         """Forward a polled update to the bridge via HTTP POST (fallback path)."""
         _bridge_host = self._bind_host or "127.0.0.1"
         try:

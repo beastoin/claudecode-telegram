@@ -141,10 +141,10 @@ class Clock(Protocol):
 class _RealSubprocessRunner:
     """Production subprocess runner — delegates to subprocess.run/Popen."""
 
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:  # type: ignore[no-any-return]
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:  # type: ignore[no-any-return]
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
 
@@ -159,7 +159,7 @@ class _RealClock:
 
 
 # Module-level singletons (overridable in tests)
-_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()  # type: ignore[explicit-any]
+_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
 
@@ -240,7 +240,7 @@ class HttpClient:
                               headers={"Content-Type": "application/json"})
     """
 
-    def __init__(
+    def __init__(  # type: ignore[explicit-any]
         self,
         retry: RetryConfig | None = None,
         rate_limit: RateLimitConfig | None = None,
@@ -324,19 +324,22 @@ class HttpClient:
 
         raise last_exc  # type: ignore[misc]
 
-    def get(self, url: str, *, timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+    def get(self, url: str, *, timeout: float = 30.0,
+            retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         """GET with retry and rate limiting."""
-        return self.request(url, method="GET", timeout=timeout, **kwargs)
+        return self.request(url, method="GET", timeout=timeout, retry=retry)
 
     def post(self, url: str, data: bytes, *, headers: dict[str, str] | None = None,
-             timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+             timeout: float = 30.0,
+             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         """POST with retry and rate limiting."""
         return self.request(url, method="POST", data=data, headers=headers,
-                            timeout=timeout, **kwargs)
+                            timeout=timeout, retry=retry)
 
-    def head(self, url: str, *, timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+    def head(self, url: str, *, timeout: float = 30.0,
+             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         """HEAD with retry and rate limiting."""
-        return self.request(url, method="HEAD", timeout=timeout, **kwargs)
+        return self.request(url, method="HEAD", timeout=timeout, retry=retry)
 
 
 # Default client instance — import this for production use

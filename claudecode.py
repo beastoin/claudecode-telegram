@@ -84,6 +84,9 @@ from collections.abc import Iterable, Mapping
 from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, TYPE_CHECKING, cast, runtime_checkable
 from urllib.parse import urlparse
 
+if TYPE_CHECKING:
+    from bridge import Machine
+
 
 # ── Claudecode domain types (owned by this module) ───────────────────
 
@@ -519,7 +522,7 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
             cmd[0] = _resolve_remote_tool(tool, host)
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
         _tv = kwargs.get("timeout", 10)
-        timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10  # type: ignore[call-overload]
+        timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     # Default timeout: prevent unbounded subprocess hangs that block bridge threads.
     # Hot-path callers should pass explicit shorter timeouts (3s probes, 5s sends).
@@ -1116,7 +1119,7 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
 
 def get_backend(name: str) -> Backend:
     """Look up a backend class by name."""
-    return cast(Backend, BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND]))
+    return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
 
 
 
@@ -1387,7 +1390,7 @@ def _forward_pipe_message(name: str, message: str) -> None:
     Uses backend routing for tmux or non-interactive workers.
     """
     import bridge
-    if not bridge.worker_manager.send(name, message):
+    if bridge.worker_manager is None or not bridge.worker_manager.send(name, message):
         _log(_LOG_WARN, "worker", f"Warning: Cannot forward pipe message to '{name}' - worker not found")
 
 
