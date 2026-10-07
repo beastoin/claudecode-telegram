@@ -10021,12 +10021,12 @@ class CommandRouter:
 
 
     def cmd_status(self, chat_id: ChatId) -> bool:
-        """Handle the /status command — rich bridge status dashboard."""
+        """Handle the /status command — clean bridge status."""
         import time as _time
 
         registered = self.workers.get_registered_sessions()
 
-        # ── Bridge info ──
+        # Uptime
         pid = os.getpid()
         try:
             proc_start = os.stat(f"/proc/{pid}").st_mtime
@@ -10043,85 +10043,75 @@ class CommandRouter:
         except (OSError, ValueError):
             uptime_str = "unknown"
 
-        lines = [f"<b>claudecode-telegram v{VERSION}</b>"]
-        lines.append(f"⏱ Uptime: {uptime_str}  •  Bind: <code>{BRIDGE_BIND}:{PORT}</code>")
-
-        # ── Connectivity ──
-        lines.append("")
-        lines.append("<b>📡 Connectivity</b>")
+        # Connectivity
         tm_status = tunnel_manager.status() if tunnel_manager else {}
         poll_active = tm_status.get("polling_active", False)
         tunnel_url = tm_status.get("tunnel_url", "")
         if tunnel_url:
-            lines.append(f"  ✅ Webhook: {tunnel_url}")
+            inbound = f"webhook ({tunnel_url})"
         elif poll_active:
-            lines.append("  ✅ Poll: active (getUpdates)")
+            inbound = "poll"
         else:
-            lines.append("  ❌ No inbound — messages can't reach bridge")
+            inbound = "DOWN"
 
-        if BRIDGE_BIND == "0.0.0.0":
-            lines.append("  ⚠️ Bound to 0.0.0.0 — exposed on all interfaces!")
-        elif BRIDGE_BIND not in ("127.0.0.1", "localhost", "::1"):
-            lines.append(f"  🔒 Tailscale-only ({BRIDGE_BIND})")
-
-        # ── Team summary ──
-        lines.append("")
-        lines.append("<b>👥 Team</b>")
+        # Team counts
+        busy = 0
+        idle = 0
+        offline = 0
+        busy_names: list[str] = []
         if registered:
-            online = 0
-            busy = 0
-            offline = 0
             for name, session in registered.items():
                 if self.workers.is_online(name, session):
-                    # Check watchdog state for busy/idle
                     wd = watchdog.worker_states.get(name)
                     if wd and wd.status == "BUSY":
                         busy += 1
+                        busy_names.append(name)
                     else:
-                        online += 1
+                        idle += 1
                 else:
                     offline += 1
-            total = len(registered)
-            parts = []
-            if busy:
-                parts.append(f"🔴 {busy} busy")
-            if online:
-                parts.append(f"🟢 {online} idle")
-            if offline:
-                parts.append(f"⚫ {offline} offline")
-            lines.append(f"  {total} workers: {', '.join(parts)}")
-            lines.append(f"  Focus: <b>{state.active or '(none)'}</b>")
-        else:
-            lines.append("  No workers — /hire &lt;name&gt; to start")
 
-        # ── Machines ──
-        lines.append("")
-        lines.append("<b>🖥 Machines</b>")
+        total = busy + idle + offline
+
+        # Machines
         machine_workers: dict[str, list[str]] = {}
         for name in registered:
             host = get_worker_host(name)
             machine_workers.setdefault(host or "local", []).append(name)
-        if machine_workers:
-            for machine, workers in sorted(machine_workers.items()):
-                lines.append(f"  {machine}: {len(workers)} workers")
-        else:
-            lines.append("  (none)")
 
-        # ── Connectors ──
+        # Connectors
         conn_status = _get_connectors_status()
-        if conn_status:
+        conn_parts: list[str] = []
+        for cname, info in conn_status.items():
+            running = info.get("running", False)
+            failures = info.get("consecutive_failures", 0)
+            if running and failures == 0:
+                conn_parts.append(f"{cname} ok")
+            elif running:
+                conn_parts.append(f"{cname} degraded ({failures} failures)")
+            else:
+                conn_parts.append(f"{cname} off")
+
+        # Build output
+        lines = [
+            f"<b>v{VERSION}</b> up {uptime_str} | {inbound} | <code>{BRIDGE_BIND}:{PORT}</code>",
+            "",
+            f"<b>{total} workers</b>: {busy} busy, {idle} idle, {offline} offline",
+            f"focus: <b>{state.active or 'none'}</b>",
+        ]
+
+        if busy_names:
+            lines.append(f"busy: {', '.join(sorted(busy_names))}")
+
+        # Machine breakdown (only if multiple)
+        if len(machine_workers) > 1:
             lines.append("")
-            lines.append("<b>🔌 Connectors</b>")
-            for name, info in conn_status.items():
-                running = info.get("running", False)
-                failures = info.get("consecutive_failures", 0)
-                if running and failures == 0:
-                    icon = "✅"
-                elif running:
-                    icon = "⚠️"
-                else:
-                    icon = "❌"
-                lines.append(f"  {icon} {name}")
+            for machine, workers in sorted(machine_workers.items()):
+                lines.append(f"{machine}: {len(workers)}")
+
+        if conn_parts:
+            lines.append("")
+            lines.append(" | ".join(conn_parts))
 
         if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
