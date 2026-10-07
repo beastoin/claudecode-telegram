@@ -181,3 +181,44 @@ test_tmux_mode_session_stays_alive() {
     tmux has-session -t claude-test-worker  # Still running?
 }
 ```
+
+### Bridge threading model
+
+The bridge uses a structured threading model with bounded concurrency:
+
+**Permanent threads** (always running):
+| Thread | What | Why |
+|--------|------|-----|
+| Main | `HTTPServer.serve_forever()` | Accept webhook/API requests |
+| Watchdog | `watchdog_loop()` daemon | Monitor worker health, restart dead workers |
+| Tunnel watchdog | `TunnelManager._watchdog()` daemon | Monitor tunnel/poll health |
+| Poll thread | `TunnelManager._poll_loop()` daemon | Long-poll `getUpdates` (when polling) |
+
+**Thread pools** (bounded, permanent):
+| Pool | Workers | Purpose |
+|------|---------|---------|
+| `_message_pool` | 8 | Process incoming updates (webhook or poll) |
+| `_task_pool` | 4 | Short background tasks (typing indicators, etc.) |
+
+**Conditional threads** (only when enabled):
+| Thread | When | What |
+|--------|------|------|
+| Gmail connector | `GMAIL_ENABLED=1` | Poll Gmail for manager emails |
+| GitHub connector | `BRIDGE_GHPOLL_ENABLED=1` | Poll GitHub for comments |
+
+**Short-lived threads** (spawn on demand, daemon):
+| Thread | Trigger | Duration |
+|--------|---------|----------|
+| `threading.Timer(1800s)` | Idle scan | Self-rescheduling 30min timer |
+| `threading.Timer(0.5s)` | Media group | Flush buffered photos/docs |
+| Teleport thread | `/teleport` command | Duration of rsync+restart |
+| Restart-all thread | `/restart all` | Sequential restart cycle |
+
+**Design rules:**
+- ThreadPoolExecutors bound all message processing — no unbounded `Thread()` for updates.
+- All daemon threads: no orphan threads block shutdown.
+- ThreadingHTTPServer spawns per-request threads but handlers dispatch to pools immediately.
+- Per-session `threading.Lock` serializes tmux sends (prevents interleaving).
+- Connector locks guard shared log/state data.
+
+Do NOT add new unbounded `Thread()` spawns. Use `_message_pool` for update handling and `_task_pool` for background tasks. Only create dedicated threads for permanent loops (like connectors).

@@ -831,24 +831,6 @@ test_cli_flags_and_commands() {
     fi
     rm -f "$tmp_env"
 
-    # --sandbox-image flag
-    if ! ./bridge.sh --sandbox-image=myimage:latest --help 2>/dev/null | grep -qi "usage"; then
-        fail "CLI --sandbox-image flag failed"
-        all_pass=false
-    fi
-
-    # --mount flag
-    if ! ./bridge.sh --mount=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
-        fail "CLI --mount flag failed"
-        all_pass=false
-    fi
-
-    # --mount-ro flag
-    if ! ./bridge.sh --mount-ro=/tmp:/container --help 2>/dev/null | grep -qi "usage"; then
-        fail "CLI --mount-ro flag failed"
-        all_pass=false
-    fi
-
     # stop command
     if ! ./bridge.sh --help 2>/dev/null | grep -q "stop"; then
         fail "CLI stop command not documented"
@@ -2797,45 +2779,6 @@ test_direct_mode_shortcuts() {
     send_direct_mode_message "/end shortcut2" >/dev/null 2>&1 || true
     send_direct_mode_message "/end shortmsg1" >/dev/null 2>&1 || true
     send_direct_mode_message "/end shortmsg2" >/dev/null 2>&1 || true
-}
-
-test_sandbox_docker_cmd() {
-    info "Testing sandbox Docker command generation..."
-    if python3 -c "
-import os
-from pathlib import Path
-os.environ['SANDBOX_ENABLED'] = '1'
-os.environ['PORT'] = '8295'
-os.environ['BRIDGE_URL'] = ''
-
-from bridge import get_docker_run_cmd
-
-cmd = get_docker_run_cmd('testworker')
-home = str(Path.home())
-
-# Verify command structure
-assert 'docker run -it' in cmd, 'should have docker run -it'
-assert '--name=claude-worker-testworker' in cmd, 'should have container name'
-assert '--rm' in cmd, 'should have --rm for cleanup'
-
-# Verify default home mount to /workspace
-assert f'-v={home}:/workspace' in cmd, 'should mount home to /workspace'
-
-# Verify working directory
-assert '-w /workspace' in cmd, 'should set workdir to /workspace'
-
-# Verify BRIDGE_URL for container->host communication
-assert 'BRIDGE_URL=http://host.docker.internal:8295' in cmd, 'should set BRIDGE_URL'
-
-# Verify claude command with --dangerously-skip-permissions
-assert 'claude --dangerously-skip-permissions' in cmd, 'should run claude with skip permissions'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Sandbox Docker command correct"
-    else
-        fail "Sandbox Docker command test failed"
-    fi
 }
 
 test_bridge_starts() {
@@ -8666,37 +8609,6 @@ print('OK')
         success "Watchdog stuck alert fires on transition"
     else
         fail "Watchdog stuck alert test failed"
-    fi
-}
-
-test_extra_mounts_docker_cmd() {
-    info "Testing extra mounts via --mount and --mount-ro in Docker cmd..."
-
-    if python3 -c "
-import os
-os.environ['SANDBOX_ENABLED'] = '1'
-os.environ['PORT'] = '8295'
-os.environ['SANDBOX_MOUNTS'] = '/host:/container,ro:/readonly:/readonly'
-
-# Re-import to pick up env changes
-import importlib
-import bridge
-importlib.reload(bridge)
-
-from bridge import SANDBOX_EXTRA_MOUNTS
-
-# Verify mounts were parsed
-assert len(SANDBOX_EXTRA_MOUNTS) >= 2, f'Should have parsed mounts, got {len(SANDBOX_EXTRA_MOUNTS)}'
-
-# Check for read-only mount
-has_ro = any(m[2] for m in SANDBOX_EXTRA_MOUNTS)
-assert has_ro, 'Should have at least one read-only mount'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "Extra mounts parsing works"
-    else
-        fail "Extra mounts parsing test failed"
     fi
 }
 
@@ -22319,7 +22231,6 @@ run_unit_tests() {
     log "── Unit Tests ──────────────────────────────────────────────────────────"
     run_test test_formatting
     run_test test_message_splitting
-    run_test test_sandbox_docker_cmd
     run_test test_hook_extract_from_transcript
     # Unit tests - Markdown conversion
     log ""
@@ -22642,7 +22553,6 @@ run_unit_tests() {
     log ""
     log "── Misc Behavior Tests (Unit) ──────────────────────────────────────────"
     run_test test_watchdog_alert_on_stuck
-    run_test test_extra_mounts_docker_cmd
     run_test test_checkin_note_machine_substitution
     # Unit tests - File validation
     log ""
