@@ -1,5 +1,29 @@
 ## Changelog
 
+### v0.49.0 - API endpoint redesign
+
+**Breaking:** All HTTP endpoints renamed to follow REST plural-noun convention. No backward-compatible aliases — clean cut.
+
+| Old | New | Rationale |
+|-----|-----|-----------|
+| `POST /response` | `POST /outputs` | Plural noun |
+| `POST /health-alert` | `POST /alerts` | Plural noun |
+| `POST /send` | `POST /messages` | Plural noun |
+| `POST /notify` | `POST /notifications` | Plural noun |
+| `POST /register` | `POST /workers` | POST to collection = create |
+| `POST /connectors/restart` | `POST /connectors/restarts` | Plural noun |
+| `POST /pr-comment` + `/pr-general-comment` | `POST /tools/review/comments` | Merged under `/tools/`; body has path+line → inline, else general |
+| `GET /pr-file-content` | `GET /tools/review/files` | Under `/tools/` |
+| `POST /pr-merge` | `POST /tools/review/merges` | Under `/tools/` |
+| `/guest/*` | `/guests/*` | Pluralized |
+| `/v1/{ch}/*` | `/relay/{ch}/*` | Drop fake version prefix |
+
+**Review routes under `/tools/`:** PR review endpoints moved under `/tools/review/` — generic name so future review types (code review, design review, etc.) can live alongside.
+
+**Updated consumers:** claudecode.sh hook, claudecode.py, bridge.sh, tools/review.py, experiments/mcp_server.py, experiments/manager_mcp_server.py, forge test scripts, Mac Mini hook.
+
+**Naming principle:** URL = plural noun (resource collection), body = detail. Matches Sean Goedecke's "boring is better" API design guidance.
+
 ### v0.48.0 - Tunnel lifecycle migration to Python
 
 **Architecture:** Migrated tunnel management (cloudflared, webhook, poll fallback, watchdog) from bridge.sh (~250 lines bash) into a new Python module with full DI seams.

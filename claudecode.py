@@ -943,7 +943,7 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
         }
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
-            f"{bridge_url}/response", data=data,
+            f"{bridge_url}/outputs", data=data,
             headers={"Content-Type": "application/json"},
         )
         with _urlopen(req, timeout=5) as r:

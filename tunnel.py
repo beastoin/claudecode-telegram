@@ -225,9 +225,10 @@ class TunnelManager:
             # Monitor cloudflared process health
             if self._tunnel_proc is not None:
                 problem = self._check_tunnel_health()
-                if problem:
-                    _log(_LOG_WARN, "tunnel", f"Tunnel {problem}, restarting...")
-                    self._on_notify(f"⚠️ Tunnel connection lost ({problem}). Reconnecting...")
+                if problem == "process died":
+                    # Cloudflared crashed — must restart to get a new one
+                    _log(_LOG_WARN, "tunnel", "Tunnel process died, restarting...")
+                    self._on_notify("⚠️ Tunnel process died. Reconnecting...")
                     self._state = TunnelState.RESTARTING
 
                     new_url = self._restart_with_retry()
@@ -250,6 +251,15 @@ class TunnelManager:
                         _log(_LOG_WARN, "tunnel", "Tunnel restart failed after retries")
                         self._start_poll_fallback()
                         continue
+                elif problem == "unreachable":
+                    # Tunnel process alive but URL not reachable — likely
+                    # DNS propagation delay.  Do NOT restart (that creates
+                    # a new URL and resets DNS from scratch).  Fall back to
+                    # polling; _periodic_webhook_check restores webhook
+                    # once DNS resolves.
+                    if not self._polling_active:
+                        _log(_LOG_WARN, "tunnel", "Tunnel URL unreachable (DNS?), falling back to polling")
+                        self._start_poll_fallback()
 
             # Monitor poll fallback health
             if self._polling_active and self._poll_thread and not self._poll_thread.is_alive():
@@ -257,10 +267,27 @@ class TunnelManager:
                 self._poll_stop.clear()
                 self._start_poll_fallback()
 
-            # Periodic webhook health check
+            # Periodic health checks
             check_counter = (check_counter + 1) % self._config.webhook_check_cycles
-            if check_counter == 0 and self._tunnel_url:
-                self._periodic_webhook_check()
+            if check_counter == 0:
+                if self._tunnel_url:
+                    self._periodic_webhook_check()
+                elif self._polling_active and self._tunnel_proc is None and self._config.mode == "auto":
+                    # Cloudflared never started (e.g. Cloudflare 429 rate limit).
+                    # Periodically retry starting it.
+                    _log(_LOG_INFO, "tunnel", "Retrying cloudflared start...")
+                    url = self._start_cloudflared()
+                    if url:
+                        self._tunnel_url = url
+                        self._save_tunnel_url(url)
+                        _log(_LOG_INFO, "tunnel", f"Tunnel established: {url}")
+                        self._stop_poll_fallback()
+                        if self._set_webhook_with_retry(url):
+                            self._state = TunnelState.RUNNING
+                            self._on_notify("✅ Tunnel established (webhook active)")
+                        else:
+                            _log(_LOG_WARN, "tunnel", "Webhook DNS not ready after tunnel start")
+                            self._start_poll_fallback()
 
     # ── Cloudflared management ────────────────────────────────────────
 
@@ -321,22 +348,35 @@ class TunnelManager:
         return proc is not None and proc.poll() is None
 
     def _is_tunnel_reachable(self) -> bool:
-        """HTTP probe the tunnel URL."""
+        """HTTP probe the tunnel URL.
+
+        Any HTTP response (even 4xx/5xx) proves the tunnel is working —
+        a 501 from our bridge for HEAD is still reachable.  Only network-
+        level failures (DNS, timeout, connection refused) mean unreachable.
+        """
         if not self._tunnel_url:
             return False
         try:
             req = urllib.request.Request(self._tunnel_url, method="HEAD")
             self._urlopen(req, timeout=self._config.reachability_timeout)
             return True
+        except urllib.error.HTTPError:
+            # Got an HTTP response — tunnel is reachable even if the
+            # bridge returns 501 (no do_HEAD) or any other status code.
+            return True
         except (urllib.error.URLError, OSError, TimeoutError):
             return False
 
     def _check_tunnel_health(self) -> str:
-        """Returns a problem description, or '' if healthy."""
+        """Returns a problem description, or '' if healthy.
+
+        Only 'process died' triggers a restart — DNS/reachability failures
+        should NOT kill the cloudflared process because getting a new URL
+        resets DNS propagation (vicious cycle).
+        """
         if not self._is_tunnel_alive():
             return "process died"
         if not self._is_tunnel_reachable():
-            self._kill_cloudflared()
             return "unreachable"
         return ""
 

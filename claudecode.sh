@@ -118,7 +118,7 @@ hook_stop() {
     if [ ! -f "$SESSION_DIR/chat_id" ]; then exit 0; fi
     if [ ! -f "$TRANSCRIPT_PATH" ]; then exit 0; fi
 
-    BRIDGE_ENDPOINT=$(bridge_endpoint /response)
+    BRIDGE_ENDPOINT=$(bridge_endpoint /outputs)
     HOOK_LOG="/tmp/hook-debug-${BRIDGE_SESSION}.log"
     JSONL_HEALTHY=true
     TEXT=""
@@ -182,7 +182,7 @@ hook_stop() {
 
     # JSONL health alert (rate-limited by bridge)
     if ! $JSONL_HEALTHY; then
-        curl -s -m 3 -X POST "$(bridge_endpoint /health-alert)" \
+        curl -s -m 3 -X POST "$(bridge_endpoint /alerts)" \
             -H "Content-Type: application/json" \
             -d "{\"worker\":\"$BRIDGE_SESSION\",\"issue\":\"jsonl_stale\",\"transcript_age\":$TRANSCRIPT_AGE,\"transcript_path\":\"$TRANSCRIPT_PATH\"}" \
             >/dev/null 2>&1 &

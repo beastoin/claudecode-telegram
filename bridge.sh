@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.48.0"
+VERSION="0.49.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,7 +298,7 @@ bridge_notify() {
     local port="$1" message="$2"
     local body
     body=$(printf '{"text":"%s"}' "$message")
-    curl -s -X POST "http://localhost:$port/notify" \
+    curl -s -X POST "http://localhost:$port/notifications" \
         -H "Content-Type: application/json" \
         -d "$body" >/dev/null 2>&1 || true
 }
@@ -937,8 +937,16 @@ show_node_status() {
         fi
     fi
 
-    # Check poll fallback process
-    if pgrep -af "getUpdates.*bot" 2>/dev/null | grep -q "localhost:${port:-0}"; then
+    # Check poll fallback via bridge health endpoint (internal Python thread)
+    if $bridge_http_ok; then
+        local tunnel_health
+        tunnel_health=$(curl -sf --max-time 3 "http://localhost:$port/health/tunnel" 2>/dev/null || echo '{}')
+        if echo "$tunnel_health" | grep -q '"polling_active": true\|"polling_active":true'; then
+            poll_running=true
+        fi
+    fi
+    # Legacy: also check external poll process (bridge.sh-managed fallback)
+    if ! $poll_running && pgrep -af "getUpdates.*bot" 2>/dev/null | grep -q "localhost:${port:-0}"; then
         poll_running=true
     fi
 
@@ -1782,7 +1790,7 @@ for name, info in data.items():
 
             log "Restarting $name connector..."
             local result
-            if ! result=$(curl -sf -X POST "http://127.0.0.1:$port/connectors/restart" \
+            if ! result=$(curl -sf -X POST "http://127.0.0.1:$port/connectors/restarts" \
                 -H "Content-Type: application/json" \
                 -d "{\"name\": \"$name\"}" 2>&1); then
                 error "Failed to restart $name connector"

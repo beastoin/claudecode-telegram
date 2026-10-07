@@ -3,7 +3,7 @@ set -euo pipefail
 
 # E2E test: forge worker binary → real bridge (TRANSPORT=local)
 # Proves the full loop: LocalTransport starts without BOT_TOKEN,
-# forge binary registers via POST /register, watchdog heartbeats via GET /
+# forge binary registers via POST /workers, watchdog heartbeats via GET /
 #
 # Usage: ./test-e2e-bridge.sh
 
@@ -155,12 +155,12 @@ if echo "$HEALTH" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'endpoints' in d, 'missing endpoints'
-assert 'POST /register' in d['endpoints'], 'missing /register endpoint'
+assert 'POST /workers' in d['endpoints'], 'missing /register endpoint'
 " 2>/dev/null; then
-    echo "  ✓ bridge returns API index with /register endpoint"
+    echo "  ✓ bridge returns API index with /workers endpoint"
     PASS=$((PASS + 1))
 else
-    echo "  ✗ bridge returns API index with /register endpoint"
+    echo "  ✗ bridge returns API index with /workers endpoint"
     FAIL=$((FAIL + 1))
 fi
 
@@ -186,11 +186,11 @@ assert "tmux session exists" tmux has-session -t "$SESSION_NAME"
 # 6b: Bridge received registration (check bridge stdout log)
 assert_log_contains "bridge logged forge registration" "$BRIDGE_LOG" "Forge worker registered: e2etest"
 
-# 6c: POST /register returns 200 (direct test)
-REG_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$BRIDGE_PORT/register" \
+# 6c: POST /workers returns 200 (direct test)
+REG_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$BRIDGE_PORT/workers" \
     -H "Content-Type: application/json" \
     -d '{"Name":"manual-test","Host":"vps","Version":"0.0.1"}')
-assert "POST /register returns 200" test "$REG_CODE" == "200"
+assert "POST /workers returns 200" test "$REG_CODE" == "200"
 
 # 6d: Working directory was created
 assert "workdir created" test -d "$TEST_DIR/forge-e2e-workdir"

@@ -192,7 +192,7 @@ assert "tmux session exists" tmux has-session -t "$SESSION_NAME"
 
 # 6b: Worker registered with bridge
 assert_file_contains "bridge received health check" "$MOCK_LOG" "GET /"
-assert_file_contains "bridge received registration" "$MOCK_LOG" "POST /register"
+assert_file_contains "bridge received registration" "$MOCK_LOG" "POST /workers"
 assert_file_contains "registration contains worker name" "$MOCK_LOG" '"Name":"e2etest"'
 
 # 6c: Working directory was created

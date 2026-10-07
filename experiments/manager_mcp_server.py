@@ -32,7 +32,7 @@ def http_json(method, url, body=None):
         return json.loads(raw) if raw else {}
 
 def register():
-    http_json("POST", f"{BRIDGE_URL}/register", {
+    http_json("POST", f"{BRIDGE_URL}/workers", {
         "name": NAME,
         "host": HOST,
         "version": "manager-mcp-0.1",

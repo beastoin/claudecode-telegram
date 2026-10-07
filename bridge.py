@@ -282,7 +282,7 @@ class MentionRouteResult(TypedDict):
 # ── Endpoint body TypedDicts (HTTP POST payloads) ────────────────────
 
 class HookResponseBody(TypedDict, total=False):
-    """POST /response — Claude hook forwarding a response."""
+    """POST /outputs — Claude hook forwarding a response."""
     session: str
     text: str
     source: str
@@ -299,7 +299,7 @@ class HookResponseBody(TypedDict, total=False):
 
 
 class HealthAlertBody(TypedDict, total=False):
-    """POST /health-alert — worker health alert."""
+    """POST /alerts — worker health alert."""
     worker: str
     issue: str
     transcript_age: int
@@ -308,7 +308,7 @@ class HealthAlertBody(TypedDict, total=False):
 
 
 class ForgeRegisterBody(TypedDict, total=False):
-    """POST /register — register a remote worker (packaged or forge)."""
+    """POST /workers — register a remote worker (packaged or forge)."""
     Name: str
     name: str
     Host: str
@@ -522,16 +522,26 @@ API_ENDPOINTS = {
     "GET /workers": "List active workers with send commands",
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
     "GET /health/workers": "Watchdog state for all workers",
+    "GET /health/tunnel": "Tunnel and poll fallback state",
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
     "GET /transcript/<name>/updates": "Poll for new transcript entries (returns {total, new})",
-    "GET /pr-review/<pr_num>": "PR review viewer with diff, search, file navigation",
-    "POST /send": "Send a prompt to a worker: {worker, message, from}; worker-to-worker HTTP path",
-    "POST /response": "Hook only: publish this worker's own response to Telegram",
-    "POST /notify": "Send notification to all admin chats",
-    "POST /health-alert": "Hook: JSONL health alert (stale transcript detection)",
-    "POST /register": "Forge/callback worker registration (name, host, version, tools, callback_url)",
+    "GET /tools/review/<pr_num>": "PR review viewer with diff, search, file navigation",
+    "POST /messages": "Send a prompt to a worker: {worker, message, from}",
+    "POST /outputs": "Hook only: publish this worker's own response to Telegram",
+    "POST /notifications": "Send notification to all admin chats",
+    "POST /alerts": "Hook: JSONL health alert (stale transcript detection)",
+    "POST /workers": "Worker registration (name, host, version, tools, callback_url)",
     "GET /connectors": "Connector status (gmail, github — running, failures, config)",
-    "POST /connectors/restart": "Restart a connector: {name: 'gmail'|'github'}",
+    "POST /connectors/restarts": "Restart a connector: {name: 'gmail'|'github'}",
+    "POST /tools/review/comments": "Post a PR comment (inline if path+line in body, else general)",
+    "GET /tools/review/files": "Fetch file content from GitHub for diff expansion",
+    "POST /tools/review/merges": "Merge a PR via GitHub API",
+    "GET /guests": "List active guest sessions",
+    "POST /guests": "Register a temporary guest agent session",
+    "DELETE /guests?token=<token>": "Disconnect a guest session",
+    "GET /relay/<channel_id>": "Relay channel guide, messages, status",
+    "POST /relay/<channel_id>/send": "Guest sends message via relay channel",
+    "POST /relay/<channel_id>/reply": "Worker replies via relay channel",
 }
 
 
@@ -3727,7 +3737,7 @@ class WorkerManager:
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
             "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
-            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. Never use POST /response to message another worker; /response only publishes your own worker output to Telegram. "
+            f"MESSAGING WORKERS: Run `curl -s \"$BRIDGE_URL/workers?from={name}\"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. Never use POST /outputs to message another worker; /outputs only publishes your own worker output to Telegram. "
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f"WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s \"$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project\"`. "
@@ -5196,13 +5206,13 @@ def _relay_base_url() -> str:
 
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
     """Generate the guideline link URL for a relay channel."""
-    return f"{_relay_base_url()}/v1/{channel_id}?token={guest_token}"
+    return f"{_relay_base_url()}/relay/{channel_id}?token={guest_token}"
 
 
 
 def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
     """Generate markdown guide for a relay channel."""
-    base = f"{_relay_base_url()}/v1/{channel['id']}"
+    base = f"{_relay_base_url()}/relay/{channel['id']}"
     worker_name = channel["worker"]
     return f"""# Chat Channel to {worker_name}
 
@@ -5272,7 +5282,7 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
         return None, None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
-    base = f"{_relay_base_url()}/v1/{channel_id}"
+    base = f"{_relay_base_url()}/relay/{channel_id}"
     reply_token = channel["reply_token"]
 
     envelope = (
@@ -7356,7 +7366,7 @@ def _fanout_channel_message(channel_id: str, from_member: str,
     """Deliver a channel message to all members except the sender.
 
     Used by both CommandRouter (manager sends via /ch) and GuestEndpointsMixin
-    (guest sends via POST /guest/send).
+    (guest sends via POST /guests/send).
     """
     tagged = f"[{channel_id} from {from_member}] {text}"
     for member_key, minfo in members_snapshot.items():
@@ -7834,7 +7844,7 @@ class CommandRouter:
             # Clear local session ID cache — the target may create a new session
             # (e.g., different project, expired session). Without clearing, VPS
             # returns the stale ID instead of SSH-fetching the real one from target.
-            # The hook's /response POST will repopulate it on first response.
+            # The hook's /outputs POST will repopulate it on first response.
             clear_claude_session_id(name)
 
             # Pre-trust the target CWD on the target machine so Claude Code
@@ -10019,7 +10029,7 @@ class CommandRouter:
 
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
 
-        # Run review.py — pass full URL (with fragment) so it can highlight linked comment
+        # Run tools/review.py — pass full URL (with fragment) so it can highlight linked comment
         script_path = Path(__file__).parent / "review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
@@ -10042,7 +10052,7 @@ class CommandRouter:
             token = secrets.token_urlsafe(32)
             tokens.add_pr_review(token, pr_num, owner, repo)
             base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-            url = f"{base_url}/pr-review/{pr_num}?token={token}"
+            url = f"{base_url}/tools/review/{pr_num}?token={token}"
             self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
         return True
 
@@ -11879,7 +11889,7 @@ class Handler(BaseHTTPRequestHandler):
         return guest
 
     def handle_guest_register(self, body: bytes = b"") -> None:
-        """POST /guest — register as a temporary guest agent."""
+        """POST /guests — register as a temporary guest agent."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
         except (json.JSONDecodeError, ValueError):
@@ -11922,8 +11932,8 @@ class Handler(BaseHTTPRequestHandler):
 
         base_url = _relay_base_url()
 
-        inbox_url = f"/guest/inbox?token={token}"
-        send_url = f"/guest/send?token={token}"
+        inbox_url = f"/guests/inbox?token={token}"
+        send_url = f"/guests/send?token={token}"
 
         listen_script = (
             f'python3 -c "\n'
@@ -11933,7 +11943,7 @@ class Handler(BaseHTTPRequestHandler):
             f"print('[listener] connected — waiting for messages',flush=True)\n"
             f"while True:\n"
             f"    try:\n"
-            f"        q=URL+'/guest/inbox?token='+TOKEN+('&after='+last if last else '')\n"
+            f"        q=URL+'/guests/inbox?token='+TOKEN+('&after='+last if last else '')\n"
             f"        d=json.loads(u.urlopen(u.Request(q),timeout=TIMEOUT_HTTP_API).read())\n"
             f"        for m in d.get('messages',[]):\n"
             f"            print(m.get('from','?')+': '+m['text'],flush=True)\n"
@@ -11967,7 +11977,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_guest_send(self, body: bytes = b"") -> None:
-        """POST /guest/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
+        """POST /guests/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
 
         Body: {"to": "lee" | ["lee","kai","#ops"], "text": "..."}
         Legacy: {"worker": "lee", "text": "..."} still supported.
@@ -12094,7 +12104,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
-        """POST /guest/reply — worker sends reply to a guest's inbox."""
+        """POST /guests/reply — worker sends reply to a guest's inbox."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {guest}
         except (json.JSONDecodeError, ValueError):
@@ -12121,7 +12131,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "message_id": msg_id})
 
     def handle_guest_inbox(self, parsed: ParseResult) -> None:
-        """GET /guest/inbox?token=xxx[&after=gm_xxx] — poll for messages."""
+        """GET /guests/inbox?token=xxx[&after=gm_xxx] — poll for messages."""
         guest = self._guest_auth(parsed)
         if not guest:
             return
@@ -12136,7 +12146,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_guest_status(self, parsed: ParseResult) -> None:
-        """GET /guest/status?token=xxx — check session validity."""
+        """GET /guests/status?token=xxx — check session validity."""
         guest = self._guest_auth(parsed)
         if not guest:
             return
@@ -12171,7 +12181,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "guests": guests_list})
 
     def handle_guest_disconnect(self, parsed: ParseResult) -> None:
-        """DELETE /guest?token=xxx — disconnect guest session."""
+        """DELETE /guests?token=xxx — disconnect guest session."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [""])[0]
         if not token:
@@ -12521,7 +12531,7 @@ class Handler(BaseHTTPRequestHandler):
         return params.get("token", "")
 
     def handle_relay_get(self, channel_id: str, action: str | None, parsed: ParseResult) -> None:
-        """Handle GET /v1/<channel_id>[/action]."""
+        """Handle GET /relay/<channel_id>[/action]."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12560,7 +12570,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"unknown action: {action}"})
 
     def handle_relay_send(self, channel_id: str, body: bytes = b"") -> None:
-        """Handle POST /v1/<channel_id>/send — guest sends message to worker."""
+        """Handle POST /relay/<channel_id>/send — guest sends message to worker."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12598,7 +12608,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_relay_reply(self, channel_id: str, body: bytes = b"") -> None:
-        """Handle POST /v1/<channel_id>/reply — worker replies to guest."""
+        """Handle POST /relay/<channel_id>/reply — worker replies to guest."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12690,6 +12700,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def handle_pr_review_comments(self, body: bytes) -> None:
+        """POST /tools/review/comments — dispatch PR comments.
+
+        Inline comment when body has path + line fields, general comment otherwise.
+        Merges the old /pr-comment and /pr-general-comment endpoints.
+        """
+        try:
+            data = cast(dict[str, object], json.loads(body))
+        except (json.JSONDecodeError, ValueError):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Invalid JSON")
+            return
+        if _str_field(data, "path") and _int_field(data, "line"):
+            self.handle_pr_comment(body)
+        else:
+            self.handle_pr_general_comment(body)
+
     def handle_pr_general_comment(self, body: bytes) -> None:
         """Post a general (non-inline) comment on a PR via GitHub API."""
         try:
@@ -12738,7 +12766,7 @@ class Handler(BaseHTTPRequestHandler):
             notify_text = f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}"
             import urllib.request
             req = urllib.request.Request(
-                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
+                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notifications",
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             _urlopen(req, timeout=TIMEOUT_TMUX_SEND)
@@ -12812,7 +12840,7 @@ class Handler(BaseHTTPRequestHandler):
             notify_text = f"\u2705 PR #{pr_num} merged ({merge_method}) via review page"
             import urllib.request
             req = urllib.request.Request(
-                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notify",
+                f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notifications",
                 data=json.dumps({"text": notify_text}).encode(),
                 headers={"Content-Type": "application/json"})
             _urlopen(req, timeout=TIMEOUT_TMUX_SEND)
@@ -13255,7 +13283,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_health_alert(self, body: bytes = b"") -> None:
         """Handle JSONL health alerts from stop hook.
 
-        POST /health-alert — hook reports a worker's JSONL transcript is stale.
+        POST /alerts — hook reports a worker's JSONL transcript is stale.
         Body: {"worker": "name", "issue": "jsonl_stale", "transcript_age": 3600, ...}
         Sends a one-time Telegram alert to admin so they can restart the worker.
         """
@@ -13281,7 +13309,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_forge_register(self, body: bytes = b"") -> None:
         """Accept registration from forge-built worker binaries.
 
-        POST /register — worker announces itself to the bridge.
+        POST /workers — worker announces itself to the bridge.
         Body: {"Name": "workerName", "Host": "hostname", "Version": "1.0.0", "Tools": {...}}
         Callback workers may include {"callback_url": "http://host:port"}.
         Response: {"ok": true}
@@ -13346,7 +13374,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_json(200, _get_connectors_status())
 
     def handle_connectors_restart(self, body: bytes = b"") -> None:
-        """POST /connectors/restart — restart a connector by name.
+        """POST /connectors/restarts — restart a connector by name.
 
         Body: {"name": "gmail"} or {"name": "github"}
         """
@@ -13365,7 +13393,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_send_endpoint(self, body: bytes = b"") -> None:
         """Send a prompt to a worker.
 
-        POST /send
+        POST /messages
         Body: {"worker": "name", "message": "text", "from": "system"}
         The "from" field (default "system") is prefixed to the message.
         """
@@ -13396,27 +13424,27 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         })
 
     def _validate_response_source(self, data: HookResponseBody, session_name: str) -> str:
-        """Return an error string when /response looks like worker messaging."""
+        """Return an error string when /outputs looks like worker messaging."""
         raw = cast(dict[str, object], data)
         messaging_fields = [key for key in ("worker", "to", "target", "message", "from") if key in raw]
         if messaging_fields:
             return (
-                "POST /response is hook-only and cannot address workers. "
+                "POST /outputs is hook-only and cannot address workers. "
                 f"Unexpected messaging fields: {', '.join(messaging_fields)}. "
-                "Use POST /send with {worker, from, message}."
+                "Use POST /messages with {worker, from, message}."
             )
 
         source = _str_field(data, "source").strip()
         if not source:
             return (
-                "Missing source. POST /response is hook-only; worker output must identify "
-                "its own source. To message another worker, use POST /send."
+                "Missing source. POST /outputs is hook-only; worker output must identify "
+                "its own source. To message another worker, use POST /messages."
             )
         if source != session_name:
             return (
                 f"Source/session mismatch: source={source!r}, session={session_name!r}. "
-                "POST /response only accepts a worker's own output. To message another "
-                "worker, use POST /send."
+                "POST /outputs only accepts a worker's own output. To message another "
+                "worker, use POST /messages."
             )
         return ""
 
@@ -13442,7 +13470,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
             source_error = self._validate_response_source(data, session_name)
             if source_error:
-                _log(_LOG_WARN, "hook", f"Rejected /response for {session_name}: {source_error}")
+                _log(_LOG_WARN, "hook", f"Rejected /outputs for {session_name}: {source_error}")
                 self._send_text(403, source_error)
                 return
 
@@ -13549,6 +13577,16 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             return
 
         self._send_unknown_endpoint("GET", parsed.path)
+
+    def do_HEAD(self) -> None:
+        """Handle HEAD requests — used by the tunnel watchdog to probe reachability."""
+        if urlparse(self.path).path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
 
     def do_DELETE(self) -> None:
         """Handle all incoming HTTP DELETE requests via EndpointRouter dispatch."""
@@ -13735,6 +13773,14 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.end_headers()
             self.wfile.write(str(e).encode())
 
+    def handle_health_tunnel_endpoint(self) -> None:
+        """Return tunnel/poll state as JSON — used by bridge.sh status."""
+        if tunnel_manager is not None:
+            data = tunnel_manager.status()
+        else:
+            data = {"mode": "none", "state": "disabled", "tunnel_url": "", "polling_active": False}
+        self._send_json(200, data)
+
 
 
 
@@ -13769,21 +13815,20 @@ def _setup_endpoint_routes() -> None:
     r = _endpoint_router
 
     # POST endpoints (exact match — match is always None)
-    r.post("/response", lambda h, b, _m: h.handle_hook_response(b))
-    r.post("/notify", lambda h, b, _m: h.handle_notify(b))
-    r.post("/send", lambda h, b, _m: h.handle_send_endpoint(b))
-    r.post("/pr-comment", lambda h, b, _m: h.handle_pr_comment(b))
-    r.post("/pr-general-comment", lambda h, b, _m: h.handle_pr_general_comment(b))
-    r.post("/pr-merge", lambda h, b, _m: h.handle_pr_merge(b))
-    r.post("/register", lambda h, b, _m: h.handle_forge_register(b))
-    r.post("/guest", lambda h, b, _m: h.handle_guest_register(b))
+    r.post("/outputs", lambda h, b, _m: h.handle_hook_response(b))
+    r.post("/notifications", lambda h, b, _m: h.handle_notify(b))
+    r.post("/messages", lambda h, b, _m: h.handle_send_endpoint(b))
+    r.post("/tools/review/comments", lambda h, b, _m: h.handle_pr_review_comments(b))
+    r.post("/tools/review/merges", lambda h, b, _m: h.handle_pr_merge(b))
+    r.post("/workers", lambda h, b, _m: h.handle_forge_register(b))
+    r.post("/guests", lambda h, b, _m: h.handle_guest_register(b))
     r.post("/channels", lambda h, b, _m: h.handle_channel_create(b))
-    r.post("/health-alert", lambda h, b, _m: h.handle_health_alert(b))
-    r.post("/connectors/restart", lambda h, b, _m: h.handle_connectors_restart(b))
+    r.post("/alerts", lambda h, b, _m: h.handle_health_alert(b))
+    r.post("/connectors/restarts", lambda h, b, _m: h.handle_connectors_restart(b))
 
     # POST endpoints (prefix/pattern match)
-    r.post_pattern(r'^/guest/send', lambda h, b, m: h.handle_guest_send(b))
-    r.post_pattern(r'^/guest/reply', lambda h, b, m: h.handle_guest_reply(b))
+    r.post_pattern(r'^/guests/send', lambda h, b, m: h.handle_guest_send(b))
+    r.post_pattern(r'^/guests/reply', lambda h, b, m: h.handle_guest_reply(b))
     r.post_pattern(
         r'^/channels/([^/]+)/members$',
         lambda h, b, m: h.handle_channel_members(_mg(m), b)
@@ -13793,11 +13838,11 @@ def _setup_endpoint_routes() -> None:
         lambda h, b, m: h.handle_channel_send(_mg(m), b)
     )
     r.post_pattern(
-        r'^/v1/([^/]+)/send$',
+        r'^/relay/([^/]+)/send$',
         lambda h, b, m: h.handle_relay_send(_mg(m), b)
     )
     r.post_pattern(
-        r'^/v1/([^/]+)/reply$',
+        r'^/relay/([^/]+)/reply$',
         lambda h, b, m: h.handle_relay_reply(_mg(m), b)
     )
 
@@ -13807,16 +13852,17 @@ def _setup_endpoint_routes() -> None:
     r.get("/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
     r.get("/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
     r.get("/health/workers", lambda h, p, _m: h.handle_health_workers_endpoint())
+    r.get("/health/tunnel", lambda h, p, _m: h.handle_health_tunnel_endpoint())
     r.get("/connectors", lambda h, p, _m: h.handle_connectors_status())
     r.get("/channels", lambda h, p, _m: h.handle_channels_list(p))
-    r.get("/pr-file-content", lambda h, p, _m: h.handle_pr_file_content(p))
+    r.get("/tools/review/files", lambda h, p, _m: h.handle_pr_file_content(p))
     r.get("/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
 
     # GET endpoints (pattern match) — order matters for prefix collisions
-    r.get_pattern(r'^/guest/inbox', lambda h, p, m: h.handle_guest_inbox(p))
-    r.get_pattern(r'^/guest/status', lambda h, p, m: h.handle_guest_status(p))
+    r.get_pattern(r'^/guests/inbox', lambda h, p, m: h.handle_guest_inbox(p))
+    r.get_pattern(r'^/guests/status', lambda h, p, m: h.handle_guest_status(p))
     r.get_pattern(
-        r'^/v1/([^/]+)(?:/(.+))?$',
+        r'^/relay/([^/]+)(?:/(.+))?$',
         lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p)
     )
     r.get_pattern(
@@ -13824,10 +13870,10 @@ def _setup_endpoint_routes() -> None:
         lambda h, p, m: h.handle_channel_messages(_mg(m), p)
     )
     r.get_pattern(r'^/transcript/', lambda h, p, m: h.handle_transcript_endpoint(p))
-    r.get_pattern(r'^/pr-review/', lambda h, p, m: h.handle_pr_review_endpoint(p))
+    r.get_pattern(r'^/tools/review/', lambda h, p, m: h.handle_pr_review_endpoint(p))
 
     # DELETE endpoints
-    r.delete("/guest", lambda h, p, _m: h.handle_guest_disconnect(p))
+    r.delete("/guests", lambda h, p, _m: h.handle_guest_disconnect(p))
     r.delete_pattern(
         r'^/channels/([^/]+)$',
         lambda h, p, m: h.handle_channel_delete(_mg(m))
@@ -13980,7 +14026,7 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     """Print startup configuration summary to stdout."""
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
-    print(f"Hook endpoint: http://localhost:{PORT}/response")
+    print(f"Hook endpoint: http://localhost:{PORT}/outputs")
     print(f"Active: {state.active or 'none'}")
     print(f"Sessions: {list(registered.keys()) or 'none'}")
     if WEBHOOK_SECRET:

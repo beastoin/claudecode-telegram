@@ -26,7 +26,7 @@ def test_relay_guide_url_format():
 
     ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
     url = bridge.relay_guide_url(ch['id'], guest_token)
-    assert '/v1/' in url, f'URL must contain /v1/: {url}'
+    assert '/relay/' in url, f'URL must contain /relay/: {url}'
     assert ch['id'] in url, f'URL must contain channel ID: {url}'
     assert 'token=' in url, f'URL must contain token param: {url}'
     assert guest_token in url, f'URL must contain actual token: {url}'

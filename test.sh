@@ -250,7 +250,7 @@ kill_test_bridge() {
     sleep 0.3
 }
 
-# curl wrapper for /response and /notify endpoints
+# curl wrapper for /outputs and /notifications endpoints
 hook_curl() {
     local url="$1"; shift
     local body="$1"; shift
@@ -3187,15 +3187,15 @@ sys.exit(0 if name in cmds else 1)
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_notify_endpoint() {
-    info "Testing /notify endpoint..."
+    info "Testing /notifications endpoint..."
 
     local result
-    result=$(hook_curl "http://localhost:$PORT/notify" '{"text":"Test notification"}')
+    result=$(hook_curl "http://localhost:$PORT/notifications" '{"text":"Test notification"}')
 
     if echo "$result" | grep -q "Sent to"; then
-        success "/notify endpoint works"
+        success "/notifications endpoint works"
     else
-        fail "/notify endpoint failed: $result"
+        fail "/notifications endpoint failed: $result"
     fi
 }
 
@@ -3414,7 +3414,7 @@ print('OK')
 }
 
 test_response_with_image_tags() {
-    info "Testing /response endpoint with image tags..."
+    info "Testing /outputs endpoint with image tags..."
 
     # Create a session
     send_message "/hire imageresponsetest" >/dev/null
@@ -3428,18 +3428,18 @@ test_response_with_image_tags() {
     # Test response with image tag (image won't exist, but parsing should work)
     local result body
     body='{"session":"imageresponsetest","source":"imageresponsetest","text":"Here is the result [[image:/tmp/nonexistent.png|test caption]]"}'
-    result=$(hook_curl "http://localhost:$PORT/response" "$body")
+    result=$(hook_curl "http://localhost:$PORT/outputs" "$body")
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for image handling attempt
         sleep 0.3
         if grep -q "imageresponsetest" "$BRIDGE_LOG" 2>/dev/null; then
-            success "/response endpoint handles image tags"
+            success "/outputs endpoint handles image tags"
         else
-            fail "/response endpoint did not process message"
+            fail "/outputs endpoint did not process message"
         fi
     else
-        fail "/response with image tags failed: $result"
+        fail "/outputs with image tags failed: $result"
     fi
 
     # Cleanup
@@ -3447,7 +3447,7 @@ test_response_with_image_tags() {
 }
 
 test_response_endpoint() {
-    info "Testing /response endpoint (hook -> bridge -> Telegram)..."
+    info "Testing /outputs endpoint (hook -> bridge -> Telegram)..."
 
     # Use real chat_id if TEST_CHAT_ID provided (for full e2e verification)
     local test_chat_id="$CHAT_ID"
@@ -3464,34 +3464,34 @@ test_response_endpoint() {
     date +%s > "$session_dir/pending"
     echo "$test_chat_id" > "$session_dir/chat_id"
 
-    # Simulate hook calling /response endpoint
+    # Simulate hook calling /outputs endpoint
     local result body
     body='{"session":"responsetest","source":"responsetest","text":"Test response from hook"}'
-    result=$(hook_curl "http://localhost:$PORT/response" "$body")
+    result=$(hook_curl "http://localhost:$PORT/outputs" "$body")
 
     if [[ "$result" == "OK" ]]; then
         # Check bridge log for success
         sleep 0.3
         if grep -q "Response sent: responsetest -> Telegram OK" "$BRIDGE_LOG" 2>/dev/null; then
             if [[ "$expect_real" == "true" ]]; then
-                success "/response endpoint sends to Telegram (check your Telegram!)"
+                success "/outputs endpoint sends to Telegram (check your Telegram!)"
             else
-                success "/response endpoint sends to Telegram"
+                success "/outputs endpoint sends to Telegram"
             fi
         else
             # Check if there was an API error (expected with fake chat_id)
             if grep -q "Telegram API error" "$BRIDGE_LOG" 2>/dev/null; then
                 if [[ "$expect_real" == "true" ]]; then
-                    fail "/response endpoint failed to send (check TEST_REAL_CHAT_ID)"
+                    fail "/outputs endpoint failed to send (check TEST_REAL_CHAT_ID)"
                 else
-                    success "/response endpoint works (API error expected with test chat_id)"
+                    success "/outputs endpoint works (API error expected with test chat_id)"
                 fi
             else
-                fail "/response endpoint did not log send attempt"
+                fail "/outputs endpoint did not log send attempt"
             fi
         fi
     else
-        fail "/response endpoint failed: $result"
+        fail "/outputs endpoint failed: $result"
     fi
 
     # Cleanup
@@ -3564,7 +3564,7 @@ test_last_active_persistence() {
 }
 
 test_response_without_pending() {
-    info "Testing /response works without pending file (v0.6.2 behavior)..."
+    info "Testing /outputs works without pending file (v0.6.2 behavior)..."
 
     # Create a session for this test
     send_message "/hire nopendingtest" >/dev/null
@@ -3578,15 +3578,15 @@ test_response_without_pending() {
     # Explicitly ensure no pending file
     rm -f "$session_dir/pending"
 
-    # Simulate hook calling /response endpoint
+    # Simulate hook calling /outputs endpoint
     local result body
     body='{"session":"nopendingtest","source":"nopendingtest","text":"Test without pending"}'
-    result=$(hook_curl "http://localhost:$PORT/response" "$body")
+    result=$(hook_curl "http://localhost:$PORT/outputs" "$body")
 
     if [[ "$result" == "OK" ]]; then
-        success "/response works without pending file (proactive messaging enabled)"
+        success "/outputs works without pending file (proactive messaging enabled)"
     else
-        fail "/response without pending failed: $result"
+        fail "/outputs without pending failed: $result"
     fi
 
     # Cleanup
@@ -5268,7 +5268,7 @@ finally:
 }
 
 test_checkin_instructions_warn_against_response_misuse() {
-    info "Testing checkin instructions warn against /response for w2w..."
+    info "Testing checkin instructions warn against /outputs for w2w..."
 
     if python3 -c "
 import sys; sys.path.insert(0, '.')
@@ -5276,13 +5276,13 @@ import bridge
 
 welcome = bridge.worker_manager._build_welcome('finn', bridge.get_backend('claude'))
 assert 'send_example' in welcome, welcome
-assert 'Never use POST /response to message another worker' in welcome, welcome
+assert 'Never use POST /outputs to message another worker' in welcome, welcome
 assert 'http_send_example' not in welcome, 'should not advertise http_send_example — maximize p2p'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "checkin instructions warn against /response, steer to p2p"
+        success "checkin instructions warn against /outputs, steer to p2p"
     else
-        fail "checkin instructions should warn against /response and use p2p"
+        fail "checkin instructions should warn against /outputs and use p2p"
     fi
 }
 
@@ -7370,95 +7370,95 @@ print('OK')
 }
 
 test_response_endpoint_missing_fields() {
-    info "Testing /response endpoint with missing fields..."
+    info "Testing /outputs endpoint with missing fields..."
 
     # Missing session
     local result
-    result=$(hook_curl "http://localhost:$PORT/response" '{"text":"Test"}')
+    result=$(hook_curl "http://localhost:$PORT/outputs" '{"text":"Test"}')
 
     if echo "$result" | grep -q "Missing"; then
-        success "/response rejects missing session"
+        success "/outputs rejects missing session"
     else
-        fail "/response should reject missing session"
+        fail "/outputs should reject missing session"
     fi
 
     # Missing text
-    result=$(hook_curl "http://localhost:$PORT/response" '{"session":"test"}')
+    result=$(hook_curl "http://localhost:$PORT/outputs" '{"session":"test"}')
 
     if echo "$result" | grep -q "Missing"; then
-        success "/response rejects missing text"
+        success "/outputs rejects missing text"
     else
-        fail "/response should reject missing text"
+        fail "/outputs should reject missing text"
     fi
 }
 
 test_response_endpoint_no_chat_id() {
-    info "Testing /response endpoint with non-existent session..."
+    info "Testing /outputs endpoint with non-existent session..."
 
     local body='{"session":"nonexistent_session_xyz","source":"nonexistent_session_xyz","text":"Test"}'
     local result
-    result=$(hook_curl "http://localhost:$PORT/response" "$body")
+    result=$(hook_curl "http://localhost:$PORT/outputs" "$body")
 
     # Should return 404 for session without chat_id file
     if echo "$result" | grep -q "No chat_id"; then
-        success "/response returns 404 for unknown session"
+        success "/outputs returns 404 for unknown session"
     else
         # Check HTTP code
         local http_code
-        http_code=$(hook_curl_code "http://localhost:$PORT/response" "$body")
+        http_code=$(hook_curl_code "http://localhost:$PORT/outputs" "$body")
         if [[ "$http_code" == "404" ]]; then
-            success "/response returns 404 for unknown session"
+            success "/outputs returns 404 for unknown session"
         else
-            fail "/response should return 404 for unknown session"
+            fail "/outputs should return 404 for unknown session"
         fi
     fi
 }
 
 test_response_endpoint_rejects_worker_misroute() {
-    info "Testing /response rejects worker-to-worker misroutes..."
+    info "Testing /outputs rejects worker-to-worker misroutes..."
 
     local result http_code
-    result=$(hook_curl "http://localhost:$PORT/response" \
+    result=$(hook_curl "http://localhost:$PORT/outputs" \
         '{"session":"sui","source":"finn","text":"Hey sui, can you check this?"}')
 
-    if echo "$result" | grep -q "Source/session mismatch" && echo "$result" | grep -q "POST /send"; then
-        success "/response rejects source/session mismatch"
+    if echo "$result" | grep -q "Source/session mismatch" && echo "$result" | grep -q "POST /messages"; then
+        success "/outputs rejects source/session mismatch"
     else
-        fail "/response should reject source/session mismatch: $result"
+        fail "/outputs should reject source/session mismatch: $result"
     fi
 
-    http_code=$(hook_curl_code "http://localhost:$PORT/response" \
+    http_code=$(hook_curl_code "http://localhost:$PORT/outputs" \
         '{"session":"sui","source":"finn","text":"Hey sui"}')
     if [[ "$http_code" == "403" ]]; then
-        success "/response mismatch returns 403"
+        success "/outputs mismatch returns 403"
     else
-        fail "/response mismatch should return 403, got $http_code"
+        fail "/outputs mismatch should return 403, got $http_code"
     fi
 
-    result=$(hook_curl "http://localhost:$PORT/response" \
+    result=$(hook_curl "http://localhost:$PORT/outputs" \
         '{"session":"sui","text":"Hey sui"}')
-    if echo "$result" | grep -q "Missing source" && echo "$result" | grep -q "POST /send"; then
-        success "/response rejects missing source"
+    if echo "$result" | grep -q "Missing source" && echo "$result" | grep -q "POST /messages"; then
+        success "/outputs rejects missing source"
     else
-        fail "/response should reject missing source: $result"
+        fail "/outputs should reject missing source: $result"
     fi
 }
 
 test_notify_endpoint_missing_text() {
-    info "Testing /notify endpoint with missing text..."
+    info "Testing /notifications endpoint with missing text..."
 
     local http_code
-    http_code=$(hook_curl_code "http://localhost:$PORT/notify" '{}')
+    http_code=$(hook_curl_code "http://localhost:$PORT/notifications" '{}')
 
     if [[ "$http_code" == "400" ]]; then
-        success "/notify rejects missing text (400)"
+        success "/notifications rejects missing text (400)"
     else
-        fail "/notify should return 400 for missing text, got $http_code"
+        fail "/notifications should return 400 for missing text, got $http_code"
     fi
 }
 
 test_notify_parses_image_tags() {
-    info "Testing /notify parses [[image:]] tags..."
+    info "Testing /notifications parses [[image:]] tags..."
 
     # Create a test image file
     local img="/tmp/test_notify_img_$$.png"
@@ -7475,18 +7475,18 @@ assert 'Hello' in clean, f'clean text should have Hello: {clean}'
 assert '[[image:' not in clean, f'tag should be removed: {clean}'
 assert len(images) == 1, f'expected 1 image, got {len(images)}'
 assert images[0][1] == 'test caption', f'caption mismatch: {images[0][1]}'
-print('PASS: /notify media tag parsing works')
+print('PASS: /notifications media tag parsing works')
 "; then
-        success "/notify parses [[image:]] tags from text"
+        success "/notifications parses [[image:]] tags from text"
     else
-        fail "/notify failed to parse [[image:]] tags"
+        fail "/notifications failed to parse [[image:]] tags"
     fi
 
     rm -f "$img"
 }
 
 test_notify_parses_image_tags_remote() {
-    info "Testing /notify parses [[image:]] for remote workers..."
+    info "Testing /notifications parses [[image:]] for remote workers..."
 
     if python3 -c "
 import bridge
@@ -7503,9 +7503,9 @@ with patch.object(bridge, 'get_worker_host', return_value='remote-host'):
     assert images[0][1] == 'compare'
     print('PASS: remote worker image tags accepted without local validation')
 "; then
-        success "/notify accepts remote image paths without local validation"
+        success "/notifications accepts remote image paths without local validation"
     else
-        fail "/notify should skip local validation for remote workers"
+        fail "/notifications should skip local validation for remote workers"
     fi
 }
 
@@ -12997,7 +12997,7 @@ finally:
 }
 
 test_hook_response_logs_session_id() {
-    info "Testing /response hook logs session_id to session_history.jsonl..."
+    info "Testing /outputs hook logs session_id to session_history.jsonl..."
 
     if python3 -c "
 import json, tempfile, shutil
@@ -19319,7 +19319,7 @@ test_known_endpoints_unchanged() {
 }
 
 test_send_endpoint_delivers_to_worker() {
-    info "Testing POST /send delivers to a worker..."
+    info "Testing POST /messages delivers to a worker..."
 
     send_message "/hire sendendpointtest" >/dev/null
     wait_for_session "sendendpointtest"
@@ -19331,7 +19331,7 @@ test_send_endpoint_delivers_to_worker() {
     body=$(python3 -c "import json; print(json.dumps({'worker':'sendendpointtest','message':'$unique_msg'}))")
 
     local response
-    response=$(hook_curl "http://localhost:$PORT/send" "$body")
+    response=$(hook_curl "http://localhost:$PORT/messages" "$body")
     if echo "$response" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -19344,12 +19344,12 @@ print('OK')
         local pane_content
         pane_content=$(tmux capture-pane -t "$tmux_name" -p 2>/dev/null || echo "")
         if echo "$pane_content" | grep -q "$unique_msg"; then
-            success "POST /send delivered message to tmux worker"
+            success "POST /messages delivered message to tmux worker"
         else
-            fail "POST /send response was OK but message not found in tmux pane"
+            fail "POST /messages response was OK but message not found in tmux pane"
         fi
     else
-        fail "POST /send should return delivery JSON: $response"
+        fail "POST /messages should return delivery JSON: $response"
     fi
 
     send_message "/end sendendpointtest" >/dev/null 2>&1 || true
@@ -19655,22 +19655,22 @@ print('OK')
 }
 
 test_forge_register_endpoint() {
-    info "Testing POST /register returns 200..."
+    info "Testing POST /workers (register) returns 200..."
 
     local http_code response
 
     # Basic registration
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/register" \
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/workers" \
         -H "Content-Type: application/json" \
         -d '{"Name":"testworker","Host":"vps","Version":"1.0.0","Tools":{"tmux":"3.4"}}')
     if [[ "$http_code" == "200" ]]; then
-        success "POST /register returns 200"
+        success "POST /workers (register) returns 200"
     else
-        fail "POST /register should return 200, got $http_code"
+        fail "POST /workers (register) should return 200, got $http_code"
     fi
 
     # Verify response is JSON with ok=true
-    response=$(curl -s -X POST "http://localhost:$PORT/register" \
+    response=$(curl -s -X POST "http://localhost:$PORT/workers" \
         -H "Content-Type: application/json" \
         -d '{"Name":"testworker","Host":"vps","Version":"1.0.0"}')
     if echo "$response" | python3 -c "
@@ -19679,19 +19679,19 @@ d = json.load(sys.stdin)
 assert d.get('ok') == True, f'expected ok=true, got {d}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "POST /register returns {ok: true}"
+        success "POST /workers (register) returns {ok: true}"
     else
-        fail "POST /register should return ok=true: $response"
+        fail "POST /workers (register) should return ok=true: $response"
     fi
 
     # Empty body should still return 200 (graceful)
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/register" \
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/workers" \
         -H "Content-Type: application/json" \
         -d '{}')
     if [[ "$http_code" == "200" ]]; then
-        success "POST /register handles empty body gracefully"
+        success "POST /workers (register) handles empty body gracefully"
     else
-        fail "POST /register empty body should return 200, got $http_code"
+        fail "POST /workers (register) empty body should return 200, got $http_code"
     fi
 }
 
@@ -21124,9 +21124,9 @@ print('OK')
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_guest_register_returns_token() {
-    info "Testing POST /guest returns 200 + token + name..."
+    info "Testing POST /guests returns 200 + token + name..."
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{}')
     if echo "$response" | python3 -c "
 import sys, json
@@ -21139,16 +21139,16 @@ assert 'inbox_url' in d, 'missing inbox_url'
 assert 'send_url' in d, 'missing send_url'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "POST /guest returns token + name"
+        success "POST /guests returns token + name"
     else
-        fail "POST /guest failed: $response"
+        fail "POST /guests failed: $response"
     fi
 }
 
 test_guest_register_custom_name() {
-    info "Testing POST /guest with custom name uses it..."
+    info "Testing POST /guests with custom name uses it..."
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"testbot"}')
     if echo "$response" | python3 -c "
 import sys, json
@@ -21157,14 +21157,14 @@ assert d.get('ok') == True
 assert d.get('name') == 'testbot', f'expected testbot, got {d.get(\"name\")}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "POST /guest custom name works"
+        success "POST /guests custom name works"
     else
-        fail "POST /guest custom name failed: $response"
+        fail "POST /guests custom name failed: $response"
     fi
 }
 
 test_guest_register_rejects_team_name() {
-    info "Testing POST /guest rejects team worker name..."
+    info "Testing POST /guests rejects team worker name..."
     # Hire a test worker first and wait until registered
     send_message "/hire testguard" >/dev/null 2>&1 || true
     local _tries=0
@@ -21176,21 +21176,21 @@ test_guest_register_rejects_team_name() {
         _tries=$((_tries + 1))
     done
     local response http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/guest" \
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"testguard"}')
     if [[ "$http_code" == "409" ]]; then
-        success "POST /guest rejects team worker name (409)"
+        success "POST /guests rejects team worker name (409)"
     else
-        fail "POST /guest should return 409 for team name, got $http_code"
+        fail "POST /guests should return 409 for team name, got $http_code"
     fi
     send_message "/end testguard" >/dev/null 2>&1 || true
 }
 
 test_guest_send_delivers_to_worker() {
-    info "Testing POST /guest/send delivers message to worker..."
+    info "Testing POST /guests/send delivers message to worker..."
     # Register a guest
     local reg_response token
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"sender1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
@@ -21199,7 +21199,7 @@ test_guest_send_delivers_to_worker() {
     sleep 1
 
     local send_response
-    send_response=$(curl -s -X POST "http://localhost:$PORT/guest/send?token=$token" \
+    send_response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" -d '{"worker":"guesttest","text":"hello from guest"}')
     if echo "$send_response" | python3 -c "
 import sys, json
@@ -21208,9 +21208,9 @@ assert d.get('ok') == True, f'expected ok, got {d}'
 assert d.get('delivered') == True, f'expected delivered, got {d}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "POST /guest/send delivers to worker"
+        success "POST /guests/send delivers to worker"
     else
-        fail "POST /guest/send failed: $send_response"
+        fail "POST /guests/send failed: $send_response"
     fi
     send_message "/end guesttest" >/dev/null 2>&1 || true
 }
@@ -21219,18 +21219,18 @@ test_guest_inbox_receives_reply() {
     info "Testing guest inbox receives worker reply..."
     # Register a guest
     local reg_response token name
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"inbox1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Post a reply to guest's inbox via internal endpoint
-    curl -s -X POST "http://localhost:$PORT/guest/reply" \
+    curl -s -X POST "http://localhost:$PORT/guests/reply" \
         -H "Content-Type: application/json" \
         -d '{"guest":"inbox1","from":"lee","text":"hey back"}' >/dev/null
 
     # Poll inbox
     local inbox_response
-    inbox_response=$(curl -s "http://localhost:$PORT/guest/inbox?token=$token")
+    inbox_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
     if echo "$inbox_response" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -21250,26 +21250,26 @@ print('OK')
 test_guest_inbox_after_filter_e2e() {
     info "Testing guest inbox ?after= works end-to-end..."
     local reg_response token
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"after1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Post two replies
-    curl -s -X POST "http://localhost:$PORT/guest/reply" \
+    curl -s -X POST "http://localhost:$PORT/guests/reply" \
         -H "Content-Type: application/json" \
         -d '{"guest":"after1","from":"lee","text":"msg1"}' >/dev/null
-    curl -s -X POST "http://localhost:$PORT/guest/reply" \
+    curl -s -X POST "http://localhost:$PORT/guests/reply" \
         -H "Content-Type: application/json" \
         -d '{"guest":"after1","from":"lee","text":"msg2"}' >/dev/null
 
     # Get all messages, grab first ID
     local all_response first_id
-    all_response=$(curl -s "http://localhost:$PORT/guest/inbox?token=$token")
+    all_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
     first_id=$(echo "$all_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['messages'][0]['id'])")
 
     # Get after first — should only get second
     local after_response
-    after_response=$(curl -s "http://localhost:$PORT/guest/inbox?token=$token&after=$first_id")
+    after_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token&after=$first_id")
     if echo "$after_response" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -21285,14 +21285,14 @@ print('OK')
 }
 
 test_guest_status_endpoint() {
-    info "Testing GET /guest/status returns session info..."
+    info "Testing GET /guests/status returns session info..."
     local reg_response token
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"status1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     local status_response
-    status_response=$(curl -s "http://localhost:$PORT/guest/status?token=$token")
+    status_response=$(curl -s "http://localhost:$PORT/guests/status?token=$token")
     if echo "$status_response" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -21301,32 +21301,32 @@ assert d.get('name') == 'status1'
 assert 'expires' in d
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "GET /guest/status works"
+        success "GET /guests/status works"
     else
-        fail "GET /guest/status failed: $status_response"
+        fail "GET /guests/status failed: $status_response"
     fi
 }
 
 test_guest_disconnect() {
-    info "Testing DELETE /guest clears session..."
+    info "Testing DELETE /guests clears session..."
     local reg_response token
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"disc1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Disconnect
     local del_code
-    del_code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "http://localhost:$PORT/guest?token=$token")
+    del_code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "http://localhost:$PORT/guests?token=$token")
     if [[ "$del_code" != "200" ]]; then
-        fail "DELETE /guest should return 200, got $del_code"
+        fail "DELETE /guests should return 200, got $del_code"
         return
     fi
 
     # Verify inbox now returns 403
     local inbox_code
-    inbox_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/guest/inbox?token=$token")
+    inbox_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/guests/inbox?token=$token")
     if [[ "$inbox_code" == "403" ]]; then
-        success "DELETE /guest clears session (inbox returns 403)"
+        success "DELETE /guests clears session (inbox returns 403)"
     else
         fail "After disconnect, inbox should return 403, got $inbox_code"
     fi
@@ -21336,7 +21336,7 @@ test_guest_expired_returns_403() {
     info "Testing expired guest token returns 403..."
     # Use a token that doesn't exist
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/guest/inbox?token=gt_fakeinvalidtoken")
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/guests/inbox?token=gt_fakeinvalidtoken")
     if [[ "$http_code" == "403" ]]; then
         success "Expired/invalid guest token returns 403"
     else
@@ -21347,7 +21347,7 @@ test_guest_expired_returns_403() {
 test_guests_list_endpoint() {
     info "Testing GET /guests lists active guests..."
     # Register a guest
-    curl -s -X POST "http://localhost:$PORT/guest" \
+    curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"listed1"}' >/dev/null
 
     local response
@@ -21370,7 +21370,7 @@ print('OK')
 test_guest_not_in_workers() {
     info "Testing guests never appear in /workers..."
     # Register a guest
-    curl -s -X POST "http://localhost:$PORT/guest" \
+    curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"hidden1"}' >/dev/null
 
     local workers_response
@@ -21393,7 +21393,7 @@ test_guest_mention_routing() {
     info "Testing @guest mention routes message to guest inbox..."
     # Register a guest
     local reg_response token
-    reg_response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"mentee1"}')
     token=$(echo "$reg_response" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
     if [[ -z "$token" ]]; then
@@ -21407,7 +21407,7 @@ test_guest_mention_routing() {
 
     # Check guest inbox for the message
     local inbox
-    inbox=$(curl -s "http://localhost:$PORT/guest/inbox?token=$token")
+    inbox=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
     if echo "$inbox" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -21427,7 +21427,7 @@ test_guest_telegram_notification() {
     info "Testing guest registration queues Telegram notification..."
     # Register a guest and check that notify was called
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"notif1"}')
     if echo "$response" | python3 -c "
 import sys, json
@@ -21483,7 +21483,7 @@ import bridge
 
 ch, guest_token, reply_token = bridge.relay_channel_create('testworker', 'relay-testworker')
 url = bridge.relay_guide_url(ch['id'], guest_token)
-assert '/v1/' in url, f'URL must contain /v1/: {url}'
+assert '/relay/' in url, f'URL must contain /relay/: {url}'
 assert ch['id'] in url, f'URL must contain channel ID: {url}'
 assert 'token=' in url, f'URL must contain token param: {url}'
 assert guest_token in url, f'URL must contain actual token: {url}'
@@ -21850,7 +21850,7 @@ test_channel_guest_fanout() {
     info "Testing channel message fans out to guest inbox..."
     # Register a guest
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"chanfan"}')
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
@@ -21868,7 +21868,7 @@ test_channel_guest_fanout() {
 
     # Check guest inbox has the message
     local inbox
-    inbox=$(curl -s "http://localhost:$PORT/guest/inbox?token=$token")
+    inbox=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
     if echo "$inbox" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -21890,7 +21890,7 @@ print('OK')
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_relay_guide_endpoint() {
-    info "Testing GET /v1/<channel_id> serves guide markdown..."
+    info "Testing GET /relay/<channel_id> serves guide markdown..."
 
     # Create a relay channel directly via Python
     local result
@@ -21912,10 +21912,10 @@ print(f'{ch[\"id\"]}|{guest_token}|{reply_token}')
 
     # GET the guide
     local guide
-    guide=$(curl -s "http://localhost:$PORT/v1/${ch_id}?token=${guest_token}")
+    guide=$(curl -s "http://localhost:$PORT/relay/${ch_id}?token=${guest_token}")
 
     if echo "$guide" | grep -q "testworker" && echo "$guide" | grep -q "/send"; then
-        success "GET /v1/<channel_id> serves guide markdown"
+        success "GET /relay/<channel_id> serves guide markdown"
     else
         fail "Guide endpoint failed: $guide"
     fi
@@ -21937,7 +21937,7 @@ print(ch['id'])
 " 2>/dev/null)
 
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/v1/${result}?token=bad-token")
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/relay/${result}?token=bad-token")
 
     if [[ "$http_code" == "403" ]]; then
         success "Relay guide rejects bad token (403)"
@@ -21947,7 +21947,7 @@ print(ch['id'])
 }
 
 test_relay_send_endpoint() {
-    info "Testing POST /v1/<channel_id>/send delivers to worker..."
+    info "Testing POST /relay/<channel_id>/send delivers to worker..."
 
     # Hire a worker first
     send_message "/hire relayworker" >/dev/null 2>&1
@@ -21970,13 +21970,13 @@ print(f'{ch[\"id\"]}|{gt}|{rt}')
     guest_token=$(echo "$result" | cut -d'|' -f2)
 
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/v1/${ch_id}/send" \
+    response=$(curl -s -X POST "http://localhost:$PORT/relay/${ch_id}/send" \
         -H "Authorization: Bearer ${guest_token}" \
         -H "Content-Type: application/json" \
         -d '{"text":"Hello from relay test"}')
 
     if echo "$response" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('message_id'),f'no msg id: {d}';print('OK')" 2>/dev/null | grep -q "OK"; then
-        success "POST /v1/<channel_id>/send accepted message"
+        success "POST /relay/<channel_id>/send accepted message"
     else
         fail "Relay send failed: $response"
     fi
@@ -22006,20 +22006,20 @@ print(f'{ch[\"id\"]}|{gt}|{rt}')
     reply_token=$(echo "$result" | cut -d'|' -f3)
 
     # Send a message as guest
-    curl -s -X POST "http://localhost:$PORT/v1/${ch_id}/send" \
+    curl -s -X POST "http://localhost:$PORT/relay/${ch_id}/send" \
         -H "Authorization: Bearer ${guest_token}" \
         -H "Content-Type: application/json" \
         -d '{"text":"question from guest"}' >/dev/null
 
     # Reply as worker
-    curl -s -X POST "http://localhost:$PORT/v1/${ch_id}/reply" \
+    curl -s -X POST "http://localhost:$PORT/relay/${ch_id}/reply" \
         -H "Authorization: Bearer ${reply_token}" \
         -H "Content-Type: application/json" \
         -d '{"text":"answer from worker"}' >/dev/null
 
     # Poll messages
     local msgs
-    msgs=$(curl -s "http://localhost:$PORT/v1/${ch_id}/messages" \
+    msgs=$(curl -s "http://localhost:$PORT/relay/${ch_id}/messages" \
         -H "Authorization: Bearer ${guest_token}")
 
     if echo "$msgs" | python3 -c "
@@ -22055,14 +22055,14 @@ test_guest_send_multi_workers() {
 
     # Register guest
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"multisend"}')
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Send to relaybot1 — use "to" as list
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest/send?token=$token" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"to":["relaybot1"],"text":"multi test"}')
     if echo "$response" | python3 -c "
@@ -22078,7 +22078,7 @@ print('OK')
     fi
 
     # Cleanup
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$token" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
     send_message "/end relaybot1" >/dev/null 2>&1 || true
 }
 
@@ -22086,7 +22086,7 @@ test_guest_send_to_channel() {
     info "Testing guest send to channel via relay..."
     # Register guest
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"chsender"}')
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
@@ -22101,7 +22101,7 @@ test_guest_send_to_channel() {
 
     # Guest sends to channel via #label
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest/send?token=$token" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"to":"#relay-ch","text":"hello from guest"}')
     if echo "$response" | python3 -c "
@@ -22135,16 +22135,16 @@ print('OK')
 
     # Cleanup
     curl -s -X DELETE "http://localhost:$PORT/channels/$ch_id" > /dev/null
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$token" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
 }
 
 test_guest_channel_list_filtered() {
     info "Testing guest sees only their channels..."
     # Register two guests
     local reg1 reg2
-    reg1=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg1=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"alice"}')
-    reg2=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg2=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"bob"}')
     local tok1 tok2
     tok1=$(echo "$reg1" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
@@ -22189,15 +22189,15 @@ print('OK')
 
     # Cleanup
     curl -s -X DELETE "http://localhost:$PORT/channels/$ch_id" > /dev/null
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$tok1" > /dev/null
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$tok2" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$tok1" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$tok2" > /dev/null
 }
 
 test_guest_channel_nonmember_rejected() {
     info "Testing guest can't read channels they're not in..."
     # Register guest
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"outsider"}')
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
@@ -22222,13 +22222,13 @@ test_guest_channel_nonmember_rejected() {
 
     # Cleanup
     curl -s -X DELETE "http://localhost:$PORT/channels/$ch_id" > /dev/null
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$token" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
 }
 
 test_guest_register_includes_channel_urls() {
     info "Testing guest register response includes channel URLs..."
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"urlcheck"}')
     if echo "$reg" | python3 -c "
 import sys, json
@@ -22244,7 +22244,7 @@ print('OK')
     fi
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$token" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
 }
 
 test_guest_send_legacy_compat() {
@@ -22259,14 +22259,14 @@ test_guest_send_legacy_compat() {
     done
 
     local reg
-    reg=$(curl -s -X POST "http://localhost:$PORT/guest" \
+    reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"legacy"}')
     local token
     token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Use old-style {"worker": "legacybot", "text": "..."}
     local response
-    response=$(curl -s -X POST "http://localhost:$PORT/guest/send?token=$token" \
+    response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"worker":"legacybot","text":"legacy format"}')
     if echo "$response" | python3 -c "
@@ -22279,7 +22279,7 @@ print('OK')
     else
         fail "legacy guest send failed: $response"
     fi
-    curl -s -X DELETE "http://localhost:$PORT/guest?token=$token" > /dev/null
+    curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
     send_message "/end legacybot" >/dev/null 2>&1 || true
 }
 
@@ -23137,7 +23137,7 @@ run_integration_tests() {
     run_test test_incoming_document_e2e
     run_test test_incoming_image_e2e
     run_test test_response_with_image_tags
-    # Response/notify endpoint tests
+    # Outputs/notifications endpoint tests
     log ""
     log "── Response/Notify Endpoint Tests ──────────────────────────────────────"
     run_test test_notify_endpoint

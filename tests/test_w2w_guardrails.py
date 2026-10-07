@@ -1,7 +1,7 @@
 """Behavior tests for worker-to-worker messaging guardrails.
 
-Covers: /response source validation rejects misuse,
-welcome message warns against /response for w2w.
+Covers: /outputs source validation rejects misuse,
+welcome message warns against /outputs for w2w.
 """
 import json
 import os
@@ -23,7 +23,7 @@ def _bridge_env(monkeypatch, tmp_path):
 # ── _validate_response_source ────────────────────────────────────────
 
 class TestValidateResponseSource:
-    """The /response endpoint must reject worker-to-worker misuse."""
+    """The /outputs endpoint must reject worker-to-worker misuse."""
 
     def _validate(self, data, session_name):
         import bridge
@@ -99,10 +99,10 @@ class TestWelcomeMessageRouting:
         assert "send_example" in welcome
 
     def test_welcome_warns_against_response_misuse(self):
-        """Welcome text warns workers not to use /response for w2w."""
+        """Welcome text warns workers not to use /outputs for w2w."""
         welcome = self._get_welcome()
-        assert "/response" in welcome
-        assert "Never use POST /response to message another worker" in welcome
+        assert "/outputs" in welcome
+        assert "Never use POST /outputs to message another worker" in welcome
 
     def test_welcome_directs_to_workers_endpoint(self):
         """Welcome tells workers to call /workers?from=<name> before messaging."""

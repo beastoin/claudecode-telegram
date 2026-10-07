@@ -60,7 +60,7 @@ Every path a message takes through the system. Check here before changing any me
 
 | Flow | Trigger | Behavior |
 |------|---------|----------|
-| Worker reply | Claude stop hook fires | `claudecode.sh stop` → `POST /response` → `name: <text>` in Telegram |
+| Worker reply | Claude stop hook fires | `claudecode.sh stop` → `POST /outputs` → `name: <text>` in Telegram |
 | Media tags | `[[image:/path\|caption]]` in output | Hook sends raw text; bridge parses and sends via `sendPhoto`/`sendDocument` |
 | Long reply | Output > 4096 chars | Bridge splits into multiple messages, preserves code blocks |
 | Proactive message | Worker outputs without pending request | Hook sends if `chat_id` file exists |
@@ -88,7 +88,7 @@ Every path a message takes through the system. Check here before changing any me
 | Team status | `/team` | Scans tmux sessions, health state per worker |
 | Worker restart | `/restart <name>` | Kills + restarts tmux session |
 | Teleport | `/teleport <name> <host>` | Syncs state, starts on target, stops source |
-| Remote register | `POST /register` | Registers pre-existing worker session from remote host |
+| Remote register | `POST /workers` | Registers pre-existing worker session from remote host |
 | End worker | `/end <name>` | Kills tmux session, removes from registry |
 | Bridge restart | Process restart | Scans tmux + reads `workers.json`, recovers all workers |
 
@@ -99,7 +99,7 @@ Every path a message takes through the system. Check here before changing any me
 | Session missing | Message to non-existent worker | Bridge replies with error in Telegram |
 | Worker dead | tmux session exited | Health check marks EXITED, visible in `/team` |
 | Hook no chat_id | Hook fires but no `chat_id` file | Hook exits silently |
-| Stale transcript | JSONL not updated recently | Hook sends health alert to `/health-alert` endpoint |
+| Stale transcript | JSONL not updated recently | Hook sends health alert to `/alerts` endpoint |
 
 ## Testing Requirements
 
@@ -114,7 +114,7 @@ These capture operational gotchas not covered by SPEC.md. For spec-level rules, 
 
 ### Env var propagation [SPEC-022]
 
-Export env vars explicitly at each process boundary. Use `tmux set-environment`, not `tmux send-keys "export ..."`. Check all entry points: `hire()`, `restart()`, `_restart_dead_worker()`, `POST /register`.
+Export env vars explicitly at each process boundary. Use `tmux set-environment`, not `tmux send-keys "export ..."`. Check all entry points: `hire()`, `restart()`, `_restart_dead_worker()`, `POST /workers`.
 
 ### Audit all code paths when adding config [SPEC-022]
 
@@ -123,6 +123,19 @@ When you make something configurable, search for all usages of the old hardcoded
 ### Watchdog for bridge requires careful testing
 
 Only the tunnel watchdog exists (v0.5.0). A bridge watchdog was attempted but reverted. If re-implementing: test manually first, use `stdbuf -oL` for unbuffered output, add delays between kill and port check, make `start_bridge()` pass all required env vars.
+
+### Bridge lifecycle: always use bridge.sh, never raw kill
+
+Stop, start, and check with the management script only:
+```bash
+./bridge.sh --node prod stop        # stop
+./bridge.sh --node prod status      # verify
+./bridge.sh --node prod run         # start (or --no-sandbox run)
+./bridge.sh --node prod status      # verify again after start
+```
+Never use `kill`, `pkill`, or `kill -9` on bridge processes. The script tracks PIDs, cleans up tunnels, and preserves worker state. Raw kill skips all of that.
+
+**Deployment order for breaking changes:** restart the bridge (server) first, verify with `status`, THEN deploy hooks/clients. Never update consumers before the server is running the new code.
 
 ### Node credentials [SPEC-006]
 

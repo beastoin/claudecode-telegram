@@ -16,7 +16,7 @@ from core import (
     _log, _LOG_ERROR, _LOG_WARN, _LOG_INFO, _LOG_DEBUG,
     _log_best_effort,
     SubprocessRunner, Clock, MarkdownToken,
-    _subprocess_runner, _urlopen,
+    _subprocess_runner, _urlopen, _tg_http_client,
     AppContext, get_app_context,
     VERSION,
     BOT_TOKEN, NODE_NAME, NODE_DIR,
@@ -743,16 +743,19 @@ class TelegramAPI:
         self.token: str = token
 
     def api(self, method: str, data: Mapping[str, object] | dict[str, object]) -> TelegramApiResponse:
-        """Make a raw Telegram Bot API call and return the response."""
+        """Make a raw Telegram Bot API call and return the response.
+
+        Uses _tg_http_client for connection pooling, rate limiting (25 req/s),
+        and automatic retry with exponential backoff on 429/5xx.
+        """
         if not self.token:
             return None
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{self.token}/{method}",
-            data=json.dumps(data).encode(),
-            headers={"Content-Type": "application/json"}
-        )
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        payload = json.dumps(data).encode()
+        headers = {"Content-Type": "application/json"}
         try:
-            with _urlopen(req, timeout=TIMEOUT_HTTP_API) as r:
+            with _tg_http_client.post(url, data=payload, headers=headers,
+                                       timeout=TIMEOUT_HTTP_API) as r:
                 return cast(TelegramApiResponseDict, json.loads(r.read()))
         except urllib.error.HTTPError as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")

@@ -202,7 +202,7 @@ assert "local: worker process alive" kill -0 "$WORKER_PID"
 #   3. ConnectorHost.deliverInbound() → Runtime.Send() → tmux send-keys
 #   4. Message appears in tmux pane
 UNIQUE_MSG="POLL_INBOUND_$(date +%s%N)"
-curl -sf -X POST "http://127.0.0.1:$LOCAL_PORT/send" \
+curl -sf -X POST "http://127.0.0.1:$LOCAL_PORT/messages" \
     -H "Content-Type: application/json" \
     -d "{\"text\":\"$UNIQUE_MSG\",\"from\":\"manager\"}" >/dev/null
 
@@ -236,7 +236,7 @@ BURST_COUNT=10
 BURST_PREFIX="BURST_${RUN_ID}_"
 BURST_PIDS=()
 for n in $(seq 1 $BURST_COUNT); do
-    curl -sf -X POST "http://127.0.0.1:$LOCAL_PORT/send" \
+    curl -sf -X POST "http://127.0.0.1:$LOCAL_PORT/messages" \
         -H "Content-Type: application/json" \
         -d "{\"text\":\"${BURST_PREFIX}${n}\",\"from\":\"burst\"}" >/dev/null &
     BURST_PIDS+=($!)
@@ -300,7 +300,7 @@ echo ""
 echo "=========================================="
 echo "=== TEST 2: Bridge Connector — ExternalReceiver Behavioral ==="
 echo "=========================================="
-echo "  Proves: Init() registers with bridge (POST /register)"
+echo "  Proves: Init() registers with bridge (POST /workers)"
 echo "  Proves: HookListener starts for all connectors (including ExternalReceiver)"
 echo "  Proves: Bridge tmux injection works (external message delivery)"
 echo "  Proves: TeamAware discovery works (GET /workers returns data)"
@@ -347,12 +347,12 @@ assert "bridge: worker process alive" kill -0 "$WORKER_PID"
 assert "bridge: tmux session created by Runtime" \
     tmux has-session -t "${TEST_TMUX_PREFIX}${WORKER_NAME}"
 
-# --- VERIFY: Init() called POST /register on bridge ---
-# The forge BridgeConnector.Init() POSTs {"name":"triassic-4"} to /register.
+# --- VERIFY: Init() called POST /workers on bridge ---
+# The forge BridgeConnector.Init() POSTs {"name":"triassic-4"} to /workers.
 # Bridge logs this as "Forge worker registered: triassic-4"
 sleep 1
 BRIDGE_LOG_CONTENT=$(cat "$BRIDGE_LOG" 2>/dev/null || echo "")
-assert_contains "bridge: Init() registered worker (POST /register logged by bridge)" \
+assert_contains "bridge: Init() registered worker (POST /workers logged by bridge)" \
     "$BRIDGE_LOG_CONTENT" "Forge worker registered"
 
 # --- VERIFY: HookListener starts for all connectors (including ExternalReceiver) ---

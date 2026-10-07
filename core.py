@@ -164,6 +164,191 @@ _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
 
 
+# ── HTTP client infrastructure ────────────────────────────────────────
+# Connection pooling, rate limiting, and exponential backoff retry for
+# all outbound HTTP calls to third-party services.
+
+import http.cookiejar
+import threading
+import urllib.error
+
+@dataclass(frozen=True)
+class RetryConfig:
+    """Configuration for exponential backoff retry."""
+    max_retries: int = 3
+    initial_delay: float = 1.0        # seconds
+    max_delay: float = 60.0           # cap per retry
+    backoff_factor: float = 2.0       # delay *= factor each retry
+    retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+@dataclass(frozen=True)
+class RateLimitConfig:
+    """Token-bucket rate limiter configuration."""
+    requests_per_second: float = 30.0  # Telegram limit: 30 msg/sec
+    burst: int = 30                    # allow short bursts
+
+
+class _TokenBucket:
+    """Thread-safe token-bucket rate limiter.
+
+    Allows up to `burst` requests immediately, then refills at
+    `rate` tokens per second.  call acquire() before each request.
+    """
+
+    def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
+        self._rate = rate
+        self._burst = burst
+        self._clock = clock or _RealClock()
+        self._tokens = float(burst)
+        self._last_refill = self._clock.time()
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout: float = 30.0) -> bool:
+        """Block until a token is available or timeout expires.
+
+        Returns True if acquired, False if timed out.
+        """
+        deadline = self._clock.time() + timeout
+        while True:
+            with self._lock:
+                now = self._clock.time()
+                elapsed = now - self._last_refill
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return True
+            # Wait a fraction of the refill interval
+            wait = min(1.0 / self._rate, deadline - self._clock.time())
+            if wait <= 0:
+                return False
+            self._clock.sleep(wait)
+
+
+class HttpClient:
+    """HTTP client with connection pooling, rate limiting, and retry.
+
+    Drop-in replacement for raw urllib calls.  Each host gets its own
+    persistent HTTP(S) connection (keep-alive), requests are rate-limited
+    via a token-bucket, and transient errors trigger exponential backoff.
+
+    Usage:
+        client = HttpClient()
+        resp = client.request("https://api.telegram.org/bot.../sendMessage",
+                              data=b'{"chat_id":...}',
+                              headers={"Content-Type": "application/json"})
+    """
+
+    def __init__(
+        self,
+        retry: RetryConfig | None = None,
+        rate_limit: RateLimitConfig | None = None,
+        clock: Clock | None = None,
+        urlopen: Callable[..., http.client.HTTPResponse] | None = None,
+    ) -> None:
+        self._retry = retry or RetryConfig()
+        self._rate_config = rate_limit or RateLimitConfig()
+        self._clock = clock or _RealClock()
+        self._urlopen_fn = urlopen or urllib.request.urlopen
+
+        # Per-host connection pools (keep-alive via HTTPHandler)
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPHandler(),
+            urllib.request.HTTPSHandler(),
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+        )
+
+        # Per-host rate limiters
+        self._limiters: dict[str, _TokenBucket] = {}
+        self._limiters_lock = threading.Lock()
+
+    def _get_limiter(self, host: str) -> _TokenBucket:
+        """Get or create a rate limiter for a given host."""
+        with self._limiters_lock:
+            if host not in self._limiters:
+                self._limiters[host] = _TokenBucket(
+                    rate=self._rate_config.requests_per_second,
+                    burst=self._rate_config.burst,
+                    clock=self._clock,
+                )
+            return self._limiters[host]
+
+    def request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        retry: RetryConfig | None = None,
+    ) -> http.client.HTTPResponse:
+        """Make an HTTP request with rate limiting and exponential backoff.
+
+        Raises the last exception if all retries fail.
+        Raises TimeoutError if rate limiter times out.
+        """
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or "localhost"
+        cfg = retry or self._retry
+
+        # Rate limit
+        limiter = self._get_limiter(host)
+        if not limiter.acquire(timeout=timeout):
+            raise TimeoutError(f"Rate limit timeout for {host}")
+
+        req = urllib.request.Request(url, data=data, method=method)
+        if headers:
+            for k, v in headers.items():
+                req.add_header(k, v)
+
+        last_exc: BaseException | None = None
+        delay = cfg.initial_delay
+
+        for attempt in range(cfg.max_retries + 1):
+            try:
+                return self._urlopen_fn(req, timeout=timeout)
+            except urllib.error.HTTPError as e:
+                if e.code not in cfg.retryable_status:
+                    raise
+                last_exc = e
+                _log(_LOG_WARN, "http", f"{method} {url} -> {e.code} (attempt {attempt+1}/{cfg.max_retries+1})")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                last_exc = e
+                _log(_LOG_WARN, "http", f"{method} {url} -> {type(e).__name__} (attempt {attempt+1}/{cfg.max_retries+1})")
+
+            if attempt < cfg.max_retries:
+                self._clock.sleep(min(delay, cfg.max_delay))
+                delay *= cfg.backoff_factor
+
+        raise last_exc  # type: ignore[misc]
+
+    def get(self, url: str, *, timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+        """GET with retry and rate limiting."""
+        return self.request(url, method="GET", timeout=timeout, **kwargs)
+
+    def post(self, url: str, data: bytes, *, headers: dict[str, str] | None = None,
+             timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+        """POST with retry and rate limiting."""
+        return self.request(url, method="POST", data=data, headers=headers,
+                            timeout=timeout, **kwargs)
+
+    def head(self, url: str, *, timeout: float = 30.0, **kwargs: Any) -> http.client.HTTPResponse:
+        """HEAD with retry and rate limiting."""
+        return self.request(url, method="HEAD", timeout=timeout, **kwargs)
+
+
+# Default client instance — import this for production use
+_http_client: HttpClient = HttpClient()
+
+# Telegram-specific client with tighter rate limit (30 msg/sec global)
+_tg_http_client: HttpClient = HttpClient(
+    rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
+    retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
+)
+
+
 # ── Node-derived configuration ─────────────────────────────────────────
 # NODE_NAME drives defaults for PORT, TMUX_PREFIX, SESSIONS_DIR.
 # Explicit env vars always override.
@@ -335,11 +520,11 @@ class TunnelConfig:
     provided_url: str = ""
     cloudflared_binary: str = "cloudflared"
     startup_timeout: int = 60
-    max_restart_attempts: int = 3
-    initial_backoff: int = 5
+    max_restart_attempts: int = 5
+    initial_backoff: int = 10
     watchdog_interval: int = 10
     reachability_timeout: int = 10
-    webhook_retry_delays: tuple[int, ...] = (0, 5, 15, 30)
+    webhook_retry_delays: tuple[int, ...] = (0, 5, 10, 20, 40, 80)
     webhook_check_cycles: int = 6  # check every N watchdog cycles (~60s)
     poll_timeout: int = 30
     poll_error_delay: int = 2

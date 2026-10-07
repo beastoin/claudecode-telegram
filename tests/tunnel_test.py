@@ -291,6 +291,39 @@ def test_reachable_returns_false_on_error(tmp_path: Path) -> None:
     assert mgr._is_tunnel_reachable() is False
 
 
+def test_reachable_returns_true_on_http_error(tmp_path: Path) -> None:
+    """HTTP error (e.g. 501) still means tunnel is reachable — we got a response."""
+    import urllib.error
+    mgr, _, _, urlopen = _make_manager(tmp_path)
+    mgr._tunnel_url = "https://test.trycloudflare.com"
+
+    # Simulate bridge returning 501 for HEAD (no do_HEAD handler)
+    def raise_501(req: Any, timeout: float = 10) -> Any:
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        urlopen.calls.append(url)
+        raise urllib.error.HTTPError(url, 501, "Not Implemented", {}, None)
+
+    urlopen.__call__ = raise_501  # type: ignore[method-assign]
+
+    # Should be True — an HTTP response proves the tunnel is up
+    assert mgr._is_tunnel_reachable() is True
+
+
+def test_health_check_unreachable_does_not_kill_tunnel(tmp_path: Path) -> None:
+    """Unreachable tunnel should NOT kill cloudflared — avoids URL reset cycle."""
+    mgr, _, _, urlopen = _make_manager(tmp_path)
+    proc = FakePopen(alive=True)
+    mgr._tunnel_proc = proc
+    mgr._tunnel_url = "https://test.trycloudflare.com"
+    urlopen.set_fail(True)  # simulate DNS failure
+
+    result = mgr._check_tunnel_health()
+    assert result == "unreachable"
+    # Process should still be alive — NOT killed
+    assert proc._killed is False
+    assert mgr._tunnel_proc is proc
+
+
 # ── Tests: Webhook ────────────────────────────────────────────────────
 
 

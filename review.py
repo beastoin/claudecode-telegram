@@ -1374,7 +1374,7 @@ async function expandCtx(filename, newStart, newEnd, oldStart, status, btn) {{
         if (!lines) {{
             const token = new URLSearchParams(window.location.search).get('token');
             const ref = status === 'removed' ? prMeta.base_sha : prMeta.head_sha;
-            const resp = await fetch('/pr-file-content?token=' + encodeURIComponent(token) +
+            const resp = await fetch('/tools/review/files?token=' + encodeURIComponent(token) +
                 '&owner=' + encodeURIComponent(prMeta.owner) +
                 '&repo=' + encodeURIComponent(prMeta.repo) +
                 '&path=' + encodeURIComponent(filename) +
@@ -1436,7 +1436,7 @@ async function submitComment(btn) {{
     btn.textContent = 'Posting...';
     try {{
         const token = new URLSearchParams(window.location.search).get('token');
-        const resp = await fetch('/pr-comment', {{
+        const resp = await fetch('/tools/review/comments', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
             body: JSON.stringify({{
@@ -1687,7 +1687,7 @@ async function submitGeneralComment() {{
     btn.disabled = true;
     try {{
         const token = new URLSearchParams(window.location.search).get('token');
-        const resp = await fetch('/pr-general-comment', {{
+        const resp = await fetch('/tools/review/comments', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
             body: JSON.stringify({{
@@ -1725,7 +1725,7 @@ async function doMerge() {{
     btn.textContent = '...';
     try {{
         const token = new URLSearchParams(window.location.search).get('token');
-        const resp = await fetch('/pr-merge', {{
+        const resp = await fetch('/tools/review/merges', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
             body: JSON.stringify({{
@@ -1810,14 +1810,14 @@ def _format_comment_with_context(comment_body: str, pr_num: int, path: str, line
 
 
 def _notify_telegram(comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = "") -> None:
-    """Send PR comment notification to Telegram via bridge's /notify endpoint."""
+    """Send PR comment notification to Telegram via bridge's /notifications endpoint."""
     bridge_url = os.environ.get("BRIDGE_URL", "http://localhost:8271")
     text = f"\U0001f4ac " + _format_comment_with_context(
         comment_body, pr_num, path, line, context_snippet, short_sha)
     try:
         import urllib.request
         req = urllib.request.Request(
-            f"{bridge_url}/notify",
+            f"{bridge_url}/notifications",
             data=json.dumps({"text": text}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST")
@@ -1937,7 +1937,7 @@ def main() -> None:
                 pass
 
             def do_POST(self) -> None:
-                if self.path == '/pr-comment':
+                if self.path == '/tools/review/comments':
                     length = int(self.headers.get('Content-Length', 0))
                     body = self.rfile.read(length)
                     try:
@@ -2004,7 +2004,7 @@ def main() -> None:
 
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
-                if parsed.path == '/pr-file-content':
+                if parsed.path == '/tools/review/files':
                     params = parse_qs(parsed.query)
                     o = params.get('owner', [''])[0]
                     r = params.get('repo', [''])[0]

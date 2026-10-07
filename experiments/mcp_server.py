@@ -73,7 +73,7 @@ def send_message(worker: str, text: str) -> dict[str, Any]:
         return {"ok": False, "error": "worker is required"}
     if not text.strip():
         return {"ok": False, "error": "text is required"}
-    return _http_json("POST", "/send", {"worker": worker, "message": text})
+    return _http_json("POST", "/messages", {"worker": worker, "message": text})
 
 
 @mcp.tool()

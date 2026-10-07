@@ -75,7 +75,7 @@ def test_checkin_instructions_warn_against_response_misuse():
 
     welcome = bridge.worker_manager._build_welcome('finn', bridge.get_backend('claude'))
     assert 'send_example' in welcome, welcome
-    assert 'Never use POST /response to message another worker' in welcome, welcome
+    assert 'Never use POST /outputs to message another worker' in welcome, welcome
     assert 'http_send_example' not in welcome, 'should not advertise http_send_example — maximize p2p'
 
 
