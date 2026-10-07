@@ -491,12 +491,15 @@ else:
 # BRIDGE_PUBLIC_URL: reachable URL for teleported workers (e.g., http://100.125.36.102:8271)
 # When set and BRIDGE_BIND is not explicitly set, bind to the IP from BRIDGE_PUBLIC_URL
 # (e.g., 100.125.36.102) — NOT 0.0.0.0, which would expose the bridge on all interfaces
-# including the public internet.
+# including the public internet.  Local hooks also use this IP (reachable on same machine).
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     _pub_host = urlparse(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
+    # Local hooks need to reach the bridge too — use the same IP
+    if BRIDGE_BIND != "0.0.0.0":
+        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 
 # BRIDGE_SSH_TARGET: ssh alias that remote machines use to reach the bridge host.
 # Used by /workers?from= when a remote caller needs to address a bridge-local peer.

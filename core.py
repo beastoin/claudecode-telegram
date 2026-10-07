@@ -391,6 +391,8 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     from urllib.parse import urlparse as _urlparse_pub
     _pub_host = _urlparse_pub(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
+    if BRIDGE_BIND != "0.0.0.0":
+        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 
