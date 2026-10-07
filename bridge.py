@@ -82,7 +82,7 @@ from telegram import (
     format_team_lines as _format_team_lines_pure,
 )
 
-import tunnel as _tunnel_mod
+import telegram as _tunnel_mod  # TunnelManager lives in telegram.py
 from core import _build_tunnel_config
 
 from claudecode import *  # noqa: F401,F403
