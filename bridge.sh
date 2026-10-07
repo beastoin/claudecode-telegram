@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.49.0"
+VERSION="0.50.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,11 +22,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   ADMIN_CHAT_ID           - Pre-set admin (otherwise auto-learns first user)
 #   TUNNEL_URL              - Use existing tunnel instead of starting cloudflared
 #   TELEGRAM_WEBHOOK_SECRET - Webhook verification secret
-#
-# Sandbox mode (Docker isolation):
-#   SANDBOX_ENABLED         - Set to "1" to run workers in Docker containers (default: 0)
-#   SANDBOX_IMAGE           - Docker image name (default: claudecode-telegram:latest)
-#   Use --mount/--mount-ro flags for additional mounts (CLI preferred over env)
 #
 # Derived (auto-set per node, don't set manually):
 #   PORT, SESSIONS_DIR, TMUX_PREFIX
@@ -51,9 +46,6 @@ JSON_OUTPUT=false
 FORCE=false
 ALL_NODES=false
 NODE_NAME="${NODE_NAME:-}"
-SANDBOX="${SANDBOX_ENABLED:-0}"  # Default: disabled (sandbox not stable yet)
-SANDBOX_MOUNTS=""  # Extra mounts from --mount/--mount-ro flags
-
 # ============================================================
 # OUTPUT + LOGGING
 # ============================================================
@@ -517,26 +509,6 @@ cmd_run() {
     [[ -n "${GMAIL_FROM_FILTER:-}" ]] && export GMAIL_FROM_FILTER
     [[ -n "${GMAIL_GWS_BIN:-}" ]] && export GMAIL_GWS_BIN
 
-    # Sandbox mode env vars
-    export SANDBOX_ENABLED="${SANDBOX:-0}"
-    export SANDBOX_IMAGE="${SANDBOX_IMAGE:-claudecode-telegram:latest}"
-    export SANDBOX_MOUNTS="${SANDBOX_MOUNTS:-}"
-
-    if [[ "$SANDBOX_ENABLED" == "1" ]]; then
-        log "$(green "Sandbox mode enabled") - workers run in Docker containers"
-        log "$(dim "Default mount: $HOME → /workspace")"
-        if [[ -n "$SANDBOX_MOUNTS" ]]; then
-            log "$(dim "Extra mounts: $SANDBOX_MOUNTS")"
-        fi
-        # Check if docker is available
-        if ! command -v docker &>/dev/null; then
-            warn "Docker not found - falling back to direct execution"
-            export SANDBOX_ENABLED=0
-        fi
-    else
-        log "$(yellow "Sandbox mode disabled") - workers run directly (--dangerously-skip-permissions)"
-    fi
-
     local bridge_log="$node_dir/bridge.log"
 
     # Set tunnel mode env vars for Python's TunnelManager
@@ -548,8 +520,12 @@ cmd_run() {
         export TUNNEL_URL="$tunnel_url"
         log "$(dim "Using provided tunnel URL: $tunnel_url")"
     else
-        export TUNNEL_MODE="auto"
-        log "$(dim "Tunnel: auto (cloudflared quick-tunnel)")"
+        export TUNNEL_MODE="${TUNNEL_MODE:-poll}"
+        if [[ "$TUNNEL_MODE" == "auto" ]]; then
+            log "$(dim "Tunnel: auto (cloudflared quick-tunnel)")"
+        else
+            log "$(dim "Polling: getUpdates long-polling (set TUNNEL_MODE=auto for cloudflared)")"
+        fi
     fi
 
     log ""
@@ -1686,20 +1662,12 @@ FLAGS
   --no-color            Disable colors
   --env-file <path>     Load env from file
   -f, --force           Overwrite existing
-  --sandbox             Run workers in Docker (default: disabled)
-  --no-sandbox          Run workers directly (--dangerously-skip-permissions)
-  --sandbox-image <img> Docker image (default: claudecode-telegram:latest)
-  --mount <path>        Extra mount (host:container or just path)
-  --mount-ro <path>     Extra mount, read-only
-
 ENVIRONMENT
   NODE_NAME               Target node (default: auto-detect or "prod")
   TELEGRAM_BOT_TOKEN      Bot token from @BotFather (required)
   PORT                    Server port (default: 8270)
   TUNNEL_URL              Pre-configured tunnel URL
   TELEGRAM_WEBHOOK_SECRET Webhook verification secret (optional)
-  SANDBOX_ENABLED         Enable sandbox mode (1/0, default: 0)
-  SANDBOX_IMAGE           Docker image for workers
 
 DIRECTORY STRUCTURE
   ~/.claude/telegram/nodes/
@@ -1849,14 +1817,6 @@ main() {
             -n=*|--node=*) NODE_NAME="${1#*=}"; shift;;
             -n|--node)     NODE_NAME="$2"; shift 2;;
             --all)        ALL_NODES=true; shift;;
-            --sandbox)    SANDBOX=1; shift;;
-            --no-sandbox) SANDBOX=0; shift;;
-            --sandbox-image=*) SANDBOX_IMAGE="${1#*=}"; shift;;
-            --sandbox-image)   SANDBOX_IMAGE="$2"; shift 2;;
-            --mount=*)    SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}${1#*=}"; shift;;
-            --mount)      SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}$2"; shift 2;;
-            --mount-ro=*) SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:${1#*=}"; shift;;
-            --mount-ro)   SANDBOX_MOUNTS="${SANDBOX_MOUNTS:+$SANDBOX_MOUNTS,}ro:$2"; shift 2;;
             -*)           error "Unknown flag: $1"; exit 2;;
             *)            break;;
         esac

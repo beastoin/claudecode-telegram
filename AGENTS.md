@@ -130,7 +130,7 @@ Stop, start, and check with the management script only:
 ```bash
 ./bridge.sh --node prod stop        # stop
 ./bridge.sh --node prod status      # verify
-./bridge.sh --node prod run         # start (or --no-sandbox run)
+./bridge.sh --node prod run         # start
 ./bridge.sh --node prod status      # verify again after start
 ```
 Never use `kill`, `pkill`, or `kill -9` on bridge processes. The script tracks PIDs, cleans up tunnels, and preserves worker state. Raw kill skips all of that.
@@ -142,7 +142,7 @@ Never use `kill`, `pkill`, or `kill -9` on bridge processes. The script tracks P
 Token env files live at `~/.config/claudecode-telegram/<node>.env`. Use them for restarts:
 ```bash
 source ~/.config/claudecode-telegram/prod.env
-TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./bridge.sh --node prod --no-sandbox run
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" ./bridge.sh --node prod run
 ```
 
 ### tmux send race condition [SPEC-001]

@@ -33,7 +33,7 @@ Default mode starts a bridge on port 8295. It runs all FAST tests plus:
 - Worker routing (`@mention`, `@all`, reply-to)
 - Security (webhook secret, token isolation, file permissions)
 - Image and document handling
-- `/response` and `/notify` endpoints
+- `/outputs` and `/notifications` endpoints
 - Persistence files
 - Guest system endpoints
 - Pilot grid endpoints
@@ -188,7 +188,6 @@ These tests run without a bridge. They test Python functions and constants direc
 **Core formatting and splitting:**
 - Response prefix and multipart formatting
 - Message splitting (short, newlines, hard, HTML-aware)
-- Sandbox Docker command generation
 - Hook transcript extraction (single, multiple, skip, failure)
 
 **Markdown conversion:**
@@ -244,7 +243,7 @@ These tests run without a bridge. They test Python functions and constants direc
 
 **Media tags:**
 - Image and file tag parsing
-- `/notify` image tags
+- `/notifications` image tags
 - Remote worker image tags (no local validation)
 
 **Persistence functions:**
@@ -337,7 +336,7 @@ These tests run `bridge.sh` directly. They do not start a bridge.
 - `--version` shows version
 - `--node`, `--port`, `--all` flag syntax
 - `--no-tunnel`, `--tunnel-url`, `--headless`, `--quiet`, `--verbose` flags
-- `--no-color`, `--env-file`, `--sandbox-image`, `--mount`, `--mount-ro` flags
+- `--no-color`, `--env-file` flags
 - Default ports by node name
 - Unknown command rejection
 - Missing token error message
@@ -356,13 +355,13 @@ These tests start a bridge on port 8295. They test real HTTP endpoints and Teleg
 
 **HTTP endpoints:**
 - `GET /` health check
-- `POST /response` endpoint (valid, missing fields, no chat_id, without pending)
-- `POST /notify` endpoint (valid, missing text)
+- `POST /outputs` endpoint (valid, missing fields, no chat_id, without pending)
+- `POST /notifications` endpoint (valid, missing text)
 - `GET /workers` endpoint (exists, JSON structure, shows tmux workers, empty state)
 - `GET /machines` endpoint structure
 - API index returns curated endpoint list (not all routed endpoints)
 - 404 for unknown endpoints
-- `POST /register` forge registration
+- `POST /workers` forge registration
 
 **Admin:**
 - First user becomes admin
@@ -432,7 +431,7 @@ These tests start a bridge on port 8295. They test real HTTP endpoints and Teleg
 - tmux workers shown, empty state
 
 **send_to_worker integration:**
-- `POST /send` delivers through bridge routing
+- `POST /messages` delivers through bridge routing
 
 **Worker-to-worker pipe:**
 - Pipe message delivery

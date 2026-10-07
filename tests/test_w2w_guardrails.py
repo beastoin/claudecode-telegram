@@ -89,8 +89,7 @@ class TestWelcomeMessageRouting:
         mgr._build_welcome = bridge.WorkerManager._build_welcome.__get__(mgr)
         backend_obj = MagicMock()
         backend_obj.is_interactive = True
-        with patch.object(bridge, "read_checkin_note", return_value=""), \
-             patch.object(bridge, "SANDBOX_ENABLED", False):
+        with patch.object(bridge, "read_checkin_note", return_value=""):
             return mgr._build_welcome(name, backend_obj)
 
     def test_welcome_mentions_send_example(self):

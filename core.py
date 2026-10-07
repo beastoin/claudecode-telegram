@@ -448,11 +448,6 @@ PENDING_TIMEOUT = 600
 FILE_INBOX_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 
-SANDBOX_ENABLED = os.environ.get("SANDBOX_ENABLED", "0") == "1"
-SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "claudecode-telegram:latest")
-SANDBOX_EXTRA_MOUNTS: list[Any] = []
-_mounts_env = os.environ.get("SANDBOX_MOUNTS", "")
-
 TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
 _CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
 _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
@@ -516,7 +511,7 @@ class MediaConfig:
 @dataclass(frozen=True)
 class TunnelConfig:
     """Tunnel lifecycle configuration (immutable)."""
-    mode: Literal["auto", "provided", "none"] = "auto"
+    mode: Literal["auto", "poll", "provided", "none"] = "poll"
     provided_url: str = ""
     cloudflared_binary: str = "cloudflared"
     startup_timeout: int = 60
@@ -533,22 +528,26 @@ class TunnelConfig:
 
 # ── Tunnel env vars ────────────────────────────────────────────────────
 
-TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "auto")
+TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
 
 def _build_tunnel_config() -> TunnelConfig:
     """Build TunnelConfig from environment variables."""
-    mode: Literal["auto", "provided", "none"]
+    mode: Literal["auto", "poll", "provided", "none"]
     tunnel_url = TUNNEL_URL
     raw = TUNNEL_MODE.lower()
     if raw == "none":
         mode = "none"
+    elif raw == "poll":
+        mode = "poll"
     elif tunnel_url:
         mode = "provided"
     elif raw == "provided":
         mode = "provided"
-    else:
+    elif raw == "auto":
         mode = "auto"
+    else:
+        mode = "poll"
     return TunnelConfig(mode=mode, provided_url=tunnel_url)
 
 
@@ -606,8 +605,6 @@ class AppContext:
     node_name: str = ""
     claude_dir: Path | None = None
     default_backend: str = "claude"
-    sandbox_enabled: bool = False
-    sandbox_image: str = ""
     team_dir: str = ""
     watchdog_interval: int = 4
     webhook_secret: str = ""
@@ -636,8 +633,6 @@ def _build_app_context() -> AppContext:
         node_name=NODE_NAME,
         claude_dir=CLAUDE_DIR,
         default_backend=DEFAULT_BACKEND,
-        sandbox_enabled=SANDBOX_ENABLED,
-        sandbox_image=SANDBOX_IMAGE,
         team_dir=TEAM_DIR,
         watchdog_interval=WATCHDOG_INTERVAL,
         webhook_secret=WEBHOOK_SECRET,

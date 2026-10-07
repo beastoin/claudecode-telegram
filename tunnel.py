@@ -191,11 +191,14 @@ class TunnelManager:
             self._state = TunnelState.FAILED
             return
 
-        # Phase 2: Establish tunnel + webhook
-        if self._config.mode == "provided":
+        # Phase 2: Establish tunnel + webhook (or go straight to polling)
+        if self._config.mode == "poll":
+            _log(_LOG_INFO, "tunnel", "Poll mode — using getUpdates long-polling (no tunnel)")
+            self._start_poll_fallback()
+        elif self._config.mode == "provided":
             self._tunnel_url = self._config.provided_url
             _log(_LOG_INFO, "tunnel", f"Using provided tunnel URL: {self._tunnel_url}")
-        else:
+        elif self._config.mode == "auto":
             url = self._start_cloudflared()
             if url:
                 self._tunnel_url = url

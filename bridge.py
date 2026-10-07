@@ -34,6 +34,7 @@ import re
 import urllib.error
 import urllib.request
 import shlex
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 from pathlib import Path
@@ -50,7 +51,7 @@ from core import (  # underscore names not in *
     _RealSubprocessRunner, _RealClock,
     _build_app_context,
     _wd_cfg, _res_cfg,
-    _DEFAULT_PORTS, _bridge_url_env, _mounts_env, _node_name,
+    _DEFAULT_PORTS, _bridge_url_env, _node_name,
     _CHECKIN_NOTE_PATH, _LEARNING_REMINDER_PATH,
     _app_context,
 )
@@ -545,20 +546,6 @@ API_ENDPOINTS = {
 }
 
 
-# Sandbox mode: run Claude Code in Docker container for isolation
-# CLI flags: --sandbox, --sandbox-image, --mount, --mount-ro
-# Default: mounts ~ to /workspace (rw)
-SANDBOX_ENABLED = os.environ.get("SANDBOX_ENABLED", "0") == "1"
-
-SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "claudecode-telegram:latest")
-
-# Extra mounts from CLI: list of (host_path, container_path, readonly)
-# Parsed from SANDBOX_MOUNTS env var: "/host:/container,/path,ro:/secrets:/secrets"
-SANDBOX_EXTRA_MOUNTS = []
-
-_mounts_env = os.environ.get("SANDBOX_MOUNTS", "")
-
-
 # Derive node name from TMUX_PREFIX for per-node isolation in /tmp
 # "claude-test-" -> "test", "claude-" -> "default"
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
@@ -734,8 +721,6 @@ class AppContext:
     node_name: str = ""
     claude_dir: Path | None = None
     default_backend: str = "claude"
-    sandbox_enabled: bool = False
-    sandbox_image: str = ""
     team_dir: str = ""
     watchdog_interval: int = 4
     webhook_secret: str = ""
@@ -784,8 +769,6 @@ def _build_app_context() -> AppContext:
         node_name=NODE_NAME,
         claude_dir=CLAUDE_DIR,
         default_backend=DEFAULT_BACKEND,
-        sandbox_enabled=SANDBOX_ENABLED,
-        sandbox_image=SANDBOX_IMAGE,
         team_dir=TEAM_DIR,
         watchdog_interval=WATCHDOG_INTERVAL,
         webhook_secret=WEBHOOK_SECRET,
@@ -2525,11 +2508,7 @@ def _fire_reminder(name: str, st: ReminderState) -> None:
     st["reminder_pending"] = True
     _save_learning_reminder_state()
     reminder = _read_learning_reminder(name)
-    threading.Thread(
-        target=_send_learning_reminder,
-        args=(name, reminder),
-        daemon=True,
-    ).start()
+    _task_pool.submit(_send_learning_reminder, name, reminder)
 
 
 
@@ -3750,9 +3729,6 @@ class WorkerManager:
                 "Each message triggers a blocking CLI call, responses arrive async in Telegram. "
                 "Use nohup/& if calling CLI directly."
             )
-        if SANDBOX_ENABLED and backend_obj.is_interactive:
-            welcome += " Running in sandbox mode (Docker container)."
-
         # Append manager note if set (with {name} and {machine} substitution)
         note = read_checkin_note()
         if note:
@@ -3820,23 +3796,16 @@ class WorkerManager:
 
         # Backend stored in workers.json registry only (no per-worker file)
 
-        if SANDBOX_ENABLED and backend_obj.is_interactive:
-            if startup_cwd:
-                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name)
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
-            _log(_LOG_INFO, "worker", f"Started worker '{name}' in sandbox mode")
-        else:
-            start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
-            if startup_cwd:
-                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
-            if backend_obj.is_interactive:
-                self._clock.sleep(DELAY_STARTUP_LONG)
-                self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
+        if startup_cwd:
+            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        if backend_obj.is_interactive:
+            self._clock.sleep(DELAY_STARTUP_LONG)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
 
         if backend_obj.is_interactive:
-            self._clock.sleep(DELAY_RESPONSE_GAP if not SANDBOX_ENABLED else DELAY_CLAUDE_LOAD + 1)
+            self._clock.sleep(DELAY_RESPONSE_GAP)
 
         welcome = self._build_welcome(name, backend_obj)
         if not backend_obj.is_interactive:
@@ -3881,9 +3850,6 @@ class WorkerManager:
                     session_id_file.unlink()
             except OSError as e:
                 return False, f"Failed to clean non-interactive metadata: {e}"
-
-        if SANDBOX_ENABLED and backend.is_interactive:
-            stop_docker_container(name)
 
         clear_pending(name)
         _set_worker_cwd(name, "")
@@ -4043,19 +4009,11 @@ class WorkerManager:
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_TMUX_SEND)
 
-        if SANDBOX_ENABLED and backend.is_interactive:
-            stop_docker_container(name)
-            self._clock.sleep(DELAY_RETRY)
-            if startup_cwd:
-                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
-        else:
-            start_cmd = backend.start_cmd(resume_id)
-            start_cmd = f'unset CLAUDECODE && {start_cmd}'
-            if startup_cwd:
-                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        start_cmd = backend.start_cmd(resume_id)
+        start_cmd = f'unset CLAUDECODE && {start_cmd}'
+        if startup_cwd:
+            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
 
     def _wait_for_startup(self, name: str, tmux_name: str, backend: Backend,
                           resume_id: str, startup_cwd: str) -> bool:
@@ -4160,20 +4118,14 @@ class WorkerManager:
         if startup_cwd:
             _ensure_workspace_trusted(startup_cwd)
 
-        if SANDBOX_ENABLED and backend.is_interactive:
-            if startup_cwd:
-                self._cd_tmux_to_cwd(tmux_name, startup_cwd)
-            docker_cmd = get_docker_run_cmd(name, resume_id=resume_id)
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, docker_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
-        else:
-            start_cmd = backend.start_cmd(resume_id)
-            start_cmd = f'unset CLAUDECODE && {start_cmd}'
-            if startup_cwd:
-                start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
-            self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
-            if backend.is_interactive:
-                self._clock.sleep(DELAY_STARTUP_LONG)
-                self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        start_cmd = backend.start_cmd(resume_id)
+        start_cmd = f'unset CLAUDECODE && {start_cmd}'
+        if startup_cwd:
+            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        if backend.is_interactive:
+            self._clock.sleep(DELAY_STARTUP_LONG)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
 
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
@@ -4285,85 +4237,6 @@ def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None
 
 
 
-def get_docker_run_cmd(name: str, resume_id: str = "") -> str:
-    """Build docker run command for sandbox mode.
-
-    Default: mounts ~ to /workspace (rw)
-    Extra mounts via SANDBOX_EXTRA_MOUNTS (from --mount/--mount-ro flags)
-
-    Args:
-        name: Worker name (used for container name)
-
-    Returns:
-        Command string to run in tmux
-    """
-    import platform
-    container_name = f"claude-worker-{name}"
-    home = Path.home()
-
-    # Base command
-    cmd_parts = [
-        "docker", "run", "-it",
-        f"--name={container_name}",
-        "--rm",  # Clean up on exit
-    ]
-
-    # Host gateway for bridge communication
-    if platform.system() == "Linux":
-        cmd_parts.append("--add-host=host.docker.internal:host-gateway")
-
-    # Default mount: ~ → /workspace (rw)
-    cmd_parts.append(f"-v={home}:/workspace")
-
-    # Extra mounts from --mount/--mount-ro flags
-    for host_path, container_path, readonly in SANDBOX_EXTRA_MOUNTS:
-        if readonly:
-            cmd_parts.append(f"-v={host_path}:{container_path}:ro")
-        else:
-            cmd_parts.append(f"-v={host_path}:{container_path}")
-
-    # Mount session files for hook coordination
-    cmd_parts.append(f"-v={SESSIONS_DIR}:{SESSIONS_DIR}")
-
-    # Mount temp for file inbox
-    FILE_INBOX_ROOT.mkdir(parents=True, exist_ok=True)
-    cmd_parts.append(f"-v={FILE_INBOX_ROOT}:{FILE_INBOX_ROOT}")
-
-    # Environment variables for hook
-    # Use global BRIDGE_URL if user-provided, otherwise default to host.docker.internal for Docker
-    if _bridge_url_env:
-        docker_bridge_url = BRIDGE_URL  # User-provided takes precedence
-    else:
-        docker_bridge_url = f"http://host.docker.internal:{PORT}"
-    cmd_parts.extend([
-        f"-e=BRIDGE_URL={docker_bridge_url}",
-        f"-e=PORT={PORT}",
-        f"-e=TMUX_PREFIX={TMUX_PREFIX}",
-        f"-e=SESSIONS_DIR={SESSIONS_DIR}",
-        f"-e=BRIDGE_SESSION={name}",  # Session name for hook (tmux unavailable inside container)
-        "-e=TMUX_FALLBACK=1",
-    ])
-
-    # Working directory
-    cmd_parts.extend(["-w", "/workspace"])
-
-    # Image
-    cmd_parts.append(SANDBOX_IMAGE)
-
-    # Run claude with --dangerously-skip-permissions (same as non-sandbox)
-    cmd_parts.append(build_claude_start_cmd(resume_id))
-
-    return " ".join(cmd_parts)
-
-
-
-
-
-def stop_docker_container(name: str) -> None:
-    """Stop and remove a docker container."""
-    container_name = f"claude-worker-{name}"
-    _subprocess_runner.run(["docker", "stop", container_name], capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
-    _subprocess_runner.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
 
 
 
@@ -4557,6 +4430,14 @@ except ImportError as e:
 # CONFIGURATION
 # ======================================================================
 
+# ── Thread pool for bounded concurrency on per-message/per-task threads ──
+# Replaces unbounded Thread() spawns for webhook/poll update handlers,
+# typing indicators, and short background tasks.  Permanent loops
+# (watchdog, tunnel, connectors) keep their own dedicated threads.
+_message_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="msg")
+_task_pool    = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
+
+
 class ReuseAddrServer(ThreadingHTTPServer):
     """HTTP server with SO_REUSEADDR to avoid 'Address already in use' on restart."""
     allow_reuse_address = True
@@ -4615,20 +4496,6 @@ if not BRIDGE_PUBLIC_URL:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
     except (subprocess.SubprocessError, OSError):
         pass  # Tailscale not available — non-critical probe
-
-if _mounts_env:
-    for mount_spec in _mounts_env.split(","):
-        mount_spec = mount_spec.strip()
-        if not mount_spec:
-            continue
-        readonly = mount_spec.startswith("ro:")
-        if readonly:
-            mount_spec = mount_spec[3:]
-        if ":" in mount_spec:
-            host, container = mount_spec.split(":", 1)
-        else:
-            host = container = mount_spec
-        SANDBOX_EXTRA_MOUNTS.append((host, container, readonly))
 
 
 # Gmail connector: poll Gmail for manager emails with @worker mentions
@@ -9614,9 +9481,6 @@ class CommandRouter:
         else:
             lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
 
-        if SANDBOX_ENABLED:
-            lines.append(f"Sandbox: {Path.home()} → /workspace")
-
         self.reply(chat_id, "\n".join(lines))
 
     def handle_message(self, update: TelegramUpdate) -> None:
@@ -10163,22 +10027,7 @@ class CommandRouter:
         ]
 
         lines.append("")
-        if SANDBOX_ENABLED:
-            lines.append("Sandbox: enabled (Docker isolation)")
-            lines.append(f"Image: {SANDBOX_IMAGE}")
-            lines.append(f"Default mount: {Path.home()} → /workspace")
-            if SANDBOX_EXTRA_MOUNTS:
-                lines.append("Extra mounts:")
-                for host, container, ro in SANDBOX_EXTRA_MOUNTS:
-                    ro_flag = " (ro)" if ro else ""
-                    lines.append(f"  {host} → {container}{ro_flag}")
-            lines.append("")
-            lines.append("Note: Workers run in containers with access")
-            lines.append("only to mounted directories. System paths")
-            lines.append("outside mounts are not accessible.")
-        else:
-            lines.append("Sandbox: disabled (direct execution)")
-            lines.append("Workers run with full system access.")
+        lines.append("Execution: direct (--dangerously-skip-permissions)")
 
         self.reply(chat_id, "\n".join(lines))
         return True
@@ -10272,11 +10121,7 @@ class CommandRouter:
   # type: ignore[arg-type]
         if backend.is_interactive and chat_id is not None:
             worker_set_pending(session_name, chat_id)
-        threading.Thread(
-            target=send_typing_loop,
-            args=(chat_id, session_name),
-            daemon=True
-        ).start()
+        _task_pool.submit(send_typing_loop, chat_id, session_name)
 
         send_ok = self.workers.send(session_name, text, chat_id, session)
         if not send_ok:
@@ -10485,10 +10330,8 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                         return None, sid, cwd
                     else:
                         # Start background sync
-                        t = threading.Thread(target=_start_transcript_sync,
-                                             args=(name, host, remote_path, local_tmp, sync_key),
-                                             daemon=True)
-                        t.start()
+                        _task_pool.submit(_start_transcript_sync,
+                                          name, host, remote_path, local_tmp, sync_key)
                         return "syncing", sid, cwd
             except (OSError, subprocess.SubprocessError) as exc:
                 _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
@@ -13190,11 +13033,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                         command_router.handle_message(upd)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                         _log(_LOG_ERROR, "webhook", f"handle_message CRASH: {exc}", exc=exc)
-                threading.Thread(
-                    target=_safe_handle,
-                    args=(update,),
-                    daemon=True,
-                ).start()
+                _message_pool.submit(_safe_handle, update)
         except (json.JSONDecodeError, KeyError) as e:
             _log(_LOG_ERROR, "webhook", f"parse error: {e}", exc=e)
 
@@ -13956,6 +13795,10 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         except OSError as exc:
             _log(_LOG_DEBUG, "shutdown:pipe", f"{type(exc).__name__}: {exc}")
 
+    # Shutdown thread pools (don't wait for queued tasks)
+    _message_pool.shutdown(wait=False, cancel_futures=True)
+    _task_pool.shutdown(wait=False, cancel_futures=True)
+
     send_shutdown_message()
     sys.exit(0)
 
@@ -14039,16 +13882,7 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     else:
         print("Admin: auto-learn (first user to message becomes admin)")
 
-    if SANDBOX_ENABLED:
-        print(f"Sandbox mode: Workers run in Docker containers")
-        print(f"Mounted: {Path.home()} → /workspace")
-        if SANDBOX_EXTRA_MOUNTS:
-            for host_path, container_path, ro in SANDBOX_EXTRA_MOUNTS:
-                ro_flag = " (ro)" if ro else ""
-                print(f"Mounted: {host_path} → {container_path}{ro_flag}")
-        print("Workers can only access mounted directories")
-    else:
-        print("Sandbox mode: disabled (direct execution)")
+    print("Execution: direct (--dangerously-skip-permissions)")
 
 
 
@@ -14065,9 +13899,6 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
             lines.append(f"Focused: {active}")
     else:
         lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
-
-    if SANDBOX_ENABLED:
-        lines.append(f"Sandbox: {Path.home()} → /workspace")
 
     result = transport.send_text(last_chat_id, "\n".join(lines))
     if result and result.get("ok"):
@@ -14471,7 +14302,7 @@ def main() -> None:
                         command_router.handle_message(upd)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                         _log(_LOG_ERROR, "tunnel:poll", f"handle_message CRASH: {exc}", exc=exc)
-                threading.Thread(target=_safe_handle, args=(update,), daemon=True).start()
+                _message_pool.submit(_safe_handle, update)
 
         def _tunnel_on_notify(msg: str) -> None:
             """Send tunnel status notifications to admin chat."""

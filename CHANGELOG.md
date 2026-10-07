@@ -1,5 +1,24 @@
 ## Changelog
 
+### v0.50.0 - Thread pool, sandbox removal, polling default
+
+**Thread pool for bounded concurrency:**
+- Replaced unbounded `Thread()` spawns for webhook/poll update handlers with `ThreadPoolExecutor(max_workers=8)`.
+- Short background tasks (typing indicators, learning reminders, transcript sync) use a separate `ThreadPoolExecutor(max_workers=4)`.
+- Permanent loops (watchdog, tunnel, connectors) keep dedicated threads — not pooled.
+- Graceful shutdown drains both pools.
+
+**Sandbox removal:**
+- Removed `SANDBOX_ENABLED`, `SANDBOX_IMAGE`, `SANDBOX_MOUNTS`, `SANDBOX_EXTRA_MOUNTS` from core.py, bridge.py, and bridge.sh.
+- Removed `--sandbox`, `--no-sandbox`, `--sandbox-image`, `--mount`, `--mount-ro` CLI flags from bridge.sh.
+- Sandbox was never production-ready; workers always ran with `--dangerously-skip-permissions`. Net -214 lines.
+
+**Polling as default tunnel mode:**
+- Changed `TUNNEL_MODE` default from `"auto"` (cloudflare quick-tunnel) to `"poll"` (getUpdates long-polling).
+- Tunnel mode `"poll"` skips cloudflared entirely — goes straight to long-polling.
+- `TUNNEL_MODE=auto` still works for explicit cloudflare quick-tunnel.
+- bridge.sh respects `TUNNEL_MODE` env var with fallback to poll.
+
 ### v0.49.0 - API endpoint redesign
 
 **Breaking:** All HTTP endpoints renamed to follow REST plural-noun convention. No backward-compatible aliases — clean cut.

@@ -19,7 +19,7 @@ from core import (
     _LOG_ERROR, _LOG_WARN, _LOG_INFO, _LOG_DEBUG,
     _build_app_context,
     _wd_cfg, _res_cfg, _urlopen,
-    _DEFAULT_PORTS, _bridge_url_env, _mounts_env, _node_name,
+    _DEFAULT_PORTS, _bridge_url_env, _node_name,
     _CHECKIN_NOTE_PATH, _LEARNING_REMINDER_PATH,
     SubprocessRunner, Clock, MarkdownToken,
     AppContext, get_app_context,
@@ -38,7 +38,7 @@ from core import (
     DELAY_PROCESS_SETTLE, DELAY_CLAUDE_LOAD,
     DEFAULT_BACKEND, DEFAULT_WORKER_BACKEND, PENDING_TIMEOUT,
     FILE_INBOX_ROOT, WORKER_PIPE_ROOT,
-    SANDBOX_ENABLED, SANDBOX_IMAGE, SANDBOX_EXTRA_MOUNTS,
+
     TEAM_DIR,
     MACHINES_CONFIG_FILE,
     WEBHOOK_SECRET,

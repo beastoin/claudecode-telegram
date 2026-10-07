@@ -210,7 +210,7 @@ class WorkerFixture:
 class BridgeHarness:
     """Context manager that isolates bridge.py globals for testing.
 
-    Patches SESSIONS_DIR, NODE_DIR, TMUX_PREFIX, SANDBOX_ENABLED,
+    Patches SESSIONS_DIR, NODE_DIR, TMUX_PREFIX,
     _CLAUDE_JSON_PATH, _clock, _subprocess_runner, _urlopen.
     All are restored on exit.  A temp filesystem is created and cleaned up.
 
@@ -238,7 +238,6 @@ class BridgeHarness:
         self._patch("SESSIONS_DIR", self.sessions_dir)
         self._patch("NODE_DIR", self.node_dir)
         self._patch("TMUX_PREFIX", self.tmux_prefix)
-        self._patch("SANDBOX_ENABLED", False)
         self._patch("_CLAUDE_JSON_PATH", self.claude_json)
         self._patch("_clock", self.clock)
         self._patch("_urlopen", self.telegram.urlopen)
