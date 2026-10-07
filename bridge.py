@@ -92,8 +92,6 @@ from claudecode import (  # underscore names excluded from * import
 # Only bridge-specific types are defined here.
 
 
-
-
 class WorkerEndpointInfo(TypedDict, total=False):
     name: str
     backend: str
@@ -109,7 +107,6 @@ class WorkerEndpointInfo(TypedDict, total=False):
 
 # Probe/token types (DiskUsageDict, MemUsageDict, etc.) → claudecode.py
 # Telegram types (MediaGroupEntry, etc.) → telegram.py
-
 
 
 class MachinePublicDict(TypedDict, total=False):
@@ -128,13 +125,11 @@ class MachinePublicDict(TypedDict, total=False):
     health: MachineHealthDict
 
 
-
 class MachinesCatalogResponse(TypedDict):
     version: int
     config_path: str
     caller: str | None
     machines: list[MachinePublicDict]
-
 
 
 # Worker types (GitPushStateResult, TmuxSessionDict, RegistryWorkerDict, etc.) → claudecode.py
@@ -152,13 +147,11 @@ class TranscriptSyncState(TypedDict, total=False):
     remote_size: int
 
 
-
 class TranscriptMessageUsage(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
-
 
 
 class TranscriptMessageContent(TypedDict, total=False):
@@ -171,13 +164,11 @@ class TranscriptMessageContent(TypedDict, total=False):
     is_error: bool
 
 
-
 class TranscriptMessage(TypedDict, total=False):
     role: str           # "user", "assistant"
     content: str | list[TranscriptMessageContent]
     model: str
     usage: TranscriptMessageUsage
-
 
 
 class TranscriptEntry(TypedDict, total=False):
@@ -187,7 +178,6 @@ class TranscriptEntry(TypedDict, total=False):
     version: str
     gitBranch: str
     _idx: int           # added by pagination logic
-
 
 
 class TranscriptStatsDict(TypedDict):
@@ -208,12 +198,9 @@ class TranscriptStatsDict(TypedDict):
     duration: str
 
 
-
 class ToolResultDict(TypedDict, total=False):
     content: str
     is_error: bool
-
-
 
 
 class ConnectorMessageLogEntry(TypedDict):
@@ -223,18 +210,15 @@ class ConnectorMessageLogEntry(TypedDict):
     targets: list[str]
 
 
-
 class ConnectorMetadataDict(TypedDict, total=False):
     number: int
     repo: str
-
 
 
 class ConnectorAttachmentDict(TypedDict, total=False):
     path: str
     filename: str
     mimeType: str
-
 
 
 class ConnectorStatusDict(TypedDict, total=False):
@@ -244,11 +228,9 @@ class ConnectorStatusDict(TypedDict, total=False):
     enabled: bool
 
 
-
 class MentionRouteResult(TypedDict):
     name: str
     status: str  # "sent", "offline", "unknown"
-
 
 
 # ── Endpoint body TypedDicts (HTTP POST payloads) ────────────────────
@@ -267,14 +249,11 @@ class HookResponseBody(TypedDict, total=False):
     message: str
 
 
-
-
 class HealthAlertBody(TypedDict, total=False):
     worker: str
     issue: str
     transcript_age: int
     node: str
-
 
 
 class ForgeRegisterBody(TypedDict, total=False):
@@ -294,12 +273,6 @@ class ForgeRegisterBody(TypedDict, total=False):
     machine: str
 
 
-
-
-
-
-
-
 class PrActionBody(TypedDict, total=False):
     token: str
     owner: str
@@ -312,13 +285,11 @@ class PrActionBody(TypedDict, total=False):
     merge_method: str
 
 
-
 class TelegramWebhookBody(TypedDict, total=False):
     update_id: int
     message: TelegramMessageDict
     callback_query: TelegramCallbackQuery
     edited_message: TelegramMessageDict
-
 
 
 class NodeConfigDict(TypedDict, total=False):
@@ -328,8 +299,6 @@ class NodeConfigDict(TypedDict, total=False):
     port: int
     webhook_secret: str
     connectors: dict[str, object]  # config varies per connector type
-
-
 
 
 # NamedTuples (WorkerStateEntry, FileValidation, etc.) → telegram.py / claudecode.py
@@ -421,7 +390,6 @@ else:
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
-
 
 
 # BRIDGE_URL: hook callback target. Localhost URLs are always derived from PORT to
@@ -584,222 +552,7 @@ _CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
 _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 
 
-
-# ── Config dataclasses (frozen, immutable defaults) ──────────────────
-
-@dataclass(frozen=True)
-class WatchdogConfig:  # type: ignore[no-redef]
-    interval: int = 4
-    start_grace: int = 30
-    think_grace: int = 30
-    tool_gap_grace: int = 12
-    stale_pending: int = 900
-    cpu_active: float = 15.0
-    cpu_idle: float = 7.0
-    idle_streak_stuck: int = 3
-    alert_cooldown: int = 180
-    restart_cooldown: int = 60
-    host_down_threshold: int = 3
-
-
-
-@dataclass(frozen=True)
-class ResourceAlertConfig:  # type: ignore[no-redef]
-    disk_warn_pct: int = 85
-    disk_alert_pct: int = 95
-    disk_alert_gb: int = 5
-    disk_cooldown: int = 3600
-    cpu_hog_pct: int = 90
-    cpu_hog_duration_min: int = 60
-    cpu_hog_cooldown: int = 3600
-    worktree_threshold_gb: int = 30
-    worktree_cooldown: int = 3600
-    mem_threshold_pct: int = 90
-    mem_threshold_gb: int = 4
-    mem_cooldown: int = 3600
-    io_iowait_pct: int = 30
-    io_cooldown: int = 3600
-    infra_cooldown: int = 300
-
-
-
-@dataclass(frozen=True)
-class MediaConfig:  # type: ignore[no-redef]
-    max_file_size: int = 50 * 1024 * 1024
-    photo_max_sum: int = 10000
-    photo_max_dim: int = 5000
-
-
-
-_wd_cfg = WatchdogConfig()
-
-WATCHDOG_INTERVAL = _wd_cfg.interval
-
-START_GRACE = _wd_cfg.start_grace
-
-THINK_GRACE = _wd_cfg.think_grace
-
-TOOL_GAP_GRACE = _wd_cfg.tool_gap_grace
-
-STALE_PENDING = _wd_cfg.stale_pending
-
-CPU_ACTIVE = _wd_cfg.cpu_active
-
-CPU_IDLE = _wd_cfg.cpu_idle
-
-IDLE_STREAK_STUCK = _wd_cfg.idle_streak_stuck
-
-ALERT_COOLDOWN = _wd_cfg.alert_cooldown
-
-
-
-# ── AppContext: injectable configuration ──
-
-@dataclass
-class AppContext:  # type: ignore[no-redef]
-    bot_token: str = ""
-    port: int = 8270
-    bridge_bind: str = "127.0.0.1"
-    bridge_url: str = ""
-    bridge_public_url: str = ""
-    bridge_ssh_target: str = "vps"
-    sessions_dir: Path | None = None
-    tmux_prefix: str = "claude-"
-    node_name: str = ""
-    claude_dir: Path | None = None
-    default_backend: str = "claude"
-    team_dir: str = ""
-    watchdog_interval: int = 4
-    webhook_secret: str = ""
-    transport_mode: str = "telegram"
-
-    def __post_init__(self) -> None:
-        if self.sessions_dir is None:
-            self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
-        if self.claude_dir is None:
-            self.claude_dir = Path.home() / ".claude"
-        if not self.bridge_url:
-            self.bridge_url = f"http://localhost:{self.port}"
-
-
-
-def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[no-redef,explicit-any]
-    try:
-        return func(*args, **kwargs)
-    except Exception as exc:
-        _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
-        return None
-
-
-
-def _build_app_context() -> AppContext:  # type: ignore[no-redef]
-    return AppContext(
-        bot_token=BOT_TOKEN,
-        port=PORT,
-        bridge_bind=BRIDGE_BIND,
-        bridge_url=BRIDGE_URL,
-        bridge_public_url=BRIDGE_PUBLIC_URL,
-        bridge_ssh_target=BRIDGE_SSH_TARGET,
-        sessions_dir=SESSIONS_DIR,
-        tmux_prefix=TMUX_PREFIX,
-        node_name=NODE_NAME,
-        claude_dir=CLAUDE_DIR,
-        default_backend=DEFAULT_BACKEND,
-        team_dir=TEAM_DIR,
-        watchdog_interval=WATCHDOG_INTERVAL,
-        webhook_secret=WEBHOOK_SECRET,
-        transport_mode=TRANSPORT_MODE if 'TRANSPORT_MODE' in dir() else "telegram",
-    )
-
-
-
-def get_app_context() -> AppContext:  # type: ignore[no-redef]
-    global _app_context
-    if _app_context is None:
-        _app_context = _build_app_context()
-    return _app_context
-
-
-
-# ── Injectable testing seams ──
-
-class MarkdownToken(Protocol):  # type: ignore[no-redef]
-    type: str
-    content: str
-    children: list['MarkdownToken'] | None
-    attrs: dict[str, str] | None
-
-
-
-class SubprocessRunner(Protocol):  # type: ignore[no-redef]
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]: ...
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]: ...
-
-
-class Clock(Protocol):  # type: ignore[no-redef]
-    def time(self) -> float: ...
-    def sleep(self, seconds: float) -> None: ...
-
-
-
-class _RealSubprocessRunner:  # type: ignore[no-redef]
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
-
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
-        return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
-
-
-
-class _RealClock:  # type: ignore[no-redef]
-    def time(self) -> float:
-        return time.time()
-
-    def sleep(self, seconds: float) -> None:
-        time.sleep(seconds)
-
-
-
-# Module-level defaults (overridable in tests by replacing these singletons)
-_subprocess_runner: SubprocessRunner = _RealSubprocessRunner()  # type: ignore[no-redef]
-
-_clock: Clock = _RealClock()  # type: ignore[no-redef]
-
-_urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[no-redef,explicit-any]  # Injectable for testing
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Structured logging
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Severity levels for structured log output.
-_LOG_ERROR: str = "ERROR"  # type: ignore[no-redef]
-
-_LOG_WARN: str = "WARN"  # type: ignore[no-redef]
-
-_LOG_INFO: str = "INFO"  # type: ignore[no-redef]
-
-_LOG_DEBUG: str = "DEBUG"  # type: ignore[no-redef]
-
-
-
-def _log(level: str, component: str, msg: str | Path, *,  # type: ignore[no-redef]
-         exc: BaseException | None = None) -> None:
-    print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
-    if exc is not None:
-        import traceback as _tb
-        _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-
-
-
-
-# ── Watchdog & health monitoring constants ────────────────────────────
-_res_cfg = ResourceAlertConfig()
-
-RESTART_COOLDOWN: int = _wd_cfg.restart_cooldown  # type: ignore[no-redef]
-
-HOST_DOWN_THRESHOLD: int = _wd_cfg.host_down_threshold  # type: ignore[no-redef]
+# ── Bridge-specific resource alert aliases ────────────────────────────
 
 
 DISK_WARN_THRESHOLD_PCT = _res_cfg.disk_warn_pct
@@ -838,22 +591,9 @@ IO_ALERT_COOLDOWN = _res_cfg.io_cooldown
 INFRA_ALERT_COOLDOWN = _res_cfg.infra_cooldown
 
 
-# Persistence files (in node directory, survives restart)
-NODE_DIR = SESSIONS_DIR.parent  # ~/.claude/telegram/nodes/<node>
-
-# Security: Pre-set admin or auto-learn first user (RAM only, re-learns on restart)
-ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
-admin_chat_id: ChatId | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None  # type: ignore[no-redef]
-
-# Singleton AppContext — lazily built on first access
-_app_context: AppContext | None = None  # type: ignore[no-redef]
-
 # ── End of shared types/constants ─────────────────────────────────────
-# telegram.py and claudecode.py imported at top of file (no circular deps).
 
 # ── Control plane classes (from claudecode.py) ───────────────────────
-
-
 
 
 @dataclass
@@ -894,24 +634,16 @@ class WorkerRegistryEntry:
         )
 
 
-
-
 # ProcessRegistry → claudecode.py
-
-
-
 
 
 # WorkerWatchdogState, LearningReminderState, HostHealthState → claudecode.py
 # (imported via `from claudecode import *` at top of file)
 
 
-
 # ── Machine catalog, health monitoring, activity extraction (from claudecode.py) ──
 
 # ── Moved from claudecode.py: machine catalog, health monitoring, activity extraction ──
-
-
 
 
 # ── WorkerRecord: normalized worker data model ──
@@ -970,19 +702,14 @@ class WorkerRecord:
         )
 
 
-
-
 def get_worker_host(name: str) -> str | None:
     registry = _load_registry()
     worker = registry.get("workers", {}).get(name, {})
     return worker.get("host")
 
 
-
-
 class MachineConfigError(ValueError):
     pass
-
 
 
 @dataclass(frozen=True)
@@ -1015,8 +742,6 @@ class Machine:
         }
 
 
-
-
 def _validate_machine_id(machine_id: str) -> str:
     if not isinstance(machine_id, str) or not machine_id:
         raise MachineConfigError("machine id must be a non-empty string")
@@ -1025,16 +750,12 @@ def _validate_machine_id(machine_id: str) -> str:
     return machine_id
 
 
-
-
 def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
         raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
     return value
-
-
 
 
 def _implicit_local_machine() -> Machine:
@@ -1048,8 +769,6 @@ def _implicit_local_machine() -> Machine:
         role="bridge",
         configured=False,
     )
-
-
 
 
 def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
@@ -1125,16 +844,12 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
     return machines
 
 
-
-
 def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
     with remote_cache.lock:
         if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
             remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
             remote_cache.machines_path = MACHINES_CONFIG_FILE
         return dict(remote_cache.machines)
-
-
 
 
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
@@ -1157,8 +872,6 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
         role="worker-host",
         configured=False,
     )
-
-
 
 
 def _machine_health(machine: Machine) -> MachineHealthDict:
@@ -1187,8 +900,6 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
     return health
 
 
-
-
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
     target_host = machine.ssh_target
     if caller_host == target_host:
@@ -1196,8 +907,6 @@ def _machine_access(machine: Machine, caller_host: str | None) -> str:
     if target_host is None:
         return f"ssh {BRIDGE_SSH_TARGET}"
     return f"ssh {target_host}"
-
-
 
 
 def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
@@ -1242,8 +951,6 @@ def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
     }
 
 
-
-
 def _ensure_bare_repo(project_name: str) -> str:
     bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
     if not os.path.isdir(bare_path):
@@ -1252,8 +959,6 @@ def _ensure_bare_repo(project_name: str) -> str:
             ["git", "init", "--bare", bare_path],
             capture_output=True, text=True, check=True, timeout=TIMEOUT_REMOTE_CMD)
     return bare_path
-
-
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
@@ -1289,9 +994,6 @@ def _read_noninteractive_activity(worker_name: str) -> str:
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
     return "idle"
-
-
-
 
 
 def _check_hook_failure_signal(name: str) -> str | None:
@@ -1338,8 +1040,6 @@ def _check_hook_failure_signal(name: str) -> str | None:
     return None
 
 
-
-
 def _clear_hook_failures(name: str) -> None:
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
     host = get_worker_host(name)
@@ -1354,8 +1054,6 @@ def _clear_hook_failures(name: str) -> None:
             Path(signal_path).unlink(missing_ok=True)
         except OSError as exc:
             _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
-
-
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
@@ -1380,8 +1078,6 @@ def _detect_poisoned(name: str, tmux_name: str) -> str | None:
         if len(pattern.findall(combined)) >= 3:
             return pattern.pattern
     return None
-
-
 
 
 def parse_hire_args(raw: str) -> tuple[str, str]:
@@ -1426,8 +1122,6 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
     return name, backend
 
 
-
-
 def _activity_from_spinner(stripped: list[str]) -> str | None:
     _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
@@ -1449,8 +1143,6 @@ def _activity_from_spinner(stripped: list[str]) -> str | None:
             dur_match = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
             return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
     return None
-
-
 
 
 def _activity_from_tool(stripped: list[str]) -> str | None:
@@ -1477,8 +1169,6 @@ def _activity_from_tool(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _activity_from_rate_limit(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         lower = raw.lower()
@@ -1489,8 +1179,6 @@ def _activity_from_rate_limit(stripped: list[str]) -> str | None:
         if lower.startswith("retrying") or "retrying in" in lower:
             return "Retrying API request"
     return None
-
-
 
 
 def _activity_from_interactive(stripped: list[str]) -> str | None:
@@ -1519,8 +1207,6 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _activity_from_prompt(stripped: list[str]) -> str | None:
     last_prompt_idx = None
     last_plan_bar_idx = None
@@ -1541,15 +1227,11 @@ def _activity_from_prompt(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _activity_from_editor(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         if "Save and close editor to continue" in raw:
             return "Waiting for external editor"
     return None
-
-
 
 
 def _activity_from_hooks(stripped: list[str]) -> str | None:
@@ -1561,8 +1243,6 @@ def _activity_from_hooks(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _activity_from_confirmation(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
@@ -1572,8 +1252,6 @@ def _activity_from_confirmation(stripped: list[str]) -> str | None:
         if "Waiting for team lead" in raw:
             return "Waiting for team lead approval"
     return None
-
-
 
 
 def _activity_from_tasks(stripped: list[str]) -> str | None:
@@ -1591,15 +1269,11 @@ def _activity_from_tasks(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _is_output_block_end(text: str) -> bool:
     trimmed = text.lstrip()
     if trimmed.startswith("Context left until auto-compact:"):
         return True
     return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
-
-
 
 
 def _activity_from_output_block(stripped: list[str]) -> str | None:
@@ -1631,8 +1305,6 @@ def _activity_from_output_block(stripped: list[str]) -> str | None:
     return None
 
 
-
-
 def _activity_from_error(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
@@ -1642,8 +1314,6 @@ def _activity_from_error(stripped: list[str]) -> str | None:
                 return f"Error: {tail}" if tail else "Error"
             return f"Error: {raw[:60]}"
     return None
-
-
 
 
 def _extract_activity(lines: list[str]) -> str:
@@ -1676,16 +1346,12 @@ def _extract_activity(lines: list[str]) -> str:
     return "Active"
 
 
-
-
 def _extract_context_pct(lines: list[str]) -> str | None:
     for line in reversed(lines):
         m = re.search(r'Context left.*?(\d+)%', line)
         if m:
             return f"{m.group(1)}%"
     return None
-
-
 
 
 def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
@@ -1707,8 +1373,6 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
         return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
     except (subprocess.SubprocessError, OSError):
         return TmuxActivityResult("Unknown", None, None)
-
-
 
 
 def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
@@ -1777,8 +1441,6 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     })
 
 
-
-
 def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
     reply = reply.strip().lower()
 
@@ -1821,8 +1483,6 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 # in the control plane (bridge.py), not in runtime primitives (claudecode.py).
 
 
-
-
 def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
     if not host:
         shutil.copy2(src, dst)
@@ -1832,9 +1492,6 @@ def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "
         _subprocess_runner.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
 
 
-
-
-
 def parse_worker_target(target: str) -> ParsedWorkerTarget:
     if "@" in target:
         name, host = target.rsplit("@", 1)
@@ -1842,16 +1499,10 @@ def parse_worker_target(target: str) -> ParsedWorkerTarget:
     return ParsedWorkerTarget(target, None)
 
 
-
-
-
 def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
     if target_host:
         return f"claude@100.125.36.102:{bare_repo_path}"
     return bare_repo_path
-
-
-
 
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
@@ -1922,9 +1573,6 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "git-sync", f"push state error: {e}")
         return None
-
-
-
 
 
 def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
@@ -2017,9 +1665,6 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
         return False
 
 
-
-
-
 def _get_project_name(cwd: str, host: str | None = None) -> str | None:
     try:
         r = _remote_run(
@@ -2043,9 +1688,6 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
         return None
 
 
-
-
-
 def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
     with watchdog.lock:
         data = _load_registry()
@@ -2057,9 +1699,6 @@ def _registry_update_teleport(name: str, host: str, home_host: str | None, home_
         _save_registry(data)
 
 
-
-
-
 def _registry_clear_teleport(name: str) -> None:
     with watchdog.lock:
         data = _load_registry()
@@ -2069,9 +1708,6 @@ def _registry_clear_teleport(name: str) -> None:
         worker.pop("home_cwd", None)
         data.setdefault("workers", {})[name] = worker
         _save_registry(data)
-
-
-
 
 
 def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
@@ -2092,9 +1728,6 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
     return output[0].strip()
 
 
-
-
-
 def _child_count(pid: str, host: str | None = None) -> int:
     if not pid:
         return 0
@@ -2110,9 +1743,6 @@ def _child_count(pid: str, host: str | None = None) -> int:
         return 0
 
     return len([line for line in result.stdout.splitlines() if line.strip()])
-
-
-
 
 
 def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
@@ -2146,14 +1776,9 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
     return stats
 
 
-
-
-
 def mark_hook_event(session_name: str) -> None:
     with watchdog.lock:
         watchdog.last_hook_ts[session_name] = _clock.time()
-
-
 
 
 def kill_adapter(name: str) -> None:
@@ -2176,9 +1801,6 @@ def kill_adapter(name: str) -> None:
             _log(_LOG_DEBUG, "io:kill_adapter", f"{type(exc).__name__}: {exc}")
 
 
-
-
-
 def _read_learning_reminder(name: str) -> str:
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
@@ -2188,9 +1810,6 @@ def _read_learning_reminder(name: str) -> str:
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
-
-
-
 
 
 def _new_reminder_state() -> ReminderState:
@@ -2203,14 +1822,8 @@ def _new_reminder_state() -> ReminderState:
     }
 
 
-
-
-
 def _learning_reminder_state_file() -> str | None:
     return None
-
-
-
 
 
 def _save_learning_reminder_state() -> None:
@@ -2226,16 +1839,10 @@ def _save_learning_reminder_state() -> None:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state save error: {e}")
 
 
-
-
-
 def _reset_learning_reminder(name: str) -> None:
     with learning_reminders.lock:
         learning_reminders.state[name] = _new_reminder_state()
         _save_learning_reminder_state()
-
-
-
 
 
 def _fire_reminder(name: str, st: ReminderState) -> None:
@@ -2245,9 +1852,6 @@ def _fire_reminder(name: str, st: ReminderState) -> None:
     _save_learning_reminder_state()
     reminder = _read_learning_reminder(name)
     _task_pool.submit(_send_learning_reminder, name, reminder)
-
-
-
 
 
 def _check_learning_reminder(name: str) -> None:
@@ -2271,9 +1875,6 @@ def _check_learning_reminder(name: str) -> None:
             _fire_reminder(name, st)
         else:
             _save_learning_reminder_state()
-
-
-
 
 
 def _scan_idle_workers() -> None:
@@ -2301,9 +1902,6 @@ def _scan_idle_workers() -> None:
         _schedule_idle_scan()
 
 
-
-
-
 def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
     with learning_reminders.lock:
         changed = False
@@ -2315,17 +1913,11 @@ def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
             _save_learning_reminder_state()
 
 
-
-
-
 def _schedule_idle_scan() -> None:
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
     learning_reminders.idle_scan_timer.name = "idle-scan"
     learning_reminders.idle_scan_timer.daemon = True
     learning_reminders.idle_scan_timer.start()
-
-
-
 
 
 def _send_learning_reminder(name: str, text: str) -> None:
@@ -2337,9 +1929,6 @@ def _send_learning_reminder(name: str, text: str) -> None:
             _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
     except (ConnectionError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder error for {name}: {e}")
-
-
-
 
 
 def _load_registry() -> RegistryFileDict:
@@ -2362,9 +1951,6 @@ def _load_registry() -> RegistryFileDict:
         return {}
 
 
-
-
-
 def _save_registry(data: RegistryFileDict) -> None:
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2382,9 +1968,6 @@ def _save_registry(data: RegistryFileDict) -> None:
             raise
     except OSError as e:
         _log(_LOG_WARN, "worker", f"Failed to save worker registry: {e}")
-
-
-
 
 
 def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
@@ -2405,9 +1988,6 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
             entry["host"] = host
         data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
-
-
-
 
 
 def _registry_add_callback(name: str, callback_url: str, host: str = "",
@@ -2433,9 +2013,6 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
         _save_registry(data)
 
 
-
-
-
 def _registry_remove(name: str) -> None:
     with watchdog.lock:
         data = _load_registry()
@@ -2443,9 +2020,6 @@ def _registry_remove(name: str) -> None:
             return
         data["workers"].pop(name, None)
         _save_registry(data)
-
-
-
 
 
 def _set_worker_cwd(name: str, cwd: str) -> None:
@@ -2457,16 +2031,10 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
             watchdog.worker_cwds.pop(name, None)
 
 
-
-
-
 def _get_worker_cwd(name: str) -> str:
     with watchdog.lock:
         cwd = watchdog.worker_cwds.get(name)
     return cwd if isinstance(cwd, str) else ""
-
-
-
 
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
@@ -2486,9 +2054,6 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
     _log(_LOG_INFO, "registry", f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
 
 
-
-
-
 def read_checkin_note() -> str:
     try:
         path = _CHECKIN_NOTE_PATH
@@ -2501,14 +2066,8 @@ def read_checkin_note() -> str:
     return ""
 
 
-
-
-
 def get_inbox_dir(session_name: str) -> Path:
     return FILE_INBOX_ROOT / session_name / "inbox"
-
-
-
 
 
 def ensure_inbox_dir(session_name: str) -> Path:
@@ -2516,9 +2075,6 @@ def ensure_inbox_dir(session_name: str) -> Path:
     inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
     inbox.chmod(0o700)
     return inbox
-
-
-
 
 
 def cleanup_inbox(session_name: str) -> None:
@@ -2531,23 +2087,14 @@ def cleanup_inbox(session_name: str) -> None:
                 _log(_LOG_WARN, "bridge", f"Failed to delete {f}: {e}")
 
 
-
-
-
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.get_workers(caller_from=caller_from)
 
 
-
-
-
 def get_pending_file(name: str) -> Path:
     return get_session_dir(name) / "pending"
-
-
-
 
 
 def _read_session_file(name: str, filename: str) -> str | None:
@@ -2583,9 +2130,6 @@ def _read_session_file(name: str, filename: str) -> str | None:
         except (OSError, ValueError) as exc:
             _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
     return ""
-
-
-
 
 
 def _ensure_workspace_trusted_remote(
@@ -2628,9 +2172,6 @@ def _ensure_workspace_trusted_remote(
              f"remote pre-trust {cwd} on {host}: {exc}")
 
 
-
-
-
 def _build_teleport_context(
     name: str,
     source_host: str | None,
@@ -2655,16 +2196,11 @@ def _build_teleport_context(
     return "\n".join(lines)
 
 
-
-
 def _get_pending_lock(name: str) -> threading.Lock:
     with processes.pending_locks_guard:
         if name not in processes.pending_locks:
             processes.pending_locks[name] = threading.Lock()
         return processes.pending_locks[name]
-
-
-
 
 
 def set_pending(name: str, chat_id: ChatId) -> None:
@@ -2685,9 +2221,6 @@ def set_pending(name: str, chat_id: ChatId) -> None:
     _sync_chat_id_to_remote(name, str(chat_id_file))
 
 
-
-
-
 def _remap_sessions_dir(host: str | None) -> str:
     remote_sessions_dir = str(SESSIONS_DIR)
     local_home = os.path.expanduser("~")
@@ -2695,9 +2228,6 @@ def _remap_sessions_dir(host: str | None) -> str:
     if remote_home and remote_home != local_home and remote_sessions_dir.startswith(local_home):
         remote_sessions_dir = remote_home + remote_sessions_dir[len(local_home):]
     return remote_sessions_dir
-
-
-
 
 
 def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
@@ -2714,9 +2244,6 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
         _log(_LOG_WARN, "set_pending", f"Failed to sync chat_id to {host} for {name}: {e}")
 
 
-
-
-
 def clear_pending(name: str) -> None:
     session_dir = get_session_dir(name)
     pending = session_dir / "pending"
@@ -2724,9 +2251,6 @@ def clear_pending(name: str) -> None:
         pending.unlink()
     except OSError as exc:
         _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
-
-
-
 
 
 def is_pending(name: str) -> bool:
@@ -2742,18 +2266,12 @@ def is_pending(name: str) -> bool:
         return False
 
 
-
-
-
 def try_set_pending(name: str, chat_id: ChatId) -> bool:
     with _get_pending_lock(name):
         if is_pending(name):
             return False
         set_pending(name, chat_id)
         return True
-
-
-
 
 
 def _pending_timestamp(name: str) -> int | None:
@@ -2764,9 +2282,6 @@ def _pending_timestamp(name: str) -> int | None:
         return int(pending.read_text().strip())
     except OSError:
         return None
-
-
-
 
 
 def compute_state(
@@ -2830,9 +2345,6 @@ def compute_state(
     return "OFFLINE", "tmux alive, claude missing"
 
 
-
-
-
 def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
     if tail_lines <= 0:
         return ""
@@ -2861,9 +2373,6 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         return "".join(lines[-tail_lines:])
     except OSError:
         return ""
-
-
-
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
@@ -2926,7 +2435,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         _log(_LOG_ERROR, "watchdog", f"Watchdog alert error: {e}")
 
 
-
 def _format_watchdog_status(name: str,
                             pending_lookup: Callable[[str], bool] | None = None,
                             state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
@@ -2959,7 +2467,6 @@ def format_team_lines(  # type: ignore[no-redef]
     )
 
 
-
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
     backend = get_backend(backend_name)
     if not backend.is_interactive:
@@ -2974,9 +2481,6 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
             return True
         _clock.sleep(DELAY_RETRY)
     return False
-
-
-
 
 
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
@@ -3001,7 +2505,6 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_WARN, "bridge", f"Callback send failed for '{name}' at {msg_url}: {e}")
         return False
-
 
 
 class WorkerManager:
@@ -3760,14 +3263,10 @@ class WorkerManager:
         return True, None
 
 
-
-
-
 def _sync_worker_manager() -> None:
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
-
 
 
 def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
@@ -3776,14 +3275,8 @@ def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
     return worker_manager.is_online(name, session)
 
 
-
-
-
 def worker_set_pending(name: str, chat_id: ChatId) -> None:
     set_pending(name, chat_id)
-
-
-
 
 
 def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
@@ -3792,16 +3285,10 @@ def worker_send(name: str, message: str, chat_id: int | None = None, session: Tm
     return worker_manager.send(name, message, chat_id, session)
 
 
-
-
-
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.scan_tmux_sessions()
-
-
-
 
 
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
@@ -3810,19 +3297,10 @@ def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None
     return worker_manager.get_registered_sessions(registered)
 
 
-
-
-
-
-
-
-
-
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.send(name, message, chat_id)
-
 
 
 # ── Control plane singletons ────────────────────────────────────────────
@@ -3842,7 +3320,6 @@ PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]
 GetRouteHandler = Callable[["Handler", ParseResult, re.Match[str] | None], None]
 
 
-
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
 
 class _GuestSessionDictRequired(TypedDict):
@@ -3852,11 +3329,9 @@ class _GuestSessionDictRequired(TypedDict):
     notified_workers: set[str] | list[str]
 
 
-
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
     token_hash: str
     expires_at: str
-
 
 
 GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
@@ -3872,11 +3347,9 @@ GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
 """Shape of a guest inbox message in storage."""
 
 
-
 class ChannelMemberDict(TypedDict, total=False):
     type: str         # "worker", "guest", or "manager"
     name: str         # omitted for manager members
-
 
 
 # Note: channel messages and relay messages use the JSON key "from" (a Python keyword).
@@ -3893,7 +3366,6 @@ ChannelMessageDict = TypedDict("ChannelMessageDict", {
 """Shape of a message inside a channel's messages list."""
 
 
-
 class ChannelDict(TypedDict):
     id: str
     label: str
@@ -3903,7 +3375,6 @@ class ChannelDict(TypedDict):
     created_by: str
     members: dict[str, ChannelMemberDict]
     messages: list[ChannelMessageDict]
-
 
 
 _RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
@@ -3916,10 +3387,8 @@ _RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
 })
 
 
-
 class RelayMessageDict(_RelayMessageDictRequired, total=False):
     sender_name: str
-
 
 
 class RelayChannelDict(TypedDict):
@@ -3936,17 +3405,14 @@ class RelayChannelDict(TypedDict):
     messages: list[RelayMessageDict]
 
 
-
 class PostRouteResolution(NamedTuple):
     handler: PostRouteHandler | None
     match: re.Match[str] | None
 
 
-
 class GetRouteResolution(NamedTuple):
     handler: GetRouteHandler | None
     match: re.Match[str] | None
-
 
 
 try:
@@ -3958,7 +3424,6 @@ except ImportError as e:
     GitHubConnector = None  # type: ignore[assignment,misc]
     GMAIL_IMPORT_ERROR = e
     GITHUB_IMPORT_ERROR = e
-
 
 
 # ── File map ───────────────────────────────────────────────────────────
@@ -4081,11 +3546,6 @@ if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
 
 
 
-# Singleton context — built lazily after all globals are initialized
-_app_context: AppContext | None = None  # type: ignore[no-redef]
-
-
-
 # ============================================================
 # GUEST SYSTEM: temporary external agent sessions
 # ============================================================
@@ -4130,7 +3590,6 @@ class GuestSession:
         return _clock.time() >= self.expires_at_unix
 
 
-
 @dataclass
 class GuestInboxMessage:
     id: str
@@ -4148,7 +3607,6 @@ class GuestInboxMessage:
         )
 
 
-
 @dataclass
 class ChannelMember:
     key: str          # "manager", "worker:name", "guest:name"
@@ -4158,7 +3616,6 @@ class ChannelMember:
     @classmethod
     def from_dict(cls, key: str, data: ChannelMemberDict) -> "ChannelMember":
         return cls(key=key, type=data["type"], name=data.get("name", ""))
-
 
 
 @dataclass
@@ -4180,7 +3637,6 @@ class ChannelMessage:
         )
 
 
-
 @dataclass
 class RelayMessage:
     id: str
@@ -4200,13 +3656,11 @@ class RelayMessage:
         )
 
 
-
 class GuestStore:
     def __init__(self) -> None:
         self.guests: dict[str, GuestSessionDict] = {}
         self.inboxes: dict[str, list[GuestInboxMessageDict]] = {}
         self.lock: threading.Lock = threading.Lock()
-
 
 
 guest_store = GuestStore()
@@ -4216,10 +3670,8 @@ GUEST_TTL = 86400           # 24 hours
 GUEST_INBOX_CAP = 200
 
 
-
 def _guest_state_path() -> Path:
     return NODE_DIR / "guest_state.json"
-
 
 
 def _guest_save() -> None:
@@ -4245,7 +3697,6 @@ def _guest_save() -> None:
         _log(_LOG_WARN, "guest", f"Failed to save state: {e}")
 
 
-
 def _guest_load() -> None:
     path = _guest_state_path()
     if not path.exists():
@@ -4269,12 +3720,10 @@ def _guest_load() -> None:
         _log(_LOG_WARN, "guest", f"Failed to load state: {e}")
 
 
-
 def guest_create_token() -> tuple[str, str]:
     token = f"gt_{secrets.token_urlsafe(32)}"
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     return token, token_hash
-
 
 
 def guest_generate_name(existing_names: set[str] | None = None) -> str:
@@ -4285,7 +3734,6 @@ def guest_generate_name(existing_names: set[str] | None = None) -> str:
         if len(name) >= 3 and name not in existing_names:
             return name
     return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
-
 
 
 def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
@@ -4301,10 +3749,8 @@ def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[
     return True, ""
 
 
-
 def guest_is_expired(expires_at_unix: float) -> bool:
     return _clock.time() >= expires_at_unix
-
 
 
 def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
@@ -4322,13 +3768,11 @@ def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None 
     return result
 
 
-
 def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
         inbox = inbox[-GUEST_INBOX_CAP:]
     return inbox
-
 
 
 # ============================================================
@@ -4341,7 +3785,6 @@ class ChannelStore:
         self.lock: threading.Lock = threading.Lock()
 
 
-
 channel_store = ChannelStore()
 
 CHANNEL_TTL = 86400           # 24 hours
@@ -4349,10 +3792,8 @@ CHANNEL_TTL = 86400           # 24 hours
 CHANNEL_MSG_CAP = 200
 
 
-
 def _channel_state_path() -> Path:
     return NODE_DIR / "channel_state.json"
-
 
 
 def _channel_save() -> None:
@@ -4367,7 +3808,6 @@ def _channel_save() -> None:
         os.chmod(path, 0o600)
     except OSError as e:
         _log(_LOG_WARN, "channel", f"Failed to save state: {e}")
-
 
 
 def _channel_load() -> None:
@@ -4388,11 +3828,9 @@ def _channel_load() -> None:
         _log(_LOG_WARN, "channel", f"Failed to load state: {e}")
 
 
-
 def channel_create_id(label: str = "") -> str:
     short = secrets.token_urlsafe(4).rstrip("=").lower()[:6]
     return f"ch_{short}"
-
 
 
 def channel_new(channel_id: str, label: str, created_by: str,
@@ -4420,7 +3858,6 @@ def channel_new(channel_id: str, label: str, created_by: str,
     }
 
 
-
 def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
     added = []
     for m in members:
@@ -4438,7 +3875,6 @@ def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
     return added
 
 
-
 def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str]:
     removed = []
     for m in members:
@@ -4446,7 +3882,6 @@ def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str
             del channel["members"][m]
             removed.append(m)
     return removed
-
 
 
 def channel_append_message(channel: ChannelDict, from_member: str, text: str) -> ChannelMessageDict:
@@ -4464,7 +3899,6 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
     return cast(ChannelMessageDict, msg)
 
 
-
 def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
     if not after:
         return list(channel["messages"]), False
@@ -4478,16 +3912,13 @@ def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tupl
     return channel["messages"][found_idx + 1:], False
 
 
-
 def channel_is_expired(channel: ChannelDict) -> bool:
     return _clock.time() > channel["expires_at_unix"]
-
 
 
 def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
     return [info["name"] for info in channel["members"].values()
             if info["type"] == member_type and "name" in info]
-
 
 
 # ============================================================
@@ -4500,17 +3931,14 @@ class RelayStore:
         self.lock: threading.Lock = threading.Lock()
 
 
-
 relay_store = RelayStore()
 
 
 RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
 
 
-
 def _relay_state_path() -> Path:
     return NODE_DIR / "relay_state.json"
-
 
 
 def _relay_save() -> None:
@@ -4527,7 +3955,6 @@ def _relay_save() -> None:
         os.chmod(path, 0o600)
     except OSError as e:
         _log(_LOG_WARN, "relay", f"Failed to save state: {e}")
-
 
 
 def _relay_load() -> None:
@@ -4547,7 +3974,6 @@ def _relay_load() -> None:
             _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "relay", f"Failed to load state: {e}")
-
 
 
 def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
@@ -4571,17 +3997,14 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
     return cast(RelayChannelDict, channel), guest_token, reply_token
 
 
-
 def _relay_base_url() -> str:
     if BRIDGE_PUBLIC_URL:
         return BRIDGE_PUBLIC_URL
     return f"http://{RELAY_PUBLIC_HOST}:{PORT}"
 
 
-
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
     return f"{_relay_base_url()}/relay/{channel_id}?token={guest_token}"
-
 
 
 def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
@@ -4618,7 +4041,6 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 """
 
 
-
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4631,7 +4053,6 @@ def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     return channel
 
 
-
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4642,7 +4063,6 @@ def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"):
         return None
     return channel
-
 
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
@@ -4684,7 +4104,6 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
     return envelope, relay_msg
 
 
-
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4707,7 +4126,6 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     return relay_msg
 
 
-
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4722,7 +4140,6 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayM
     return list(msgs)
 
 
-
 # Default rsync excludes for teleport directory sync
 TELEPORT_RSYNC_EXCLUDES = [
     "node_modules", ".git", "__pycache__", ".venv", "venv",
@@ -4730,7 +4147,6 @@ TELEPORT_RSYNC_EXCLUDES = [
     ".tox", ".mypy_cache", ".pytest_cache", "*.pyc",
     ".build", ".claude/worktrees",
 ]
-
 
 
 def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
@@ -4781,14 +4197,12 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
     return cast(list[CodexTranscriptEntry], messages)
 
 
-
 def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
     if not path:
         return []
     return _parse_codex_transcript(path, host=host)
-
 
 
 # ── Typed dataclasses for health/resource probes ─────────────
@@ -4812,7 +4226,6 @@ class DiskUsage:
     def to_dict(self) -> DiskUsageDict:
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
-
 
 
 @dataclass
@@ -4839,7 +4252,6 @@ class MemoryUsage:
                 "ts": self.ts}
 
 
-
 @dataclass
 class IoUsage:
     iowait_pct: float = 0.0
@@ -4864,7 +4276,6 @@ class IoUsage:
                 "ts": self.ts}
 
 
-
 @dataclass
 class CpuHog:
     pid: int
@@ -4882,7 +4293,6 @@ class CpuHog:
         )
 
 
-
 @dataclass
 class WorktreeItem:
     path: str
@@ -4896,7 +4306,6 @@ class WorktreeItem:
             size_mb=float(d.get("size_mb", 0.0)),
             worker=str(d.get("worker", "")),
         )
-
 
 
 def _load_learning_reminder_state() -> None:
@@ -4914,7 +4323,6 @@ def _load_learning_reminder_state() -> None:
             _log(_LOG_INFO, "worker", f"Learning reminder state loaded: {len(data)} workers")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state load error: {e}")
-
 
 
 media_groups = MediaGroupState()
@@ -4936,7 +4344,6 @@ class RewindToken:
     @classmethod
     def from_dict(cls: type["RewindToken"], d: RewindTokenEntry) -> "RewindToken":
         return cls(name=d["name"], expires_at=d["expires_at"])
-
 
 
 @dataclass
@@ -5009,7 +4416,6 @@ class TokenStore:
 tokens = TokenStore()
 
 
-
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
     now = _clock.time()
     with watchdog.lock:
@@ -5054,11 +4460,9 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
             _log(_LOG_ERROR, "watchdog", f"Host alert error: {e}")
 
 
-
 def _is_host_down(host: str) -> bool:
     with watchdog.lock:
         return host_health.down.get(host, False)
-
 
 
 def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
@@ -5082,7 +4486,6 @@ def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
         return None
 
 
-
 def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
     try:
         r = _remote_run(
@@ -5102,7 +4505,6 @@ def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
         return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
     except (ValueError, KeyError):
         return None
-
 
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
@@ -5170,7 +4572,6 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                 _log(_LOG_ERROR, "watchdog", f"Disk alert error: {e}")
 
 
-
 def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
     try:
         r = _remote_run(
@@ -5199,7 +4600,6 @@ def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
         return _mem_result
     except (ValueError, KeyError):
         return None
-
 
 
 def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
@@ -5242,7 +4642,6 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
         return None
 
 
-
 def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
     try:
         r = _remote_run(
@@ -5265,7 +4664,6 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
         return procs
     except (ValueError, KeyError):
         return []
-
 
 
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
@@ -5314,7 +4712,6 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                 _log(_LOG_WARN, "watchdog", f"Memory alert: {alert_text.splitlines()[0]}")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_ERROR, "watchdog", f"Memory alert error: {e}")
-
 
 
 def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
@@ -5381,7 +4778,6 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
         return None
 
 
-
 def _check_io_usage_macos(host: str) -> IoUsageDict | None:
     try:
         r = _remote_run(
@@ -5403,7 +4799,6 @@ def _check_io_usage_macos(host: str) -> IoUsageDict | None:
         }
     except (ValueError, KeyError):
         return None
-
 
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
@@ -5452,7 +4847,6 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                 _log(_LOG_ERROR, "watchdog", f"IO alert error: {e}")
 
 
-
 def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
     try:
         if is_mac:
@@ -5486,7 +4880,6 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
         return []
 
 
-
 def _parse_etime(etime: str) -> int | None:
     try:
         days = 0
@@ -5504,7 +4897,6 @@ def _parse_etime(etime: str) -> int | None:
         return days * 24 * 60 + hours * 60 + mins
     except (ValueError, IndexError):
         return None
-
 
 
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
@@ -5543,7 +4935,6 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                         _log(_LOG_WARN, "watchdog", f"CPU hog alert: {host_label} ({len(real_hogs)} process{'es' if len(real_hogs) > 1 else ''})")
                     except (urllib.error.URLError, OSError, TimeoutError) as e:
                         _log(_LOG_ERROR, "watchdog", f"CPU hog alert error: {e}")
-
 
 
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
@@ -5630,7 +5021,6 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
             _log(_LOG_ERROR, "watchdog", f"Worktree check error for {host_label}: {e}")
 
 
-
 def _probe_tailscale() -> None:
     now = _clock.time()
     try:
@@ -5666,7 +5056,6 @@ def _probe_tailscale() -> None:
             _log(_LOG_WARN, "watchdog", f"Tailscale: {alert_text.splitlines()[0]}")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
-
 
 
 # (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
@@ -5713,7 +5102,6 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         transport.send_text(admin_chat_id, text)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "watchdog", f"Watchdog resolved alert error: {e}")
-
 
 
 def _handle_watchdog_transition(
@@ -5795,7 +5183,6 @@ def _handle_watchdog_transition(
         watchdog.prev_worker_states[name] = state
 
 
-
 def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
     with watchdog.lock:
         prev = watchdog.worker_states.get(name)
@@ -5805,7 +5192,6 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
             since = now
         watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
     return since
-
 
 
 def watchdog_loop() -> None:
@@ -5842,7 +5228,6 @@ def watchdog_loop() -> None:
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)
 
 
-
 def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
     if probe_failed:
         for name in registered_names:
@@ -5850,7 +5235,6 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
     else:
         for name in registered_names:
             watchdog.consecutive_probe_failures[name] = 0
-
 
 
 def _watchdog_probe_remote_hosts(
@@ -5884,7 +5268,6 @@ def _watchdog_probe_remote_hosts(
             _record_host_probe(host, ok=False, error=str(e)[:200])
 
     return remote_workers, remote_pane_pids, failed_hosts
-
 
 
 def _watchdog_collect_worker_pids(
@@ -5924,7 +5307,6 @@ def _watchdog_collect_worker_pids(
     return claude_pids, tmux_present, backend_info
 
 
-
 def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
     pids_by_host: dict[str | None, list[str]] = {}
     for name, pid in claude_pids.items():
@@ -5934,7 +5316,6 @@ def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcSta
     for host, pids in pids_by_host.items():
         stats.update(_ps_stats(pids, host=host))
     return stats
-
 
 
 def _watchdog_evaluate_workers(
@@ -6049,7 +5430,6 @@ def _watchdog_evaluate_workers(
         _handle_watchdog_transition(name, worker_state, reason, since, now=now)
 
 
-
 def _watchdog_compute_children(name: str, children_total: int,
                                 is_interactive: bool, claude_pid: str | None,
                                 now: float) -> int:
@@ -6068,7 +5448,6 @@ def _watchdog_compute_children(name: str, children_total: int,
     return children_total
 
 
-
 def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -> None:
     with watchdog.lock:
         prev_children = watchdog.prev_children.get(name)
@@ -6076,7 +5455,6 @@ def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -
         if activity_increased or cpu >= CPU_ACTIVE:
             watchdog.last_activity_ts[name] = now
         watchdog.prev_children[name] = children
-
 
 
 def _watchdog_refine_state(
@@ -6145,7 +5523,6 @@ def _watchdog_refine_state(
     return worker_state, reason
 
 
-
 def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
     with watchdog.lock:
         stale_dicts: list[dict[str, object]] = cast(list[dict[str, object]], [
@@ -6164,7 +5541,6 @@ def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
             watchdog.consecutive_probe_failures.pop(name, None)
 
 
-
 def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
     checks: list[tuple[str, Callable[[], None]]] = [
         ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
@@ -6179,7 +5555,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
             check_fn()
         except (subprocess.SubprocessError, OSError) as e:
             _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
-
 
 
 def _fetch_remote_file(host: str, remote_path: str) -> str | None:
@@ -6200,7 +5575,6 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     return None
 
 
-
 def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
     host = get_worker_host(name)
     if not host:
@@ -6219,7 +5593,6 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
     return result
 
 
-
 def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
     host = get_worker_host(name)
     if host:
@@ -6235,7 +5608,6 @@ def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | N
     files = _localize_media(name, files)
 
     return clean_text, images, files
-
 
 
 def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
@@ -6294,7 +5666,6 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
         _send_text_as_html(name, clean_text, chat_id, log_prefix)
 
 
-
 def _send_html_fallback_chunks(
     name: str, remaining_chunks: list[str], chat_id: int,
     log_prefix: str, prev_msg_id: int | None,
@@ -6321,7 +5692,6 @@ def _send_html_fallback_chunks(
         if i < len(formatted_parts) - 1:
             _clock.sleep(DELAY_BRIEF)
     return prev_msg_id
-
 
 
 def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
@@ -6366,7 +5736,6 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
             _clock.sleep(DELAY_BRIEF)
 
 
-
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
     # Send images
     for img_path, img_caption in images:
@@ -6406,7 +5775,6 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
             transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
 
-
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
     clean_text, images, files = _parse_response_media(name, text)
 
@@ -6419,7 +5787,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
 
     _send_response_media(name, images, files, chat_id)
-
 
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
@@ -6439,12 +5806,10 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     return None
 
 
-
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.hire(name, backend, chat_id=chat_id)
-
 
 
 def kill_session(name: str) -> tuple[bool, str | None]:
@@ -6453,12 +5818,10 @@ def kill_session(name: str) -> tuple[bool, str | None]:
     return worker_manager.end(name)
 
 
-
 def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.restart(name, mode=mode)
-
 
 
 def switch_session(name: str) -> tuple[bool, str | None]:
@@ -6469,7 +5832,6 @@ def switch_session(name: str) -> tuple[bool, str | None]:
     state.active = name
     save_last_active(name)
     return True, None
-
 
 
 # ============================================================
@@ -6484,7 +5846,6 @@ def send_typing_loop(chat_id: int | str, session_name: str) -> None:
     while is_pending(session_name):
         transport.send_chat_action(chat_id, "typing")
         _clock.sleep(DELAY_CLAUDE_LOAD)
-
 
 
 def get_all_chat_ids() -> list[ChatId]:
@@ -6506,7 +5867,6 @@ def get_all_chat_ids() -> list[ChatId]:
     return list(chat_ids)
 
 
-
 def send_shutdown_message() -> None:
     chat_ids = get_all_chat_ids()
     if not chat_ids:
@@ -6519,14 +5879,12 @@ def send_shutdown_message() -> None:
     _log(_LOG_INFO, "notify", "Shutdown notifications sent")
 
 
-
 # ============================================================
 # NON-CORE: CommandRouter
 # ============================================================
 
 class _LegacyTransportProto(Protocol):
     def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse: ...
-
 
 
 class _LegacyTransportAdapter(MessageTransport):
@@ -6589,14 +5947,10 @@ class _LegacyTransportAdapter(MessageTransport):
         return None
 
 
-
 # ── CommandRouter: dict-based dispatch ──
 
 # Type alias for command handler functions
 CommandFn = Callable[[str, ChatId, MessageId], bool]
-
-
-
 
 
 def _fanout_channel_message(channel_id: str, from_member: str,
@@ -6634,7 +5988,6 @@ def _fanout_channel_message(channel_id: str, from_member: str,
                         f"[{channel_id}] {from_member}: {text}")
             except (urllib.error.URLError, OSError, TimeoutError) as exc:
                 _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
-
 
 
 class CommandRouter:
@@ -7713,7 +7066,6 @@ class CommandRouter:
             _log(_LOG_DEBUG, "notify:_teleport_notify", f"{type(exc).__name__}: {exc}")
 
 
-
     # ── Worker Lifecycle ──────────────────────────────────────────────
 
     def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
@@ -8502,7 +7854,6 @@ class CommandRouter:
         self.route_to_active(media_text, chat_id, msg_id)
 
 
-
     # ── Mention Routing ──────────────────────────────────────────────
 
     def _reset_mention_streak(self) -> None:
@@ -8680,8 +8031,6 @@ class CommandRouter:
         return f"Manager reply:\n{reply_text}"
 
 
-
-
     # ── Core Router ─────────────────────────────────────────────────
 
     def __init__(self, transport: MessageTransport | None,
@@ -8691,7 +8040,6 @@ class CommandRouter:
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
         self.workers: "WorkerManager" = workers
-        # Restart-all state  # type: ignore[no-redef]
         self._restart_all_lock: threading.Lock = threading.Lock()
         self._restart_all_running: bool = False  # type: ignore[no-redef]
         self._restart_all_abort: threading.Event = threading.Event()
@@ -9077,7 +8425,6 @@ class CommandRouter:
         return True
 
 
-
     def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
         if not name:
             self.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
@@ -9211,25 +8558,7 @@ class CommandRouter:
     # ── Restart All (sequential) ──────────────────────────────────
 
 
-
-
     # ── Teleport commands ──────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     def cmd_status(self, chat_id: ChatId) -> bool:
@@ -9333,10 +8662,6 @@ class CommandRouter:
         return True
 
 
-
-
-
-
     def route_to_active(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
         registered = self.workers.get_registered_sessions()
 
@@ -9436,7 +8761,6 @@ class CommandRouter:
                     self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
-
 assert worker_manager is not None
 command_router = CommandRouter(transport, worker_manager)
 
@@ -9477,7 +8801,6 @@ _transcript_sync = TranscriptSyncRegistry()
 INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indexer.py")
 
 
-
 def _run_transcript_query(jsonl_path: str, sid: str, query: str,
                           host: str | None = None, *,
                           page: int | None = None,
@@ -9515,7 +8838,6 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
     return None
-
 
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
@@ -9571,7 +8893,6 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
         _transcript_sync.set(key, {"status": "error", "progress": "Sync failed",
                                    "started": _transcript_sync.get_started(key),
                                    "path": None, "error": str(e)[:200]})
-
 
 
 def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
@@ -9634,7 +8955,6 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     return None, sid, cwd
 
 
-
 def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
     entries = []
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
@@ -9653,7 +8973,6 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
                 continue
             entries.append(entry)
     return entries
-
 
 
 def _generate_member_avatar(name: str) -> str:
@@ -9693,7 +9012,6 @@ def _generate_member_avatar(name: str) -> str:
             f'opacity=".9">{initials}</text></svg></div>')
 
 
-
 # Known team member prefixes for avatar detection
 _TEAM_MEMBERS = {
     "chen", "geni", "hiro", "jin", "kai", "kelvin", "kenji",
@@ -9704,7 +9022,6 @@ _TEAM_MEMBERS = {
 
 # Manager GitHub avatar
 _MANAGER_AV = '<div class="u-av"><img src="https://avatars.githubusercontent.com/u/4256921" alt="manager"></div>'
-
 
 
 def _detect_message_author(text: str) -> AuthorDetection:
@@ -9720,7 +9037,6 @@ def _detect_message_author(text: str) -> AuthorDetection:
             return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
     # Default: manager avatar, full text
     return AuthorDetection("manager", _MANAGER_AV, stripped)
-
 
 
 # ── Transcript rendering SVG constants ──────────────────────────────────
@@ -9741,7 +9057,6 @@ _TRANSCRIPT_TOOL_SVGS: dict[str, str] = {
 }
 
 _TRANSCRIPT_DEFAULT_TOOL_SVG = '<svg class="t-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M5.433 2.304A4.49 4.49 0 003.5 6c0 1.598.832 3.002 2.09 3.802.518.328.929.923.902 1.64v.008l-.164 3.337a.75.75 0 11-1.498-.073l.163-3.34c.007-.14-.1-.313-.357-.476A5.994 5.994 0 012 6c0-2.033 1.01-3.83 2.555-4.916A1.89 1.89 0 015.433 2.304zM10.567 2.304A4.49 4.49 0 0112.5 6c0 1.598-.832 3.002-2.09 3.802-.518.328-.929.923-.902 1.64v.008l.164 3.337a.75.75 0 101.498-.073l-.163-3.34c-.007-.14.1-.313.357-.476A5.994 5.994 0 0114 6c0-2.033-1.01-3.83-2.555-4.916a1.89 1.89 0 00-.878 1.22z"/></svg>'
-
 
 
 def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None) -> str:
@@ -9899,7 +9214,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
     return "\n".join(parts)
 
 
-
 def _format_model_name(model_name: str) -> str:
     import re as _re
     s = model_name.replace("claude-", "")
@@ -9912,7 +9226,6 @@ def _format_model_name(model_name: str) -> str:
     # Remaining dashes to spaces
     s = s.replace("-", " ").title()
     return s
-
 
 
 def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
@@ -10002,7 +9315,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             "duration": duration_str}
 
 
-
 def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
     import html as html_mod
     esc = html_mod.escape
@@ -10051,8 +9363,6 @@ vertical-align:middle;margin-right:8px}}
 <p class="elapsed">{elapsed}s elapsed</p>
 {msg}
 </div></body></html>'''
-
-
 
 
 def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
@@ -10278,7 +9588,6 @@ a:hover{{text-decoration:underline}}
 '''
 
 
-
 def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
                          prompts_filter_url: str,
                          esc: Callable[[str], str]) -> str:
@@ -10293,7 +9602,6 @@ def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
 </div>
 </header>
 '''
-
 
 
 def _transcript_html_entries(page_entries: list[TranscriptEntry],
@@ -10393,7 +9701,6 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
 '''
 
 
-
 def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
                               file_size_str: str, total: int,
                               page: int, total_pages: int,
@@ -10427,7 +9734,6 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
 <a href="#" title="Bottom" onclick="window.scrollTo(0,document.body.scrollHeight);return false">↓</a>
 </div>
 '''
-
 
 
 def _transcript_html_search_js() -> str:
@@ -10576,7 +9882,6 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {
 </script>
 </body>
 </html>'''
-
 
 
 def _render_transcript_html(name: str, session_id: str | None = None,
@@ -10783,7 +10088,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             + _transcript_html_search_js())
 
 
-
 # ── EndpointRouter + Handler: thin HTTP dispatch ──
 
 class EndpointRouter:
@@ -10844,12 +10148,8 @@ class EndpointRouter:
         return GetRouteResolution(None, None)
 
 
-
 # Singleton endpoint router — populated after Handler class is defined
 _endpoint_router = EndpointRouter()
-
-
-
 
 
 def _checkin_can_restart(name: str, tmux_name: str,
@@ -10882,7 +10182,6 @@ def _checkin_can_restart(name: str, tmux_name: str,
         watchdog.restart_in_progress[name] = _clock.time()
 
     return True, ""
-
 
 
 def _checkin_do_restart(name: str, backend_name: str,
@@ -10930,9 +10229,6 @@ def _checkin_do_restart(name: str, backend_name: str,
     finally:
         with watchdog.restart_lock:
             watchdog.restart_in_progress.pop(name, None)
-
-
-
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -11264,7 +10560,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "name": guest["name"]})
 
 
-
     # ── Channel Endpoints ──────────────────────────────────────────
 
     def _channel_auth_guest(self, parsed: ParseResult) -> GuestSessionDict | None:
@@ -11567,7 +10862,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "channel": channel_id})
 
 
-
     # ── Relay Endpoints ────────────────────────────────────────────
 
     def _relay_get_token(self) -> str | None:
@@ -11684,7 +10978,6 @@ class Handler(BaseHTTPRequestHandler):
             "message_id": msg["message_id"],
             "delivered": True,
         })
-
 
 
     # ── PR Endpoints ──────────────────────────────────────────────
@@ -11994,7 +11287,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode())
-
 
 
     # ── Transcript Endpoints ─────────────────────────────────────
@@ -12502,28 +11794,12 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     # ── Guest System Handlers ──────────────────────────────────────────────
 
 
-
-
-
-
-
-
-
     # ─────────────────────────────────────────────────────────────
     # GROUP CHANNEL endpoints
     # ─────────────────────────────────────────────────────────────
 
 
-
-
-
-
-
-
     # ── Relay v1 endpoint handlers ──────────────────────────────────────
-
-
-
 
 
     def do_GET(self) -> None:
@@ -12727,26 +12003,14 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_json(200, data)
 
 
-
-
-
-
-
-
-
-
-
-
 # ── Endpoint registration ──
 
 def _mg(m: re.Match[str] | None, n: int = 1) -> str:
     return m.group(n) if m else ""
 
 
-
 def _mg2(m: re.Match[str] | None) -> str:
     return m.group(2) if m else None
-
 
 
 def _setup_endpoint_routes() -> None:
@@ -12818,9 +12082,7 @@ def _setup_endpoint_routes() -> None:
     )
 
 
-
 _setup_endpoint_routes()
-
 
 
 # ============================================================
@@ -12901,7 +12163,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     sys.exit(0)
 
 
-
 def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
@@ -12921,7 +12182,6 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
             if tmux_exists(tmux_name, host=host):
                 export_hook_env(tmux_name, backend_name, host=host)
     return registered
-
 
 
 def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
@@ -12957,7 +12217,6 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     return last_chat_id
 
 
-
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
@@ -12981,7 +12240,6 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     print("Execution: direct (--dangerously-skip-permissions)")
 
 
-
 def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
     state.startup_notified = True
     sessions = list(registered.keys())
@@ -13002,12 +12260,10 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
         _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
 
 
-
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     connectors.log_message(tag, html_text, plain_text, targets)
-
 
 
 def _connector_render_html(tag: str, current_html: str) -> str:
@@ -13103,7 +12359,6 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 </html>'''
 
 
-
 def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None) -> str:
     import html as _html
     icon = "🔔" if tag == "github" else "📧"
@@ -13129,7 +12384,6 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
     return "\n".join(parts)
 
 
-
 def _connector_export_github(number: int, repo: str) -> str | None:
     try:
         r = _subprocess_runner.run(
@@ -13147,7 +12401,6 @@ def _connector_export_github(number: int, repo: str) -> str | None:
     except subprocess.SubprocessError as e:
         _log(_LOG_WARN, "github", f"export failed for #{number}: {e}")
     return None
-
 
 
 def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[ConnectorAttachmentDict] | None, ConnectorMetadataDict | None], None]:
@@ -13203,10 +12456,8 @@ def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, lis
     return handler
 
 
-
 def _connector_get_workers() -> set[str]:
     return set(get_registered_sessions().keys())
-
 
 
 def _connector_on_alert(tag: str) -> Callable[[str], None]:
@@ -13217,7 +12468,6 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_WARN, tag, f"Failed to send Telegram alert: {e}")
     return handler
-
 
 
 def _start_connectors() -> tuple[object, object]:
@@ -13254,7 +12504,6 @@ def _start_connectors() -> tuple[object, object]:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
 
     return gmail_inst, github_inst
-
 
 
 def _restart_connector(name: str) -> tuple[bool, str]:
@@ -13307,7 +12556,6 @@ def _restart_connector(name: str) -> tuple[bool, str]:
         return False, f"Unknown connector: {name} (valid: gmail, github)"
 
 
-
 def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
@@ -13325,7 +12573,6 @@ def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     else:
         result["github"] = {"name": "github", "running": False, "enabled": False}
     return result
-
 
 
 def main() -> None:
@@ -13405,7 +12652,6 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
-
 
 
 if __name__ == "__main__":
