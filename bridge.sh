@@ -602,9 +602,14 @@ stop_single_node() {
         main_pid=$(cat "$pid_file")
         if kill "$main_pid" 2>/dev/null; then
             ((killed++))
+            # Wait for process to actually exit (up to 5s)
+            local waited=0
+            while kill -0 "$main_pid" 2>/dev/null && [[ $waited -lt 5 ]]; do
+                sleep 1
+                ((waited++))
+            done
             success "Main process stopped (PID $main_pid)"
             rm -f "$pid_file"
-            sleep 1
         fi
     fi
 
@@ -714,7 +719,6 @@ cmd_restart() {
         if kill "$main_pid" 2>/dev/null; then
             success "Main process stopped (PID $main_pid)"
             rm -f "$pid_file"
-            sleep 1
         fi
     fi
 
@@ -723,7 +727,19 @@ cmd_restart() {
     [[ -f "$node_dir/tunnel.pid" ]] && kill "$(cat "$node_dir/tunnel.pid")" 2>/dev/null || true
     rm -f "$node_dir/bridge.pid" "$node_dir/tunnel.pid" "$node_dir/tunnel.log" "$node_dir/tunnel_url" "$node_dir/port" "$node_dir/bot_id" "$node_dir/bot_username"
 
-    sleep 1
+    # Wait for port to be free (up to 10s)
+    local port
+    port="${PORT:-$(get_default_port "$node")}"
+    local waited=0
+    while ss -tlnp 2>/dev/null | grep -q ":${port} " && [[ $waited -lt 10 ]]; do
+        sleep 1
+        ((waited++))
+    done
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        error "Port $port still in use after 10s — check for orphan processes"
+        hint "Run: ./bridge.sh --node $node status"
+        exit 1
+    fi
 
     # Start fresh with same args
     log ""
