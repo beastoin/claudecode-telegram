@@ -10377,7 +10377,16 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     Returns (transcript_path, sid, cwd) or (None, sid, cwd) if not found.
     For remote workers, returns ("syncing", sid, cwd) if sync is in progress.
     """
-    cwd = get_claude_session_cwd(name) or os.path.expanduser("~")
+    cwd = get_claude_session_cwd(name)
+    # RAM CWD may be empty after bridge restart — fall back to live tmux pane CWD
+    if not cwd:
+        host = get_worker_host(name)
+        tmux_name = f"{TMUX_PREFIX}{name}"
+        try:
+            cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
+        except Exception:
+            pass
+    cwd = cwd or os.path.expanduser("~")
     sid = session_id or get_claude_session_id(name, authoritative=True)
     if not sid:
         return None, "", cwd
