@@ -70,6 +70,7 @@ class TunnelManager:
         port: int,
         node_dir: Path,
         webhook_secret: str = "",
+        bind_host: str = "",
         subprocess_runner: SubprocessRunner | None = None,
         clock: Clock | None = None,
         urlopen: Callable[..., http.client.HTTPResponse] | None = None,
@@ -80,6 +81,7 @@ class TunnelManager:
         self._token = bot_token
         self._port = port
         self._node_dir = node_dir
+        self._bind_host = bind_host
         self._webhook_secret = webhook_secret
         self._runner = subprocess_runner or _default_subprocess_runner
         self._clock = clock or _default_clock
@@ -481,7 +483,8 @@ class TunnelManager:
     def _poll_loop(self) -> None:
         """getUpdates long-polling loop. Runs in a daemon thread."""
         offset = 0
-        _log(_LOG_INFO, "tunnel:poll", f"Poll loop started (bridge=localhost:{self._port})")
+        _bridge_host = self._bind_host or "127.0.0.1"
+        _log(_LOG_INFO, "tunnel:poll", f"Poll loop started (bridge={_bridge_host}:{self._port})")
         while not self._poll_stop.is_set():
             try:
                 url = f"https://api.telegram.org/bot{self._token}/getUpdates?offset={offset}&timeout={self._config.poll_timeout}"
@@ -511,28 +514,30 @@ class TunnelManager:
 
     def _forward_to_localhost(self, update: dict[str, Any]) -> None:
         """Forward a polled update to the bridge via HTTP POST (fallback path)."""
+        _bridge_host = self._bind_host or "127.0.0.1"
         try:
             req = urllib.request.Request(
-                f"http://localhost:{self._port}/",
+                f"http://{_bridge_host}:{self._port}/",
                 data=json.dumps(update).encode(),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
             self._urlopen(req, timeout=5)
         except Exception as exc:
-            _log(_LOG_WARN, "tunnel:poll", f"Localhost forward failed: {exc}")
+            _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")
 
     # ── Port wait ─────────────────────────────────────────────────────
 
     def _wait_for_port(self) -> bool:
         """Wait for bridge HTTP server to bind to the port."""
         elapsed = 0
+        bind_host = self._bind_host or "127.0.0.1"
         while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(1)
-                    s.connect(("127.0.0.1", self._port))
-                    _log(_LOG_INFO, "tunnel", f"Bridge ready on port {self._port} ({elapsed}s)")
+                    s.connect((bind_host, self._port))
+                    _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
                     return True
             except (ConnectionRefusedError, OSError):
                 pass

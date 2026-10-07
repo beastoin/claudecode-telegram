@@ -13879,7 +13879,11 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     """Print startup configuration summary to stdout."""
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
-    print(f"Hook endpoint: http://localhost:{PORT}/outputs")
+    if BRIDGE_BIND == "0.0.0.0":
+        print(f"  ⚠️  WARNING: Bound to 0.0.0.0 — bridge is exposed on ALL network interfaces")
+        print(f"  ⚠️  including the public internet. Use BRIDGE_BIND=<tailscale-ip> or set")
+        print(f"  ⚠️  BRIDGE_PUBLIC_URL=http://<tailscale-ip>:{PORT} for Tailscale-only access.")
+    print(f"Hook endpoint: http://{BRIDGE_BIND}:{PORT}/outputs")
     print(f"Active: {state.active or 'none'}")
     print(f"Sessions: {list(registered.keys()) or 'none'}")
     if WEBHOOK_SECRET:
@@ -14328,6 +14332,7 @@ def main() -> None:
             port=PORT,
             node_dir=NODE_DIR,
             webhook_secret=WEBHOOK_SECRET,
+            bind_host=BRIDGE_BIND,
             on_update=_tunnel_on_update,
             on_notify=_tunnel_on_notify,
         )
