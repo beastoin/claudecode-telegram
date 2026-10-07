@@ -10073,30 +10073,34 @@ class CommandRouter:
 
         total = busy + idle + offline
 
-        # Machines
+        # Machines — map ssh_target to display name from catalog
         machine_workers: dict[str, list[str]] = {}
+        catalog = get_machine_catalog()
+        ssh_to_display: dict[str | None, str] = {None: "local"}
+        for m in catalog.values():
+            if m.ssh_target:
+                ssh_to_display[m.ssh_target] = m.display_name or m.id
         for name in registered:
             host = get_worker_host(name)
-            machine_workers.setdefault(host or "local", []).append(name)
+            label = ssh_to_display.get(host, host or "local")
+            machine_workers.setdefault(label, []).append(name)
 
-        # Connectors
+        # Connectors — only show running ones
         conn_status = _get_connectors_status()
         conn_parts: list[str] = []
         for cname, info in conn_status.items():
             running = info.get("running", False)
             failures = info.get("consecutive_failures", 0)
             if running and failures == 0:
-                conn_parts.append(f"{cname} ok")
+                conn_parts.append(cname)
             elif running:
-                conn_parts.append(f"{cname} degraded ({failures} failures)")
-            else:
-                conn_parts.append(f"{cname} off")
+                conn_parts.append(f"{cname} ({failures} err)")
 
         # Build output
         lines = [
-            f"<b>v{VERSION}</b> up {uptime_str} | {inbound} | <code>{BRIDGE_BIND}:{PORT}</code>",
+            f"<b>v{VERSION}</b> | up {uptime_str} | {inbound}",
             "",
-            f"<b>{total} workers</b>: {busy} busy, {idle} idle, {offline} offline",
+            f"<b>{total}</b> workers: {busy} busy, {idle} idle, {offline} off",
             f"focus: <b>{state.active or 'none'}</b>",
         ]
 
@@ -10105,13 +10109,13 @@ class CommandRouter:
 
         # Machine breakdown (only if multiple)
         if len(machine_workers) > 1:
-            lines.append("")
-            for machine, workers in sorted(machine_workers.items()):
-                lines.append(f"{machine}: {len(workers)}")
+            machine_line = " / ".join(
+                f"{label} {len(ws)}" for label, ws in sorted(machine_workers.items())
+            )
+            lines.append(machine_line)
 
         if conn_parts:
-            lines.append("")
-            lines.append(" | ".join(conn_parts))
+            lines.append(", ".join(conn_parts))
 
         if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
@@ -14399,7 +14403,7 @@ def main() -> None:
                 def _safe_handle(upd: dict[str, Any]) -> None:
                     try:
                         command_router.handle_message(upd)
-                    except Exception as exc:
+                    except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, OSError) as exc:
                         _log(_LOG_ERROR, "tunnel:poll", f"handle_message CRASH: {exc}", exc=exc)
                 _message_pool.submit(_safe_handle, update)
 

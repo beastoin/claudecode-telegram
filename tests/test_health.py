@@ -688,3 +688,107 @@ def test_watchdog_exited_state():
 
     bridge.telegram_api = orig_api
     bridge.admin_chat_id = None
+
+
+# ── /status command tests ──────────────────────────────────────────────
+
+
+class TestCmdStatus:
+    """Tests for the /status command — verifies output correctness and no crashes."""
+
+    @pytest.fixture(autouse=True)
+    def _import_bridge(self):
+        import bridge as _b
+        self.bridge = _b
+
+    def _make_router(self):
+        """Create a CommandRouter with a mock transport that captures sent messages."""
+        sent: list[dict[str, object]] = []
+
+        class FakeLegacy:
+            def send_message(self, chat_id, text, **kw):
+                sent.append({'chat_id': chat_id, 'text': text, **kw})
+                return {'ok': True, 'result': {'message_id': 1}}
+            def set_reaction(self, *a, **kw):
+                pass
+
+        router = self.bridge.CommandRouter(FakeLegacy(), self.bridge.worker_manager)
+        return router, sent
+
+    def test_cmd_status_no_workers(self, tmp_path):
+        """cmd_status works with zero workers registered."""
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+        self.bridge.NODE_DIR = tmp_path
+        self.bridge.worker_manager._sessions_cache = None
+        orig_scan = self.bridge.worker_manager.scan_tmux_sessions
+        self.bridge.worker_manager.scan_tmux_sessions = lambda: {}
+
+        try:
+            router, sent = self._make_router()
+            result = router.cmd_status(chat_id=123)
+
+            assert result is True
+            assert len(sent) == 1
+            text = str(sent[0]['text'])
+            assert f'v{self.bridge.VERSION}' in text
+            assert '0' in text and 'workers' in text
+        finally:
+            self.bridge.worker_manager.scan_tmux_sessions = orig_scan
+
+    def test_cmd_status_with_busy_worker(self, tmp_path):
+        """cmd_status correctly reports BUSY workers using wd.status (not wd.state)."""
+        import json as _json
+        from claudecode import WorkerStateEntry
+
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+        (tmp_path / 'workers.json').write_text(_json.dumps({
+            'workers': {
+                'alice': {'session': 'test-alice', 'backend': 'claude', 'host': None},
+            }
+        }))
+        self.bridge.worker_manager._sessions_cache = None
+
+        orig_online = self.bridge.worker_manager.is_online
+        self.bridge.worker_manager.is_online = lambda name, session=None: True
+
+        self.bridge.watchdog.worker_states['alice'] = WorkerStateEntry(
+            status='BUSY', reason='working', since=1000.0
+        )
+
+        try:
+            router, sent = self._make_router()
+            result = router.cmd_status(chat_id=123)
+
+            assert result is True
+            text = str(sent[0]['text'])
+            assert '1 busy' in text
+            assert 'alice' in text
+        finally:
+            self.bridge.worker_manager.is_online = orig_online
+            self.bridge.watchdog.worker_states.pop('alice', None)
+
+    def test_cmd_status_worker_state_uses_status_not_state(self):
+        """WorkerStateEntry field is 'status', not 'state' — regression test."""
+        from claudecode import WorkerStateEntry
+
+        entry = WorkerStateEntry(status='BUSY', reason='test', since=1.0)
+        assert entry.status == 'BUSY'
+        assert not hasattr(entry, 'state'), \
+            "WorkerStateEntry should not have a 'state' attribute — use 'status'"
+
+    def test_cmd_status_no_emoji(self, tmp_path):
+        """Status output should be clean — no emoji characters."""
+        import re
+
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+        self.bridge.worker_manager._sessions_cache = None
+
+        router, sent = self._make_router()
+        router.cmd_status(chat_id=123)
+
+        text = str(sent[0]['text'])
+        emoji_pattern = re.compile(
+            r'[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FA6F]'
+        )
+        assert not emoji_pattern.search(text), \
+            f"/status output contains emoji: {text}"
