@@ -187,32 +187,33 @@ test_tmux_mode_session_stays_alive() {
 The bridge uses a structured threading model with bounded concurrency:
 
 **Permanent threads** (always running):
-| Thread | What | Why |
-|--------|------|-----|
-| Main | `HTTPServer.serve_forever()` | Accept webhook/API requests |
-| Watchdog | `watchdog_loop()` daemon | Monitor worker health, restart dead workers |
-| Tunnel watchdog | `TunnelManager._watchdog()` daemon | Monitor tunnel/poll health |
-| Poll thread | `TunnelManager._poll_loop()` daemon | Long-poll `getUpdates` (when polling) |
+| Name | What | Why |
+|------|------|-----|
+| `MainThread` | `HTTPServer.serve_forever()` | Accept webhook/API requests |
+| `worker-watchdog` | `watchdog_loop()` daemon | Monitor worker health, restart dead workers |
+| `tunnel-watchdog` | `TunnelManager._watchdog_loop()` daemon | Monitor tunnel/poll health |
+| `tunnel-poll` | `TunnelManager._poll_loop()` daemon | Long-poll `getUpdates` (when polling) |
 
 **Thread pools** (bounded, permanent):
-| Pool | Workers | Purpose |
-|------|---------|---------|
-| `_message_pool` | 8 | Process incoming updates (webhook or poll) |
-| `_task_pool` | 4 | Short background tasks (typing indicators, etc.) |
+| Name prefix | Workers | Purpose |
+|-------------|---------|---------|
+| `msg-N` | 8 | Process incoming updates (webhook or poll) |
+| `task-N` | 4 | Short background tasks (typing indicators, learning reminders, transcript sync) |
 
 **Conditional threads** (only when enabled):
-| Thread | When | What |
-|--------|------|------|
-| Gmail connector | `GMAIL_ENABLED=1` | Poll Gmail for manager emails |
-| GitHub connector | `BRIDGE_GHPOLL_ENABLED=1` | Poll GitHub for comments |
+| Name | When | What |
+|------|------|------|
+| `gmail-poller` | `GMAIL_ENABLED=1` | Poll Gmail for manager emails |
+| `github-poller` | `BRIDGE_GHPOLL_ENABLED=1` | Poll GitHub for comments |
 
 **Short-lived threads** (spawn on demand, daemon):
-| Thread | Trigger | Duration |
-|--------|---------|----------|
-| `threading.Timer(1800s)` | Idle scan | Self-rescheduling 30min timer |
-| `threading.Timer(0.5s)` | Media group | Flush buffered photos/docs |
-| Teleport thread | `/teleport` command | Duration of rsync+restart |
-| Restart-all thread | `/restart all` | Sequential restart cycle |
+| Name | Trigger | Duration |
+|------|---------|----------|
+| `idle-scan` | Timer 1800s | Self-rescheduling 30min idle worker scan |
+| `media-flush-{id}` | Timer 0.5s | Flush buffered media group photos/docs |
+| `teleport-{worker}` | `/teleport` command | Duration of rsync+restart |
+| `teleback-{worker}` | `/teleback` command | Duration of rsync+restart |
+| `restart-all` | `/restart all` | Sequential restart cycle |
 
 **Design rules:**
 - ThreadPoolExecutors bound all message processing — no unbounded `Thread()` for updates.
@@ -222,3 +223,12 @@ The bridge uses a structured threading model with bounded concurrency:
 - Connector locks guard shared log/state data.
 
 Do NOT add new unbounded `Thread()` spawns. Use `_message_pool` for update handling and `_task_pool` for background tasks. Only create dedicated threads for permanent loops (like connectors).
+
+### HTTP API security model [SPEC-030]
+
+See SPEC-030 for the full model. Key rules for agents:
+
+- **Admin secret** (`BRIDGE_API_SECRET`) must NEVER be injected into worker env, hook env, or tmux env. Only the bridge process reads it.
+- **New mutating endpoints** default to admin tier (HMAC required). Only downgrade to worker tier with explicit justification.
+- **Classify first, then serve**: endpoint tier check runs before any request handling. New endpoints must be added to the tier classification in the handler, not just the route table.
+- **External binding** (`BRIDGE_BIND != 127.0.0.1/::1`) refuses startup without `BRIDGE_API_SECRET`. Never weaken this check.

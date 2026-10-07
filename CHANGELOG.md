@@ -1,6 +1,6 @@
 ## Changelog
 
-### v0.50.0 - Thread pool, sandbox removal, polling default
+### v0.50.0 - Thread pool, sandbox removal, polling default, security model
 
 **Thread pool for bounded concurrency:**
 - Replaced unbounded `Thread()` spawns for webhook/poll update handlers with `ThreadPoolExecutor(max_workers=8)`.
@@ -12,6 +12,17 @@
 - Removed `SANDBOX_ENABLED`, `SANDBOX_IMAGE`, `SANDBOX_MOUNTS`, `SANDBOX_EXTRA_MOUNTS` from core.py, bridge.py, and bridge.sh.
 - Removed `--sandbox`, `--no-sandbox`, `--sandbox-image`, `--mount`, `--mount-ro` CLI flags from bridge.sh.
 - Sandbox was never production-ready; workers always ran with `--dangerously-skip-permissions`. Net -214 lines.
+
+**Security model (SPEC-030):**
+- Defined HTTP API security model through adversarial debate (Claude + Codex, 4 rounds).
+- Four endpoint tiers: Admin (HMAC even on localhost), Worker (localhost + consistency check), Public-local (read-only), External (HMAC required).
+- Fail-closed external binding: refuse startup without `BRIDGE_API_SECRET` when `BRIDGE_BIND` is not loopback.
+- Body size limits, per-endpoint rate limits, source consistency checks on `/outputs`.
+- Admin secret never in worker/hook env.
+
+**Thread audit:**
+- Documented complete threading model in AGENTS.md: permanent threads, pools, conditional threads, short-lived threads.
+- Confirmed design is sound: no unbounded thread spawns, all daemon, bounded pools.
 
 **Polling as default tunnel mode:**
 - Changed `TUNNEL_MODE` default from `"auto"` (cloudflare quick-tunnel) to `"poll"` (getUpdates long-polling).

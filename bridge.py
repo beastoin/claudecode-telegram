@@ -2588,6 +2588,7 @@ def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
 def _schedule_idle_scan() -> None:
     """Schedule next idle scan (every 30 minutes)."""
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
+    learning_reminders.idle_scan_timer.name = "idle-scan"
     learning_reminders.idle_scan_timer.daemon = True
     learning_reminders.idle_scan_timer.start()
 
@@ -7438,6 +7439,7 @@ class CommandRouter:
         threading.Thread(
             target=self._do_teleport,
             args=(worker_name, target_host, target_cwd, full_sync, chat_id),
+            name=f"teleport-{worker_name}",
             daemon=True
         ).start()
         return True
@@ -7527,6 +7529,7 @@ class CommandRouter:
         threading.Thread(
             target=self._do_teleport,
             args=(worker_name, target_host, target_cwd, full_sync, chat_id, True),
+            name=f"teleback-{worker_name}",
             daemon=True
         ).start()
         return True
@@ -8776,6 +8779,7 @@ class CommandRouter:
         self._restart_all_thread: threading.Thread | None = threading.Thread(
             target=self._run_restart_all_sequence,
             args=(chat_id, names, mode),
+            name="restart-all",
             daemon=True,
         )
         self._restart_all_thread.start()
@@ -9543,6 +9547,7 @@ class CommandRouter:
                 group["timer"].cancel()
             t = threading.Timer(_MEDIA_GROUP_WAIT,
                                 self._handle_media_group_flush, args=[media_group_id])
+            t.name = f"media-flush-{media_group_id}"
             t.daemon = True
             group["timer"] = t
             t.start()
@@ -14277,7 +14282,7 @@ def main() -> None:
     if last_chat_id:
         _send_startup_notification(last_chat_id, registered)
 
-    watchdog = threading.Thread(target=watchdog_loop, daemon=True)
+    watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)
     watchdog.start()
 
     _load_learning_reminder_state()
