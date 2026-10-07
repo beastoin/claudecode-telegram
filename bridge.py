@@ -9462,6 +9462,7 @@ class CommandRouter:
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),
             "/status": lambda arg, cid, mid: self.cmd_status(cid),
+            "/settings": lambda arg, cid, mid: self.cmd_status(cid),  # alias
             "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),
             "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
             "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
