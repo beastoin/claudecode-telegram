@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Claude Code <-> Telegram Bridge - Multi-Session Control Panel
-
-Composition root: HTTP server, command routing, wires telegram.py and
-claudecode.py together. Shared infrastructure lives in core.py.
-
-Module dependency graph (no circular imports):
-    core.py          ← types, constants, logging, DI seams
-      ↓
-    telegram.py      ← Telegram API, imports core
-    claudecode.py    ← worker management, imports core
-      ↓
-    bridge.py        ← this file, imports all three
-"""
-
 import collections
 from dataclasses import dataclass, field
 import fcntl
@@ -39,7 +25,7 @@ from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 from pathlib import Path
 from collections.abc import Iterable, Mapping
-from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
+from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
 
 # ── Re-export everything from core so existing `from bridge import X` works ──
 from core import *  # noqa: F401,F403
@@ -109,7 +95,6 @@ from claudecode import (  # underscore names excluded from * import
 
 
 class WorkerEndpointInfo(TypedDict, total=False):
-    """Worker info returned by /workers endpoint."""
     name: str
     backend: str
     status: str
@@ -128,7 +113,6 @@ class WorkerEndpointInfo(TypedDict, total=False):
 
 
 class MachinePublicDict(TypedDict, total=False):
-    """Public-facing machine info returned by API."""
     id: str
     display_name: str
     ssh_target: str | None
@@ -146,7 +130,6 @@ class MachinePublicDict(TypedDict, total=False):
 
 
 class MachinesCatalogResponse(TypedDict):
-    """Response shape of get_machines()."""
     version: int
     config_path: str
     caller: str | None
@@ -160,7 +143,6 @@ class MachinesCatalogResponse(TypedDict):
 
 
 class TranscriptSyncState(TypedDict, total=False):
-    """Shape of transcript background sync tracking entry."""
     status: str     # "syncing", "done", "error"
     progress: str
     error: str | None
@@ -172,7 +154,6 @@ class TranscriptSyncState(TypedDict, total=False):
 
 
 class TranscriptMessageUsage(TypedDict, total=False):
-    """Token usage stats from a Claude transcript message."""
     input_tokens: int
     output_tokens: int
     cache_read_input_tokens: int
@@ -181,7 +162,6 @@ class TranscriptMessageUsage(TypedDict, total=False):
 
 
 class TranscriptMessageContent(TypedDict, total=False):
-    """A single content block in a transcript message (text, tool_use, tool_result)."""
     type: str           # "text", "tool_use", "tool_result"
     text: str
     name: str           # tool name (for tool_use)
@@ -193,7 +173,6 @@ class TranscriptMessageContent(TypedDict, total=False):
 
 
 class TranscriptMessage(TypedDict, total=False):
-    """Message object inside a transcript entry."""
     role: str           # "user", "assistant"
     content: str | list[TranscriptMessageContent]
     model: str
@@ -202,7 +181,6 @@ class TranscriptMessage(TypedDict, total=False):
 
 
 class TranscriptEntry(TypedDict, total=False):
-    """A single entry from a Claude JSONL transcript file."""
     type: str           # "user", "assistant", "system", "progress", etc.
     message: TranscriptMessage
     timestamp: str
@@ -213,7 +191,6 @@ class TranscriptEntry(TypedDict, total=False):
 
 
 class TranscriptStatsDict(TypedDict):
-    """Return shape of _transcript_stats()."""
     n_user: int
     n_tool: int
     n_edit: int
@@ -233,7 +210,6 @@ class TranscriptStatsDict(TypedDict):
 
 
 class ToolResultDict(TypedDict, total=False):
-    """Tool result entry in transcript tool_results map."""
     content: str
     is_error: bool
 
@@ -241,7 +217,6 @@ class ToolResultDict(TypedDict, total=False):
 
 
 class ConnectorMessageLogEntry(TypedDict):
-    """Shape of entries in the connector message log deque."""
     ts: float
     html: str
     plain: str
@@ -250,14 +225,12 @@ class ConnectorMessageLogEntry(TypedDict):
 
 
 class ConnectorMetadataDict(TypedDict, total=False):
-    """Metadata passed to connector message handlers."""
     number: int
     repo: str
 
 
 
 class ConnectorAttachmentDict(TypedDict, total=False):
-    """A downloaded file attachment from a connector."""
     path: str
     filename: str
     mimeType: str
@@ -265,7 +238,6 @@ class ConnectorAttachmentDict(TypedDict, total=False):
 
 
 class ConnectorStatusDict(TypedDict, total=False):
-    """Status of a single connector."""
     name: str
     running: bool
     error: str
@@ -274,7 +246,6 @@ class ConnectorStatusDict(TypedDict, total=False):
 
 
 class MentionRouteResult(TypedDict):
-    """Return shape of CommandRouter._route_mention."""
     name: str
     status: str  # "sent", "offline", "unknown"
 
@@ -283,7 +254,6 @@ class MentionRouteResult(TypedDict):
 # ── Endpoint body TypedDicts (HTTP POST payloads) ────────────────────
 
 class HookResponseBody(TypedDict, total=False):
-    """POST /outputs — Claude hook forwarding a response."""
     session: str
     text: str
     source: str
@@ -300,7 +270,6 @@ class HookResponseBody(TypedDict, total=False):
 
 
 class HealthAlertBody(TypedDict, total=False):
-    """POST /alerts — worker health alert."""
     worker: str
     issue: str
     transcript_age: int
@@ -309,7 +278,6 @@ class HealthAlertBody(TypedDict, total=False):
 
 
 class ForgeRegisterBody(TypedDict, total=False):
-    """POST /workers — register a remote worker (packaged or forge)."""
     Name: str
     name: str
     Host: str
@@ -333,7 +301,6 @@ class ForgeRegisterBody(TypedDict, total=False):
 
 
 class PrActionBody(TypedDict, total=False):
-    """POST /pr/* — PR review comment, merge, or general comment."""
     token: str
     owner: str
     repo: str
@@ -347,7 +314,6 @@ class PrActionBody(TypedDict, total=False):
 
 
 class TelegramWebhookBody(TypedDict, total=False):
-    """Telegram webhook update body (wraps TelegramUpdate)."""
     update_id: int
     message: TelegramMessageDict
     callback_query: TelegramCallbackQuery
@@ -356,7 +322,6 @@ class TelegramWebhookBody(TypedDict, total=False):
 
 
 class NodeConfigDict(TypedDict, total=False):
-    """Node configuration file shape (~/.config/claudecode-telegram/<node>.json)."""
     admin_chat_id: int
     tunnel: str
     host: str
@@ -373,63 +338,44 @@ class NodeConfigDict(TypedDict, total=False):
 
 
 class _MentionSnapshot(NamedTuple):
-    """Immutable snapshot of MentionTracker for test save/restore."""
     target: str | None
     mention_count: int
     ts: float
 
 
 class MentionTracker:
-    """Tracks consecutive @mentions for auto-focus.
-
-    All access uses attribute style (``_last_mention.target``, etc.)
-    for proper type narrowing.
-    """
-
     def __init__(self) -> None:
-        """Initialize mention streak tracking (count and last timestamp)."""
         self.target: str | None = None
         self.count: int = 0
         self.ts: float = 0.0
 
     def snapshot(self) -> _MentionSnapshot:
-        """Capture current state for later restore (used in tests)."""
         return _MentionSnapshot(target=self.target, mention_count=self.count, ts=self.ts)
 
     def restore(self, snap: _MentionSnapshot) -> None:
-        """Restore state from a snapshot (used in tests)."""
         self.target = snap.target
         self.count = snap.mention_count
         self.ts = snap.ts
 
 
 class _StateSnapshot(NamedTuple):
-    """Immutable snapshot of BridgeRuntimeState for test save/restore."""
     active: str | None
     startup_notified: bool
 
 
 class BridgeRuntimeState:
-    """Typed in-memory state (RAM only — tmux IS persistence).
-
-    All access uses attribute style (``state.active``, etc.)
-    for proper type narrowing.
-    """
     def __init__(self) -> None:
-        """Initialize bridge runtime state (focus, admin, notifications)."""
         self.active: str | None = None
         self.startup_notified: bool = False
         self.mention: MentionTracker = MentionTracker()
 
     def snapshot(self) -> _StateSnapshot:
-        """Capture current state for later restore (used in tests)."""
         return _StateSnapshot(
             active=self.active,
             startup_notified=self.startup_notified,
         )
 
     def restore(self, snap: _StateSnapshot) -> None:
-        """Restore state from a snapshot (used in tests)."""
         self.active = snap.active
         self.startup_notified = snap.startup_notified
 
@@ -643,7 +589,6 @@ _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 
 @dataclass(frozen=True)
 class WatchdogConfig:  # type: ignore[no-redef]
-    """Watchdog timing and threshold configuration (immutable)."""
     interval: int = 4
     start_grace: int = 30
     think_grace: int = 30
@@ -660,7 +605,6 @@ class WatchdogConfig:  # type: ignore[no-redef]
 
 @dataclass(frozen=True)
 class ResourceAlertConfig:  # type: ignore[no-redef]
-    """Resource monitoring thresholds and cooldowns (immutable)."""
     disk_warn_pct: int = 85
     disk_alert_pct: int = 95
     disk_alert_gb: int = 5
@@ -681,7 +625,6 @@ class ResourceAlertConfig:  # type: ignore[no-redef]
 
 @dataclass(frozen=True)
 class MediaConfig:  # type: ignore[no-redef]
-    """Media handling limits and extension sets (immutable)."""
     max_file_size: int = 50 * 1024 * 1024
     photo_max_sum: int = 10000
     photo_max_dim: int = 5000
@@ -714,7 +657,6 @@ ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 
 @dataclass
 class AppContext:  # type: ignore[no-redef]
-    """Injectable application configuration — replaces scattered module globals."""
     bot_token: str = ""
     port: int = 8270
     bridge_bind: str = "127.0.0.1"
@@ -732,7 +674,6 @@ class AppContext:  # type: ignore[no-redef]
     transport_mode: str = "telegram"
 
     def __post_init__(self) -> None:
-        """Validate and normalize fields after dataclass initialization."""
         if self.sessions_dir is None:
             self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
         if self.claude_dir is None:
@@ -743,15 +684,6 @@ class AppContext:  # type: ignore[no-redef]
 
 
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[no-redef,explicit-any]
-    """Call func(*args, **kwargs) and log on failure instead of crashing.
-
-    Use for fire-and-forget operations where failure is acceptable but
-    should not be silent (aligns with 'fail loudly' philosophy).
-    Returns the function result on success, None on failure.
-
-    Callable[..., object] is intentional: this is a generic wrapper that
-    accepts any callable signature (standard pattern for utility wrappers).
-    """
     try:
         return func(*args, **kwargs)
     except Exception as exc:
@@ -761,7 +693,6 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
 
 
 def _build_app_context() -> AppContext:  # type: ignore[no-redef]
-    """Build AppContext from current module globals (bridge between old and new)."""
     return AppContext(
         bot_token=BOT_TOKEN,
         port=PORT,
@@ -783,7 +714,6 @@ def _build_app_context() -> AppContext:  # type: ignore[no-redef]
 
 
 def get_app_context() -> AppContext:  # type: ignore[no-redef]
-    """Get the singleton AppContext. Built on first call from module globals."""
     global _app_context
     if _app_context is None:
         _app_context = _build_app_context()
@@ -794,7 +724,6 @@ def get_app_context() -> AppContext:  # type: ignore[no-redef]
 # ── Injectable testing seams ──
 
 class MarkdownToken(Protocol):  # type: ignore[no-redef]
-    """Protocol for markdown-it-py inline tokens."""
     type: str
     content: str
     children: list['MarkdownToken'] | None
@@ -803,59 +732,30 @@ class MarkdownToken(Protocol):  # type: ignore[no-redef]
 
 
 class SubprocessRunner(Protocol):  # type: ignore[no-redef]
-    """Abstraction over subprocess.run and subprocess.Popen for test injection.
-
-    kwargs typing note: subprocess.run/Popen accept 20+ keyword arguments
-    (capture_output, text, cwd, env, timeout, stdin, stdout, stderr, check,
-    shell, etc.). Typing them precisely requires Unpack[TypedDict] (Python 3.12+).
-    Using **kwargs: object is the standard Protocol escape hatch for <3.12.
-    """
-
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        """Execute a subprocess command and wait for completion."""
-        ...
-
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
-        """Spawn a subprocess without waiting for completion."""
-        ...
-
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]: ...
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]: ...
 
 
 class Clock(Protocol):  # type: ignore[no-redef]
-    """Abstraction over time for deterministic testing."""
-
-    def time(self) -> float:
-        """Return the current time in seconds since epoch."""
-        ...
-
-    def sleep(self, seconds: float) -> None:
-        """Sleep for the given number of seconds."""
-        ...
+    def time(self) -> float: ...
+    def sleep(self, seconds: float) -> None: ...
 
 
 
 class _RealSubprocessRunner:  # type: ignore[no-redef]
-    """Production subprocess runner — delegates to subprocess.run/Popen."""
-
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        """Execute a subprocess command via the real subprocess module."""
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
-        """Spawn a subprocess without waiting, via the real subprocess module."""
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
 
 
 class _RealClock:  # type: ignore[no-redef]
-    """Production clock — delegates to the time module."""
-
     def time(self) -> float:
-        """Return current wall-clock time."""
         return time.time()
 
     def sleep(self, seconds: float) -> None:
-        """Sleep for real wall-clock duration."""
         time.sleep(seconds)
 
 
@@ -886,12 +786,6 @@ _LOG_DEBUG: str = "DEBUG"  # type: ignore[no-redef]
 
 def _log(level: str, component: str, msg: str | Path, *,  # type: ignore[no-redef]
          exc: BaseException | None = None) -> None:
-    """Emit a structured log line to stderr.
-
-    Format: [LEVEL:component] message
-    Optionally appends a traceback if exc is provided.
-    All bridge error/warning output should route through this function.
-    """
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         import traceback as _tb
@@ -964,11 +858,6 @@ _app_context: AppContext | None = None  # type: ignore[no-redef]
 
 @dataclass
 class WorkerRegistryEntry:
-    """Typed representation of a single entry in the worker registry JSON.
-
-    Maps to the shape ``{"backend": ..., "protocol": ..., "callback_url": ..., ...}``
-    stored under ``registry["workers"][name]``.
-    """
     backend: str = "claude"
     protocol: str = ""
     callback_url: str = ""
@@ -981,7 +870,6 @@ class WorkerRegistryEntry:
     home_cwd: str = ""
 
     def to_dict(self) -> RegistryWorkerDict:
-        """Serialize this instance to a plain dictionary."""
         result: RegistryWorkerDict = {"backend": self.backend}
         for field_name in ("protocol", "callback_url", "host", "version", "chat_id",
                            "hire_time", "tools", "home_host", "home_cwd"):
@@ -992,7 +880,6 @@ class WorkerRegistryEntry:
 
     @classmethod
     def from_dict(cls: type["WorkerRegistryEntry"], data: RegistryWorkerDict) -> "WorkerRegistryEntry":
-        """Construct an instance from a plain dictionary."""
         return cls(
             backend=data.get("backend", "claude"),
             protocol=data.get("protocol", ""),
@@ -1031,7 +918,6 @@ class WorkerRegistryEntry:
 
 @dataclass
 class WorkerRecord:
-    """Normalized worker representation — single typed object for all sources."""
     name: str
     backend: str = "claude"
     host: str | None = None
@@ -1047,22 +933,18 @@ class WorkerRecord:
 
     @property
     def is_remote(self) -> bool:
-        """Worker lives on a different machine from the bridge."""
         return bool(self.host)
 
     @property
     def is_callback(self) -> bool:
-        """Worker uses HTTP callback protocol (e.g., forge/packaged workers)."""
         return bool(self.callback_url)
 
     @property
     def is_interactive(self) -> bool:
-        """Worker uses an interactive CLI (tmux-based send)."""
         # Defer to Backend for the canonical answer
         return self.backend == "claude"
 
     def to_session_dict(self) -> WorkerSessionDict:
-        """Convert back to legacy session dict for backward compatibility."""
         result: WorkerSessionDict = {"backend": self.backend}
         if self.tmux_name:
             result["tmux"] = self.tmux_name
@@ -1077,7 +959,6 @@ class WorkerRecord:
 
     @classmethod
     def from_session_dict(cls: type["WorkerRecord"], name: str, session: WorkerSessionDict, tmux_prefix: str = "") -> "WorkerRecord":
-        """Create from legacy session dict (as returned by get_registered_sessions)."""
         return cls(
             name=name,
             backend=session.get("backend", "claude"),
@@ -1092,7 +973,6 @@ class WorkerRecord:
 
 
 def get_worker_host(name: str) -> str | None:
-    """Get the SSH host for a worker from the persistent registry, or None if local."""
     registry = _load_registry()
     worker = registry.get("workers", {}).get(name, {})
     return worker.get("host")
@@ -1101,18 +981,12 @@ def get_worker_host(name: str) -> str | None:
 
 
 class MachineConfigError(ValueError):
-    """Invalid machines.json configuration."""
-
+    pass
 
 
 
 @dataclass(frozen=True)
 class Machine:
-    """Static machine catalog entry.
-
-    This matches SDD-host-awareness.md Phase 0. Optional metadata is read-only
-    decoration for operators and does not affect worker routing yet.
-    """
     id: str
     ssh_target: str | None
     bridge_base_url: str
@@ -1125,11 +999,9 @@ class Machine:
 
     @property
     def is_local(self) -> bool:
-        """Check whether this machine is the local bridge host."""
         return self.ssh_target is None
 
     def public_dict(self) -> MachinePublicDict:
-        """Return a sanitized dictionary safe for API responses."""
         return {
             "id": self.id,
             "display_name": self.display_name or self.id,
@@ -1146,7 +1018,6 @@ class Machine:
 
 
 def _validate_machine_id(machine_id: str) -> str:
-    """Validate and return a machine id (alphanumeric + dash/underscore)."""
     if not isinstance(machine_id, str) or not machine_id:
         raise MachineConfigError("machine id must be a non-empty string")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", machine_id):
@@ -1157,7 +1028,6 @@ def _validate_machine_id(machine_id: str) -> str:
 
 
 def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
-    """Coerce a config value to str, allowing None (→ empty string)."""
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -1168,7 +1038,6 @@ def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
 
 
 def _implicit_local_machine() -> Machine:
-    """Create a Machine for the local host when no machines.json exists."""
     return Machine(
         id=BRIDGE_SSH_TARGET or "vps",
         ssh_target=None,
@@ -1184,11 +1053,6 @@ def _implicit_local_machine() -> Machine:
 
 
 def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
-    """Load the static machine catalog.
-
-    Missing file is allowed and yields one implicit local bridge machine for
-    backward compatibility. Malformed operator config fails loudly.
-    """
     config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
     if not config_path.exists():
         return {_implicit_local_machine().id: _implicit_local_machine()}
@@ -1264,7 +1128,6 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
 
 
 def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
-    """Return the startup machine catalog."""
     with remote_cache.lock:
         if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
             remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
@@ -1275,7 +1138,6 @@ def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
 
 
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
-    """Look up the Machine for a worker's ssh_target, creating an ad-hoc entry if needed."""
     if host is None:
         for machine in machines.values():
             if machine.is_local:
@@ -1300,7 +1162,6 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
 
 
 def _machine_health(machine: Machine) -> MachineHealthDict:
-    """Build a health status dict for a machine (disk, memory, IO, up/down)."""
     host_label = machine.ssh_target or "VPS"
     with watchdog.lock:
         health: MachineHealthDict = {
@@ -1329,7 +1190,6 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
 
 
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
-    """Return the access command for reaching a machine ('local' or 'ssh <host>')."""
     target_host = machine.ssh_target
     if caller_host == target_host:
         return "local"
@@ -1341,7 +1201,6 @@ def _machine_access(machine: Machine, caller_host: str | None) -> str:
 
 
 def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
-    """Return configured machines plus derived workers, access, and health."""
     machines = get_machine_catalog()
     registered = get_registered_sessions()
     caller_info = registered.get(caller_from, {}) if caller_from else {}
@@ -1386,7 +1245,6 @@ def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
 
 
 def _ensure_bare_repo(project_name: str) -> str:
-    """Create bare repo at GIT_SERVER_DIR/<project>.git if missing. Returns path."""
     bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
     if not os.path.isdir(bare_path):
         os.makedirs(GIT_SERVER_DIR, exist_ok=True)
@@ -1399,7 +1257,6 @@ def _ensure_bare_repo(project_name: str) -> str:
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
-    """Return human-readable activity string for a non-interactive worker."""
     with processes.adapter_pids_lock:
         entry = processes.adapter_pids.get(worker_name)
     if entry:
@@ -1438,12 +1295,6 @@ def _read_noninteractive_activity(worker_name: str) -> str:
 
 
 def _check_hook_failure_signal(name: str) -> str | None:
-    """Check hook-written failure signal file for recent tool failures.
-
-    PostToolUseFailure hook appends lines: "<epoch> <tool_name>"
-    Returns reason string if >= HOOK_FAILURE_THRESHOLD recent failures, else None.
-    For teleported workers, reads the file from the remote host.
-    """
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
     host = get_worker_host(name)
 
@@ -1490,9 +1341,6 @@ def _check_hook_failure_signal(name: str) -> str | None:
 
 
 def _clear_hook_failures(name: str) -> None:
-    """Remove hook failure signal file for a worker (on restart/clean).
-    For teleported workers, removes the file on the remote host.
-    """
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
     host = get_worker_host(name)
     if host:
@@ -1511,7 +1359,6 @@ def _clear_hook_failures(name: str) -> None:
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
-    """Check if a worker session is poisoned (crashed/stuck). Returns reason or None."""
     # Primary: check hook-written failure signal file
     hook_reason = _check_hook_failure_signal(name)
     if hook_reason:
@@ -1538,14 +1385,6 @@ def _detect_poisoned(name: str, tmux_name: str) -> str | None:
 
 
 def parse_hire_args(raw: str) -> tuple[str, str]:
-    """Parse /hire arguments and return (name, backend).
-
-    Supports:
-    - /hire alice                    -> (alice, claude)
-    - /hire alice --backend codex    -> (alice, codex)
-    - /hire alice --codex            -> (alice, codex)  [legacy]
-    - /hire codex-alice              -> (alice, codex)  [prefix syntax]
-    """
     parts = [p for p in (raw or "").split() if p]
     backend = DEFAULT_BACKEND
     name_parts = []
@@ -1590,12 +1429,6 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
 
 def _activity_from_spinner(stripped: list[str]) -> str | None:
-    """Detect active thinking spinner (priority 1).
-
-    Claude Code cycles through various Unicode chars as spinner frames.
-    ✻ is ALSO a spinner frame — distinguish by "…" presence.
-    "✻ Verbing… (49m)" = active; "✻ Thought for 5s" = completed (no "…").
-    """
     _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
         first = raw[0] if raw else ""
@@ -1621,11 +1454,6 @@ def _activity_from_spinner(stripped: list[str]) -> str | None:
 
 
 def _activity_from_tool(stripped: list[str]) -> str | None:
-    """Detect actively running tool (priority 2).
-
-    Matches "● ToolName(...)" followed by "⎿ Running…" within 5 lines.
-    Also handles MCP tools: "● mcp__server__tool(".
-    """
     last_running_tool = None
     for i, raw in enumerate(stripped):
         tool_match = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
@@ -1652,7 +1480,6 @@ def _activity_from_tool(stripped: list[str]) -> str | None:
 
 
 def _activity_from_rate_limit(stripped: list[str]) -> str | None:
-    """Detect rate limiting or connection errors (priority 3)."""
     for raw in reversed(stripped):
         lower = raw.lower()
         if "rate limit" in lower:
@@ -1667,12 +1494,6 @@ def _activity_from_rate_limit(stripped: list[str]) -> str | None:
 
 
 def _activity_from_interactive(stripped: list[str]) -> str | None:
-    """Detect interactive prompts — TUI selection/question UI (priority 3b/3c).
-
-    Checks footer lines (shared with _extract_question_details) and content
-    patterns. Must run BEFORE the ❯ prompt check because ❯ in these states
-    is a SELECTION CURSOR, not the text input prompt.
-    """
     # 3b. Footer-based detection
     for raw in reversed(stripped):
         for footer in _INTERACTIVE_FOOTERS:
@@ -1701,11 +1522,6 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
 
 
 def _activity_from_prompt(stripped: list[str]) -> str | None:
-    """Detect prompt/mode bars — ❯ idle, ⏸ plan mode (priority 4).
-
-    Bottom-bar elements are informational, not blocking.
-    "bypass permissions on" means permissions ARE being bypassed.
-    """
     last_prompt_idx = None
     last_plan_bar_idx = None
     for i, raw in enumerate(stripped):
@@ -1728,7 +1544,6 @@ def _activity_from_prompt(stripped: list[str]) -> str | None:
 
 
 def _activity_from_editor(stripped: list[str]) -> str | None:
-    """Detect external editor mode (priority 5)."""
     for raw in reversed(stripped):
         if "Save and close editor to continue" in raw:
             return "Waiting for external editor"
@@ -1738,7 +1553,6 @@ def _activity_from_editor(stripped: list[str]) -> str | None:
 
 
 def _activity_from_hooks(stripped: list[str]) -> str | None:
-    """Detect system hook execution (priority 6)."""
     for raw in reversed(stripped):
         if "Running SessionStart" in raw:
             return "Running SessionStart hooks"
@@ -1750,7 +1564,6 @@ def _activity_from_hooks(stripped: list[str]) -> str | None:
 
 
 def _activity_from_confirmation(stripped: list[str]) -> str | None:
-    """Detect confirmation prompts — plan approval, team lead (priority 7)."""
     for raw in reversed(stripped):
         if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
             return "Waiting for plan approval"
@@ -1764,7 +1577,6 @@ def _activity_from_confirmation(stripped: list[str]) -> str | None:
 
 
 def _activity_from_tasks(stripped: list[str]) -> str | None:
-    """Detect task progress checklist (priority 8)."""
     done = 0
     total = 0
     for raw in stripped:
@@ -1782,7 +1594,6 @@ def _activity_from_tasks(stripped: list[str]) -> str | None:
 
 
 def _is_output_block_end(text: str) -> bool:
-    """Detect if a tmux line signals the end of a Claude output block."""
     trimmed = text.lstrip()
     if trimmed.startswith("Context left until auto-compact:"):
         return True
@@ -1792,7 +1603,6 @@ def _is_output_block_end(text: str) -> bool:
 
 
 def _activity_from_output_block(stripped: list[str]) -> str | None:
-    """Extract last non-tool ● output block summary (priority 9)."""
     for i in range(len(stripped) - 1, -1, -1):
         raw = stripped[i]
         if not raw.startswith("●"):
@@ -1824,7 +1634,6 @@ def _activity_from_output_block(stripped: list[str]) -> str | None:
 
 
 def _activity_from_error(stripped: list[str]) -> str | None:
-    """Detect standalone error lines (priority 10)."""
     for raw in reversed(stripped):
         if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
             lower = raw.lower()
@@ -1838,12 +1647,6 @@ def _activity_from_error(stripped: list[str]) -> str | None:
 
 
 def _extract_activity(lines: list[str]) -> str:
-    """Extract a 1-line activity summary from tmux pane output.
-
-    Based on Claude Code v2.1.59 (repo d6ab0ea, 2026-02-26).
-    Scans for Claude Code UI signals in priority order.
-    Each check is a focused helper returning str | None.
-    """
     if not lines:
         return "Active"
 
@@ -1876,7 +1679,6 @@ def _extract_activity(lines: list[str]) -> str:
 
 
 def _extract_context_pct(lines: list[str]) -> str | None:
-    """Extract context % from tmux output if present."""
     for line in reversed(lines):
         m = re.search(r'Context left.*?(\d+)%', line)
         if m:
@@ -1887,11 +1689,6 @@ def _extract_context_pct(lines: list[str]) -> str | None:
 
 
 def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
-    """Read tmux pane and extract activity summary + context% + raw lines.
-
-    Returns TmuxActivityResult(activity, context_pct, raw_lines).
-    When host is set, reads from a remote tmux session via SSH.
-    """
     try:
         if host:
             proc = _remote_run(
@@ -1915,14 +1712,6 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
 
 
 def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
-    """Extract interactive question details from tmux pane output.
-
-    Returns dict with:
-      header: str — question title from ☐ line (or "")
-      options: list of {num: int, label: str, selected: bool}
-      selected_num: int — currently selected option number (or 0)
-    Returns None if no interactive prompt detected.
-    """
     if not lines:
         return None
 
@@ -1991,12 +1780,6 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
 
 
 def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
-    """Handle manager's reply to an interactive prompt via keystroke navigation.
-
-    reply: "1"-"9" for option selection, "skip"/"cancel" for Escape.
-    details: from _extract_question_details().
-    Returns True if handled, False if not applicable.
-    """
     reply = reply.strip().lower()
 
     if reply in ("skip", "cancel", "esc"):
@@ -2041,12 +1824,6 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 
 
 def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
-    """Copy a file, optionally to/from a remote host via scp.
-
-    direction='push': local src -> remote dst
-    direction='pull': remote src -> local dst
-    host=None: local copy via shutil.copy2
-    """
     if not host:
         shutil.copy2(src, dst)
     elif direction == "push":
@@ -2059,11 +1836,6 @@ def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "
 
 
 def parse_worker_target(target: str) -> ParsedWorkerTarget:
-    """Parse 'name@host' or 'name' into a ParsedWorkerTarget.
-
-    Returns ParsedWorkerTarget(name, None) for local workers,
-    ParsedWorkerTarget(name, host) for remote.
-    """
     if "@" in target:
         name, host = target.rsplit("@", 1)
         return ParsedWorkerTarget(name, host)
@@ -2074,10 +1846,6 @@ def parse_worker_target(target: str) -> ParsedWorkerTarget:
 
 
 def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
-    """Return the URL to access the bare repo from target_host.
-
-    Local targets get the direct path. Remote targets get an SSH URL to VPS.
-    """
     if target_host:
         return f"claude@100.125.36.102:{bare_repo_path}"
     return bare_repo_path
@@ -2088,15 +1856,6 @@ def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
                     host: str | None = None) -> GitPushStateResult | None:
-    """Push working state to bare repo without mutating source.
-
-    Approach: temporarily `git add -A` to capture untracked files in the index,
-    run `git stash create` (non-mutating — creates commit without moving HEAD),
-    then `git reset` to restore original index. Working tree is never modified.
-
-    Returns metadata dict {orig_sha, orig_branch, staged_files, stash_sha}
-    or None on failure.
-    """
     try:
         # Get current HEAD
         r = _remote_run(["git", "-C", source_cwd, "rev-parse", "HEAD"],
@@ -2170,12 +1929,6 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
 
 def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                     metadata: GitPushStateResult, host: str | None = None) -> bool:
-    """Pull and apply working state on target. Returns success.
-
-    For fresh targets: clones from bare repo.
-    For existing targets: fetches and applies.
-    Restores branch, working tree changes, and staged files.
-    """
     try:
         orig_sha = metadata["orig_sha"]
         orig_branch = metadata["orig_branch"]
@@ -2268,11 +2021,6 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
 
 
 def _get_project_name(cwd: str, host: str | None = None) -> str | None:
-    """Derive project name from git remote.origin.url.
-
-    Returns short name (e.g., 'omi' from 'https://github.com/BasedHardware/omi.git')
-    or None if no origin remote.
-    """
     try:
         r = _remote_run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
@@ -2299,7 +2047,6 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
 
 
 def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
-    """Update registry with teleport location info."""
     with watchdog.lock:
         data = _load_registry()
         worker = data.get("workers", {}).get(name, {})
@@ -2314,7 +2061,6 @@ def _registry_update_teleport(name: str, host: str, home_host: str | None, home_
 
 
 def _registry_clear_teleport(name: str) -> None:
-    """Clear teleport location info from registry (after teleback)."""
     with watchdog.lock:
         data = _load_registry()
         worker = data.get("workers", {}).get(name, {})
@@ -2329,7 +2075,6 @@ def _registry_clear_teleport(name: str) -> None:
 
 
 def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
-    """Return Claude PID for a pane, or None if not found."""
     try:
         result = _remote_run(
             ["pgrep", "-P", str(pane_pid), "-f", "claude"],
@@ -2351,7 +2096,6 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
 
 
 def _child_count(pid: str, host: str | None = None) -> int:
-    """Return child process count for pid."""
     if not pid:
         return 0
     try:
@@ -2372,7 +2116,6 @@ def _child_count(pid: str, host: str | None = None) -> int:
 
 
 def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
-    """Return {pid: {'cpu': float, 'state': str}} for given pids."""
     pid_list = [str(pid) for pid in pids if pid]
     if not pid_list:
         return {}
@@ -2407,7 +2150,6 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
 
 
 def mark_hook_event(session_name: str) -> None:
-    """Record timestamp of last hook response for a session."""
     with watchdog.lock:
         watchdog.last_hook_ts[session_name] = _clock.time()
 
@@ -2415,7 +2157,6 @@ def mark_hook_event(session_name: str) -> None:
 
 
 def kill_adapter(name: str) -> None:
-    """Kill inflight adapter process for a worker."""
     with processes.adapter_pids_lock:
         entry = processes.adapter_pids.pop(name, None)
     if entry is None:
@@ -2439,7 +2180,6 @@ def kill_adapter(name: str) -> None:
 
 
 def _read_learning_reminder(name: str) -> str:
-    """Read learning reminder from file, substitute {name}. Falls back to hardcoded constant."""
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
             text = Path(_LEARNING_REMINDER_PATH).read_text().strip()
@@ -2454,7 +2194,6 @@ def _read_learning_reminder(name: str) -> str:
 
 
 def _new_reminder_state() -> ReminderState:
-    """Create a fresh learning-reminder state dict with zero counters."""
     now = _clock.time()
     return {
         "response_count": 0,
@@ -2468,11 +2207,6 @@ def _new_reminder_state() -> ReminderState:
 
 
 def _learning_reminder_state_file() -> str | None:
-    """Deprecated — learning reminder state is now RAM-only.
-
-    Returns None unconditionally so save/load are no-ops.
-    Harmless to reset on bridge restart (worst case: a duplicate reminder).
-    """
     return None
 
 
@@ -2480,7 +2214,6 @@ def _learning_reminder_state_file() -> str | None:
 
 
 def _save_learning_reminder_state() -> None:
-    """Persist state to disk. Caller should hold learning_reminders.lock."""
     path = _learning_reminder_state_file()
     if not path:
         return
@@ -2497,7 +2230,6 @@ def _save_learning_reminder_state() -> None:
 
 
 def _reset_learning_reminder(name: str) -> None:
-    """Reset learning reminder state for a worker (on hire/restart/SessionStart)."""
     with learning_reminders.lock:
         learning_reminders.state[name] = _new_reminder_state()
         _save_learning_reminder_state()
@@ -2507,7 +2239,6 @@ def _reset_learning_reminder(name: str) -> None:
 
 
 def _fire_reminder(name: str, st: ReminderState) -> None:
-    """Mark state as fired and send reminder in background. Caller holds learning_reminders.lock."""
     st["response_count"] = 0
     st["last_reminder_ts"] = _clock.time()
     st["reminder_pending"] = True
@@ -2520,7 +2251,6 @@ def _fire_reminder(name: str, st: ReminderState) -> None:
 
 
 def _check_learning_reminder(name: str) -> None:
-    """Increment response count and fire learning reminder if threshold met."""
     with learning_reminders.lock:
         st = learning_reminders.state.get(name)
         if st is None:
@@ -2547,7 +2277,6 @@ def _check_learning_reminder(name: str) -> None:
 
 
 def _scan_idle_workers() -> None:
-    """Check all tracked workers for idle timeout. Called periodically by timer."""
     try:
         now = _clock.time()
         idle_threshold = LEARNING_REMINDER_IDLE_HOURS * 3600
@@ -2576,7 +2305,6 @@ def _scan_idle_workers() -> None:
 
 
 def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
-    """Initialize state for workers not already tracked (from disk or previous session)."""
     with learning_reminders.lock:
         changed = False
         for name in worker_names:
@@ -2591,7 +2319,6 @@ def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
 
 
 def _schedule_idle_scan() -> None:
-    """Schedule next idle scan (every 30 minutes)."""
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
     learning_reminders.idle_scan_timer.name = "idle-scan"
     learning_reminders.idle_scan_timer.daemon = True
@@ -2602,7 +2329,6 @@ def _schedule_idle_scan() -> None:
 
 
 def _send_learning_reminder(name: str, text: str) -> None:
-    """Send learning reminder to worker (runs in background thread)."""
     try:
         _clock.sleep(DELAY_RESPONSE_GAP)  # avoid colliding with the response
         if send_to_worker(name, text):
@@ -2617,7 +2343,6 @@ def _send_learning_reminder(name: str, text: str) -> None:
 
 
 def _load_registry() -> RegistryFileDict:
-    """Load worker registry from disk. Returns {} on missing/corrupt."""
     try:
         if not WORKER_REGISTRY_FILE.exists():
             return {}
@@ -2641,7 +2366,6 @@ def _load_registry() -> RegistryFileDict:
 
 
 def _save_registry(data: RegistryFileDict) -> None:
-    """Atomic write of registry to disk."""
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(NODE_DIR), suffix=".tmp")
@@ -2665,7 +2389,6 @@ def _save_registry(data: RegistryFileDict) -> None:
 
 def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
                    host: str | None = None) -> None:
-    """Add a worker to the persistent registry (merge with existing entry)."""
     with watchdog.lock:
         data = _load_registry()
         if "workers" not in data:
@@ -2689,7 +2412,6 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
 
 def _registry_add_callback(name: str, callback_url: str, host: str = "",
                            version: str = "", tools: dict[str, object] | None = None) -> None:
-    """Add an HTTP callback worker to the persistent registry."""
     with watchdog.lock:
         data = _load_registry()
         if "workers" not in data:
@@ -2715,7 +2437,6 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
 
 
 def _registry_remove(name: str) -> None:
-    """Remove a worker from the persistent registry."""
     with watchdog.lock:
         data = _load_registry()
         if "workers" not in data:
@@ -2728,7 +2449,6 @@ def _registry_remove(name: str) -> None:
 
 
 def _set_worker_cwd(name: str, cwd: str) -> None:
-    """Set startup cwd hint for a worker in RAM."""
     normalized = normalize_cwd(cwd)
     with watchdog.lock:
         if normalized:
@@ -2741,7 +2461,6 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
 
 
 def _get_worker_cwd(name: str) -> str:
-    """Get startup cwd hint for a worker from RAM."""
     with watchdog.lock:
         cwd = watchdog.worker_cwds.get(name)
     return cwd if isinstance(cwd, str) else ""
@@ -2751,7 +2470,6 @@ def _get_worker_cwd(name: str) -> str:
 
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
-    """First-run: create registry from currently running tmux sessions."""
     if WORKER_REGISTRY_FILE.exists():
         return
     if not registered:
@@ -2772,7 +2490,6 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
 
 
 def read_checkin_note() -> str:
-    """Read checkin note from file. Returns empty string if file missing."""
     try:
         path = _CHECKIN_NOTE_PATH
         if os.path.isfile(path):
@@ -2788,10 +2505,6 @@ def read_checkin_note() -> str:
 
 
 def get_inbox_dir(session_name: str) -> Path:
-    """Get inbox directory for incoming files (images, documents, etc.).
-
-    Uses /tmp for ephemeral storage, session-namespaced to prevent cross-session access.
-    """
     return FILE_INBOX_ROOT / session_name / "inbox"
 
 
@@ -2799,7 +2512,6 @@ def get_inbox_dir(session_name: str) -> Path:
 
 
 def ensure_inbox_dir(session_name: str) -> Path:
-    """Create inbox directory with secure permissions."""
     inbox = get_inbox_dir(session_name)
     inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
     inbox.chmod(0o700)
@@ -2810,7 +2522,6 @@ def ensure_inbox_dir(session_name: str) -> Path:
 
 
 def cleanup_inbox(session_name: str) -> None:
-    """Clean up all files in a session's inbox."""
     inbox = get_inbox_dir(session_name)
     if inbox.exists():
         for f in inbox.iterdir():
@@ -2824,11 +2535,6 @@ def cleanup_inbox(session_name: str) -> None:
 
 
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
-    """Get all active workers with their communication details.
-
-    If ``caller_from`` is set to a worker name, ``send_example`` for each peer
-    is rendered from that caller's machine perspective.
-    """
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.get_workers(caller_from=caller_from)
@@ -2838,7 +2544,6 @@ def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
 
 
 def get_pending_file(name: str) -> Path:
-    """Return the path to a worker's pending-message file."""
     return get_session_dir(name) / "pending"
 
 
@@ -2846,11 +2551,6 @@ def get_pending_file(name: str) -> Path:
 
 
 def _read_session_file(name: str, filename: str) -> str | None:
-    """Read a session file, routing to remote host for teleported workers.
-
-    Tries local cache first (fast), falls back to SSH for remote workers.
-    Local cache is populated by this function and by save_claude_session_*.
-    """
     # Try local first (works for local workers, fast cache for remote)
     f = get_session_dir(name) / filename
     if f.exists():
@@ -2892,14 +2592,6 @@ def _ensure_workspace_trusted_remote(
     cwd: str | None,
     host: str | None,
 ) -> None:
-    """Pre-trust *cwd* on a remote (or local) machine's ``~/.claude.json``.
-
-    Same as :func:`_ensure_workspace_trusted` but operates on a remote
-    host via SSH + inline Python.  When *host* is ``None`` (local),
-    delegates to the local function.
-
-    Best effort — never raises.
-    """
     if not cwd:
         return
     if not host:
@@ -2946,11 +2638,6 @@ def _build_teleport_context(
     source_cwd: str | None,
     session_id: str | None,
 ) -> str:
-    """Build context message injected into a worker after cross-machine teleport.
-
-    Tells the worker where they came from, where they are now, and how to
-    retrieve previous work via ``beast transcript search``.
-    """
     src_label = source_host or "VPS (local)"
     lines = [
         f"📦 You were teleported from {src_label} to {target_host}.",
@@ -2971,7 +2658,6 @@ def _build_teleport_context(
 
 
 def _get_pending_lock(name: str) -> threading.Lock:
-    """Get or create a per-worker lock for atomic pending check+set."""
     with processes.pending_locks_guard:
         if name not in processes.pending_locks:
             processes.pending_locks[name] = threading.Lock()
@@ -2982,7 +2668,6 @@ def _get_pending_lock(name: str) -> threading.Lock:
 
 
 def set_pending(name: str, chat_id: ChatId) -> None:
-    """Mark session as having a pending request with secure permissions (0o600)."""
     session_dir = ensure_session_dir(name)
     pending = session_dir / "pending"
     chat_id_file = session_dir / "chat_id"
@@ -3004,7 +2689,6 @@ def set_pending(name: str, chat_id: ChatId) -> None:
 
 
 def _remap_sessions_dir(host: str | None) -> str:
-    """Remap SESSIONS_DIR to use remote host's $HOME prefix."""
     remote_sessions_dir = str(SESSIONS_DIR)
     local_home = os.path.expanduser("~")
     remote_home = _get_remote_home(host)
@@ -3017,13 +2701,6 @@ def _remap_sessions_dir(host: str | None) -> str:
 
 
 def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
-    """Sync chat_id file to remote host if worker is teleported there.
-
-    The Stop hook reads SESSIONS_DIR/<worker>/chat_id locally on the machine
-    where Claude runs. For teleported workers, the hook is on the remote host
-    but chat_id is only written on VPS. This bridges the gap by pushing the
-    file after each write.
-    """
     host = get_worker_host(name)
     if not host:
         return
@@ -3041,7 +2718,6 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
 
 
 def clear_pending(name: str) -> None:
-    """Clear pending status for session."""
     session_dir = get_session_dir(name)
     pending = session_dir / "pending"
     try:
@@ -3054,12 +2730,6 @@ def clear_pending(name: str) -> None:
 
 
 def is_pending(name: str) -> bool:
-    """Check if session has a pending request within the timeout window.
-
-    Non-mutating: does NOT delete the pending file. The file is preserved
-    so the watchdog can detect STALE_PENDING at 15 minutes. Cleanup happens
-    only via clear_pending() when a response arrives.
-    """
     pending = get_pending_file(name)
     if not pending.exists():
         return False
@@ -3076,7 +2746,6 @@ def is_pending(name: str) -> bool:
 
 
 def try_set_pending(name: str, chat_id: ChatId) -> bool:
-    """Atomic check+set: returns True if pending was set, False if already pending."""
     with _get_pending_lock(name):
         if is_pending(name):
             return False
@@ -3088,7 +2757,6 @@ def try_set_pending(name: str, chat_id: ChatId) -> bool:
 
 
 def _pending_timestamp(name: str) -> int | None:
-    """Read the mtime of a worker's pending-response file, or None if absent."""
     pending = get_pending_file(name)
     if not pending.exists():
         return None
@@ -3117,7 +2785,6 @@ def compute_state(
     adapter_alive: bool = False,
     poisoned_reason: str | None = None,
 ) -> tuple[str, str]:
-    """Compute the current watchdog state for a worker (READY, BUSY, STUCK, etc.)."""
     if not tmux_exists:
         return "OFFLINE", "tmux missing"
 
@@ -3167,9 +2834,6 @@ def compute_state(
 
 
 def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
-    """Read the last N lines of adapter.log for a worker, or empty string.
-    For teleported workers, reads via SSH from the remote host.
-    """
     if tail_lines <= 0:
         return ""
     host = get_worker_host(name)
@@ -3203,7 +2867,6 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
-    """Send a watchdog alert to Telegram admin when a worker changes state."""
     if admin_chat_id is None:
         return
 
@@ -3267,7 +2930,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
 def _format_watchdog_status(name: str,
                             pending_lookup: Callable[[str], bool] | None = None,
                             state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
-    """Wrapper: injects runtime state into telegram._format_watchdog_status."""
     if pending_lookup is None:
         pending_lookup = is_pending
     if state_snapshot is None:
@@ -3285,7 +2947,6 @@ def format_team_lines(  # type: ignore[no-redef]
     pending_lookup: Callable[[str], bool] | None = None,
     worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None
 ) -> list[str]:
-    """Wrapper: injects runtime state into telegram.format_team_lines."""
     if pending_lookup is None:
         pending_lookup = is_pending
     with watchdog.lock:
@@ -3300,7 +2961,6 @@ def format_team_lines(  # type: ignore[no-redef]
 
 
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
-    """Wait until restarted worker is actually back at the prompt."""
     backend = get_backend(backend_name)
     if not backend.is_interactive:
         return tmux_exists(tmux_name, host=host)
@@ -3320,7 +2980,6 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
 
 
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
-    """Send a message to a callback-URL worker (HTTP POST). Returns True on success."""
     callback_url = (session or {}).get("callback_url", "")
     if not callback_url:
         callback_url = _load_registry().get("workers", {}).get(name, {}).get("callback_url", "")
@@ -3346,38 +3005,21 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
 
 
 class WorkerManager:
-    """Manages worker lifecycle: hire, end, restart, and tmux session orchestration.
-
-    Tracks active workers via tmux session discovery and the persistent
-    registry file. Handles session creation, welcome message injection,
-    backend selection, and dead-worker restart logic.
-    """
-
     def __init__(self, sessions_dir: Path, tmux_prefix: str,
                  runner: SubprocessRunner | None = None,
                  clock: Clock | None = None) -> None:
-        """Initialize worker manager with tmux prefix, session paths, and DI seams.
-
-        Args:
-            sessions_dir: Root directory for per-worker session files.
-            tmux_prefix: Prefix for tmux session names (e.g. 'claude-prod-').
-            runner: Subprocess runner for test injection (defaults to real subprocess).
-            clock: Clock for test injection (defaults to real wall-clock time).
-        """
         self.sessions_dir = sessions_dir
         self.tmux_prefix = tmux_prefix
         self._runner: SubprocessRunner = runner or _subprocess_runner
         self._clock: Clock = clock or _clock
 
     def _sync_paths(self) -> None:
-        """Sync instance paths with current module globals (for runtime reconfiguration)."""
         if self.sessions_dir != SESSIONS_DIR:
             self.sessions_dir = SESSIONS_DIR
         if self.tmux_prefix != TMUX_PREFIX:
             self.tmux_prefix = TMUX_PREFIX
 
     def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
-        """Resolve startup cwd with priority: explicit > RAM hint > disk > fallback."""
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
             candidate = normalize_cwd(_get_worker_cwd(name))
@@ -3394,7 +3036,6 @@ class WorkerManager:
         return ""
 
     def _get_tmux_pane_cwd(self, tmux_name: str, host: str | None = None) -> str:
-        """Read current pane cwd for a tmux session."""
         result = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
@@ -3404,14 +3045,12 @@ class WorkerManager:
         return ""
 
     def _cd_tmux_to_cwd(self, tmux_name: str, cwd: str) -> None:
-        """Change tmux shell cwd before starting backend process."""
         if not cwd:
             return
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_SHORT)
 
     def scan_tmux_sessions(self) -> dict[str, TmuxSessionDict]:
-        """Scan tmux for claude-* sessions (local + remote machines)."""
         self._sync_paths()
         registered: dict[str, TmuxSessionDict] = {}
 
@@ -3479,13 +3118,11 @@ class WorkerManager:
     _SESSIONS_CACHE_TTL = 15  # seconds
 
     def invalidate_sessions_cache(self) -> None:
-        """Force next get_registered_sessions() to re-scan.  Call after hire/fire/restart."""
         with self._sessions_cache_lock:
             self._sessions_cache = None
             self._sessions_cache_ts = 0
 
     def get_registered_sessions(self, registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
-        """Get registered sessions from tmux. Cached for _SESSIONS_CACHE_TTL seconds."""
         self._sync_paths()
         if registered is None:
             now = self._clock.time()
@@ -3536,7 +3173,6 @@ class WorkerManager:
         return registered
 
     def is_online(self, name: str, session: TmuxSessionDict | None = None) -> bool:
-        """Check if worker is online and ready."""
         self._sync_paths()
         if not session:
             sessions = self.get_registered_sessions()
@@ -3570,7 +3206,6 @@ class WorkerManager:
         return backend.is_online(tmux_name)
 
     def send(self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None) -> bool:
-        """Send message to worker using backend registry."""
         self._sync_paths()
         if not session:
             sessions = self.get_registered_sessions()
@@ -3588,13 +3223,6 @@ class WorkerManager:
         return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
 
     def get_workers(self, caller_from: str | None = None) -> list[WorkerEndpointInfo]:
-        """Get all active workers with their communication details.
-
-        If ``caller_from`` is the name of a registered worker, each ``send_example``
-        is rendered from that caller's perspective: bare tmux/pipe when caller
-        and peer share a machine, ssh-wrapped when they don't. When ``caller_from``
-        is None, the bridge's own perspective is used (legacy behavior).
-        """
         self._sync_paths()
         workers: list[WorkerEndpointInfo] = []
         registered = self.get_registered_sessions()
@@ -3701,13 +3329,6 @@ class WorkerManager:
         return workers
 
     def _wrap_for_caller(self, cmd: str, peer_host: str | None, caller_host: str | None) -> str:
-        """Wrap a shell command so it executes on the peer's machine from the caller's POV.
-
-        - Same machine (incl. both None): bare command, no ssh.
-        - Caller on bridge, peer remote: ssh to peer's host (legacy behavior).
-        - Caller remote, peer on bridge: ssh to BRIDGE_SSH_TARGET.
-        - Caller and peer on different remotes: ssh directly to peer's host.
-        """
         if caller_host == peer_host:
             return cmd
         if peer_host is None:
@@ -3718,7 +3339,6 @@ class WorkerManager:
         return f'ssh {ssh_target} "{escaped}"'
 
     def _build_welcome(self, name: str, backend_obj: Backend) -> str:
-        """Build welcome/instructions message for a worker."""
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
             "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
@@ -3752,7 +3372,6 @@ class WorkerManager:
         return welcome
 
     def hire(self, name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
-        """Create a new worker instance."""
         self._sync_paths()
         if not is_valid_backend(backend):
             return False, f"Unknown backend '{backend}'. Available: {', '.join(list_backends())}"
@@ -3837,7 +3456,6 @@ class WorkerManager:
         return True, None
 
     def end(self, name: str) -> tuple[bool, str | None]:
-        """Kill a worker instance."""
         self._sync_paths()
         registered = self.get_registered_sessions()
         if name not in registered:
@@ -3875,14 +3493,6 @@ class WorkerManager:
         return True, None
 
     def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
-        """Restart a worker in its existing tmux session.
-
-        If tmux session is gone but worker is in the persistent registry,
-        re-creates the tmux session and restarts the backend (dead worker recovery).
-
-        For teleported workers, returns sentinel (False, "use_remote_restart") —
-        callers should route to CommandRouter._restart_remote_worker() instead.
-        """
         self._sync_paths()
         registered = self.get_registered_sessions()
         if name not in registered:
@@ -3946,11 +3556,6 @@ class WorkerManager:
         return True, None
 
     def _prepare_restart_state(self, name: str, mode: str) -> tuple[str, str]:
-        """Prepare resume ID and startup CWD for a restart.
-
-        For resume mode, preserves session IDs. For relaunch, clears them.
-        Returns (resume_id, startup_cwd).
-        """
         resume_id = ""
         resume_cwd = ""
         session_dir = self.sessions_dir / name
@@ -3969,10 +3574,6 @@ class WorkerManager:
         return resume_id, startup_cwd
 
     def _stop_running_claude(self, name: str, tmux_name: str) -> None:
-        """Gracefully stop a running Claude instance in a tmux session.
-
-        Sends C-c and /exit, then force-kills if still running after 5s.
-        """
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_RETRY)
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=TIMEOUT_TMUX_SEND)
@@ -3993,7 +3594,6 @@ class WorkerManager:
             _log(_LOG_WARN, "restart", f"{name}: Claude still running after 5s kill wait")
 
     def _kill_stray_children(self, name: str, tmux_name: str) -> None:
-        """Kill stray child processes (SSH, vim, etc.) in a tmux pane."""
         pane_pids = _tmux_pane_pids()
         pane_pid = pane_pids.get(tmux_name)
         if pane_pid:
@@ -4011,7 +3611,6 @@ class WorkerManager:
 
     def _send_start_command(self, name: str, tmux_name: str, backend: Backend,
                             resume_id: str, startup_cwd: str) -> None:
-        """Inject tmux env vars and send the backend start command."""
         self._runner.run(["tmux", "send-keys", "-t", tmux_name,
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_TMUX_SEND)
@@ -4024,10 +3623,6 @@ class WorkerManager:
 
     def _wait_for_startup(self, name: str, tmux_name: str, backend: Backend,
                           resume_id: str, startup_cwd: str) -> bool:
-        """Wait for Claude to start, with stale-resume auto-retry.
-
-        Returns True if Claude started successfully.
-        """
         started = False
         for _ in range(10):
             self._clock.sleep(DELAY_STARTUP)
@@ -4040,11 +3635,6 @@ class WorkerManager:
 
     def _retry_after_stale_resume(self, name: str, tmux_name: str, backend: Backend,
                                   resume_id: str, startup_cwd: str) -> bool:
-        """Retry a fresh start after a stale resume fails.
-
-        Clears session ID and hooks, sends a fresh start command, and notifies admin.
-        Returns True if the fresh start succeeded.
-        """
         _log(_LOG_WARN, "restart", f"{name}: resume failed (stale session {resume_id[:8]}), auto-retrying fresh")
         clear_claude_session_id(name)
         _clear_hook_failures(name)
@@ -4079,11 +3669,6 @@ class WorkerManager:
         return started
 
     def _restart_dead_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str) -> tuple[bool, str | None]:
-        """Re-create a dead worker (tmux gone) from registry.
-
-        Creates a new tmux session, exports env, starts backend, sends welcome.
-        Preserves session files (session_id, cwd) for resume capability.
-        """
         if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
 
@@ -4179,7 +3764,6 @@ class WorkerManager:
 
 
 def _sync_worker_manager() -> None:
-    """Sync the global worker_manager instance with current module globals."""
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
@@ -4187,12 +3771,6 @@ def _sync_worker_manager() -> None:
 
 
 def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
-    """Check if worker is online and ready.
-
-    Args:
-        name: Worker name
-        session: Session dict from get_registered_sessions() (optional, avoids re-lookup)
-    """
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.is_online(name, session)
@@ -4202,7 +3780,6 @@ def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
 
 
 def worker_set_pending(name: str, chat_id: ChatId) -> None:
-    """Set pending state for worker."""
     set_pending(name, chat_id)
 
 
@@ -4210,17 +3787,6 @@ def worker_set_pending(name: str, chat_id: ChatId) -> None:
 
 
 def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
-    """Send message to worker using backend registry.
-
-    Args:
-        name: Worker name
-        message: Message text to send
-        chat_id: Chat ID (unused, kept for compatibility)
-        session: Session dict (optional, avoids re-lookup)
-
-    Returns:
-        True if send succeeded
-    """
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.send(name, message, chat_id, session)
@@ -4230,7 +3796,6 @@ def worker_send(name: str, message: str, chat_id: int | None = None, session: Tm
 
 
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
-    """Scan tmux for registered sessions."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.scan_tmux_sessions()
@@ -4240,7 +3805,6 @@ def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
 
 
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
-    """Get registered sessions from tmux (all backends have tmux now)."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.get_registered_sessions(registered)
@@ -4255,7 +3819,6 @@ def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None
 
 
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
-    """Send a message to a worker using the appropriate backend."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.send(name, message, chat_id)
@@ -4283,7 +3846,6 @@ GetRouteHandler = Callable[["Handler", ParseResult, re.Match[str] | None], None]
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
 
 class _GuestSessionDictRequired(TypedDict):
-    """Required fields in a guest session dict."""
     name: str
     created_at: str
     expires_at_unix: float
@@ -4292,10 +3854,6 @@ class _GuestSessionDictRequired(TypedDict):
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
-    """Shape of a guest session stored in GuestStore.guests.
-
-    token_hash and expires_at are present in storage but not in to_dict() output.
-    """
     token_hash: str
     expires_at: str
 
@@ -4316,7 +3874,6 @@ GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
 
 
 class ChannelMemberDict(TypedDict, total=False):
-    """Shape of a member entry inside a channel's members dict."""
     type: str         # "worker", "guest", or "manager"
     name: str         # omitted for manager members
 
@@ -4338,7 +3895,6 @@ ChannelMessageDict = TypedDict("ChannelMessageDict", {
 
 
 class ChannelDict(TypedDict):
-    """Shape of a channel stored in ChannelStore.channels."""
     id: str
     label: str
     created_at: str
@@ -4362,16 +3918,11 @@ _RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
 
 
 class RelayMessageDict(_RelayMessageDictRequired, total=False):
-    """Shape of a message in a relay channel.
-
-    sender_name is optional — present when a named sender is known.
-    """
     sender_name: str
 
 
 
 class RelayChannelDict(TypedDict):
-    """Shape of a relay channel stored in RelayStore.channels."""
     id: str
     label: str
     worker: str
@@ -4387,14 +3938,12 @@ class RelayChannelDict(TypedDict):
 
 
 class PostRouteResolution(NamedTuple):
-    """Result of resolving a POST route to its handler."""
     handler: PostRouteHandler | None
     match: re.Match[str] | None
 
 
 
 class GetRouteResolution(NamedTuple):
-    """Result of resolving a GET/DELETE route to its handler."""
     handler: GetRouteHandler | None
     match: re.Match[str] | None
 
@@ -4452,16 +4001,10 @@ _task_pool    = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 
 
 class ReuseAddrServer(ThreadingHTTPServer):
-    """HTTP server with SO_REUSEADDR to avoid 'Address already in use' on restart."""
     allow_reuse_address = True
 
 
 class ConnectorRegistry:
-    """Thread-safe registry for external connectors (Gmail, GitHub).
-
-    Groups connector instances with their message log and lock —
-    ensures the lock always guards its data.
-    """
     def __init__(self) -> None:
         from typing import Any as _Any
         self.gmail: _Any = None  # type: ignore[explicit-any]
@@ -4470,7 +4013,6 @@ class ConnectorRegistry:
         self._lock: threading.Lock = threading.Lock()
 
     def stop_all(self) -> None:
-        """Stop all running connectors."""
         for name, inst in [("gmail", self.gmail), ("github", self.github)]:
             if inst is not None:
                 try:
@@ -4480,7 +4022,6 @@ class ConnectorRegistry:
                     _log(_LOG_DEBUG, f"shutdown:{name}", f"{type(exc).__name__}: {exc}")
 
     def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
-        """Log a connector message for debugging (capped at 20 per tag)."""
         with self._lock:
             if tag not in self._log:
                 self._log[tag] = collections.deque(maxlen=20)
@@ -4492,7 +4033,6 @@ class ConnectorRegistry:
             })
 
     def get_log(self, tag: str) -> list[ConnectorMessageLogEntry]:
-        """Return a snapshot of recent messages for a connector tag."""
         with self._lock:
             return list(self._log.get(tag, []))
 
@@ -4558,7 +4098,6 @@ _app_context: AppContext | None = None  # type: ignore[no-redef]
 
 @dataclass
 class GuestSession:
-    """A temporary external agent session."""
     name: str
     token_hash: str
     created_at: str
@@ -4567,7 +4106,6 @@ class GuestSession:
 
     @classmethod
     def from_dict(cls: type["GuestSession"], token_hash: str, data: GuestSessionDict) -> "GuestSession":
-        """Construct an instance from a plain dictionary."""
         notified = data.get("notified_workers", set())
         if isinstance(notified, list):
             notified = set(notified)
@@ -4580,7 +4118,6 @@ class GuestSession:
         )
 
     def to_dict(self) -> GuestSessionDict:
-        """Serialize this instance to a plain dictionary."""
         return {
             "name": self.name,
             "created_at": self.created_at,
@@ -4590,14 +4127,12 @@ class GuestSession:
 
     @property
     def is_expired(self) -> bool:
-        """Check whether this entry has passed its expiration time."""
         return _clock.time() >= self.expires_at_unix
 
 
 
 @dataclass
 class GuestInboxMessage:
-    """A message in a guest's inbox."""
     id: str
     sender: str
     text: str
@@ -4605,7 +4140,6 @@ class GuestInboxMessage:
 
     @classmethod
     def from_dict(cls: type["GuestInboxMessage"], data: GuestInboxMessageDict) -> "GuestInboxMessage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             id=data.get("id", ""),
             sender=data.get("from", data.get("sender", "")),
@@ -4617,21 +4151,18 @@ class GuestInboxMessage:
 
 @dataclass
 class ChannelMember:
-    """A member of a group channel."""
     key: str          # "manager", "worker:name", "guest:name"
     type: str         # "manager", "worker", "guest"  # noqa: A003 — shadows builtin
     name: str = ""    # display name (empty for manager)
 
     @classmethod
     def from_dict(cls, key: str, data: ChannelMemberDict) -> "ChannelMember":
-        """Construct an instance from a plain dictionary."""
         return cls(key=key, type=data["type"], name=data.get("name", ""))
 
 
 
 @dataclass
 class ChannelMessage:
-    """A message in a group channel."""
     id: str
     seq: int
     sender: str  # member key
@@ -4640,7 +4171,6 @@ class ChannelMessage:
 
     @classmethod
     def from_dict(cls: type["ChannelMessage"], data: ChannelMessageDict) -> "ChannelMessage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             id=data["id"],
             seq=data["seq"],
@@ -4653,7 +4183,6 @@ class ChannelMessage:
 
 @dataclass
 class RelayMessage:
-    """A message in a relay channel."""
     id: str
     sender: str       # "guest" or "worker"
     text: str
@@ -4662,7 +4191,6 @@ class RelayMessage:
 
     @classmethod
     def from_dict(cls: type["RelayMessage"], d: RelayMessageDict) -> "RelayMessage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             id=d.get("message_id", ""),
             sender=d.get("from", d.get("sender", "")),
@@ -4674,10 +4202,7 @@ class RelayMessage:
 
 
 class GuestStore:
-    """Thread-safe store for guest sessions and inboxes."""
-
     def __init__(self) -> None:
-        """Initialize guest sessions store with thread-safe locks."""
         self.guests: dict[str, GuestSessionDict] = {}
         self.inboxes: dict[str, list[GuestInboxMessageDict]] = {}
         self.lock: threading.Lock = threading.Lock()
@@ -4693,13 +4218,11 @@ GUEST_INBOX_CAP = 200
 
 
 def _guest_state_path() -> Path:
-    """Path to persisted guest state file."""
     return NODE_DIR / "guest_state.json"
 
 
 
 def _guest_save() -> None:
-    """Persist guest state to disk. Call with guest_store.lock held."""
     try:
         path = _guest_state_path()
         now = _clock.time()
@@ -4724,7 +4247,6 @@ def _guest_save() -> None:
 
 
 def _guest_load() -> None:
-    """Load guest state from disk on startup."""
     path = _guest_state_path()
     if not path.exists():
         return
@@ -4749,7 +4271,6 @@ def _guest_load() -> None:
 
 
 def guest_create_token() -> tuple[str, str]:
-    """Create a guest token and its hash. Returns (token, token_hash)."""
     token = f"gt_{secrets.token_urlsafe(32)}"
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     return token, token_hash
@@ -4757,7 +4278,6 @@ def guest_create_token() -> tuple[str, str]:
 
 
 def guest_generate_name(existing_names: set[str] | None = None) -> str:
-    """Generate a short random guest name (3-6 chars), unique vs existing."""
     if existing_names is None:
         existing_names = set()
     for _ in range(100):
@@ -4769,7 +4289,6 @@ def guest_generate_name(existing_names: set[str] | None = None) -> str:
 
 
 def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
-    """Validate a guest name. Returns (ok, error_message)."""
     if not name or not name.strip():
         return False, "name is required"
     name = name.strip().lower()
@@ -4784,13 +4303,11 @@ def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[
 
 
 def guest_is_expired(expires_at_unix: float) -> bool:
-    """Check if a guest session has expired."""
     return _clock.time() >= expires_at_unix
 
 
 
 def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
-    """Filter messages, returning only those after the given message ID."""
     if not after:
         return list(messages)
     found = False
@@ -4807,7 +4324,6 @@ def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None 
 
 
 def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
-    """Append a message to inbox, capping at GUEST_INBOX_CAP."""
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
         inbox = inbox[-GUEST_INBOX_CAP:]
@@ -4820,10 +4336,7 @@ def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessag
 # ============================================================
 
 class ChannelStore:
-    """Thread-safe store for group channels."""
-
     def __init__(self) -> None:
-        """Initialize channel store with thread-safe locks."""
         self.channels: dict[str, ChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -4838,13 +4351,11 @@ CHANNEL_MSG_CAP = 200
 
 
 def _channel_state_path() -> Path:
-    """Path to persisted channel state file."""
     return NODE_DIR / "channel_state.json"
 
 
 
 def _channel_save() -> None:
-    """Persist channel state to disk. Call with channel_store.lock held."""
     try:
         path = _channel_state_path()
         active = {cid: ch for cid, ch in channel_store.channels.items()
@@ -4860,7 +4371,6 @@ def _channel_save() -> None:
 
 
 def _channel_load() -> None:
-    """Load channel state from disk on startup."""
     path = _channel_state_path()
     if not path.exists():
         return
@@ -4880,7 +4390,6 @@ def _channel_load() -> None:
 
 
 def channel_create_id(label: str = "") -> str:
-    """Generate a stable channel ID: ch_<6-char random>."""
     short = secrets.token_urlsafe(4).rstrip("=").lower()[:6]
     return f"ch_{short}"
 
@@ -4888,7 +4397,6 @@ def channel_create_id(label: str = "") -> str:
 
 def channel_new(channel_id: str, label: str, created_by: str,
                 members: list[str], ttl: int = CHANNEL_TTL) -> ChannelDict:
-    """Create a channel dict. Members are typed strings like 'worker:geni', 'guest:alice', 'manager'."""
     now = _clock.time()
     member_dict = {}
     for m in members:
@@ -4914,7 +4422,6 @@ def channel_new(channel_id: str, label: str, created_by: str,
 
 
 def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
-    """Add members to channel. Returns list of actually added members."""
     added = []
     for m in members:
         if m in channel["members"]:
@@ -4933,7 +4440,6 @@ def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
 
 
 def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str]:
-    """Remove members from channel. Returns list of actually removed members."""
     removed = []
     for m in members:
         if m in channel["members"]:
@@ -4944,7 +4450,6 @@ def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str
 
 
 def channel_append_message(channel: ChannelDict, from_member: str, text: str) -> ChannelMessageDict:
-    """Append a message to the channel. Returns the message dict."""
     channel["seq"] += 1
     msg = {
         "id": f"cm_{channel['seq']:06d}",
@@ -4961,7 +4466,6 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
 
 
 def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
-    """Get channel messages, optionally after a given message ID. Returns (messages, truncated)."""
     if not after:
         return list(channel["messages"]), False
     found_idx = -1
@@ -4976,13 +4480,11 @@ def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tupl
 
 
 def channel_is_expired(channel: ChannelDict) -> bool:
-    """Check if a channel has expired."""
     return _clock.time() > channel["expires_at_unix"]
 
 
 
 def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
-    """Get names of members of a specific type (worker, guest, manager)."""
     return [info["name"] for info in channel["members"].values()
             if info["type"] == member_type and "name" in info]
 
@@ -4993,10 +4495,7 @@ def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str
 # ============================================================
 
 class RelayStore:
-    """Thread-safe store for relay channels."""
-
     def __init__(self) -> None:
-        """Initialize relay channel store with thread-safe locks."""
         self.channels: dict[str, RelayChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
@@ -5010,13 +4509,11 @@ RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
 
 
 def _relay_state_path() -> Path:
-    """Path to persisted relay state file."""
     return NODE_DIR / "relay_state.json"
 
 
 
 def _relay_save() -> None:
-    """Persist relay channels to disk. Call with relay_store.lock held."""
     try:
         path = _relay_state_path()
         # Only save non-expired channels
@@ -5034,7 +4531,6 @@ def _relay_save() -> None:
 
 
 def _relay_load() -> None:
-    """Load relay channels from disk on startup."""
     path = _relay_state_path()
     if not path.exists():
         return
@@ -5055,7 +4551,6 @@ def _relay_load() -> None:
 
 
 def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
-    """Create a relay channel with guest and reply tokens. Returns (channel, guest_token, reply_token)."""
     channel_id = channel_create_id(label)
     guest_token = f"gt_{secrets.token_urlsafe(32)}"
     reply_token = f"rt_{secrets.token_urlsafe(32)}"
@@ -5078,7 +4573,6 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
 
 
 def _relay_base_url() -> str:
-    """Base URL for relay endpoints. Prefers BRIDGE_PUBLIC_URL (Tailscale/tunnel), falls back to RELAY_PUBLIC_HOST."""
     if BRIDGE_PUBLIC_URL:
         return BRIDGE_PUBLIC_URL
     return f"http://{RELAY_PUBLIC_HOST}:{PORT}"
@@ -5086,13 +4580,11 @@ def _relay_base_url() -> str:
 
 
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
-    """Generate the guideline link URL for a relay channel."""
     return f"{_relay_base_url()}/relay/{channel_id}?token={guest_token}"
 
 
 
 def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
-    """Generate markdown guide for a relay channel."""
     base = f"{_relay_base_url()}/relay/{channel['id']}"
     worker_name = channel["worker"]
     return f"""# Chat Channel to {worker_name}
@@ -5128,7 +4620,6 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 
 
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
-    """Authenticate a guest token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
     if not channel:
@@ -5142,7 +4633,6 @@ def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
 
 
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
-    """Authenticate a reply token for a relay channel. Returns channel or None."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
     if not channel:
@@ -5156,7 +4646,6 @@ def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
 
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
-    """Guest sends a message to the worker. Returns (envelope_text, message_dict)."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
     if not channel:
@@ -5197,7 +4686,6 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
 
 
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
-    """Worker replies to the guest. Returns message dict."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
     if not channel:
@@ -5221,7 +4709,6 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
 
 
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
-    """Get messages for a relay channel, optionally after a message ID."""
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
     if not channel:
@@ -5247,11 +4734,6 @@ TELEPORT_RSYNC_EXCLUDES = [
 
 
 def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
-    """Parse a codex native JSONL file into a list of messages.
-
-    Reads the same format beast hours ParseCodexFile() handles:
-    event types: session_meta, turn_context, response_item (message/function_call/function_call_output).
-    """
     try:
         if host:
             r = _remote_run(["cat", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
@@ -5301,7 +4783,6 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
 
 
 def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
-    """Read the codex native transcript for a worker."""
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
     if not path:
@@ -5314,7 +4795,6 @@ def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
 
 @dataclass
 class DiskUsage:
-    """Result of a disk usage probe."""
     pct: float          # usage percentage (0-100)
     free_gb: float      # free space in GB
     total_gb: float     # total space in GB
@@ -5322,7 +4802,6 @@ class DiskUsage:
 
     @classmethod
     def from_dict(cls: type["DiskUsage"], d: DiskUsageDict) -> "DiskUsage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
             free_gb=d.get("free_gb", 0.0),
@@ -5331,7 +4810,6 @@ class DiskUsage:
         )
 
     def to_dict(self) -> DiskUsageDict:
-        """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
 
@@ -5339,7 +4817,6 @@ class DiskUsage:
 
 @dataclass
 class MemoryUsage:
-    """Result of a memory usage probe."""
     pct: float          # usage percentage (0-100)
     used_gb: float      # used memory in GB
     total_gb: float     # total memory in GB
@@ -5348,7 +4825,6 @@ class MemoryUsage:
 
     @classmethod
     def from_dict(cls: type["MemoryUsage"], d: MemUsageDict) -> "MemoryUsage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             pct=d.get("pct", 0.0),
             used_gb=d.get("used_gb", 0.0),
@@ -5358,7 +4834,6 @@ class MemoryUsage:
         )
 
     def to_dict(self) -> MemUsageDict:
-        """Serialize this instance to a plain dictionary."""
         return {"pct": self.pct, "used_gb": self.used_gb,
                 "total_gb": self.total_gb, "avail_gb": self.avail_gb,
                 "ts": self.ts}
@@ -5367,7 +4842,6 @@ class MemoryUsage:
 
 @dataclass
 class IoUsage:
-    """Result of an I/O usage probe."""
     iowait_pct: float = 0.0
     read_iops: int = 0
     write_iops: int = 0
@@ -5376,7 +4850,6 @@ class IoUsage:
 
     @classmethod
     def from_dict(cls: type["IoUsage"], d: IoUsageDict) -> "IoUsage":
-        """Construct an instance from a plain dictionary."""
         return cls(
             iowait_pct=d.get("iowait_pct", 0.0),
             read_iops=d.get("read_iops", 0),
@@ -5386,7 +4859,6 @@ class IoUsage:
         )
 
     def to_dict(self) -> IoUsageDict:
-        """Serialize this instance to a plain dictionary."""
         return {"iowait_pct": self.iowait_pct, "read_iops": self.read_iops,
                 "write_iops": self.write_iops, "util_pct": self.util_pct,
                 "ts": self.ts}
@@ -5395,7 +4867,6 @@ class IoUsage:
 
 @dataclass
 class CpuHog:
-    """A process consuming high CPU."""
     pid: int
     cpu_pct: float
     command: str
@@ -5403,7 +4874,6 @@ class CpuHog:
 
     @classmethod
     def from_dict(cls: type["CpuHog"], d: CpuHogEntry) -> "CpuHog":
-        """Construct an instance from a plain dictionary."""
         return cls(
             pid=int(d.get("pid", 0)),
             cpu_pct=float(cast(float, d.get("cpu_pct", d.get("cpu", 0.0)))),
@@ -5415,14 +4885,12 @@ class CpuHog:
 
 @dataclass
 class WorktreeItem:
-    """A git worktree and its disk usage."""
     path: str
     size_mb: float
     worker: str = ""
 
     @classmethod
     def from_dict(cls: type["WorktreeItem"], d: dict[str, str | float]) -> "WorktreeItem":
-        """Construct an instance from a plain dictionary."""
         return cls(
             path=str(d.get("path", "")),
             size_mb=float(d.get("size_mb", 0.0)),
@@ -5432,7 +4900,6 @@ class WorktreeItem:
 
 
 def _load_learning_reminder_state() -> None:
-    """Load persisted state from disk into learning_reminders.state."""
     path = _learning_reminder_state_file()
     if not path or not os.path.exists(path):
         return
@@ -5457,45 +4924,37 @@ media_groups = MediaGroupState()
 
 @dataclass
 class RewindToken:
-    """A rewind (transcript viewer) token."""
     name: str            # worker name or "__team__"
     expires_at: float    # unix timestamp
 
     def is_expired(self) -> bool:
-        """Check whether this entry has passed its expiration time."""
         return _clock.time() >= self.expires_at
 
     def to_dict(self) -> RewindTokenEntry:
-        """Serialize this instance to a plain dictionary."""
         return {"name": self.name, "expires_at": self.expires_at}
 
     @classmethod
     def from_dict(cls: type["RewindToken"], d: RewindTokenEntry) -> "RewindToken":
-        """Construct an instance from a plain dictionary."""
         return cls(name=d["name"], expires_at=d["expires_at"])
 
 
 
 @dataclass
 class PrReviewToken:
-    """A PR review viewer token."""
     pr_num: int
     owner: str
     repo: str
     expires_at: float
 
     def is_expired(self) -> bool:
-        """Check whether this entry has passed its expiration time."""
         return _clock.time() >= self.expires_at
 
     def to_dict(self) -> PrReviewTokenEntry:
-        """Serialize this instance to a plain dictionary."""
         return {"pr_num": self.pr_num, "owner": self.owner,
                 "repo": self.repo, "expires_at": self.expires_at}
 
     @classmethod
     def from_dict(cls: type["PrReviewToken"], d: PrReviewTokenEntry) -> "PrReviewToken":
-        """Construct an instance from a plain dictionary."""
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
 
@@ -5504,21 +4963,14 @@ PR_REVIEW_EXTEND: int = 300  # seconds to extend PR review token on each access
 
 
 class TokenStore:
-    """Thread-safe store for access tokens (rewind, PR review).
-
-    Groups the token dicts with their lock — all expiry checking and
-    cleanup happen inside the class so callers never handle the lock.
-    """
     def __init__(self) -> None:
         self._lock: threading.Lock = threading.Lock()
 
     def add_rewind(self, token: str, name: str, timeout: int = REWIND_TIMEOUT) -> None:
-        """Register a rewind token for a worker session."""
         with self._lock:
             REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
 
     def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
-        """Check a rewind token, clean expired, optionally extend, return entry or None."""
         if not token:
             return None
         now = _clock.time()
@@ -5532,13 +4984,11 @@ class TokenStore:
             return entry
 
     def add_pr_review(self, token: str, pr_num: int, owner: str, repo: str) -> None:
-        """Register a PR review token."""
         with self._lock:
             PR_REVIEW_TOKENS[token] = {"pr_num": pr_num, "owner": owner, "repo": repo,
                                        "expires_at": _clock.time() + PR_REVIEW_EXTEND}
 
     def validate_pr_review(self, token: str | None, extend: bool = True) -> PrReviewTokenEntry | None:
-        """Check a PR review token. Returns entry or None. Optionally extends expiry."""
         if not token:
             return None
         now = _clock.time()
@@ -5561,7 +5011,6 @@ tokens = TokenStore()
 
 
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
-    """Track host SSH probe results; alert on DOWN/BACK UP transitions."""
     now = _clock.time()
     with watchdog.lock:
         was_down = host_health.down.get(host, False)
@@ -5607,14 +5056,12 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
 
 
 def _is_host_down(host: str) -> bool:
-    """Check if a remote host is marked as down by the watchdog."""
     with watchdog.lock:
         return host_health.down.get(host, False)
 
 
 
 def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
-    """Check disk usage on a host (None = local). Returns {pct, free_gb, total_gb} or None."""
     try:
         r = _remote_run(
             ["df", "-BG", "--output=size,used,avail,pcent", "/"],
@@ -5637,7 +5084,6 @@ def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
 
 
 def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
-    """Check disk usage on macOS host (df output differs from Linux)."""
     try:
         r = _remote_run(
             ["df", "-g", "/"],
@@ -5660,7 +5106,6 @@ def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
 
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
-    """Probe disk usage on local + remote hosts, alert on threshold breaches."""
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)  # None = local (VPS)
 
@@ -5727,7 +5172,6 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
 
 
 def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
-    """Check memory usage on a host (None = local). Returns {pct, used_gb, total_gb, avail_gb, top_procs} or None."""
     try:
         r = _remote_run(
             ["free", "-b"],
@@ -5759,7 +5203,6 @@ def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
 
 
 def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
-    """Check memory usage on macOS host via vm_stat."""
     try:
         r = _remote_run(
             ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
@@ -5801,7 +5244,6 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
 
 
 def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
-    """Get top 5 memory-consuming processes on a host."""
     try:
         r = _remote_run(
             ["ps", "aux", "--sort=-rss"],
@@ -5827,7 +5269,6 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
 
 
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
-    """Probe memory usage on local + remote hosts, alert on threshold breaches."""
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
@@ -5877,7 +5318,6 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
 
 
 def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
-    """Check IO stats on a host (None = local). Returns {iowait_pct, read_iops, write_iops, util_pct} or None."""
     try:
         r = _remote_run(
             ["iostat", "-x", "-d", "1", "2", "-o", "JSON"],
@@ -5943,7 +5383,6 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
 
 
 def _check_io_usage_macos(host: str) -> IoUsageDict | None:
-    """Check IO stats on macOS host via iostat."""
     try:
         r = _remote_run(
             ["iostat", "-c", "2", "-w", "1"],
@@ -5968,7 +5407,6 @@ def _check_io_usage_macos(host: str) -> IoUsageDict | None:
 
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
-    """Probe IO usage on local + remote hosts, alert on high IO wait."""
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
@@ -6016,7 +5454,6 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
 
 
 def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
-    """Get processes using >CPU_HOG_THRESHOLD_PCT CPU on a host. Returns [{pid, cpu, etime_min, cmd}]."""
     try:
         if is_mac:
             cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
@@ -6051,7 +5488,6 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
 
 
 def _parse_etime(etime: str) -> int | None:
-    """Parse ps etime format [[dd-]hh:]mm:ss into total minutes."""
     try:
         days = 0
         if "-" in etime:
@@ -6072,7 +5508,6 @@ def _parse_etime(etime: str) -> int | None:
 
 
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
-    """Detect runaway processes: >90% CPU for >1 hour. Alert admin."""
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
@@ -6112,7 +5547,6 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
 
 
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
-    """Check worktree directories and alert when total exceeds threshold."""
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
 
@@ -6198,7 +5632,6 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
 
 
 def _probe_tailscale() -> None:
-    """Check Tailscale connectivity, alert on disconnect/recovery."""
     now = _clock.time()
     try:
         r = _subprocess_runner.run(
@@ -6239,7 +5672,6 @@ def _probe_tailscale() -> None:
 # (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
-    """Send a 'resolved' alert to admin when a worker recovers from a problem state."""
     if admin_chat_id is None:
         return
 
@@ -6291,7 +5723,6 @@ def _handle_watchdog_transition(
     since: float,
     now: float | None = None,
 ) -> None:
-    """Process a watchdog state transition: alert on bad states, clear on recovery."""
     if now is None:
         now = _clock.time()
 
@@ -6316,7 +5747,6 @@ def _handle_watchdog_transition(
         return
 
     def eligible_for_alert() -> bool:
-        """Check whether enough time has passed to send another alert."""
         if state in {"OFFLINE", "DEAD", "EXITED"}:
             return since is not None and (now - since) >= START_GRACE
         return True
@@ -6367,7 +5797,6 @@ def _handle_watchdog_transition(
 
 
 def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
-    """Update worker state and preserve since for unchanged states."""
     with watchdog.lock:
         prev = watchdog.worker_states.get(name)
         if prev and prev[0] == state:
@@ -6380,10 +5809,6 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 
 
 def watchdog_loop() -> None:
-    """Main watchdog loop — periodically probes all workers and fires alerts.
-
-    Exits cleanly when watchdog.stop_event is set (by graceful_shutdown).
-    """
     _disk_check_counter = 0
     while not watchdog.stop_event.is_set():
         try:
@@ -6419,7 +5844,6 @@ def watchdog_loop() -> None:
 
 
 def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
-    """Update consecutive probe failure counters for all registered workers."""
     if probe_failed:
         for name in registered_names:
             watchdog.consecutive_probe_failures[name] = watchdog.consecutive_probe_failures.get(name, 0) + 1
@@ -6432,10 +5856,6 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
 def _watchdog_probe_remote_hosts(
     registered: dict[str, TmuxSessionDict]
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
-    """Probe remote hosts for tmux sessions in bulk.
-
-    Returns (remote_workers, remote_pane_pids, failed_hosts).
-    """
     remote_workers: dict[str, list[tuple[str, str]]] = {}
     for name, session in registered.items():
         host = get_worker_host(name)
@@ -6473,10 +5893,6 @@ def _watchdog_collect_worker_pids(
     remote_pane_pids: dict[str, str],
     now: float
 ) -> tuple[dict[str, str], dict[str, bool], dict[str, Backend]]:
-    """Collect claude PIDs, tmux presence, and backend info for all workers.
-
-    Returns (claude_pids, tmux_present, backend_info).
-    """
     claude_pids: dict[str, str] = {}
     tmux_present: dict[str, bool] = {}
     backend_info: dict[str, Backend] = {}
@@ -6510,7 +5926,6 @@ def _watchdog_collect_worker_pids(
 
 
 def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
-    """Gather CPU stats for all claude PIDs, grouped by host."""
     pids_by_host: dict[str | None, list[str]] = {}
     for name, pid in claude_pids.items():
         host = get_worker_host(name)
@@ -6532,7 +5947,6 @@ def _watchdog_evaluate_workers(
     failed_hosts: set[str],
     now: float
 ) -> None:
-    """Evaluate state for each registered worker and handle transitions."""
     for name, session in registered.items():
         tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
         tmux_exists = tmux_present.get(name, False)
@@ -6639,7 +6053,6 @@ def _watchdog_evaluate_workers(
 def _watchdog_compute_children(name: str, children_total: int,
                                 is_interactive: bool, claude_pid: str | None,
                                 now: float) -> int:
-    """Apply dynamic baseline to child count (MCP servers are persistent)."""
     pending_ts = _pending_timestamp(name)
     pending = pending_ts is not None
     if is_interactive and claude_pid:
@@ -6657,7 +6070,6 @@ def _watchdog_compute_children(name: str, children_total: int,
 
 
 def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -> None:
-    """Track activity based on child count increases and CPU usage."""
     with watchdog.lock:
         prev_children = watchdog.prev_children.get(name)
         activity_increased = (prev_children is not None and children > prev_children)
@@ -6674,7 +6086,6 @@ def _watchdog_refine_state(
     is_interactive: bool, pending: bool, pending_age: float,
     host: str | None, now: float
 ) -> tuple[str, str]:
-    """Refine STUCK/READY states with streak tracking and interactive prompt detection."""
     if worker_state == "STUCK":
         watchdog.idle_streak[name] = watchdog.idle_streak.get(name, 0) + 1
         streak = watchdog.idle_streak[name]
@@ -6736,7 +6147,6 @@ def _watchdog_refine_state(
 
 
 def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
-    """Remove watchdog state for workers no longer in the registry."""
     with watchdog.lock:
         stale_dicts: list[dict[str, object]] = cast(list[dict[str, object]], [
             watchdog.worker_states, watchdog.last_child_ts,
@@ -6756,7 +6166,6 @@ def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
 
 
 def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
-    """Run periodic resource checks (disk, memory, IO, CPU, worktrees, Tailscale)."""
     checks: list[tuple[str, Callable[[], None]]] = [
         ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
         ("Memory", lambda: _probe_mem_all_hosts(remote_hosts)),
@@ -6774,11 +6183,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 
 
 def _fetch_remote_file(host: str, remote_path: str) -> str | None:
-    """Fetch a file from a remote host via rsync to a local temp path.
-
-    Returns local temp path on success, None on failure.
-    Preserves the original filename so Telegram displays it correctly.
-    """
     original_name = Path(remote_path).name
     tmp_dir = tempfile.mkdtemp(prefix="remote-file-")
     local_path = os.path.join(tmp_dir, original_name)
@@ -6798,12 +6202,6 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
 
 
 def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
-    """For teleported workers, fetch remote files to local temp paths.
-
-    Always fetches from remote for teleported workers, even if a local file
-    with the same path exists (e.g., /tmp/raw.png) — the remote file is the
-    correct one.
-    """
     host = get_worker_host(name)
     if not host:
         return media_list
@@ -6823,11 +6221,6 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
 
 
 def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
-    """Parse media tags from response text.
-
-    Returns (clean_text, images, files).
-    For teleported workers, skips local file existence checks during parsing.
-    """
     host = get_worker_host(name)
     if host:
         _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
@@ -6846,7 +6239,6 @@ def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | N
 
 
 def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
-    """Send text content to Telegram, trying rich → HTML → plain fallback chain."""
     # Try sendRichMessage first (Bot API 10.1+: native headings, tables, 32K limit)
     rich_sent = False
     rich_failed_at = -1
@@ -6908,7 +6300,6 @@ def _send_html_fallback_chunks(
     log_prefix: str, prev_msg_id: int | None,
     start_index: int, total_chunks: int
 ) -> int | None:
-    """Send remaining rich chunks as HTML after partial rich failure."""
     remaining_md = '\n'.join(remaining_chunks)
     remaining_html = markdown_to_telegram_html(remaining_md)
     prefix_reserve = len(name) + 30
@@ -6934,7 +6325,6 @@ def _send_html_fallback_chunks(
 
 
 def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
-    """Send text as HTML with plain-text fallback on 400 errors."""
     html_text = markdown_to_telegram_html(clean_text)
     prefix_reserve = len(name) + 30
     chunks = split_message(html_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
@@ -6978,7 +6368,6 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
 
 
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
-    """Send image and file attachments to Telegram with type-based routing."""
     # Send images
     for img_path, img_caption in images:
         if img_path is None:
@@ -7019,11 +6408,6 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
 
 
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
-    """Send a worker response to Telegram — text and media.
-
-    Orchestrates: media parsing → text sending (rich/HTML/plain fallback) →
-    image/file delivery.
-    """
     clean_text, images, files = _parse_response_media(name, text)
 
     # Debug: log very short text (helps trace empty "name:" messages)
@@ -7039,7 +6423,6 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
-    """Deploy an HTML file via beast serve and return the public URL, or None on failure."""
     try:
         r = _subprocess_runner.run(
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
@@ -7058,7 +6441,6 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
 
 
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
-    """Create a new worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.hire(name, backend, chat_id=chat_id)
@@ -7066,7 +6448,6 @@ def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | 
 
 
 def kill_session(name: str) -> tuple[bool, str | None]:
-    """Kill a worker instance. Returns (success, error_message)."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.end(name)
@@ -7074,7 +6455,6 @@ def kill_session(name: str) -> tuple[bool, str | None]:
 
 
 def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
-    """Restart claude in an existing tmux session. Returns (success, error_message)."""
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.restart(name, mode=mode)
@@ -7082,7 +6462,6 @@ def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]
 
 
 def switch_session(name: str) -> tuple[bool, str | None]:
-    """Switch active session. Returns (success, error_message)."""
     registered = get_registered_sessions()
     if name not in registered:
         return False, f"Worker '{name}' not found"
@@ -7102,7 +6481,6 @@ def switch_session(name: str) -> tuple[bool, str | None]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def send_typing_loop(chat_id: int | str, session_name: str) -> None:
-    """Send typing indicator while request is pending."""
     while is_pending(session_name):
         transport.send_chat_action(chat_id, "typing")
         _clock.sleep(DELAY_CLAUDE_LOAD)
@@ -7110,7 +6488,6 @@ def send_typing_loop(chat_id: int | str, session_name: str) -> None:
 
 
 def get_all_chat_ids() -> list[ChatId]:
-    """Get all unique chat_ids from session files."""
     chat_ids: set[ChatId] = set()
     if SESSIONS_DIR.exists():
         for session_dir in SESSIONS_DIR.iterdir():
@@ -7131,7 +6508,6 @@ def get_all_chat_ids() -> list[ChatId]:
 
 
 def send_shutdown_message() -> None:
-    """Send shutdown notification to all known chat_ids."""
     chat_ids = get_all_chat_ids()
     if not chat_ids:
         _log(_LOG_WARN, "notify", "No chat_ids to notify")
@@ -7149,87 +6525,67 @@ def send_shutdown_message() -> None:
 # ============================================================
 
 class _LegacyTransportProto(Protocol):
-    """Protocol for legacy TelegramAPI-style test doubles (FakeTelegram etc.)."""
-
     def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse: ...
 
 
 
 class _LegacyTransportAdapter(MessageTransport):
-    """Wraps legacy TelegramAPI-style objects (with send_message/set_reaction)
-    for backward compat with tests that pass FakeTelegram to CommandRouter."""
-
     def __init__(self, legacy: _LegacyTransportProto) -> None:
-        """Initialize with TelegramAPI or duck-typed test double (must have send_message)."""
         self._legacy: _LegacyTransportProto = legacy
 
     @property
     def name(self) -> str:
-        """Return the transport name identifier."""
         return "legacy-adapter"
 
     def send_text(self, chat_id: ChatId, text: str,
                   parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
-        """Send a plain text message."""
         result = self._legacy.send_message(chat_id, text)
         return result if result else {"ok": True, "result": {"message_id": 1}}
 
     def send_photo(self, chat_id: ChatId, photo_path: str | Path,
                    caption: str | None = None) -> bool:
-        """Send a photo to a Telegram chat."""
         return False
 
     def send_document(self, chat_id: ChatId, doc_path: str | Path,
                       caption: str | None = None) -> bool:
-        """Send a document file to a Telegram chat."""
         return False
 
     def send_animation(self, chat_id: ChatId, animation_path: str | Path,
                        caption: str | None = None) -> bool:
-        """Send an animation (GIF/MP4) to a Telegram chat."""
         return False
 
     def send_video(self, chat_id: ChatId, video_path: str | Path,
                    caption: str | None = None) -> bool:
-        """Send a video to a Telegram chat."""
         return False
 
     def send_audio(self, chat_id: ChatId, audio_path: str | Path,
                    caption: str | None = None) -> bool:
-        """Send an audio file to a Telegram chat."""
         return False
 
     def send_voice(self, chat_id: ChatId, voice_path: str | Path,
                    caption: str | None = None) -> bool:
-        """Send a voice message to a Telegram chat."""
         return False
 
     def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
-        """Send a sticker to a Telegram chat."""
         return False
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
-        """Send a chat action indicator (typing, uploading, etc.)."""
         pass  # intentional no-op: abstract method
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> None:
-        """Set an emoji reaction on a message."""
         if hasattr(self._legacy, 'set_reaction'):
             self._legacy.set_reaction(chat_id, message_id, reaction)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode = None) -> TelegramApiResponse:
-        """Edit an existing message by its ID."""
         return {"ok": True, "result": {"message_id": message_id}}
 
     def setup_commands(self, commands: list[dict[str, str]]) -> None:
-        """Register bot command suggestions with Telegram."""
         pass  # intentional no-op: abstract method
 
     def download_file(self, file_id: str, session_name: str) -> str | None:
-        """Download a file from Telegram by file ID."""
         return None
 
 
@@ -7247,11 +6603,6 @@ def _fanout_channel_message(channel_id: str, from_member: str,
                             text: str, msg: ChannelMessageDict,
                             members_snapshot: dict[str, ChannelMemberDict],
                             registered: dict[str, TmuxSessionDict]) -> None:
-    """Deliver a channel message to all members except the sender.
-
-    Used by both CommandRouter (manager sends via /ch) and GuestEndpointsMixin
-    (guest sends via POST /guests/send).
-    """
     tagged = f"[{channel_id} from {from_member}] {text}"
     for member_key, minfo in members_snapshot.items():
         if member_key == from_member:
@@ -7287,12 +6638,9 @@ def _fanout_channel_message(channel_id: str, from_member: str,
 
 
 class CommandRouter:
-    """Dispatches Telegram commands and messages to worker handlers."""
-
     # ── Teleport Commands ──────────────────────────────────────────────
 
     def cmd_teleport(self, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
-        """Teleport a worker to a remote machine."""
         if not arg:
             cmd_name = "/teleport-check" if check_only else "/teleport"
             self.reply(chat_id, f"Usage: {cmd_name} <worker> <host>[:/path]")
@@ -7461,7 +6809,6 @@ class CommandRouter:
         return True
 
     def cmd_teleback(self, arg: str, chat_id: ChatId) -> bool:
-        """Bring a teleported worker back to its previous machine."""
         parts = arg.split()
         worker_name = parts[0].lower() if parts else ""
         full_sync = "--full" in parts
@@ -7551,14 +6898,6 @@ class CommandRouter:
         return True
 
     def _check_teleback_conflicts(self, name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
-        """Check for working directory conflicts before teleback.
-
-        Compares git status on both remote (where worker is) and local
-        (VPS, where worker is coming back to). If both sides have
-        uncommitted changes or new commits, report conflicts.
-
-        Returns list of conflict descriptions, or empty list if clean.
-        """
         conflicts: list[str] = []
         if not local_cwd or not remote_host:
             return conflicts
@@ -7629,7 +6968,6 @@ class CommandRouter:
 
     def _do_teleport(self, name: str, target_host: str, target_cwd: str, full_sync: bool,
                      chat_id: int | str, is_teleback: bool=False) -> None:
-        """Run the full teleport flow in a background thread."""
         try:
             registered = self.workers.get_registered_sessions()
             session = registered.get(name, {})
@@ -7820,7 +7158,6 @@ class CommandRouter:
                 _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
     def _stop_worker_for_teleport(self, name: str, tmux_name: str, host: str | None=None) -> str | None:
-        """Gracefully stop Claude Code and return session_id."""
         session_id = get_claude_session_id(name, authoritative=True)
 
         # Send /exit for graceful shutdown
@@ -7852,12 +7189,6 @@ class CommandRouter:
     def _sync_working_directory(self, source_cwd: str, target_cwd: str,
                                  source_host: str | None=None, target_host: str | None=None,
                                  full: bool=False) -> bool:
-        """Sync working directory from source to target.
-
-        Prefers git-based sync (fast, delta-only) for git repos.
-        Falls back to rsync for non-git dirs or on git failure.
-        Use full=True to force rsync (skip git entirely).
-        """
         if not full and _is_git_repo(source_cwd, host=source_host):
             project = _get_project_name(source_cwd, host=source_host)
             if project:
@@ -7883,7 +7214,6 @@ class CommandRouter:
     def _rsync_working_directory(self, source_cwd: str, target_cwd: str,
                                   source_host: str | None=None, target_host: str | None=None,
                                   full: bool=False) -> bool:
-        """rsync working directory from source to target (fallback path)."""
         _remote_run(["mkdir", "-p", target_cwd],
                      host=target_host, capture_output=True)
 
@@ -7931,7 +7261,6 @@ class CommandRouter:
 
     def _sync_session_transcript(self, session_id: str, source_cwd: str, target_cwd: str,
                                   source_host: str | None=None, target_host: str | None=None) -> None:
-        """Sync Claude Code session transcript between machines."""
         if not session_id:
             return
 
@@ -7971,16 +7300,6 @@ class CommandRouter:
                 _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
 
     def _sync_shared_repos(self, target_host: str, chat_id: int | str | None = None) -> list[str]:
-        """Sync team and agent-config git repos between VPS and target.
-
-        Best-effort: never raises.  Returns a list of warning strings
-        for any operations that failed.  The caller can report them but
-        a failure here must never abort the teleport.
-
-        VPS hosts bare repos at ~/git/{team,agent-config}.git.
-        Both VPS working copies and target clones use these as origin.
-        Push from source, pull on target.
-        """
         if not target_host:
             return []
 
@@ -8067,17 +7386,6 @@ class CommandRouter:
         return warnings
 
     def _sync_worker_data_back(self, name: str, source_host: str | None) -> None:
-        """Sync worker-scoped data back from remote after teleback.
-
-        Only syncs:
-        - ~/team/<worker>/ — worker's own team dir (kanban, playbook, etc.)
-        - ~/.claude/projects/*/memory/ — worker's auto-memory
-        Working directory and session transcript are already synced
-        by _sync_working_directory and _sync_session_transcript.
-
-        VPS is source of truth for team-scope config — workers don't
-        override ~/team/playbook.md, ~/agent-config/, etc.
-        """
         if not source_host:
             return
 
@@ -8115,14 +7423,6 @@ class CommandRouter:
                         capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
 
     def _run_teleport_preflight(self, target_host: str, worker_name: str, backend_name: str) -> list[str]:
-        """Run team-defined preflight check scripts against target.
-
-        Scripts live in agent-config/teleport-preflight.d/*.sh (team-managed)
-        and ~/.config/claudecode-telegram/teleport-preflight.d/*.sh (local).
-
-        Each script receives env vars: TARGET_HOST, WORKER_NAME, BACKEND,
-        BRIDGE_URL. Exit 0 = pass, exit 1 = fail (stdout = reason).
-        """
         fails = []
         preflight_dirs = [
             os.path.expanduser("~/agent-config/teleport-preflight.d"),
@@ -8163,14 +7463,6 @@ class CommandRouter:
         return fails
 
     def _install_hooks_on_target(self, target_host: str) -> list[str]:
-        """Install Claude Code hooks and settings on target machine.
-
-        Best-effort: never raises.  Returns a list of warning strings.
-
-        With git-synced agent-config, this is a lightweight fallback
-        for any files not covered by the repo (e.g., .claude.json).
-        Hooks/skills/settings are synced via _sync_shared_repos.
-        """
         if not target_host:
             return []
 
@@ -8205,12 +7497,6 @@ class CommandRouter:
         return warnings
 
     def _sync_session_files_to_target(self, name: str, target_sessions_dir: str, target_host: str) -> None:
-        """Copy session files (chat_id, session_id, cwd) to target machine.
-
-        The Stop hook reads chat_id from SESSIONS_DIR/<worker>/chat_id to
-        route responses to Telegram. Without these files, the hook exits
-        silently and responses never reach Telegram.
-        """
         local_session_dir = SESSIONS_DIR / name
         if not local_session_dir.is_dir():
             return
@@ -8226,13 +7512,6 @@ class CommandRouter:
                     capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
 
     def _sync_credentials_to_target(self, target_host: str) -> None:
-        """Copy Claude credentials to target if target has no valid token.
-
-        ~/.claude/.credentials.json has the actual access/refresh tokens.
-        Without it, Claude starts unauthenticated on the target machine.
-        Skip if target already has a valid (non-expired) token with a DIFFERENT
-        refresh token — means target was logged in independently.
-        """
         local_creds = os.path.expanduser("~/.claude/.credentials.json")
         if not os.path.exists(local_creds):
             return
@@ -8275,7 +7554,6 @@ class CommandRouter:
 
     def _start_worker_on_target(self, name: str, target_host: str, target_cwd: str | None,
                                  session_id: str | None, backend_name: str, skip_session_sync: bool=False) -> bool:
-        """Create tmux session on target and start Claude Code with --resume."""
         tmux_name = f"{TMUX_PREFIX}{name}"
 
         # Clean up any leftover session
@@ -8393,7 +7671,6 @@ class CommandRouter:
 
     def _teleport_rollback(self, name: str, tmux_name: str, source_host: str | None, source_cwd: str | None,
                             session_id: str | None, backend_name: str, chat_id: ChatId | None, reason: str) -> None:
-        """Roll back a failed teleport by restarting on source."""
         self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
         try:
             # Restore source CWD (may have been overwritten with target path)
@@ -8428,7 +7705,6 @@ class CommandRouter:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
     def _teleport_notify(self, chat_id: ChatId | None, text: str) -> None:
-        """Send progress notification during teleport."""
         if chat_id is None:
             return
         try:
@@ -8441,7 +7717,6 @@ class CommandRouter:
     # ── Worker Lifecycle ──────────────────────────────────────────────
 
     def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
-        """Handle the /hire command — create a new worker."""
         if not name:
             self.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
             return True
@@ -8471,7 +7746,6 @@ class CommandRouter:
         return True
 
     def cmd_end(self, name: str, chat_id: ChatId) -> bool:
-        """Handle the /end command — terminate a worker."""
         if not name:
             self.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
             return True
@@ -8486,7 +7760,6 @@ class CommandRouter:
         return True
 
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
-        """Handle the /restart command — restart a worker session."""
         args = (args or "").strip()
 
         # Parse flags
@@ -8579,7 +7852,6 @@ class CommandRouter:
                 watchdog.restart_in_progress.pop(name, None)
 
     def _do_restart(self, name: str, session: TmuxSessionDict | None, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
-        """Execute restart after in-flight guard. Called from cmd_restart."""
         # Teleported worker: delegate to remote restart
         if host:
             mode = "relaunch" if clean else "resume"
@@ -8654,11 +7926,6 @@ class CommandRouter:
         return True
 
     def _restart_remote_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str) -> tuple[bool, str | None]:
-        """Restart a teleported worker on its remote host.
-
-        Reuses _stop_worker_for_teleport + _start_worker_on_target which
-        already handle remote tmux, $HOME remapping, credential sync, etc.
-        """
         resume_id = ""
         target_cwd = get_claude_session_cwd(name)
 
@@ -8769,7 +8036,6 @@ class CommandRouter:
         return True, None
 
     def _cmd_restart_all(self, chat_id: int | str, clean: bool) -> bool:
-        """Handle /restart-all command — sequentially restart all workers."""
         registered = self.workers.get_registered_sessions()
         if not registered:
             self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
@@ -8802,7 +8068,6 @@ class CommandRouter:
         return True
 
     def _run_restart_all_sequence(self, chat_id: int | str, names: list[str], mode: str) -> None:
-        """Background thread: restart workers one at a time with delay between."""
         delay_s = 7
         failed = []
         try:
@@ -8850,7 +8115,6 @@ class CommandRouter:
                 self._restart_all_thread = None
 
     def _cmd_restart_cancel(self, chat_id: int | str) -> bool:
-        """Cancel a running restart-all sequence."""
         with self._restart_all_lock:
             if not self._restart_all_running:
                 self.reply(chat_id, "No restart-all sequence is running.")
@@ -8862,7 +8126,6 @@ class CommandRouter:
     # ── Channel & Relay ─────────────────────────────────────────────
 
     def _cmd_relay_list(self, chat_id: ChatId) -> bool:
-        """Handle /relay list — show active relay channels."""
         with relay_store.lock:
             active = [(cid, ch) for cid, ch in relay_store.channels.items()
                       if _clock.time() <= ch["expires_at_unix"]]
@@ -8879,7 +8142,6 @@ class CommandRouter:
         return True
 
     def _cmd_relay_add(self, parts: list[str], chat_id: ChatId) -> bool:
-        """Handle /relay add <channel_id> <worker>."""
         if len(parts) < 3:
             self.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
             return True
@@ -8907,7 +8169,6 @@ class CommandRouter:
         return True
 
     def _cmd_relay_remove(self, parts: list[str], chat_id: ChatId) -> bool:
-        """Handle /relay remove <channel_id> <worker>."""
         if len(parts) < 3:
             self.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
             return True
@@ -8934,7 +8195,6 @@ class CommandRouter:
         return True
 
     def _cmd_relay_status(self, chat_id: ChatId) -> bool:
-        """Handle /relay status — counts for relays, channels, guests."""
         now = _clock.time()
         with relay_store.lock:
             relay_active = [(cid, ch) for cid, ch in relay_store.channels.items()
@@ -8965,7 +8225,6 @@ class CommandRouter:
         return True
 
     def _cmd_relay_stop(self, parts: list[str], chat_id: ChatId) -> bool:
-        """Handle /relay stop <label> — close a relay channel."""
         if len(parts) < 2:
             self.reply(chat_id, "Usage: /relay stop <label>")
             return True
@@ -8992,12 +8251,6 @@ class CommandRouter:
         return True
 
     def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
-        """Relay: connect an external agent to a worker via guideline link.
-
-        Dispatches to subcommand helpers:
-        /relay <worker> — open relay, returns guideline link URL
-        /relay add/remove/list/status/stop — manage relay channels
-        """
         if not arg:
             with relay_store.lock:
                 active = [ch for ch in relay_store.channels.values()
@@ -9055,7 +8308,6 @@ class CommandRouter:
     # ── Media Routing ──────────────────────────────────────────────────
 
     def _extract_reply_media(self, reply_to: TelegramMessageDict, target_worker: str) -> str | None:
-        """Download media from a reply-to message. Returns media text or None."""
         # Check for media types in priority order
         animation = reply_to.get("animation")
         photo = reply_to.get("photo")
@@ -9107,7 +8359,6 @@ class CommandRouter:
         return f"Manager forwarded {media_label}: {local_path}"
 
     def _worker_from_reply(self, msg: TelegramMessageDict | None) -> str | None:
-        """Extract worker name from a reply-to message's text prefix (e.g. 'bob:\\n...')."""
         reply_to = msg.get("reply_to_message") if msg else None
         if not reply_to:
             return None
@@ -9124,7 +8375,6 @@ class CommandRouter:
         return None
 
     def _handle_media_group_flush(self, group_id: str) -> None:
-        """Flush a buffered media group: route all items using the group's caption."""
         with media_groups.lock:
             group = media_groups.buffer.pop(group_id, None)
         if not group:
@@ -9214,11 +8464,6 @@ class CommandRouter:
         self._route_media_message(full_text, caption, chat_id, msg_id, msg=first_msg)
 
     def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> str | None:
-        """Determine which worker's inbox to download media into.
-
-        Uses same priority as _route_media_message: @mentions > reply-to > active.
-        Returns the target worker name (or state.active as fallback).
-        """
         if caption:
             targets, _ = self.parse_at_mentions(caption)
             if targets:
@@ -9229,7 +8474,6 @@ class CommandRouter:
         return state.active
 
     def _route_media_message(self, media_text: str, caption: str, chat_id: ChatId | None, msg_id: int | None, msg: TelegramMessageDict | None=None) -> None:
-        """Route a media message, honoring @mentions in caption or reply-to context."""
         if caption:
             unknown_mentions = self.unknown_at_mentions(caption)
             if unknown_mentions:
@@ -9262,7 +8506,6 @@ class CommandRouter:
     # ── Mention Routing ──────────────────────────────────────────────
 
     def _reset_mention_streak(self) -> None:
-        """Reset the @mention auto-focus streak tracker."""
         _last_mention.target = None
         _last_mention.count = 0
         _last_mention.ts = 0
@@ -9272,7 +8515,6 @@ class CommandRouter:
                                 reply_to: TelegramMessageDict | None,
                                 reply_context: str,
                                 reply_context_ts: int | None) -> None:
-        """Route a message with @mentions to the targeted workers."""
         # Bare @mention means focus switch only (silent on success)
         if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
             target = targets[0]
@@ -9334,8 +8576,6 @@ class CommandRouter:
     _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
 
     def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
-        """Extract known @mentions from anywhere in text. Returns (targets, original_text).
-        Matches registered workers first, then active guests. Full message preserved."""
         if not text:
             return [], ""
         registered = self.workers.get_registered_sessions()
@@ -9350,7 +8590,6 @@ class CommandRouter:
         return found, text
 
     def unknown_at_mentions(self, text: str) -> list[str]:
-        """Return @mentions that do not match a known worker/guest."""
         if not text:
             return []
         registered = self.workers.get_registered_sessions()
@@ -9365,7 +8604,6 @@ class CommandRouter:
         return unknown
 
     def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
-        """Format a warning message for unrecognized @mentions."""
         import difflib
 
         registered = self.workers.get_registered_sessions()
@@ -9382,7 +8620,6 @@ class CommandRouter:
         return f"⚠️ Unknown: {' '.join(parts)}"
 
     def _route_mention(self, name: str, message: str, chat_id: ChatId | None, msg_id: int | None) -> MentionRouteResult | None:
-        """Route a @mention to either a worker or a guest inbox. Workers win name collisions."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if session:
@@ -9408,7 +8645,6 @@ class CommandRouter:
         return {"name": name, "status": "unknown"}
 
     def parse_worker_prefix(self, text: str) -> tuple[str | None, str]:
-        """Parse 'name: message' prefix from bot-sent messages."""
         if not text:
             return None, ""
         match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
@@ -9422,7 +8658,6 @@ class CommandRouter:
         return name, message
 
     def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
-        """Extract text and timestamp from a replied-to message."""
         if not reply_msg:
             return "", None
         text = _extract_msg_text(reply_msg)
@@ -9430,7 +8665,6 @@ class CommandRouter:
         return text, ts
 
     def format_reply_context(self, reply_text: str, context_text: str, context_ts: int | None = None) -> str:
-        """Format reply-to context for prepending to forwarded messages."""
         reply_text = (reply_text or "").strip()
         context_text = (context_text or "").strip()
         if context_text:
@@ -9453,7 +8687,6 @@ class CommandRouter:
     def __init__(self, transport: MessageTransport | None,
                  workers: "WorkerManager") -> None:
         # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
-        """Initialize command router with worker manager, transport, and dispatch table."""
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
@@ -9484,12 +8717,10 @@ class CommandRouter:
         }
 
     def reply(self, chat_id: ChatId | None, text: str, outcome: str | None = None) -> None:
-        """Send a reply message to a chat via the transport."""
         if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, text)
 
     def send_startup_message(self, chat_id: ChatId | None) -> None:
-        """Send the bridge startup notification to the admin chat."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
         active = state.active
@@ -9505,7 +8736,6 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
 
     def handle_message(self, update: TelegramUpdate) -> None:
-        """Route an incoming Telegram update to the appropriate handler."""
         global admin_chat_id
         _log(_LOG_INFO, "handle_message", f"ENTER update_id={update.get('update_id')}")
 
@@ -9538,7 +8768,6 @@ class CommandRouter:
             self._route_text_message(incoming)
 
     def _check_admin(self, chat_id: ChatId | None) -> bool:
-        """Verify chat_id is admin, auto-learning if first contact. Returns True if allowed."""
         global admin_chat_id
         if chat_id is None:
             return False
@@ -9548,7 +8777,6 @@ class CommandRouter:
         return chat_id == admin_chat_id
 
     def _buffer_media_group(self, media_group_id: str, msg: TelegramMessageDict, text: str) -> None:
-        """Buffer a media group item and schedule flush when group is complete."""
         with media_groups.lock:
             if media_group_id not in media_groups.buffer:
                 media_groups.buffer[media_group_id] = {
@@ -9570,10 +8798,6 @@ class CommandRouter:
             t.start()
 
     def _handle_single_media(self, incoming: 'IncomingMessage') -> bool:
-        """Handle a single media message (animation, photo, document, audio, etc.).
-
-        Returns True if the message was handled, False otherwise.
-        """
         global admin_chat_id
         msg = incoming.raw_msg
         text = incoming.text
@@ -9640,11 +8864,6 @@ class CommandRouter:
 
     def _format_media_text(self, incoming: 'IncomingMessage',
                            local_path: str, media_label: str) -> str | None:
-        """Format the text description for a downloaded media file.
-
-        Returns the formatted text, or None if the message was already handled
-        (e.g., voice with successful transcription).
-        """
         text = incoming.text
         chat_id = incoming.chat_id
         msg_id = incoming.msg_id
@@ -9693,7 +8912,6 @@ class CommandRouter:
         return f"Manager sent media: {local_path}"
 
     def _route_text_message(self, incoming: 'IncomingMessage') -> None:
-        """Route a text-only message: commands, @mentions, reply-to, or active worker."""
         global admin_chat_id
         text = incoming.text
         chat_id = incoming.chat_id
@@ -9762,7 +8980,6 @@ class CommandRouter:
         self.route_to_active(routed_text, chat_id, msg_id)
 
     def handle_command(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> bool:
-        """Parse and dispatch a slash command."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
         if "@" in cmd:
@@ -9796,7 +9013,6 @@ class CommandRouter:
 
 
     def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
-        """Handle the /pilot command — open a terminal viewer session."""
         if not name:
             self.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
             return True
@@ -9863,7 +9079,6 @@ class CommandRouter:
 
 
     def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
-        """Handle the /rewind command — generate a transcript viewer link."""
         if not name:
             self.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
             return True
@@ -9892,7 +9107,6 @@ class CommandRouter:
         return True
 
     def cmd_pr_review(self, arg: str, chat_id: ChatId) -> bool:
-        """Handle the /pr command — open a PR review page."""
         if not arg:
             self.reply(chat_id, "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
             return True
@@ -9941,7 +9155,6 @@ class CommandRouter:
         return True
 
     def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
-        """Handle the /focus command — switch the active worker."""
         if not name:
             self.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
             return True
@@ -9955,7 +9168,6 @@ class CommandRouter:
         return True
 
     def cmd_team(self, chat_id: ChatId) -> bool:
-        """Handle the /team command — show all workers and their states."""
         registered = self.workers.scan_tmux_sessions()
         registered = self.workers.get_registered_sessions(registered)
 
@@ -10021,7 +9233,6 @@ class CommandRouter:
 
 
     def cmd_status(self, chat_id: ChatId) -> bool:
-        """Handle the /status command — clean bridge status."""
         import time as _time
 
         registered = self.workers.get_registered_sessions()
@@ -10127,7 +9338,6 @@ class CommandRouter:
 
 
     def route_to_active(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
-        """Route a text message to the currently focused worker."""
         registered = self.workers.get_registered_sessions()
 
         if not state.active:
@@ -10142,7 +9352,6 @@ class CommandRouter:
         self.route_message(state.active, text, chat_id, msg_id, one_off=False)
 
     def route_to_all(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
-        """Broadcast a text message to all active workers."""
         registered = self.workers.get_registered_sessions()
         sessions = list(registered.keys())
         if not sessions:
@@ -10160,7 +9369,6 @@ class CommandRouter:
             self.reply(chat_id, "No one's online to share with.")
 
     def route_message(self, session_name: str, text: str, chat_id: ChatId | None, msg_id: int | None, one_off: bool=False) -> None:
-        """Deliver a text message to a specific worker via tmux or pipe."""
         registered = self.workers.get_registered_sessions()
         session = registered.get(session_name)
         if not session:
@@ -10239,11 +9447,6 @@ command_router = CommandRouter(transport, worker_manager)
 
 # Background transcript sync tracking: {key: {status, progress, error, path, started}}
 class TranscriptSyncRegistry:
-    """Thread-safe registry for background transcript syncs.
-
-    Groups the sync state dict with its lock — ensures thread-safe
-    access without caller needing to manage the lock.
-    """
     def __init__(self) -> None:
         self._state: dict[str, TranscriptSyncState] = {}
         self._lock: threading.Lock = threading.Lock()
@@ -10257,13 +9460,11 @@ class TranscriptSyncRegistry:
             self._state[key] = value
 
     def update(self, key: str, **fields: object) -> None:
-        """Update specific fields of an existing sync entry."""
         with self._lock:
             if key in self._state:
                 self._state[key].update(fields)
 
     def get_started(self, key: str) -> float:
-        """Get the 'started' timestamp for a sync key (0 if not found)."""
         with self._lock:
             entry = self._state.get(key, {})
             return entry.get("started", 0)
@@ -10284,7 +9485,6 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
                           search: str | None = None,
                           filter_mode: str | None = None,
                           sort: str | None = None) -> dict[str, object] | None:
-    """Run indexer.py transcript locally or via SSH. Returns parsed JSON dict or None on failure."""
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = INDEXER_SCRIPT
     if host:
@@ -10319,7 +9519,6 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
 
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
-    """Background thread: rsync transcript from remote host with progress tracking."""
     try:
         _transcript_sync.set(key, {"status": "syncing", "progress": "Connecting to remote host...",
                                    "started": _clock.time(), "path": None, "error": None})
@@ -10376,11 +9575,6 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
 
 
 def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
-    """Resolve transcript JSONL path for a worker (local or remote).
-
-    Returns (transcript_path, sid, cwd) or (None, sid, cwd) if not found.
-    For remote workers, returns ("syncing", sid, cwd) if sync is in progress.
-    """
     cwd = get_claude_session_cwd(name)
     # RAM CWD may be empty after bridge restart — fall back to live tmux pane CWD
     if not cwd:
@@ -10442,7 +9636,6 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
 
 
 def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
-    """Parse JSONL transcript into a list of visible entries (skip noise)."""
     entries = []
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -10464,11 +9657,6 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
 
 
 def _generate_member_avatar(name: str) -> str:
-    """Generate a unique SVG avatar for a team member based on name hash.
-
-    Produces 1000+ unique variants via:
-    - Hue (36 steps) × shape (6) × accent (5) × saturation (2) = 2160 combos
-    """
     name_hash = hash(name) & 0xFFFFFFFF
     hue = (name_hash % 36) * 10  # 0-350 in steps of 10
     sat = 55 + (name_hash >> 6 & 1) * 15  # 55 or 70
@@ -10520,13 +9708,6 @@ _MANAGER_AV = '<div class="u-av"><img src="https://avatars.githubusercontent.com
 
 
 def _detect_message_author(text: str) -> AuthorDetection:
-    """Detect author from message prefix like 'ryo: message'.
-
-    Returns AuthorDetection(author, avatar_html, display_text).
-    - Team member prefix → generated avatar, text without prefix
-    - 'manager:' prefix → GitHub avatar, text without prefix
-    - No prefix → GitHub avatar (default = manager), original text
-    """
     stripped = text.strip()
     # Check for "name: " prefix (1-10 chars before colon)
     colon_pos = stripped.find(":")
@@ -10564,12 +9745,6 @@ _TRANSCRIPT_DEFAULT_TOOL_SVG = '<svg class="t-icon" viewBox="0 0 16 16" fill="cu
 
 
 def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None) -> str:
-    """Convert a single transcript entry to HTML block(s).
-
-    Matches ampcode.com visual style: tool results merged into tool_use blocks,
-    Edit diffs with +/- coloring, collapsible thinking.
-    tool_results: map of tool_use_id → {content: str, is_error: bool}
-    """
     import base64 as _b64
     if tool_results is None:
         tool_results = {}
@@ -10726,7 +9901,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
 
 
 def _format_model_name(model_name: str) -> str:
-    """Format model ID into display name: 'claude-opus-4-6' → 'Opus 4.6'."""
     import re as _re
     s = model_name.replace("claude-", "")
     # Strip date suffixes like -20251001
@@ -10742,7 +9916,6 @@ def _format_model_name(model_name: str) -> str:
 
 
 def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
-    """Extract metadata stats from transcript entries."""
     n_user = sum(1 for e in entries if e.get("type") == "user"
                  and e.get("message", {}).get("role") == "user"
                  and isinstance(e.get("message", {}).get("content"), str))
@@ -10831,7 +10004,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
 
 
 def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
-    """Render a loading page while transcript syncs from remote host."""
     import html as html_mod
     esc = html_mod.escape
     info = _transcript_sync.get(sync_key) or {}
@@ -10884,7 +10056,6 @@ vertical-align:middle;margin-right:8px}}
 
 
 def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
-    """Return the DOCTYPE, head, CSS and opening body/layout tags."""
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -11111,7 +10282,6 @@ a:hover{{text-decoration:underline}}
 def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
                          prompts_filter_url: str,
                          esc: Callable[[str], str]) -> str:
-    """Return the header bar with worker name and session metadata."""
     return f'''<header>
 <div class="h-row"><h1>{esc(name)}</h1><button class="sb-toggle" onclick="document.querySelector('.sidebar').classList.toggle('sb-open')" title="Session info"><svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M0 8a8 8 0 1116 0A8 8 0 010 8zm8-6.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM6.5 7.75A.75.75 0 017.25 7h1a.75.75 0 01.75.75v2.75h.25a.75.75 0 010 1.5h-2a.75.75 0 010-1.5h.25v-2h-.25a.75.75 0 01-.75-.75zM8 6a1 1 0 110-2 1 1 0 010 2z"/></svg></button></div>
 <div class="meta">
@@ -11137,7 +10307,6 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
                              esc: Callable[[str], str],
                              session_id: str | None,
                              filter_mode: str) -> str:
-    """Return the search form, filter/search banners, thread content and pagination."""
     _tool_results = tool_results
     # Render blocks — group consecutive assistant entries into a turn-body
     # No avatar/label on assistant turns (matches AmpCode: only user has avatar)
@@ -11149,7 +10318,6 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
 
     # Build context URL for search mode (click message → jump to full transcript)
     def _ctx_url(entry: TranscriptEntry) -> str:
-        """Build a context URL for search results — links to full transcript."""
         if not search_query:
             return ""
         idx = entry.get("_idx", -1)
@@ -11230,7 +10398,6 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
                               file_size_str: str, total: int,
                               page: int, total_pages: int,
                               esc: Callable[[str], str]) -> str:
-    """Return the closing content div, sidebar panel, layout wrappers and jump buttons."""
     return f'''</div>
 <aside class="sidebar"><div class="sidebar-inner">
 <div class="sb-title">Session Info</div>
@@ -11264,7 +10431,6 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
 
 
 def _transcript_html_search_js() -> str:
-    """Return the JavaScript block for markdown rendering, search highlight and live updates."""
     return '''<script>
 // Render markdown blocks with marked.js + highlight.js
 marked.setOptions({
@@ -11418,17 +10584,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                             search_query: str = "", token: str = "",
                             filter_mode: str = "", search_sort: str = "relevance",
                             live_base_url: str = "") -> str:
-    """Render a worker's transcript as polished HTML (ampcode.com style).
-
-    Supports pagination (?page=N&per_page=50) and search (?q=term).
-    filter_mode="prompts" shows only user messages.
-    page=None means "show last page" (most recent entries).
-    Uses marked.js for markdown and highlight.js for syntax highlighting.
-
-    live_base_url: when set, pagination/search/filter links use this absolute
-    URL prefix instead of relative URLs.  Used by /rewind static snapshots so
-    links point back to the bridge's live /transcript/<name> endpoint.
-    """
     import html as html_mod
     esc = html_mod.escape
 
@@ -11556,7 +10711,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     qs_base = "&".join(qs_parts)
 
     def page_url(p: int | str) -> str:
-        """Build a full URL for a transcript/PR page path."""
         parts = [f"page={p}"]
         if qs_base:
             parts.append(qs_base)
@@ -11633,14 +10787,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
 # ── EndpointRouter + Handler: thin HTTP dispatch ──
 
 class EndpointRouter:
-    """Maps HTTP paths to handler functions via dispatch table.
-
-    Supports POST, GET, and DELETE methods. Exact paths are checked first,
-    then regex patterns in registration order.
-    """
-
     def __init__(self) -> None:
-        """Initialize per-method route tables."""
         self._post_exact: dict[str, PostRouteHandler] = {}
         self._post_patterns: list[tuple[re.Pattern[str], PostRouteHandler]] = []
         self._get_exact: dict[str, GetRouteHandler] = {}
@@ -11649,31 +10796,24 @@ class EndpointRouter:
         self._delete_patterns: list[tuple[re.Pattern[str], GetRouteHandler]] = []
 
     def post(self, path: str, handler: PostRouteHandler) -> None:
-        """Register a POST handler for an exact path."""
         self._post_exact[path] = handler
 
     def post_pattern(self, pattern: str, handler: PostRouteHandler) -> None:
-        """Register a POST handler for a regex path pattern."""
         self._post_patterns.append((re.compile(pattern), handler))
 
     def get(self, path: str, handler: GetRouteHandler) -> None:
-        """Register a GET handler for an exact path."""
         self._get_exact[path] = handler
 
     def get_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
-        """Register a GET handler for a regex path pattern."""
         self._get_patterns.append((re.compile(pattern), handler))
 
     def delete(self, path: str, handler: GetRouteHandler) -> None:
-        """Register a DELETE handler for an exact path."""
         self._delete_exact[path] = handler
 
     def delete_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
-        """Register a DELETE handler for a regex path pattern."""
         self._delete_patterns.append((re.compile(pattern), handler))
 
     def resolve_post(self, path: str) -> PostRouteResolution:
-        """Find handler for POST path. Returns PostRouteResolution(handler, match)."""
         handler = self._post_exact.get(path)
         if handler:
             return PostRouteResolution(handler, None)
@@ -11684,7 +10824,6 @@ class EndpointRouter:
         return PostRouteResolution(None, None)
 
     def resolve_get(self, path: str) -> GetRouteResolution:
-        """Find handler for GET path. Returns GetRouteResolution(handler, match)."""
         handler = self._get_exact.get(path)
         if handler:
             return GetRouteResolution(handler, None)
@@ -11695,7 +10834,6 @@ class EndpointRouter:
         return GetRouteResolution(None, None)
 
     def resolve_delete(self, path: str) -> GetRouteResolution:
-        """Find handler for DELETE path. Returns GetRouteResolution(handler, match)."""
         handler = self._delete_exact.get(path)
         if handler:
             return GetRouteResolution(handler, None)
@@ -11717,11 +10855,6 @@ _endpoint_router = EndpointRouter()
 def _checkin_can_restart(name: str, tmux_name: str,
                          host: str | None, pane_cwd: str,
                          requested_cwd: str) -> tuple[bool, str]:
-    """Check restart guards for a CWD-triggered checkin restart.
-
-    Returns (allowed, block_reason). If allowed=False, block_reason
-    explains why (cooldown, inflight, Claude running).
-    """
     # Cooldown: prevent restart loops from repeated checkins
     last_restart = watchdog.recent_restarts.get(name, 0)
     elapsed = _clock.time() - last_restart
@@ -11755,10 +10888,6 @@ def _checkin_can_restart(name: str, tmux_name: str,
 def _checkin_do_restart(name: str, backend_name: str,
                         tmux_name: str, host: str | None,
                         requested_cwd: str) -> tuple[bool, str]:
-    """Execute a CWD-triggered restart and notify the manager.
-
-    Returns (ok, error_msg). Cleans up inflight tracking on completion.
-    """
     notify_chat_id = get_manager_chat_id(name)
     try:
         if notify_chat_id is not None:
@@ -11807,12 +10936,9 @@ def _checkin_do_restart(name: str, backend_name: str,
 
 
 class Handler(BaseHTTPRequestHandler):
-    """HTTP request handler for Telegram webhook and worker API endpoints."""
-
     # ── Guest Endpoints ────────────────────────────────────────────
 
     def _guest_auth(self, parsed: ParseResult | None = None) -> GuestSessionDict | None:
-        """Authenticate guest from token query param. Returns guest dict or None (sends 403)."""
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [""])[0]
         if not token:
@@ -11831,7 +10957,6 @@ class Handler(BaseHTTPRequestHandler):
         return guest
 
     def handle_guest_register(self, body: bytes = b"") -> None:
-        """POST /guests — register as a temporary guest agent."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
         except (json.JSONDecodeError, ValueError):
@@ -11919,12 +11044,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_guest_send(self, body: bytes = b"") -> None:
-        """POST /guests/send?token=xxx — guest sends to worker(s), guest(s), or channel(s).
-
-        Body: {"to": "lee" | ["lee","kai","#ops"], "text": "..."}
-        Legacy: {"worker": "lee", "text": "..."} still supported.
-        Targets: bare name = worker, "guest:name" = guest, "#label" or "ch_xxx" = channel.
-        """
         parsed = urlparse(self.path)
         guest = self._guest_auth(parsed)
         if not guest:
@@ -12046,7 +11165,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
-        """POST /guests/reply — worker sends reply to a guest's inbox."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {guest}
         except (json.JSONDecodeError, ValueError):
@@ -12073,7 +11191,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "message_id": msg_id})
 
     def handle_guest_inbox(self, parsed: ParseResult) -> None:
-        """GET /guests/inbox?token=xxx[&after=gm_xxx] — poll for messages."""
         guest = self._guest_auth(parsed)
         if not guest:
             return
@@ -12088,7 +11205,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_guest_status(self, parsed: ParseResult) -> None:
-        """GET /guests/status?token=xxx — check session validity."""
         guest = self._guest_auth(parsed)
         if not guest:
             return
@@ -12101,7 +11217,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_guests_list(self) -> None:
-        """GET /guests — list active guests (admin only)."""
         with guest_store.lock:
             guests_list = []
             expired = []
@@ -12123,7 +11238,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "guests": guests_list})
 
     def handle_guest_disconnect(self, parsed: ParseResult) -> None:
-        """DELETE /guests?token=xxx — disconnect guest session."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [""])[0]
         if not token:
@@ -12154,7 +11268,6 @@ class Handler(BaseHTTPRequestHandler):
     # ── Channel Endpoints ──────────────────────────────────────────
 
     def _channel_auth_guest(self, parsed: ParseResult) -> GuestSessionDict | None:
-        """Authenticate a guest from query token for channel access. Returns guest or sends error."""
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
         if not token:
@@ -12169,7 +11282,6 @@ class Handler(BaseHTTPRequestHandler):
         return guest
 
     def handle_channel_create(self, body: bytes = b"") -> None:
-        """POST /channels — create a group channel."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {label, members, include_manager}
         except (json.JSONDecodeError, ValueError):
@@ -12237,7 +11349,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
-        """POST /channels/{id}/members — add/remove members."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {add, remove}
         except (json.JSONDecodeError, ValueError):
@@ -12280,7 +11391,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
-        """POST /channels/{id}/send — send message to channel (fan-out)."""
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
         except (json.JSONDecodeError, ValueError):
@@ -12363,7 +11473,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_channel_messages(self, channel_id: str, parsed: ParseResult) -> None:
-        """GET /channels/{id}/messages — poll channel messages. Guests must provide ?token=."""
         query_params = parse_qs(parsed.query)
         after = query_params.get("after", [None])[0]
         token = query_params.get("token", [None])[0]
@@ -12404,7 +11513,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, resp)
 
     def handle_channels_list(self, parsed: ParseResult | None = None) -> None:
-        """GET /channels — list active channels. With ?token=, filter to guest's channels."""
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [None])[0]
         filter_member = None
@@ -12442,7 +11550,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "channels": active})
 
     def handle_channel_delete(self, channel_id: str) -> None:
-        """DELETE /channels/{id} — delete a channel."""
         with channel_store.lock:
             channel = channel_store.channels.pop(channel_id, None)
             if channel:
@@ -12464,7 +11571,6 @@ class Handler(BaseHTTPRequestHandler):
     # ── Relay Endpoints ────────────────────────────────────────────
 
     def _relay_get_token(self) -> str | None:
-        """Extract Bearer token from Authorization header or query param."""
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             return auth[7:].strip()
@@ -12473,7 +11579,6 @@ class Handler(BaseHTTPRequestHandler):
         return params.get("token", "")
 
     def handle_relay_get(self, channel_id: str, action: str | None, parsed: ParseResult) -> None:
-        """Handle GET /relay/<channel_id>[/action]."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12512,7 +11617,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"unknown action: {action}"})
 
     def handle_relay_send(self, channel_id: str, body: bytes = b"") -> None:
-        """Handle POST /relay/<channel_id>/send — guest sends message to worker."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12550,7 +11654,6 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_relay_reply(self, channel_id: str, body: bytes = b"") -> None:
-        """Handle POST /relay/<channel_id>/reply — worker replies to guest."""
         token = self._relay_get_token()
         if not token:
             self._send_json(401, {"error": "missing token"})
@@ -12587,7 +11690,6 @@ class Handler(BaseHTTPRequestHandler):
     # ── PR Endpoints ──────────────────────────────────────────────
 
     def handle_pr_file_content(self, parsed: ParseResult) -> None:
-        """Fetch file content from GitHub for diff context expansion."""
         import base64 as _b64
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
@@ -12632,7 +11734,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def handle_pr_keepalive(self, parsed: ParseResult) -> None:
-        """Extend PR review token expiry on client activity."""
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
         if not tokens.validate_pr_review(token):
@@ -12643,11 +11744,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def handle_pr_review_comments(self, body: bytes) -> None:
-        """POST /tools/review/comments — dispatch PR comments.
-
-        Inline comment when body has path + line fields, general comment otherwise.
-        Merges the old /pr-comment and /pr-general-comment endpoints.
-        """
         try:
             data = cast(dict[str, object], json.loads(body))
         except (json.JSONDecodeError, ValueError):
@@ -12661,7 +11757,6 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_pr_general_comment(body)
 
     def handle_pr_general_comment(self, body: bytes) -> None:
-        """Post a general (non-inline) comment on a PR via GitHub API."""
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
@@ -12731,7 +11826,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"ok": true}')
 
     def handle_pr_merge(self, body: bytes) -> None:
-        """Merge a PR via GitHub API."""
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
@@ -12795,11 +11889,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"ok": true}')
 
     def handle_pr_review_endpoint(self, parsed: ParseResult) -> None:
-        """Serve generated PR review HTML.
-
-        Requires a valid token (?token=...) generated by /pr command.
-        Token expires after 5 minutes (same as rewind).
-        """
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
@@ -12826,7 +11915,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(f.read())
 
     def handle_pr_comment(self, body: bytes) -> None:
-        """Post an inline comment on a PR via GitHub API + notify Telegram."""
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
@@ -12912,15 +12000,6 @@ class Handler(BaseHTTPRequestHandler):
     # ── Transcript Endpoints ─────────────────────────────────────
 
     def handle_transcript_endpoint(self, parsed: ParseResult) -> None:
-        """Serve polished HTML transcript for a worker.
-
-        Requires a valid rewind token (?token=...) generated by /rewind command.
-        GET /transcript/<name>?token=...      — required auth
-        GET /transcript/<name>?token=...&sid=...        — specific session ID
-        GET /transcript/<name>?token=...&page=2         — pagination
-        GET /transcript/<name>?token=...&per_page=100   — entries per page (default 50)
-        GET /transcript/<name>?token=...&q=search+term  — full-text search
-        """
         try:
             query_params = parse_qs(parsed.query)
             # Token auth — clean up expired, validate, extend sliding window
@@ -13039,7 +12118,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     # ── Core HTTP Handler ─────────────────────────────────────────
 
     def _send_json(self, status_code: int, data: Mapping[str, object]) -> None:
-        """Send a JSON response with proper Content-Type."""
         body = json.dumps(data).encode()
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
@@ -13047,11 +12125,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.wfile.write(body)
 
     def _send_error_json(self, status_code: int, message: str) -> None:
-        """Send a JSON error response with status code and message."""
         self._send_json(status_code, {"error": message})
 
     def _send_html(self, body: bytes, status: int = 200) -> None:
-        """Send HTML response, gzip-compressed if client supports it."""
         accept = self.headers.get("Accept-Encoding", "")
         if "gzip" in accept and len(body) > 1024:
             import gzip as _gzip
@@ -13070,7 +12146,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(body)
 
     def _send_text(self, status_code: int, text: str) -> None:
-        """Send a plain text response with proper Content-Type."""
         body = text.encode()
         self.send_response(status_code)
         self.send_header("Content-Type", "text/plain")
@@ -13078,7 +12153,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.wfile.write(body)
 
     def _send_unknown_endpoint(self, method: str, path: str) -> None:
-        """Return 404 JSON for unrecognized endpoints with available alternatives."""
         self._send_json(404, {
             "error": f"Unknown endpoint: {method} {path}",
             "available_endpoints": API_ENDPOINTS,
@@ -13089,7 +12163,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         # Exact-match and pattern-match POST handlers are registered in
         # _setup_endpoint_routes() below. Adding a new endpoint means
         # one registration call, not another if/elif here.
-        """Handle all incoming HTTP POST requests."""
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_post(parsed.path)
         if handler:
@@ -13127,7 +12200,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             _log(_LOG_INFO, "webhook", f"update_id={update.get('update_id')}, types={update_types}, text={repr(text[:50]) if text else '(none)'}")
             if "message" in update:
                 def _safe_handle(upd: TelegramUpdate) -> None:
-                    """Handle a Telegram update in a thread, logging errors instead of crashing."""
                     try:
                         command_router.handle_message(upd)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
@@ -13137,16 +12209,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             _log(_LOG_ERROR, "webhook", f"parse error: {e}", exc=e)
 
     def handle_notify(self, body: bytes = b"") -> None:
-        """Handle system notification request (internal, HMAC-authenticated).
-
-        SECURITY: This endpoint allows the shell script to trigger
-        notifications without having access to the bot token.
-        Used for tunnel watchdog alerts and worker notifications.
-
-        Supports [[image:/path|caption]] and [[file:/path|caption]] tags.
-        Pass optional "name" field to enable remote file fetching for
-        teleported workers.
-        """
         try:
             data = cast(dict[str, object], json.loads(body))  # body: {text, name, chat_id}
             text = _str_field(data, "text")
@@ -13219,12 +12281,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(str(e).encode())
 
     def handle_health_alert(self, body: bytes = b"") -> None:
-        """Handle JSONL health alerts from stop hook.
-
-        POST /alerts — hook reports a worker's JSONL transcript is stale.
-        Body: {"worker": "name", "issue": "jsonl_stale", "transcript_age": 3600, ...}
-        Sends a one-time Telegram alert to admin so they can restart the worker.
-        """
         try:
             data = cast(HealthAlertBody, json.loads(body)) if body else {}
             worker = _str_field(data, "worker", "unknown")
@@ -13245,13 +12301,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_json(500, {"ok": False, "error": str(e)})
 
     def handle_forge_register(self, body: bytes = b"") -> None:
-        """Accept registration from forge-built worker binaries.
-
-        POST /workers — worker announces itself to the bridge.
-        Body: {"Name": "workerName", "Host": "hostname", "Version": "1.0.0", "Tools": {...}}
-        Callback workers may include {"callback_url": "http://host:port"}.
-        Response: {"ok": true}
-        """
         try:
             data = cast(ForgeRegisterBody, json.loads(body)) if body else {}
             name = _str_field(data, "Name") or _str_field(data, "name")
@@ -13308,14 +12357,9 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_json(500, {"ok": False, "error": str(e)})
 
     def handle_connectors_status(self) -> None:
-        """GET /connectors — return status of all connectors."""
         self._send_json(200, _get_connectors_status())
 
     def handle_connectors_restart(self, body: bytes = b"") -> None:
-        """POST /connectors/restarts — restart a connector by name.
-
-        Body: {"name": "gmail"} or {"name": "github"}
-        """
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
         except (json.JSONDecodeError, ValueError):
@@ -13329,12 +12373,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_json(200 if ok else 500, {"ok": ok, "name": name, "message": msg})
 
     def handle_send_endpoint(self, body: bytes = b"") -> None:
-        """Send a prompt to a worker.
-
-        POST /messages
-        Body: {"worker": "name", "message": "text", "from": "system"}
-        The "from" field (default "system") is prefixed to the message.
-        """
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {worker, message, text}
         except (json.JSONDecodeError, ValueError):
@@ -13362,7 +12400,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         })
 
     def _validate_response_source(self, data: HookResponseBody, session_name: str) -> str:
-        """Return an error string when /outputs looks like worker messaging."""
         raw = cast(dict[str, object], data)
         messaging_fields = [key for key in ("worker", "to", "target", "message", "from") if key in raw]
         if messaging_fields:
@@ -13387,14 +12424,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         return ""
 
     def handle_hook_response(self, body: bytes = b"") -> None:
-        """Handle response forwarded from Claude hook.
-
-        SECURITY: This is how Claude responses get to Telegram without
-        Claude ever having access to the bot token. Hook POSTs here,
-        bridge sends to Telegram. HMAC-authenticated.
-
-        FILE SUPPORT: Parses [[image:/path|caption]] (photos, animations) and [[file:/path|caption]] (documents, video, audio, voice, stickers) tags.
-        """
         try:
             data = cast(HookResponseBody, json.loads(body))
             session_name = _str_field(data, "session")
@@ -13498,7 +12527,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
 
     def do_GET(self) -> None:
-        """Handle all incoming HTTP GET requests via EndpointRouter dispatch."""
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_get(parsed.path)
         if handler:
@@ -13517,7 +12545,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_unknown_endpoint("GET", parsed.path)
 
     def do_HEAD(self) -> None:
-        """Handle HEAD requests — used by the tunnel watchdog to probe reachability."""
         if urlparse(self.path).path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -13527,7 +12554,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.end_headers()
 
     def do_DELETE(self) -> None:
-        """Handle all incoming HTTP DELETE requests via EndpointRouter dispatch."""
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_delete(parsed.path)
         if handler:
@@ -13536,12 +12562,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_unknown_endpoint("DELETE", parsed.path)
 
     def handle_workers_endpoint(self, parsed: ParseResult | None = None) -> None:
-        """Return list of active workers with communication details.
-
-        GET /workers                 — bridge-POV send_example (legacy)
-        GET /workers?from=<name>     — caller-POV send_example, wraps ssh if cross-machine
-        Response: {"workers": [{"name": ..., "machine": ..., "protocol": ..., "address": ..., "send_example": ...}, ...]}
-        """
         try:
             caller_from = None
             if parsed is not None:
@@ -13560,11 +12580,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(str(e).encode())
 
     def handle_machines_endpoint(self, parsed: ParseResult | None = None) -> None:
-        """Return configured machines with derived workers, access, and health.
-
-        GET /machines             — bridge-POV access hints
-        GET /machines?from=<name> — caller-POV access hints
-        """
         try:
             caller_from = None
             if parsed is not None:
@@ -13578,12 +12593,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_json(500, {"error": str(e)})
 
     def handle_checkin_endpoint(self, parsed: ParseResult) -> None:
-        """Return worker instructions as plain text.
-
-        GET /checkin                    — generic instructions (uses default backend)
-        GET /checkin?name=lee           — personalized instructions for worker 'lee'
-        GET /checkin?name=lee&cwd=/dir  — set startup cwd (RAM); restart worker if cwd changed
-        """
         try:
             params = parse_qs(parsed.query)
             name = params.get("name", ["worker"])[0]
@@ -13680,7 +12689,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(str(exc).encode())
 
     def handle_health_workers_endpoint(self) -> None:
-        """Return watchdog worker states as JSON (debug endpoint)."""
         try:
             now = _clock.time()
             registered = get_registered_sessions()
@@ -13712,7 +12720,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(str(e).encode())
 
     def handle_health_tunnel_endpoint(self) -> None:
-        """Return tunnel/poll state as JSON — used by bridge.sh status."""
         if tunnel_manager is not None:
             data = tunnel_manager.status()
         else:
@@ -13733,23 +12740,16 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 # ── Endpoint registration ──
 
 def _mg(m: re.Match[str] | None, n: int = 1) -> str:
-    """Extract group from a regex match (guaranteed non-None in pattern routes)."""
     return m.group(n) if m else ""
 
 
 
 def _mg2(m: re.Match[str] | None) -> str:
-    """Extract optional group 2 from a regex match."""
     return m.group(2) if m else None
 
 
 
 def _setup_endpoint_routes() -> None:
-    """Register all POST and GET endpoints in the endpoint router.
-
-    Called once at module load time. All handlers receive
-    (handler_instance, payload, match) — match is None for exact paths.
-    """
     r = _endpoint_router
 
     # POST endpoints (exact match — match is always None)
@@ -13828,7 +12828,6 @@ _setup_endpoint_routes()
 # ============================================================
 
 def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
-    """Handle shutdown signals gracefully with diagnostic info."""
     from datetime import datetime
     sig_name = signal.Signals(signum).name if signum else "unknown"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -13904,7 +12903,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
 
 
 def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
-    """Discover existing tmux sessions and re-export hook env vars."""
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
     if registered:
@@ -13927,10 +12925,6 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
 
 
 def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
-    """Restore persisted bridge state (active worker, admin, relay/channel/guest).
-
-    Returns the last known chat_id or None.
-    """
     global admin_chat_id
 
     last_active = load_last_active()
@@ -13965,7 +12959,6 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
 
 
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
-    """Print startup configuration summary to stdout."""
     setup_bot_commands()
     print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
     if BRIDGE_BIND == "0.0.0.0":
@@ -13990,7 +12983,6 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
 
 
 def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
-    """Send startup notification to admin via Telegram."""
     state.startup_notified = True
     sessions = list(registered.keys())
     active = state.active
@@ -14014,13 +13006,11 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
-    """Log a connector message for debugging (capped at 20 per tag)."""
     connectors.log_message(tag, html_text, plain_text, targets)
 
 
 
 def _connector_render_html(tag: str, current_html: str) -> str:
-    """Render HTML page with current message + recent history (rewind style)."""
     import html as html_mod
     esc = html_mod.escape
     msgs = connectors.get_log(tag)
@@ -14115,7 +13105,6 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 
 
 def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None) -> str:
-    """Create concise Telegram HTML summary (max 4 lines, clickable link)."""
     import html as _html
     icon = "🔔" if tag == "github" else "📧"
     body = plain_text.strip()
@@ -14142,7 +13131,6 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
 
 
 def _connector_export_github(number: int, repo: str) -> str | None:
-    """Export a GitHub issue/PR via beast github export --serve, return public URL."""
     try:
         r = _subprocess_runner.run(
             ["beast", "github", "export", str(number), "--format", "print",
@@ -14163,9 +13151,7 @@ def _connector_export_github(number: int, repo: str) -> str | None:
 
 
 def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[ConnectorAttachmentDict] | None, ConnectorMetadataDict | None], None]:
-    """Create a message handler for a connector tag (Gmail/GitHub)."""
     def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[ConnectorAttachmentDict] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
-        """Route connector message to Telegram admin and/or target workers."""
         if plain_text is None:
             plain_text = html_text
         _connector_log_message(tag, html_text, plain_text, targets)
@@ -14219,15 +13205,12 @@ def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, lis
 
 
 def _connector_get_workers() -> set[str]:
-    """Return the set of registered worker names for connector routing."""
     return set(get_registered_sessions().keys())
 
 
 
 def _connector_on_alert(tag: str) -> Callable[[str], None]:
-    """Create an alert handler for a connector tag (sends to admin chat)."""
     def handler(text: str) -> None:
-        """Forward alert text to admin via Telegram."""
         if admin_chat_id:
             try:
                 send_telegram_message(admin_chat_id, text)
@@ -14238,7 +13221,6 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
 
 
 def _start_connectors() -> tuple[object, object]:
-    """Start Gmail and GitHub connectors if enabled, return (gmail, github) instances."""
     gmail_inst = None
     if GMAIL_ENABLED and GmailConnector is not None:
         gmail_inst = GmailConnector(
@@ -14276,7 +13258,6 @@ def _start_connectors() -> tuple[object, object]:
 
 
 def _restart_connector(name: str) -> tuple[bool, str]:
-    """Hot-restart a connector by name. Returns (ok, message)."""
     if name == "gmail":
         if not GMAIL_ENABLED:
             return False, "Gmail connector not enabled (GMAIL_ENABLED=0)"
@@ -14328,7 +13309,6 @@ def _restart_connector(name: str) -> tuple[bool, str]:
 
 
 def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
-    """Return status dict for all connectors."""
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
         if connectors.gmail is not None:
@@ -14349,11 +13329,6 @@ def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
 
 
 def main() -> None:
-    """Entry point — configure and start the bridge HTTP server.
-
-    Orchestrates: validation → signal setup → session discovery →
-    state restoration → startup logging → notification → background services.
-    """
     global admin_chat_id, tunnel_manager
 
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
@@ -14397,10 +13372,9 @@ def main() -> None:
     # and handles cloudflared, webhook registration, and poll fallback.
     tunnel_config = _build_tunnel_config()
     if tunnel_config.mode != "none" and BOT_TOKEN:
-        def _tunnel_on_update(update: dict[str, Any]) -> None:
-            """Forward polled updates to the command router (poll fallback path)."""
+        def _tunnel_on_update(update: dict[str, object]) -> None:
             if "message" in update:
-                def _safe_handle(upd: dict[str, Any]) -> None:
+                def _safe_handle(upd: dict[str, object]) -> None:
                     try:
                         command_router.handle_message(upd)
                     except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, OSError) as exc:
@@ -14408,7 +13382,6 @@ def main() -> None:
                 _message_pool.submit(_safe_handle, update)
 
         def _tunnel_on_notify(msg: str) -> None:
-            """Send tunnel status notifications to admin chat."""
             if admin_chat_id:
                 try:
                     transport.send_text(admin_chat_id, msg)
@@ -14454,8 +13427,6 @@ if __name__ == "__main__":
 import types as _types_mod
 
 class _BridgeModule(_types_mod.ModuleType):
-    """Bridge module with setattr propagation to source modules."""
-
     _sources: tuple[_types_mod.ModuleType, ...] = ()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -14469,7 +13440,6 @@ class _BridgeModule(_types_mod.ModuleType):
         super().__setattr__(name, value)
 
     def __getattr__(self, name: str) -> object:
-        """Fall through to source modules for names not in bridge's namespace."""
         for mod in self._sources:
             try:
                 return getattr(mod, name)

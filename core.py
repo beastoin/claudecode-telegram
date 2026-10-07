@@ -1,22 +1,3 @@
-"""Shared infrastructure for the claudecode-telegram bridge.
-
-This module contains types, constants, DI seams, and logging used by
-telegram.py, claudecode.py, and bridge.py. It imports nothing from
-those modules — dependencies flow one direction only:
-
-    core.py  (this file — foundation, no internal imports)
-      ↓
-    telegram.py      (Telegram API, owns ChatId/MessageId/etc.)
-    claudecode.py    (worker management, owns WorkerState/TmuxSession/etc.)
-      ↓
-    bridge.py        (composition root — HTTP server, routing, wires everything)
-
-Each downstream module can be imported independently:
-    python3 -c "import core"         # works
-    python3 -c "import telegram"     # works (imports core, not bridge)
-    python3 -c "import claudecode"   # works (imports core, not bridge)
-"""
-
 from __future__ import annotations
 
 import http.client
@@ -28,7 +9,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol, runtime_checkable
+from typing import Callable, Literal, Protocol, runtime_checkable
 
 
 # ── Version ────────────────────────────────────────────────────────────
@@ -37,17 +18,13 @@ VERSION = "0.47.0"
 
 
 # ── Safe JSON field accessors ──────────────────────────────────────────
-# TypedDict .get() returns field type | None for total=False.
-# These narrow to concrete types so callers can .strip(), compare, etc.
 
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
-    """Extract a string field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     return str(val) if val is not None else default
 
 
 def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
-    """Extract an int field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     if isinstance(val, int):
         return val
@@ -60,13 +37,11 @@ def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
 
 
 def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
-    """Extract a dict field, returning empty dict if missing or wrong type."""
     val = d.get(key)
     return val if isinstance(val, dict) else {}
 
 
 def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
-    """Extract a bool field from a parsed JSON dict, with type narrowing."""
     val = d.get(key, default)
     return bool(val)
 
@@ -81,11 +56,6 @@ _LOG_DEBUG: str = "DEBUG"
 
 def _log(level: str, component: str, msg: str | Path, *,
          exc: BaseException | None = None) -> None:
-    """Emit a structured log line to stderr.
-
-    Format: [LEVEL:component] message
-    Optionally appends a traceback if exc is provided.
-    """
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         import traceback as _tb
@@ -93,10 +63,6 @@ def _log(level: str, component: str, msg: str | Path, *,
 
 
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
-    """Call func(*args, **kwargs) and log on failure instead of crashing.
-
-    Returns the function result on success, None on failure.
-    """
     try:
         return func(*args, **kwargs)
     except Exception as exc:
@@ -107,7 +73,6 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
 # ── DI seams (injectable for testing) ──────────────────────────────────
 
 class MarkdownToken(Protocol):
-    """Protocol for markdown-it-py inline tokens."""
     type: str
     content: str
     children: list['MarkdownToken'] | None
@@ -115,32 +80,22 @@ class MarkdownToken(Protocol):
 
 
 class SubprocessRunner(Protocol):
-    """Abstraction over subprocess.run and subprocess.Popen for test injection."""
-
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        """Execute a subprocess command and wait for completion."""
         ...
 
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
-        """Spawn a subprocess without waiting for completion."""
         ...
 
 
 class Clock(Protocol):
-    """Abstraction over time for deterministic testing."""
-
     def time(self) -> float:
-        """Return the current time in seconds since epoch."""
         ...
 
     def sleep(self, seconds: float) -> None:
-        """Sleep for the given number of seconds."""
         ...
 
 
 class _RealSubprocessRunner:
-    """Production subprocess runner — delegates to subprocess.run/Popen."""
-
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
@@ -149,8 +104,6 @@ class _RealSubprocessRunner:
 
 
 class _RealClock:
-    """Production clock — delegates to the time module."""
-
     def time(self) -> float:
         return time.time()
 
@@ -158,15 +111,12 @@ class _RealClock:
         time.sleep(seconds)
 
 
-# Module-level singletons (overridable in tests)
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
 
 
 # ── HTTP client infrastructure ────────────────────────────────────────
-# Connection pooling, rate limiting, and exponential backoff retry for
-# all outbound HTTP calls to third-party services.
 
 import http.cookiejar
 import threading
@@ -174,28 +124,20 @@ import urllib.error
 
 @dataclass(frozen=True)
 class RetryConfig:
-    """Configuration for exponential backoff retry."""
     max_retries: int = 3
-    initial_delay: float = 1.0        # seconds
-    max_delay: float = 60.0           # cap per retry
-    backoff_factor: float = 2.0       # delay *= factor each retry
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    backoff_factor: float = 2.0
     retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 
 @dataclass(frozen=True)
 class RateLimitConfig:
-    """Token-bucket rate limiter configuration."""
-    requests_per_second: float = 30.0  # Telegram limit: 30 msg/sec
-    burst: int = 30                    # allow short bursts
+    requests_per_second: float = 30.0
+    burst: int = 30
 
 
 class _TokenBucket:
-    """Thread-safe token-bucket rate limiter.
-
-    Allows up to `burst` requests immediately, then refills at
-    `rate` tokens per second.  call acquire() before each request.
-    """
-
     def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
         self._rate = rate
         self._burst = burst
@@ -205,10 +147,6 @@ class _TokenBucket:
         self._lock = threading.Lock()
 
     def acquire(self, timeout: float = 30.0) -> bool:
-        """Block until a token is available or timeout expires.
-
-        Returns True if acquired, False if timed out.
-        """
         deadline = self._clock.time() + timeout
         while True:
             with self._lock:
@@ -219,7 +157,6 @@ class _TokenBucket:
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return True
-            # Wait a fraction of the refill interval
             wait = min(1.0 / self._rate, deadline - self._clock.time())
             if wait <= 0:
                 return False
@@ -227,19 +164,6 @@ class _TokenBucket:
 
 
 class HttpClient:
-    """HTTP client with connection pooling, rate limiting, and retry.
-
-    Drop-in replacement for raw urllib calls.  Each host gets its own
-    persistent HTTP(S) connection (keep-alive), requests are rate-limited
-    via a token-bucket, and transient errors trigger exponential backoff.
-
-    Usage:
-        client = HttpClient()
-        resp = client.request("https://api.telegram.org/bot.../sendMessage",
-                              data=b'{"chat_id":...}',
-                              headers={"Content-Type": "application/json"})
-    """
-
     def __init__(  # type: ignore[explicit-any]
         self,
         retry: RetryConfig | None = None,
@@ -252,19 +176,16 @@ class HttpClient:
         self._clock = clock or _RealClock()
         self._urlopen_fn = urlopen or urllib.request.urlopen
 
-        # Per-host connection pools (keep-alive via HTTPHandler)
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPHandler(),
             urllib.request.HTTPSHandler(),
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
         )
 
-        # Per-host rate limiters
         self._limiters: dict[str, _TokenBucket] = {}
         self._limiters_lock = threading.Lock()
 
     def _get_limiter(self, host: str) -> _TokenBucket:
-        """Get or create a rate limiter for a given host."""
         with self._limiters_lock:
             if host not in self._limiters:
                 self._limiters[host] = _TokenBucket(
@@ -284,16 +205,10 @@ class HttpClient:
         timeout: float = 30.0,
         retry: RetryConfig | None = None,
     ) -> http.client.HTTPResponse:
-        """Make an HTTP request with rate limiting and exponential backoff.
-
-        Raises the last exception if all retries fail.
-        Raises TimeoutError if rate limiter times out.
-        """
         from urllib.parse import urlparse
         host = urlparse(url).hostname or "localhost"
         cfg = retry or self._retry
 
-        # Rate limit
         limiter = self._get_limiter(host)
         if not limiter.acquire(timeout=timeout):
             raise TimeoutError(f"Rate limit timeout for {host}")
@@ -326,26 +241,21 @@ class HttpClient:
 
     def get(self, url: str, *, timeout: float = 30.0,
             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
-        """GET with retry and rate limiting."""
         return self.request(url, method="GET", timeout=timeout, retry=retry)
 
     def post(self, url: str, data: bytes, *, headers: dict[str, str] | None = None,
              timeout: float = 30.0,
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
-        """POST with retry and rate limiting."""
         return self.request(url, method="POST", data=data, headers=headers,
                             timeout=timeout, retry=retry)
 
     def head(self, url: str, *, timeout: float = 30.0,
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
-        """HEAD with retry and rate limiting."""
         return self.request(url, method="HEAD", timeout=timeout, retry=retry)
 
 
-# Default client instance — import this for production use
 _http_client: HttpClient = HttpClient()
 
-# Telegram-specific client with tighter rate limit (30 msg/sec global)
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
     retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
@@ -353,8 +263,6 @@ _tg_http_client: HttpClient = HttpClient(
 
 
 # ── Node-derived configuration ─────────────────────────────────────────
-# NODE_NAME drives defaults for PORT, TMUX_PREFIX, SESSIONS_DIR.
-# Explicit env vars always override.
 
 NODE_NAME = os.environ.get("NODE_NAME", "")
 
@@ -380,7 +288,6 @@ else:
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 
-# BRIDGE_URL: hook callback target. Only non-localhost URLs honored from env.
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
 if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
     BRIDGE_URL = _bridge_url_env
@@ -389,8 +296,6 @@ else:
 
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
-    # Bind to the specific IP from BRIDGE_PUBLIC_URL (e.g., 100.125.36.102)
-    # instead of 0.0.0.0 — avoids exposing the bridge on the public interface.
     from urllib.parse import urlparse as _urlparse_pub
     _pub_host = _urlparse_pub(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
@@ -405,7 +310,6 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 NODE_DIR = SESSIONS_DIR.parent if NODE_NAME else SESSIONS_DIR.parent
 
-# Derived node name for /tmp isolation
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
 
 MACHINES_CONFIG_FILE = Path(os.environ.get(
@@ -416,7 +320,6 @@ MACHINES_CONFIG_FILE = Path(os.environ.get(
 
 # ── Timeouts (seconds) ─────────────────────────────────────────────────
 
-# Subprocess
 TIMEOUT_TMUX_CHECK = 3
 TIMEOUT_TMUX_SEND = 5
 TIMEOUT_REMOTE_CMD = 10
@@ -425,17 +328,11 @@ TIMEOUT_GIT_OP = 30
 TIMEOUT_LARGE_TRANSFER = 60
 TIMEOUT_RSYNC = 120
 TIMEOUT_FULL_SYNC = 600
-
-# HTTP
 TIMEOUT_HTTP_API = 10
 TIMEOUT_HTTP_DOWNLOAD = 30
 TIMEOUT_HTTP_UPLOAD = 60
-
-# Process lifecycle
 TIMEOUT_PROCESS_WAIT = 3
 TIMEOUT_THREAD_JOIN = 1.0
-
-# Delays
 DELAY_TMUX_SEND = 0.3
 DELAY_PIPE_POLL = 0.5
 DELAY_STARTUP = 1.0
@@ -463,7 +360,6 @@ _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 
 PERSISTENCE_NOTE = "They'll stay on your team."
 
-# Voice mode: STT
 STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 
@@ -475,7 +371,6 @@ admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else Non
 
 @dataclass(frozen=True)
 class WatchdogConfig:
-    """Watchdog timing and threshold configuration (immutable)."""
     interval: int = 4
     start_grace: int = 30
     think_grace: int = 30
@@ -491,7 +386,6 @@ class WatchdogConfig:
 
 @dataclass(frozen=True)
 class ResourceAlertConfig:
-    """Resource monitoring thresholds and cooldowns (immutable)."""
     disk_warn_pct: int = 85
     disk_alert_pct: int = 95
     disk_alert_gb: int = 5
@@ -511,7 +405,6 @@ class ResourceAlertConfig:
 
 @dataclass(frozen=True)
 class MediaConfig:
-    """Media handling limits and extension sets (immutable)."""
     max_file_size: int = 50 * 1024 * 1024
     photo_max_sum: int = 10000
     photo_max_dim: int = 5000
@@ -519,7 +412,6 @@ class MediaConfig:
 
 @dataclass(frozen=True)
 class TunnelConfig:
-    """Tunnel lifecycle configuration (immutable)."""
     mode: Literal["auto", "poll", "provided", "none"] = "poll"
     provided_url: str = ""
     cloudflared_binary: str = "cloudflared"
@@ -529,7 +421,7 @@ class TunnelConfig:
     watchdog_interval: int = 10
     reachability_timeout: int = 10
     webhook_retry_delays: tuple[int, ...] = (0, 5, 10, 20, 40, 80)
-    webhook_check_cycles: int = 6  # check every N watchdog cycles (~60s)
+    webhook_check_cycles: int = 6
     poll_timeout: int = 30
     poll_error_delay: int = 2
     port_wait_timeout: int = 30
@@ -541,7 +433,6 @@ TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
 
 def _build_tunnel_config() -> TunnelConfig:
-    """Build TunnelConfig from environment variables."""
     mode: Literal["auto", "poll", "provided", "none"]
     tunnel_url = TUNNEL_URL
     raw = TUNNEL_MODE.lower()
@@ -572,7 +463,7 @@ CPU_ACTIVE = _wd_cfg.cpu_active
 CPU_IDLE = _wd_cfg.cpu_idle
 IDLE_STREAK_STUCK = _wd_cfg.idle_streak_stuck
 ALERT_COOLDOWN = _wd_cfg.alert_cooldown
-RESTART_COOLDOWN = _res_cfg.disk_cooldown  # re-exported for compat
+RESTART_COOLDOWN = _res_cfg.disk_cooldown
 
 
 # ── Derived resource constants ──────────────────────────────────────────
@@ -602,7 +493,6 @@ TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
 
 @dataclass
 class AppContext:
-    """Injectable application configuration — replaces scattered module globals."""
     bot_token: str = ""
     port: int = 8270
     bridge_bind: str = "127.0.0.1"
@@ -629,7 +519,6 @@ class AppContext:
 
 
 def _build_app_context() -> AppContext:
-    """Build AppContext from current module globals."""
     return AppContext(
         bot_token=BOT_TOKEN,
         port=PORT,
@@ -652,7 +541,6 @@ def _build_app_context() -> AppContext:
 _app_context: AppContext | None = None
 
 def get_app_context() -> AppContext:
-    """Get the singleton AppContext. Built on first call from module globals."""
     global _app_context
     if _app_context is None:
         _app_context = _build_app_context()
