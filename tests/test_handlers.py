@@ -60,6 +60,7 @@ def _make_handler():
     handler._send_json = bridge.Handler._send_json.__get__(handler, bridge.Handler)
     handler._send_text = bridge.Handler._send_text.__get__(handler, bridge.Handler)
     handler._send_error_json = bridge.Handler._send_error_json.__get__(handler, bridge.Handler)
+    handler._parse_body = bridge.Handler._parse_body.__get__(handler, bridge.Handler)
     handler._validate_response_source = bridge.Handler._validate_response_source.__get__(handler, bridge.Handler)
     return handler
 

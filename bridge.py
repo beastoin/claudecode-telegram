@@ -2003,6 +2003,15 @@ class WorkerManager:
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
         return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
 
+    def _pipe_worker_entry(self, name: str, peer_host: str | None, caller_host: str | None) -> WorkerEndpointInfo:
+        pipe_path = ensure_worker_pipe(name)
+        pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
+        return cast(WorkerEndpointInfo, {
+            "name": name, "machine": peer_host or BRIDGE_SSH_TARGET, "protocol": "pipe",
+            "address": str(pipe_path), "send_example": self._wrap_for_caller(pipe_cmd, peer_host, caller_host),
+            "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze.",
+        })
+
     def get_workers(self, caller_from: str | None = None) -> list[WorkerEndpointInfo]:
         self._sync_paths()
         workers: list[WorkerEndpointInfo] = []
@@ -2013,16 +2022,10 @@ class WorkerManager:
                 msg_url = callback_url.rstrip("/")
                 if not msg_url.endswith("/msg"): msg_url = f"{msg_url}/msg"
                 payload = json.dumps({"from": "YOUR_NAME", "text": "your message here"})
-                send_example = (
-                    f"curl -sS -X POST {shlex.quote(msg_url)} "
-                    f"-H 'Content-Type: application/json' "
-                    f"--data-raw {shlex.quote(payload)}" )
                 workers.append(cast(WorkerEndpointInfo, {
-                    "name": name,
-                    "machine": info.get("host", "") or BRIDGE_SSH_TARGET,
-                    "protocol": "http",
-                    "address": msg_url,
-                    "send_example": send_example,
+                    "name": name, "machine": info.get("host", "") or BRIDGE_SSH_TARGET,
+                    "protocol": "http", "address": msg_url,
+                    "send_example": f"curl -sS -X POST {shlex.quote(msg_url)} -H 'Content-Type: application/json' --data-raw {shlex.quote(payload)}",
                     "note": "HTTP callback worker. POST JSON with from/text. Always set from to your worker name.",
                 }))
                 continue
@@ -2032,24 +2035,11 @@ class WorkerManager:
 
             if "tmux" not in info:
                 if not backend.is_interactive:
-                    pipe_path = ensure_worker_pipe(name)
-                    pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
-                    send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
-                    workers.append(cast(WorkerEndpointInfo, {
-                        "name": name,
-                        "machine": peer_host or BRIDGE_SSH_TARGET,
-                        "protocol": "pipe",
-                        "address": str(pipe_path),
-                        "send_example": send_example,
-                        "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
-                    }))
+                    workers.append(self._pipe_worker_entry(name, peer_host, caller_host))
                 else:
                     workers.append(cast(WorkerEndpointInfo, {
-                        "name": name,
-                        "machine": peer_host or BRIDGE_SSH_TARGET,
-                        "protocol": "none",
-                        "address": "",
-                        "status": "exited",
+                        "name": name, "machine": peer_host or BRIDGE_SSH_TARGET,
+                        "protocol": "none", "address": "", "status": "exited",
                         "note": f"Worker exited. Use /restart {name} to bring back.",
                     }))
                 continue
@@ -2057,24 +2047,11 @@ class WorkerManager:
             if not backend.is_interactive:
                 if peer_host:
                     workers.append(cast(WorkerEndpointInfo, {
-                        "name": name,
-                        "machine": peer_host,
-                        "protocol": "adapter",
+                        "name": name, "machine": peer_host, "protocol": "adapter",
                         "address": f"{peer_host}:{info.get('tmux', '')}",
                         "note": f"Non-interactive ({backend_name}) on {peer_host}. Use @{name} from Telegram or bridge API.",
                     }))
-                else:
-                    pipe_path = ensure_worker_pipe(name)
-                    pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
-                    send_example = self._wrap_for_caller(pipe_cmd, peer_host, caller_host)
-                    workers.append(cast(WorkerEndpointInfo, {
-                        "name": name,
-                        "machine": peer_host or BRIDGE_SSH_TARGET,
-                        "protocol": "pipe",
-                        "address": str(pipe_path),
-                        "send_example": send_example,
-                        "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze."
-                    }))
+                else: workers.append(self._pipe_worker_entry(name, peer_host, caller_host))
             else:
                 tmux_name = info.get("tmux")
                 tmux_cmd = (
@@ -4332,8 +4309,10 @@ def switch_session(name: str) -> tuple[bool, str | None]:
     save_last_active(name)
     return True, None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+def _notify_admin(msg: str) -> None:
+    try:
+        if admin_chat_id: send_telegram_message(admin_chat_id, msg)
+    except (urllib.error.URLError, OSError, TimeoutError): pass
 
 def send_typing_loop(chat_id: int | str, session_name: str) -> None:
     while is_pending(session_name):
@@ -4455,11 +4434,7 @@ def _fanout_channel_message(channel_id: str, from_member: str,
                         "channel": channel_id, "text": text, "ts": msg["ts"],
                     })
         elif minfo["type"] == "manager":
-            try:
-                if admin_chat_id:
-                    send_telegram_message(admin_chat_id, f"[{channel_id}] {from_member}: {text}")
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+            _notify_admin(f"[{channel_id}] {from_member}: {text}")
 
 class CommandRouter:
     # ── Teleport Commands ──────────────────────────────────────────────
@@ -6776,65 +6751,45 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         parts.append(f'<div class="a-text markdown" data-md="{b64}"></div>')
                 elif ct == "tool_use":
                     tn = item.get("name", "?"); ti = item.get("input", {})
-                    tool_svg = _tool_svgs.get(tn, _default_tool_svg); inp = ""; is_fp = False
-                    if tn in ("Read", "Write"):
-                        inp = ti.get("file_path", ""); is_fp = bool(inp and "/" in inp)
-                    elif tn == "Edit":
-                        inp = ti.get("file_path", ""); is_fp = bool(inp and "/" in inp)
-                    elif tn == "Glob": inp = ti.get("pattern", "")
-                    elif tn == "Bash": inp = ti.get("command", "")
-                    elif tn in ("Grep", "Search"): inp = ti.get("pattern", "")
+                    tool_svg = _tool_svgs.get(tn, _default_tool_svg)
+                    _INPUT_KEYS = {"Read": "file_path", "Write": "file_path", "Edit": "file_path",
+                                   "Glob": "pattern", "Bash": "command", "Grep": "pattern", "Search": "pattern"}
+                    key = _INPUT_KEYS.get(tn)
+                    if key: inp = ti.get(key, "")
                     elif tn == "Agent": inp = ti.get("description", "") or str(ti.get("prompt", ""))[:80]
                     else: inp = json.dumps(ti, ensure_ascii=False)[:200]
+                    is_fp = tn in ("Read", "Write", "Edit") and inp and "/" in inp
                     inp = str(inp)[:300]; tool_id = item.get("id", ""); tr = tool_results.get(tool_id, {})
                     tr_text = tr.get("content", ""); tr_err = tr.get("is_error", False)
-                    _skip_result = (not tr_text or tr_text == "Bash completed with no output"
-                                    or tr_text.strip() == "")
+                    has_result = bool(tr_text and tr_text.strip() and tr_text != "Bash completed with no output")
                     tr_esc = ""
-                    if not _skip_result:
+                    if has_result:
                         tr_str = str(tr_text)[:5000]; tr_esc = esc(tr_str)
                         if len(str(tr_text)) > 5000: tr_esc += "\n… truncated"
+                    err_cls = " act-err" if tr_err else ""
 
                     if tn == "Edit" and ti.get("old_string") is not None:
-                        file_path_esc = esc(ti.get("file_path", "?")); old_s = ti.get("old_string", "")
-                        new_s = ti.get("new_string", ""); old_lines = old_s.splitlines(True)
-                        new_lines = new_s.splitlines(True); n_del = len(old_lines); n_add = len(new_lines)
-                        diff_html_lines = []; ln_old = 1
-                        for ln in old_lines[:60]:
-                            diff_html_lines.append(f'<div class="diff-del"><span class="diff-ln">{ln_old}</span><span class="diff-sign">-</span>{esc(ln.rstrip())}</div>')
-                            ln_old += 1
-                        ln_new = 1
-                        for ln in new_lines[:60]:
-                            diff_html_lines.append(f'<div class="diff-add"><span class="diff-ln">{ln_new}</span><span class="diff-sign">+</span>{esc(ln.rstrip())}</div>')
-                            ln_new += 1
-                        if len(old_lines) > 60 or len(new_lines) > 60:
-                            diff_html_lines.append('<div class="diff-ctx"><span class="diff-ln"></span><span class="diff-sign"> </span>… truncated</div>')
-                        diff_body = "\n".join(diff_html_lines); n_overlap = min(n_del, n_add)
-                        n_pure_add = n_add - n_overlap; n_pure_del = n_del - n_overlap
-                        stats_html = f'<span class="diff-stat"><span class="diff-plus">+{n_pure_add}</span> <span class="diff-minus">-{n_pure_del}</span> <span class="diff-mod">~{n_overlap}</span></span>'
-                        pp = file_path_esc.rsplit("/", 1)
-                        fp_html = f'<span class="fp-dir">{esc(pp[0])}/</span>{esc(pp[1])}' if len(pp) > 1 else esc(file_path_esc)
-                        err_cls = " act-err" if tr_err else ""
-                        parts.append(f'<details class="act diff-act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp_html}</span>{stats_html}{_chev}</summary><div class="diff-body">{diff_body}</div></details>')
+                        fp = esc(ti.get("file_path", "?")); old = ti.get("old_string", "").splitlines(True); new = ti.get("new_string", "").splitlines(True)
+                        dl = [f'<div class="diff-del"><span class="diff-ln">{i+1}</span><span class="diff-sign">-</span>{esc(l.rstrip())}</div>' for i, l in enumerate(old[:60])]
+                        dl += [f'<div class="diff-add"><span class="diff-ln">{i+1}</span><span class="diff-sign">+</span>{esc(l.rstrip())}</div>' for i, l in enumerate(new[:60])]
+                        if len(old) > 60 or len(new) > 60: dl.append('<div class="diff-ctx"><span class="diff-ln"></span><span class="diff-sign"> </span>… truncated</div>')
+                        no, na, nm = len(old), len(new), min(len(old), len(new))
+                        stats = f'<span class="diff-stat"><span class="diff-plus">+{na-nm}</span> <span class="diff-minus">-{no-nm}</span> <span class="diff-mod">~{nm}</span></span>'
+                        pp = fp.rsplit("/", 1); fp_h = f'<span class="fp-dir">{esc(pp[0])}/</span>{esc(pp[1])}' if len(pp) > 1 else fp
+                        parts.append(f'<details class="act diff-act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp_h}</span>{stats}{_chev}</summary><div class="diff-body">{chr(10).join(dl)}</div></details>')
                     elif tn == "Bash" and inp:
-                        body_parts = [f'<div class="act-cmd">{esc(inp)}</div>']
-                        if tr_esc:
-                            body_parts.append(f'<div class="act-out{" act-out-err" if tr_err else ""}">{tr_esc}</div>')
-                        err_cls = " act-err" if tr_err else ""
-                        parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="t-det">{esc(inp[:80])}</span>{_chev}</summary><div class="act-body">{"".join(body_parts)}</div></details>')
-                    elif is_fp:
-                        pp = inp.rsplit("/", 1); dp = esc(pp[0]) if len(pp) > 1 else ""; bp = esc(pp[-1])
-                        file_path_html = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
-                        if tr_esc and not _skip_result:
-                            err_cls = " act-err" if tr_err else ""
-                            parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{file_path_html}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
-                        else:
-                            parts.append(f'<div class="chip">{tool_svg}<span class="fp">{file_path_html}</span></div>')
+                        body_html = f'<div class="act-cmd">{esc(inp)}</div>'
+                        if tr_esc: body_html += f'<div class="act-out{" act-out-err" if tr_err else ""}">{tr_esc}</div>'
+                        parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="t-det">{esc(inp[:80])}</span>{_chev}</summary><div class="act-body">{body_html}</div></details>')
                     else:
-                        if tr_esc and not _skip_result:
-                            err_cls = " act-err" if tr_err else ""
-                            parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="t-det">{esc(inp[:80])}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
-                        else: parts.append(f'<div class="chip">{tool_svg}<span class="t-det">{esc(inp)}</span></div>')
+                        if is_fp:
+                            pp = inp.rsplit("/", 1); dp = esc(pp[0]) if len(pp) > 1 else ""; bp = esc(pp[-1])
+                            inner = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
+                            label = f'<span class="fp">{inner}</span>'
+                        else: label = f'<span class="t-det">{esc(inp[:80])}</span>'
+                        if tr_esc and has_result:
+                            parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}{label}{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
+                        else: parts.append(f'<div class="chip">{tool_svg}{label}</div>')
         elif isinstance(content, str) and content.strip():
             b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
             parts.append(f'<div class="a-text markdown" data-md="{b64}"></div>')
@@ -7056,30 +7011,30 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
                               file_size_str: str, total: int,
                               page: int, total_pages: int,
                               esc: Callable[[str], str]) -> str:
+    def _row(label: str, val: str) -> str: return f"<div class='sb-row'><span class='sb-label'>{label}</span><span class='sb-val'>{val}</span></div>"
+    _d = '<div class="sb-divider"></div>'
+    rows = [_row("Session", esc(sid[:12]))]
+    if stats["model"]: rows.append(_row("Model", esc(_format_model_name(stats["model"]))))
+    if stats["version"]: rows.append(_row("Version", esc(stats["version"])))
+    if stats["git_branch"]: rows.append(_row("Branch", esc(stats["git_branch"])))
+    rows.append(_d)
+    rows += [_row("Prompts", str(stats["n_user"])), _row("Tool calls", str(stats["n_tool"]))]
+    if stats["n_edit"]: rows.append(_row("Edits", str(stats["n_edit"])))
+    if stats["n_files"]: rows.append(_row("Files touched", str(stats["n_files"])))
+    if stats["lines_add"] or stats["lines_del"] or stats["lines_mod"]:
+        rows.append(_d + f'<div class="sb-lines"><span class="plus">+{stats["lines_add"]}</span><span class="minus">-{stats["lines_del"]}</span><span class="mod">~{stats["lines_mod"]}</span></div>')
+    if stats["duration"] or file_size_str or stats["input_tokens"]: rows.append(_d)
+    if stats["duration"]: rows.append(_row("Duration", esc(stats["duration"])))
+    if file_size_str: rows.append(_row("File size", esc(file_size_str)))
+    if stats["input_tokens"]: rows.append(_row("Input tokens", f'{stats["input_tokens"]:,}'))
+    if stats["output_tokens"]: rows.append(_row("Output tokens", f'{stats["output_tokens"]:,}'))
+    rows += [_d, _row("Total entries", str(total)), _row("Page", f"{page}/{total_pages}")]
+    sb = "\n".join(rows)
     return f'''</div>
 <aside class="sidebar"><div class="sidebar-inner">
 <div class="sb-title">Session Info</div>
-<div class="sb-row"><span class="sb-label">Session</span><span class="sb-val">{esc(sid[:12])}</span></div>
-{"<div class='sb-row'><span class='sb-label'>Model</span><span class='sb-val'>" + esc(_format_model_name(stats["model"])) + "</span></div>" if stats["model"] else ""}
-{"<div class='sb-row'><span class='sb-label'>Version</span><span class='sb-val'>" + esc(stats["version"]) + "</span></div>" if stats["version"] else ""}
-{"<div class='sb-row'><span class='sb-label'>Branch</span><span class='sb-val'>" + esc(stats["git_branch"]) + "</span></div>" if stats["git_branch"] else ""}
-<div class="sb-divider"></div>
-<div class="sb-row"><span class="sb-label">Prompts</span><span class="sb-val">{stats["n_user"]}</span></div>
-<div class="sb-row"><span class="sb-label">Tool calls</span><span class="sb-val">{stats["n_tool"]}</span></div>
-{"<div class='sb-row'><span class='sb-label'>Edits</span><span class='sb-val'>" + str(stats["n_edit"]) + "</span></div>" if stats["n_edit"] else ""}
-{"<div class='sb-row'><span class='sb-label'>Files touched</span><span class='sb-val'>" + str(stats["n_files"]) + "</span></div>" if stats["n_files"] else ""}
-{"<div class='sb-divider'></div><div class='sb-lines'><span class='plus'>+" + str(stats["lines_add"]) + "</span><span class='minus'>-" + str(stats["lines_del"]) + "</span><span class='mod'>~" + str(stats["lines_mod"]) + "</span></div>" if stats["lines_add"] or stats["lines_del"] or stats["lines_mod"] else ""}
-{"<div class='sb-divider'></div>" if stats["duration"] or file_size_str or stats["input_tokens"] else ""}
-{"<div class='sb-row'><span class='sb-label'>Duration</span><span class='sb-val'>" + esc(stats["duration"]) + "</span></div>" if stats["duration"] else ""}
-{"<div class='sb-row'><span class='sb-label'>File size</span><span class='sb-val'>" + esc(file_size_str) + "</span></div>" if file_size_str else ""}
-{"<div class='sb-row'><span class='sb-label'>Input tokens</span><span class='sb-val'>" + f'{stats["input_tokens"]:,}' + "</span></div>" if stats["input_tokens"] else ""}
-{"<div class='sb-row'><span class='sb-label'>Output tokens</span><span class='sb-val'>" + f'{stats["output_tokens"]:,}' + "</span></div>" if stats["output_tokens"] else ""}
-<div class="sb-divider"></div>
-<div class="sb-row"><span class="sb-label">Total entries</span><span class="sb-val">{total}</span></div>
-<div class="sb-row"><span class="sb-label">Page</span><span class="sb-val">{page}/{total_pages}</span></div>
-</div></aside>
-</div>
-</div>
+{sb}
+</div></aside></div></div>
 <div class="jump">
 <a href="#" title="Top" onclick="window.scrollTo(0,0);return false">↑</a>
 <a href="#" title="Bottom" onclick="window.scrollTo(0,document.body.scrollHeight);return false">↓</a>
@@ -7176,55 +7131,42 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                         if isinstance(rt, list):
                             rt = "\n".join(str(r.get("text", "")) for r in rt if isinstance(r, dict) and r.get("type") == "text")
                         _tool_results[tuid] = cast(ToolResultDict, {"content": str(rt), "is_error": bool(item.get("is_error"))})
-    _url_prefix = live_base_url + "?" if live_base_url else "?"; qs_parts = []
-    if token: qs_parts.append(f"token={esc(token)}")
-    if session_id: qs_parts.append(f"sid={esc(session_id)}")
-    if per_page != 50: qs_parts.append(f"per_page={per_page}")
-    if search_query: qs_parts.append(f"q={esc(search_query)}")
-    if filter_mode: qs_parts.append(f"filter={esc(filter_mode)}")
-    qs_base = "&".join(qs_parts)
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+    def _qs(*extras: str) -> str:
+        parts = []
+        if token: parts.append(f"token={esc(token)}")
+        if session_id: parts.append(f"sid={esc(session_id)}")
+        if per_page != 50: parts.append(f"per_page={per_page}")
+        parts.extend(extras)
+        return "&".join(parts)
+    qs_base = _qs(*(([f"q={esc(search_query)}"] if search_query else []) + ([f"filter={esc(filter_mode)}"] if filter_mode else [])))
 
     def page_url(p: int | str) -> str:
-        parts = [f"page={p}"]
-        if qs_base: parts.append(qs_base)
-        return _url_prefix + "&".join(parts)
+        return _url_prefix + (f"page={p}&{qs_base}" if qs_base else f"page={p}")
 
     nav_html = ""
     if total_pages > 1:
-        nav_items = []
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(1)}">First</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(page-1)}">Prev</a>')
-        start_p = max(1, page - 3); end_p = min(total_pages, start_p + 6); start_p = max(1, end_p - 6)
-        for p in range(start_p, end_p + 1):
-            cls = " pg-cur" if p == page else ""
-            nav_items.append(f'<a class="pg-btn{cls}" href="{page_url(p)}">{p}</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(page+1)}">Next</a>')
-        nav_items.append(f'<a class="pg-btn{" pg-dis" if page >= total_pages else ""}" href="{page_url(total_pages)}">Last</a>')
+        def _pg(label: str, p: int, dis: bool = False, cur: bool = False) -> str:
+            cls = " pg-dis" if dis else (" pg-cur" if cur else "")
+            return f'<a class="pg-btn{cls}" href="{page_url(p)}">{label}</a>'
+        start_p = max(1, min(page - 3, total_pages - 6)); end_p = min(total_pages, start_p + 6)
+        nav_items = [_pg("First", 1, page <= 1), _pg("Prev", page - 1, page <= 1)]
+        nav_items += [_pg(str(p), p, cur=(p == page)) for p in range(start_p, end_p + 1)]
+        nav_items += [_pg("Next", page + 1, page >= total_pages), _pg("Last", total_pages, page >= total_pages)]
         nav_html = f'<nav class="pg">{"".join(nav_items)}<span class="pg-info">Page {page}/{total_pages} ({total} entries)</span></nav>'
     search_val = esc(search_query) if search_query else ""; search_result = ""
     if search_query:
         sort_label = "by time" if search_sort == "time" else "by relevance"
         alt_sort = "time" if search_sort == "relevance" else "relevance"
-        alt_label = "time" if search_sort == "relevance" else "relevance"; sort_qs = []
-        if token: sort_qs.append(f"token={esc(token)}")
-        if session_id: sort_qs.append(f"sid={esc(session_id)}")
-        sort_qs.append(f"q={esc(search_query)}")
-        if per_page != 50: sort_qs.append(f"per_page={per_page}")
-        sort_qs.append(f"sort={alt_sort}")
-        sort_url = f'{_url_prefix}{"&".join(sort_qs)}'
+        sort_url = _url_prefix + _qs(f"q={esc(search_query)}", f"sort={alt_sort}")
         search_result = (
             f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" '
-            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>' )
-    _filt_qs = []
-    if token: _filt_qs.append(f"token={esc(token)}")
-    if session_id: _filt_qs.append(f"sid={esc(session_id)}")
-    if per_page != 50: _filt_qs.append(f"per_page={per_page}")
-    if filter_mode != "prompts": _filt_qs.append("filter=prompts")
-    prompts_filter_url = _url_prefix + "&".join(_filt_qs) if _filt_qs else _url_prefix.rstrip("?"); filter_banner = ""
+            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_sort}</a></div>' )
+    filt_qs = _qs("filter=prompts") if filter_mode != "prompts" else _qs()
+    prompts_filter_url = _url_prefix + filt_qs if filt_qs else _url_prefix.rstrip("?"); filter_banner = ""
     if filter_mode == "prompts":
-        _clear_qs = [p for p in _filt_qs]
-        _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
-        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
+        clear_url = _url_prefix + _qs() if _qs() else _url_prefix.rstrip("?")
+        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{clear_url}">show all</a></div>'
     return (_transcript_html_head(name, esc)
             + _transcript_html_nav(name, stats, prompts_filter_url, esc)
             + _transcript_html_entries(
@@ -7355,6 +7297,13 @@ def _checkin_do_restart(name: str, backend_name: str,
         with watchdog.restart_lock: watchdog.restart_in_progress.pop(name, None)
 
 class Handler(BaseHTTPRequestHandler):
+
+    def _parse_body(self, body: bytes) -> dict[str, object] | None:
+        try: return cast(dict[str, object], json.loads(body)) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            self._send_error_json(400, "invalid JSON")
+            return None
+
     # ── Guest Endpoints ────────────────────────────────────────────
 
     def _guest_auth(self, parsed: ParseResult | None = None) -> GuestSessionDict | None:
@@ -7426,11 +7375,7 @@ class Handler(BaseHTTPRequestHandler):
             f"    time.sleep(3)\n"
             f'"' )
 
-        try:
-            if admin_chat_id:
-                send_telegram_message(admin_chat_id, f"\U0001f514 Guest \"{name}\" connected")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+        _notify_admin(f"\U0001f514 Guest \"{name}\" connected")
         _log(_LOG_INFO, "guest", f"Guest registered: {name} (expires {expires_at})")
         self._send_json(200, {
             "ok": True,
@@ -7447,11 +7392,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_send(self, body: bytes = b"") -> None:
         parsed = urlparse(self.path); guest = self._guest_auth(parsed)
         if not guest: return
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "invalid JSON")
-            return
+        data = self._parse_body(body)
+        if data is None: return
 
         text = _str_field(data, "text").strip()
         if not text:
@@ -7470,29 +7412,13 @@ class Handler(BaseHTTPRequestHandler):
         registered = get_registered_sessions(); results = []
 
         for target in targets:
-            if target.startswith("#"):
-                ch_id = None
+            if target.startswith("#") or target.startswith("ch_"):
                 with channel_store.lock:
-                    for cid, ch in channel_store.channels.items():
-                        if ch["label"] == target[1:] and not channel_is_expired(ch):
-                            ch_id = cid
-                            break
-                if not ch_id:
-                    results.append({"target": target, "ok": False, "error": "channel not found"})
-                    continue
-                with channel_store.lock:
-                    target_ch: ChannelDict | None = channel_store.channels.get(ch_id)
-                    if not target_ch or from_member not in target_ch["members"]:
-                        results.append({"target": target, "ok": False, "error": "not a member"})
-                        continue
-                    msg = channel_append_message(target_ch, from_member, text)
-                    members_snapshot = dict(target_ch["members"])
-                _fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
-                results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
-
-            elif target.startswith("ch_"):
-                with channel_store.lock:
-                    channel = channel_store.channels.get(target)
+                    if target.startswith("#"):
+                        ch_id = next((cid for cid, ch in channel_store.channels.items()
+                                      if ch["label"] == target[1:] and not channel_is_expired(ch)), None)
+                    else: ch_id = target
+                    channel = channel_store.channels.get(ch_id) if ch_id else None
                     if not channel or channel_is_expired(channel):
                         results.append({"target": target, "ok": False, "error": "channel not found"})
                         continue
@@ -7501,8 +7427,8 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     msg = channel_append_message(channel, from_member, text)
                     members_snapshot = dict(channel["members"])
-                _fanout_channel_message(target, from_member, text, msg, members_snapshot, registered)
-                results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
+                _fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
+                results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
             elif target.startswith("guest:"):
                 target_guest = target.split(":", 1)[1]; msg_id = f"gm_{secrets.token_hex(4)}"
@@ -7533,23 +7459,15 @@ class Handler(BaseHTTPRequestHandler):
                     if worker not in notified:
                         if isinstance(notified, set): notified.add(worker)
                         guest["notified_workers"] = notified
-                        try:
-                            if admin_chat_id:
-                                send_telegram_message(admin_chat_id, f"\U0001f514 Guest \"{guest_name}\" → {worker}")
-                        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                            _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+                        _notify_admin(f"\U0001f514 Guest \"{guest_name}\" → {worker}")
                 results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
 
         if len(results) == 1: self._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
         else: self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "invalid JSON")
-            return
-
+        data = self._parse_body(body)
+        if data is None: return
         guest_name = _str_field(data, "guest").strip(); from_worker = _str_field(data, "from").strip()
         text = _str_field(data, "text").strip()
         if not guest_name or not text:
@@ -7616,11 +7534,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(403, "invalid token")
             return
 
-        try:
-            if admin_chat_id:
-                send_telegram_message(admin_chat_id, f"\U0001f514 Guest \"{guest['name']}\" disconnected")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            _log(_LOG_DEBUG, "notify:handle_guest_disconnect", f"{type(exc).__name__}: {exc}")
+        _notify_admin(f"\U0001f514 Guest \"{guest['name']}\" disconnected")
         _log(_LOG_INFO, "guest", f"Guest disconnected: {guest['name']}")
         self._send_json(200, {"ok": True, "name": guest["name"]})
 
@@ -7639,12 +7553,8 @@ class Handler(BaseHTTPRequestHandler):
         return guest
 
     def handle_channel_create(self, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "invalid JSON")
-            return
-
+        data = self._parse_body(body)
+        if data is None: return
         label = _str_field(data, "label").strip(); members = data.get("members", [])
         include_manager = _bool_field(data, "include_manager", True)
         ttl = min(_int_field(data, "ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
@@ -7674,12 +7584,7 @@ class Handler(BaseHTTPRequestHandler):
             channel_store.channels[channel_id] = channel
             _channel_save()
         member_str = ", ".join(valid_members)
-        try:
-            if admin_chat_id:
-                send_telegram_message(admin_chat_id,
-                    f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+        _notify_admin(f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
         _log(_LOG_INFO, "channel", f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
         self._send_json(200, {
             "ok": True,
@@ -7691,12 +7596,8 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "invalid JSON")
-            return
-
+        data = self._parse_body(body)
+        if data is None: return
         with channel_store.lock:
             channel = channel_store.channels.get(channel_id)
             if not channel or channel_is_expired(channel):
@@ -7710,14 +7611,8 @@ class Handler(BaseHTTPRequestHandler):
             current = list(channel["members"].keys())
 
         if added or removed:
-            try:
-                if admin_chat_id:
-                    parts = []
-                    if added: parts.append(f"added {', '.join(added)}")
-                    if removed: parts.append(f"removed {', '.join(removed)}")
-                    send_telegram_message(admin_chat_id, f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                _log(_LOG_DEBUG, "notify:handle_channel_members", f"{type(exc).__name__}: {exc}")
+            parts = (["added " + ", ".join(added)] if added else []) + (["removed " + ", ".join(removed)] if removed else [])
+            _notify_admin(f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
         self._send_json(200, {
             "ok": True,
             "channel": channel_id,
@@ -7727,12 +7622,8 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "invalid JSON")
-            return
-
+        data = self._parse_body(body)
+        if data is None: return
         text = _str_field(data, "text").strip()
         if not text:
             self._send_error_json(400, "text required")
@@ -7781,18 +7672,13 @@ class Handler(BaseHTTPRequestHandler):
                         "ts": msg["ts"],
                     })
             elif info["type"] == "manager":
-                try:
-                    if admin_chat_id:
-                        send_telegram_message(admin_chat_id, f"[{channel_id}] {from_member}: {text}")
-                except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                    _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+                _notify_admin(f"[{channel_id}] {from_member}: {text}")
         self._send_json(200, { "ok": True, "channel": channel_id, "message_id": msg["id"], "seq": msg["seq"],
         })
 
     def handle_channel_messages(self, channel_id: str, parsed: ParseResult) -> None:
         query_params = parse_qs(parsed.query); after = query_params.get("after", [None])[0]
-        token = query_params.get("token", [None])[0]
-
+        token = query_params.get("token", [None])[0]; from_member = None
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
             with guest_store.lock: guest = guest_store.guests.get(token_hash)
@@ -7800,23 +7686,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error_json(403, "invalid or expired token")
                 return
             from_member = f"guest:{guest['name']}"
-            with channel_store.lock:
-                channel = channel_store.channels.get(channel_id)
-                if not channel or channel_is_expired(channel):
-                    self._send_error_json(404, "channel not found")
-                    return
-                if from_member not in channel["members"]:
-                    self._send_error_json(403, "not a member of this channel")
-                    return
-                msgs, truncated = channel_get_messages(channel, after)
-        else:
-            with channel_store.lock:
-                channel = channel_store.channels.get(channel_id)
-                if not channel or channel_is_expired(channel):
-                    self._send_error_json(404, "channel not found")
-                    return
-                msgs, truncated = channel_get_messages(channel, after)
-        resp = { "ok": True, "channel": channel_id, "messages": msgs, }
+        with channel_store.lock:
+            channel = channel_store.channels.get(channel_id)
+            if not channel or channel_is_expired(channel):
+                self._send_error_json(404, "channel not found")
+                return
+            if from_member and from_member not in channel["members"]:
+                self._send_error_json(403, "not a member of this channel")
+                return
+            msgs, truncated = channel_get_messages(channel, after)
+        resp: dict[str, object] = {"ok": True, "channel": channel_id, "messages": msgs}
         if truncated: resp["truncated"] = True
         self._send_json(200, resp)
 
@@ -7857,11 +7736,7 @@ class Handler(BaseHTTPRequestHandler):
         if not channel:
             self._send_error_json(404, "channel not found")
             return
-        try:
-            if admin_chat_id:
-                send_telegram_message(admin_chat_id, f"\U0001f4e2 Channel {channel_id} closed")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            _log(_LOG_DEBUG, "notify:handle_channel_delete", f"{type(exc).__name__}: {exc}")
+        _notify_admin(f"\U0001f4e2 Channel {channel_id} closed")
         _log(_LOG_INFO, "channel", f"Channel deleted: {channel_id}")
         self._send_json(200, {"ok": True, "channel": channel_id})
 
@@ -8498,11 +8373,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_json(200, _get_connectors_status())
 
     def handle_connectors_restart(self, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "Invalid JSON")
-            return
+        data = self._parse_body(body)
+        if data is None: return
         name = str(data.get("name", "")).strip().lower()
         if not name:
             self._send_error_json(400, "Missing 'name' (gmail or github)")
@@ -8511,12 +8383,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self._send_json(200 if ok else 500, {"ok": ok, "name": name, "message": msg})
 
     def handle_send_endpoint(self, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            self._send_error_json(400, "Invalid JSON")
-            return
-
+        data = self._parse_body(body)
+        if data is None: return
         worker = _str_field(data, "worker").strip(); message = _str_field(data, "message") or _str_field(data, "text")
         sender = _str_field(data, "from", "system").strip() or "system"
         if not worker:
