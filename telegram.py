@@ -764,8 +764,7 @@ class LocalTransport(MessageTransport):
             if v is not None: msg += f" {k}={v}"
         _log(_LOG_DEBUG, "local-transport", msg)
         if self._log_file:
-            with open(self._log_file, "a") as f:
-                f.write(msg + "\n")
+            with open(self._log_file, "a") as f: f.write(msg + "\n")
     _MSG_OK: TelegramApiResponse = {"ok": True, "result": {"message_id": 1}}
 
     def send_text(self, chat_id: ChatId, text: str, parse_mode: ParseMode = None, reply_to: MessageId | None = None) -> TelegramApiResponse:
@@ -1271,8 +1270,7 @@ def markdown_to_telegram_html(text: str) -> str:
             if tok.content: result.append(escape_html(tok.content))
         i += 1
     output = "".join(result).strip()
-    while "\n\n\n" in output:
-        output = output.replace("\n\n\n", "\n\n")
+    while "\n\n\n" in output: output = output.replace("\n\n\n", "\n\n")
     return _wrap_plain_tables(output)
 
 def _pipe_tables_to_html(text: str) -> str:
@@ -1424,8 +1422,7 @@ def update_bot_commands() -> None:
     commands = list(BOT_COMMANDS)
     import bridge as _br
     registered = _br.get_registered_sessions()
-    for name in sorted(registered.keys()):
-        commands.append({"command": name, "description": f"Message {name}"})
+    for name in sorted(registered.keys()): commands.append({"command": name, "description": f"Message {name}"})
     transport.setup_commands(commands)
     worker_count = len(registered)
     _log(_LOG_INFO, "telegram", f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
@@ -1773,8 +1770,7 @@ class TunnelManager:
             try:
                 url = f"https://api.telegram.org/bot{self._token}/getUpdates?offset={offset}&timeout={self._config.poll_timeout}"
                 req = urllib.request.Request(url)
-                with self._urlopen(req, timeout=self._config.poll_timeout + 5) as resp:
-                    data = json.loads(resp.read())
+                with self._urlopen(req, timeout=self._config.poll_timeout + 5) as resp: data = json.loads(resp.read())
 
                 if not data.get("ok"):
                     self._clock.sleep(1)

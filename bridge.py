@@ -727,8 +727,7 @@ def _ensure_bare_repo(project_name: str) -> str:
     return bare_path
 
 def _read_noninteractive_activity(worker_name: str) -> str:
-    with processes.adapter_pids_lock:
-        entry = processes.adapter_pids.get(worker_name)
+    with processes.adapter_pids_lock: entry = processes.adapter_pids.get(worker_name)
     if entry:
         proc, _ = entry
         if proc.poll() is None: return "adapter running"
@@ -1319,12 +1318,10 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
     return stats
 
 def mark_hook_event(session_name: str) -> None:
-    with watchdog.lock:
-        watchdog.last_hook_ts[session_name] = _clock.time()
+    with watchdog.lock: watchdog.last_hook_ts[session_name] = _clock.time()
 
 def kill_adapter(name: str) -> None:
-    with processes.adapter_pids_lock:
-        entry = processes.adapter_pids.pop(name, None)
+    with processes.adapter_pids_lock: entry = processes.adapter_pids.pop(name, None)
     if entry is None: return
     proc, stderr_fh = entry
     if proc and proc.poll() is None:
@@ -1361,8 +1358,7 @@ def _save_learning_reminder_state() -> None:
     if not path: return
     try:
         tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(learning_reminders.state, f)
+        with open(tmp, "w") as f: json.dump(learning_reminders.state, f)
         os.replace(tmp, path)
     except OSError as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state save error: {e}")
@@ -1411,8 +1407,7 @@ def _scan_idle_workers() -> None:
                 since_reminder = now - st.get("last_reminder_ts", now)
                 if idle_seconds >= idle_threshold and since_reminder >= idle_threshold: to_fire.append(name)
 
-            for name in to_fire:
-                _fire_reminder(name, learning_reminders.state[name])
+            for name in to_fire: _fire_reminder(name, learning_reminders.state[name])
     except KeyError as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder idle scan error: {e}")
     finally:
@@ -1462,8 +1457,7 @@ def _save_registry(data: RegistryFileDict) -> None:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(NODE_DIR), suffix=".tmp")
         try:
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(data, f)
+            with os.fdopen(tmp_fd, "w") as f: json.dump(data, f)
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, str(WORKER_REGISTRY_FILE))
         except OSError:
@@ -1519,8 +1513,7 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
         else: watchdog.worker_cwds.pop(name, None)
 
 def _get_worker_cwd(name: str) -> str:
-    with watchdog.lock:
-        cwd = watchdog.worker_cwds.get(name)
+    with watchdog.lock: cwd = watchdog.worker_cwds.get(name)
     return cwd if isinstance(cwd, str) else ""
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
@@ -1781,8 +1774,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
     log_path = get_session_dir(name) / "adapter.log"
     if not log_path.exists(): return ""
     try:
-        with log_path.open("r", errors="ignore") as fh:
-            lines = fh.readlines()
+        with log_path.open("r", errors="ignore") as fh: lines = fh.readlines()
         return "".join(lines[-tail_lines:])
     except OSError:
         return ""
@@ -1791,15 +1783,13 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     if admin_chat_id is None: return
 
     now = _clock.time()
-    with watchdog.lock:
-        last = watchdog.last_alert_ts.get(name)
+    with watchdog.lock: last = watchdog.last_alert_ts.get(name)
     if last and (now - last) < ALERT_COOLDOWN:
         _log(_LOG_WARN, "watchdog", f"Alert suppressed for {name} ({state}): cooldown {now - last:.0f}s < {ALERT_COOLDOWN}s")
         return
 
     if state == "WAITING_INPUT":
-        with watchdog.lock:
-            details = watchdog.waiting_input_details.get(name)
+        with watchdog.lock: details = watchdog.waiting_input_details.get(name)
         header = details.get("header", "") if details else ""; title = f"🟡 {name} needs your reply"
         if header: title += f": {header}"
         parts = [title]
@@ -1837,8 +1827,7 @@ def _format_watchdog_status(name: str,
                             state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
     if pending_lookup is None: pending_lookup = is_pending
     if state_snapshot is None:
-        with watchdog.lock:
-            state_snapshot = dict(watchdog.worker_states)
+        with watchdog.lock: state_snapshot = dict(watchdog.worker_states)
     return _format_watchdog_status_pure(
         name, pending_lookup=pending_lookup,
         state_snapshot=state_snapshot, clock_now=_clock.time(), )
@@ -1850,8 +1839,7 @@ def format_team_lines(  # type: ignore[no-redef]
     worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None
 ) -> list[str]:
     if pending_lookup is None: pending_lookup = is_pending
-    with watchdog.lock:
-        state_snapshot = dict(watchdog.worker_states)
+    with watchdog.lock: state_snapshot = dict(watchdog.worker_states)
     return _format_team_lines_pure(
         registered, active,
         pending_lookup=pending_lookup, worker_live=worker_live,
@@ -1879,8 +1867,7 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
     body = json.dumps({"from": from_name, "text": message}).encode()
     req = urllib.request.Request( msg_url, data=body, headers={"Content-Type": "application/json"}, method="POST", )
     try:
-        with _urlopen(req, timeout=TIMEOUT_HTTP_API) as resp:
-            return 200 <= resp.status < 300
+        with _urlopen(req, timeout=TIMEOUT_HTTP_API) as resp: return 200 <= resp.status < 300
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_WARN, "bridge", f"Callback send failed for '{name}' at {msg_url}: {e}")
         return False
@@ -1971,8 +1958,7 @@ class WorkerManager:
     _sessions_cache_lock = threading.Lock(); _SESSIONS_CACHE_TTL = 15
 
     def invalidate_sessions_cache(self) -> None:
-        with self._sessions_cache_lock:
-            self._sessions_cache = None; self._sessions_cache_ts = 0
+        with self._sessions_cache_lock: self._sessions_cache = None; self._sessions_cache_ts = 0
 
     def get_registered_sessions(self, registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
         self._sync_paths()
@@ -2244,8 +2230,7 @@ class WorkerManager:
             kill_adapter(name)
             session_dir = self.sessions_dir / name
             try:
-                for session_id_file in session_dir.glob("*_session_id"):
-                    session_id_file.unlink()
+                for session_id_file in session_dir.glob("*_session_id"): session_id_file.unlink()
             except OSError as e:
                 return False, f"Failed to clean non-interactive metadata: {e}"
 
@@ -2311,8 +2296,7 @@ class WorkerManager:
             resume_cwd = ""
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
-            for session_id_file in session_dir.glob("*_session_id"):
-                session_id_file.unlink()
+            for session_id_file in session_dir.glob("*_session_id"): session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd: _ensure_workspace_trusted(startup_cwd)
         return resume_id, startup_cwd
@@ -2423,8 +2407,7 @@ class WorkerManager:
         else:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
-            for session_id_file in session_dir.glob("*_session_id"):
-                session_id_file.unlink()
+            for session_id_file in session_dir.glob("*_session_id"): session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
         if startup_cwd: _ensure_workspace_trusted(startup_cwd)
         start_cmd = backend.start_cmd(resume_id); start_cmd = f'unset CLAUDECODE && {start_cmd}'
@@ -2623,8 +2606,7 @@ class ConnectorRegistry:
             })
 
     def get_log(self, tag: str) -> list[ConnectorMessageLogEntry]:
-        with self._lock:
-            return list(self._log.get(tag, []))
+        with self._lock: return list(self._log.get(tag, []))
 
 connectors = ConnectorRegistry()
 tunnel_manager: _tunnel_mod.TunnelManager | None = None
@@ -2765,8 +2747,7 @@ def _guest_save() -> None:
         active_names = {guest["name"] for guest in active_guests.values()}
         active_inboxes = {k: v for k, v in guest_store.inboxes.items() if k in active_names}
         tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump({"guests": active_guests, "inboxes": active_inboxes}, f, indent=2)
+        with open(tmp, "w") as f: json.dump({"guests": active_guests, "inboxes": active_inboxes}, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
     except OSError as e:
@@ -2776,8 +2757,7 @@ def _guest_load() -> None:
     path = _guest_state_path()
     if not path.exists(): return
     try:
-        with open(path) as f:
-            data = json.load(f)
+        with open(path) as f: data = json.load(f)
         now = _clock.time(); restored = 0
         for k, v in data.get("guests", {}).items():
             if now <= v.get("expires_at_unix", 0):
@@ -2841,8 +2821,7 @@ def _channel_save() -> None:
         path = _channel_state_path(); active = {cid: ch for cid, ch in channel_store.channels.items()
                   if not channel_is_expired(ch)}
         tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(active, f, indent=2)
+        with open(tmp, "w") as f: json.dump(active, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
     except OSError as e:
@@ -2852,8 +2831,7 @@ def _channel_load() -> None:
     path = _channel_state_path()
     if not path.exists(): return
     try:
-        with open(path) as f:
-            data = json.load(f)
+        with open(path) as f: data = json.load(f)
         restored = 0
         for cid, ch in data.items():
             if not channel_is_expired(ch):
@@ -2951,8 +2929,7 @@ def _relay_save() -> None:
         path = _relay_state_path(); now = _clock.time(); active = {cid: ch for cid, ch in relay_store.channels.items()
                   if now <= ch["expires_at_unix"]}
         tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(active, f, indent=2)
+        with open(tmp, "w") as f: json.dump(active, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
     except OSError as e:
@@ -2962,8 +2939,7 @@ def _relay_load() -> None:
     path = _relay_state_path()
     if not path.exists(): return
     try:
-        with open(path) as f:
-            data = json.load(f)
+        with open(path) as f: data = json.load(f)
         now = _clock.time(); restored = 0
         for cid, ch in data.items():
             if now <= ch.get("expires_at_unix", 0):
@@ -3022,24 +2998,21 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 """
 
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
-    with relay_store.lock:
-        channel = relay_store.channels.get(channel_id)
+    with relay_store.lock: channel = relay_store.channels.get(channel_id)
     if not channel: return None
     if _clock.time() > channel.get("expires_at_unix", 0): return None
     if hashlib.sha256(token.encode()).hexdigest() != channel.get("guest_token_hash"): return None
     return channel
 
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
-    with relay_store.lock:
-        channel = relay_store.channels.get(channel_id)
+    with relay_store.lock: channel = relay_store.channels.get(channel_id)
     if not channel: return None
     if _clock.time() > channel.get("expires_at_unix", 0): return None
     if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"): return None
     return channel
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
-    with relay_store.lock:
-        channel = relay_store.channels.get(channel_id)
+    with relay_store.lock: channel = relay_store.channels.get(channel_id)
     if not channel: return None, None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"; base = f"{_relay_base_url()}/relay/{channel_id}"
@@ -3069,8 +3042,7 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
     return envelope, relay_msg
 
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
-    with relay_store.lock:
-        channel = relay_store.channels.get(channel_id)
+    with relay_store.lock: channel = relay_store.channels.get(channel_id)
     if not channel: return None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
@@ -3088,8 +3060,7 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     return relay_msg
 
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
-    with relay_store.lock:
-        channel = relay_store.channels.get(channel_id)
+    with relay_store.lock: channel = relay_store.channels.get(channel_id)
     if not channel: return []
     msgs = channel["messages"]
     if not after: return list(msgs)
@@ -3244,8 +3215,7 @@ def _load_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
     if not path or not os.path.exists(path): return
     try:
-        with open(path) as f:
-            data = json.load(f)
+        with open(path) as f: data = json.load(f)
         if isinstance(data, dict):
             with learning_reminders.lock:
                 for name, st in data.items():
@@ -3298,16 +3268,14 @@ class TokenStore:
         self._lock: threading.Lock = threading.Lock()
 
     def add_rewind(self, token: str, name: str, timeout: int = REWIND_TIMEOUT) -> None:
-        with self._lock:
-            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
+        with self._lock: REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
 
     def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
         if not token: return None
         now = _clock.time()
         with self._lock:
             expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del REWIND_TOKENS[k]
+            for k in expired: del REWIND_TOKENS[k]
             entry = REWIND_TOKENS.get(token)
             if entry and extend: entry["expires_at"] = now + REWIND_TIMEOUT
             return entry
@@ -3322,8 +3290,7 @@ class TokenStore:
         now = _clock.time()
         with self._lock:
             expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
-            for k in expired:
-                del PR_REVIEW_TOKENS[k]
+            for k in expired: del PR_REVIEW_TOKENS[k]
             if token not in PR_REVIEW_TOKENS: return None
             entry = PR_REVIEW_TOKENS[token]
             if entry.get("expires_at", 0) <= now: return None
@@ -3373,8 +3340,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
             _log(_LOG_ERROR, "watchdog", f"Host alert error: {e}")
 
 def _is_host_down(host: str) -> bool:
-    with watchdog.lock:
-        return host_health.down.get(host, False)
+    with watchdog.lock: return host_health.down.get(host, False)
 
 def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
     try:
@@ -3541,8 +3507,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                 last_alert = host_health.mem_alert_ts.get(host_label, 0)
                 if now - last_alert >= MEM_ALERT_COOLDOWN:
                     top_lines = ""
-                    for p in usage.get("top_procs", [])[:3]:
-                        top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+                    for p in usage.get("top_procs", [])[:3]: top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
                     alert_text = (
                         f"🧠 Memory critical: {host_label}\n"
                         f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)" )
@@ -3705,8 +3670,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
         hogs = _get_cpu_hogs(host, is_mac=is_mac)
         real_hogs = [h for h in hogs if h["etime_min"] >= CPU_HOG_DURATION_MIN]
 
-        with watchdog.lock:
-            host_health.cpu_hogs[host_label] = real_hogs
+        with watchdog.lock: host_health.cpu_hogs[host_label] = real_hogs
 
         if real_hogs:
             last_alert = host_health.cpu_hog_alert_ts.get(host_label, 0)
@@ -3827,8 +3791,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
-    with watchdog.lock:
-        prev_state = watchdog.prev_worker_states.get(name)
+    with watchdog.lock: prev_state = watchdog.prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states: return
 
     restart_ts = watchdog.recent_restarts.get(name)
@@ -3839,8 +3802,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     watchdog.last_resolved_ts[name] = now
 
-    with watchdog.lock:
-        alert_info = watchdog.alert_msg_ids.pop(name, None)
+    with watchdog.lock: alert_info = watchdog.alert_msg_ids.pop(name, None)
     if alert_info:
         old_msg_id, old_text = alert_info
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
@@ -3862,19 +3824,16 @@ def _handle_watchdog_transition( name: str, state: str, reason: str, since: floa
     if now is None: now = _clock.time()
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
-    with watchdog.lock:
-        prev_state = watchdog.prev_worker_states.get(name)
+    with watchdog.lock: prev_state = watchdog.prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
 
     if state == "HOST_OFFLINE":
-        with watchdog.lock:
-            watchdog.prev_worker_states[name] = state
+        with watchdog.lock: watchdog.prev_worker_states[name] = state
         return
 
     teleport_state_file = SESSIONS_DIR / name / "teleport_state"
     if state in {"OFFLINE", "DEAD", "EXITED"} and teleport_state_file.exists():
-        with watchdog.lock:
-            watchdog.prev_worker_states[name] = state
+        with watchdog.lock: watchdog.prev_worker_states[name] = state
         return
 
     def eligible_for_alert() -> bool:
@@ -3884,8 +3843,7 @@ def _handle_watchdog_transition( name: str, state: str, reason: str, since: floa
     GOOD_PROBE_THRESHOLD = 3; BAD_PROBE_THRESHOLD = 3; is_remote = bool(get_worker_host(name))
 
     if state in bad_states:
-        with watchdog.lock:
-            watchdog.consecutive_good_probes[name] = 0
+        with watchdog.lock: watchdog.consecutive_good_probes[name] = 0
 
         if is_remote and state in {"OFFLINE", "DEAD"}:
             with watchdog.lock:
@@ -3898,8 +3856,7 @@ def _handle_watchdog_transition( name: str, state: str, reason: str, since: floa
                 _log(_LOG_WARN, "watchdog", f"State change {name}: {prev_state} -> {state} ({reason}), sending alert")
                 _send_watchdog_alert(name, state, reason)
         elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert(): _send_watchdog_alert(name, state, reason)
-        with watchdog.lock:
-            watchdog.prev_worker_states[name] = state
+        with watchdog.lock: watchdog.prev_worker_states[name] = state
         return
 
     if state in good_states and prev_state in bad_states:
@@ -3956,8 +3913,7 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
         for name in registered_names:
             watchdog.consecutive_probe_failures[name] = watchdog.consecutive_probe_failures.get(name, 0) + 1
     else:
-        for name in registered_names:
-            watchdog.consecutive_probe_failures[name] = 0
+        for name in registered_names: watchdog.consecutive_probe_failures[name] = 0
 
 def _watchdog_probe_remote_hosts( registered: dict[str, TmuxSessionDict]
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
@@ -4010,8 +3966,7 @@ def _watchdog_collect_worker_pids(
             claude_pid = _get_claude_pid(pane_pid, host=host)
             if claude_pid:
                 claude_pids[name] = claude_pid
-                with watchdog.lock:
-                    watchdog.last_seen_claude[name] = now
+                with watchdog.lock: watchdog.last_seen_claude[name] = now
             else:
                 with watchdog.lock:
                     if name not in watchdog.last_seen_claude: watchdog.last_seen_claude[name] = now
@@ -4023,8 +3978,7 @@ def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcSta
         host = get_worker_host(name)
         pids_by_host.setdefault(host, []).append(pid)
     stats: dict[str, ProcStatsEntry] = {}
-    for host, pids in pids_by_host.items():
-        stats.update(_ps_stats(pids, host=host))
+    for host, pids in pids_by_host.items(): stats.update(_ps_stats(pids, host=host))
     return stats
 
 def _watchdog_evaluate_workers(
@@ -4059,8 +4013,7 @@ def _watchdog_evaluate_workers(
             backend_name = get_worker_backend(name, session); backend = get_backend(backend_name)
         is_interactive = backend.is_interactive; adapter_alive = False
         if not is_interactive:
-            with processes.adapter_pids_lock:
-                entry = processes.adapter_pids.get(name)
+            with processes.adapter_pids_lock: entry = processes.adapter_pids.get(name)
             if entry:
                 proc, _stderr = entry
                 adapter_alive = proc.poll() is None
@@ -4070,12 +4023,10 @@ def _watchdog_evaluate_workers(
         children = _watchdog_compute_children(name, children_total, is_interactive, claude_pid, now)
 
         if children > 0:
-            with watchdog.lock:
-                watchdog.last_child_ts[name] = now
+            with watchdog.lock: watchdog.last_child_ts[name] = now
         _watchdog_track_activity(name, children, cpu, now)
         pending_ts = _pending_timestamp(name); pending = pending_ts is not None
-        with watchdog.lock:
-            last_activity = watchdog.last_activity_ts.get(name, 0.0)
+        with watchdog.lock: last_activity = watchdog.last_activity_ts.get(name, 0.0)
 
         if pending_ts:
             effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
@@ -4186,8 +4137,7 @@ def _watchdog_refine_state(
         if pane_text:
             pane_lines = pane_text.splitlines(); details = _extract_question_details(pane_lines)
             if details:
-                with watchdog.lock:
-                    watchdog.waiting_input_details[name] = details
+                with watchdog.lock: watchdog.waiting_input_details[name] = details
                 worker_state = "WAITING_INPUT"; header = details.get("header", "")
                 reason = f"question={header}" if header else "interactive prompt"
     return worker_state, reason
@@ -4446,8 +4396,7 @@ def send_shutdown_message() -> None:
         return
 
     _log(_LOG_INFO, "notify", f"Sending shutdown to {len(chat_ids)} chat(s)...")
-    for chat_id in chat_ids:
-        transport.send_text(chat_id, "Going offline briefly. Your team stays the same.")
+    for chat_id in chat_ids: transport.send_text(chat_id, "Going offline briefly. Your team stays the same.")
     _log(_LOG_INFO, "notify", "Shutdown notifications sent")
 
 class _LegacyTransportProto(Protocol):
@@ -4576,8 +4525,7 @@ class CommandRouter:
             return True
         backend_name = worker_entry.get("backend", "claude")
 
-        with watchdog.lock:
-            worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        with watchdog.lock: worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
         current_state = worker_state[0]
         if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
             self.reply(chat_id,
@@ -4698,8 +4646,7 @@ class CommandRouter:
             self.reply(chat_id, f"{worker_name} hasn't been teleported.")
             return True
 
-        with watchdog.lock:
-            worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        with watchdog.lock: worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
         if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
             self.reply(chat_id,
                 f"{worker_name} is busy. Must be idle to teleback. "
@@ -4992,8 +4939,7 @@ class CommandRouter:
             except (ConnectionError, TimeoutError, OSError) as e:
                 _log(_LOG_WARN, "teleport", f"git ls-files failed, skipping gitignore excludes: {e}")
 
-            for excl in TELEPORT_RSYNC_EXCLUDES:
-                cmd.extend(["--exclude", excl])
+            for excl in TELEPORT_RSYNC_EXCLUDES: cmd.extend(["--exclude", excl])
         src = source_cwd.rstrip("/") + "/"; dst = target_cwd.rstrip("/") + "/"
 
         if source_host: cmd.extend([f"{source_host}:{src}", dst])
@@ -5085,8 +5031,7 @@ class CommandRouter:
             if remote_home and remote_home != local_home:
                 settings_src = os.path.expanduser("~/.claude/settings.json")
                 if os.path.exists(settings_src):
-                    with open(settings_src) as f:
-                        settings_text = f.read()
+                    with open(settings_src) as f: settings_text = f.read()
                     settings_text = settings_text.replace(local_home, remote_home)
                     fd, tmp = tempfile.mkstemp(suffix=".json")
                     try:
@@ -5408,8 +5353,7 @@ class CommandRouter:
         if len(remaining) > 1:
             names = [n.lower() for n in remaining]
             self.reply(chat_id, f"Restarting {len(names)} workers: {', '.join(names)}...")
-            for n in names:
-                self.cmd_restart(chat_id, f"{'--clean ' if clean else ''}{'--force ' if force else ''}{n}")
+            for n in names: self.cmd_restart(chat_id, f"{'--clean ' if clean else ''}{'--force ' if force else ''}{n}")
             return True
 
         if name_arg: name = name_arg
@@ -5458,8 +5402,7 @@ class CommandRouter:
             if force: watchdog.force_restart_pending_cwd[name] = True
             return result
         finally:
-            with watchdog.restart_lock:
-                watchdog.restart_in_progress.pop(name, None)
+            with watchdog.restart_lock: watchdog.restart_in_progress.pop(name, None)
 
     def _do_restart(self, name: str, session: TmuxSessionDict | None, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
         if host:
@@ -5538,8 +5481,7 @@ class CommandRouter:
             session_dir = SESSIONS_DIR / name
             session_dir.mkdir(parents=True, exist_ok=True)
             cleared = list(session_dir.glob("*_session_id"))
-            for f in cleared:
-                f.unlink()
+            for f in cleared: f.unlink()
             _clear_hook_failures(name)
             _log(_LOG_INFO, "_restart_remote", f"{name}: cleared {len(cleared)} session files for relaunch")
 
@@ -5569,8 +5511,7 @@ class CommandRouter:
                     _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} NOT found at {session_file}, starting fresh")
                     resume_id = ""; session_dir = SESSIONS_DIR / name
                     session_dir.mkdir(parents=True, exist_ok=True)
-                    for f in session_dir.glob("*_session_id"):
-                        f.unlink()
+                    for f in session_dir.glob("*_session_id"): f.unlink()
                 else: _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
         _ensure_workspace_trusted_remote(target_cwd, host)
         _log(_LOG_INFO, "_restart_remote", f"{name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
@@ -5870,8 +5811,7 @@ class CommandRouter:
         return None
 
     def _handle_media_group_flush(self, group_id: str) -> None:
-        with media_groups.lock:
-            group = media_groups.buffer.pop(group_id, None)
+        with media_groups.lock: group = media_groups.buffer.pop(group_id, None)
         if not group: return
         items = group["items"]; caption = group.get("caption", ""); first_msg = items[0] if items else {}
         chat_id = first_msg.get("chat", {}).get("id"); msg_id = first_msg.get("message_id"); target = None
@@ -5938,8 +5878,7 @@ class CommandRouter:
             targets, _ = self.parse_at_mentions(caption)
             if targets:
                 statuses = []
-                for name in targets:
-                    statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
+                for name in targets: statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
                 sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
                 offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
                 if offline:
@@ -5979,14 +5918,11 @@ class CommandRouter:
             if reply_media:
                 media_text = reply_media
                 if message: media_text = f"{message}\n\n{reply_media}"
-                for name in targets:
-                    statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
+                for name in targets: statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
             else:
-                for name in targets:
-                    statuses.append(self._route_mention(name, message, chat_id, msg_id))
+                for name in targets: statuses.append(self._route_mention(name, message, chat_id, msg_id))
         else:
-            for name in targets:
-                statuses.append(self._route_mention(name, message, chat_id, msg_id))
+            for name in targets: statuses.append(self._route_mention(name, message, chat_id, msg_id))
         sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
         offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
         if offline:
@@ -6360,8 +6296,7 @@ class CommandRouter:
                 url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
                 if worker_host: url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
-                with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                    cast(dict[str, object], _json.loads(resp.read()))
+                with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp: cast(dict[str, object], _json.loads(resp.read()))
                 enabled.append(n)
                 session_names.append(session_name)
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -6378,8 +6313,7 @@ class CommandRouter:
                 f"http://localhost:{pilot_port}/api/grid-session",
                 data=payload, method="POST",
                 headers={"Content-Type": "application/json"})
-            with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                cast(dict[str, object], _json.loads(resp.read()))
+            with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp: cast(dict[str, object], _json.loads(resp.read()))
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
@@ -6403,8 +6337,7 @@ class CommandRouter:
                 name, per_page=200, token=token,
                 live_base_url=f"{base_url}/transcript/{name}")
             snap_path = f"/tmp/rewind-{name}.html"
-            with open(snap_path, "w") as f:
-                f.write(html_content)
+            with open(snap_path, "w") as f: f.write(html_content)
             serve_url = _beast_serve_deploy(snap_path, f"rewind-{name}")
             if serve_url:
                 self.reply(chat_id, f"⏪ Rewind for {name}\n{serve_url}")
@@ -6644,12 +6577,10 @@ class TranscriptSyncRegistry:
         self._lock: threading.Lock = threading.Lock()
 
     def get(self, key: str) -> TranscriptSyncState | None:
-        with self._lock:
-            return self._state.get(key)
+        with self._lock: return self._state.get(key)
 
     def set(self, key: str, value: TranscriptSyncState) -> None:
-        with self._lock:
-            self._state[key] = value
+        with self._lock: self._state[key] = value
 
     def update(self, key: str, **fields: object) -> None:
         with self._lock:
@@ -7237,8 +7168,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         if not transcript_path or not Path(str(transcript_path)).exists():
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not available</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
         all_entries = _parse_transcript_entries(transcript_path); total = len(all_entries)
-        for _i, _e in enumerate(all_entries):
-            _e["_idx"] = _i
+        for _i, _e in enumerate(all_entries): _e["_idx"] = _i
         total_pages = max(1, (total + per_page - 1) // per_page)
         if page is None: page = total_pages
         page = max(1, min(page, total_pages)); start = (page - 1) * per_page
@@ -7458,8 +7388,7 @@ def _checkin_do_restart(name: str, backend_name: str,
                     f"Hold messages for now. If this continues, run /restart {name}.", )
         return True, ""
     finally:
-        with watchdog.restart_lock:
-            watchdog.restart_in_progress.pop(name, None)
+        with watchdog.restart_lock: watchdog.restart_in_progress.pop(name, None)
 
 class Handler(BaseHTTPRequestHandler):
     # ── Guest Endpoints ────────────────────────────────────────────
@@ -7471,8 +7400,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(403, "token required")
             return None
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        with guest_store.lock:
-            guest = guest_store.guests.get(token_hash)
+        with guest_store.lock: guest = guest_store.guests.get(token_hash)
         if not guest or guest_is_expired(guest["expires_at_unix"]):
             if guest:
                 with guest_store.lock:
@@ -7489,8 +7417,7 @@ class Handler(BaseHTTPRequestHandler):
             data = {}
         requested_name = _str_field(data, "name").strip().lower(); team_workers = set(get_registered_sessions().keys())
 
-        with guest_store.lock:
-            existing_guests = {g["name"] for g in guest_store.guests.values()}
+        with guest_store.lock: existing_guests = {g["name"] for g in guest_store.guests.values()}
 
         if requested_name:
             ok, err = guest_validate_name(requested_name, team_workers, existing_guests)
@@ -7679,8 +7606,7 @@ class Handler(BaseHTTPRequestHandler):
         guest = self._guest_auth(parsed)
         if not guest: return
         query_params = parse_qs(parsed.query); after = query_params.get("after", [None])[0]; guest_name = guest["name"]
-        with guest_store.lock:
-            msgs = list(guest_store.inboxes.get(guest_name, []))
+        with guest_store.lock: msgs = list(guest_store.inboxes.get(guest_name, []))
         filtered = guest_inbox_filter(msgs, after=after)
         self._send_json(200, { "ok": True, "name": guest_name, "messages": filtered,
         })
@@ -7688,8 +7614,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_status(self, parsed: ParseResult) -> None:
         guest = self._guest_auth(parsed)
         if not guest: return
-        with guest_store.lock:
-            workers = list(guest.get("notified_workers", set()))
+        with guest_store.lock: workers = list(guest.get("notified_workers", set()))
         self._send_json(200, {
             "ok": True, "name": guest["name"],
             "expires": guest["expires_at"],
@@ -7745,8 +7670,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(403, "token required")
             return None
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        with guest_store.lock:
-            guest = guest_store.guests.get(token_hash)
+        with guest_store.lock: guest = guest_store.guests.get(token_hash)
         if not guest or guest_is_expired(guest["expires_at_unix"]):
             self._send_error_json(403, "invalid or expired token")
             return None
@@ -7775,8 +7699,7 @@ class Handler(BaseHTTPRequestHandler):
         token = query_params.get("token", [None])[0]
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            with guest_store.lock:
-                guest = guest_store.guests.get(token_hash)
+            with guest_store.lock: guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
                 self._send_error_json(403, "invalid or expired token")
                 return
@@ -7858,8 +7781,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            with guest_store.lock:
-                guest = guest_store.guests.get(token_hash)
+            with guest_store.lock: guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
                 self._send_error_json(403, "invalid or expired token")
                 return
@@ -7911,8 +7833,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            with guest_store.lock:
-                guest = guest_store.guests.get(token_hash)
+            with guest_store.lock: guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
                 self._send_error_json(403, "invalid or expired token")
                 return
@@ -7942,8 +7863,7 @@ class Handler(BaseHTTPRequestHandler):
         token = query_params.get("token", [None])[0]; filter_member = None
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            with guest_store.lock:
-                guest = guest_store.guests.get(token_hash)
+            with guest_store.lock: guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
                 self._send_error_json(403, "invalid or expired token")
                 return
@@ -7964,8 +7884,7 @@ class Handler(BaseHTTPRequestHandler):
                         "send_url": f"/channels/{ch['id']}/send",
                         "messages_url": f"/channels/{ch['id']}/messages",
                     })
-            for cid in expired_ids:
-                del channel_store.channels[cid]
+            for cid in expired_ids: del channel_store.channels[cid]
             if expired_ids: _channel_save()
         self._send_json(200, {"ok": True, "channels": active})
 
@@ -8057,8 +7976,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         workers = channel.get("workers", [channel["worker"]]); delivered = {}
-        for w in workers:
-            delivered[w] = send_to_worker(w, envelope)
+        for w in workers: delivered[w] = send_to_worker(w, envelope)
         self._send_json(200, {
             "message_id": msg["message_id"],
             "delivered": all(delivered.values()),
@@ -8198,8 +8116,7 @@ class Handler(BaseHTTPRequestHandler):
         if targets:
             worker_msg = ( f"manager: PR #{pr_num} review comment\n\n" f"{comment_body}"
             )
-            for t in targets:
-                send_to_worker(t, worker_msg)
+            for t in targets: send_to_worker(t, worker_msg)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -8272,8 +8189,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"<h2>PR review not found</h2><p>File {html_path} missing. Re-run /pr command.</p>".encode())
             return
 
-        with open(html_path, "rb") as f:
-            self._send_html(f.read())
+        with open(html_path, "rb") as f: self._send_html(f.read())
 
     def handle_pr_comment(self, body: bytes) -> None:
         try:
@@ -8323,8 +8239,7 @@ class Handler(BaseHTTPRequestHandler):
         if targets:
             worker_msg = ( f"manager: PR #{pr_num} review comment on {path}:{line}\n\n" f"{comment_body}"
             )
-            for t in targets:
-                send_to_worker(t, worker_msg)
+            for t in targets: send_to_worker(t, worker_msg)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -8567,8 +8482,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
             _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
             chat_ids = get_all_chat_ids()
-            for chat_id in chat_ids:
-                transport.send_text(chat_id, alert_text)
+            for chat_id in chat_ids: transport.send_text(chat_id, alert_text)
             self._send_json(200, {"ok": True})
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")
@@ -8879,8 +8793,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_health_workers_endpoint(self) -> None:
         try:
             now = _clock.time(); registered = get_registered_sessions()
-            with watchdog.lock:
-                state_snapshot = dict(watchdog.worker_states)
+            with watchdog.lock: state_snapshot = dict(watchdog.worker_states)
             workers = {}
             for name in sorted(registered.keys()):
                 entry = state_snapshot.get(name)
@@ -8988,16 +8901,14 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
                     _log(_LOG_DEBUG, "shutdown:media_timer", f"{type(exc).__name__}: {exc}")
         media_groups.buffer.clear()
 
-    with processes.adapter_pids_lock:
-        adapter_names = list(processes.adapter_pids.keys())
+    with processes.adapter_pids_lock: adapter_names = list(processes.adapter_pids.keys())
     for name in adapter_names:
         try:
             kill_adapter(name)
         except (OSError, ProcessLookupError) as exc:
             _log(_LOG_DEBUG, "shutdown:adapter", f"{type(exc).__name__}: {exc}")
 
-    with processes.pipe_readers_lock:
-        pipe_names = list(processes.pipe_readers.keys())
+    with processes.pipe_readers_lock: pipe_names = list(processes.pipe_readers.keys())
     for name in pipe_names:
         try:
             stop_pipe_reader(name)
@@ -9176,8 +9087,7 @@ def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, lis
             if not serve_url:
                 try:
                     page_html = _connector_render_html(tag, html_text); tmp_path = f"/tmp/connector-{tag}.html"
-                    with open(tmp_path, "w") as f:
-                        f.write(page_html)
+                    with open(tmp_path, "w") as f: f.write(page_html)
                     serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
                 except OSError as e:
                     _log(_LOG_WARN, tag, f"beast serve failed: {e}")

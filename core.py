@@ -174,8 +174,7 @@ class HttpClient:
 
         req = urllib.request.Request(url, data=data, method=method)
         if headers:
-            for k, v in headers.items():
-                req.add_header(k, v)
+            for k, v in headers.items(): req.add_header(k, v)
         last_exc: BaseException | None = None
         delay = cfg.initial_delay
 

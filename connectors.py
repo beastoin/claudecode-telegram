@@ -317,8 +317,7 @@ class BaseConnector(abc.ABC, Generic[M]):
     def stop(self) -> None:
         """Signal the polling thread to stop and wait up to 5s."""
         self._stop_event.set()
-        with self._lock:
-            t = self._thread
+        with self._lock: t = self._thread
         if t is not None: t.join(timeout=5)
 
     def restart(self) -> tuple[bool, str]:
@@ -341,8 +340,7 @@ class BaseConnector(abc.ABC, Generic[M]):
 
     @property
     def running(self) -> bool:
-        with self._lock:
-            return self._thread is not None and self._thread.is_alive()
+        with self._lock: return self._thread is not None and self._thread.is_alive()
 
     def status(self) -> ConnectorStatus:
         """Return a status dict for API responses."""
@@ -390,12 +388,10 @@ class BaseConnector(abc.ABC, Generic[M]):
             alert_fn(f"{tag} {text}")
         except Exception as e:
             print(f"{tag} Failed to send alert: {e}")
-            with self._lock:
-                self._alert_sent = False  # Rollback — allow retry
+            with self._lock: self._alert_sent = False  # Rollback — allow retry
 
     def _clear_alert(self) -> None:
-        with self._lock:
-            was_alerted = self._alert_sent; self._alert_sent = False
+        with self._lock: was_alerted = self._alert_sent; self._alert_sent = False
         if was_alerted:
             tag = f"[{self.connector_name}]"
             if self.on_alert:
@@ -412,8 +408,7 @@ class BaseConnector(abc.ABC, Generic[M]):
         if should_alert: self._send_alert(f"Polling failing ({self._consecutive_failures} consecutive errors)")
 
     def track_success(self) -> None:
-        with self._lock:
-            was_failing = self._consecutive_failures > 0; self._consecutive_failures = 0
+        with self._lock: was_failing = self._consecutive_failures > 0; self._consecutive_failures = 0
         if was_failing: self._clear_alert()
     # -- Poll loop --
 
@@ -801,8 +796,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
     # -- History ID persistence (atomic write) --
 
     def _save_history_id(self) -> None:
-        with self._lock:
-            hid = self._history_id
+        with self._lock: hid = self._history_id
         if not hid: return
         try:
             _atomic_write_text(self._history_file_path, hid)
@@ -829,8 +823,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         profile = self._get_profile()
         if profile and profile.get("historyId"):
             hid = str(profile["historyId"])
-            with self._lock:
-                self._history_id = hid
+            with self._lock: self._history_id = hid
             self._save_history_id()
             return hid
         return None
@@ -1025,8 +1018,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
 
     def _get_new_message_ids(self) -> tuple[Optional[list[str]], Optional[str]]:
         """Return (message_ids, new_history_id). Caller advances historyId after processing."""
-        with self._lock:
-            current_hid = self._history_id
+        with self._lock: current_hid = self._history_id
         if not current_hid: return [], None
         data = self._get_history(current_hid)
         if data is None: return None, None
@@ -1153,14 +1145,12 @@ class GmailConnector(BaseConnector[GmailMessage]):
         msg_ids, new_hid = self._get_new_message_ids()
         if msg_ids is None:
             self.track_failure()
-            with self._lock:
-                fail_count = self._consecutive_failures
+            with self._lock: fail_count = self._consecutive_failures
             if fail_count >= CONSECUTIVE_FAIL_REBOOTSTRAP:
                 print(f"[gmail] ⚠ {fail_count} failures — attempting re-bootstrap")
                 new_id = self._bootstrap_history_id(skip_disk=True)
                 if new_id:
-                    with self._lock:
-                        self._history_id = new_id
+                    with self._lock: self._history_id = new_id
                     self.track_success()
                     print(f"[gmail] Re-bootstrap OK (historyId={new_id})")
                 else:
@@ -1176,21 +1166,18 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 had_errors = True
         # Advance historyId AFTER all messages processed (skip on errors to allow retry)
         if new_hid and not had_errors:
-            with self._lock:
-                self._history_id = new_hid
+            with self._lock: self._history_id = new_hid
             self._save_history_id()
         elif had_errors: print("[gmail] historyId NOT advanced — some messages failed, will retry next poll")
 
     def _on_preflight_ok(self) -> None:
         hid = self._bootstrap_history_id()
-        with self._lock:
-            self._history_id = hid
+        with self._lock: self._history_id = hid
         if not hid:
             print("[gmail] Bootstrap failed, retrying in 60s...")
             if self._stop_event.wait(60): return
             hid = self._bootstrap_history_id()
-            with self._lock:
-                self._history_id = hid
+            with self._lock: self._history_id = hid
             if not hid:
                 self._send_alert("Gmail connector disabled — cannot get historyId")
                 self._stop_event.set()
@@ -1288,14 +1275,12 @@ class GitHubConnector(BaseConnector[GithubComment]):
     def _load_state(self) -> bool:
         if not self._state_file: return False
         try:
-            with open(self._state_file) as f:
-                data: object = json.load(f)
+            with open(self._state_file) as f: data: object = json.load(f)
             if not isinstance(data, dict): return False
             state = _validate_github_state(cast(dict[str, object], data))
             with self._lock:
                 if state["last_poll_time"]: self._last_poll_time = state["last_poll_time"]
-                for sid in state["seen_ids"]:
-                    self._seen_ids.add(sid)
+                for sid in state["seen_ids"]: self._seen_ids.add(sid)
                 return bool(self._last_poll_time)
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return False
@@ -1313,13 +1298,11 @@ class GitHubConnector(BaseConnector[GithubComment]):
     def _on_preflight_ok(self) -> None:
         restored = self._load_state()
         if restored:
-            with self._lock:
-                seen_count = len(self._seen_ids); poll_time = self._last_poll_time
+            with self._lock: seen_count = len(self._seen_ids); poll_time = self._last_poll_time
             print(f"[github] Restart — restored state: {seen_count} seen IDs, since={poll_time}")
         else:
             initial_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            with self._lock:
-                self._last_poll_time = initial_time
+            with self._lock: self._last_poll_time = initial_time
             seed, _ = self._get_all_comments(initial_time)
             if seed:
                 with self._lock:
@@ -1329,8 +1312,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 print(f"[github] First run — seeded {len(seed)} existing comments as seen")
             else: print(f"[github] First run — no comments to seed")
             self._save_state()
-        with self._lock:
-            poll_time = self._last_poll_time
+        with self._lock: poll_time = self._last_poll_time
         repos_str = ", ".join(self.repos)
         print(f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})")
     # -- GitHub API --
@@ -1476,14 +1458,12 @@ class GitHubConnector(BaseConnector[GithubComment]):
             if cid in self._seen_ids: return
         # Check sender BEFORE marking as seen — failed delivery won't permanently skip
         if not self.is_allowed_sender(comment):
-            with self._lock:
-                self._seen_ids.add(cid)  # Non-target sender: mark seen, no retry needed
+            with self._lock: self._seen_ids.add(cid)  # Non-target sender: mark seen, no retry needed
             return
         raw_body = comment.get("body")
         body: str = str(raw_body).strip() if isinstance(raw_body, str) else ""
         if not body:
-            with self._lock:
-                self._seen_ids.add(cid)
+            with self._lock: self._seen_ids.add(cid)
             return
         context = self.extract_issue_context(comment)
         targets, cleaned = self.parse_mentions(body)
@@ -1501,14 +1481,12 @@ class GitHubConnector(BaseConnector[GithubComment]):
         metadata = ConnectorMetadata(number=context["number"], repo=comment_repo, comment_id=cid)
         self.on_message(targets, html_text, plain_text, [], metadata=metadata)
         # Mark seen AFTER successful delivery
-        with self._lock:
-            self._seen_ids.add(cid)
+        with self._lock: self._seen_ids.add(cid)
         print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
     # -- Polling --
 
     def poll_once(self) -> None:
-        with self._lock:
-            poll_time = self._last_poll_time
+        with self._lock: poll_time = self._last_poll_time
         if not poll_time: return
         all_comments, fetch_complete = self._get_all_comments(poll_time)
         if all_comments is None:
@@ -1525,8 +1503,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 had_errors = True
         # Advance time only on full success (complete fetch + no processing errors)
         if not had_errors and fetch_complete:
-            with self._lock:
-                self._last_poll_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with self._lock: self._last_poll_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
             reasons: list[str] = []
             if not fetch_complete: reasons.append("partial fetch")

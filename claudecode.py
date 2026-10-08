@@ -287,8 +287,7 @@ remote_cache = RemoteCache()
 
 def _resolve_remote_tool(tool: str, host: str) -> str:
     key = f"{host}:{tool}"
-    with remote_cache.lock:
-        cached = remote_cache.tools.get(key)
+    with remote_cache.lock: cached = remote_cache.tools.get(key)
     if cached: return cached
     probe = (
         f'command -v {shlex.quote(tool)} 2>/dev/null || '
@@ -300,8 +299,7 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND, )
         found = r.stdout.strip()
         if found:
-            with remote_cache.lock:
-                remote_cache.tools[key] = found
+            with remote_cache.lock: remote_cache.tools[key] = found
             _log(_LOG_INFO, "bridge", f"discovered {tool} on {host}: {found}")
             return found
     except (subprocess.SubprocessError, OSError) as exc:
@@ -563,8 +561,7 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
         data = json.dumps(payload).encode()
         req = urllib.request.Request( f"{bridge_url}/outputs", data=data, headers={"Content-Type": "application/json"},
         )
-        with _urlopen(req, timeout=5) as r:
-            return r.status == 200
+        with _urlopen(req, timeout=5) as r: return r.status == 200
     except (urllib.error.URLError, OSError) as e:
         _log(_LOG_WARN, "codex", f"Failed to send to bridge: {e}")
         return False
@@ -832,8 +829,7 @@ def start_pipe_reader(name: str) -> None:
     stop_event = threading.Event()
     thread = threading.Thread( target=pipe_reader_loop, args=(name, stop_event), daemon=True, name=f"pipe-reader-{name}"
     )
-    with processes.pipe_readers_lock:
-        processes.pipe_readers[name] = (thread, stop_event)
+    with processes.pipe_readers_lock: processes.pipe_readers[name] = (thread, stop_event)
     thread.start()
     _log(_LOG_INFO, "pipe", f"Started pipe reader thread for '{name}'")
 
@@ -904,8 +900,7 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
             "cwd": cwd or "",
             "event": event,
         })
-        with open(history_file, "a") as fh:
-            fh.write(entry + "\n")
+        with open(history_file, "a") as fh: fh.write(entry + "\n")
         history_file.chmod(0o600)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
@@ -1032,8 +1027,7 @@ def get_any_session_id(name: str) -> tuple[str, str]:
     return "", ""
 
 def _get_remote_home(host: str | None) -> str:
-    with remote_cache.lock:
-        cached = remote_cache.home_dirs.get(host or "")
+    with remote_cache.lock: cached = remote_cache.home_dirs.get(host or "")
     if cached is not None: return cached
     try:
         r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
@@ -1041,8 +1035,7 @@ def _get_remote_home(host: str | None) -> str:
         home = r.stdout.strip() if r.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
         home = ""
-    with remote_cache.lock:
-        remote_cache.home_dirs[host or ""] = home
+    with remote_cache.lock: remote_cache.home_dirs[host or ""] = home
     return home
 
 POISON_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
