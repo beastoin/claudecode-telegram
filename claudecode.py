@@ -110,9 +110,6 @@ class WorktreeUsageDict(TypedDict):
     total_gb: float; items: list[WorktreeItemDict]; ts: float
 class CpuHogEntry(TypedDict, total=False):
     pid: int; cpu: float; etime_min: int; cmd: str
-class HealthSummaryDict(TypedDict, total=False):
-    ssh_down: bool; ssh_down_since: float | None; disk: DiskUsageDict | None; mem: MemUsageDict | None; io: IoUsageDict | None
-    cpu_hogs: list[CpuHogEntry]; worktrees: WorktreeUsageDict | None
 class MachineHealthDict(TypedDict, total=False):
     status: str; down_since: float | None; last_error: str | None
     disk: DiskUsageDict | None; memory: MemUsageDict | None; io: IoUsageDict | None
@@ -141,9 +138,6 @@ class WorkerWatchdogState:
         self.lock = threading.Lock(); self.stop_event = threading.Event()
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
-    def clear_worker(self, name: str) -> None:
-        for store in (self.worker_states, self.last_child_ts, self.last_seen_claude, self.last_hook_ts, self.last_alert_ts, self.alert_msg_ids, self.idle_streak, self.prev_worker_states, self.consecutive_probe_failures, self.consecutive_good_probes, self.consecutive_bad_probes, self.idle_child_baseline, self.prev_children, self.last_activity_ts, self.worker_cwds, self.recent_restarts, self.restart_in_progress, self.force_restart_pending_cwd, self.waiting_input_details, self.last_resolved_ts):
-            store.pop(name, None)
 class LearningReminderState:
     def __init__(self) -> None:
         self.state: dict[str, ReminderState] = {}; self.lock: threading.Lock = threading.Lock()
@@ -160,8 +154,6 @@ class HostHealthState:
         self.tailscale_down: bool = False; self.tailscale_alert_ts: float = 0.0
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
-    def to_health_summary(self, host: str) -> HealthSummaryDict:
-        return HealthSummaryDict(ssh_down=self.down.get(host, False), ssh_down_since=self.down_since.get(host), disk=self.disk_usage.get(host), mem=self.mem_usage.get(host), io=self.io_usage.get(host), cpu_hogs=self.cpu_hogs.get(host, []), worktrees=self.worktree_usage.get(host))
 def build_claude_start_cmd(resume_id: str = "") -> str:
     cmd = ["claude"]
     if resume_id: cmd.extend(["--resume", resume_id])
@@ -614,18 +606,6 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         with open(history_file, "a") as fh: fh.write(entry + "\n")
         history_file.chmod(0o600)
     except OSError as exc: _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
-def get_session_history(name: str, event: str | None = None) -> list[dict[str, object]]:
-    f = get_session_dir(name) / "session_history.jsonl"
-    if not f.exists(): return []
-    entries = []
-    for line in f.read_text().strip().splitlines():
-        if not line: continue
-        try:
-            e = cast(dict[str, object], json.loads(line))
-            if event and e.get("event") != event: continue
-            entries.append(e)
-        except json.JSONDecodeError: continue
-    return entries
 _CLAUDE_JSON_PATH = Path.home() / ".claude.json"
 def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
 ) -> None:

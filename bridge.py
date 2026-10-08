@@ -231,24 +231,8 @@ class WorkerRecord:
     def is_remote(self) -> bool:
         return bool(self.host)
     @property
-    def is_callback(self) -> bool:
-        return bool(self.callback_url)
-    @property
     def is_interactive(self) -> bool:
         return self.backend == "claude"
-    def to_session_dict(self) -> WorkerSessionDict:
-        result: WorkerSessionDict = {"backend": self.backend}
-        if self.tmux_name: result["tmux"] = self.tmux_name
-        if self.host: result["host"] = self.host
-        if self.callback_url: result["callback_url"] = self.callback_url; result["protocol"] = "http"
-        if self.version: result["version"] = self.version
-        return result
-    @classmethod
-    def from_session_dict(cls: type["WorkerRecord"], name: str, session: WorkerSessionDict, tmux_prefix: str = "") -> "WorkerRecord":
-        return cls(name=name, backend=session.get("backend", "claude"), host=session.get("host"),
-            tmux_name=session.get("tmux", f"{tmux_prefix}{name}" if tmux_prefix else ""),
-            callback_url=session.get("callback_url", ""), protocol=session.get("protocol", ""),
-            version=session.get("version", ""))
 def get_worker_host(name: str) -> str | None:
     registry = _load_registry(); worker = registry.get("workers", {}).get(name, {}); return worker.get("host")
 class MachineConfigError(ValueError):
@@ -1049,28 +1033,6 @@ def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     return worker_manager.get_workers(caller_from=caller_from)
 def get_pending_file(name: str) -> Path:
     return get_session_dir(name) / "pending"
-def _read_session_file(name: str, filename: str) -> str | None:
-    f = get_session_dir(name) / filename
-    if f.exists():
-        val = f.read_text().strip()
-        if val: return val
-    host = get_worker_host(name)
-    if host:
-        try:
-            session_path = _remap_path(str(get_session_dir(name) / filename), host)
-            r = _remote_run(["cat", session_path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-            if r.returncode == 0:
-                val = r.stdout.strip()
-                try:
-                    ensure_session_dir(name)
-                    _tmp = f.with_suffix('.tmp')
-                    _tmp.write_text(val)
-                    _tmp.chmod(0o600)
-                    os.replace(str(_tmp), str(f))
-                except OSError as exc: _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
-                return val
-        except (OSError, ValueError) as exc: _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
-    return ""
 def _ensure_workspace_trusted_remote( cwd: str | None, host: str | None,
 ) -> None:
     if not cwd: return
@@ -1731,10 +1693,6 @@ class WorkerManager:
 def _sync_worker_manager() -> None:
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR; worker_manager.tmux_prefix = TMUX_PREFIX
-def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.is_online(name, session)
 def worker_set_pending(name: str, chat_id: ChatId) -> None:
     set_pending(name, chat_id)
 def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
@@ -2091,9 +2049,6 @@ def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tupl
     return channel["messages"][found_idx + 1:], False
 def channel_is_expired(channel: ChannelDict) -> bool:
     return _clock.time() > channel["expires_at_unix"]
-def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
-    return [info["name"] for info in channel["members"].values()
-            if info["type"] == member_type and "name" in info]
 class RelayStore:
     def __init__(self) -> None:
         self.channels: dict[str, RelayChannelDict] = {}
@@ -3120,6 +3075,24 @@ def _fanout_channel_message(channel_id: str, from_member: str,
                     })
         elif minfo["type"] == "manager": _notify_admin(f"[{channel_id}] {from_member}: {text}")
 class CommandRouter:
+    def _check_worker_transfer_ready(self, worker_name: str, chat_id: ChatId, action: str) -> str | None:
+        """Shared validation for teleport/teleback. Returns error message or None if ready."""
+        with watchdog.lock: worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+        if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
+            return (f"{worker_name} is busy. Must be idle to {action}.\n"
+                    f"Wait for it to finish or /pause {worker_name} first.")
+        teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+        if teleport_file.exists(): return f"{worker_name} has a teleport in progress."
+        return None
+    def _check_remote_host_ready(self, target_host: str, chat_id: ChatId,
+                                  tools: tuple[str, ...] = ("claude", "tmux", "rsync")) -> str | None:
+        """Check SSH reachability and tool availability. Returns error or None."""
+        r = _remote_run(["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+        if r.returncode != 0: return f"Cannot reach {target_host} via SSH."
+        for tool in tools:
+            if _resolve_remote_tool(tool, target_host) == tool:
+                return f"{tool} not found on {target_host}. Install it first."
+        return None
     def cmd_teleport(self, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
         if not arg:
             cmd_name = "/teleport-check" if check_only else "/teleport"
@@ -3141,26 +3114,11 @@ class CommandRouter:
             self.reply(chat_id, f"Worker '{worker_name}' not found in registry.")
             return True
         backend_name = worker_entry.get("backend", "claude")
-        with watchdog.lock: worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-        current_state = worker_state[0]
-        if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
-            self.reply(chat_id,
-                f"{worker_name} is busy. Must be idle to teleport.\n"
-                f"Wait for it to finish or /pause {worker_name} first.")
-            return True
-        teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
-        if teleport_file.exists():
-            self.reply(chat_id, f"{worker_name} has a teleport in progress.")
-            return True
-        r = _remote_run(["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-        if r.returncode != 0:
-            self.reply(chat_id, f"Cannot reach {target_host} via SSH.")
-            return True
-        required_tools = ["claude", "tmux", "rsync"] + ([backend_name] if backend_name != "claude" else [])
-        for tool in required_tools:
-            if _resolve_remote_tool(tool, target_host) == tool:
-                self.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")
-                return True
+        err = self._check_worker_transfer_ready(worker_name, chat_id, "teleport")
+        if err: self.reply(chat_id, err); return True
+        required_tools = ("claude", "tmux", "rsync") + ((backend_name,) if backend_name != "claude" else ())
+        err = self._check_remote_host_ready(target_host, chat_id, required_tools)
+        if err: self.reply(chat_id, err); return True
         tmux_name = f"{self.workers.tmux_prefix}{worker_name}"
         r = _remote_run(
             ["bash", "-c", f"tmux has-session -t {tmux_name} 2>/dev/null && echo exists || echo none"],
@@ -3230,28 +3188,12 @@ class CommandRouter:
         if current_host is None and home_cwd is None:
             self.reply(chat_id, f"{worker_name} hasn't been teleported.")
             return True
-        with watchdog.lock: worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-        if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
-            self.reply(chat_id,
-                f"{worker_name} is busy. Must be idle to teleback. "
-                f"Wait or /pause {worker_name} first.")
-            return True
-        teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
-        if teleport_file.exists():
-            self.reply(chat_id, f"{worker_name} has a teleport in progress.")
-            return True
+        err = self._check_worker_transfer_ready(worker_name, chat_id, "teleback")
+        if err: self.reply(chat_id, err); return True
         target_host = home_host; target_cwd = home_cwd or get_claude_session_cwd(worker_name)
         if target_host:
-            r = _remote_run(["echo", "ok"], host=target_host,
-                            capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-            if r.returncode != 0:
-                self.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")
-                return True
-            for tool in ("claude", "tmux", "rsync"):
-                tool_path = _resolve_remote_tool(tool, target_host)
-                if tool_path == tool:
-                    self.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")
-                    return True
+            err = self._check_remote_host_ready(target_host, chat_id)
+            if err: self.reply(chat_id, err); return True
         if current_host:
             r = _remote_run(["echo", "ok"], host=current_host,
                             capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -3834,50 +3776,35 @@ class CommandRouter:
         if host:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
-            backend_obj = get_backend(backend_name); resume_id = (get_claude_session_id(name, authoritative=False) or
-                         get_claude_session_id(name, authoritative=True)) if mode == "resume" else ""
-            target_cwd = get_claude_session_cwd(name)
-            _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, resume_id={resume_id}, cwd={target_cwd}")
+            backend_obj = get_backend(backend_name)
+            _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, host={host}")
             self.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
-            ok, err = self._restart_remote_worker( name, backend_name, backend_obj, tmux_name, host, mode)
+            ok, err = self._restart_remote_worker(name, backend_name, backend_obj, tmux_name, host, mode)
             watchdog.recent_restarts[name] = _clock.time()
             _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart result ok={ok}, err={err}")
-            if ok: self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-            else: self.reply(chat_id, f"Could not restart \"{name}\" on {host}. {err}", outcome="Needs decision")
-            return True
-        if clean:
-            ok, err = restart_claude(name, mode="relaunch")
-            if ok:
-                watchdog.recent_restarts[name] = _clock.time()
-                self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
-                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-            else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
-            return True
+            return self._restart_reply(chat_id, name, ok, err, host)
         backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
-        worker_alive = session and "tmux" in session and tmux_exists(tmux_name)
-        if not backend.is_interactive and worker_alive:
+        if not clean and not backend.is_interactive and session and "tmux" in session and tmux_exists(tmux_name):
             session_id, source = get_any_session_id(name)
             if session_id: self.reply(chat_id, f"{name.capitalize()} is still active. Next message continues where you left off.")
             else: self.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
             return True
-        session_dir = get_session_dir(name); has_session_id = False
-        if session_dir.exists(): has_session_id = any(session_dir.glob("*_session_id"))
-        if not has_session_id:
-            ok, err = restart_claude(name, mode="relaunch")
-            if ok:
-                watchdog.recent_restarts[name] = _clock.time()
-                self.reply(chat_id, f"Restarting {name.capitalize()} fresh...")
-                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-            else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
-            return True
-        ok, err = restart_claude(name, mode="resume")
-        if ok:
-            watchdog.recent_restarts[name] = _clock.time()
-            self.reply(chat_id, f"Resuming {name.capitalize()}...")
-            self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-        else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+        mode = "relaunch" if clean else "resume"
+        if mode == "resume":
+            session_dir = get_session_dir(name)
+            if not session_dir.exists() or not any(session_dir.glob("*_session_id")): mode = "relaunch"
+        label = "Resuming" if mode == "resume" else ("Bringing" if clean else "Restarting")
+        self.reply(chat_id, f"{label} {name.capitalize()}...")
+        ok, err = restart_claude(name, mode=mode)
+        if ok: watchdog.recent_restarts[name] = _clock.time()
+        return self._restart_reply(chat_id, name, ok, err)
+    def _restart_reply(self, chat_id: ChatId, name: str, ok: bool, err: str | None, host: str | None = None) -> bool:
+        if ok: self.reply(chat_id, f"{name.capitalize()} is back and ready.")
+        else:
+            loc = f" on {host}" if host else ""
+            self.reply(chat_id, f"Could not restart \"{name}\"{loc}. {err}", outcome="Needs decision")
         return True
     def _restart_remote_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str) -> tuple[bool, str | None]:
         resume_id = ""; target_cwd = get_claude_session_cwd(name)
@@ -4332,14 +4259,6 @@ class CommandRouter:
                 guest_store.inboxes[name] = guest_inbox_append(inbox, cast(GuestInboxMessageDict, msg_obj))
             return {"name": name, "status": "sent"}
         return {"name": name, "status": "unknown"}
-    def parse_worker_prefix(self, text: str) -> tuple[str | None, str]:
-        if not text: return None, ""
-        match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
-        if not match: return None, ""
-        name = match.group(1).lower(); message = match.group(2).strip()
-        registered = self.workers.get_registered_sessions()
-        if name not in registered: return None, ""
-        return name, message
     def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
         if not reply_msg: return "", None
         text = _extract_msg_text(reply_msg); ts = reply_msg.get("date")

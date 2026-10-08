@@ -395,9 +395,12 @@ def test_teleport_preflight_checks_rsync_and_backend():
     import bridge
 
     src = inspect.getsource(bridge.CommandRouter.cmd_teleport)
+    # _check_remote_host_ready is the shared helper that checks tool availability
+    helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
 
-    # Must check rsync on target
-    assert 'rsync' in src and '_resolve_remote_tool' in src, \
+    # Must check rsync on target (directly or via helper)
+    assert ('rsync' in src and '_resolve_remote_tool' in src) or \
+           ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
         'cmd_teleport should check rsync on target via _resolve_remote_tool'
 
     # Must check backend-specific binary (not just claude)
