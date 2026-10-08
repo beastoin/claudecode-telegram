@@ -169,13 +169,11 @@ class HttpClient:
         from urllib.parse import urlparse
         host = urlparse(url).hostname or "localhost"; cfg = retry or self._retry; limiter = self._get_limiter(host)
         if not limiter.acquire(timeout=timeout): raise TimeoutError(f"Rate limit timeout for {host}")
-
         req = urllib.request.Request(url, data=data, method=method)
         if headers:
             for k, v in headers.items(): req.add_header(k, v)
         last_exc: BaseException | None = None
         delay = cfg.initial_delay
-
         for attempt in range(cfg.max_retries + 1):
             try:
                 return self._urlopen_fn(req, timeout=timeout)
@@ -186,7 +184,6 @@ class HttpClient:
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 last_exc = e
                 _log(_LOG_WARN, "http", f"{method} {url} -> {type(e).__name__} (attempt {attempt+1}/{cfg.max_retries+1})")
-
             if attempt < cfg.max_retries:
                 self._clock.sleep(min(delay, cfg.max_delay))
                 delay *= cfg.backoff_factor

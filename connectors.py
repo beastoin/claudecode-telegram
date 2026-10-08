@@ -976,7 +976,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         body = self._clean_body(body)
         manager_text, forwarded_content = self._detect_forward_split(body)
         thread_tag = f" [thread:{thread_id}]" if thread_id else ""
-
         if forwarded_content is not None:
             if manager_text: manager_text = self._strip_reply_chain(manager_text)
             forwarded_content = self._clean_body(forwarded_content)
@@ -991,7 +990,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
             plain_parts.append(f"--- Forwarded: {subject} ---")
             plain_parts.append(forwarded_content)
             return "\n".join(html_parts), "\n".join(plain_parts)
-
         body = self._strip_reply_chain(body); body = _truncate(body)
         html = f"📧 <b>{_escape_html(subject)}</b>{thread_tag}\n\n{_escape_html(body)}"
         plain = f"manager (via email):{thread_tag} {body}"
@@ -1088,16 +1086,13 @@ class GmailConnector(BaseConnector[GmailMessage]):
     def _process_message(self, msg_id: str) -> None:
         message = self.get_message(msg_id)
         if not message: raise RuntimeError(f"get_message({msg_id}) returned None — transient API failure")
-
         is_sent = self.is_sent_message(message)
         if not is_sent and not self.is_allowed_sender(message): return
-
         body = self.extract_body_text(message); subject = self.extract_subject(message)
         raw_tid = message.get("threadId")
         thread_id: str = str(raw_tid) if isinstance(raw_tid, str) else ""
         message_id = self.extract_message_id(message); attachments = self.extract_attachments(message)
         if not body.strip(): return
-
         if is_sent:
             html_text, plain_text = self._format_sent_reply(body, subject, thread_id, message)
             downloaded: list[Attachment] = []
@@ -1106,14 +1101,12 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 if path: downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
             self.on_message([], html_text, plain_text, downloaded)
             return
-
         # Strip reply chain BEFORE mention parsing to avoid routing on quoted @mentions
         body = self._strip_reply_chain(body)
         targets, cleaned = self.parse_mentions(body)
         if targets: html_text, plain_text = self.format_email_message(cleaned, subject, thread_id)
         else: html_text, plain_text = self.format_email_message(body, subject, thread_id)
         att_line = self._format_attachment_line(attachments); html_text += att_line; plain_text += att_line
-
         if targets and message_id:
             # Shell-safe: quote all interpolated values
             safe_subject = subject.replace("'", "'\\''"); safe_thread = thread_id.replace("'", "'\\''")

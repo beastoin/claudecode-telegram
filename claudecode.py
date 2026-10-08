@@ -388,9 +388,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 _clock.sleep(DELAY_RETRY)
                 r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=TIMEOUT_TMUX_SEND)
                 return r.returncode == 0
-
             buf_name = f"msg-{uuid.uuid4().hex[:8]}"
-
             if host:
                 r = _remote_run(
                     ["tmux", "load-buffer", "-b", buf_name, "-"],
@@ -408,7 +406,6 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 finally:
                     try: os.unlink(tmpfile)
                     except OSError as exc: _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
-
             if r.returncode != 0: return False
             r = _remote_run(
                 ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
@@ -429,15 +426,12 @@ def get_pane_command(tmux_name: str, host: str | None = None) -> str:
 def is_process_running(tmux_name: str, process_name: str, host: str | None = None) -> bool:
     cmd = get_pane_command(tmux_name, host=host)
     if process_name.lower() in cmd.lower(): return True
-
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
         host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
     if result.returncode != 0: return False
-
     pane_pid = result.stdout.strip()
     if not pane_pid: return False
-
     result = _remote_run(
         ["pgrep", "-P", pane_pid, process_name],
         host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK )
@@ -453,9 +447,7 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
     except (subprocess.SubprocessError, OSError):
         return {}
-
     if result.returncode != 0: return {}
-
     pane_map = {}
     for line in result.stdout.splitlines():
         parts = line.strip().split()
@@ -519,12 +511,10 @@ def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str
 def _codex_parse_jsonl(output: str) -> tuple[str, str]:
     response_parts: list[str] = []
     thread_id: str = ""
-
     for line in output.strip().split("\n"):
         if not line.strip(): continue
         try: event: dict[str, object] = json.loads(line)
         except json.JSONDecodeError: continue
-
         event_type = _str_field(event, "type")
         if event_type == "thread.started": thread_id = _str_field(event, "thread_id")
         elif event_type == "item.completed":
@@ -539,7 +529,6 @@ def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[s
     if workdir: cmd.extend(["-C", workdir])
     if session_id and not session_id.startswith("-"): cmd.extend(["resume", session_id, "-"])
     else: cmd.append("-")
-
     try:
         result = subprocess.run(cmd, input=message, capture_output=True, text=True)
         response, new_session_id = _codex_parse_jsonl(result.stdout)
@@ -567,9 +556,7 @@ def _codex_adapter_thread(worker_name: str, text: str,
     try:
         session_id = _codex_load_session_id(worker_name, sessions_dir)
         response, new_session_id, _rc = _codex_run(text, session_id)
-
         if new_session_id: _codex_save_session_id(worker_name, sessions_dir, new_session_id)
-
         if response: _codex_send_to_bridge(worker_name, response, bridge_url)
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Adapter thread for '{worker_name}' failed: {e}")
@@ -587,16 +574,13 @@ def _codex_adapter_remote(worker_name: str, text: str,
             if r.returncode == 0: session_id = r.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
-
         cmd_parts = ["codex", "exec", "--json", "--yolo"]
         if session_id and not session_id.startswith("-"): cmd_parts.extend(["resume", session_id, "-"])
         else: cmd_parts.append("-")
         ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", host] + cmd_parts
         result = subprocess.run(ssh_cmd, input=text, capture_output=True, text=True)
         response, new_session_id = _codex_parse_jsonl(result.stdout)
-
         if result.returncode != 0 and not response: response = (result.stderr or "").strip() or "Codex exec failed."
-
         if new_session_id:
             try:
                 subprocess.run(
@@ -606,11 +590,9 @@ def _codex_adapter_remote(worker_name: str, text: str,
                     timeout=10, capture_output=True, )
             except (OSError, subprocess.TimeoutExpired):
                 pass
-
         if response:
             target_url = BRIDGE_PUBLIC_URL or bridge_url
             _codex_send_to_bridge(worker_name, response, target_url)
-
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
 
@@ -647,11 +629,9 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
     if not sid_file.exists(): return None
     session_id = sid_file.read_text().strip()
     if not session_id: return None
-
     home = os.path.expanduser("~")
     if host: home = _get_remote_home(host) or home
     codex_dir = os.path.join(home, ".codex", "sessions")
-
     if host:
         try:
             r = _remote_run(
@@ -661,7 +641,6 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:_find_codex_transcript", f"{type(exc).__name__}: {exc}")
         return None
-
     import glob
     matches = glob.glob(os.path.join(codex_dir, "**", f"*{session_id}*"), recursive=True)
     jsonl_matches = [m for m in matches if m.endswith(".jsonl")]
@@ -748,7 +727,6 @@ def ensure_worker_pipe(name: str) -> Path:
     pipe_path = get_worker_pipe_path(name); pipe_dir = pipe_path.parent
     pipe_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     pipe_dir.chmod(0o700)
-
     if not pipe_path.exists():
         os.mkfifo(str(pipe_path), mode=0o600)
         _log(_LOG_INFO, "pipe", f"Created worker pipe: {pipe_path}")
@@ -758,7 +736,6 @@ def ensure_worker_pipe(name: str) -> Path:
 def cleanup_worker_pipe(name: str) -> None:
     stop_pipe_reader(name)
     pipe_path = get_worker_pipe_path(name)
-
     if pipe_path.exists():
         try:
             pipe_path.unlink()
@@ -773,16 +750,13 @@ def cleanup_worker_pipe(name: str) -> None:
 def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     pipe_path = get_worker_pipe_path(name)
     _log(_LOG_INFO, "pipe", f"Pipe reader started for worker '{name}' at {pipe_path}")
-
     while not stop_event.is_set():
         try:
             if stop_event.is_set(): break
-
             with open(str(pipe_path), 'r') as pipe:
                 while not stop_event.is_set():
                     line = pipe.readline()
                     if not line: break
-
                     message = line.strip()
                     if message:
                         _log(_LOG_INFO, "pipe", f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}")
@@ -790,7 +764,6 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
                             _forward_pipe_message(name, message)
                         except (OSError, ValueError) as e:
                             _log(_LOG_ERROR, "bridge", f"Error forwarding pipe message to '{name}': {e}")
-
         except FileNotFoundError:
             _log(_LOG_WARN, "pipe", f"Pipe for '{name}' no longer exists, stopping reader")
             break
@@ -798,7 +771,6 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
             if stop_event.is_set(): break
             _log(_LOG_ERROR, "bridge", f"Pipe reader error for '{name}': {e}")
             stop_event.wait(0.5)
-
     with processes.pipe_readers_lock:
         if name in processes.pipe_readers: processes.pipe_readers.pop(name, None)
     _log(_LOG_INFO, "pipe", f"Pipe reader stopped for worker '{name}'")
@@ -819,7 +791,6 @@ def start_pipe_reader(name: str) -> None:
     if not pipe_path.exists():
         _log(_LOG_WARN, "bridge", f"Cannot start pipe reader: pipe does not exist for '{name}'")
         return
-
     stop_event = threading.Event()
     thread = threading.Thread( target=pipe_reader_loop, args=(name, stop_event), daemon=True, name=f"pipe-reader-{name}"
     )
@@ -950,14 +921,12 @@ def _cache_session_id(name: str, sid: str) -> None:
         old_lines = old_content.split("\n", 1) if old_content else []
         old_sid = old_lines[0].strip() if old_lines else ""
         old_cwd = old_lines[1].strip() if len(old_lines) > 1 else ""
-
         if (sid == old_sid and old_cwd and cwd and
                 old_cwd.rstrip("/") != cwd.rstrip("/")):
             _log(_LOG_WARN, "session",
                  f"{name}: rejecting stale session_id write "
                  f"(sid={sid[:12]}, old_cwd={old_cwd}, current_cwd={cwd})")
             return
-
         if old_sid != sid: _log_session_event(name, sid, cwd, "cache")
         _tmp = id_file.with_suffix('.tmp')
         _tmp.write_text(f"{sid}\n{cwd}")
@@ -968,7 +937,6 @@ def _cache_session_id(name: str, sid: str) -> None:
 
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     cache_file = get_session_dir(name) / "claude_session_id"; current_cwd = get_claude_session_cwd(name)
-
     def _read_cache() -> str:
         if not cache_file.exists(): return ""
         content = cache_file.read_text().strip()
@@ -984,7 +952,6 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
                      f"current_cwd={current_cwd})")
                 return ""
         return sid
-
     val = _read_cache()
     if val: return val
     if current_cwd:
@@ -1019,6 +986,13 @@ def get_any_session_id(name: str) -> tuple[str, str]:
             source = f.name.replace("_session_id", "")
             return val, source
     return "", ""
+
+def _remap_path(local_path: str, host: str | None) -> str:
+    if not host or not local_path: return local_path
+    remote_home = _get_remote_home(host); local_home = os.path.expanduser("~")
+    if remote_home and remote_home != local_home and local_path.startswith(local_home):
+        return remote_home + local_path[len(local_home):]
+    return local_path
 
 def _get_remote_home(host: str | None) -> str:
     with remote_cache.lock: cached = remote_cache.home_dirs.get(host or "")
@@ -1149,7 +1123,6 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             return
     except (urllib.error.URLError, OSError, TimeoutError):
         pass
-
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host, timeout=TIMEOUT_TMUX_CHECK)
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host, timeout=TIMEOUT_TMUX_CHECK)
     sessions_dir_val = str(SESSIONS_DIR)
