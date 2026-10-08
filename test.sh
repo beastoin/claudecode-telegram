@@ -15551,6 +15551,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(project_dir)))
@@ -15598,6 +15615,23 @@ class FakeHandler:
         pass
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(missing)))
@@ -15659,6 +15693,23 @@ class FakeHandler:
         pass
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=ren&cwd=' + quote(remote_cwd))
@@ -15741,6 +15792,23 @@ class FakeHandler:
         self.headers_sent.append(a)
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=ren&cwd=' + quote(new_cwd))
@@ -15823,6 +15891,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
@@ -15906,6 +15991,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
@@ -15982,6 +16084,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=alice&cwd=' + quote(str(new_dir)))
@@ -16057,6 +16176,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=bob&cwd=' + quote(str(new_dir)))
@@ -16125,6 +16261,23 @@ class FakeHandler:
         self.headers[key] = value
     def end_headers(self):
         pass
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+    def _send_error_json(self, code, message):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps({'ok': False, 'error': message}).encode())
+    def _send_json(self, code, data):
+        import json as _j
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(_j.dumps(data).encode())
 
 handler = FakeHandler()
 parsed = urlparse('/checkin?name=bob&cwd=' + quote(str(new_dir)))

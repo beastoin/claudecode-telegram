@@ -69,6 +69,12 @@ class FakeHandler:
     def end_headers(self):
         pass
 
+    def _send_text(self, code, text):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(text.encode() if isinstance(text, str) else text)
+
 
 def test_checkin_instructions_warn_against_response_misuse():
     import bridge

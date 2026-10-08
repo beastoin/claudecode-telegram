@@ -1607,7 +1607,12 @@ def test_remote_dispatch_capture_pane_text():
 
 def test_remote_dispatch_export_hook_env():
     from unittest.mock import patch, MagicMock
-    import bridge
+    import bridge, claudecode
+
+    # Clear remote home cache so _remap_path always calls _remote_run
+    with claudecode.remote_cache.lock:
+        saved_home = dict(claudecode.remote_cache.home_dirs)
+        claudecode.remote_cache.home_dirs.clear()
 
     calls = []
 
@@ -1621,8 +1626,12 @@ def test_remote_dispatch_export_hook_env():
             return MagicMock(returncode=1, stdout='', stderr='')
         return MagicMock(returncode=0, stdout='', stderr='')
 
-    with patch('bridge._remote_run', side_effect=mock_remote):
-        bridge.export_hook_env('claude-prod-ren', host='mac-mini')
+    try:
+        with patch('bridge._remote_run', side_effect=mock_remote):
+            bridge.export_hook_env('claude-prod-ren', host='mac-mini')
+    finally:
+        with claudecode.remote_cache.lock:
+            claudecode.remote_cache.home_dirs.update(saved_home)
 
     # 7 calls: 1 show-environment guard + 5 set-environment + 1 echo HOME
     assert len(calls) == 7, f'Expected 7 calls (1 guard + 5 set-env + 1 echo HOME), got {len(calls)}'
@@ -1788,6 +1797,11 @@ def test_checkin_cwd_accepts_remote_path_for_teleported_worker():
         def end_headers(self):
             pass
 
+        def _send_text(self, code, text):
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(text.encode() if isinstance(text, str) else text)
+
     handler = FakeHandler()
     parsed = urlparse('/checkin?name=ren&cwd=' + quote(remote_cwd))
 
@@ -1867,6 +1881,11 @@ def test_checkin_cwd_restart_uses_remote_for_teleported():
 
         def end_headers(self):
             pass
+
+        def _send_text(self, code, text):
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(text.encode() if isinstance(text, str) else text)
 
     handler = FakeHandler()
     parsed = urlparse('/checkin?name=ren&cwd=' + quote(new_cwd))
