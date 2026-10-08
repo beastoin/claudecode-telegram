@@ -2221,66 +2221,6 @@ def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     host = get_worker_host(worker_name); path = _find_codex_transcript(worker_name, host=host)
     if not path: return []
     return _parse_codex_transcript(path, host=host)
-@dataclass
-class DiskUsage:
-    pct: float
-    free_gb: float
-    total_gb: float
-    ts: float = 0.0
-    @classmethod
-    def from_dict(cls: type["DiskUsage"], d: DiskUsageDict) -> "DiskUsage":
-        return cls(pct=d.get("pct", 0.0), free_gb=d.get("free_gb", 0.0), total_gb=d.get("total_gb", 0.0), ts=d.get("ts", 0.0))
-    def to_dict(self) -> DiskUsageDict:
-        return {"pct": self.pct, "free_gb": self.free_gb,
-                "total_gb": self.total_gb, "ts": self.ts}
-@dataclass
-class MemoryUsage:
-    pct: float
-    used_gb: float
-    total_gb: float
-    avail_gb: float = 0.0
-    ts: float = 0.0
-    @classmethod
-    def from_dict(cls: type["MemoryUsage"], d: MemUsageDict) -> "MemoryUsage":
-        return cls(pct=d.get("pct", 0.0), used_gb=d.get("used_gb", 0.0), total_gb=d.get("total_gb", 0.0),
-            avail_gb=d.get("avail_gb", 0.0), ts=d.get("ts", 0.0))
-    def to_dict(self) -> MemUsageDict:
-        return {"pct": self.pct, "used_gb": self.used_gb,
-                "total_gb": self.total_gb, "avail_gb": self.avail_gb,
-                "ts": self.ts}
-@dataclass
-class IoUsage:
-    iowait_pct: float = 0.0
-    read_iops: int = 0
-    write_iops: int = 0
-    util_pct: float = 0.0
-    ts: float = 0.0
-    @classmethod
-    def from_dict(cls: type["IoUsage"], d: IoUsageDict) -> "IoUsage":
-        return cls(iowait_pct=d.get("iowait_pct", 0.0), read_iops=d.get("read_iops", 0),
-            write_iops=d.get("write_iops", 0), util_pct=d.get("util_pct", 0.0), ts=d.get("ts", 0.0))
-    def to_dict(self) -> IoUsageDict:
-        return {"iowait_pct": self.iowait_pct, "read_iops": self.read_iops,
-                "write_iops": self.write_iops, "util_pct": self.util_pct,
-                "ts": self.ts}
-@dataclass
-class CpuHog:
-    pid: int
-    cpu_pct: float
-    command: str
-    user: str = ""
-    @classmethod
-    def from_dict(cls: type["CpuHog"], d: CpuHogEntry) -> "CpuHog":
-        return cls(pid=int(d.get("pid", 0)), cpu_pct=float(cast(float, d.get("cpu_pct", d.get("cpu", 0.0)))),
-            command=str(d.get("command", d.get("cmd", ""))), user=str(d.get("user", "")))
-@dataclass
-class WorktreeItem:
-    path: str
-    size_mb: float
-    worker: str = ""
-    @classmethod
-    def from_dict(cls: type["WorktreeItem"], d: dict[str, str | float]) -> "WorktreeItem":
-        return cls(path=str(d.get("path", "")), size_mb=float(d.get("size_mb", 0.0)), worker=str(d.get("worker", "")))
 def _load_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
     if not path or not os.path.exists(path): return
@@ -2362,264 +2302,188 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
     with watchdog.lock:
         was_down = host_health.down.get(host, False)
         if ok:
-            host_health.ssh_failures[host] = 0
-            host_health.last_error.pop(host, None)
+            host_health.ssh_failures[host] = 0; host_health.last_error.pop(host, None)
             if was_down:
                 host_health.down[host] = False
                 down_since = host_health.down_since.pop(host, now); duration = int(now - down_since)
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
-                alert_text = (f"✅ Host BACK UP: {host}\n"
-                              f"Was down for {duration // 60}m {duration % 60}s\n"
-                              f"Workers affected: {', '.join(workers_on_host) or 'none'}")
-                _do_send = True
+                _do_send = True; alert_text = f"✅ Host BACK UP: {host}\nWas down for {duration // 60}m {duration % 60}s\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
             else: _do_send = False; alert_text = None
         else:
             failures = host_health.ssh_failures.get(host, 0) + 1
-            host_health.ssh_failures[host] = failures
-            host_health.last_error[host] = error or "ssh probe failed"
+            host_health.ssh_failures[host] = failures; host_health.last_error[host] = error or "ssh probe failed"
             if not was_down and failures >= HOST_DOWN_THRESHOLD:
-                host_health.down[host] = True
-                host_health.down_since[host] = now
+                host_health.down[host] = True; host_health.down_since[host] = now
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
-                alert_text = (f"🔴 Host DOWN: {host}\n"
-                              f"After {failures} consecutive SSH failures\n"
-                              f"Error: {error or 'unknown'}\n"
-                              f"Workers affected: {', '.join(workers_on_host) or 'none'}")
-                _do_send = True
+                _do_send = True; alert_text = f"🔴 Host DOWN: {host}\nAfter {failures} consecutive SSH failures\nError: {error or 'unknown'}\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
             else: _do_send = False; alert_text = None
     if _do_send: _watchdog_alert("Host", alert_text)
 def _is_host_down(host: str) -> bool:
     with watchdog.lock: return host_health.down.get(host, False)
 def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
     try:
-        r = _remote_run(
-            ["df", "-BG", "--output=size,used,avail,pcent", "/"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        cmd = ["df", "-g", "/"] if is_mac else ["df", "-BG", "--output=size,used,avail,pcent", "/"]
+        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
         if len(lines) < 2: return None
         parts = lines[1].split()
+        if is_mac:
+            if len(parts) < 6: return None
+            return {"pct": int(parts[4].rstrip("%")), "free_gb": float(parts[3]), "total_gb": float(parts[1])}
         if len(parts) < 4: return None
-        total_gb = float(parts[0].rstrip("G")); free_gb = float(parts[2].rstrip("G")); pct = int(parts[3].rstrip("%"))
-        return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
+        return {"pct": int(parts[3].rstrip("%")), "free_gb": float(parts[2].rstrip("G")), "total_gb": float(parts[0].rstrip("G"))}
     except (ValueError, KeyError): return None
-def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
-    try:
-        r = _remote_run( ["df", "-g", "/"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0: return None
-        lines = r.stdout.strip().splitlines()
-        if len(lines) < 2: return None
-        parts = lines[1].split()
-        if len(parts) < 6: return None
-        total_gb = float(parts[1]); free_gb = float(parts[3]); pct = int(parts[4].rstrip("%"))
-        return {"pct": pct, "free_gb": free_gb, "total_gb": total_gb}
-    except (ValueError, KeyError): return None
-def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
-    now = _clock.time(); hosts_to_check = [None] + list(remote_hosts)
-    for host in hosts_to_check:
-        if host and _is_host_down(host): continue
-        host_label = host or "VPS"; is_mac = bool(host and "mac" in host.lower())
-        usage = _check_disk_usage_macos(host) if is_mac and host else _check_disk_usage(host)
-        if usage is None: continue
-        is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
-        is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
-        current_level: str | bool
-        if is_critical: current_level = "critical"
-        elif is_warning: current_level = "warning"
-        else: current_level = False
-        alert_text: str | None = None
-        with watchdog.lock:
-            host_health.disk_usage[host_label] = {**usage, "ts": now}
-            prev_level = host_health.disk_alerted.get(host_label, False)
-            if current_level and current_level != prev_level:
-                if current_level == "critical" or not prev_level:
-                    last_alert = host_health.disk_alert_ts.get(host_label, 0)
-                    if now - last_alert >= DISK_ALERT_COOLDOWN:
-                        if current_level == "critical":
-                            alert_text = (
-                                f"🔴 Disk space CRITICAL: {host_label}\n"
-                                f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)\n"
-                                f"Action needed: clean up old files, worktrees, or logs" )
-                        else:
-                            alert_text = (
-                                f"⚠️ Disk space warning: {host_label}\n"
-                                f"Usage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)" )
-                        host_health.disk_alert_ts[host_label] = now
-                        host_health.disk_alerted[host_label] = current_level
-                else: host_health.disk_alerted[host_label] = current_level
-            elif not current_level and prev_level:
-                host_health.disk_alerted[host_label] = False
-                alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
-        _watchdog_alert("Disk", alert_text)
 def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
     try:
-        r = _remote_run( ["free", "-b"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0: return None
-        lines = r.stdout.strip().splitlines(); mem_line = None
-        for line in lines:
-            if line.startswith("Mem:"):
-                mem_line = line
-                break
-        if not mem_line: return None
-        parts = mem_line.split(); total = int(parts[1]); used = int(parts[2])
-        avail = int(parts[6]) if len(parts) >= 7 else total - used; total_gb = total / (1024**3)
-        used_gb = used / (1024**3); avail_gb = avail / (1024**3); pct = int((used / total) * 100) if total > 0 else 0
-        top_procs = _get_top_mem_procs(host)
-        _mem_result: MemUsageDict = {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
-        return _mem_result
-    except (ValueError, KeyError): return None
-def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
-    try:
-        r = _remote_run(
-            ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0: return None
-        lines = r.stdout.strip().splitlines()
-        if len(lines) < 2: return None
-        total = int(lines[0]); page_size = 16384; free_pages = 0; inactive_pages = 0
-        speculative_pages = 0
-        for line in lines[1:]:
-            if "page size of" in line:
-                try:
-                    page_size = int(line.split("page size of")[1].strip().rstrip("."))
-                except (ValueError, IndexError) as exc: _log(_LOG_DEBUG, "parse:_check_mem_usage_macos", f"{type(exc).__name__}: {exc}")
-            elif "Pages free:" in line: free_pages = int(line.split(":")[1].strip().rstrip("."))
-            elif "Pages inactive:" in line: inactive_pages = int(line.split(":")[1].strip().rstrip("."))
-            elif "Pages speculative:" in line: speculative_pages = int(line.split(":")[1].strip().rstrip("."))
-        avail = (free_pages + inactive_pages + speculative_pages) * page_size; used = total - avail
+        if is_mac:
+            r = _remote_run(["bash", "-c", "sysctl -n hw.memsize && vm_stat"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0: return None
+            lines = r.stdout.strip().splitlines()
+            if len(lines) < 2: return None
+            total = int(lines[0]); page_size = 16384; free_p = inactive_p = spec_p = 0
+            for line in lines[1:]:
+                if "page size of" in line:
+                    try: page_size = int(line.split("page size of")[1].strip().rstrip("."))
+                    except (ValueError, IndexError): pass
+                elif "Pages free:" in line: free_p = int(line.split(":")[1].strip().rstrip("."))
+                elif "Pages inactive:" in line: inactive_p = int(line.split(":")[1].strip().rstrip("."))
+                elif "Pages speculative:" in line: spec_p = int(line.split(":")[1].strip().rstrip("."))
+            avail = (free_p + inactive_p + spec_p) * page_size; used = total - avail
+        else:
+            r = _remote_run(["free", "-b"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0: return None
+            mem_line = next((l for l in r.stdout.strip().splitlines() if l.startswith("Mem:")), None)
+            if not mem_line: return None
+            parts = mem_line.split(); total = int(parts[1]); used = int(parts[2])
+            avail = int(parts[6]) if len(parts) >= 7 else total - used
         total_gb = total / (1024**3); used_gb = used / (1024**3); avail_gb = avail / (1024**3)
-        pct = int((used / total) * 100) if total > 0 else 0; top_procs = _get_top_mem_procs(host)
-        _mem_result: MemUsageDict = {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
-        return _mem_result
+        pct = int((used / total) * 100) if total > 0 else 0
+        top_procs = _get_top_mem_procs(host)
+        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
     except (ValueError, KeyError): return None
 def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
     try:
-        r = _remote_run(
-            ["ps", "aux", "--sort=-rss"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        r = _remote_run(["ps", "aux", "--sort=-rss"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0: return []
-        lines = r.stdout.strip().splitlines(); procs = []
-        for line in lines[1:6]:
+        procs = []
+        for line in r.stdout.strip().splitlines()[1:6]:
             parts = line.split(None, 10)
             if len(parts) >= 11:
-                rss_kb = int(parts[5])
-                procs.append(cast(dict[str, object], {
-                    "pid": parts[1],
-                    "rss_gb": round(rss_kb / (1024 * 1024), 1),
-                    "pct": parts[3],
-                    "cmd": parts[10][:80],
-                }))
+                procs.append(cast(dict[str, object], {"pid": parts[1], "rss_gb": round(int(parts[5]) / (1024 * 1024), 1), "pct": parts[3], "cmd": parts[10][:80]}))
         return procs
     except (ValueError, KeyError): return []
-def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
-    now = _clock.time(); hosts_to_check = [None] + list(remote_hosts)
-    for host in hosts_to_check:
-        if host and _is_host_down(host): continue
-        host_label = host or "VPS"; is_mac = bool(host and "mac" in host.lower())
-        usage = _check_mem_usage_macos(host) if is_mac and host else _check_mem_usage(host)
-        if usage is None: continue
-        is_critical = usage["pct"] >= MEM_ALERT_THRESHOLD_PCT or usage["avail_gb"] < MEM_ALERT_THRESHOLD_GB
-        alert_text = None
-        with watchdog.lock:
-            host_health.mem_usage[host_label] = {**usage, "ts": now}
-            was_alerted = host_health.mem_alerted.get(host_label, False)
-            if is_critical and not was_alerted:
-                last_alert = host_health.mem_alert_ts.get(host_label, 0)
-                if now - last_alert >= MEM_ALERT_COOLDOWN:
-                    top_lines = ""
-                    for p in usage.get("top_procs", [])[:3]: top_lines += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
-                    alert_text = (
-                        f"🧠 Memory critical: {host_label}\n"
-                        f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)" )
-                    if top_lines: alert_text += f"\nTop consumers:{top_lines}"
-                    host_health.mem_alert_ts[host_label] = now
-                    host_health.mem_alerted[host_label] = True
-            elif not is_critical and was_alerted:
-                host_health.mem_alerted[host_label] = False
-                alert_text = f"✅ Memory recovered: {host_label} — {usage['pct']}% ({usage['avail_gb']:.1f}GB available)"
-        _watchdog_alert("Memory", alert_text)
 def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
+    if is_mac:
+        try:
+            r = _remote_run(["iostat", "-c", "2", "-w", "1"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0: return None
+            lines = r.stdout.strip().splitlines()
+            if len(lines) < 3: return None
+            parts = lines[-1].split()
+            return {"iowait_pct": 0, "read_iops": int(float(parts[0])), "write_iops": int(float(parts[1])), "util_pct": 0} if len(parts) >= 6 else None
+        except (ValueError, KeyError): return None
     try:
-        r = _remote_run(
-            ["iostat", "-x", "-d", "1", "2", "-o", "JSON"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+        r = _remote_run(["iostat", "-x", "-d", "1", "2", "-o", "JSON"], host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode == 0 and r.stdout.strip():
-            import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout)); _sysstat = data.get("sysstat", {})
+            data = cast(dict[str, object], json.loads(r.stdout)); _sysstat = data.get("sysstat", {})
             _hosts = _sysstat.get("hosts", [{}]) if isinstance(_sysstat, dict) else [{}]
             _host0 = _hosts[0] if isinstance(_hosts, list) and _hosts else {}
             stats = _host0.get("statistics", []) if isinstance(_host0, dict) else []
             if isinstance(stats, list) and len(stats) >= 2:
-                _last_stat = stats[-1]; disks = _last_stat.get("disk", []) if isinstance(_last_stat, dict) else []
-                total_r_iops = sum(d.get("r/s", 0) for d in disks); total_w_iops = sum(d.get("w/s", 0) for d in disks)
-                max_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0)
-                cpu_r = _remote_run(
-                    ["bash", "-c", "awk '{print $5}' /proc/stat | head -1"],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK)
-                iowait = 0.0
-                r2 = _remote_run(
-                    ["vmstat", "1", "2"],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+                disks = stats[-1].get("disk", []) if isinstance(stats[-1], dict) else []
+                r_iops = sum(d.get("r/s", 0) for d in disks); w_iops = sum(d.get("w/s", 0) for d in disks)
+                m_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0); iowait = 0.0
+                r2 = _remote_run(["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
                 if r2.returncode == 0:
-                    lines = r2.stdout.strip().splitlines()
-                    if len(lines) >= 3:
-                        parts = lines[-1].split()
-                        if len(parts) >= 16: iowait = float(parts[15])
-                return {"iowait_pct": round(iowait, 1), "read_iops": round(total_r_iops), "write_iops": round(total_w_iops), "util_pct": round(max_util, 1)}
+                    vlines = r2.stdout.strip().splitlines()
+                    if len(vlines) >= 3:
+                        vp = vlines[-1].split()
+                        if len(vp) >= 16: iowait = float(vp[15])
+                return {"iowait_pct": round(iowait, 1), "read_iops": round(r_iops), "write_iops": round(w_iops), "util_pct": round(m_util, 1)}
     except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
-        _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
+        _log(_LOG_DEBUG, "parse:io", f"{type(exc).__name__}: {exc}")
     try:
-        r = _remote_run( ["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        r = _remote_run(["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
         if len(lines) < 3: return None
         parts = lines[-1].split()
         if len(parts) < 16: return None
-        iowait = float(parts[15]); bi = int(parts[8]); bo = int(parts[9])
-        return { "iowait_pct": round(iowait, 1), "read_iops": bi, "write_iops": bo, "util_pct": 0, }
+        return {"iowait_pct": round(float(parts[15]), 1), "read_iops": int(parts[8]), "write_iops": int(parts[9]), "util_pct": 0}
     except (ValueError, KeyError): return None
-def _check_io_usage_macos(host: str) -> IoUsageDict | None:
-    try:
-        r = _remote_run(
-            ["iostat", "-c", "2", "-w", "1"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0: return None
-        lines = r.stdout.strip().splitlines()
-        if len(lines) < 3: return None
-        parts = lines[-1].split()
-        if len(parts) < 6: return None
-        return { "iowait_pct": 0, "read_iops": int(float(parts[0])), "write_iops": int(float(parts[1])), "util_pct": 0,
-        }
-    except (ValueError, KeyError): return None
-def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
-    now = _clock.time(); hosts_to_check = [None] + list(remote_hosts)
-    for host in hosts_to_check:
+def _probe_metric(remote_hosts: set[str], *, check_fn: Callable[..., dict[str, object] | None],
+                  usage_store: dict[str, object], alerted_store: dict[str, object],
+                  alert_ts_store: dict[str, float], cooldown: int | float,
+                  is_critical_fn: Callable[[dict[str, object]], bool],
+                  alert_fmt: Callable[[str, dict[str, object]], str],
+                  recovery_fmt: Callable[[str, dict[str, object]], str], category: str) -> None:
+    """Generic host metric probe: check -> threshold -> alert with cooldown."""
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
         if host and _is_host_down(host): continue
-        host_label = host or "VPS"; is_mac = bool(host and "mac" in host.lower())
-        usage = _check_io_usage_macos(host) if is_mac and host else _check_io_usage(host)
+        host_label = host or "VPS"
+        usage = check_fn(host)
         if usage is None: continue
-        is_critical = usage["iowait_pct"] >= IO_ALERT_IOWAIT_PCT; alert_text = None
+        is_crit = is_critical_fn(usage); alert_text = None
         with watchdog.lock:
-            host_health.io_usage[host_label] = {**usage, "ts": now}
-            was_alerted = host_health.io_alerted.get(host_label, False)
-            if is_critical and not was_alerted:
-                last_alert = host_health.io_alert_ts.get(host_label, 0)
-                if now - last_alert >= IO_ALERT_COOLDOWN:
-                    alert_text = (
-                        f"⚡ IO critical: {host_label}\n"
-                        f"IO wait: {usage['iowait_pct']}%\n"
-                        f"IOPS: {usage['read_iops']}r + {usage['write_iops']}w" )
-                    if usage["util_pct"]: alert_text += f" | disk util: {usage['util_pct']}%"
-                    host_health.io_alert_ts[host_label] = now
-                    host_health.io_alerted[host_label] = True
-            elif not is_critical and was_alerted:
-                host_health.io_alerted[host_label] = False
-                alert_text = f"✅ IO recovered: {host_label} — iowait {usage['iowait_pct']}%, IOPS {usage['read_iops']}r+{usage['write_iops']}w"
-        _watchdog_alert("IO", alert_text)
-def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
+            usage_store[host_label] = {**usage, "ts": now}
+            was_alerted = alerted_store.get(host_label, False)
+            if is_crit and not was_alerted:
+                if now - alert_ts_store.get(host_label, 0) >= cooldown:
+                    alert_text = alert_fmt(host_label, usage)
+                    alert_ts_store[host_label] = now; alerted_store[host_label] = True
+            elif not is_crit and was_alerted:
+                alerted_store[host_label] = False; alert_text = recovery_fmt(host_label, usage)
+        _watchdog_alert(category, alert_text)
+def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
+        if host and _is_host_down(host): continue
+        host_label = host or "VPS"
+        usage = _check_disk_usage(host)
+        if usage is None: continue
+        is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
+        is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
+        level = "critical" if is_critical else ("warning" if is_warning else False)
+        alert_text: str | None = None
+        with watchdog.lock:
+            host_health.disk_usage[host_label] = {**usage, "ts": now}
+            prev = host_health.disk_alerted.get(host_label, False)
+            if level and level != prev:
+                if level == "critical" or not prev:
+                    if now - host_health.disk_alert_ts.get(host_label, 0) >= DISK_ALERT_COOLDOWN:
+                        emoji = "🔴 Disk space CRITICAL" if level == "critical" else "⚠️ Disk space warning"
+                        alert_text = f"{emoji}: {host_label}\nUsage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)"
+                        if level == "critical": alert_text += "\nAction needed: clean up old files, worktrees, or logs"
+                        host_health.disk_alert_ts[host_label] = now; host_health.disk_alerted[host_label] = level
+                else: host_health.disk_alerted[host_label] = level
+            elif not level and prev:
+                host_health.disk_alerted[host_label] = False
+                alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
+        _watchdog_alert("Disk", alert_text)
+def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
+    def _fmt(h: str, u: dict[str, object]) -> str:
+        text = f"🧠 Memory critical: {h}\nUsage: {u['pct']}% ({u['avail_gb']:.1f}GB available of {u['total_gb']:.0f}GB)"
+        for p in u.get("top_procs", [])[:3]: text += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+        return text
+    _probe_metric(remote_hosts, check_fn=_check_mem_usage, usage_store=host_health.mem_usage,
+        alerted_store=host_health.mem_alerted, alert_ts_store=host_health.mem_alert_ts,
+        cooldown=MEM_ALERT_COOLDOWN, is_critical_fn=lambda u: u["pct"] >= MEM_ALERT_THRESHOLD_PCT or u["avail_gb"] < MEM_ALERT_THRESHOLD_GB,
+        alert_fmt=_fmt, recovery_fmt=lambda h, u: f"✅ Memory recovered: {h} — {u['pct']}% ({u['avail_gb']:.1f}GB available)", category="Memory")
+def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
+    _probe_metric(remote_hosts, check_fn=_check_io_usage, usage_store=host_health.io_usage,
+        alerted_store=host_health.io_alerted, alert_ts_store=host_health.io_alert_ts,
+        cooldown=IO_ALERT_COOLDOWN, is_critical_fn=lambda u: u["iowait_pct"] >= IO_ALERT_IOWAIT_PCT,
+        alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w" + (f" | disk util: {u['util_pct']}%" if u["util_pct"] else ""),
+        recovery_fmt=lambda h, u: f"✅ IO recovered: {h} — iowait {u['iowait_pct']}%, IOPS {u['read_iops']}r+{u['write_iops']}w", category="IO")
+def _get_cpu_hogs(host: str | None = None) -> list[CpuHogEntry]:
+    is_mac = bool(host and "mac" in host.lower())
     try:
-        if is_mac: cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
-        else: cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
+        cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "-r"] if is_mac else ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
         r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0: return []
         hogs: list[CpuHogEntry] = []
@@ -2629,85 +2493,56 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
             try: pid = int(parts[0]); cpu = float(parts[1])
             except (ValueError, IndexError): continue
             if cpu < CPU_HOG_THRESHOLD_PCT: break
-            etime_str = parts[2]; etime_min = _parse_etime(etime_str)
-            if etime_min is None: continue
-            cmd_name = parts[3][:80] if len(parts) > 3 else "?"
-            hogs.append({"pid": pid, "cpu": cpu, "etime_min": etime_min, "cmd": cmd_name})
+            etime_str = parts[2]; days = 0
+            if "-" in etime_str: day_part, etime_str = etime_str.split("-", 1); days = int(day_part)
+            tp = etime_str.split(":")
+            try:
+                mins = days * 1440 + (int(tp[0]) * 60 + int(tp[1]) if len(tp) == 3 else int(tp[0])) if len(tp) >= 2 else None
+            except (ValueError, IndexError): mins = None
+            if mins is None: continue
+            hogs.append({"pid": pid, "cpu": cpu, "etime_min": mins, "cmd": parts[3][:80] if len(parts) > 3 else "?"})
         return hogs
     except (ValueError, KeyError): return []
-def _parse_etime(etime: str) -> int | None:
-    try:
-        days = 0
-        if "-" in etime:
-            day_part, rest = etime.split("-", 1)
-            days = int(day_part); etime = rest
-        parts = etime.split(":")
-        if len(parts) == 3: hours, mins, _secs = int(parts[0]), int(parts[1]), int(parts[2])
-        elif len(parts) == 2: hours, mins, _secs = 0, int(parts[0]), int(parts[1])
-        else: return None
-        return days * 24 * 60 + hours * 60 + mins
-    except (ValueError, IndexError): return None
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
-    now = _clock.time(); hosts_to_check = [None] + list(remote_hosts)
-    for host in hosts_to_check:
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
+        if host and _is_host_down(host): continue
+        host_label = host or "VPS"
+        real_hogs = [h for h in _get_cpu_hogs(host) if h["etime_min"] >= CPU_HOG_DURATION_MIN]
+        with watchdog.lock: host_health.cpu_hogs[host_label] = real_hogs
+        if real_hogs and now - host_health.cpu_hog_alert_ts.get(host_label, 0) >= CPU_HOG_ALERT_COOLDOWN:
+            lines = []
+            for h in real_hogs[:5]:
+                elapsed = f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
+                lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
+            host_health.cpu_hog_alert_ts[host_label] = now
+            _watchdog_alert("CPU hog", f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines))
+def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
         if host and _is_host_down(host): continue
         host_label = host or "VPS"; is_mac = bool(host and "mac" in host.lower())
-        hogs = _get_cpu_hogs(host, is_mac=is_mac)
-        real_hogs = [h for h in hogs if h["etime_min"] >= CPU_HOG_DURATION_MIN]
-        with watchdog.lock: host_health.cpu_hogs[host_label] = real_hogs
-        if real_hogs:
-            last_alert = host_health.cpu_hog_alert_ts.get(host_label, 0)
-            if now - last_alert >= CPU_HOG_ALERT_COOLDOWN:
-                lines = []
-                for h in real_hogs[:5]:
-                    elapsed = f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
-                    lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
-                alert_text = (
-                    f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n"
-                    + "\n".join(lines) )
-                host_health.cpu_hog_alert_ts[host_label] = now
-                _watchdog_alert("CPU hog", alert_text)
-def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
-    now = _clock.time(); hosts_to_check = [None] + list(remote_hosts)
-    for host in hosts_to_check:
-        if host and _is_host_down(host): continue
-        host_label = host or "VPS"; is_mac = host and "mac" in host.lower()
         try:
-            if is_mac:
-                cmd = ["bash", "-c",
-                       "find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | "
-                       "while read d; do du -sk \"$d\" 2>/dev/null; done"]
-            else:
-                cmd = ["bash", "-c",
-                       "find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | "
-                       "while read d; do du -sb \"$d\" 2>/dev/null; done"]
+            du_flag = "-sk" if is_mac else "-sb"
+            cmd = ["bash", "-c", f"find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | while read d; do du {du_flag} \"$d\" 2>/dev/null; done"]
             r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
             if r.returncode != 0 or not r.stdout.strip(): continue
-            items: list[WorktreeItemDict] = []
-            total_bytes = 0
+            items: list[WorktreeItemDict] = []; total_bytes = 0
             for line in r.stdout.strip().splitlines():
                 parts = line.split(None, 1)
                 if len(parts) < 2: continue
-                try: size_val = int(parts[0]); path = parts[1]
+                try: size_val = int(parts[0])
                 except (ValueError, IndexError): continue
-                size_bytes = size_val * 1024 if is_mac else size_val; size_gb = size_bytes / (1024**3)
-                total_bytes += size_bytes
-                items.append({"path": path, "size_gb": round(size_gb, 1)})
+                size_bytes = size_val * 1024 if is_mac else size_val; total_bytes += size_bytes
+                items.append({"path": parts[1], "size_gb": round(size_bytes / (1024**3), 1)})
             total_gb = total_bytes / (1024**3)
-            with watchdog.lock:
-                host_health.worktree_usage[host_label] = {"total_gb": round(total_gb, 1), "items": items, "ts": now}
+            with watchdog.lock: host_health.worktree_usage[host_label] = {"total_gb": round(total_gb, 1), "items": items, "ts": now}
             was_alerted = host_health.worktree_alerted.get(host_label, False)
             if total_gb >= WORKTREE_ALERT_THRESHOLD_GB and not was_alerted:
-                last_alert = host_health.worktree_alert_ts.get(host_label, 0)
-                if now - last_alert >= WORKTREE_ALERT_COOLDOWN:
-                    top_items = sorted(items, key=lambda x: x["size_gb"], reverse=True)[:5]
-                    lines = [f"  {it['size_gb']}GB — {it['path']}" for it in top_items]
-                    alert_text = (
-                        f"📁 Worktree bloat on {host_label}: {total_gb:.1f}GB total (threshold: {WORKTREE_ALERT_THRESHOLD_GB}GB)\n"
-                        f"Top directories:\n" + "\n".join(lines) )
-                    host_health.worktree_alert_ts[host_label] = now
-                    host_health.worktree_alerted[host_label] = True
-                    _watchdog_alert("Worktree", alert_text)
+                if now - host_health.worktree_alert_ts.get(host_label, 0) >= WORKTREE_ALERT_COOLDOWN:
+                    top = sorted(items, key=lambda x: x["size_gb"], reverse=True)[:5]
+                    host_health.worktree_alert_ts[host_label] = now; host_health.worktree_alerted[host_label] = True
+                    _watchdog_alert("Worktree", f"📁 Worktree bloat on {host_label}: {total_gb:.1f}GB total (threshold: {WORKTREE_ALERT_THRESHOLD_GB}GB)\nTop directories:\n" + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top))
             elif total_gb < WORKTREE_ALERT_THRESHOLD_GB and was_alerted:
                 host_health.worktree_alerted[host_label] = False
                 _watchdog_alert("Worktree", f"✅ Worktree size recovered: {host_label} — {total_gb:.1f}GB (below {WORKTREE_ALERT_THRESHOLD_GB}GB)")
@@ -2716,22 +2551,15 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
 def _probe_tailscale() -> None:
     now = _clock.time()
     try:
-        r = _subprocess_runner.run(
-            ["tailscale", "status", "--json"],
-            capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode == 0:
-            import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout)); is_up = data.get("BackendState") == "Running"
-        else: is_up = False
-    except (subprocess.SubprocessError, OSError): is_up = False
+        r = _subprocess_runner.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        is_up = r.returncode == 0 and json.loads(r.stdout).get("BackendState") == "Running"
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError): is_up = False
     alert_text = None
     with watchdog.lock:
         if not is_up and not host_health.tailscale_down:
             if now - host_health.tailscale_alert_ts >= INFRA_ALERT_COOLDOWN:
                 host_health.tailscale_down = True; host_health.tailscale_alert_ts = now
-                alert_text = (
-                    "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\n"
-                    "Run: sudo tailscale up" )
+                alert_text = "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\nRun: sudo tailscale up"
         elif is_up and host_health.tailscale_down:
             host_health.tailscale_down = False; alert_text = "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
     _watchdog_alert("Tailscale", alert_text)
