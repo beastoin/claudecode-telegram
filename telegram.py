@@ -191,20 +191,12 @@ class IncomingMessage:
 
     @classmethod
     def from_update(cls: type["IncomingMessage"], update: TelegramUpdate) -> "IncomingMessage":
-        msg = update.get("message", {})
-        text = msg.get("text", "") or msg.get("caption", "")
-        photo = msg.get("photo")
-        document = msg.get("document")
-        animation = msg.get("animation")
-        audio = msg.get("audio")
-        voice = msg.get("voice")
-        video = msg.get("video")
-        video_note = msg.get("video_note")
-        sticker = msg.get("sticker")
-        doc_is_image = False
+        msg = update.get("message", {}); text = msg.get("text", "") or msg.get("caption", ""); photo = msg.get("photo")
+        document = msg.get("document"); animation = msg.get("animation"); audio = msg.get("audio")
+        voice = msg.get("voice"); video = msg.get("video"); video_note = msg.get("video_note")
+        sticker = msg.get("sticker"); doc_is_image = False
         if document:
-            mime_type = document.get("mime_type", "")
-            doc_is_image = mime_type.startswith("image/")
+            mime_type = document.get("mime_type", ""); doc_is_image = mime_type.startswith("image/")
         has_media = bool( photo or document or animation or video or audio or voice or video_note or sticker )
         return cls(
             update_id=update.get("update_id", 0),
@@ -228,8 +220,7 @@ class IncomingMessage:
 def _extract_msg_text(msg: TelegramMessageDict) -> str:
     text = msg.get("text") or msg.get("caption") or ""
     if not text:
-        rich = msg.get("rich_message")
-        blocks = rich.get("blocks") if rich else None
+        rich = msg.get("rich_message"); blocks = rich.get("blocks") if rich else None
         if isinstance(blocks, list):
             parts = []
             for b in blocks:
@@ -257,15 +248,13 @@ def _normalize_activity(raw: str) -> str:
     if not raw: return raw
     m = re.match(r'^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$', raw)
     if m:
-        verb = m.group(1)
-        dur = m.group(2)
+        verb = m.group(1); dur = m.group(2)
         if dur: return f"Thinking ({dur})"
         return "Thinking"
     return raw
 
 def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, str, int]:
-    status = (watchdog_status or "").lower()
-    act = (activity or "").lower()
+    status = (watchdog_status or "").lower(); act = (activity or "").lower()
 
     if "rate limit" in act: return "🔴", "rate limit", 0
     if "error" in act or "traceback" in act or "not running" in act or "failed" in act: return "🔴", "error", 0
@@ -328,19 +317,15 @@ def format_team_lines(
     if normalize_backend_fn is None: normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
     backend_values = set()
     for name, session in registered.items():
-        live = worker_live.get(name, {})
-        backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
+        live = worker_live.get(name, {}); backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
         backend_values.add(backend)
-    show_backend = len(backend_values) > 1
-    rows = []
-    counts = {"🔴": 0, "🟡": 0, "🟢": 0}
+    show_backend = len(backend_values) > 1; rows = []; counts = {"🔴": 0, "🟡": 0, "🟢": 0}
     for name in sorted(registered.keys()):
         session = registered[name]
         watchdog_status = _format_watchdog_status(name, pending_lookup,
                                                   state_snapshot=state_snapshot,
                                                   clock_now=clock_now)
-        live = worker_live.get(name, {})
-        backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
+        live = worker_live.get(name, {}); backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
         raw_activity = str(live.get("activity") or "").strip()
         if not raw_activity or raw_activity == "Unknown": raw_activity = watchdog_status
         activity = _normalize_activity(raw_activity)
@@ -355,8 +340,7 @@ def format_team_lines(
         focus_rank = 0 if name == active else 1
         rows.append((severity_rank, focus_rank, name, blocker, row))
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
-    attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]
-    lines = []
+    attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]; lines = []
     focused = active or "(none)"
     lines.append(
         f"Team: {len(registered)} agents · focused: {focused} | "
@@ -501,8 +485,7 @@ class TelegramAPI:
 
     def api(self, method: str, data: Mapping[str, object] | dict[str, object]) -> TelegramApiResponse:
         if not self.token: return None
-        url = f"https://api.telegram.org/bot{self.token}/{method}"
-        payload = json.dumps(data).encode()
+        url = f"https://api.telegram.org/bot{self.token}/{method}"; payload = json.dumps(data).encode()
         headers = {"Content-Type": "application/json"}
         try:
             with _tg_http_client.post(url, data=payload, headers=headers,
@@ -511,8 +494,7 @@ class TelegramAPI:
         except urllib.error.HTTPError as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
             try:
-                raw = e.read()
-                body = cast(TelegramApiResponseDict, json.loads(raw))
+                raw = e.read(); body = cast(TelegramApiResponseDict, json.loads(raw))
                 return body
             except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, ValueError):
                 return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code} (non-JSON body)"}
@@ -637,8 +619,7 @@ class TelegramTransport(MessageTransport):
                               filename: str | None = None,
                               mime_type: str | None = None) -> bool:
         if not BOT_TOKEN: return False
-        file_path = Path(file_path)
-        data = file_data if file_data is not None else file_path.read_bytes()
+        file_path = Path(file_path); data = file_data if file_data is not None else file_path.read_bytes()
         fname = filename or file_path.name
         ctype = mime_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         boundary = uuid.uuid4().hex
@@ -731,8 +712,7 @@ class TelegramTransport(MessageTransport):
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "bridge", f"getFile error: {e}")
             return None
-        file_path = str(file_info.get("file_path", ""))
-        file_size = int(file_info.get("file_size", 0))
+        file_path = str(file_info.get("file_path", "")); file_size = int(file_info.get("file_size", 0))
         if not file_path:
             _log(_LOG_WARN, "telegram", "No file_path in response")
             return None
@@ -742,10 +722,8 @@ class TelegramTransport(MessageTransport):
         download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         import bridge as _br
         import claudecode as _cc
-        inbox = _br.ensure_inbox_dir(session_name)
-        ext = Path(file_path).suffix or ""
-        local_filename = f"{uuid.uuid4().hex}{ext}"
-        local_path = inbox / local_filename
+        inbox = _br.ensure_inbox_dir(session_name); ext = Path(file_path).suffix or ""
+        local_filename = f"{uuid.uuid4().hex}{ext}"; local_path = inbox / local_filename
         try:
             req = urllib.request.Request(download_url)
             with _urlopen(req, timeout=TIMEOUT_HTTP_UPLOAD) as r:
@@ -885,8 +863,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists(): return None
 
-        boundary = uuid.uuid4().hex
-        body_parts = []
+        boundary = uuid.uuid4().hex; body_parts = []
         body_parts.append(f"--{boundary}".encode())
         content_type = mimetypes.guess_type(str(file_path_obj))[0] or "audio/ogg"
         body_parts.append(f'Content-Disposition: form-data; name="file"; filename="{file_path_obj.name}"'.encode())
@@ -901,8 +878,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
             data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"} )
         with _urlopen(req, timeout=timeout) as r:
-            result = cast(TelegramApiResponseDict, json.loads(r.read()))
-            text = str(result.get("text", "")).strip()
+            result = cast(TelegramApiResponseDict, json.loads(r.read())); text = str(result.get("text", "")).strip()
             if text:
                 duration = str(result.get("audio_duration_s", "?"))
                 _log(_LOG_INFO, "stt", f"STT transcribed: {len(text)} chars from {duration}s audio")
@@ -928,12 +904,10 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                     TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
                     TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
                     TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1), )
-                new_w = int(w * scale)
-                new_h = int(h * scale)
+                new_w = int(w * scale); new_h = int(h * scale)
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 import io
-                buf = io.BytesIO()
-                fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
+                buf = io.BytesIO(); fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
                 if fmt == "PNG" and resized.mode not in ("RGBA", "P", "L", "LA"): resized = resized.convert("RGBA")
                 elif fmt == "JPEG" and resized.mode != "RGB": resized = resized.convert("RGB")
                 resized.save(buf, format=fmt)
@@ -977,8 +951,7 @@ CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple[str, bool]]:
-    segments = []
-    last = 0
+    segments = []; last = 0
     for match in pattern.finditer(text):
         if match.start() > last: segments.append((text[last:match.start()], False))
         segments.append((match.group(0), True))
@@ -998,15 +971,12 @@ def _collapse_excess_newlines(text: str) -> str:
     return "".join(output)
 
 def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str | None, str]]]:
-    pattern = re.compile(rf"(\\)?\[\[{tag_name}:([^\]|]+)(?:\|([^\]]*))?\]\]")
-    items = []
-    removed = 0
+    pattern = re.compile(rf"(\\)?\[\[{tag_name}:([^\]|]+)(?:\|([^\]]*))?\]\]"); items = []; removed = 0
 
     def replace_tag(match: re.Match[str]) -> str:
         nonlocal removed
         if match.group(1): return match.group(0)[1:]
-        path = match.group(2).strip()
-        caption = (match.group(3) or "").strip()
+        path = match.group(2).strip(); caption = (match.group(3) or "").strip()
         ok, _ = validate_func(path)
         if ok:
             items.append((path, caption))
@@ -1155,8 +1125,7 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
             href = escape_html((tok.attrs or {}).get("href", ""))
             out.append(f'<a href="{href}">')
         elif tok.type == "image":
-            alt = escape_html(tok.content or "image")
-            src = escape_html((tok.attrs or {}).get("src", ""))
+            alt = escape_html(tok.content or "image"); src = escape_html((tok.attrs or {}).get("src", ""))
             out.append(f'[{alt}]({src})')
         elif tok.type == "html_inline": out.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
         elif tok.content: out.append(escape_html(tok.content))
@@ -1165,8 +1134,7 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
 def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
     all_rows = [headers] + rows
     if not all_rows or not all_rows[0]: return ""
-    num_cols = max(len(r) for r in all_rows)
-    col_widths = [0] * num_cols
+    num_cols = max(len(r) for r in all_rows); col_widths = [0] * num_cols
     for row in all_rows:
         for ci, cell in enumerate(row):
             if ci < num_cols: col_widths[ci] = max(col_widths[ci], len(cell))
@@ -1189,12 +1157,10 @@ def _wrap_plain_tables(text: str) -> str:
         if part.startswith('<pre>'):
             out.append(part)
             continue
-        lines = part.split('\n')
-        i = 0
+        lines = part.split('\n'); i = 0
         while i < len(lines):
             if _MULTI_SPACE_RE.search(lines[i]):
-                run = [lines[i]]
-                j = i + 1
+                run = [lines[i]]; j = i + 1
                 while j < len(lines) and (_MULTI_SPACE_RE.search(lines[j]) or lines[j].strip() == ''):
                     run.append(lines[j])
                     j += 1
@@ -1221,8 +1187,7 @@ def _wrap_plain_tables(text: str) -> str:
 
 def markdown_to_telegram_html(text: str) -> str:
     from markdown_it import MarkdownIt
-    md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
-    tokens = md.parse(text)
+    md = MarkdownIt("commonmark").enable("strikethrough").enable("table"); tokens = md.parse(text)
     result: list[str] = []
     list_depth = 0
     ordered_counter: list[int] = []
@@ -1248,8 +1213,7 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "heading_close": result.append("</b>\n")
 
         elif tok.type == "fence":
-            lang = tok.info.strip() if tok.info else ""
-            code = escape_html(tok.content.rstrip("\n"))
+            lang = tok.info.strip() if tok.info else ""; code = escape_html(tok.content.rstrip("\n"))
             if lang: result.append(f'<pre><code class="language-{escape_html(lang)}">{code}</code></pre>\n')
             else: result.append(f"<pre>{code}</pre>\n")
         elif tok.type == "code_block":
@@ -1284,15 +1248,11 @@ def markdown_to_telegram_html(text: str) -> str:
             if result and not result[-1].endswith("\n"): result.append("\n")
 
         elif tok.type == "table_open":
-            in_table = True
-            table_headers = []
-            table_rows = []
+            in_table = True; table_headers = []; table_rows = []
         elif tok.type == "table_close":
-            in_table = False
-            pre_block = _render_table_as_pre(table_headers, table_rows)
+            in_table = False; pre_block = _render_table_as_pre(table_headers, table_rows)
             if pre_block: result.append(pre_block)
-            table_headers = []
-            table_rows = []
+            table_headers = []; table_rows = []
         elif tok.type == "thead_open": in_thead = True
         elif tok.type == "thead_close": in_thead = False
         elif tok.type in ("tbody_open", "tbody_close"): pass
@@ -1328,19 +1288,13 @@ def _pipe_tables_to_html(text: str) -> str:
         return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
     def _cell_md(s: str) -> str:
-        s = _esc(s)
-        s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
-        s = re.sub(r'__(.+?)__', r'<b>\1</b>', s)
-        s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', s)
-        s = re.sub(r'~~(.+?)~~', r'<s>\1</s>', s)
+        s = _esc(s); s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s); s = re.sub(r'__(.+?)__', r'<b>\1</b>', s)
+        s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', s); s = re.sub(r'~~(.+?)~~', r'<s>\1</s>', s)
         s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
         s = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', s)
         return s
 
-    lines = text.split('\n')
-    result = []
-    i = 0
-    in_code_fence = False
+    lines = text.split('\n'); result = []; i = 0; in_code_fence = False
     while i < len(lines):
         if re.match(r'^\s*(`{3,}|~{3,})', lines[i]):
             in_code_fence = not in_code_fence
@@ -1352,8 +1306,7 @@ def _pipe_tables_to_html(text: str) -> str:
                 and i + 1 < len(lines)
                 and '|' in lines[i]
                 and re.match(r'^\s*\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?\s*$', lines[i + 1])):
-            headers = _parse_row(lines[i])
-            aligns = []
+            headers = _parse_row(lines[i]); aligns = []
             for cell in (_parse_row(lines[i + 1]) or []):
                 cell = cell.strip()
                 if cell.startswith(':') and cell.endswith(':'): aligns.append(' style="text-align:center"')
@@ -1382,8 +1335,7 @@ def _pipe_tables_to_html(text: str) -> str:
     return '\n'.join(result)
 
 def format_response_text(session_name: str, text: str) -> str:
-    stripped = text.lstrip()
-    prefix = f"{session_name}:"
+    stripped = text.lstrip(); prefix = f"{session_name}:"
     if stripped.lower().startswith(prefix.lower()): text = stripped[len(prefix):].lstrip()
     return f"<b>{session_name}:</b>\n{text}"
 
@@ -1409,8 +1361,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     def _scan_tags(text: str) -> list[tuple[str, str]]:
         stack: list[tuple[str, str]] = []
         for m in TAG_RE.finditer(text):
-            is_close = m.group(1) == '/'
-            tag_name = m.group(2).lower()
+            is_close = m.group(1) == '/'; tag_name = m.group(2).lower()
             if tag_name not in TRACKED_TAGS: continue
             if is_close:
                 for j in range(len(stack) - 1, -1, -1):
@@ -1422,12 +1373,9 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
 
     def _find_split(text: str, budget: int) -> int:
         if budget <= 0: budget = 1
-        search = text[:budget]
-        last_tag_start = search.rfind('<')
-        last_tag_end = search.rfind('>')
+        search = text[:budget]; last_tag_start = search.rfind('<'); last_tag_end = search.rfind('>')
         if last_tag_start > last_tag_end:
-            search = text[:last_tag_start]
-            budget = last_tag_start
+            search = text[:last_tag_start]; budget = last_tag_start
 
         for sep in ('\n\n', '\n', ' '):
             pos = search.rfind(sep)
@@ -1435,13 +1383,11 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
 
         return max(budget, 1)
 
-    chunks = []
-    remaining = text
+    chunks = []; remaining = text
     carry_stack: list[tuple[str, str]] = []
 
     while remaining:
-        prefix = _opening_tags(carry_stack)
-        available = max_len - len(prefix)
+        prefix = _opening_tags(carry_stack); available = max_len - len(prefix)
 
         if len(prefix) + len(remaining) + len(_closing_tags(carry_stack)) <= max_len:
             suffix = _closing_tags(_scan_tags(prefix + remaining))
@@ -1452,26 +1398,18 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
         if budget < 100: budget = 100
 
         for _attempt in range(5):
-            split_at = _find_split(remaining, budget)
-            chunk_text = remaining[:split_at].rstrip()
-            full_chunk = prefix + chunk_text
-            open_stack = _scan_tags(full_chunk)
-            suffix = _closing_tags(open_stack)
+            split_at = _find_split(remaining, budget); chunk_text = remaining[:split_at].rstrip()
+            full_chunk = prefix + chunk_text; open_stack = _scan_tags(full_chunk); suffix = _closing_tags(open_stack)
 
             if len(full_chunk) + len(suffix) <= max_len: break
-            overshoot = len(full_chunk) + len(suffix) - max_len
-            budget = max(budget - overshoot - 20, 100)
+            overshoot = len(full_chunk) + len(suffix) - max_len; budget = max(budget - overshoot - 20, 100)
         else:
             hard_limit = max_len - len(prefix) - len(suffix) - 10
             if hard_limit < 1: hard_limit = 1
-            chunk_text = remaining[:hard_limit].rstrip()
-            full_chunk = prefix + chunk_text
-            open_stack = _scan_tags(full_chunk)
-            suffix = _closing_tags(open_stack)
-            split_at = hard_limit
+            chunk_text = remaining[:hard_limit].rstrip(); full_chunk = prefix + chunk_text
+            open_stack = _scan_tags(full_chunk); suffix = _closing_tags(open_stack); split_at = hard_limit
         chunks.append(full_chunk + suffix)
-        carry_stack = open_stack
-        remaining = remaining[split_at:].lstrip()
+        carry_stack = open_stack; remaining = remaining[split_at:].lstrip()
 
         if split_at == 0: remaining = remaining[1:]
     return chunks
@@ -1507,12 +1445,8 @@ def get_manager_chat_id(name: str) -> ChatId | None:
         return None
 
 class TunnelState(enum.Enum):
-    STOPPED = "stopped"
-    STARTING = "starting"
-    RUNNING = "running"
-    RESTARTING = "restarting"
-    POLL_FALLBACK = "poll_fallback"
-    FAILED = "failed"
+    STOPPED = "stopped"; STARTING = "starting"; RUNNING = "running"; RESTARTING = "restarting"
+    POLL_FALLBACK = "poll_fallback"; FAILED = "failed"
 
 class TunnelManager:
 
@@ -1530,18 +1464,11 @@ class TunnelManager:
         on_notify: Callable[[str], None] | None = None,
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        self._config = config
-        self._token = bot_token
-        self._port = port
-        self._node_dir = node_dir
-        self._bind_host = bind_host
-        self._webhook_secret = webhook_secret
-        self._runner = subprocess_runner or _RealSubprocessRunner()
-        self._clock = clock or _RealClock()
+        self._config = config; self._token = bot_token; self._port = port; self._node_dir = node_dir
+        self._bind_host = bind_host; self._webhook_secret = webhook_secret
+        self._runner = subprocess_runner or _RealSubprocessRunner(); self._clock = clock or _RealClock()
         self._urlopen: UrlOpenFn = urlopen or cast(UrlOpenFn, _urlopen)
-        self._on_notify = on_notify or (lambda _msg: None)
-        self._on_update = on_update
-        self._lock = threading.Lock()
+        self._on_notify = on_notify or (lambda _msg: None); self._on_update = on_update; self._lock = threading.Lock()
         self._state = TunnelState.STOPPED
         self._tunnel_url: str = ""
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -1593,8 +1520,7 @@ class TunnelManager:
     # ── Telegram API helpers (use injected urlopen) ────────────────────
 
     def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-        url = f"https://api.telegram.org/bot{self._token}/{method}"
-        data = json.dumps(payload or {}).encode()
+        url = f"https://api.telegram.org/bot{self._token}/{method}"; data = json.dumps(payload or {}).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
             with self._urlopen(req, timeout=10) as resp:
@@ -1659,8 +1585,7 @@ class TunnelManager:
                 if problem == "process died":
                     _log(_LOG_WARN, "tunnel", "Tunnel process died, restarting...")
                     self._on_notify("⚠️ Tunnel process died. Reconnecting...")
-                    self._state = TunnelState.RESTARTING
-                    new_url = self._restart_with_retry()
+                    self._state = TunnelState.RESTARTING; new_url = self._restart_with_retry()
                     if new_url:
                         self._tunnel_url = new_url
                         self._save_tunnel_url(new_url)
@@ -1814,8 +1739,7 @@ class TunnelManager:
         else:
             info = self._tg_get_webhook_info()
             if info:
-                result = info.get("result", {})
-                current_url = result.get("url", "") if isinstance(result, dict) else ""
+                result = info.get("result", {}); current_url = result.get("url", "") if isinstance(result, dict) else ""
                 if not current_url or self._tunnel_url not in current_url:
                     resp = self._tg_set_webhook(self._tunnel_url, secret_token=self._webhook_secret)
                     if resp.get("ok"):
@@ -1832,8 +1756,7 @@ class TunnelManager:
         self._poll_stop.clear()
         self._poll_thread = threading.Thread( target=self._poll_loop, name="tunnel-poll", daemon=True, )
         self._poll_thread.start()
-        self._polling_active = True
-        self._state = TunnelState.POLL_FALLBACK
+        self._polling_active = True; self._state = TunnelState.POLL_FALLBACK
         _log(_LOG_INFO, "tunnel", "Poll fallback started")
 
     def _stop_poll_fallback(self) -> None:
@@ -1844,8 +1767,7 @@ class TunnelManager:
         _log(_LOG_INFO, "tunnel", "Poll fallback stopped")
 
     def _poll_loop(self) -> None:
-        offset = 0
-        _bridge_host = self._bind_host or "127.0.0.1"
+        offset = 0; _bridge_host = self._bind_host or "127.0.0.1"
         _log(_LOG_INFO, "tunnel:poll", f"Poll loop started (bridge={_bridge_host}:{self._port})")
         while not self._poll_stop.is_set():
             try:
@@ -1888,8 +1810,7 @@ class TunnelManager:
     # ── Port wait ─────────────────────────────────────────────────────
 
     def _wait_for_port(self) -> bool:
-        elapsed = 0
-        bind_host = self._bind_host or "127.0.0.1"
+        elapsed = 0; bind_host = self._bind_host or "127.0.0.1"
         while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1939,8 +1860,7 @@ class TunnelManager:
             if info.get("ok"):
                 result = info.get("result", {})
                 if isinstance(result, dict):
-                    bot_id = result.get("id")
-                    username = result.get("username", "")
+                    bot_id = result.get("id"); username = result.get("username", "")
                     if bot_id: (self._node_dir / "bot_id").write_text(str(bot_id))
                     if username: (self._node_dir / "bot_username").write_text(username)
         except Exception:

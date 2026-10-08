@@ -116,21 +116,15 @@ class RateLimitConfig:
 
 class _TokenBucket:
     def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
-        self._rate = rate
-        self._burst = burst
-        self._clock = clock or _RealClock()
-        self._tokens = float(burst)
-        self._last_refill = self._clock.time()
-        self._lock = threading.Lock()
+        self._rate = rate; self._burst = burst; self._clock = clock or _RealClock(); self._tokens = float(burst)
+        self._last_refill = self._clock.time(); self._lock = threading.Lock()
 
     def acquire(self, timeout: float = 30.0) -> bool:
         deadline = self._clock.time() + timeout
         while True:
             with self._lock:
-                now = self._clock.time()
-                elapsed = now - self._last_refill
-                self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
-                self._last_refill = now
+                now = self._clock.time(); elapsed = now - self._last_refill
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rate); self._last_refill = now
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return True
@@ -146,10 +140,8 @@ class HttpClient:
         clock: Clock | None = None,
         urlopen: Callable[..., http.client.HTTPResponse] | None = None,
     ) -> None:
-        self._retry = retry or RetryConfig()
-        self._rate_config = rate_limit or RateLimitConfig()
-        self._clock = clock or _RealClock()
-        self._urlopen_fn = urlopen or urllib.request.urlopen
+        self._retry = retry or RetryConfig(); self._rate_config = rate_limit or RateLimitConfig()
+        self._clock = clock or _RealClock(); self._urlopen_fn = urlopen or urllib.request.urlopen
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPHandler(),
             urllib.request.HTTPSHandler(),
@@ -177,9 +169,7 @@ class HttpClient:
         retry: RetryConfig | None = None,
     ) -> http.client.HTTPResponse:
         from urllib.parse import urlparse
-        host = urlparse(url).hostname or "localhost"
-        cfg = retry or self._retry
-        limiter = self._get_limiter(host)
+        host = urlparse(url).hostname or "localhost"; cfg = retry or self._retry; limiter = self._get_limiter(host)
         if not limiter.acquire(timeout=timeout): raise TimeoutError(f"Rate limit timeout for {host}")
 
         req = urllib.request.Request(url, data=data, method=method)
@@ -362,8 +352,7 @@ TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
 
 def _build_tunnel_config() -> TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"]
-    tunnel_url = TUNNEL_URL
-    raw = TUNNEL_MODE.lower()
+    tunnel_url = TUNNEL_URL; raw = TUNNEL_MODE.lower()
     if raw == "none": mode = "none"
     elif raw == "poll": mode = "poll"
     elif tunnel_url: mode = "provided"

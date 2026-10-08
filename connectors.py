@@ -329,8 +329,7 @@ class BaseConnector(abc.ABC, Generic[M]):
             if self._thread is not None and self._thread.is_alive():
                 return False, f"{self.connector_name}: old thread did not exit in time"
             self._stop_event.clear()
-            self._consecutive_failures = 0
-            self._alert_sent = False
+            self._consecutive_failures = 0; self._alert_sent = False
         ok, msg = self.preflight_check()
         if not ok: return False, msg
         with self._lock:
@@ -396,8 +395,7 @@ class BaseConnector(abc.ABC, Generic[M]):
 
     def _clear_alert(self) -> None:
         with self._lock:
-            was_alerted = self._alert_sent
-            self._alert_sent = False
+            was_alerted = self._alert_sent; self._alert_sent = False
         if was_alerted:
             tag = f"[{self.connector_name}]"
             if self.on_alert:
@@ -415,8 +413,7 @@ class BaseConnector(abc.ABC, Generic[M]):
 
     def track_success(self) -> None:
         with self._lock:
-            was_failing = self._consecutive_failures > 0
-            self._consecutive_failures = 0
+            was_failing = self._consecutive_failures > 0; self._consecutive_failures = 0
         if was_failing: self._clear_alert()
     # -- Poll loop --
 
@@ -459,8 +456,7 @@ def _sanitize_filename(name: str) -> str:
     """Strip path separators, traversal, and limit length."""
     name = os.path.basename(name)  # strip directory components
     name = name.replace("..", "_").replace("/", "_").replace("\\", "_")
-    name = re.sub(r'[^\w.\-]', '_', name)  # keep only safe chars
-    name = name or "attachment"
+    name = re.sub(r'[^\w.\-]', '_', name)  # keep only safe chars; name = name or "attachment"
     if len(name) > _MAX_FILENAME_LEN:
         root, ext = os.path.splitext(name)
         if len(ext) >= _MAX_FILENAME_LEN: ext = ext[:10]  # Truncate absurdly long extensions
@@ -546,8 +542,7 @@ def _str_list_val(raw: dict[str, object], key: str) -> list[str]:
 
 def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
     """Validate and narrow a raw dict into a GmailBody."""
-    body = GmailBody()
-    data = _str_val(raw, "data")
+    body = GmailBody(); data = _str_val(raw, "data")
     if data: body["data"] = data
     size = _int_val(raw, "size")
     if size: body["size"] = size
@@ -558,8 +553,7 @@ def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
 
 def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
     """Validate and narrow a raw dict into a GmailHeader."""
-    header = GmailHeader()
-    name = _str_val(raw, "name")
+    header = GmailHeader(); name = _str_val(raw, "name")
     if name: header["name"] = name
     value = _str_val(raw, "value")
     if value: header["value"] = value
@@ -597,8 +591,7 @@ def _validate_payload_part( raw: dict[str, object], depth: int = 0, counter: Opt
 
 def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
     """Validate and narrow a raw API dict into a GmailMessage TypedDict."""
-    result = GmailMessage()
-    msg_id = _str_val(raw, "id")
+    result = GmailMessage(); msg_id = _str_val(raw, "id")
     if msg_id: result["id"] = msg_id
     thread_id = _str_val(raw, "threadId")
     if thread_id: result["threadId"] = thread_id
@@ -613,16 +606,14 @@ def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
 
 def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResponse:
     """Validate and narrow a raw dict into a GmailHistoryResponse."""
-    result = GmailHistoryResponse()
-    hid = _str_val(raw, "historyId")
+    result = GmailHistoryResponse(); hid = _str_val(raw, "historyId")
     if hid: result["historyId"] = hid
     history_raw = raw.get("history")
     if isinstance(history_raw, list):
         entries: list[GmailHistoryEntry] = []
         for entry_raw in history_raw:
             if not isinstance(entry_raw, dict): continue
-            entry = GmailHistoryEntry()
-            added_raw = cast(dict[str, object], entry_raw).get("messagesAdded")
+            entry = GmailHistoryEntry(); added_raw = cast(dict[str, object], entry_raw).get("messagesAdded")
             if isinstance(added_raw, list):
                 refs: list[GmailMessageRef] = []
                 for added in added_raw:
@@ -640,16 +631,14 @@ def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResp
 
 def _validate_gmail_attachment_data(raw: dict[str, object]) -> GmailAttachmentData:
     """Validate and narrow a raw dict into a GmailAttachmentData."""
-    result = GmailAttachmentData()
-    data = _str_val(raw, "data")
+    result = GmailAttachmentData(); data = _str_val(raw, "data")
     if data: result["data"] = data
     return result
 
 
 def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessageListResponse:
     """Validate and narrow a raw dict into a GmailMessageListResponse."""
-    result = GmailMessageListResponse()
-    msgs_raw = raw.get("messages")
+    result = GmailMessageListResponse(); msgs_raw = raw.get("messages")
     if isinstance(msgs_raw, list):
         msgs: list[GmailMessage] = []
         for m in msgs_raw:
@@ -675,15 +664,13 @@ def _validate_github_state(raw: dict[str, object]) -> GithubState:
 
 def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
     """Validate and narrow a raw API dict into a GithubComment TypedDict."""
-    result = GithubComment()
-    cid = _int_val(raw, "id")
+    result = GithubComment(); cid = _int_val(raw, "id")
     if cid: result["id"] = cid
     body = _str_val(raw, "body")
     if body: result["body"] = body
     user_raw = raw.get("user")
     if isinstance(user_raw, dict):
-        user = GithubUser()
-        login = _str_val(cast(dict[str, object], user_raw), "login")
+        user = GithubUser(); login = _str_val(cast(dict[str, object], user_raw), "login")
         if login: user["login"] = login
         result["user"] = user
     html_url = _str_val(raw, "html_url")
@@ -807,8 +794,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         return _validate_gmail_message_list_response(raw)
 
     def mark_as_read(self, msg_id: str) -> bool:
-        params = json.dumps({"userId": "me", "id": msg_id})
-        body = json.dumps({"removeLabelIds": ["UNREAD"]})
+        params = json.dumps({"userId": "me", "id": msg_id}); body = json.dumps({"removeLabelIds": ["UNREAD"]})
         result = self._run_gws("messages", "modify", "--params", params, json_body=body)
         return result is not None
 
@@ -972,10 +958,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
     # -- Body cleaning --
 
     def _clean_body(self, text: str) -> str:
-        text = text.replace('\r\n', '\n')
-        text = re.sub(r'<https?://[^>]+>', '', text)
-        text = re.sub(r'\[image:[^\]]*\]', '', text)
-        text = re.sub(r'Get Outlook for iOS\s*', '', text)
+        text = text.replace('\r\n', '\n'); text = re.sub(r'<https?://[^>]+>', '', text)
+        text = re.sub(r'\[image:[^\]]*\]', '', text); text = re.sub(r'Get Outlook for iOS\s*', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
@@ -1025,18 +1009,14 @@ class GmailConnector(BaseConnector[GmailMessage]):
             plain_parts.append(forwarded_content)
             return "\n".join(html_parts), "\n".join(plain_parts)
 
-        body = self._strip_reply_chain(body)
-        body = _truncate(body)
+        body = self._strip_reply_chain(body); body = _truncate(body)
         html = f"📧 <b>{_escape_html(subject)}</b>{thread_tag}\n\n{_escape_html(body)}"
         plain = f"manager (via email):{thread_tag} {body}"
         return html, plain
 
     def _format_sent_reply(self, body: str, subject: str, thread_id: str, message: GmailMessage) -> tuple[str, str]:
-        body = self._clean_body(body)
-        body = self._strip_reply_chain(body)
-        body = _truncate(body)
-        sender_name = self.extract_sender_name(message)
-        thread_tag = f" [thread:{thread_id}]" if thread_id else ""
+        body = self._clean_body(body); body = self._strip_reply_chain(body); body = _truncate(body)
+        sender_name = self.extract_sender_name(message); thread_tag = f" [thread:{thread_id}]" if thread_id else ""
         html = f"✉️ <b>Sent:</b> {_escape_html(subject)}{thread_tag}\n\n{_escape_html(body)}"
         plain = f"{sender_name} (sent via email):{thread_tag} {body}"
         return html, plain
@@ -1130,12 +1110,10 @@ class GmailConnector(BaseConnector[GmailMessage]):
         is_sent = self.is_sent_message(message)
         if not is_sent and not self.is_allowed_sender(message): return
 
-        body = self.extract_body_text(message)
-        subject = self.extract_subject(message)
+        body = self.extract_body_text(message); subject = self.extract_subject(message)
         raw_tid = message.get("threadId")
         thread_id: str = str(raw_tid) if isinstance(raw_tid, str) else ""
-        message_id = self.extract_message_id(message)
-        attachments = self.extract_attachments(message)
+        message_id = self.extract_message_id(message); attachments = self.extract_attachments(message)
         if not body.strip(): return
 
         if is_sent:
@@ -1152,14 +1130,11 @@ class GmailConnector(BaseConnector[GmailMessage]):
         targets, cleaned = self.parse_mentions(body)
         if targets: html_text, plain_text = self.format_email_message(cleaned, subject, thread_id)
         else: html_text, plain_text = self.format_email_message(body, subject, thread_id)
-        att_line = self._format_attachment_line(attachments)
-        html_text += att_line
-        plain_text += att_line
+        att_line = self._format_attachment_line(attachments); html_text += att_line; plain_text += att_line
 
         if targets and message_id:
             # Shell-safe: quote all interpolated values
-            safe_subject = subject.replace("'", "'\\''")
-            safe_thread = thread_id.replace("'", "'\\''")
+            safe_subject = subject.replace("'", "'\\''"); safe_thread = thread_id.replace("'", "'\\''")
             safe_msgid = message_id.replace("'", "'\\''")
             reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
             reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
@@ -1224,8 +1199,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         self._catchup_unread()
 
     def _catchup_unread(self) -> None:
-        q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"
-        data = self._list_messages(q, max_results=5)
+        q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"; data = self._list_messages(q, max_results=5)
         if not data: return
         messages_list = data.get("messages")
         if not isinstance(messages_list, list): return
@@ -1340,8 +1314,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         restored = self._load_state()
         if restored:
             with self._lock:
-                seen_count = len(self._seen_ids)
-                poll_time = self._last_poll_time
+                seen_count = len(self._seen_ids); poll_time = self._last_poll_time
             print(f"[github] Restart — restored state: {seen_count} seen IDs, since={poll_time}")
         else:
             initial_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1381,8 +1354,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
     def _get_all_comments(self, since: str) -> tuple[Optional[list[GithubComment]], bool]:
         """Returns (comments, is_complete). is_complete=False means partial fetch."""
         all_raws: list[Optional[str]] = []
-        any_success = False
-        is_complete = True
+        any_success = False; is_complete = True
         for repo in self.repos:
             issue_raw = self._gh_api(
                 f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100", )
@@ -1390,8 +1362,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100", )
             if issue_raw is not None or pr_raw is not None: any_success = True
             if issue_raw is None or pr_raw is None:
-                is_complete = False
-                failed = "issues" if issue_raw is None else "pulls"
+                is_complete = False; failed = "issues" if issue_raw is None else "pulls"
                 print(f"[github] Partial fetch for {repo} — {failed} comments failed")
             all_raws.extend([issue_raw, pr_raw])
         if not any_success: return None, False
@@ -1422,8 +1393,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 number=str(comment["issue_num"]),
                 kind=str(comment["kind"]),
                 url=str(comment.get("html_url", "")), )
-        raw_issue_url = comment.get("issue_url")
-        raw_pr_url = comment.get("pull_request_url")
+        raw_issue_url = comment.get("issue_url"); raw_pr_url = comment.get("pull_request_url")
         issue_url: str = str(raw_issue_url) if isinstance(raw_issue_url, str) else ""
         if not issue_url and isinstance(raw_pr_url, str): issue_url = str(raw_pr_url)
         raw_html_url = comment.get("html_url")
@@ -1456,11 +1426,9 @@ class GitHubConnector(BaseConnector[GithubComment]):
         text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', lambda m: m.group(1) or '(image)', text)
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', lambda m: f'<a href="{_escape_html(m.group(2))}">{m.group(1)}</a>', text)
         text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
-        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text); text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
         text = re.sub(r'(?<!\w)\*([^*\n]+)\*(?!\w)', r'<i>\1</i>', text)
-        text = re.sub(r'(?<!\w)_([^_\n]+)_(?!\w)', r'<i>\1</i>', text)
-        lines = text.split('\n')
+        text = re.sub(r'(?<!\w)_([^_\n]+)_(?!\w)', r'<i>\1</i>', text); lines = text.split('\n')
         result: list[str] = []
         in_quote = False
         quote_lines: list[str] = []
@@ -1471,19 +1439,14 @@ class GitHubConnector(BaseConnector[GithubComment]):
             else:
                 if in_quote:
                     result.append(f'<blockquote>{chr(10).join(quote_lines)}</blockquote>')
-                    quote_lines = []
-                    in_quote = False
+                    quote_lines = []; in_quote = False
                 result.append(line)
         if in_quote: result.append(f'<blockquote>{chr(10).join(quote_lines)}</blockquote>')
-        text = '\n'.join(result)
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = '\n'.join(result); text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
     def format_comment(self, body: str, context: IssueContext) -> tuple[str, str]:
-        body = _truncate(body)
-        kind = context["kind"]
-        number = context["number"]
-        url = context["url"]
+        body = _truncate(body); kind = context["kind"]; number = context["number"]; url = context["url"]
         tag = f"#{number}" if number else ""
         link = f'<a href="{_escape_html(url)}">#{number}</a>' if url and number else tag
         html = f"🔔 <b>GitHub {kind} {link}</b>\n\n{self._md_to_telegram_html(body)}"

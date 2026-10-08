@@ -191,8 +191,7 @@ class WorkerWatchdogState:
         self.force_restart_pending_cwd: dict[str, bool] = {}
         self.waiting_input_details: dict[str, QuestionDetails] = {}
         self.last_resolved_ts: dict[str, float] = {}
-        self.lock = threading.Lock()
-        self.stop_event = threading.Event()
+        self.lock = threading.Lock(); self.stop_event = threading.Event()
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
@@ -311,11 +310,9 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
 
 def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
     if host:
-        cmd = list(cmd)
-        tool = str(cmd[0])
+        cmd = list(cmd); tool = str(cmd[0])
         if tool in ("tmux", "claude"): cmd[0] = _resolve_remote_tool(tool, host)
-        remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
-        _tv = kwargs.get("timeout", 10)
+        remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd); _tv = kwargs.get("timeout", 10)
         timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     kwargs.setdefault("timeout", 10)
@@ -472,9 +469,7 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
     return pane_map
 
 class ClaudeBackend:
-    name = "claude"
-    binary = "claude"
-    is_interactive = True
+    name = "claude"; binary = "claude"; is_interactive = True
 
     def start_cmd(self, resume_id: str = "") -> str:
         return build_claude_start_cmd(resume_id)
@@ -555,8 +550,7 @@ def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[s
         result = subprocess.run(cmd, input=message, capture_output=True, text=True)
         response, new_session_id = _codex_parse_jsonl(result.stdout)
         if result.returncode != 0 and not response:
-            stderr = (result.stderr or "").strip()
-            response = stderr or "Codex exec failed."
+            stderr = (result.stderr or "").strip(); response = stderr or "Codex exec failed."
         return response, new_session_id or session_id, result.returncode
     except (OSError, subprocess.SubprocessError) as e:
         return f"Error: {e}", session_id, 1
@@ -592,8 +586,7 @@ def _codex_adapter_remote(worker_name: str, text: str,
     try:
         import bridge
         remote_sessions = bridge._remap_sessions_dir(host)
-        sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"
-        session_id = ""
+        sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"; session_id = ""
         try:
             r = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=5", host, "cat", sid_file],
@@ -629,10 +622,7 @@ def _codex_adapter_remote(worker_name: str, text: str,
         _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
 
 class CodexBackend:
-    name = "codex"
-    binary = "codex"
-    is_interactive = False
-    is_exec = True
+    name = "codex"; binary = "codex"; is_interactive = False; is_exec = True
 
     def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Codex worker ready (non-interactive)'"
@@ -762,8 +752,7 @@ def get_worker_pipe_path(name: str) -> Path:
     return WORKER_PIPE_ROOT / name / "in.pipe"
 
 def ensure_worker_pipe(name: str) -> Path:
-    pipe_path = get_worker_pipe_path(name)
-    pipe_dir = pipe_path.parent
+    pipe_path = get_worker_pipe_path(name); pipe_dir = pipe_path.parent
     pipe_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     pipe_dir.chmod(0o700)
 
@@ -908,8 +897,7 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
 def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None:
     if not session_id: return
     try:
-        session_dir = ensure_session_dir(name)
-        history_file = session_dir / "session_history.jsonl"
+        session_dir = ensure_session_dir(name); history_file = session_dir / "session_history.jsonl"
         entry = json.dumps({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
             "session_id": session_id,
@@ -951,8 +939,7 @@ def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
                 if target.exists(): data = cast(dict[str, object], json.loads(target.read_text()))
                 else: data = {}
                 _projects_raw = data.setdefault("projects", {})
-                projects = _projects_raw if isinstance(_projects_raw, dict) else {}
-                _entry_raw = projects.get(cwd, {})
+                projects = _projects_raw if isinstance(_projects_raw, dict) else {}; _entry_raw = projects.get(cwd, {})
                 entry = _entry_raw if isinstance(_entry_raw, dict) else {}
                 if entry.get("hasTrustDialogAccepted") is True: return
                 projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
@@ -969,10 +956,8 @@ from telegram import _build_cwd_change_notice as _build_cwd_change_notice  # noq
 def _cache_session_id(name: str, sid: str) -> None:
     if not sid: return
     try:
-        session_dir = ensure_session_dir(name)
-        id_file = session_dir / "claude_session_id"
-        cwd = get_claude_session_cwd(name) or ""
-        old_content = id_file.read_text().strip() if id_file.exists() else ""
+        session_dir = ensure_session_dir(name); id_file = session_dir / "claude_session_id"
+        cwd = get_claude_session_cwd(name) or ""; old_content = id_file.read_text().strip() if id_file.exists() else ""
         old_lines = old_content.split("\n", 1) if old_content else []
         old_sid = old_lines[0].strip() if old_lines else ""
         old_cwd = old_lines[1].strip() if len(old_lines) > 1 else ""
@@ -993,15 +978,13 @@ def _cache_session_id(name: str, sid: str) -> None:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
 
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
-    cache_file = get_session_dir(name) / "claude_session_id"
-    current_cwd = get_claude_session_cwd(name)
+    cache_file = get_session_dir(name) / "claude_session_id"; current_cwd = get_claude_session_cwd(name)
 
     def _read_cache() -> str:
         if not cache_file.exists(): return ""
         content = cache_file.read_text().strip()
         if not content: return ""
-        lines = content.split("\n", 1)
-        sid = lines[0].strip()
+        lines = content.split("\n", 1); sid = lines[0].strip()
         if not sid: return ""
         if len(lines) > 1:
             cached_cwd = lines[1].strip()
@@ -1017,8 +1000,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     if val: return val
     if current_cwd:
         import bridge
-        host = bridge.get_worker_host(name)
-        scanned = _scan_latest_session_id(current_cwd, host=host)
+        host = bridge.get_worker_host(name); scanned = _scan_latest_session_id(current_cwd, host=host)
         if scanned:
             _cache_session_id(name, scanned)
             return scanned
@@ -1142,8 +1124,7 @@ _INTERACTIVE_CONTENT = [
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     if session and session.get("backend"): return normalize_backend(str(session.get("backend")))
     import bridge
-    registry = bridge._load_registry()
-    entry = registry.get("workers", {}).get(name, {})
+    registry = bridge._load_registry(); entry = registry.get("workers", {}).get(name, {})
     if entry.get("backend"): return normalize_backend(str(entry["backend"]))
     return DEFAULT_BACKEND
 
@@ -1189,8 +1170,7 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
         try:
             r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-            remote_home = r.stdout.strip() if r.returncode == 0 else ""
-            local_home = str(Path.home())
+            remote_home = r.stdout.strip() if r.returncode == 0 else ""; local_home = str(Path.home())
             if remote_home and remote_home != local_home and sessions_dir_val.startswith(local_home):
                 sessions_dir_val = remote_home + sessions_dir_val[len(local_home):]
         except (subprocess.SubprocessError, OSError) as exc:
