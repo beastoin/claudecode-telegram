@@ -382,9 +382,7 @@ def _release_flock(fd: int) -> None:
     os.close(fd)
 
 def tmux_exists(tmux_name: str, host: str | None = None, timeout: int = 3) -> bool:
-    return _remote_run(
-        ["tmux", "has-session", "-t", tmux_name],
-        host=host, capture_output=True, timeout=timeout
+    return _remote_run( ["tmux", "has-session", "-t", tmux_name], host=host, capture_output=True, timeout=timeout
     ).returncode == 0
 
 def tmux_send_message(tmux_name: str, text: str, host: str | None = None, literal: bool = False) -> bool:
@@ -584,9 +582,7 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
             "source": session_name, "backend": "codex", "escape": True,
         }
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{bridge_url}/outputs", data=data,
-            headers={"Content-Type": "application/json"},
+        req = urllib.request.Request( f"{bridge_url}/outputs", data=data, headers={"Content-Type": "application/json"},
         )
         with _urlopen(req, timeout=5) as r:
             return r.status == 200
@@ -680,9 +676,7 @@ class CodexBackend:
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
 
-BACKENDS: dict[str, Backend] = {
-    "claude": ClaudeBackend(),
-    "codex": CodexBackend(),
+BACKENDS: dict[str, Backend] = { "claude": ClaudeBackend(), "codex": CodexBackend(),
 }
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
@@ -781,9 +775,7 @@ PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
 
 # ── Worker registry ───────────────────────────────────────────────────
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
-RESERVED_NAMES = {
-    "team", "focus", "restart", "settings", "hire", "end",
-    "all", "cancel", "start", "help",
+RESERVED_NAMES = { "team", "focus", "restart", "settings", "hire", "end", "all", "cancel", "start", "help",
 }
 
 # ── Inter-worker pipes ───────────────────────────────────────────────
@@ -871,11 +863,7 @@ def start_pipe_reader(name: str) -> None:
         return
 
     stop_event = threading.Event()
-    thread = threading.Thread(
-        target=pipe_reader_loop,
-        args=(name, stop_event),
-        daemon=True,
-        name=f"pipe-reader-{name}"
+    thread = threading.Thread( target=pipe_reader_loop, args=(name, stop_event), daemon=True, name=f"pipe-reader-{name}"
     )
     with processes.pipe_readers_lock:
         processes.pipe_readers[name] = (thread, stop_event)
@@ -920,12 +908,9 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     slug = _project_slug(cwd)
     if host:
         try:
-            cmd = [
-                "bash", "-c",
-                f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1',
+            cmd = [ "bash", "-c", f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1',
             ]
-            r = _remote_run(cmd, host=host, capture_output=True,
-                            text=True, timeout=TIMEOUT_REMOTE_CMD)
+            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0: return ""
             path = (r.stdout or "").strip()
             if not path: return ""
@@ -976,9 +961,7 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, o
 
 _CLAUDE_JSON_PATH = Path.home() / ".claude.json"
 
-def _ensure_workspace_trusted(
-    cwd: str,
-    config_path: Path | None = None,
+def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
 ) -> None:
     if not cwd: return
     target = config_path or _CLAUDE_JSON_PATH
@@ -1142,8 +1125,7 @@ def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
     if not normalized: return "", "cwd is empty"
     if host:
         try:
-            r = _remote_run(["test", "-d", normalized], host=host,
-                            capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
+            r = _remote_run(["test", "-d", normalized], host=host, capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0: return "", f"cwd does not exist on {host}: {normalized}"
         except (subprocess.SubprocessError, OSError) as e:
             return "", f"cwd check failed on {host}: {e}"

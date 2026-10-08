@@ -206,9 +206,7 @@ class IncomingMessage:
         if document:
             mime_type = document.get("mime_type", "")
             doc_is_image = mime_type.startswith("image/")
-        has_media = bool(
-            photo or document or animation or video
-            or audio or voice or video_note or sticker
+        has_media = bool( photo or document or animation or video or audio or voice or video_note or sticker
         )
         return cls(
             update_id=update.get("update_id", 0),
@@ -243,18 +241,12 @@ def _extract_msg_text(msg: TelegramMessageDict) -> str:
                 if not bt: continue
                 if isinstance(bt, str): parts.append(bt)
                 elif isinstance(bt, list):
-                    parts.append("".join(
-                        chunk if isinstance(chunk, str) else chunk.get("text", "")
-                        for chunk in bt
+                    parts.append("".join( chunk if isinstance(chunk, str) else chunk.get("text", "") for chunk in bt
                     ))
             text = "\n".join(parts)
     return text
 
-def _build_cwd_change_notice(
-    name: str,
-    old_cwd: str,
-    new_cwd: str,
-    old_sid: str,
+def _build_cwd_change_notice( name: str, old_cwd: str, new_cwd: str, old_sid: str,
 ) -> str:
     lines = [f"⚠️ {name}: workspace changed"]
     if old_sid: lines.append(f"<b>from:</b> <code>{old_cwd}</code> (session <code>{old_sid[:12]}…</code>)")
@@ -541,9 +533,7 @@ class TelegramAPI:
         return self.api("sendMessage", payload)
 
     def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = {
-            "chat_id": chat_id,
-            "rich_message": {"markdown": markdown},
+        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown},
         }
         payload.update(kwargs)
         return self.api("sendRichMessage", payload)
@@ -605,9 +595,7 @@ class TelegramTransport(MessageTransport):
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: MessageId | None = None) -> TelegramApiResponse:
-        payload: dict[str, object] = {
-            "chat_id": chat_id,
-            "rich_message": {"markdown": markdown},
+        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown},
         }
         if reply_to: payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
@@ -876,9 +864,7 @@ def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_stic
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 MAX_FILE_SIZE = 50 * 1024 * 1024
-ALLOWED_IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".webp", ".bmp",
-    ".gif", ".mp4",
+ALLOWED_IMAGE_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4",
 }
 ALLOWED_DOC_EXTENSIONS = {
     ".md", ".txt", ".rst", ".pdf",
@@ -953,10 +939,7 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
         from PIL import Image
         with Image.open(photo_path) as img:
             w, h = img.size
-            needs_resize = (
-                w + h > TELEGRAM_PHOTO_MAX_SUM or
-                w > TELEGRAM_PHOTO_MAX_DIM or
-                h > TELEGRAM_PHOTO_MAX_DIM
+            needs_resize = ( w + h > TELEGRAM_PHOTO_MAX_SUM or w > TELEGRAM_PHOTO_MAX_DIM or h > TELEGRAM_PHOTO_MAX_DIM
             )
             if needs_resize:
                 scale = min(
@@ -1004,8 +987,7 @@ def is_blocked_filename(filename: str) -> bool:
     return name_lower in BLOCKED_FILENAMES or name_lower.startswith(".env")
 
 def validate_document_path(doc_path: str | Path) -> FileValidation:
-    return _validate_file_path(doc_path, "Document", blocked_exts=BLOCKED_DOC_EXTENSIONS,
-                               check_blocked_name=True)
+    return _validate_file_path(doc_path, "Document", blocked_exts=BLOCKED_DOC_EXTENSIONS, check_blocked_name=True)
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
 VOICE_EXTENSIONS = {".ogg", ".opus", ".oga"}
@@ -1597,8 +1579,7 @@ class TunnelManager:
             return
         self._kill_stale_tunnel()
         self._stop_event.clear()
-        self._watchdog_thread = threading.Thread(
-            target=self._watchdog_loop, name="tunnel-watchdog", daemon=True,
+        self._watchdog_thread = threading.Thread( target=self._watchdog_loop, name="tunnel-watchdog", daemon=True,
         )
         self._watchdog_thread.start()
 
@@ -1872,8 +1853,7 @@ class TunnelManager:
         self._tg_delete_webhook()
         self._clock.sleep(1)
         self._poll_stop.clear()
-        self._poll_thread = threading.Thread(
-            target=self._poll_loop, name="tunnel-poll", daemon=True,
+        self._poll_thread = threading.Thread( target=self._poll_loop, name="tunnel-poll", daemon=True,
         )
         self._poll_thread.start()
         self._polling_active = True

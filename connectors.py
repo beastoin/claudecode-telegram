@@ -309,9 +309,7 @@ class BaseConnector(abc.ABC, Generic[M]):
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError(f"{self.connector_name}: already running (call stop() first)")
             self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._poll_loop, daemon=True,
-                name=f"{self.connector_name}-poller",
+            self._thread = threading.Thread( target=self._poll_loop, daemon=True, name=f"{self.connector_name}-poller",
             )
             self._thread.start()
             return self._thread
@@ -376,10 +374,7 @@ class BaseConnector(abc.ABC, Generic[M]):
             if name in registered and name not in found: found.append(name)
         if not found: return [], text
         found_set = set(found)
-        cleaned = re.sub(
-            r'@([a-zA-Z0-9_-]+)',
-            lambda m: '' if m.group(1).lower() in found_set else m.group(0),
-            text,
+        cleaned = re.sub( r'@([a-zA-Z0-9_-]+)', lambda m: '' if m.group(1).lower() in found_set else m.group(0), text,
         )
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         return found, cleaned
@@ -574,8 +569,7 @@ def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
     return header
 
 
-def _validate_payload_part(
-    raw: dict[str, object], depth: int = 0, counter: Optional[list[int]] = None,
+def _validate_payload_part( raw: dict[str, object], depth: int = 0, counter: Optional[list[int]] = None,
 ) -> GmailPayloadPart:
     """Validate and narrow a raw dict into a GmailPayloadPart. Depth+count limited."""
     if counter is None: counter = [0]  # Root call: start fresh counter
@@ -669,9 +663,7 @@ def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessag
 
 def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
     """Validate and narrow a raw dict into a GmailProfile."""
-    return GmailProfile(
-        emailAddress=_str_val(raw, "emailAddress"),
-        historyId=_str_val(raw, "historyId"),
+    return GmailProfile( emailAddress=_str_val(raw, "emailAddress"), historyId=_str_val(raw, "historyId"),
     )
 
 def _validate_github_state(raw: dict[str, object]) -> GithubState:
@@ -912,8 +904,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if not isinstance(payload, dict): return ""
         return self._find_text_part(payload)
 
-    def _find_text_part(
-        self, part: GmailPayloadPart, depth: int = 0, counter: Optional[list[int]] = None,
+    def _find_text_part( self, part: GmailPayloadPart, depth: int = 0, counter: Optional[list[int]] = None,
     ) -> str:
         if counter is None: counter = [0]
         counter[0] += 1
@@ -1013,14 +1004,10 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if gmail_marker in body:
             parts = body.split(gmail_marker, 1)
             return parts[0].strip(), parts[1].strip()
-        outlook_match = re.search(
-            r'\n_{3,}\n\s*From:.*?\nSent:.*?\nTo:.*?\nSubject:',
-            body, re.DOTALL,
+        outlook_match = re.search( r'\n_{3,}\n\s*From:.*?\nSent:.*?\nTo:.*?\nSubject:', body, re.DOTALL,
         )
         if outlook_match: return body[:outlook_match.start()].strip(), body[outlook_match.start():].strip()
-        generic_match = re.search(
-            r'\n-{2,}\s*(?:Original Message|Forwarded)\s*-{2,}',
-            body, re.IGNORECASE,
+        generic_match = re.search( r'\n-{2,}\s*(?:Original Message|Forwarded)\s*-{2,}', body, re.IGNORECASE,
         )
         if generic_match: return body[:generic_match.start()].strip(), body[generic_match.start():].strip()
         return None, None
@@ -1355,9 +1342,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
     def _save_state(self) -> None:
         if not self._state_file: return
         with self._lock:
-            state = GithubState(
-                last_poll_time=self._last_poll_time,
-                seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
+            state = GithubState( last_poll_time=self._last_poll_time, seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
             )
         try:
             _atomic_write_text(self._state_file, json.dumps(state))
