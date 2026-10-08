@@ -84,25 +84,14 @@ class ReminderState(TypedDict):
     last_reminder_ts: float
     last_response_ts: float
     reminder_pending: bool
-
 class WorkerStateEntry(NamedTuple):
-    status: str
-    reason: str
-    since: float
-
+    status: str; reason: str; since: float
 class ParsedWorkerTarget(NamedTuple):
-    name: str
-    host: str | None
-
+    name: str; host: str | None
 class TmuxActivityResult(NamedTuple):
-    activity: str
-    context_pct: str | None
-    raw_lines: list[str] | None
-
+    activity: str; context_pct: str | None; raw_lines: list[str] | None
 class AuthorDetection(NamedTuple):
-    author: str
-    avatar_html: str
-    display_text: str
+    author: str; avatar_html: str; display_text: str
 
 class TmuxSessionDict(TypedDict, total=False):
     tmux: str
@@ -139,92 +128,40 @@ class RegistryFileDict(TypedDict, total=False):
     workers: dict[str, RegistryWorkerDict]
 
 class RewindTokenEntry(TypedDict):
-    name: str
-    expires_at: float
-
+    name: str; expires_at: float
 class PrReviewTokenEntry(TypedDict):
-    pr_num: int
-    owner: str
-    repo: str
-    expires_at: float
-
+    pr_num: int; owner: str; repo: str; expires_at: float
 class ProcStatsEntry(TypedDict):
-    cpu: float
-    state: str
-
+    cpu: float; state: str
 class QuestionOption(TypedDict):
-    num: int
-    label: str
-    selected: bool
+    num: int; label: str; selected: bool
 
 class QuestionDetails(TypedDict):
-    header: str
-    options: list[QuestionOption]
-    selected_num: int
-
+    header: str; options: list[QuestionOption]; selected_num: int
 class DiskUsageDict(TypedDict, total=False):
-    pct: float
-    free_gb: float
-    total_gb: float
-    ts: float
-
+    pct: float; free_gb: float; total_gb: float; ts: float
 class MemUsageDict(TypedDict, total=False):
-    pct: int | float
-    used_gb: float
-    total_gb: float
-    avail_gb: float
-    top_procs: list[dict[str, object]]
-    ts: float
-
+    pct: int | float; used_gb: float; total_gb: float; avail_gb: float
+    top_procs: list[dict[str, object]]; ts: float
 class IoUsageDict(TypedDict, total=False):
-    iowait_pct: float
-    read_iops: int
-    write_iops: int
-    util_pct: float
-    ts: float
-
+    iowait_pct: float; read_iops: int; write_iops: int; util_pct: float; ts: float
 class WorktreeItemDict(TypedDict):
-    path: str
-    size_gb: float
-
+    path: str; size_gb: float
 class WorktreeUsageDict(TypedDict):
-    total_gb: float
-    items: list[WorktreeItemDict]
-    ts: float
-
+    total_gb: float; items: list[WorktreeItemDict]; ts: float
 class CpuHogEntry(TypedDict, total=False):
-    pid: int
-    cpu: float
-    etime_min: int
-    cmd: str
-
+    pid: int; cpu: float; etime_min: int; cmd: str
 class HealthSummaryDict(TypedDict, total=False):
-    ssh_down: bool
-    ssh_down_since: float | None
-    disk: DiskUsageDict | None
-    mem: MemUsageDict | None
-    io: IoUsageDict | None
-    cpu_hogs: list[CpuHogEntry]
-    worktrees: WorktreeUsageDict | None
-
+    ssh_down: bool; ssh_down_since: float | None
+    disk: DiskUsageDict | None; mem: MemUsageDict | None; io: IoUsageDict | None
+    cpu_hogs: list[CpuHogEntry]; worktrees: WorktreeUsageDict | None
 class MachineHealthDict(TypedDict, total=False):
-    status: str
-    down_since: float | None
-    last_error: str | None
-    disk: DiskUsageDict | None
-    memory: MemUsageDict | None
-    io: IoUsageDict | None
-
+    status: str; down_since: float | None; last_error: str | None
+    disk: DiskUsageDict | None; memory: MemUsageDict | None; io: IoUsageDict | None
 class CodexTranscriptEntry(TypedDict, total=False):
-    role: str
-    text: str
-    timestamp: str
-
+    role: str; text: str; timestamp: str
 class GitPushStateResult(TypedDict, total=False):
-    orig_sha: str
-    orig_branch: str
-    staged_files: list[str]
-    stash_sha: str | None
+    orig_sha: str; orig_branch: str; staged_files: list[str]; stash_sha: str | None
 
 class ProcessRegistry:
     def __init__(self) -> None:
@@ -254,12 +191,12 @@ class WorkerWatchdogState:
         self.worker_cwds: dict[str, str] = {}
         self.recent_restarts: dict[str, float] = {}
         self.restart_in_progress: dict[str, float] = {}
-        self.restart_lock: threading.Lock = threading.Lock()
+        self.restart_lock = threading.Lock()
         self.force_restart_pending_cwd: dict[str, bool] = {}
         self.waiting_input_details: dict[str, QuestionDetails] = {}
         self.last_resolved_ts: dict[str, float] = {}
-        self.lock: threading.Lock = threading.Lock()
-        self.stop_event: threading.Event = threading.Event()
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
@@ -1260,25 +1197,13 @@ def _get_remote_home(host: str | None) -> str:
         remote_cache.home_dirs[host or ""] = home
     return home
 
-POISON_PATTERNS = [
-    re.compile(r"error.*overloaded", re.IGNORECASE),
-    re.compile(r"error.*401", re.IGNORECASE),
-    re.compile(r"error.*403", re.IGNORECASE),
-    re.compile(r"error.*429", re.IGNORECASE),
-    re.compile(r"image.*dimensions.*exceed", re.IGNORECASE),
-    re.compile(r"context.*(length|window).*exceed", re.IGNORECASE),
-    re.compile(r"context_length_exceeded", re.IGNORECASE),
-    re.compile(r"rate.?limit", re.IGNORECASE),
-    re.compile(r"invalid.*api.?key", re.IGNORECASE),
-    re.compile(r"invalid_request_error", re.IGNORECASE),
-    re.compile(r"insufficient_quota", re.IGNORECASE),
-    re.compile(r"model.*not.*found", re.IGNORECASE),
-    re.compile(r"APIError", re.IGNORECASE),
-    re.compile(r"connection.*reset", re.IGNORECASE),
-    re.compile(r"timeout.*error", re.IGNORECASE),
-    re.compile(r"error.*529", re.IGNORECASE),
-    re.compile(r"error.*503", re.IGNORECASE),
-]
+POISON_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
+    r"error.*overloaded", r"error.*40[139]", r"error.*429", r"error.*5[02][39]",
+    r"image.*dimensions.*exceed", r"context.*(length|window).*exceed",
+    r"context_length_exceeded", r"rate.?limit", r"invalid.*api.?key",
+    r"invalid_request_error", r"insufficient_quota", r"model.*not.*found",
+    r"APIError", r"connection.*reset", r"timeout.*error",
+)]
 
 def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None) -> str:
     if lines <= 0:

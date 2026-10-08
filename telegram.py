@@ -342,37 +342,21 @@ def _format_watchdog_status(name: str,
     state, _reason, since = entry
     now = clock_now
 
-    if state == "READY":
-        return "Ready"
-    if state == "BUSY_TOOL":
-        return "Working"
-    if state == "BUSY_THINKING":
-        return "Thinking"
-    if state == "WAITING":
-        return "Working"
+    _SIMPLE = {"READY": "Ready", "BUSY_TOOL": "Working", "BUSY_THINKING": "Thinking",
+               "WAITING": "Working", "DEAD": "Not responding", "HOST_OFFLINE": "Host offline",
+               "OFFLINE": "Offline", "EXITED": "Session ended", "UNTRACKED_BUSY": "Working"}
+    if state in _SIMPLE:
+        return _SIMPLE[state]
+    minutes = max(0, int((now - since) / 60)) if since else 0
     if state == "WAITING_INPUT":
-        minutes = max(0, int((now - since) / 60)) if since else 0
         return f"Needs reply ({minutes}m)"
     if state == "STUCK":
         age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
         if age_match:
             minutes = int(age_match.group(1)) // 60
-        else:
-            minutes = max(0, int((now - since) / 60)) if since else 0
         return f"No progress ({minutes}m)"
     if state == "POISONED":
-        minutes = max(0, int((now - since) / 60)) if since else 0
         return f"Error loop ({minutes}m)"
-    if state == "DEAD":
-        return "Not responding"
-    if state == "HOST_OFFLINE":
-        return "Host offline"
-    if state == "OFFLINE":
-        return "Offline"
-    if state == "EXITED":
-        return "Session ended"
-    if state == "UNTRACKED_BUSY":
-        return "Working"
     return state.lower()
 
 def format_team_lines(
@@ -693,46 +677,47 @@ class TelegramTransport(MessageTransport):
             payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
-    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
-                   caption: str | None = None) -> bool:
+    _MEDIA_DISPATCH: dict[str, tuple[str, str, str, bool]] = {
+        "photo":     ("sendPhoto",     "photo",     "photo", True),
+        "animation": ("sendAnimation", "animation", "photo", False),
+        "document":  ("sendDocument",  "document",  "doc", False),
+        "video":     ("sendVideo",     "video",     "doc", False),
+        "audio":     ("sendAudio",     "audio",     "doc", False),
+        "voice":     ("sendVoice",     "voice",     "doc", False),
+    }
+    _VALIDATORS = {"photo": lambda p: validate_photo_path(p), "doc": lambda p: validate_document_path(p)}
+
+    def _dispatch_media(self, kind: str, chat_id: ChatId, path: str | Path,
+                        caption: str | None = None) -> bool:
         if not BOT_TOKEN:
             return False
-        ok, validated = validate_photo_path(photo_path)
+        api_method, field, vkey, _ = self._MEDIA_DISPATCH[kind]
+        ok, validated = self._VALIDATORS[vkey](path)
         if not ok:
             _log(_LOG_WARN, "telegram", validated)
             return False
-        photo_data, filename = _prepare_photo_for_telegram(validated)
-        mime = mimetypes.guess_type(str(validated))[0] or "image/jpeg"
-        return self._send_media_multipart(
-            chat_id, validated, "photo", "sendPhoto", caption,
-            file_data=photo_data, filename=filename, mime_type=mime,
-        )
+        file_data: bytes | None = None
+        filename: str | None = None
+        mime_type: str | None = None
+        if kind == "photo":
+            file_data, filename = _prepare_photo_for_telegram(validated)
+            mime_type = mimetypes.guess_type(str(validated))[0] or "image/jpeg"
+        elif kind == "animation":
+            mime_type = "video/mp4" if Path(validated).suffix.lower() == ".mp4" else "image/gif"
+        return self._send_media_multipart(chat_id, validated, field, api_method, caption,
+                                          file_data=file_data, filename=filename, mime_type=mime_type)
+
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
+                   caption: str | None = None) -> bool:
+        return self._dispatch_media("photo", chat_id, photo_path, caption)
 
     def send_animation(self, chat_id: ChatId, animation_path: str | Path,
                        caption: str | None = None) -> bool:
-        if not BOT_TOKEN:
-            return False
-        ok, validated = validate_photo_path(animation_path)
-        if not ok:
-            _log(_LOG_WARN, "telegram", validated)
-            return False
-        mime = "video/mp4" if Path(validated).suffix.lower() == ".mp4" else "image/gif"
-        return self._send_media_multipart(
-            chat_id, validated, "animation", "sendAnimation", caption,
-            mime_type=mime,
-        )
+        return self._dispatch_media("animation", chat_id, animation_path, caption)
 
     def send_document(self, chat_id: ChatId, doc_path: str | Path,
                       caption: str | None = None) -> bool:
-        if not BOT_TOKEN:
-            return False
-        ok, validated = validate_document_path(doc_path)
-        if not ok:
-            _log(_LOG_WARN, "telegram", validated)
-            return False
-        return self._send_media_multipart(
-            chat_id, validated, "document", "sendDocument", caption,
-        )
+        return self._dispatch_media("document", chat_id, doc_path, caption)
 
     def _send_media_multipart(self, chat_id: ChatId, file_path: Path | str,
                               field_name: str, api_method: str,
@@ -788,27 +773,15 @@ class TelegramTransport(MessageTransport):
 
     def send_video(self, chat_id: ChatId, video_path: str | Path,
                    caption: str | None = None) -> bool:
-        ok, validated = validate_document_path(video_path)
-        if not ok:
-            _log(_LOG_WARN, "telegram", validated)
-            return False
-        return self._send_media_multipart(chat_id, validated, "video", "sendVideo", caption)
+        return self._dispatch_media("video", chat_id, video_path, caption)
 
     def send_audio(self, chat_id: ChatId, audio_path: str | Path,
                    caption: str | None = None) -> bool:
-        ok, validated = validate_document_path(audio_path)
-        if not ok:
-            _log(_LOG_WARN, "telegram", validated)
-            return False
-        return self._send_media_multipart(chat_id, validated, "audio", "sendAudio", caption)
+        return self._dispatch_media("audio", chat_id, audio_path, caption)
 
     def send_voice(self, chat_id: ChatId, voice_path: str | Path,
                    caption: str | None = None) -> bool:
-        ok, validated = validate_document_path(voice_path)
-        if not ok:
-            _log(_LOG_WARN, "telegram", validated)
-            return False
-        return self._send_media_multipart(chat_id, validated, "voice", "sendVoice", caption)
+        return self._dispatch_media("voice", chat_id, voice_path, caption)
 
     def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
         sticker_path = Path(sticker_path)
@@ -912,69 +885,36 @@ class LocalTransport(MessageTransport):
             with open(self._log_file, "a") as f:
                 f.write(msg + "\n")
 
-    def send_text(self, chat_id: ChatId, text: str,
-                  parse_mode: ParseMode = None,
-                  reply_to: MessageId | None = None) -> TelegramApiResponse:
-        self._log("send_text", chat_id, text=text[:200], parse_mode=parse_mode)
-        return {"ok": True, "result": {"message_id": 1}}
+    _MSG_OK: TelegramApiResponse = {"ok": True, "result": {"message_id": 1}}
 
-    def send_rich_text(self, chat_id: ChatId, markdown: str,
-                       reply_to: MessageId | None = None) -> TelegramApiResponse:
-        self._log("send_rich_text", chat_id, text=markdown[:200])
-        return {"ok": True, "result": {"message_id": 1}}
-
-    def send_photo(self, chat_id: ChatId, photo_path: str | Path,
-                   caption: str | None = None) -> bool:
-        self._log("send_photo", chat_id, path=photo_path, caption=caption)
-        return True
-
-    def send_document(self, chat_id: ChatId, doc_path: str | Path,
-                      caption: str | None = None) -> bool:
-        self._log("send_document", chat_id, path=doc_path, caption=caption)
-        return True
-
-    def send_animation(self, chat_id: ChatId, animation_path: str | Path,
-                       caption: str | None = None) -> bool:
-        self._log("send_animation", chat_id, path=animation_path, caption=caption)
-        return True
-
-    def send_video(self, chat_id: ChatId, video_path: str | Path,
-                   caption: str | None = None) -> bool:
-        self._log("send_video", chat_id, path=video_path, caption=caption)
-        return True
-
-    def send_audio(self, chat_id: ChatId, audio_path: str | Path,
-                   caption: str | None = None) -> bool:
-        self._log("send_audio", chat_id, path=audio_path, caption=caption)
-        return True
-
-    def send_voice(self, chat_id: ChatId, voice_path: str | Path,
-                   caption: str | None = None) -> bool:
-        self._log("send_voice", chat_id, path=voice_path, caption=caption)
-        return True
-
-    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
-        self._log("send_sticker", chat_id, path=sticker_path)
-        return True
-
+    def send_text(self, chat_id: ChatId, text: str, parse_mode: ParseMode = None, reply_to: MessageId | None = None) -> TelegramApiResponse:
+        self._log("send_text", chat_id, text=text[:200]); return self._MSG_OK
+    def send_rich_text(self, chat_id: ChatId, markdown: str, reply_to: MessageId | None = None) -> TelegramApiResponse:
+        self._log("send_rich_text", chat_id, text=markdown[:200]); return self._MSG_OK
+    def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str, parse_mode: ParseMode = None) -> TelegramApiResponse:
+        self._log("edit_message", chat_id, message_id=message_id); return {"ok": True, "result": {"message_id": message_id}}
+    def send_photo(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_photo", chat_id, path=p); return True
+    def send_document(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_document", chat_id, path=p); return True
+    def send_animation(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_animation", chat_id, path=p); return True
+    def send_video(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_video", chat_id, path=p); return True
+    def send_audio(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_audio", chat_id, path=p); return True
+    def send_voice(self, chat_id: ChatId, p: str | Path, caption: str | None = None) -> bool:
+        self._log("send_voice", chat_id, path=p); return True
+    def send_sticker(self, chat_id: ChatId, p: str | Path) -> bool:
+        self._log("send_sticker", chat_id, path=p); return True
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
         self._log("send_chat_action", chat_id, action=action)
-
-    def set_reaction(self, chat_id: ChatId, message_id: MessageId,
-                     reaction: list[dict[str, str]]) -> None:
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId, reaction: list[dict[str, str]]) -> None:
         self._log("set_reaction", chat_id, message_id=message_id)
-
-    def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
-                     parse_mode: ParseMode = None) -> TelegramApiResponse:
-        self._log("edit_message", chat_id, message_id=message_id, text=text[:200])
-        return {"ok": True, "result": {"message_id": message_id}}
-
     def setup_commands(self, commands: list[dict[str, str]]) -> None:
         self._log("setup_commands", 0, count=len(commands))
-
     def download_file(self, file_id: str, session_name: str) -> str | None:
-        self._log("download_file", 0, file_id=file_id, session=session_name)
-        return None
+        self._log("download_file", 0, file_id=file_id); return None
 
 def _init_transport() -> MessageTransport:
     if TRANSPORT_MODE == "local":
@@ -1000,26 +940,13 @@ def download_telegram_file(file_id: str, session_name: str | None) -> str | None
         return None
     return transport.download_file(file_id, session_name)
 
-def send_voice(chat_id: ChatId, voice_path: str, caption: str | None = None) -> bool:
-    return transport.send_voice(chat_id, voice_path, caption)
-
-def send_photo(chat_id: ChatId, photo_path: str, caption: str | None = None) -> bool:
-    return transport.send_photo(chat_id, photo_path, caption)
-
-def send_animation(chat_id: ChatId, animation_path: str, caption: str | None = None) -> bool:
-    return transport.send_animation(chat_id, animation_path, caption)
-
-def send_document(chat_id: ChatId, doc_path: str, caption: str | None = None) -> bool:
-    return transport.send_document(chat_id, doc_path, caption)
-
-def send_video(chat_id: ChatId, video_path: str, caption: str | None = None) -> bool:
-    return transport.send_video(chat_id, video_path, caption)
-
-def send_audio(chat_id: ChatId, audio_path: str, caption: str | None = None) -> bool:
-    return transport.send_audio(chat_id, audio_path, caption)
-
-def send_sticker(chat_id: ChatId, sticker_path: str) -> bool:
-    return transport.send_sticker(chat_id, sticker_path)
+def send_voice(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_voice(chat_id, path, caption)
+def send_photo(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_photo(chat_id, path, caption)
+def send_animation(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_animation(chat_id, path, caption)
+def send_document(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_document(chat_id, path, caption)
+def send_video(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_video(chat_id, path, caption)
+def send_audio(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_audio(chat_id, path, caption)
+def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_sticker(chat_id, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1142,53 +1069,36 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     except ImportError:
         return photo_path.read_bytes(), photo_path.name
 
+def _validate_file_path(path: str | Path, label: str,
+                        allowed_exts: set[str] | None = None,
+                        blocked_exts: set[str] | None = None,
+                        check_blocked_name: bool = False) -> FileValidation:
+    p = Path(path)
+    if not p.exists():
+        return FileValidation(False, f"{label} not found: {p}")
+    if not p.is_file():
+        return FileValidation(False, f"Not a file: {p}")
+    ext = p.suffix.lower()
+    if allowed_exts and ext not in allowed_exts:
+        return FileValidation(False, f"Invalid {label.lower()} extension: {p.suffix}")
+    if blocked_exts and ext in blocked_exts:
+        return FileValidation(False, f"Blocked extension (sensitive): {p.suffix}")
+    if check_blocked_name and is_blocked_filename(p.name):
+        return FileValidation(False, f"Blocked filename (sensitive): {p.name}")
+    if p.stat().st_size > MAX_FILE_SIZE:
+        return FileValidation(False, f"{label} too large: {p.stat().st_size} > {MAX_FILE_SIZE}")
+    return FileValidation(True, p)
+
 def validate_photo_path(photo_path: str | Path) -> FileValidation:
-    photo_path = Path(photo_path)
-
-    if not photo_path.exists():
-        return FileValidation(False, f"Photo not found: {photo_path}")
-
-    if not photo_path.is_file():
-        return FileValidation(False, f"Not a file: {photo_path}")
-
-    if photo_path.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
-        return FileValidation(False, f"Invalid image extension: {photo_path.suffix}")
-
-    file_size = photo_path.stat().st_size
-    if file_size > MAX_FILE_SIZE:
-        return FileValidation(False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}")
-
-    return FileValidation(True, photo_path)
+    return _validate_file_path(photo_path, "Photo", allowed_exts=ALLOWED_IMAGE_EXTENSIONS)
 
 def is_blocked_filename(filename: str) -> bool:
     name_lower = filename.lower()
-    if name_lower in BLOCKED_FILENAMES:
-        return True
-    if name_lower.startswith(".env"):
-        return True
-    return False
+    return name_lower in BLOCKED_FILENAMES or name_lower.startswith(".env")
 
 def validate_document_path(doc_path: str | Path) -> FileValidation:
-    doc_path = Path(doc_path)
-
-    if not doc_path.exists():
-        return FileValidation(False, f"Document not found: {doc_path}")
-
-    if not doc_path.is_file():
-        return FileValidation(False, f"Not a file: {doc_path}")
-
-    ext_lower = doc_path.suffix.lower()
-    if ext_lower in BLOCKED_DOC_EXTENSIONS:
-        return FileValidation(False, f"Blocked extension (sensitive): {doc_path.suffix}")
-
-    if is_blocked_filename(doc_path.name):
-        return FileValidation(False, f"Blocked filename (sensitive): {doc_path.name}")
-
-    file_size = doc_path.stat().st_size
-    if file_size > MAX_FILE_SIZE:
-        return FileValidation(False, f"Document too large: {file_size} > {MAX_FILE_SIZE}")
-
-    return FileValidation(True, doc_path)
+    return _validate_file_path(doc_path, "Document", blocked_exts=BLOCKED_DOC_EXTENSIONS,
+                               check_blocked_name=True)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
@@ -1396,6 +1306,10 @@ def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
                 out.append(tok.content)
     return "".join(out)
 
+_INLINE_TAG_MAP = {"strong_open": "<b>", "strong_close": "</b>", "em_open": "<i>",
+                   "em_close": "</i>", "s_open": "<s>", "s_close": "</s>",
+                   "link_close": "</a>", "softbreak": "\n", "hardbreak": "\n"}
+
 def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: list[str]) -> str:
     out: list[str] = []
     for tok in children:
@@ -1403,36 +1317,19 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
             out.append(escape_html(tok.content))
         elif tok.type == "code_inline":
             out.append(f"<code>{escape_html(tok.content)}</code>")
-        elif tok.type == "strong_open":
-            out.append("<b>")
-        elif tok.type == "strong_close":
-            out.append("</b>")
-        elif tok.type == "em_open":
-            out.append("<i>")
-        elif tok.type == "em_close":
-            out.append("</i>")
-        elif tok.type == "s_open":
-            out.append("<s>")
-        elif tok.type == "s_close":
-            out.append("</s>")
+        elif tok.type in _INLINE_TAG_MAP:
+            out.append(_INLINE_TAG_MAP[tok.type])
         elif tok.type == "link_open":
             href = escape_html((tok.attrs or {}).get("href", ""))
             out.append(f'<a href="{href}">')
-        elif tok.type == "link_close":
-            out.append("</a>")
-        elif tok.type == "softbreak":
-            out.append("\n")
-        elif tok.type == "hardbreak":
-            out.append("\n")
         elif tok.type == "image":
             alt = escape_html(tok.content or "image")
             src = escape_html((tok.attrs or {}).get("src", ""))
             out.append(f'[{alt}]({src})')
         elif tok.type == "html_inline":
             out.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
-        else:
-            if tok.content:
-                out.append(escape_html(tok.content))
+        elif tok.content:
+            out.append(escape_html(tok.content))
     return "".join(out)
 
 def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
