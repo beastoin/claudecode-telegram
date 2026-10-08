@@ -43,8 +43,7 @@ from core import (
     HOST_DOWN_THRESHOLD,
     PERSISTENCE_NOTE,
     STT_ENDPOINT, STT_TIMEOUT,
-    ADMIN_CHAT_ID_ENV, admin_chat_id,
-)
+    ADMIN_CHAT_ID_ENV, admin_chat_id, )
 import collections
 from dataclasses import dataclass, field
 import fcntl
@@ -208,8 +207,7 @@ class WorkerWatchdogState:
             self.prev_children, self.last_activity_ts, self.worker_cwds,
             self.recent_restarts, self.restart_in_progress,
             self.force_restart_pending_cwd, self.waiting_input_details,
-            self.last_resolved_ts,
-        ):
+            self.last_resolved_ts, ):
             store.pop(name, None)
 
 class LearningReminderState:
@@ -252,8 +250,7 @@ class HostHealthState:
             mem=self.mem_usage.get(host),
             io=self.io_usage.get(host),
             cpu_hogs=self.cpu_hogs.get(host, []),
-            worktrees=self.worktree_usage.get(host),
-        )
+            worktrees=self.worktree_usage.get(host), )
 
 # ── Backend protocol + implementations ────────────────────────────────
 
@@ -297,13 +294,11 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
     probe = (
         f'command -v {shlex.quote(tool)} 2>/dev/null || '
         f'for p in /opt/homebrew/bin/{tool} /usr/local/bin/{tool} /usr/bin/{tool} /bin/{tool}; '
-        f'do [ -x "$p" ] && echo "$p" && break; done'
-    )
+        f'do [ -x "$p" ] && echo "$p" && break; done' )
     try:
         r = _subprocess_runner.run(
             ["ssh", "-o", "ConnectTimeout=3", host, probe],
-            capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND,
-        )
+            capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND, )
         found = r.stdout.strip()
         if found:
             with remote_cache.lock:
@@ -393,8 +388,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             if literal:
                 r = _remote_run(
                     ["tmux", "send-keys", "-t", tmux_name, "-l", text],
-                    host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND,
-                )
+                    host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND, )
                 if r.returncode != 0: return False
                 _clock.sleep(DELAY_RETRY)
                 r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=TIMEOUT_TMUX_SEND)
@@ -405,8 +399,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             if host:
                 r = _remote_run(
                     ["tmux", "load-buffer", "-b", buf_name, "-"],
-                    host=host, input=text.encode(), capture_output=True, timeout=TIMEOUT_TMUX_SEND,
-                )
+                    host=host, input=text.encode(), capture_output=True, timeout=TIMEOUT_TMUX_SEND, )
             else:
                 fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="tmux-send-")
                 try:
@@ -416,8 +409,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                         os.close(fd)
                     r = _subprocess_runner.run(
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile],
-                        capture_output=True, timeout=TIMEOUT_TMUX_SEND,
-                    )
+                        capture_output=True, timeout=TIMEOUT_TMUX_SEND, )
                 finally:
                     try:
                         os.unlink(tmpfile)
@@ -427,8 +419,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             if r.returncode != 0: return False
             r = _remote_run(
                 ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
-                host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND,
-            )
+                host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND, )
             if r.returncode != 0: return False
             _clock.sleep(DELAY_STARTUP)
             r = _remote_run(["tmux", "send-keys", "-t", tmux_name, "Enter"], host=host, timeout=TIMEOUT_TMUX_SEND)
@@ -439,8 +430,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
 def get_pane_command(tmux_name: str, host: str | None = None) -> str:
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
-        host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
-    )
+        host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
     return result.stdout.strip() if result.returncode == 0 else ""
 
 def is_process_running(tmux_name: str, process_name: str, host: str | None = None) -> bool:
@@ -449,8 +439,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
 
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
-        host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
-    )
+        host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
     if result.returncode != 0: return False
 
     pane_pid = result.stdout.strip()
@@ -458,8 +447,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
 
     result = _remote_run(
         ["pgrep", "-P", pane_pid, process_name],
-        host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK
-    )
+        host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK )
     return result.returncode == 0
 
 def tmux_send_escape(tmux_name: str, host: str | None = None) -> None:
@@ -469,8 +457,7 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
     try:
         result = _remote_run(
             ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-        )
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
     except (subprocess.SubprocessError, OSError):
         return {}
 
@@ -504,8 +491,7 @@ class ClaudeBackend:
         try:
             r = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND,
-            )
+                host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND, )
             if r.returncode == 0 and "Paste code here" in r.stdout: literal = True
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:send", f"{type(exc).__name__}: {exc}")
@@ -579,8 +565,7 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
     try:
         payload: dict[str, str | bool] = {
             "session": session_name, "text": text,
-            "source": session_name, "backend": "codex", "escape": True,
-        }
+            "source": session_name, "backend": "codex", "escape": True, }
         data = json.dumps(payload).encode()
         req = urllib.request.Request( f"{bridge_url}/outputs", data=data, headers={"Content-Type": "application/json"},
         )
@@ -612,8 +597,7 @@ def _codex_adapter_remote(worker_name: str, text: str,
         try:
             r = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=5", host, "cat", sid_file],
-                capture_output=True, text=True, timeout=10,
-            )
+                capture_output=True, text=True, timeout=10, )
             if r.returncode == 0: session_id = r.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -633,8 +617,7 @@ def _codex_adapter_remote(worker_name: str, text: str,
                     ["ssh", "-o", "ConnectTimeout=5", host,
                      "mkdir", "-p", f"{remote_sessions}/{worker_name}",
                      "&&", "echo", shlex.quote(new_session_id), ">", sid_file],
-                    timeout=10, capture_output=True,
-                )
+                    timeout=10, capture_output=True, )
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -662,22 +645,19 @@ class CodexBackend:
             t = threading.Thread(
                 target=_codex_adapter_remote,
                 args=(worker_name, text, bridge_url, sessions_dir, host),
-                daemon=True,
-            )
+                daemon=True, )
         else:
             t = threading.Thread(
                 target=_codex_adapter_thread,
                 args=(worker_name, text, bridge_url, sessions_dir),
-                daemon=True,
-            )
+                daemon=True, )
         t.start()
         return True
 
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
 
-BACKENDS: dict[str, Backend] = { "claude": ClaudeBackend(), "codex": CodexBackend(),
-}
+BACKENDS: dict[str, Backend] = { "claude": ClaudeBackend(), "codex": CodexBackend(), }
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
     sid_file = SESSIONS_DIR / worker_name / "codex_session_id"
@@ -767,16 +747,14 @@ _LEARNING_REMINDER_TEXT = (
     "**Quality check:**\n"
     'Good: "When backend returns 500 on auth-token, check if Firebase emulator is running first, '
     'because the error message says connection refused which misleads you into checking network config."\n'
-    'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
-)
+    'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)' )
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
 REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
 PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
 
 # ── Worker registry ───────────────────────────────────────────────────
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
-RESERVED_NAMES = { "team", "focus", "restart", "settings", "hire", "end", "all", "cancel", "start", "help",
-}
+RESERVED_NAMES = { "team", "focus", "restart", "settings", "hire", "end", "all", "cancel", "start", "help", }
 
 # ── Inter-worker pipes ───────────────────────────────────────────────
 
@@ -908,8 +886,7 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     slug = _project_slug(cwd)
     if host:
         try:
-            cmd = [ "bash", "-c", f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1',
-            ]
+            cmd = [ "bash", "-c", f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1', ]
             r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0: return ""
             path = (r.stdout or "").strip()
@@ -1099,8 +1076,7 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None)
     try:
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-        )
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
     except (subprocess.SubprocessError, OSError):
         return ""
     if result.returncode != 0: return ""
@@ -1148,8 +1124,7 @@ _INTERACTIVE_FOOTERS = [
     "Enter to confirm",
     "ctrl-g to edit",
     "Auto-approving in",
-    "Press any key to intervene",
-]
+    "Press any key to intervene", ]
 _INTERACTIVE_CONTENT = [
     "Would you like to proceed?",
     "written up a plan and is ready to execute",
@@ -1162,8 +1137,7 @@ _INTERACTIVE_CONTENT = [
     "Allow Glob",
     "Allow Grep",
     "Allow Agent",
-    "Allow Notebook",
-]
+    "Allow Notebook", ]
 
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     if session and session.get("backend"): return normalize_backend(str(session.get("backend")))
@@ -1176,8 +1150,7 @@ def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict 
 def get_tmux_env_value(tmux_name: str, key: str) -> str:
     result = _subprocess_runner.run(
         ["tmux", "show-environment", "-t", tmux_name, key],
-        capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
-    )
+        capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
     if result.returncode != 0: return ""
     value = result.stdout.strip()
     if "=" not in value: return ""
@@ -1189,8 +1162,7 @@ def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = Non
     while _clock.time() - start < timeout:
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
-        )
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
         if result.returncode == 0:
             if re.search(r'^❯\s*$', result.stdout, re.MULTILINE): return True
         _clock.sleep(DELAY_BRIEF * 2)

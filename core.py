@@ -153,8 +153,7 @@ class HttpClient:
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPHandler(),
             urllib.request.HTTPSHandler(),
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
-        )
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), )
         self._limiters: dict[str, _TokenBucket] = {}
         self._limiters_lock = threading.Lock()
 
@@ -164,8 +163,7 @@ class HttpClient:
                 self._limiters[host] = _TokenBucket(
                     rate=self._rate_config.requests_per_second,
                     burst=self._rate_config.burst,
-                    clock=self._clock,
-                )
+                    clock=self._clock, )
             return self._limiters[host]
 
     def request(
@@ -224,8 +222,7 @@ class HttpClient:
 _http_client: HttpClient = HttpClient()
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
-    retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
-)
+    retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})), )
 
 # ── Node-derived configuration ─────────────────────────────────────────
 NODE_NAME = os.environ.get("NODE_NAME", "")
@@ -448,8 +445,7 @@ def _build_app_context() -> AppContext:
         team_dir=TEAM_DIR,
         watchdog_interval=WATCHDOG_INTERVAL,
         webhook_secret=WEBHOOK_SECRET,
-        transport_mode=TRANSPORT_MODE,
-    )
+        transport_mode=TRANSPORT_MODE, )
 _app_context: AppContext | None = None
 
 def get_app_context() -> AppContext:

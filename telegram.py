@@ -19,8 +19,7 @@ from core import (
     STT_ENDPOINT, STT_TIMEOUT,
     TEAM_DIR,
     ADMIN_CHAT_ID_ENV, admin_chat_id,
-    DEFAULT_BACKEND,
-)
+    DEFAULT_BACKEND, )
 import collections
 from dataclasses import dataclass, field
 import enum
@@ -206,8 +205,7 @@ class IncomingMessage:
         if document:
             mime_type = document.get("mime_type", "")
             doc_is_image = mime_type.startswith("image/")
-        has_media = bool( photo or document or animation or video or audio or voice or video_note or sticker
-        )
+        has_media = bool( photo or document or animation or video or audio or voice or video_note or sticker )
         return cls(
             update_id=update.get("update_id", 0),
             chat_id=msg.get("chat", {}).get("id"),
@@ -225,8 +223,7 @@ class IncomingMessage:
             doc_is_image=doc_is_image,
             media_group_id=msg.get("media_group_id"),
             reply_to=msg.get("reply_to_message"),
-            raw_msg=msg,
-        )
+            raw_msg=msg, )
 
 def _extract_msg_text(msg: TelegramMessageDict) -> str:
     text = msg.get("text") or msg.get("caption") or ""
@@ -285,8 +282,7 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
         "approval",
         "accept edits",
         "confirm",
-        "in plan mode",
-    )
+        "in plan mode", )
     if "working (waiting)" in status or any(sig in act for sig in waiting_signals): return "🟡", "needs reply", 1
 
     return "🟢", "ok", 2
@@ -364,8 +360,7 @@ def format_team_lines(
     focused = active or "(none)"
     lines.append(
         f"Team: {len(registered)} agents · focused: {focused} | "
-        f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked"
-    )
+        f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked" )
     if attention_rows: lines.append("Needs your reply: " + ", ".join(attention_rows))
     lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
     return lines
@@ -389,13 +384,11 @@ BOT_COMMANDS = [
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
-    {"command": "end", "description": "Offboard a worker: /end <name>"},
-]
+    {"command": "end", "description": "Offboard a worker: /end <name>"}, ]
 BLOCKED_COMMANDS = [
     "/mcp", "/help", "/config", "/model", "/compact", "/cost",
     "/doctor", "/init", "/login", "/logout", "/permissions",
-    "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
-]
+    "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen" ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
@@ -533,8 +526,7 @@ class TelegramAPI:
         return self.api("sendMessage", payload)
 
     def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown},
-        }
+        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown}, }
         payload.update(kwargs)
         return self.api("sendRichMessage", payload)
 
@@ -595,8 +587,7 @@ class TelegramTransport(MessageTransport):
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
                        reply_to: MessageId | None = None) -> TelegramApiResponse:
-        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown},
-        }
+        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown}, }
         if reply_to: payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
@@ -606,8 +597,7 @@ class TelegramTransport(MessageTransport):
         "document":  ("sendDocument",  "document",  "doc", False),
         "video":     ("sendVideo",     "video",     "doc", False),
         "audio":     ("sendAudio",     "audio",     "doc", False),
-        "voice":     ("sendVoice",     "voice",     "doc", False),
-    }
+        "voice":     ("sendVoice",     "voice",     "doc", False), }
     _VALIDATORS = {"photo": lambda p: validate_photo_path(p), "doc": lambda p: validate_document_path(p)}
 
     def _dispatch_media(self, kind: str, chat_id: ChatId, path: str | Path,
@@ -661,8 +651,7 @@ class TelegramTransport(MessageTransport):
             f'Content-Disposition: form-data; name="{field_name}"; filename="{fname}"'.encode(),
             f"Content-Type: {ctype}".encode(),
             b"",
-            data,
-        ]
+            data, ]
         if caption:
             body_parts.extend([
                 f"--{boundary}".encode(),
@@ -677,8 +666,7 @@ class TelegramTransport(MessageTransport):
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/{api_method}",
                 data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-            )
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"} )
             with _urlopen(req, timeout=TIMEOUT_HTTP_UPLOAD) as r:
                 result = cast(TelegramApiResponseDict, json.loads(r.read()))
                 if result.get("ok"):
@@ -732,8 +720,7 @@ class TelegramTransport(MessageTransport):
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
                 data=json.dumps({"file_id": file_id}).encode(),
-                headers={"Content-Type": "application/json"}
-            )
+                headers={"Content-Type": "application/json"} )
             with _urlopen(req, timeout=TIMEOUT_HTTP_DOWNLOAD) as r:
                 result = cast(TelegramApiResponseDict, json.loads(r.read()))
                 if not result.get("ok"):
@@ -864,8 +851,7 @@ def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_stic
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 MAX_FILE_SIZE = 50 * 1024 * 1024
-ALLOWED_IMAGE_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4",
-}
+ALLOWED_IMAGE_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4", }
 ALLOWED_DOC_EXTENSIONS = {
     ".md", ".txt", ".rst", ".pdf",
     ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml",
@@ -878,16 +864,13 @@ ALLOWED_DOC_EXTENSIONS = {
     ".mp3", ".m4a", ".flac", ".aac", ".wav",
     ".ogg", ".opus", ".oga",
     ".mp4", ".mov", ".avi", ".mkv", ".webm",
-    ".tgs",
-}
+    ".tgs", }
 BLOCKED_DOC_EXTENSIONS = {
     ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
-    ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc",
-}
+    ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc", }
 BLOCKED_FILENAMES = {
     ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
-    "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig",
-}
+    "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig", }
 
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024: return f"{size_bytes} B"
@@ -916,8 +899,7 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         req = urllib.request.Request(
             STT_ENDPOINT,
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
-        )
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"} )
         with _urlopen(req, timeout=timeout) as r:
             result = cast(TelegramApiResponseDict, json.loads(r.read()))
             text = str(result.get("text", "")).strip()
@@ -945,8 +927,7 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                 scale = min(
                     TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
                     TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
-                    TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1),
-                )
+                    TELEGRAM_PHOTO_MAX_SUM / max(w + h, 1), )
                 new_w = int(w * scale)
                 new_h = int(h * scale)
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -1064,8 +1045,7 @@ class _TelegramHTMLSanitizer(HTMLParser):
         "code": frozenset({"class"}),
         "blockquote": frozenset({"expandable"}),
         "span": frozenset({"class"}),
-        "tg-emoji": frozenset({"emoji-id"}),
-    }
+        "tg-emoji": frozenset({"emoji-id"}), }
 
     def __init__(self, rejected_open_tags: list[str]) -> None:
         super().__init__(convert_charrefs=False)
@@ -1579,8 +1559,7 @@ class TunnelManager:
             return
         self._kill_stale_tunnel()
         self._stop_event.clear()
-        self._watchdog_thread = threading.Thread( target=self._watchdog_loop, name="tunnel-watchdog", daemon=True,
-        )
+        self._watchdog_thread = threading.Thread( target=self._watchdog_loop, name="tunnel-watchdog", daemon=True, )
         self._watchdog_thread.start()
 
     def stop(self) -> None:
@@ -1609,8 +1588,7 @@ class TunnelManager:
             "mode": self._config.mode,
             "state": self._state.value,
             "tunnel_url": self._tunnel_url,
-            "polling_active": self._polling_active,
-        }
+            "polling_active": self._polling_active, }
 
     # ── Telegram API helpers (use injected urlopen) ────────────────────
 
@@ -1736,8 +1714,7 @@ class TunnelManager:
             proc = self._runner.popen(
                 [self._config.cloudflared_binary, "tunnel", "--url", f"http://localhost:{self._port}"],
                 stdout=open(log_file, "w"),
-                stderr=subprocess.STDOUT,
-            )
+                stderr=subprocess.STDOUT, )
         except (OSError, FileNotFoundError) as exc:
             _log(_LOG_ERROR, "tunnel", f"Failed to start cloudflared: {exc}")
             return ""
@@ -1853,8 +1830,7 @@ class TunnelManager:
         self._tg_delete_webhook()
         self._clock.sleep(1)
         self._poll_stop.clear()
-        self._poll_thread = threading.Thread( target=self._poll_loop, name="tunnel-poll", daemon=True,
-        )
+        self._poll_thread = threading.Thread( target=self._poll_loop, name="tunnel-poll", daemon=True, )
         self._poll_thread.start()
         self._polling_active = True
         self._state = TunnelState.POLL_FALLBACK
@@ -1904,8 +1880,7 @@ class TunnelManager:
                 f"http://{_bridge_host}:{self._port}/",
                 data=json.dumps(update).encode(),
                 headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+                method="POST", )
             self._urlopen(req, timeout=5)
         except Exception as exc:
             _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")

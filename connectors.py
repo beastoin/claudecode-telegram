@@ -336,8 +336,7 @@ class BaseConnector(abc.ABC, Generic[M]):
         with self._lock:
             self._thread = threading.Thread(
                 target=self._poll_loop, kwargs={"skip_preflight": True},
-                daemon=True, name=f"{self.connector_name}-poller",
-            )
+                daemon=True, name=f"{self.connector_name}-poller", )
             self._thread.start()
         return True, msg
 
@@ -355,8 +354,7 @@ class BaseConnector(abc.ABC, Generic[M]):
                 sender_filter=self.sender_filter,
                 poll_interval=self.poll_interval,
                 consecutive_failures=self._consecutive_failures,
-                alert_sent=self._alert_sent,
-            )
+                alert_sent=self._alert_sent, )
     # -- Sender filtering --
 
     def is_allowed_sender(self, message: M) -> bool:
@@ -374,8 +372,7 @@ class BaseConnector(abc.ABC, Generic[M]):
             if name in registered and name not in found: found.append(name)
         if not found: return [], text
         found_set = set(found)
-        cleaned = re.sub( r'@([a-zA-Z0-9_-]+)', lambda m: '' if m.group(1).lower() in found_set else m.group(0), text,
-        )
+        cleaned = re.sub( r'@([a-zA-Z0-9_-]+)', lambda m: '' if m.group(1).lower() in found_set else m.group(0), text, )
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         return found, cleaned
 
@@ -663,8 +660,7 @@ def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessag
 
 def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
     """Validate and narrow a raw dict into a GmailProfile."""
-    return GmailProfile( emailAddress=_str_val(raw, "emailAddress"), historyId=_str_val(raw, "historyId"),
-    )
+    return GmailProfile( emailAddress=_str_val(raw, "emailAddress"), historyId=_str_val(raw, "historyId"), )
 
 def _validate_github_state(raw: dict[str, object]) -> GithubState:
     """Validate and narrow a raw dict into a GithubState."""
@@ -725,13 +721,11 @@ class GmailConnector(BaseConnector[GmailMessage]):
             poll_interval=poll_interval,
             on_message=on_message,
             get_registered_workers=get_registered_workers,
-            on_alert=on_alert,
-        )
+            on_alert=on_alert, )
         self.gws_bin: str = gws_bin
         self._history_id: Optional[str] = None
         self._history_file_path: str = history_file or os.path.join(
-            os.path.expanduser("~"), ".cache", "beast", "email", "gmail_history_id",
-        )
+            os.path.expanduser("~"), ".cache", "beast", "email", "gmail_history_id", )
 
     def preflight_check(self) -> tuple[bool, str]:
         if not os.path.isfile(self.gws_bin): return False, f"gws binary not found at {self.gws_bin}"
@@ -751,8 +745,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 poll_interval=self.poll_interval,
                 consecutive_failures=self._consecutive_failures,
                 alert_sent=self._alert_sent,
-                history_id=self._history_id,
-            )
+                history_id=self._history_id, )
     # -- gws CLI wrapper --
 
     def _run_gws(self, *args: str, json_body: Optional[str] = None) -> Optional[dict[str, object]]:
@@ -992,8 +985,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             r'\s+On \d{1,2} \w{3,9} \d{4}[ ,].{5,80} wrote:',
             r'\n>[ >].*(?:\n>[ >].*)*',
             r'\n-{2,}\s*Reply above this line\s*-{2,}',
-            r'\n_{2,}\nFrom:.*?\nSent:',
-        ]
+            r'\n_{2,}\nFrom:.*?\nSent:', ]
         for pat in patterns:
             m = re.search(pat, text, re.DOTALL)
             if m: text = text[:m.start()]
@@ -1004,11 +996,9 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if gmail_marker in body:
             parts = body.split(gmail_marker, 1)
             return parts[0].strip(), parts[1].strip()
-        outlook_match = re.search( r'\n_{3,}\n\s*From:.*?\nSent:.*?\nTo:.*?\nSubject:', body, re.DOTALL,
-        )
+        outlook_match = re.search( r'\n_{3,}\n\s*From:.*?\nSent:.*?\nTo:.*?\nSubject:', body, re.DOTALL, )
         if outlook_match: return body[:outlook_match.start()].strip(), body[outlook_match.start():].strip()
-        generic_match = re.search( r'\n-{2,}\s*(?:Original Message|Forwarded)\s*-{2,}', body, re.IGNORECASE,
-        )
+        generic_match = re.search( r'\n-{2,}\s*(?:Original Message|Forwarded)\s*-{2,}', body, re.IGNORECASE, )
         if generic_match: return body[:generic_match.start()].strip(), body[generic_match.start():].strip()
         return None, None
 
@@ -1279,8 +1269,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             poll_interval=poll_interval,
             on_message=on_message,
             get_registered_workers=get_registered_workers,
-            on_alert=on_alert,
-        )
+            on_alert=on_alert, )
         self.gh_bin: str = gh_bin or "gh"
         # Accept single repo string or list of repos
         if isinstance(repo, str): repos = [repo]
@@ -1298,8 +1287,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             try:
                 result = subprocess.run(
                     [self.gh_bin, "api", f"/repos/{repo}", "--jq", ".id"],
-                    capture_output=True, text=True, timeout=10,
-                )
+                    capture_output=True, text=True, timeout=10, )
                 if result.returncode != 0: return False, f"gh api failed for {repo}: {result.stderr.strip()}"
             except subprocess.TimeoutExpired:
                 return False, f"gh api timed out during preflight for {repo}"
@@ -1320,8 +1308,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 alert_sent=self._alert_sent,
                 repos=self.repos,
                 last_poll_time=self._last_poll_time,
-                seen_ids_count=len(self._seen_ids),
-            )
+                seen_ids_count=len(self._seen_ids), )
     # -- State persistence --
 
     def _load_state(self) -> bool:
@@ -1379,8 +1366,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         try:
             result = subprocess.run(
                 [self.gh_bin, "api", endpoint, "--paginate"],
-                capture_output=True, text=True, timeout=timeout,
-            )
+                capture_output=True, text=True, timeout=timeout, )
             if result.returncode != 0:
                 print(f"[github] gh api error: {result.stderr.strip()}")
                 return None
@@ -1399,11 +1385,9 @@ class GitHubConnector(BaseConnector[GithubComment]):
         is_complete = True
         for repo in self.repos:
             issue_raw = self._gh_api(
-                f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
-            )
+                f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100", )
             pr_raw = self._gh_api(
-                f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
-            )
+                f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100", )
             if issue_raw is not None or pr_raw is not None: any_success = True
             if issue_raw is None or pr_raw is None:
                 is_complete = False
@@ -1437,8 +1421,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             return IssueContext(
                 number=str(comment["issue_num"]),
                 kind=str(comment["kind"]),
-                url=str(comment.get("html_url", "")),
-            )
+                url=str(comment.get("html_url", "")), )
         raw_issue_url = comment.get("issue_url")
         raw_pr_url = comment.get("pull_request_url")
         issue_url: str = str(raw_issue_url) if isinstance(raw_issue_url, str) else ""
