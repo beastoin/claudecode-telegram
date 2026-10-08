@@ -9063,7 +9063,7 @@ class Handler(BaseHTTPRequestHandler):
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [""])[0]
         if not token:
-            self._send_json(403, {"ok": False, "error": "token required"})
+            self._send_error_json(403, "token required")
             return None
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         with guest_store.lock:
@@ -9073,7 +9073,7 @@ class Handler(BaseHTTPRequestHandler):
                 with guest_store.lock:
                     guest_store.guests.pop(token_hash, None)
                     _guest_save()
-            self._send_json(403, {"ok": False, "error": "invalid or expired guest session"})
+            self._send_error_json(403, "invalid or expired guest session")
             return None
         return guest
 
@@ -9171,12 +9171,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            self._send_error_json(400, "invalid JSON")
             return
 
         text = _str_field(data, "text").strip()
         if not text:
-            self._send_json(400, {"ok": False, "error": "text required"})
+            self._send_error_json(400, "text required")
             return
 
         raw_to = data.get("to", _str_field(data, "worker"))
@@ -9187,7 +9187,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             targets = []
         if not targets:
-            self._send_json(400, {"ok": False, "error": "to (or worker) required"})
+            self._send_error_json(400, "to (or worker) required")
             return
 
         guest_name = guest["name"]
@@ -9282,14 +9282,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            self._send_error_json(400, "invalid JSON")
             return
 
         guest_name = _str_field(data, "guest").strip()
         from_worker = _str_field(data, "from").strip()
         text = _str_field(data, "text").strip()
         if not guest_name or not text:
-            self._send_json(400, {"ok": False, "error": "guest and text required"})
+            self._send_error_json(400, "guest and text required")
             return
 
         msg_id = f"gm_{secrets.token_hex(4)}"
@@ -9355,7 +9355,7 @@ class Handler(BaseHTTPRequestHandler):
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [""])[0]
         if not token:
-            self._send_json(403, {"ok": False, "error": "token required"})
+            self._send_error_json(403, "token required")
             return
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         with guest_store.lock:
@@ -9364,7 +9364,7 @@ class Handler(BaseHTTPRequestHandler):
                 guest_store.inboxes.pop(guest["name"], None)
                 _guest_save()
         if not guest:
-            self._send_json(403, {"ok": False, "error": "invalid token"})
+            self._send_error_json(403, "invalid token")
             return
 
         try:
@@ -9383,13 +9383,13 @@ class Handler(BaseHTTPRequestHandler):
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
         if not token:
-            self._send_json(403, {"ok": False, "error": "token required"})
+            self._send_error_json(403, "token required")
             return None
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         with guest_store.lock:
             guest = guest_store.guests.get(token_hash)
         if not guest or guest_is_expired(guest["expires_at_unix"]):
-            self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+            self._send_error_json(403, "invalid or expired token")
             return None
         return guest
 
@@ -9397,7 +9397,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            self._send_error_json(400, "invalid JSON")
             return
 
         label = _str_field(data, "label").strip()
@@ -9406,7 +9406,7 @@ class Handler(BaseHTTPRequestHandler):
         ttl = min(_int_field(data, "ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
 
         if not isinstance(members, list):
-            self._send_json(400, {"ok": False, "error": "members must be a list"})
+            self._send_error_json(400, "members must be a list")
             return
 
         valid_members = []
@@ -9424,7 +9424,7 @@ class Handler(BaseHTTPRequestHandler):
             with guest_store.lock:
                 guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
-                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                self._send_error_json(403, "invalid or expired token")
                 return
             created_by = f"guest:{guest['name']}"
             if created_by not in valid_members:
@@ -9461,13 +9461,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            self._send_error_json(400, "invalid JSON")
             return
 
         with channel_store.lock:
             channel = channel_store.channels.get(channel_id)
             if not channel or channel_is_expired(channel):
-                self._send_json(404, {"ok": False, "error": "channel not found"})
+                self._send_error_json(404, "channel not found")
                 return
 
             raw_add = data.get("add", [])
@@ -9503,12 +9503,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "invalid JSON"})
+            self._send_error_json(400, "invalid JSON")
             return
 
         text = _str_field(data, "text").strip()
         if not text:
-            self._send_json(400, {"ok": False, "error": "text required"})
+            self._send_error_json(400, "text required")
             return
 
         parsed = urlparse(self.path)
@@ -9521,7 +9521,7 @@ class Handler(BaseHTTPRequestHandler):
             with guest_store.lock:
                 guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
-                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                self._send_error_json(403, "invalid or expired token")
                 return
             from_member = f"guest:{guest['name']}"
         elif not from_member:
@@ -9530,10 +9530,10 @@ class Handler(BaseHTTPRequestHandler):
         with channel_store.lock:
             channel = channel_store.channels.get(channel_id)
             if not channel or channel_is_expired(channel):
-                self._send_json(404, {"ok": False, "error": "channel not found"})
+                self._send_error_json(404, "channel not found")
                 return
             if from_member not in channel["members"] and from_member != "manager":
-                self._send_json(403, {"ok": False, "error": f"{from_member} not a member"})
+                self._send_error_json(403, f"{from_member} not a member")
                 return
             msg = channel_append_message(channel, from_member, text)
             members_snapshot = dict(channel["members"])
@@ -9589,23 +9589,23 @@ class Handler(BaseHTTPRequestHandler):
             with guest_store.lock:
                 guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
-                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                self._send_error_json(403, "invalid or expired token")
                 return
             from_member = f"guest:{guest['name']}"
             with channel_store.lock:
                 channel = channel_store.channels.get(channel_id)
                 if not channel or channel_is_expired(channel):
-                    self._send_json(404, {"ok": False, "error": "channel not found"})
+                    self._send_error_json(404, "channel not found")
                     return
                 if from_member not in channel["members"]:
-                    self._send_json(403, {"ok": False, "error": "not a member of this channel"})
+                    self._send_error_json(403, "not a member of this channel")
                     return
                 msgs, truncated = channel_get_messages(channel, after)
         else:
             with channel_store.lock:
                 channel = channel_store.channels.get(channel_id)
                 if not channel or channel_is_expired(channel):
-                    self._send_json(404, {"ok": False, "error": "channel not found"})
+                    self._send_error_json(404, "channel not found")
                     return
                 msgs, truncated = channel_get_messages(channel, after)
 
@@ -9627,7 +9627,7 @@ class Handler(BaseHTTPRequestHandler):
             with guest_store.lock:
                 guest = guest_store.guests.get(token_hash)
             if not guest or guest_is_expired(guest["expires_at_unix"]):
-                self._send_json(403, {"ok": False, "error": "invalid or expired token"})
+                self._send_error_json(403, "invalid or expired token")
                 return
             filter_member = f"guest:{guest['name']}"
 
@@ -9661,7 +9661,7 @@ class Handler(BaseHTTPRequestHandler):
             if channel:
                 _channel_save()
         if not channel:
-            self._send_json(404, {"ok": False, "error": "channel not found"})
+            self._send_error_json(404, "channel not found")
             return
         try:
             if admin_chat_id:
@@ -9849,9 +9849,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(dict[str, object], json.loads(body))
         except (json.JSONDecodeError, ValueError):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Invalid JSON")
+            self._send_text(400, "Invalid JSON")
             return
         if _str_field(data, "path") and _int_field(data, "line"):
             self.handle_pr_comment(body)
@@ -9862,16 +9860,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Invalid JSON")
+            self._send_text(400, "Invalid JSON")
             return
 
         token = _str_field(data, "token")
         if not tokens.validate_pr_review(token):
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired")
+            self._send_text(403, "Token expired")
             return
 
         owner = _str_field(data, "owner")
@@ -9879,9 +9873,7 @@ class Handler(BaseHTTPRequestHandler):
         pr_num = _int_field(data, "pr_num")
         comment_body = _str_field(data, "body").strip()
         if not all([owner, repo, pr_num, comment_body]):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Missing required fields")
+            self._send_text(400, "Missing required fields")
             return
 
         try:
@@ -9890,14 +9882,10 @@ class Handler(BaseHTTPRequestHandler):
                  "--method", "POST", "-f", f"body={comment_body}"],
                 capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
             if r.returncode != 0:
-                self.send_response(502)
-                self.end_headers()
-                self.wfile.write(f"GitHub API error: {r.stderr[:200]}".encode())
+                self._send_text(502, f"GitHub API error: {r.stderr[:200]}")
                 return
         except subprocess.TimeoutExpired:
-            self.send_response(504)
-            self.end_headers()
-            self.wfile.write(b"GitHub API timeout")
+            self._send_text(504, "GitHub API timeout")
             return
 
         try:
@@ -9929,16 +9917,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Invalid JSON")
+            self._send_text(400, "Invalid JSON")
             return
 
         token = _str_field(data, "token")
         if not tokens.validate_pr_review(token):
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired")
+            self._send_text(403, "Token expired")
             return
 
         owner = _str_field(data, "owner")
@@ -9949,9 +9933,7 @@ class Handler(BaseHTTPRequestHandler):
             merge_method = "merge"
 
         if not all([owner, repo, pr_num]):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Missing required fields")
+            self._send_text(400, "Missing required fields")
             return
 
         try:
@@ -9961,14 +9943,10 @@ class Handler(BaseHTTPRequestHandler):
                 capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
             if r.returncode != 0:
                 err = r.stderr.strip()[:300] or r.stdout.strip()[:300]
-                self.send_response(502)
-                self.end_headers()
-                self.wfile.write(f"Merge failed: {err}".encode())
+                self._send_text(502, f"Merge failed: {err}")
                 return
         except subprocess.TimeoutExpired:
-            self.send_response(504)
-            self.end_headers()
-            self.wfile.write(b"Merge API timeout")
+            self._send_text(504, "Merge API timeout")
             return
 
         try:
@@ -10016,16 +9994,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = cast(PrActionBody, json.loads(body))
         except (json.JSONDecodeError, ValueError):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Invalid JSON")
+            self._send_text(400, "Invalid JSON")
             return
 
         token = _str_field(data, "token")
         if not tokens.validate_pr_review(token):
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b"Token expired - reload the PR review page")
+            self._send_text(403, "Token expired - reload the PR review page")
             return
 
         owner = _str_field(data, "owner")
@@ -10038,9 +10012,7 @@ class Handler(BaseHTTPRequestHandler):
         head_sha = _str_field(data, "head_sha")
 
         if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Missing required fields")
+            self._send_text(400, "Missing required fields")
             return
 
         try:
@@ -10058,14 +10030,10 @@ class Handler(BaseHTTPRequestHandler):
             if r.returncode != 0:
                 err = r.stderr.strip() or r.stdout.strip()
                 _log(_LOG_ERROR, "pr-comment", f"GitHub API error: {err}")
-                self.send_response(502)
-                self.end_headers()
-                self.wfile.write(f"GitHub API error: {err}".encode())
+                self._send_text(502, f"GitHub API error: {err}")
                 return
         except subprocess.TimeoutExpired:
-            self.send_response(504)
-            self.end_headers()
-            self.wfile.write(b"GitHub API timeout")
+            self._send_text(504, "GitHub API timeout")
             return
 
         if admin_chat_id:
@@ -10197,9 +10165,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_html(html_content.encode("utf-8"))
         except (OSError, ValueError, KeyError) as e:
             _log(_LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            self._send_text(500, str(e))
 
     # ── Core HTTP Handler ─────────────────────────────────────────
 
@@ -10211,7 +10177,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         self.wfile.write(body)
 
     def _send_error_json(self, status_code: int, message: str) -> None:
-        self._send_json(status_code, {"error": message})
+        self._send_json(status_code, {"ok": False, "error": message})
 
     def _send_html(self, body: bytes, status: int = 200) -> None:
         accept = self.headers.get("Accept-Encoding", "")
@@ -10261,15 +10227,11 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             header_token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header_token != WEBHOOK_SECRET:
                 _log(_LOG_WARN, "webhook", f"Webhook rejected: invalid secret token")
-                self.send_response(403)
-                self.end_headers()
-                self.wfile.write(b"Forbidden")
+                self._send_text(403, "Forbidden")
                 return
 
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        self._send_text(200, "OK")
         try:
             update = cast(TelegramWebhookBody, json.loads(body))
             update_types = [k for k in update.keys() if k != "update_id"]
@@ -10293,9 +10255,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             name = _str_field(data, "name")
 
             if not text:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Missing text")
+                self._send_text(400, "Missing text")
                 return
 
             host = get_worker_host(name) if name else None
@@ -10347,14 +10307,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             _log(_LOG_INFO, "notify", f"sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
                  f"{f' ({has_media} media)' if has_media else ''}")
 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(f"Sent to {sent} chats".encode())
+            self._send_text(200, f"Sent to {sent} chats")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "bridge", f"Notify error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            self._send_text(500, str(e))
 
     def handle_health_alert(self, body: bytes = b"") -> None:
         try:
@@ -10439,11 +10395,11 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            self._send_error_json(400, "Invalid JSON")
             return
         name = str(data.get("name", "")).strip().lower()
         if not name:
-            self._send_json(400, {"ok": False, "error": "Missing 'name' (gmail or github)"})
+            self._send_error_json(400, "Missing 'name' (gmail or github)")
             return
         ok, msg = _restart_connector(name)
         self._send_json(200 if ok else 500, {"ok": ok, "name": name, "message": msg})
@@ -10452,17 +10408,17 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
-            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            self._send_error_json(400, "Invalid JSON")
             return
 
         worker = _str_field(data, "worker").strip()
         message = _str_field(data, "message") or _str_field(data, "text")
         sender = _str_field(data, "from", "system").strip() or "system"
         if not worker:
-            self._send_json(400, {"ok": False, "error": "Missing worker"})
+            self._send_error_json(400, "Missing worker")
             return
         if not isinstance(message, str) or not message.strip():
-            self._send_json(400, {"ok": False, "error": "Missing message"})
+            self._send_error_json(400, "Missing message")
             return
 
         prefixed = f"{sender}: {message}"
@@ -10506,9 +10462,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             text = _str_field(data, "text")
 
             if not session_name or not text:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Missing session or text")
+                self._send_text(400, "Missing session or text")
                 return
 
             source_error = self._validate_response_source(data, session_name)
@@ -10530,9 +10484,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 _log(_LOG_INFO, "hook", f"Hook response: auto-created chat_id for session '{session_name}' from admin_chat_id")
             else:
                 _log(_LOG_WARN, "hook", f"Hook response: no chat_id for session '{session_name}'")
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"No chat_id for session")
+                self._send_text(404, "No chat_id for session")
                 return
 
             if len(text.strip()) <= 5:
@@ -10558,14 +10510,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             clear_pending(session_name)
             mark_hook_event(session_name)
 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
+            self._send_text(200, "OK")
         except (json.JSONDecodeError, OSError, ValueError, KeyError) as e:
             _log(_LOG_ERROR, "bridge", f"Hook response error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            self._send_text(500, str(e))
 
     # ── Guest System Handlers ──────────────────────────────────────────────
 
@@ -10622,9 +10570,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(json.dumps(response).encode())
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             _log(_LOG_ERROR, "worker", f"Workers endpoint error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            self._send_text(500, str(e))
 
     def handle_machines_endpoint(self, parsed: ParseResult | None = None) -> None:
         try:
@@ -10724,9 +10670,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(welcome.encode())
         except (subprocess.SubprocessError, OSError, KeyError) as exc:
             _log(_LOG_ERROR, "bridge", f"Checkin endpoint error: {exc}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(exc).encode())
+            self._send_text(500, str(exc))
 
     def handle_health_workers_endpoint(self) -> None:
         try:
@@ -10755,9 +10699,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.wfile.write(json.dumps(response).encode())
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             _log(_LOG_ERROR, "worker", f"Health workers endpoint error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            self._send_text(500, str(e))
 
     def handle_health_tunnel_endpoint(self) -> None:
         if tunnel_manager is not None:
