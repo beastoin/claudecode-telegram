@@ -880,6 +880,8 @@ test_webhook_secret() {
     NODE_NAME="secretmerged" \
     SESSIONS_DIR="$secret_sessions_dir" \
     TMUX_PREFIX="$secret_tmux_prefix" \
+    BRIDGE_BIND=127.0.0.1 \
+    BRIDGE_PUBLIC_URL= \
     $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$secret_log" 2>&1 &
     local secret_pid=$!
 
@@ -2808,6 +2810,8 @@ test_bridge_starts() {
     TEAM_DIR="$TEST_TEAM_DIR" \
     PILOT_PORT="$TEST_PILOT_PORT" \
     MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    BRIDGE_BIND=127.0.0.1 \
+    BRIDGE_PUBLIC_URL= \
     $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -7395,21 +7399,17 @@ test_response_endpoint_no_chat_id() {
     info "Testing /outputs endpoint with non-existent session..."
 
     local body='{"session":"nonexistent_session_xyz","source":"nonexistent_session_xyz","text":"Test"}'
-    local result
-    result=$(hook_curl "http://localhost:$PORT/outputs" "$body")
+    local http_code
+    http_code=$(hook_curl_code "http://localhost:$PORT/outputs" "$body")
 
-    # Should return 404 for session without chat_id file
-    if echo "$result" | grep -q "No chat_id"; then
-        success "/outputs returns 404 for unknown session"
+    # When ADMIN_CHAT_ID is set, bridge auto-creates chat_id from admin → 200.
+    # When unset, no chat_id → 404.
+    if [[ "$http_code" == "404" ]]; then
+        success "/outputs returns 404 for unknown session (no admin_chat_id)"
+    elif [[ "$http_code" == "200" ]]; then
+        success "/outputs auto-created chat_id from admin_chat_id for unknown session"
     else
-        # Check HTTP code
-        local http_code
-        http_code=$(hook_curl_code "http://localhost:$PORT/outputs" "$body")
-        if [[ "$http_code" == "404" ]]; then
-            success "/outputs returns 404 for unknown session"
-        else
-            fail "/outputs should return 404 for unknown session"
-        fi
+        fail "/outputs should return 404 or 200 (auto-create) for unknown session, got $http_code"
     fi
 }
 
@@ -18181,6 +18181,8 @@ start_direct_mode_bridge() {
     TMUX_PREFIX="$TEST_TMUX_PREFIX" \
     ADMIN_CHAT_ID="${TEST_CHAT_ID:-$CHAT_ID}" \
     DIRECT_MODE=1 \
+    BRIDGE_BIND=127.0.0.1 \
+    BRIDGE_PUBLIC_URL= \
     $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$DIRECT_MODE_BRIDGE_LOG" 2>&1 &
     DIRECT_MODE_BRIDGE_PID=$!
     echo "$DIRECT_MODE_BRIDGE_PID" > "$TEST_NODE_DIR/direct_mode_bridge.pid"
@@ -23040,6 +23042,8 @@ test_chaos_bridge_kill_restart_recovers_state() {
     TEAM_DIR="$TEST_TEAM_DIR" \
     PILOT_PORT="$TEST_PILOT_PORT" \
     MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    BRIDGE_BIND=127.0.0.1 \
+    BRIDGE_PUBLIC_URL= \
     $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
@@ -23110,6 +23114,8 @@ test_chaos_bridge_restart_workers_survive() {
     TEAM_DIR="$TEST_TEAM_DIR" \
     PILOT_PORT="$TEST_PILOT_PORT" \
     MACHINES_CONFIG_FILE="/tmp/nonexistent-machines.json" \
+    BRIDGE_BIND=127.0.0.1 \
+    BRIDGE_PUBLIC_URL= \
     $PYTHON -u "$SCRIPT_DIR/bridge.py" > "$BRIDGE_LOG" 2>&1 &
     BRIDGE_PID=$!
     echo "$BRIDGE_PID" > "$TEST_NODE_DIR/bridge.pid"
