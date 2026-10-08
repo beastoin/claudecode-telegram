@@ -347,8 +347,6 @@ BLOCKED_COMMANDS = [
     "/doctor", "/init", "/login", "/logout", "/permissions",
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen" ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
 def save_last_chat_id(chat_id: ChatId | None) -> None:
     if chat_id is None: return
     try:
@@ -740,8 +738,6 @@ def send_video(chat_id: ChatId, path: str, caption: str | None = None) -> bool: 
 def send_audio(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_audio(chat_id, path, caption)
 def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_sticker(chat_id, path)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_IMAGE_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4", }
 ALLOWED_DOC_EXTENSIONS = {
@@ -1198,8 +1194,6 @@ def format_response_text(session_name: str, text: str) -> str:
     if stripped.lower().startswith(prefix.lower()): text = stripped[len(prefix):].lstrip()
     return f"<b>{session_name}:</b>\n{text}"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
 TELEGRAM_MAX_LENGTH = 4096
 TELEGRAM_RICH_MAX_LENGTH = 32768
 def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
