@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 # ── Infrastructure from core (no circular dependency) ──────────────────
@@ -22,7 +21,6 @@ from core import (
     ADMIN_CHAT_ID_ENV, admin_chat_id,
     DEFAULT_BACKEND,
 )
-
 import collections
 from dataclasses import dataclass, field
 import enum
@@ -53,11 +51,8 @@ class UrlOpenFn(Protocol):
     def __call__(self, req: urllib.request.Request, *, timeout: float) -> http.client.HTTPResponse: ...
 
 # ── Telegram domain types (owned by this module) ─────────────────────
-
 ChatId = int | str
-
 MessageId = int
-
 ParseMode = Literal["HTML", "MarkdownV2"] | None
 
 class TelegramApiResponseDict(TypedDict, total=False):
@@ -65,7 +60,6 @@ class TelegramApiResponseDict(TypedDict, total=False):
     result: object
     description: str
     error_code: int
-
 TelegramApiResponse = TelegramApiResponseDict | None
 
 class TelegramUser(TypedDict, total=False):
@@ -149,7 +143,6 @@ class TelegramMessageDict(TypedDict, total=False):
     caption: str
     media_group_id: str
     rich_message: dict[str, str]
-
 TelegramCallbackQuery = TypedDict("TelegramCallbackQuery", {
     "id": str,
     "from": TelegramUser,
@@ -210,17 +203,14 @@ class IncomingMessage:
         video = msg.get("video")
         video_note = msg.get("video_note")
         sticker = msg.get("sticker")
-
         doc_is_image = False
         if document:
             mime_type = document.get("mime_type", "")
             doc_is_image = mime_type.startswith("image/")
-
         has_media = bool(
             photo or document or animation or video
             or audio or voice or video_note or sticker
         )
-
         return cls(
             update_id=update.get("update_id", 0),
             chat_id=msg.get("chat", {}).get("id"),
@@ -334,14 +324,12 @@ def _format_watchdog_status(name: str,
         pending_lookup = lambda _: False  # noqa: E731
     if clock_now is None:
         clock_now = time.time()
-
     entry = state_snapshot.get(name) if state_snapshot else None
     if not entry:
         return "Working" if pending_lookup(name) else "Ready"
 
     state, _reason, since = entry
     now = clock_now
-
     _SIMPLE = {"READY": "Ready", "BUSY_TOOL": "Working", "BUSY_THINKING": "Thinking",
                "WAITING": "Working", "DEAD": "Not responding", "HOST_OFFLINE": "Host offline",
                "OFFLINE": "Offline", "EXITED": "Session ended", "UNTRACKED_BUSY": "Working"}
@@ -379,14 +367,12 @@ def format_team_lines(
         clock_now = time.time()
     if normalize_backend_fn is None:
         normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
-
     backend_values = set()
     for name, session in registered.items():
         live = worker_live.get(name, {})
         backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
         backend_values.add(backend)
     show_backend = len(backend_values) > 1
-
     rows = []
     counts = {"🔴": 0, "🟡": 0, "🟢": 0}
     for name in sorted(registered.keys()):
@@ -396,30 +382,24 @@ def format_team_lines(
                                                   clock_now=clock_now)
         live = worker_live.get(name, {})
         backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
-
         raw_activity = str(live.get("activity") or "").strip()
         if not raw_activity or raw_activity == "Unknown":
             raw_activity = watchdog_status
         activity = _normalize_activity(raw_activity)
         if len(activity) > 42:
             activity = activity[:39].rstrip() + "..."
-
         context_pct = str(live.get("context_pct") or "").strip()
         icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
         counts[icon] += 1
-
         name_cell = f"{name} 🎯" if name == active else name
         ctx_part = f" | ctx {context_pct}" if context_pct and context_pct != "--" else ""
         row = f"{icon} {name_cell} — {activity}{ctx_part}"
         if show_backend:
             row += f" | backend={backend}"
-
         focus_rank = 0 if name == active else 1
         rows.append((severity_rank, focus_rank, name, blocker, row))
-
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
     attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]
-
     lines = []
     focused = active or "(none)"
     lines.append(
@@ -432,7 +412,6 @@ def format_team_lines(
     return lines
 
 LAST_CHAT_ID_FILE = NODE_DIR / "last_chat_id"
-
 LAST_ACTIVE_FILE = NODE_DIR / "last_active"
 
 class MediaGroupState:
@@ -440,9 +419,7 @@ class MediaGroupState:
     def __init__(self) -> None:
         self.buffer: dict[str, MediaGroupEntry] = {}
         self.lock: threading.Lock = threading.Lock()
-
 _MEDIA_GROUP_WAIT: float = 0.8
-
 BOT_COMMANDS = [
     {"command": "team", "description": "Show your team"},
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
@@ -455,7 +432,6 @@ BOT_COMMANDS = [
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
 ]
-
 BLOCKED_COMMANDS = [
     "/mcp", "/help", "/config", "/model", "/compact", "/cost",
     "/doctor", "/init", "/login", "/logout", "/permissions",
@@ -884,7 +860,6 @@ class LocalTransport(MessageTransport):
         if self._log_file:
             with open(self._log_file, "a") as f:
                 f.write(msg + "\n")
-
     _MSG_OK: TelegramApiResponse = {"ok": True, "result": {"message_id": 1}}
 
     def send_text(self, chat_id: ChatId, text: str, parse_mode: ParseMode = None, reply_to: MessageId | None = None) -> TelegramApiResponse:
@@ -950,14 +925,11 @@ def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_stic
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-
 MAX_FILE_SIZE = 50 * 1024 * 1024
-
 ALLOWED_IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp",
     ".gif", ".mp4",
 }
-
 ALLOWED_DOC_EXTENSIONS = {
     ".md", ".txt", ".rst", ".pdf",
     ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml",
@@ -972,12 +944,10 @@ ALLOWED_DOC_EXTENSIONS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm",
     ".tgs",
 }
-
 BLOCKED_DOC_EXTENSIONS = {
     ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
     ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc",
 }
-
 BLOCKED_FILENAMES = {
     ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
     "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig",
@@ -1013,7 +983,6 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         body_parts.append(f"--{boundary}--".encode())
         body_parts.append(b"")
         body = b"\r\n".join(body_parts)
-
         req = urllib.request.Request(
             STT_ENDPOINT,
             data=body,
@@ -1032,7 +1001,6 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         return None
 
 TELEGRAM_PHOTO_MAX_SUM = 10000
-
 TELEGRAM_PHOTO_MAX_DIM = 5000
 
 def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
@@ -1099,17 +1067,11 @@ def is_blocked_filename(filename: str) -> bool:
 def validate_document_path(doc_path: str | Path) -> FileValidation:
     return _validate_file_path(doc_path, "Document", blocked_exts=BLOCKED_DOC_EXTENSIONS,
                                check_blocked_name=True)
-
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
-
 VOICE_EXTENSIONS = {".ogg", ".opus", ".oga"}
-
 STICKER_EXTENSIONS = {".tgs"}
-
 CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple[str, bool]]:
@@ -1165,7 +1127,6 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
                 output.append(inline_segment)
             else:
                 output.append(pattern.sub(replace_tag, inline_segment))
-
     clean_text = "".join(output)
     if removed:
         clean_text = _collapse_excess_newlines(clean_text).strip()
@@ -1181,7 +1142,6 @@ def escape_html(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 class _TelegramHTMLSanitizer(HTMLParser):
-
     SAFE_TAGS: frozenset[str] = frozenset({
         "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
         "code", "pre", "a", "blockquote", "span", "tg-emoji", "tg-spoiler",
@@ -1394,10 +1354,8 @@ def _wrap_plain_tables(text: str) -> str:
 
 def markdown_to_telegram_html(text: str) -> str:
     from markdown_it import MarkdownIt
-
     md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
     tokens = md.parse(text)
-
     result: list[str] = []
     list_depth = 0
     ordered_counter: list[int] = []
@@ -1407,7 +1365,6 @@ def markdown_to_telegram_html(text: str) -> str:
     table_rows: list[list[str]] = []
     in_thead = False
     rejected_open_tags: list[str] = []
-
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -1510,13 +1467,10 @@ def markdown_to_telegram_html(text: str) -> str:
         else:
             if tok.content:
                 result.append(escape_html(tok.content))
-
         i += 1
-
     output = "".join(result).strip()
     while "\n\n\n" in output:
         output = output.replace("\n\n\n", "\n\n")
-
     return _wrap_plain_tables(output)
 
 def _pipe_tables_to_html(text: str) -> str:
@@ -1559,7 +1513,6 @@ def _pipe_tables_to_html(text: str) -> str:
                 and '|' in lines[i]
                 and re.match(r'^\s*\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?\s*$', lines[i + 1])):
             headers = _parse_row(lines[i])
-
             aligns = []
             for cell in (_parse_row(lines[i + 1]) or []):
                 cell = cell.strip()
@@ -1569,14 +1522,12 @@ def _pipe_tables_to_html(text: str) -> str:
                     aligns.append(' style="text-align:right"')
                 else:
                     aligns.append('')
-
             html = ['<table>']
             html.append('<tr>')
             for j, h in enumerate(headers or []):
                 align = aligns[j] if j < len(aligns) else ''
                 html.append(f'<th{align}>{_cell_md(h)}</th>')
             html.append('</tr>')
-
             i += 2
             while i < len(lines) and '|' in lines[i] and lines[i].strip().startswith('|'):
                 cells = _parse_row(lines[i])
@@ -1586,13 +1537,11 @@ def _pipe_tables_to_html(text: str) -> str:
                     html.append(f'<td{align}>{_cell_md(cell)}</td>')
                 html.append('</tr>')
                 i += 1
-
             html.append('</table>')
             result.append('\n'.join(html))
         else:
             result.append(lines[i])
             i += 1
-
     return '\n'.join(result)
 
 def format_response_text(session_name: str, text: str) -> str:
@@ -1604,9 +1553,7 @@ def format_response_text(session_name: str, text: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-
 TELEGRAM_MAX_LENGTH = 4096
-
 TELEGRAM_RICH_MAX_LENGTH = 32768
 
 def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
@@ -1644,7 +1591,6 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
         if budget <= 0:
             budget = 1
         search = text[:budget]
-
         last_tag_start = search.rfind('<')
         last_tag_end = search.rfind('>')
         if last_tag_start > last_tag_end:
@@ -1695,14 +1641,12 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
             open_stack = _scan_tags(full_chunk)
             suffix = _closing_tags(open_stack)
             split_at = hard_limit
-
         chunks.append(full_chunk + suffix)
         carry_stack = open_stack
         remaining = remaining[split_at:].lstrip()
 
         if split_at == 0:
             remaining = remaining[1:]
-
     return chunks
 
 def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]:
@@ -1713,12 +1657,10 @@ def setup_bot_commands() -> None:
 
 def update_bot_commands() -> None:
     commands = list(BOT_COMMANDS)
-
     import bridge as _br
     registered = _br.get_registered_sessions()
     for name in sorted(registered.keys()):
         commands.append({"command": name, "description": f"Message {name}"})
-
     transport.setup_commands(commands)
     worker_count = len(registered)
     _log(_LOG_INFO, "telegram", f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
@@ -1774,13 +1716,11 @@ class TunnelManager:
         self._urlopen: UrlOpenFn = urlopen or cast(UrlOpenFn, _urlopen)
         self._on_notify = on_notify or (lambda _msg: None)
         self._on_update = on_update
-
         self._lock = threading.Lock()
         self._state = TunnelState.STOPPED
         self._tunnel_url: str = ""
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._polling_active: bool = False
-
         self._stop_event = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._poll_stop = threading.Event()
@@ -1890,9 +1830,7 @@ class TunnelManager:
                 self._start_poll_fallback()
             else:
                 self._state = TunnelState.RUNNING
-
         self._save_bot_info()
-
         check_counter = 0
         while not self._stop_event.is_set():
             self._stop_event.wait(self._config.watchdog_interval)
@@ -1905,13 +1843,11 @@ class TunnelManager:
                     _log(_LOG_WARN, "tunnel", "Tunnel process died, restarting...")
                     self._on_notify("⚠️ Tunnel process died. Reconnecting...")
                     self._state = TunnelState.RESTARTING
-
                     new_url = self._restart_with_retry()
                     if new_url:
                         self._tunnel_url = new_url
                         self._save_tunnel_url(new_url)
                         _log(_LOG_INFO, "tunnel", f"Tunnel restarted: {new_url}")
-
                         self._stop_poll_fallback()
                         if self._set_webhook_with_retry(new_url):
                             self._state = TunnelState.RUNNING
@@ -1933,7 +1869,6 @@ class TunnelManager:
                 _log(_LOG_WARN, "tunnel", "Poll fallback thread died, restarting...")
                 self._poll_stop.clear()
                 self._start_poll_fallback()
-
             check_counter = (check_counter + 1) % self._config.webhook_check_cycles
             if check_counter == 0:
                 if self._tunnel_url:
@@ -1971,7 +1906,6 @@ class TunnelManager:
 
         self._tunnel_proc = proc
         self._save_pid(proc.pid)
-
         url = self._wait_for_url(log_file, self._config.startup_timeout)
         if not url:
             self._kill_cloudflared()
@@ -2032,7 +1966,6 @@ class TunnelManager:
                 _log(_LOG_INFO, "tunnel", f"Restart attempt {attempt}/{self._config.max_restart_attempts} (backoff {backoff}s)")
                 self._clock.sleep(backoff)
                 backoff *= 2
-
             self._kill_cloudflared()
             url = self._start_cloudflared()
             if url:
@@ -2088,7 +2021,6 @@ class TunnelManager:
 
         self._tg_delete_webhook()
         self._clock.sleep(1)
-
         self._poll_stop.clear()
         self._poll_thread = threading.Thread(
             target=self._poll_loop, name="tunnel-poll", daemon=True,

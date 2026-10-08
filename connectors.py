@@ -1,14 +1,10 @@
 """Polling connectors for claudecode-telegram bridge.
-
 Gmail and GitHub connectors that poll external services for new messages,
 parse @worker mentions, and deliver to workers via bridge callbacks.
-
 Flat module — no subpackages. Import directly:
     from connectors import GmailConnector, GitHubConnector
 """
-
 from __future__ import annotations
-
 import abc
 import base64
 import binascii
@@ -20,11 +16,9 @@ import tempfile
 import threading
 from datetime import datetime, timezone, timedelta
 from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
-
 # ---------------------------------------------------------------------------
 # Types — strongly typed data structures for all external API shapes
 # ---------------------------------------------------------------------------
-
 # -- Gmail API types --
 
 class GmailHeader(TypedDict, total=False):
@@ -32,13 +26,11 @@ class GmailHeader(TypedDict, total=False):
     name: str
     value: str
 
-
 class GmailBody(TypedDict, total=False):
     """Body of a Gmail MIME part."""
     data: str
     size: int
     attachmentId: str
-
 
 class GmailPayloadPart(TypedDict, total=False):
     """A MIME part in a Gmail message payload (recursive via 'parts')."""
@@ -48,7 +40,6 @@ class GmailPayloadPart(TypedDict, total=False):
     headers: list[GmailHeader]
     parts: list[GmailPayloadPart]
 
-
 class GmailMessage(TypedDict, total=False):
     """A Gmail message as returned by messages.get (format=full)."""
     id: str
@@ -57,39 +48,31 @@ class GmailMessage(TypedDict, total=False):
     payload: GmailPayloadPart
     historyId: str
 
-
 class GmailMessageRef(TypedDict, total=False):
     """Lightweight message reference inside history entries."""
     message: GmailMessage
 
-
 class GmailHistoryEntry(TypedDict, total=False):
     """One entry in a Gmail history list response."""
     messagesAdded: list[GmailMessageRef]
-
 
 class GmailHistoryResponse(TypedDict, total=False):
     """Response from Gmail history.list API."""
     history: list[GmailHistoryEntry]
     historyId: str
 
-
 class GmailProfile(TypedDict, total=False):
     """Response from Gmail users.getProfile."""
     emailAddress: str
     historyId: str
 
-
 class GmailAttachmentData(TypedDict, total=False):
     """Response from Gmail messages.attachments.get."""
     data: str
 
-
 class GmailMessageListResponse(TypedDict, total=False):
     """Response from Gmail messages.list."""
     messages: list[GmailMessage]
-
-
 # -- Gmail internal types --
 
 class GmailAttachmentInfo(TypedDict):
@@ -98,14 +81,11 @@ class GmailAttachmentInfo(TypedDict):
     mimeType: str
     size: int
     attachmentId: str
-
-
 # -- GitHub API types --
 
 class GithubUser(TypedDict, total=False):
     """GitHub user object (only login used)."""
     login: str
-
 
 class GithubComment(TypedDict, total=False):
     """A GitHub issue or PR review comment."""
@@ -118,16 +98,12 @@ class GithubComment(TypedDict, total=False):
     # Pre-shaped fields (set by bridge when forwarding)
     issue_num: str
     kind: str
-
-
 # -- GitHub internal types --
 
 class GithubState(TypedDict):
     """Persisted state for GitHubConnector."""
     last_poll_time: Optional[str]
     seen_ids: list[int]
-
-
 # -- Connector output types --
 
 class Attachment(TypedDict, total=False):
@@ -136,20 +112,17 @@ class Attachment(TypedDict, total=False):
     filename: str
     mimeType: str
 
-
 class ConnectorMetadata(TypedDict, total=False):
     """Metadata passed alongside connector messages."""
     number: Optional[str]
     repo: str
     comment_id: int
 
-
 class IssueContext(TypedDict):
     """Context extracted from a GitHub comment."""
     number: str
     kind: str
     url: str
-
 
 class ConnectorStatus(TypedDict):
     """Status dict returned by BaseConnector.status()."""
@@ -160,7 +133,6 @@ class ConnectorStatus(TypedDict):
     consecutive_failures: int
     alert_sent: bool
 
-
 class GmailStatus(TypedDict):
     """Status dict returned by GmailConnector.status()."""
     name: str
@@ -170,7 +142,6 @@ class GmailStatus(TypedDict):
     consecutive_failures: int
     alert_sent: bool
     history_id: Optional[str]
-
 
 class GithubStatus(TypedDict):
     """Status dict returned by GitHubConnector.status()."""
@@ -183,8 +154,6 @@ class GithubStatus(TypedDict):
     repos: list[str]
     last_poll_time: Optional[str]
     seen_ids_count: int
-
-
 # -- Callback protocols --
 
 class MessageCallback(Protocol):
@@ -198,16 +167,13 @@ class MessageCallback(Protocol):
         metadata: Optional[ConnectorMetadata] = None,
     ) -> None: ...
 
-
 class AlertCallback(Protocol):
     """Callback for sending alert notifications."""
     def __call__(self, text: str) -> None: ...
 
-
 class WorkerListCallback(Protocol):
     """Callback that returns the set of registered worker names."""
     def __call__(self) -> set[str]: ...
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -243,7 +209,6 @@ def _atomic_write_text(path: str, content: str) -> None:
                 pass
         raise
 
-
 def _atomic_write_bytes(path: str, data: bytes) -> None:
     """Write bytes atomically: tmp (0o600) + fsync + rename + dir fsync."""
     dirname = os.path.dirname(path) or "."
@@ -274,8 +239,6 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             except OSError:
                 pass
         raise
-
-
 # Repo name pattern: owner/name (GitHub: start/end with alnum, no ".." or "." runs)
 _REPO_SEGMENT = r'[a-zA-Z0-9](?:[a-zA-Z0-9_-]|\.(?!\.))*[a-zA-Z0-9]'
 _REPO_PATTERN = re.compile(rf'^(?:{_REPO_SEGMENT}|[a-zA-Z0-9])/(?:{_REPO_SEGMENT}|[a-zA-Z0-9])$')
@@ -284,24 +247,20 @@ _MAX_FILENAME_LEN = 200  # Limit attachment filename length
 _B64_URLSAFE = re.compile(r'^[A-Za-z0-9_-]+={0,2}$')
 _MAX_MIME_DEPTH = 10  # Max recursion depth for MIME part traversal
 _MAX_MIME_PARTS = 100  # Max total MIME parts to process
-
 CONSECUTIVE_FAIL_WARN = 3
 CONSECUTIVE_FAIL_REBOOTSTRAP = 5
 _MAX_POLL_INTERVAL = 3600
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
 _MAX_SEEN_IDS = 500
 _PRUNE_KEEP = 200
-
 # Type variable for the message type each connector handles
 M = TypeVar("M")
-
 # ---------------------------------------------------------------------------
 # BaseConnector
 # ---------------------------------------------------------------------------
 
 class BaseConnector(abc.ABC, Generic[M]):
     """Abstract polling connector with preflight, failure tracking, and alerts."""
-
     connector_name: str = "base"
 
     def __init__(
@@ -326,7 +285,6 @@ class BaseConnector(abc.ABC, Generic[M]):
         self._consecutive_failures: int = 0
         self._alert_sent: bool = False
         self._lock: threading.RLock = threading.RLock()
-
     # -- Abstract interface (subclasses MUST override) --
 
     @abc.abstractmethod
@@ -340,7 +298,6 @@ class BaseConnector(abc.ABC, Generic[M]):
     @abc.abstractmethod
     def extract_sender(self, message: M) -> str:
         """Return the lowercased sender identity from a message."""
-
     # -- Lifecycle --
 
     def _on_preflight_ok(self) -> None:
@@ -404,7 +361,6 @@ class BaseConnector(abc.ABC, Generic[M]):
                 consecutive_failures=self._consecutive_failures,
                 alert_sent=self._alert_sent,
             )
-
     # -- Sender filtering --
 
     def is_allowed_sender(self, message: M) -> bool:
@@ -464,7 +420,6 @@ class BaseConnector(abc.ABC, Generic[M]):
                     self.on_alert(f"{tag} Recovered — polling resumed")
                 except Exception as e:
                     print(f"{tag} Failed to send recovery alert: {e}")
-
     # -- Failure tracking --
 
     def track_failure(self) -> None:
@@ -480,7 +435,6 @@ class BaseConnector(abc.ABC, Generic[M]):
             self._consecutive_failures = 0
         if was_failing:
             self._clear_alert()
-
     # -- Poll loop --
 
     def _poll_loop(self, skip_preflight: bool = False) -> None:
@@ -508,8 +462,6 @@ class BaseConnector(abc.ABC, Generic[M]):
                 print(f"{tag} Poll error: {e}")
                 self.track_failure()
             self._stop_event.wait(self.poll_interval)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -521,7 +473,6 @@ def _escape_html(text: str) -> str:
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace('"', "&quot;"))
-
 
 def _sanitize_filename(name: str) -> str:
     """Strip path separators, traversal, and limit length."""
@@ -599,7 +550,6 @@ def _safe_json_loads_list(raw: str) -> list[GithubComment]:
         if isinstance(item, dict):
             comments.append(_validate_github_comment(cast(dict[str, object], item)))
     return comments
-
 
 # ---------------------------------------------------------------------------
 # Validation — narrow dict[str, object] to concrete TypedDicts at boundaries
@@ -768,7 +718,6 @@ def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
         historyId=_str_val(raw, "historyId"),
     )
 
-
 def _validate_github_state(raw: dict[str, object]) -> GithubState:
     """Validate and narrow a raw dict into a GithubState."""
     lpt_raw = raw.get("last_poll_time")
@@ -813,14 +762,12 @@ def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
         result["kind"] = kind
     return result
 
-
 # ---------------------------------------------------------------------------
 # GmailConnector
 # ---------------------------------------------------------------------------
 
 class GmailConnector(BaseConnector[GmailMessage]):
     """Polls Gmail via gws CLI for new emails from a whitelisted sender."""
-
     connector_name: str = "gmail"
 
     def __init__(
@@ -869,7 +816,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 alert_sent=self._alert_sent,
                 history_id=self._history_id,
             )
-
     # -- gws CLI wrapper --
 
     def _run_gws(self, *args: str, json_body: Optional[str] = None) -> Optional[dict[str, object]]:
@@ -1176,7 +1122,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         """Returns (html_text, plain_text) for Telegram and worker delivery."""
         body = self._clean_body(body)
         manager_text, forwarded_content = self._detect_forward_split(body)
-
         thread_tag = f" [thread:{thread_id}]" if thread_id else ""
 
         if forwarded_content is not None:
@@ -1184,7 +1129,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 manager_text = self._strip_reply_chain(manager_text)
             forwarded_content = self._clean_body(forwarded_content)
             forwarded_content = _truncate(forwarded_content, 1200)
-
             fwd_subject = subject if re.match(r'(?i)^(fwd?|forwarded):', subject) else f"Fwd: {subject}"
             html_parts = [f"📧 <b>{_escape_html(fwd_subject)}</b>{thread_tag}"]
             plain_parts = [f"manager (via email):{thread_tag}"]
@@ -1354,18 +1298,15 @@ class GmailConnector(BaseConnector[GmailMessage]):
             reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
             reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
             plain_text += reply_hint
-
         downloaded_atts: list[Attachment] = []
         for att in attachments:
             path = self._download_attachment(msg_id, att)
             if path:
                 downloaded_atts.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
                 print(f"[gmail] attachment: {att['filename']} -> {path}")
-
         self.on_message(targets, html_text, plain_text, downloaded_atts)
         if not self.mark_as_read(msg_id):
             print(f"[gmail] Warning: failed to mark message {msg_id} as read")
-
     # -- Polling --
 
     def poll_once(self) -> None:
@@ -1445,15 +1386,12 @@ class GmailConnector(BaseConnector[GmailMessage]):
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
         self._save_history_id()
-
-
 # ---------------------------------------------------------------------------
 # GitHubConnector
 # ---------------------------------------------------------------------------
 
 class GitHubConnector(BaseConnector[GithubComment]):
     """Polls GitHub issue/PR comments via gh CLI for a configured user."""
-
     connector_name: str = "github"
 
     def __init__(
@@ -1520,7 +1458,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 last_poll_time=self._last_poll_time,
                 seen_ids_count=len(self._seen_ids),
             )
-
     # -- State persistence --
 
     def _load_state(self) -> bool:
@@ -1580,7 +1517,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
             poll_time = self._last_poll_time
         repos_str = ", ".join(self.repos)
         print(f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})")
-
     # -- GitHub API --
 
     def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
@@ -1784,7 +1720,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         with self._lock:
             self._seen_ids.add(cid)
         print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
-
     # -- Polling --
 
     def poll_once(self) -> None:

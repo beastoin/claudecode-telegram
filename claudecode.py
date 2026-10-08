@@ -28,7 +28,6 @@ from core import (
     DELAY_PROCESS_SETTLE, DELAY_CLAUDE_LOAD,
     DEFAULT_BACKEND, DEFAULT_WORKER_BACKEND, PENDING_TIMEOUT,
     FILE_INBOX_ROOT, WORKER_PIPE_ROOT,
-
     TEAM_DIR,
     MACHINES_CONFIG_FILE,
     WEBHOOK_SECRET,
@@ -46,7 +45,6 @@ from core import (
     STT_ENDPOINT, STT_TIMEOUT,
     ADMIN_CHAT_ID_ENV, admin_chat_id,
 )
-
 import collections
 from dataclasses import dataclass, field
 import fcntl
@@ -291,7 +289,6 @@ class RemoteCache:
         self.machines: dict[str, "Machine"] | None = None
         self.machines_path: Path | None = None
         self.home_dirs: dict[str, str] = {}
-
 remote_cache = RemoteCache()
 
 def _resolve_remote_tool(tool: str, host: str) -> str:
@@ -344,7 +341,6 @@ def _project_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 # ── Git-based teleport sync ───────────────────────────────────────────
-
 GIT_SERVER_DIR = os.path.expanduser("~/git-server")
 
 def _is_git_repo(cwd: str, host: str | None = None) -> bool:
@@ -363,7 +359,6 @@ class TmuxSendState:
         self.locks: dict[str, threading.Lock] = {}
         self.locks_guard: threading.Lock = threading.Lock()
         self.flock_fds: dict[str, int] = {}
-
 tmux_send = TmuxSendState()
 
 def _get_tmux_send_lock(tmux_name: str) -> threading.Lock:
@@ -588,7 +583,6 @@ def _codex_parse_jsonl(output: str) -> tuple[str, str]:
                 text = _str_field(item, "text")
                 if text:
                     response_parts.append(text)
-
     return "\n".join(response_parts).strip(), thread_id
 
 def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[str, str, int]:
@@ -663,7 +657,6 @@ def _codex_adapter_remote(worker_name: str, text: str,
             cmd_parts.extend(["resume", session_id, "-"])
         else:
             cmd_parts.append("-")
-
         ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", host] + cmd_parts
         result = subprocess.run(ssh_cmd, input=text, capture_output=True, text=True)
         response, new_session_id = _codex_parse_jsonl(result.stdout)
@@ -785,11 +778,8 @@ watchdog = WorkerWatchdogState()
 learning_reminders = LearningReminderState()
 host_health = HostHealthState()
 worker_manager = None
-
 LEARNING_REMINDER_RESPONSE_THRESHOLD = 15
-
 LEARNING_REMINDER_IDLE_HOURS = 6
-
 _LEARNING_REMINDER_TEXT = (
     "system: Self-Learning Protocol reminder — time to check your learnings.\n\n"
     "You own your learning. Do not wait for approval to update your playbook.\n\n"
@@ -825,17 +815,12 @@ _LEARNING_REMINDER_TEXT = (
     'because the error message says connection refused which misleads you into checking network config."\n'
     'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
 )
-
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
-
 REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
-
 PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
 
 # ── Worker registry ───────────────────────────────────────────────────
-
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
-
 RESERVED_NAMES = {
     "team", "focus", "restart", "settings", "hire", "end",
     "all", "cancel", "start", "help",
@@ -849,21 +834,17 @@ def get_worker_pipe_path(name: str) -> Path:
 def ensure_worker_pipe(name: str) -> Path:
     pipe_path = get_worker_pipe_path(name)
     pipe_dir = pipe_path.parent
-
     pipe_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     pipe_dir.chmod(0o700)
 
     if not pipe_path.exists():
         os.mkfifo(str(pipe_path), mode=0o600)
         _log(_LOG_INFO, "pipe", f"Created worker pipe: {pipe_path}")
-
     start_pipe_reader(name)
-
     return pipe_path
 
 def cleanup_worker_pipe(name: str) -> None:
     stop_pipe_reader(name)
-
     pipe_path = get_worker_pipe_path(name)
 
     if pipe_path.exists():
@@ -872,7 +853,6 @@ def cleanup_worker_pipe(name: str) -> None:
             _log(_LOG_INFO, "pipe", f"Removed worker pipe: {pipe_path}")
         except OSError as e:
             _log(_LOG_WARN, "worker", f"Failed to remove worker pipe {pipe_path}: {e}")
-
     pipe_dir = pipe_path.parent
     if pipe_dir.exists():
         try:
@@ -930,7 +910,6 @@ def start_pipe_reader(name: str) -> None:
                 return
             _log(_LOG_WARN, "pipe", f"Pipe reader thread for '{name}' is dead, restarting")
             processes.pipe_readers.pop(name, None)
-
     pipe_path = get_worker_pipe_path(name)
     if not pipe_path.exists():
         _log(_LOG_WARN, "bridge", f"Cannot start pipe reader: pipe does not exist for '{name}'")
@@ -954,7 +933,6 @@ def stop_pipe_reader(name: str) -> None:
             return
         thread, stop_event = processes.pipe_readers.pop(name)
     stop_event.set()
-
     pipe_path = get_worker_pipe_path(name)
     if pipe_path.exists():
         try:
@@ -1086,7 +1064,6 @@ def _ensure_workspace_trusted(
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
     except (OSError, json.JSONDecodeError) as exc:
         _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
-
 from telegram import _build_cwd_change_notice as _build_cwd_change_notice  # noqa: F401
 
 def _cache_session_id(name: str, sid: str) -> None:
@@ -1220,7 +1197,6 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None)
     return result.stdout
 
 HOOK_FAILURE_THRESHOLD = 3
-
 HOOK_FAILURE_WINDOW = 120
 
 # ── Worker backend helpers ────────────────────────────────────────────
@@ -1256,7 +1232,6 @@ def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
     return normalized, ""
 
 _ActivityCheck = Callable[[list[str]], str | None]
-
 _INTERACTIVE_FOOTERS = [
     "Enter to select",
     "Space to toggle",
@@ -1272,7 +1247,6 @@ _INTERACTIVE_FOOTERS = [
     "Auto-approving in",
     "Press any key to intervene",
 ]
-
 _INTERACTIVE_CONTENT = [
     "Would you like to proceed?",
     "written up a plan and is ready to execute",
@@ -1355,4 +1329,3 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "WORKER_BACKEND", normalize_backend(backend)], host=host, timeout=TIMEOUT_TMUX_CHECK)
     bridge_url_val = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "BRIDGE_URL", bridge_url_val], host=host, timeout=TIMEOUT_TMUX_CHECK)
-

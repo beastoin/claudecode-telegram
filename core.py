@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import http.client
 import os
 import subprocess
@@ -12,7 +11,6 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, runtime_checkable
 
 # ── Version ────────────────────────────────────────────────────────────
-
 VERSION = "0.47.0"
 
 # ── Safe JSON field accessors ──────────────────────────────────────────
@@ -41,7 +39,6 @@ def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> boo
     return bool(val)
 
 # ── Structured logging ─────────────────────────────────────────────────
-
 _LOG_ERROR: str = "ERROR"
 _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
@@ -96,13 +93,11 @@ class _RealClock:
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
-
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
 
 # ── HTTP client infrastructure ────────────────────────────────────────
-
 import http.cookiejar
 import threading
 import urllib.error
@@ -157,13 +152,11 @@ class HttpClient:
         self._rate_config = rate_limit or RateLimitConfig()
         self._clock = clock or _RealClock()
         self._urlopen_fn = urlopen or urllib.request.urlopen
-
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPHandler(),
             urllib.request.HTTPSHandler(),
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
         )
-
         self._limiters: dict[str, _TokenBucket] = {}
         self._limiters_lock = threading.Lock()
 
@@ -190,7 +183,6 @@ class HttpClient:
         from urllib.parse import urlparse
         host = urlparse(url).hostname or "localhost"
         cfg = retry or self._retry
-
         limiter = self._get_limiter(host)
         if not limiter.acquire(timeout=timeout):
             raise TimeoutError(f"Rate limit timeout for {host}")
@@ -199,7 +191,6 @@ class HttpClient:
         if headers:
             for k, v in headers.items():
                 req.add_header(k, v)
-
         last_exc: BaseException | None = None
         delay = cfg.initial_delay
 
@@ -218,7 +209,6 @@ class HttpClient:
             if attempt < cfg.max_retries:
                 self._clock.sleep(min(delay, cfg.max_delay))
                 delay *= cfg.backoff_factor
-
         raise last_exc  # type: ignore[misc]
 
     def get(self, url: str, *, timeout: float = 30.0,
@@ -236,23 +226,19 @@ class HttpClient:
         return self.request(url, method="HEAD", timeout=timeout, retry=retry)
 
 _http_client: HttpClient = HttpClient()
-
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
     retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
 )
 
 # ── Node-derived configuration ─────────────────────────────────────────
-
 NODE_NAME = os.environ.get("NODE_NAME", "")
-
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
 
 if NODE_NAME and not os.environ.get("PORT"):
     PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
 else:
     PORT = int(os.environ.get("PORT", "8270"))
-
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
 
 if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
@@ -264,16 +250,13 @@ if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
     TMUX_PREFIX = f"claude-{NODE_NAME}-"
 else:
     TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
-
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
-
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
 if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
     BRIDGE_URL = _bridge_url_env
 else:
     BRIDGE_URL = f"http://localhost:{PORT}"
-
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     from urllib.parse import urlparse as _urlparse_pub
@@ -281,24 +264,17 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
     if BRIDGE_BIND != "0.0.0.0":
         BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
-
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
-
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
-
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-
 NODE_DIR = SESSIONS_DIR.parent if NODE_NAME else SESSIONS_DIR.parent
-
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
-
 MACHINES_CONFIG_FILE = Path(os.environ.get(
     "MACHINES_CONFIG_FILE",
     Path.home() / ".config" / "claudecode-telegram" / "machines.json"
 ))
 
 # ── Timeouts (seconds) ─────────────────────────────────────────────────
-
 TIMEOUT_TMUX_CHECK = 3
 TIMEOUT_TMUX_SEND = 5
 TIMEOUT_REMOTE_CMD = 10
@@ -324,23 +300,17 @@ DELAY_PROCESS_SETTLE = 3
 DELAY_CLAUDE_LOAD = 4
 
 # ── Worker/session defaults ────────────────────────────────────────────
-
 DEFAULT_BACKEND = "claude"
 DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 PENDING_TIMEOUT = 600
-
 FILE_INBOX_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
-
 TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
 _CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
 _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
-
 PERSISTENCE_NOTE = "They'll stay on your team."
-
 STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
-
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
@@ -401,7 +371,6 @@ class TunnelConfig:
     port_wait_timeout: int = 30
 
 # ── Tunnel env vars ────────────────────────────────────────────────────
-
 TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
 
@@ -425,7 +394,6 @@ def _build_tunnel_config() -> TunnelConfig:
 
 _wd_cfg = WatchdogConfig()
 _res_cfg = ResourceAlertConfig()
-
 WATCHDOG_INTERVAL = _wd_cfg.interval
 START_GRACE = _wd_cfg.start_grace
 THINK_GRACE = _wd_cfg.think_grace
@@ -438,7 +406,6 @@ ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 RESTART_COOLDOWN = _res_cfg.disk_cooldown
 
 # ── Derived resource constants ──────────────────────────────────────────
-
 DISK_WARN_PCT = _res_cfg.disk_warn_pct
 DISK_ALERT_PCT = _res_cfg.disk_alert_pct
 DISK_ALERT_GB = _res_cfg.disk_alert_gb
@@ -454,11 +421,9 @@ MEM_COOLDOWN = _res_cfg.mem_cooldown
 IO_IOWAIT_PCT = _res_cfg.io_iowait_pct
 IO_COOLDOWN = _res_cfg.io_cooldown
 INFRA_COOLDOWN = _res_cfg.infra_cooldown
-
 HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
 
 # ── AppContext: injectable configuration ────────────────────────────────
-
 TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
 
 @dataclass
@@ -505,7 +470,6 @@ def _build_app_context() -> AppContext:
         webhook_secret=WEBHOOK_SECRET,
         transport_mode=TRANSPORT_MODE,
     )
-
 _app_context: AppContext | None = None
 
 def get_app_context() -> AppContext:
