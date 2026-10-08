@@ -49,10 +49,8 @@ from pathlib import Path
 from collections.abc import Iterable, Mapping
 from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, TYPE_CHECKING, cast, runtime_checkable
 
-
 class UrlOpenFn(Protocol):
     def __call__(self, req: urllib.request.Request, *, timeout: float) -> http.client.HTTPResponse: ...
-
 
 # ── Telegram domain types (owned by this module) ─────────────────────
 
@@ -62,16 +60,13 @@ MessageId = int
 
 ParseMode = Literal["HTML", "MarkdownV2"] | None
 
-
 class TelegramApiResponseDict(TypedDict, total=False):
     ok: bool
-    result: object  # varies by method — Message, User, bool, etc.
+    result: object
     description: str
     error_code: int
 
-
 TelegramApiResponse = TelegramApiResponseDict | None
-
 
 class TelegramUser(TypedDict, total=False):
     id: int
@@ -80,13 +75,11 @@ class TelegramUser(TypedDict, total=False):
     last_name: str
     username: str
 
-
 class TelegramChat(TypedDict, total=False):
     id: int
     type: str
     title: str
     username: str
-
 
 class TelegramPhotoSize(TypedDict, total=False):
     file_id: str
@@ -95,7 +88,6 @@ class TelegramPhotoSize(TypedDict, total=False):
     height: int
     file_size: int
 
-
 class TelegramDocument(TypedDict, total=False):
     file_id: str
     file_unique_id: str
@@ -103,14 +95,12 @@ class TelegramDocument(TypedDict, total=False):
     mime_type: str
     file_size: int
 
-
 class TelegramVoice(TypedDict, total=False):
     file_id: str
     file_unique_id: str
     duration: int
     mime_type: str
     file_size: int
-
 
 class TelegramVideo(TypedDict, total=False):
     file_id: str
@@ -122,7 +112,6 @@ class TelegramVideo(TypedDict, total=False):
     mime_type: str
     file_size: int
 
-
 class TelegramAudio(TypedDict, total=False):
     file_id: str
     file_unique_id: str
@@ -133,7 +122,6 @@ class TelegramAudio(TypedDict, total=False):
     mime_type: str
     file_size: int
 
-
 class TelegramSticker(TypedDict, total=False):
     file_id: str
     file_unique_id: str
@@ -143,7 +131,6 @@ class TelegramSticker(TypedDict, total=False):
     type: str
     is_animated: bool
     is_video: bool
-
 
 class TelegramMessageDict(TypedDict, total=False):
     message_id: int
@@ -161,10 +148,8 @@ class TelegramMessageDict(TypedDict, total=False):
     reply_to_message: "TelegramMessageDict"
     caption: str
     media_group_id: str
-    rich_message: dict[str, str]  # {"markdown": str} — Telegram rich message block
+    rich_message: dict[str, str]
 
-
-# Note: Telegram API uses "from" (a Python keyword), so we use functional TypedDict form.
 TelegramCallbackQuery = TypedDict("TelegramCallbackQuery", {
     "id": str,
     "from": TelegramUser,
@@ -172,32 +157,24 @@ TelegramCallbackQuery = TypedDict("TelegramCallbackQuery", {
     "data": str,
 }, total=False)
 
-
 class TelegramUpdate(TypedDict, total=False):
     update_id: int
     message: TelegramMessageDict
     edited_message: TelegramMessageDict
     callback_query: TelegramCallbackQuery
 
-
 class FileValidation(NamedTuple):
     ok: bool
-    detail: Path | str  # Path on success, error message on failure
-
+    detail: Path | str
 
 class MediaGroupEntry(TypedDict):
     items: list[TelegramMessageDict]
     caption: str
     timer: threading.Timer | None
 
-
 # ── Cross-module type annotations (TYPE_CHECKING only) ───────────────
-# WorkerStateEntry and TmuxSessionDict are claudecode-owned types used
-# in function signatures here. With `from __future__ import annotations`,
-# all annotations are strings at runtime — no circular import.
 if TYPE_CHECKING:
     from claudecode import WorkerStateEntry, TmuxSessionDict
-
 
 # ── IncomingMessage: parse Telegram update once ──
 
@@ -207,7 +184,6 @@ class IncomingMessage:
     chat_id: int | None = None
     msg_id: int | None = None
     text: str = ""
-    # Media fields (Telegram API JSON shapes)
     photo: list[TelegramPhotoSize] | None = None
     document: TelegramDocument | None = None
     animation: TelegramDocument | None = None
@@ -216,13 +192,10 @@ class IncomingMessage:
     video: TelegramVideo | None = None
     video_note: TelegramVideo | None = None
     sticker: TelegramSticker | None = None
-    # Derived
     has_media: bool = False
     doc_is_image: bool = False
     media_group_id: str | None = None
-    # Reply context (Telegram API reply_to_message JSON)
     reply_to: TelegramMessageDict | None = None
-    # Raw message dict (for edge cases during migration)
     raw_msg: TelegramMessageDict = field(default_factory=lambda: TelegramMessageDict())
 
     @classmethod
@@ -268,7 +241,6 @@ class IncomingMessage:
             raw_msg=msg,
         )
 
-
 def _extract_msg_text(msg: TelegramMessageDict) -> str:
     text = msg.get("text") or msg.get("caption") or ""
     if not text:
@@ -292,7 +264,6 @@ def _extract_msg_text(msg: TelegramMessageDict) -> str:
             text = "\n".join(parts)
     return text
 
-
 def _build_cwd_change_notice(
     name: str,
     old_cwd: str,
@@ -307,28 +278,19 @@ def _build_cwd_change_notice(
     lines.append(f"<b>to:</b> <code>{new_cwd}</code> (fresh start)")
     return "\n".join(lines)
 
-
 # ── Team formatting (pure functions, runtime state injected by caller) ──
-
 
 def _normalize_activity(raw: str) -> str:
     if not raw:
         return raw
-    # Pattern: single capitalized gerund word optionally followed by (duration)
     m = re.match(r'^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$', raw)
     if m:
         verb = m.group(1)
         dur = m.group(2)
-        # Known multi-word prefixes that happen to start with a gerund are handled
-        # by the regex requiring the FULL string to be one word + optional duration.
-        # "Running Bash" won't match because "Bash" follows after a space.
-        # "Compacting conversation (5m)" won't match because "conversation" follows.
-        # Only single-word verbs like "Ionizing", "Whirring" match.
         if dur:
             return f"Thinking ({dur})"
         return "Thinking"
     return raw
-
 
 def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, str, int]:
     status = (watchdog_status or "").lower()
@@ -364,7 +326,6 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
 
     return "🟢", "ok", 2
 
-
 def _format_watchdog_status(name: str,
                             pending_lookup: 'Callable[[str], bool] | None' = None,
                             state_snapshot: 'dict[str, WorkerStateEntry] | None' = None,
@@ -393,8 +354,6 @@ def _format_watchdog_status(name: str,
         minutes = max(0, int((now - since) / 60)) if since else 0
         return f"Needs reply ({minutes}m)"
     if state == "STUCK":
-        # Use age from reason (derived from pending file timestamp on disk,
-        # survives bridge restarts) rather than since (resets on restart).
         age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
         if age_match:
             minutes = int(age_match.group(1)) // 60
@@ -415,7 +374,6 @@ def _format_watchdog_status(name: str,
     if state == "UNTRACKED_BUSY":
         return "Working"
     return state.lower()
-
 
 def format_team_lines(
     registered: 'dict[str, TmuxSessionDict]',
@@ -489,13 +447,9 @@ def format_team_lines(
     lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
     return lines
 
-
-# admin_chat_id lives in bridge (shared by telegram + claudecode)
-
 LAST_CHAT_ID_FILE = NODE_DIR / "last_chat_id"
 
 LAST_ACTIVE_FILE = NODE_DIR / "last_active"
-
 
 class MediaGroupState:
 
@@ -503,25 +457,20 @@ class MediaGroupState:
         self.buffer: dict[str, MediaGroupEntry] = {}
         self.lock: threading.Lock = threading.Lock()
 
-_MEDIA_GROUP_WAIT: float = 0.8  # seconds to wait for all items in a group
-
+_MEDIA_GROUP_WAIT: float = 0.8
 
 BOT_COMMANDS = [
-    # Daily commands (frequency-first, natural workflow order)
     {"command": "team", "description": "Show your team"},
     {"command": "focus", "description": "Focus a worker: /focus <name>"},
     {"command": "restart", "description": "Restart worker (--clean for fresh)"},
-    # Occasional
     {"command": "status", "description": "Bridge status dashboard"},
     {"command": "pilot", "description": "Toggle pilot access: /pilot <name>"},
     {"command": "relay", "description": "Open public channel: /relay <worker>"},
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
-    # Rare (onboarding/offboarding)
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
 ]
-
 
 BLOCKED_COMMANDS = [
     "/mcp", "/help", "/config", "/model", "/compact", "/cost",
@@ -529,13 +478,7 @@ BLOCKED_COMMANDS = [
     "/pr", "/review", "/terminal", "/vim", "/approved-tools", "/listen"
 ]
 
-
-# ============================================================
-# FILE PERSISTENCE
-# ============================================================
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Persistence (last chat ID and last active worker survive restart)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_last_chat_id(chat_id: ChatId | None) -> None:
@@ -550,7 +493,6 @@ def save_last_chat_id(chat_id: ChatId | None) -> None:
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to save last_chat_id: {e}")
 
-
 def load_last_chat_id() -> int | None:
     try:
         if LAST_CHAT_ID_FILE.exists():
@@ -560,7 +502,6 @@ def load_last_chat_id() -> int | None:
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to load last_chat_id: {e}")
     return None
-
 
 def save_last_active(name: str) -> None:
     try:
@@ -572,7 +513,6 @@ def save_last_active(name: str) -> None:
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to save last_active: {e}")
 
-
 def load_last_active() -> str | None:
     try:
         if LAST_ACTIVE_FILE.exists():
@@ -583,13 +523,7 @@ def load_last_active() -> str | None:
         _log(_LOG_WARN, "bridge", f"Failed to load last_active: {e}")
     return None
 
-
-# ============================================================
-# MESSAGE TRANSPORT ABSTRACTION
-# ============================================================
-
 TRANSPORT_MODE = os.environ.get("TRANSPORT", "telegram")
-
 
 @runtime_checkable
 class MessageTransport(Protocol):
@@ -651,11 +585,6 @@ class MessageTransport(Protocol):
     def download_file(self, file_id: str, session_name: str) -> str | None:
         ...
 
-
-# ============================================================
-# TELEGRAM API
-# ============================================================
-
 class TelegramAPI:
 
     def __init__(self, token: str) -> None:
@@ -676,9 +605,8 @@ class TelegramAPI:
             try:
                 raw = e.read()
                 body = cast(TelegramApiResponseDict, json.loads(raw))
-                return body  # Return error response so callers can inspect description
+                return body
             except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, ValueError):
-                # Non-JSON error body (proxy, middlebox, empty) — return structured error
                 return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code} (non-JSON body)"}
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
@@ -736,7 +664,6 @@ class TelegramAPI:
     def get_me(self) -> TelegramApiResponse:
         return self.api("getMe", {})
 
-
 class TelegramTransport(MessageTransport):
 
     def __init__(self, token: str) -> None:
@@ -754,7 +681,6 @@ class TelegramTransport(MessageTransport):
             payload["parse_mode"] = parse_mode
         if reply_to:
             payload["reply_to_message_id"] = reply_to
-        # Use module-level telegram_api so tests can mock bridge.telegram_api
         return telegram_api("sendMessage", payload)
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
@@ -967,7 +893,6 @@ class TelegramTransport(MessageTransport):
             _log(_LOG_ERROR, "bridge", f"Download error: {e}")
             return None
 
-
 class LocalTransport(MessageTransport):
 
     def __init__(self) -> None:
@@ -1051,15 +976,12 @@ class LocalTransport(MessageTransport):
         self._log("download_file", 0, file_id=file_id, session=session_name)
         return None
 
-
 def _init_transport() -> MessageTransport:
     if TRANSPORT_MODE == "local":
         return LocalTransport()
     return TelegramTransport(BOT_TOKEN)
 
-
 transport = _init_transport()
-
 
 def telegram_api(method: str, data: Mapping[str, object]) -> TelegramApiResponse:
     if TRANSPORT_MODE == "local":
@@ -1069,108 +991,70 @@ def telegram_api(method: str, data: Mapping[str, object]) -> TelegramApiResponse
         return transport._api.api(method, data)
     return None
 
-
 def send_telegram_message(chat_id: ChatId, text: str,
                           parse_mode: ParseMode = None) -> TelegramApiResponse:
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
-
 
 def download_telegram_file(file_id: str, session_name: str | None) -> str | None:
     if session_name is None:
         return None
     return transport.download_file(file_id, session_name)
 
-
-# Backward-compat module-level media stubs.
-# Tests patch these (e.g. patch.object(bridge, 'send_voice', ...)).
-# Production code routes through transport.*; these stubs allow test mocking.
 def send_voice(chat_id: ChatId, voice_path: str, caption: str | None = None) -> bool:
     return transport.send_voice(chat_id, voice_path, caption)
-
 
 def send_photo(chat_id: ChatId, photo_path: str, caption: str | None = None) -> bool:
     return transport.send_photo(chat_id, photo_path, caption)
 
-
 def send_animation(chat_id: ChatId, animation_path: str, caption: str | None = None) -> bool:
     return transport.send_animation(chat_id, animation_path, caption)
-
 
 def send_document(chat_id: ChatId, doc_path: str, caption: str | None = None) -> bool:
     return transport.send_document(chat_id, doc_path, caption)
 
-
 def send_video(chat_id: ChatId, video_path: str, caption: str | None = None) -> bool:
     return transport.send_video(chat_id, video_path, caption)
-
 
 def send_audio(chat_id: ChatId, audio_path: str, caption: str | None = None) -> bool:
     return transport.send_audio(chat_id, audio_path, caption)
 
-
 def send_sticker(chat_id: ChatId, sticker_path: str) -> bool:
     return transport.send_sticker(chat_id, sticker_path)
 
-
-# ============================================================
-# MEDIA HANDLING
-# ============================================================
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Image Handling
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Max file size: 50MB (Telegram Bot API limit for uploads)
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
-
-# Allowed image extensions for outgoing (sendPhoto + sendAnimation + sendVideo)
 ALLOWED_IMAGE_EXTENSIONS = {
-    # Photos (sendPhoto)
     ".jpg", ".jpeg", ".png", ".webp", ".bmp",
-    # Animations (sendAnimation) - autoplay, loop, silent
     ".gif", ".mp4",
 }
 
-
-# Allowed document extensions for outgoing (common code, docs, data files)
 ALLOWED_DOC_EXTENSIONS = {
-    # Docs
     ".md", ".txt", ".rst", ".pdf",
-    # Data
     ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml",
     ".log", ".sql", ".patch", ".diff",
-    # Code
     ".py", ".js", ".ts", ".jsx", ".tsx",
     ".go", ".rs", ".java", ".kt", ".swift",
     ".rb", ".php", ".c", ".cpp", ".h", ".hpp",
     ".sh", ".html", ".css", ".scss",
-    # Archives
     ".zip", ".tar", ".gz",
-    # Audio (sendAudio — shows player UI)
     ".mp3", ".m4a", ".flac", ".aac", ".wav",
-    # Voice (sendVoice — shows voice bubble)
     ".ogg", ".opus", ".oga",
-    # Video (sendVideo — shows video player)
     ".mp4", ".mov", ".avi", ".mkv", ".webm",
-    # Stickers (sendSticker)
     ".tgs",
 }
 
-
-# Blocked extensions (secrets, keys, certificates)
 BLOCKED_DOC_EXTENSIONS = {
     ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
     ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc",
 }
 
-
-# Blocked filenames (case-insensitive)
 BLOCKED_FILENAMES = {
     ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
     "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig",
 }
-
 
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -1179,10 +1063,6 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f} KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-
-# download_telegram_file removed — use download_telegram_file() instead
-
 
 def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
     if not STT_ENDPOINT:
@@ -1224,11 +1104,9 @@ def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
         _log(_LOG_ERROR, "bridge", f"STT error (fail-open): {e}")
         return None
 
+TELEGRAM_PHOTO_MAX_SUM = 10000
 
-TELEGRAM_PHOTO_MAX_SUM = 10000  # width + height must not exceed this
-
-TELEGRAM_PHOTO_MAX_DIM = 5000   # neither dimension may exceed this
-
+TELEGRAM_PHOTO_MAX_DIM = 5000
 
 def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     photo_path = Path(photo_path)
@@ -1242,7 +1120,6 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                 h > TELEGRAM_PHOTO_MAX_DIM
             )
             if needs_resize:
-                # Scale proportionally so both constraints are satisfied
                 scale = min(
                     TELEGRAM_PHOTO_MAX_DIM / max(w, 1),
                     TELEGRAM_PHOTO_MAX_DIM / max(h, 1),
@@ -1265,7 +1142,6 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     except ImportError:
         return photo_path.read_bytes(), photo_path.name
 
-
 def validate_photo_path(photo_path: str | Path) -> FileValidation:
     photo_path = Path(photo_path)
 
@@ -1275,77 +1151,56 @@ def validate_photo_path(photo_path: str | Path) -> FileValidation:
     if not photo_path.is_file():
         return FileValidation(False, f"Not a file: {photo_path}")
 
-    # Check extension
     if photo_path.suffix.lower() not in ALLOWED_IMAGE_EXTENSIONS:
         return FileValidation(False, f"Invalid image extension: {photo_path.suffix}")
 
-    # Check size
     file_size = photo_path.stat().st_size
     if file_size > MAX_FILE_SIZE:
         return FileValidation(False, f"Photo too large: {file_size} > {MAX_FILE_SIZE}")
 
     return FileValidation(True, photo_path)
 
-
 def is_blocked_filename(filename: str) -> bool:
     name_lower = filename.lower()
-    # Check exact filename matches
     if name_lower in BLOCKED_FILENAMES:
         return True
-    # Check .env.* pattern
     if name_lower.startswith(".env"):
         return True
     return False
 
-
 def validate_document_path(doc_path: str | Path) -> FileValidation:
     doc_path = Path(doc_path)
 
-    # Security: validate path exists and is regular file
     if not doc_path.exists():
         return FileValidation(False, f"Document not found: {doc_path}")
 
     if not doc_path.is_file():
         return FileValidation(False, f"Not a file: {doc_path}")
 
-    # Security: check for blocked extensions (sensitive)
     ext_lower = doc_path.suffix.lower()
     if ext_lower in BLOCKED_DOC_EXTENSIONS:
         return FileValidation(False, f"Blocked extension (sensitive): {doc_path.suffix}")
 
-    # Security: check for blocked filenames
     if is_blocked_filename(doc_path.name):
         return FileValidation(False, f"Blocked filename (sensitive): {doc_path.name}")
 
-    # Check size
     file_size = doc_path.stat().st_size
     if file_size > MAX_FILE_SIZE:
         return FileValidation(False, f"Document too large: {file_size} > {MAX_FILE_SIZE}")
 
-    # Note: No path restriction - workers can send from anywhere
-    # Security is enforced via extension allowlist and filename blocklist
-
     return FileValidation(True, doc_path)
 
-
-# Media extensions routed to specialized Telegram API methods
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
 
 VOICE_EXTENSIONS = {".ogg", ".opus", ".oga"}
 
-STICKER_EXTENSIONS = {".tgs"}  # animated stickers; static .webp handled by sendPhoto
-
-
-# ============================================================
-# MESSAGE FORMATTING
-# ============================================================
+STICKER_EXTENSIONS = {".tgs"}
 
 CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-
 
 def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple[str, bool]]:
     segments = []
@@ -1358,7 +1213,6 @@ def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple
     if last < len(text):
         segments.append((text[last:], False))
     return segments
-
 
 def _collapse_excess_newlines(text: str) -> str:
     output = []
@@ -1373,7 +1227,6 @@ def _collapse_excess_newlines(text: str) -> str:
                 output.append(re.sub(r"\n{3,}", "\n\n", inline_segment))
     return "".join(output)
 
-
 def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str | None, str]]]:
     pattern = re.compile(rf"(\\)?\[\[{tag_name}:([^\]|]+)(?:\|([^\]]*))?\]\]")
     items = []
@@ -1382,7 +1235,6 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
     def replace_tag(match: re.Match[str]) -> str:
         nonlocal removed
         if match.group(1):
-            # Escaped tag, return without the escape slash.
             return match.group(0)[1:]
         path = match.group(2).strip()
         caption = (match.group(3) or "").strip()
@@ -1409,18 +1261,14 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
         clean_text = _collapse_excess_newlines(clean_text).strip()
     return clean_text, items
 
-
 def parse_image_tags(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     return _parse_media_tags(text, "image", validate_photo_path)
-
 
 def parse_file_tags(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     return _parse_media_tags(text, "file", validate_document_path)
 
-
 def escape_html(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
 
 class _TelegramHTMLSanitizer(HTMLParser):
 
@@ -1522,7 +1370,6 @@ class _TelegramHTMLSanitizer(HTMLParser):
     def html(self) -> str:
         return "".join(self._out)
 
-
 def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
     if not raw:
         return ""
@@ -1530,7 +1377,6 @@ def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
     sanitizer.feed(raw)
     sanitizer.close()
     return sanitizer.html()
-
 
 def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
     out: list[str] = []
@@ -1544,12 +1390,11 @@ def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
         elif tok.type in ("strong_open", "strong_close", "em_open", "em_close",
                           "s_open", "s_close", "link_open", "link_close",
                           "html_inline"):
-            pass  # intentional no-op: skip formatting tokens
+            pass
         else:
             if tok.content:
                 out.append(tok.content)
     return "".join(out)
-
 
 def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: list[str]) -> str:
     out: list[str] = []
@@ -1590,7 +1435,6 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
                 out.append(escape_html(tok.content))
     return "".join(out)
 
-
 def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
     all_rows = [headers] + rows
     if not all_rows or not all_rows[0]:
@@ -1612,10 +1456,7 @@ def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
             lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
     return f"<pre>{chr(10).join(lines)}</pre>\n"
 
-
-# Pattern for detecting tabular lines (2+ columns separated by 2+ spaces)
 _MULTI_SPACE_RE = re.compile(r'\S  +\S.*\S  +\S')
-
 
 def _wrap_plain_tables(text: str) -> str:
     parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
@@ -1654,7 +1495,6 @@ def _wrap_plain_tables(text: str) -> str:
                 i += 1
     return '\n'.join(out) if out else text
 
-
 def markdown_to_telegram_html(text: str) -> str:
     from markdown_it import MarkdownIt
 
@@ -1676,7 +1516,7 @@ def markdown_to_telegram_html(text: str) -> str:
         tok = tokens[i]
 
         if tok.type == "paragraph_open":
-            pass  # intentional no-op: skip token
+            pass
         elif tok.type == "paragraph_close":
             if not in_table:
                 result.append("\n")
@@ -1686,13 +1526,11 @@ def markdown_to_telegram_html(text: str) -> str:
             else:
                 result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
 
-        # Headings -> bold
         elif tok.type == "heading_open":
             result.append("<b>")
         elif tok.type == "heading_close":
             result.append("</b>\n")
 
-        # Code blocks
         elif tok.type == "fence":
             lang = tok.info.strip() if tok.info else ""
             code = escape_html(tok.content.rstrip("\n"))
@@ -1704,7 +1542,6 @@ def markdown_to_telegram_html(text: str) -> str:
             code = escape_html(tok.content.rstrip("\n"))
             result.append(f"<pre>{code}</pre>\n")
 
-        # Blockquotes
         elif tok.type == "blockquote_open":
             result.append("<blockquote>")
         elif tok.type == "blockquote_close":
@@ -1712,7 +1549,6 @@ def markdown_to_telegram_html(text: str) -> str:
                 result[-1] = result[-1][:-1]
             result.append("</blockquote>\n")
 
-        # Bullet lists
         elif tok.type == "bullet_list_open":
             list_depth += 1
         elif tok.type == "bullet_list_close":
@@ -1720,7 +1556,6 @@ def markdown_to_telegram_html(text: str) -> str:
             if list_depth == 0:
                 result.append("\n")
 
-        # Ordered lists
         elif tok.type == "ordered_list_open":
             list_depth += 1
             ordered_counter.append(0)
@@ -1730,7 +1565,6 @@ def markdown_to_telegram_html(text: str) -> str:
             if list_depth == 0:
                 result.append("\n")
 
-        # List items
         elif tok.type == "list_item_open":
             indent = "  " * (list_depth - 1)
             if ordered_counter:
@@ -1742,7 +1576,6 @@ def markdown_to_telegram_html(text: str) -> str:
             if result and not result[-1].endswith("\n"):
                 result.append("\n")
 
-        # Tables -> <pre> aligned columns
         elif tok.type == "table_open":
             in_table = True
             table_headers = []
@@ -1759,7 +1592,7 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "thead_close":
             in_thead = False
         elif tok.type in ("tbody_open", "tbody_close"):
-            pass  # intentional no-op: skip token
+            pass
         elif tok.type == "tr_open":
             table_row = []
         elif tok.type == "tr_close":
@@ -1769,13 +1602,11 @@ def markdown_to_telegram_html(text: str) -> str:
                 table_rows.append(table_row[:])
             table_row = []
         elif tok.type in ("th_open", "th_close", "td_open", "td_close"):
-            pass  # intentional no-op: skip token
+            pass
 
-        # Horizontal rule
         elif tok.type == "hr":
             result.append("\u2014\u2014\u2014\u2014\n")
 
-        # HTML blocks
         elif tok.type == "html_block":
             result.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
 
@@ -1790,7 +1621,6 @@ def markdown_to_telegram_html(text: str) -> str:
         output = output.replace("\n\n\n", "\n\n")
 
     return _wrap_plain_tables(output)
-
 
 def _pipe_tables_to_html(text: str) -> str:
     import re
@@ -1821,21 +1651,18 @@ def _pipe_tables_to_html(text: str) -> str:
     i = 0
     in_code_fence = False
     while i < len(lines):
-        # Track fenced code blocks — don't convert tables inside them
         if re.match(r'^\s*(`{3,}|~{3,})', lines[i]):
             in_code_fence = not in_code_fence
             result.append(lines[i])
             i += 1
             continue
 
-        # Detect pipe table: header row, separator row, then data rows
         if (not in_code_fence
                 and i + 1 < len(lines)
                 and '|' in lines[i]
                 and re.match(r'^\s*\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?\s*$', lines[i + 1])):
             headers = _parse_row(lines[i])
 
-            # Parse alignment from separator
             aligns = []
             for cell in (_parse_row(lines[i + 1]) or []):
                 cell = cell.strip()
@@ -1871,31 +1698,25 @@ def _pipe_tables_to_html(text: str) -> str:
 
     return '\n'.join(result)
 
-
 def format_response_text(session_name: str, text: str) -> str:
-    # Strip redundant worker name prefix to avoid "lee:\nlee: message" double prefix
     stripped = text.lstrip()
     prefix = f"{session_name}:"
     if stripped.lower().startswith(prefix.lower()):
         text = stripped[len(prefix):].lstrip()
     return f"<b>{session_name}:</b>\n{text}"
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Message Splitting (Telegram 4096 char limit)
 # ─────────────────────────────────────────────────────────────────────────────
 
 TELEGRAM_MAX_LENGTH = 4096
 
 TELEGRAM_RICH_MAX_LENGTH = 32768
 
-
 def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     import re
     if len(text) <= max_len:
         return [text]
 
-    # Regex for Telegram-supported HTML tags
     TAG_RE = re.compile(r'<(/?)(\w+)([^>]*)>')
     TRACKED_TAGS = frozenset(('b', 'i', 's', 'u', 'code', 'pre', 'a',
                               'strong', 'em', 'del', 'ins', 'strike', 'blockquote'))
@@ -1927,7 +1748,6 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
             budget = 1
         search = text[:budget]
 
-        # Don't split inside a tag — find last '>' before budget
         last_tag_start = search.rfind('<')
         last_tag_end = search.rfind('>')
         if last_tag_start > last_tag_end:
@@ -1939,24 +1759,22 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
             if pos > budget // 3:
                 return pos + 1
 
-        return max(budget, 1)  # Guarantee forward progress
+        return max(budget, 1)
 
     chunks = []
     remaining = text
-    carry_stack: list[tuple[str, str]] = []  # Tags open from previous chunk
+    carry_stack: list[tuple[str, str]] = []
 
     while remaining:
         prefix = _opening_tags(carry_stack)
         available = max_len - len(prefix)
 
-        # Close carry tags in final chunk too
         if len(prefix) + len(remaining) + len(_closing_tags(carry_stack)) <= max_len:
             suffix = _closing_tags(_scan_tags(prefix + remaining))
             chunks.append(prefix + remaining + suffix)
             break
 
-        # Find split point with iterative backoff to guarantee max_len
-        budget = available - 100  # Initial conservative reserve
+        budget = available - 100
         if budget < 100:
             budget = 100
 
@@ -1969,11 +1787,9 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
 
             if len(full_chunk) + len(suffix) <= max_len:
                 break
-            # Shrink budget and retry
             overshoot = len(full_chunk) + len(suffix) - max_len
             budget = max(budget - overshoot - 20, 100)
         else:
-            # Last resort: hard cut to fit
             hard_limit = max_len - len(prefix) - len(suffix) - 10
             if hard_limit < 1:
                 hard_limit = 1
@@ -1987,26 +1803,20 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
         carry_stack = open_stack
         remaining = remaining[split_at:].lstrip()
 
-        # Safety: prevent infinite loop
         if split_at == 0:
-            # Force progress by consuming at least 1 char
             remaining = remaining[1:]
 
     return chunks
 
-
 def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]:
     return [format_response_text(session_name, chunk) for chunk in chunks]
-
 
 def setup_bot_commands() -> None:
     update_bot_commands()
 
-
 def update_bot_commands() -> None:
-    commands = list(BOT_COMMANDS)  # Copy static commands
+    commands = list(BOT_COMMANDS)
 
-    # Add worker shortcuts (e.g., /lee, /chen)
     import bridge as _br
     registered = _br.get_registered_sessions()
     for name in sorted(registered.keys()):
@@ -2015,7 +1825,6 @@ def update_bot_commands() -> None:
     transport.setup_commands(commands)
     worker_count = len(registered)
     _log(_LOG_INFO, "telegram", f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
-
 
 def get_manager_chat_id(name: str) -> ChatId | None:
     if admin_chat_id is not None:
@@ -2033,18 +1842,6 @@ def get_manager_chat_id(name: str) -> ChatId | None:
         _log(_LOG_WARN, "bridge", f"Failed to read chat_id for {name}: {e}")
         return None
 
-
-# ══════════════════════════════════════════════════════════════════════
-# Tunnel lifecycle — cloudflared, webhook, getUpdates polling
-#
-# Manages inbound message delivery from Telegram to the bridge:
-# cloudflared quick-tunnel, Telegram webhook registration, poll
-# fallback (getUpdates long-polling), and the watchdog that keeps them
-# healthy.  Designed for dependency injection — every external call goes
-# through a seam so tests never touch the network.
-# ══════════════════════════════════════════════════════════════════════
-
-
 class TunnelState(enum.Enum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -2052,7 +1849,6 @@ class TunnelState(enum.Enum):
     RESTARTING = "restarting"
     POLL_FALLBACK = "poll_fallback"
     FAILED = "failed"
-
 
 class TunnelManager:
 
@@ -2080,16 +1876,14 @@ class TunnelManager:
         self._clock = clock or _RealClock()
         self._urlopen: UrlOpenFn = urlopen or cast(UrlOpenFn, _urlopen)
         self._on_notify = on_notify or (lambda _msg: None)
-        self._on_update = on_update  # poll fallback forwards here
+        self._on_update = on_update
 
-        # Mutable state (protected by _lock where needed)
         self._lock = threading.Lock()
         self._state = TunnelState.STOPPED
         self._tunnel_url: str = ""
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._polling_active: bool = False
 
-        # Threads
         self._stop_event = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._poll_stop = threading.Event()
@@ -2172,13 +1966,11 @@ class TunnelManager:
     def _watchdog_loop(self) -> None:
         self._state = TunnelState.STARTING
 
-        # Phase 1: Wait for bridge HTTP server to bind
         if not self._wait_for_port():
             _log(_LOG_ERROR, "tunnel", f"Bridge did not bind to port {self._port}")
             self._state = TunnelState.FAILED
             return
 
-        # Phase 2: Establish tunnel + webhook (or go straight to polling)
         if self._config.mode == "poll":
             _log(_LOG_INFO, "tunnel", "Poll mode — using getUpdates long-polling (no tunnel)")
             self._start_poll_fallback()
@@ -2202,17 +1994,14 @@ class TunnelManager:
             else:
                 self._state = TunnelState.RUNNING
 
-        # Save bot info (best-effort)
         self._save_bot_info()
 
-        # Phase 3: Monitoring loop
         check_counter = 0
         while not self._stop_event.is_set():
             self._stop_event.wait(self._config.watchdog_interval)
             if self._stop_event.is_set():
                 break
 
-            # Monitor cloudflared process health
             if self._tunnel_proc is not None:
                 problem = self._check_tunnel_health()
                 if problem == "process died":
@@ -2243,13 +2032,11 @@ class TunnelManager:
                         _log(_LOG_WARN, "tunnel", "Tunnel URL unreachable (DNS?), falling back to polling")
                         self._start_poll_fallback()
 
-            # Monitor poll fallback health
             if self._polling_active and self._poll_thread and not self._poll_thread.is_alive():
                 _log(_LOG_WARN, "tunnel", "Poll fallback thread died, restarting...")
                 self._poll_stop.clear()
                 self._start_poll_fallback()
 
-            # Periodic health checks
             check_counter = (check_counter + 1) % self._config.webhook_check_cycles
             if check_counter == 0:
                 if self._tunnel_url:
@@ -2273,7 +2060,7 @@ class TunnelManager:
 
     def _start_cloudflared(self) -> str:
         log_file = self._node_dir / "tunnel.log"
-        log_file.write_text("")  # truncate
+        log_file.write_text("")
 
         try:
             proc = self._runner.popen(

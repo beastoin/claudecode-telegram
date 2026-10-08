@@ -29,7 +29,7 @@ from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedD
 
 # ── Re-export everything from core so existing `from bridge import X` works ──
 from core import *  # noqa: F401,F403
-from core import (  # underscore names not in *
+from core import (
     _str_field, _int_field, _dict_field, _bool_field,
     _log, _log_best_effort,
     _LOG_ERROR, _LOG_WARN, _LOG_INFO, _LOG_DEBUG,
@@ -42,11 +42,7 @@ from core import (  # underscore names not in *
     _app_context,
 )
 
-
 # ── Import domain types from owning modules ──────────────────────────
-# telegram.py and claudecode.py each define their own types and can be
-# imported independently (no circular dependency).  bridge.py imports
-# everything here so `from bridge import ChatId` still works.
 
 from telegram import *  # noqa: F401,F403
 from telegram import (
@@ -68,11 +64,11 @@ from telegram import (
     format_team_lines as _format_team_lines_pure,
 )
 
-import telegram as _tunnel_mod  # TunnelManager lives in telegram.py
+import telegram as _tunnel_mod
 from core import _build_tunnel_config
 
 from claudecode import *  # noqa: F401,F403
-from claudecode import (  # underscore names excluded from * import
+from claudecode import (
     _acquire_flock, _cache_session_id, _capture_pane_text,
     _codex_load_session_id, _codex_save_session_id,
     _codex_session_id_path, _detect_os_family,
@@ -85,12 +81,7 @@ from claudecode import (  # underscore names excluded from * import
     _which_binary,
 )
 
-
 # ── Bridge-only TypedDict models ─────────────────────────────────────
-# Types owned by telegram.py and claudecode.py are imported above via
-# `from telegram import *` and `from claudecode import *`.
-# Only bridge-specific types are defined here.
-
 
 class WorkerEndpointInfo(TypedDict, total=False):
     name: str
@@ -103,11 +94,6 @@ class WorkerEndpointInfo(TypedDict, total=False):
     machine: str
     address: str
     note: str
-
-
-# Probe/token types (DiskUsageDict, MemUsageDict, etc.) → claudecode.py
-# Telegram types (MediaGroupEntry, etc.) → telegram.py
-
 
 class MachinePublicDict(TypedDict, total=False):
     id: str
@@ -124,21 +110,16 @@ class MachinePublicDict(TypedDict, total=False):
     worker_count: int
     health: MachineHealthDict
 
-
 class MachinesCatalogResponse(TypedDict):
     version: int
     config_path: str
     caller: str | None
     machines: list[MachinePublicDict]
 
-
-# Worker types (GitPushStateResult, TmuxSessionDict, RegistryWorkerDict, etc.) → claudecode.py
-
 # ── Transcript / Connector / Endpoint TypedDicts ─────────────────────
 
-
 class TranscriptSyncState(TypedDict, total=False):
-    status: str     # "syncing", "done", "error"
+    status: str
     progress: str
     error: str | None
     path: str | None
@@ -146,39 +127,34 @@ class TranscriptSyncState(TypedDict, total=False):
     pct: int
     remote_size: int
 
-
 class TranscriptMessageUsage(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
 
-
 class TranscriptMessageContent(TypedDict, total=False):
-    type: str           # "text", "tool_use", "tool_result"
+    type: str
     text: str
-    name: str           # tool name (for tool_use)
-    id: str             # tool_use_id
+    name: str
+    id: str
     input: dict[str, str]
-    content: str | list[object]  # tool result content (str or list of blocks)
+    content: str | list[object]
     is_error: bool
 
-
 class TranscriptMessage(TypedDict, total=False):
-    role: str           # "user", "assistant"
+    role: str
     content: str | list[TranscriptMessageContent]
     model: str
     usage: TranscriptMessageUsage
 
-
 class TranscriptEntry(TypedDict, total=False):
-    type: str           # "user", "assistant", "system", "progress", etc.
+    type: str
     message: TranscriptMessage
     timestamp: str
     version: str
     gitBranch: str
-    _idx: int           # added by pagination logic
-
+    _idx: int
 
 class TranscriptStatsDict(TypedDict):
     n_user: int
@@ -197,11 +173,9 @@ class TranscriptStatsDict(TypedDict):
     output_tokens: int
     duration: str
 
-
 class ToolResultDict(TypedDict, total=False):
     content: str
     is_error: bool
-
 
 class ConnectorMessageLogEntry(TypedDict):
     ts: float
@@ -209,17 +183,14 @@ class ConnectorMessageLogEntry(TypedDict):
     plain: str
     targets: list[str]
 
-
 class ConnectorMetadataDict(TypedDict, total=False):
     number: int
     repo: str
-
 
 class ConnectorAttachmentDict(TypedDict, total=False):
     path: str
     filename: str
     mimeType: str
-
 
 class ConnectorStatusDict(TypedDict, total=False):
     name: str
@@ -227,11 +198,9 @@ class ConnectorStatusDict(TypedDict, total=False):
     error: str
     enabled: bool
 
-
 class MentionRouteResult(TypedDict):
     name: str
-    status: str  # "sent", "offline", "unknown"
-
+    status: str
 
 # ── Endpoint body TypedDicts (HTTP POST payloads) ────────────────────
 
@@ -248,13 +217,11 @@ class HookResponseBody(TypedDict, total=False):
     target: str
     message: str
 
-
 class HealthAlertBody(TypedDict, total=False):
     worker: str
     issue: str
     transcript_age: int
     node: str
-
 
 class ForgeRegisterBody(TypedDict, total=False):
     Name: str
@@ -266,12 +233,11 @@ class ForgeRegisterBody(TypedDict, total=False):
     CallbackURL: str
     callback_url: str
     callbackUrl: str
-    Tools: dict[str, object]  # plugin config, shape varies per tool
-    tools: dict[str, object]  # plugin config, shape varies per tool
+    Tools: dict[str, object]
+    tools: dict[str, object]
     note: str
     address: str
     machine: str
-
 
 class PrActionBody(TypedDict, total=False):
     token: str
@@ -284,13 +250,11 @@ class PrActionBody(TypedDict, total=False):
     commit_id: str
     merge_method: str
 
-
 class TelegramWebhookBody(TypedDict, total=False):
     update_id: int
     message: TelegramMessageDict
     callback_query: TelegramCallbackQuery
     edited_message: TelegramMessageDict
-
 
 class NodeConfigDict(TypedDict, total=False):
     admin_chat_id: int
@@ -298,19 +262,14 @@ class NodeConfigDict(TypedDict, total=False):
     host: str
     port: int
     webhook_secret: str
-    connectors: dict[str, object]  # config varies per connector type
-
-
-# NamedTuples (WorkerStateEntry, FileValidation, etc.) → telegram.py / claudecode.py
+    connectors: dict[str, object]
 
 # ── Bridge runtime state (routing/focus) ───────────────────────────────
-
 
 class _MentionSnapshot(NamedTuple):
     target: str | None
     mention_count: int
     ts: float
-
 
 class MentionTracker:
     def __init__(self) -> None:
@@ -326,11 +285,9 @@ class MentionTracker:
         self.count = snap.mention_count
         self.ts = snap.ts
 
-
 class _StateSnapshot(NamedTuple):
     active: str | None
     startup_notified: bool
-
 
 class BridgeRuntimeState:
     def __init__(self) -> None:
@@ -348,53 +305,39 @@ class BridgeRuntimeState:
         self.active = snap.active
         self.startup_notified = snap.startup_notified
 
-
 state = BridgeRuntimeState()
 
-# Backward-compat alias for code reading _last_mention directly
 _last_mention = state.mention
-
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-
-# Node-derived config: NODE_NAME drives defaults for PORT, TMUX_PREFIX, SESSIONS_DIR.
-# Explicit env vars always override. No NODE_NAME = original defaults.
 NODE_NAME = os.environ.get("NODE_NAME", "")
 
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
-
 
 if NODE_NAME and not os.environ.get("PORT"):
     PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
 else:
     PORT = int(os.environ.get("PORT", "8270"))
 
+BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
 
-BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")  # Bind address (localhost-only by default)
-
-WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # Optional webhook verification
-
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
     SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
 else:
     SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 
-
 if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
     TMUX_PREFIX = f"claude-{NODE_NAME}-"
 else:
-    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")  # tmux session prefix for isolation
+    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 
-
-# BRIDGE_URL: hook callback target. Localhost URLs are always derived from PORT to
-# prevent stale-port inheritance when restarting. Only non-localhost URLs (for
-# distributed setups, e.g. https://remote-bridge.example.com) are honored from env.
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
 
 if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
@@ -402,22 +345,14 @@ if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http
 else:
     BRIDGE_URL = f"http://localhost:{PORT}"
 
-# BRIDGE_PUBLIC_URL: reachable URL for teleported workers (e.g., http://100.125.36.102:8271)
-# When set and BRIDGE_BIND is not explicitly set, bind to the IP from BRIDGE_PUBLIC_URL
-# (e.g., 100.125.36.102) — NOT 0.0.0.0, which would expose the bridge on all interfaces
-# including the public internet.  Local hooks also use this IP (reachable on same machine).
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     _pub_host = urlparse(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    # Local hooks need to reach the bridge too — use the same IP
     if BRIDGE_BIND != "0.0.0.0":
         BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 
-# BRIDGE_SSH_TARGET: ssh alias that remote machines use to reach the bridge host.
-# Used by /workers?from= when a remote caller needs to address a bridge-local peer.
-# Default "vps" matches team convention; override per deployment if needed.
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 
 MACHINES_CONFIG_FILE = Path(os.environ.get(
@@ -427,15 +362,10 @@ MACHINES_CONFIG_FILE = Path(os.environ.get(
 
 PERSISTENCE_NOTE = "They'll stay on your team."
 
-
-# Voice mode: STT (speech-to-text) — transcribe incoming voice messages so workers can read them
 STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
 
-STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))  # seconds, fail-open
+STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 
-
-# API endpoint registry — used by index, 404 handler, and worker instructions.
-# Update this when adding new endpoints.
 API_ENDPOINTS = {
     "GET /": "API index — lists all endpoints",
     "GET /machines": "List configured machines, access hints, workers, and health",
@@ -464,20 +394,11 @@ API_ENDPOINTS = {
     "POST /relay/<channel_id>/reply": "Worker replies via relay channel",
 }
 
-
-# Derive node name from TMUX_PREFIX for per-node isolation in /tmp
-# "claude-test-" -> "test", "claude-" -> "default"
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
 
-
-# Temporary file inbox (session-isolated, auto-cleaned)
 FILE_INBOX_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
 
-
-# Worker pipe root for inter-worker communication
-# Each worker gets a named pipe at WORKER_PIPE_ROOT/<name>/in.pipe
 WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
-
 
 DEFAULT_BACKEND = "claude"
 
@@ -485,75 +406,60 @@ DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 
 PENDING_TIMEOUT = 600
 
-
 # ── Timeout constants (seconds) ──────────────────────────────────────
-# Subprocess timeouts — grouped by operation weight
-TIMEOUT_TMUX_CHECK = 3       # has-session, capture-pane, tmux list-sessions
+TIMEOUT_TMUX_CHECK = 3
 
-TIMEOUT_TMUX_SEND = 5        # send-keys, short tmux / remote commands
+TIMEOUT_TMUX_SEND = 5
 
-TIMEOUT_REMOTE_CMD = 10      # standard ssh remote commands (git status, cat, etc.)
+TIMEOUT_REMOTE_CMD = 10
 
-TIMEOUT_FILE_TRANSFER = 15   # scp, small file transfers
+TIMEOUT_FILE_TRANSFER = 15
 
-TIMEOUT_GIT_OP = 30          # git push/pull/clone, medium remote operations
+TIMEOUT_GIT_OP = 30
 
-TIMEOUT_LARGE_TRANSFER = 60  # rsync medium dirs, large uploads
+TIMEOUT_LARGE_TRANSFER = 60
 
-TIMEOUT_RSYNC = 120          # rsync full working directories
+TIMEOUT_RSYNC = 120
 
-TIMEOUT_FULL_SYNC = 600      # full working-directory git stash/apply
+TIMEOUT_FULL_SYNC = 600
 
+TIMEOUT_HTTP_API = 10
 
-# HTTP timeouts
-TIMEOUT_HTTP_API = 10        # Telegram Bot API calls (sendMessage, getUpdates)
+TIMEOUT_HTTP_DOWNLOAD = 30
 
-TIMEOUT_HTTP_DOWNLOAD = 30   # file downloads from Telegram servers
+TIMEOUT_HTTP_UPLOAD = 60
 
-TIMEOUT_HTTP_UPLOAD = 60     # media uploads (photos, documents, video)
+TIMEOUT_PROCESS_WAIT = 3
 
+TIMEOUT_THREAD_JOIN = 1.0
 
-# Process lifecycle
-TIMEOUT_PROCESS_WAIT = 3     # proc.wait() for adapter/child cleanup
+DELAY_TMUX_SEND = 0.3
 
-TIMEOUT_THREAD_JOIN = 1.0    # thread.join() for pipe readers
+DELAY_PIPE_POLL = 0.5
 
+DELAY_STARTUP = 1.0
 
-# Sleep/delay constants
-DELAY_TMUX_SEND = 0.3        # between tmux send-keys calls (avoid interleaving)
+DELAY_STARTUP_LONG = 1.5
 
-DELAY_PIPE_POLL = 0.5        # pipe reader poll interval
+DELAY_RETRY = 0.5
 
-DELAY_STARTUP = 1.0          # waiting for process startup confirmation
+DELAY_BRIEF = 0.05
 
-DELAY_STARTUP_LONG = 1.5     # longer startup wait (backend initialization)
+DELAY_SHORT = 0.2
 
-DELAY_RETRY = 0.5            # between retry attempts
+DELAY_RESPONSE_GAP = 2
 
-DELAY_BRIEF = 0.05           # minimal delay (lock-file poll, tmux propagation)
+DELAY_PROCESS_SETTLE = 3
 
-DELAY_SHORT = 0.2            # short pause (UI updates, pipe flush)
+DELAY_CLAUDE_LOAD = 4
 
-DELAY_RESPONSE_GAP = 2       # gap to avoid colliding with concurrent responses
-
-DELAY_PROCESS_SETTLE = 3     # let a newly-started process settle (tmux, claude)
-
-DELAY_CLAUDE_LOAD = 4        # wait for Claude Code to finish loading after start
-
-
-# Team directory: shared knowledge base (soul docs, kanban, playbook, etc.)
 TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
 
-# Checkin note: read from TEAM_DIR/checkin-note.txt on each checkin/hire/restart.
-# Supports {name} placeholder for per-worker substitution.
 _CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
 
-# Learning reminder: read from TEAM_DIR/learning-reminder.txt on each fire.
 _LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 
-
 # ── Bridge-specific resource alert aliases ────────────────────────────
-
 
 DISK_WARN_THRESHOLD_PCT = _res_cfg.disk_warn_pct
 
@@ -563,18 +469,15 @@ DISK_ALERT_THRESHOLD_GB = _res_cfg.disk_alert_gb
 
 DISK_ALERT_COOLDOWN = _res_cfg.disk_cooldown
 
-
 CPU_HOG_THRESHOLD_PCT = _res_cfg.cpu_hog_pct
 
 CPU_HOG_DURATION_MIN = _res_cfg.cpu_hog_duration_min
 
 CPU_HOG_ALERT_COOLDOWN = _res_cfg.cpu_hog_cooldown
 
-
 WORKTREE_ALERT_THRESHOLD_GB = _res_cfg.worktree_threshold_gb
 
 WORKTREE_ALERT_COOLDOWN = _res_cfg.worktree_cooldown
-
 
 MEM_ALERT_THRESHOLD_PCT = _res_cfg.mem_threshold_pct
 
@@ -582,19 +485,15 @@ MEM_ALERT_THRESHOLD_GB = _res_cfg.mem_threshold_gb
 
 MEM_ALERT_COOLDOWN = _res_cfg.mem_cooldown
 
-
 IO_ALERT_IOWAIT_PCT = _res_cfg.io_iowait_pct
 
 IO_ALERT_COOLDOWN = _res_cfg.io_cooldown
 
-
 INFRA_ALERT_COOLDOWN = _res_cfg.infra_cooldown
-
 
 # ── End of shared types/constants ─────────────────────────────────────
 
 # ── Control plane classes (from claudecode.py) ───────────────────────
-
 
 @dataclass
 class WorkerRegistryEntry:
@@ -605,7 +504,7 @@ class WorkerRegistryEntry:
     version: str = ""
     chat_id: int | None = None
     hire_time: int = 0
-    tools: dict[str, object] | None = None  # plugin config, shape varies per tool
+    tools: dict[str, object] | None = None
     home_host: str = ""
     home_cwd: str = ""
 
@@ -633,18 +532,9 @@ class WorkerRegistryEntry:
             home_cwd=data.get("home_cwd") or "",
         )
 
-
-# ProcessRegistry → claudecode.py
-
-
-# WorkerWatchdogState, LearningReminderState, HostHealthState → claudecode.py
-# (imported via `from claudecode import *` at top of file)
-
-
 # ── Machine catalog, health monitoring, activity extraction (from claudecode.py) ──
 
 # ── Moved from claudecode.py: machine catalog, health monitoring, activity extraction ──
-
 
 # ── WorkerRecord: normalized worker data model ──
 
@@ -655,9 +545,9 @@ class WorkerRecord:
     host: str | None = None
     tmux_name: str = ""
     callback_url: str = ""
-    protocol: str = ""  # "http", "tmux", "pipe", "adapter", ""
+    protocol: str = ""
     version: str = ""
-    tools: dict[str, object] | None = None  # plugin config, shape varies per tool
+    tools: dict[str, object] | None = None
     chat_id: int | None = None
     cwd: str = ""
     home_host: str = ""
@@ -673,7 +563,6 @@ class WorkerRecord:
 
     @property
     def is_interactive(self) -> bool:
-        # Defer to Backend for the canonical answer
         return self.backend == "claude"
 
     def to_session_dict(self) -> WorkerSessionDict:
@@ -701,16 +590,13 @@ class WorkerRecord:
             version=session.get("version", ""),
         )
 
-
 def get_worker_host(name: str) -> str | None:
     registry = _load_registry()
     worker = registry.get("workers", {}).get(name, {})
     return worker.get("host")
 
-
 class MachineConfigError(ValueError):
     pass
-
 
 @dataclass(frozen=True)
 class Machine:
@@ -741,7 +627,6 @@ class Machine:
             "configured": self.configured,
         }
 
-
 def _validate_machine_id(machine_id: str) -> str:
     if not isinstance(machine_id, str) or not machine_id:
         raise MachineConfigError("machine id must be a non-empty string")
@@ -749,14 +634,12 @@ def _validate_machine_id(machine_id: str) -> str:
         raise MachineConfigError(f"invalid machine id: {machine_id!r}")
     return machine_id
 
-
 def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
         raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
     return value
-
 
 def _implicit_local_machine() -> Machine:
     return Machine(
@@ -769,7 +652,6 @@ def _implicit_local_machine() -> Machine:
         role="bridge",
         configured=False,
     )
-
 
 def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
     config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
@@ -843,14 +725,12 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
         raise MachineConfigError(f"{config_path}: exactly one local machine with ssh_target=null is required")
     return machines
 
-
 def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
     with remote_cache.lock:
         if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
             remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
             remote_cache.machines_path = MACHINES_CONFIG_FILE
         return dict(remote_cache.machines)
-
 
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
     if host is None:
@@ -872,7 +752,6 @@ def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> 
         role="worker-host",
         configured=False,
     )
-
 
 def _machine_health(machine: Machine) -> MachineHealthDict:
     host_label = machine.ssh_target or "VPS"
@@ -899,7 +778,6 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
                 health["status"] = "up"
     return health
 
-
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
     target_host = machine.ssh_target
     if caller_host == target_host:
@@ -907,7 +785,6 @@ def _machine_access(machine: Machine, caller_host: str | None) -> str:
     if target_host is None:
         return f"ssh {BRIDGE_SSH_TARGET}"
     return f"ssh {target_host}"
-
 
 def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
     machines = get_machine_catalog()
@@ -950,7 +827,6 @@ def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
         "machines": list(rows.values()),
     }
 
-
 def _ensure_bare_repo(project_name: str) -> str:
     bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
     if not os.path.isdir(bare_path):
@@ -959,7 +835,6 @@ def _ensure_bare_repo(project_name: str) -> str:
             ["git", "init", "--bare", bare_path],
             capture_output=True, text=True, check=True, timeout=TIMEOUT_REMOTE_CMD)
     return bare_path
-
 
 def _read_noninteractive_activity(worker_name: str) -> str:
     with processes.adapter_pids_lock:
@@ -994,7 +869,6 @@ def _read_noninteractive_activity(worker_name: str) -> str:
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
     return "idle"
-
 
 def _check_hook_failure_signal(name: str) -> str | None:
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
@@ -1039,7 +913,6 @@ def _check_hook_failure_signal(name: str) -> str | None:
         return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
     return None
 
-
 def _clear_hook_failures(name: str) -> None:
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
     host = get_worker_host(name)
@@ -1055,14 +928,11 @@ def _clear_hook_failures(name: str) -> None:
         except OSError as exc:
             _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
 
-
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
-    # Primary: check hook-written failure signal file
     hook_reason = _check_hook_failure_signal(name)
     if hook_reason:
         return hook_reason
 
-    # Fallback: regex-based pane/log scanning
     backend_name = get_worker_backend(name)
     backend = get_backend(backend_name)
     host = get_worker_host(name)
@@ -1079,7 +949,6 @@ def _detect_poisoned(name: str, tmux_name: str) -> str | None:
             return pattern.pattern
     return None
 
-
 def parse_hire_args(raw: str) -> tuple[str, str]:
     parts = [p for p in (raw or "").split() if p]
     backend = DEFAULT_BACKEND
@@ -1092,11 +961,9 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
             i += 2
             continue
         elif part == "--codex":
-            # Legacy support
             backend = "codex"
         elif part.startswith("--"):
-            # Skip unknown flags
-            pass  # intentional no-op: skip unknown flag
+            pass
         else:
             name_parts.append(part)
         i += 1
@@ -1106,7 +973,6 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
 
     name = name_parts[0]
 
-    # Check for backend prefix syntax (e.g., codex-alice)
     for backend_name in list_backends():
         prefix = f"{backend_name}-"
         if name.startswith(prefix):
@@ -1114,36 +980,30 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
             name = name[len(prefix):]
             break
 
-    # Validate backend
     if not is_valid_backend(backend):
-        # Return invalid backend so caller can show error
         return name, backend
 
     return name, backend
-
 
 def _activity_from_spinner(stripped: list[str]) -> str | None:
     _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
         first = raw[0] if raw else ""
         if first == "✻" and "…" not in raw and "..." not in raw:
-            continue  # Past tense completed thinking (no ellipsis = done)
+            continue
         if first not in _ACTIVE_SPINNER_CHARS:
             continue
-        # "· Compacting conversation… (5m 26s · thought for 5s)" → verb + duration
         match = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
         if match:
             verb = match.group(1).strip()
             dur = match.group(2).split('·')[0].strip()
             return f"{verb} ({dur})"
-        # Fallback: "· Verb…" or "· Verb" without duration
         verb_match = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
         if verb_match:
             verb = verb_match.group(1).strip()
             dur_match = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
             return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
     return None
-
 
 def _activity_from_tool(stripped: list[str]) -> str | None:
     last_running_tool = None
@@ -1161,13 +1021,11 @@ def _activity_from_tool(stripped: list[str]) -> str | None:
                     last_running_tool = tool
                 break
     if last_running_tool:
-        # Shorten MCP tool names: mcp__figma__get_file → figma.get_file
         if last_running_tool.startswith("mcp__"):
             parts = last_running_tool.split("__")
             last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
         return f"Running {last_running_tool}"
     return None
-
 
 def _activity_from_rate_limit(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
@@ -1180,9 +1038,7 @@ def _activity_from_rate_limit(stripped: list[str]) -> str | None:
             return "Retrying API request"
     return None
 
-
 def _activity_from_interactive(stripped: list[str]) -> str | None:
-    # 3b. Footer-based detection
     for raw in reversed(stripped):
         for footer in _INTERACTIVE_FOOTERS:
             if footer in raw:
@@ -1193,7 +1049,6 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
                             return f"Waiting for input: {question}"
                 return "Waiting for user input"
 
-    # 3c. Content-based detection (plan approval, tool permission)
     for raw in stripped:
         for pattern in _INTERACTIVE_CONTENT:
             if pattern in raw:
@@ -1206,7 +1061,6 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
                 return "Waiting for user input"
     return None
 
-
 def _activity_from_prompt(stripped: list[str]) -> str | None:
     last_prompt_idx = None
     last_plan_bar_idx = None
@@ -1216,23 +1070,19 @@ def _activity_from_prompt(stripped: list[str]) -> str | None:
         if raw.startswith("⏸"):
             last_plan_bar_idx = i
 
-    # ⏸ plan mode bar (persistent at bottom, only if no prompt after it)
     if last_plan_bar_idx is not None:
         if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
             return "In plan mode"
 
-    # Prompt present = ready (text after ❯ is auto-suggestion hint)
     if last_prompt_idx is not None:
         return "Ready"
     return None
-
 
 def _activity_from_editor(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         if "Save and close editor to continue" in raw:
             return "Waiting for external editor"
     return None
-
 
 def _activity_from_hooks(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
@@ -1241,7 +1091,6 @@ def _activity_from_hooks(stripped: list[str]) -> str | None:
         if "Running PreCompact" in raw:
             return "Running PreCompact hooks"
     return None
-
 
 def _activity_from_confirmation(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
@@ -1252,7 +1101,6 @@ def _activity_from_confirmation(stripped: list[str]) -> str | None:
         if "Waiting for team lead" in raw:
             return "Waiting for team lead approval"
     return None
-
 
 def _activity_from_tasks(stripped: list[str]) -> str | None:
     done = 0
@@ -1268,20 +1116,17 @@ def _activity_from_tasks(stripped: list[str]) -> str | None:
         return f"Tasks ({done}/{total} done)"
     return None
 
-
 def _is_output_block_end(text: str) -> bool:
     trimmed = text.lstrip()
     if trimmed.startswith("Context left until auto-compact:"):
         return True
     return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
 
-
 def _activity_from_output_block(stripped: list[str]) -> str | None:
     for i in range(len(stripped) - 1, -1, -1):
         raw = stripped[i]
         if not raw.startswith("●"):
             continue
-        # Skip tool calls (● CapitalWord( or ● mcp__server__tool()
         if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw):
             continue
         parts: list[str] = []
@@ -1304,7 +1149,6 @@ def _activity_from_output_block(stripped: list[str]) -> str | None:
             return msg
     return None
 
-
 def _activity_from_error(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
@@ -1315,7 +1159,6 @@ def _activity_from_error(stripped: list[str]) -> str | None:
             return f"Error: {raw[:60]}"
     return None
 
-
 def _extract_activity(lines: list[str]) -> str:
     if not lines:
         return "Active"
@@ -1324,19 +1167,18 @@ def _extract_activity(lines: list[str]) -> str:
     if not stripped:
         return "Idle"
 
-    # Priority cascade — first match wins
     _CHECKS: list[Callable[[list[str]], str | None]] = [
-        _activity_from_spinner,       # 1. Active thinking spinner
-        _activity_from_tool,          # 2. Tool actively running
-        _activity_from_rate_limit,    # 3. Rate limiting / connection errors
-        _activity_from_interactive,   # 3b/3c. Interactive prompts
-        _activity_from_prompt,        # 4. Prompt + mode bars
-        _activity_from_editor,        # 5. Editor mode
-        _activity_from_hooks,         # 6. Hook execution
-        _activity_from_confirmation,  # 7. Confirmation prompts
-        _activity_from_tasks,         # 8. Task progress
-        _activity_from_output_block,  # 9. Last ● output block
-        _activity_from_error,         # 10. Standalone error
+        _activity_from_spinner,
+        _activity_from_tool,
+        _activity_from_rate_limit,
+        _activity_from_interactive,
+        _activity_from_prompt,
+        _activity_from_editor,
+        _activity_from_hooks,
+        _activity_from_confirmation,
+        _activity_from_tasks,
+        _activity_from_output_block,
+        _activity_from_error,
     ]
     for check in _CHECKS:
         result: str | None = check(stripped)
@@ -1345,14 +1187,12 @@ def _extract_activity(lines: list[str]) -> str:
 
     return "Active"
 
-
 def _extract_context_pct(lines: list[str]) -> str | None:
     for line in reversed(lines):
         m = re.search(r'Context left.*?(\d+)%', line)
         if m:
             return f"{m.group(1)}%"
     return None
-
 
 def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
     try:
@@ -1374,7 +1214,6 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
     except (subprocess.SubprocessError, OSError):
         return TmuxActivityResult("Unknown", None, None)
 
-
 def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     if not lines:
         return None
@@ -1383,13 +1222,10 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     if not stripped:
         return None
 
-    # If the idle ❯ prompt appears in the last few lines, the dialog was
-    # already dismissed — it's just still visible in scrollback above.
     tail = stripped[-5:]
     if any(line == "❯" for line in tail):
         return None
 
-    # Check for interactive footer or content patterns
     has_interactive = False
     for raw in reversed(stripped):
         for footer in _INTERACTIVE_FOOTERS:
@@ -1409,15 +1245,12 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     if not has_interactive:
         return None
 
-    # Extract header (☐ line)
     header = ""
     for raw in stripped:
         if "☐" in raw:
             header = raw.replace("☐", "").strip()
             break
 
-    # Extract options: lines matching "❯? N. Label" or "  N. Label"
-    # Option lines start with optional ❯, then number + dot
     options = []
     selected_num = 0
     opt_re = re.compile(r'^(❯)?\s*(\d+)\.\s+(.+)')
@@ -1440,7 +1273,6 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
         "selected_num": selected_num,
     })
 
-
 def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
     reply = reply.strip().lower()
 
@@ -1450,7 +1282,6 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 
     if reply.isdigit():
         target_num = int(reply)
-        # Find target option index and current selected index
         option_nums = [o["num"] for o in details["options"]]
         if target_num not in option_nums:
             return False
@@ -1477,20 +1308,15 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 
     return False
 
-
 # ── Control plane functions (moved from claudecode.py) ───────────────
-# These are orchestration/monitoring/lifecycle functions that belong
-# in the control plane (bridge.py), not in runtime primitives (claudecode.py).
-
 
 def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
     if not host:
         shutil.copy2(src, dst)
     elif direction == "push":
         _subprocess_runner.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
-    else:  # pull
+    else:
         _subprocess_runner.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
-
 
 def parse_worker_target(target: str) -> ParsedWorkerTarget:
     if "@" in target:
@@ -1498,17 +1324,14 @@ def parse_worker_target(target: str) -> ParsedWorkerTarget:
         return ParsedWorkerTarget(name, host)
     return ParsedWorkerTarget(target, None)
 
-
 def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
     if target_host:
         return f"claude@100.125.36.102:{bare_repo_path}"
     return bare_repo_path
 
-
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
                     host: str | None = None) -> GitPushStateResult | None:
     try:
-        # Get current HEAD
         r = _remote_run(["git", "-C", source_cwd, "rev-parse", "HEAD"],
                         host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
         if r.returncode != 0:
@@ -1516,41 +1339,32 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
             return None
         orig_sha = r.stdout.strip()
 
-        # Get current branch name (or "HEAD" if detached)
         r = _remote_run(["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
                         host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
 
-        # Get originally staged files (before we touch the index)
         r = _remote_run(["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
                         host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
         staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
 
-        # Stage everything (including untracked) temporarily to capture in stash
         _remote_run(["git", "-C", source_cwd, "add", "-A"],
                     host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
 
         try:
-            # Create stash commit (non-mutating — working tree untouched)
             r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
                             host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
             stash_sha = r.stdout.strip() if r.returncode == 0 else ""
         finally:
-            # Restore original index: reset, then re-stage originally staged files.
-            # MUST run even on exception to avoid leaving the index dirty.
             _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
                         host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
             if staged_files:
                 _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
                             host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
 
-        # Determine what to push: stash commit if dirty, HEAD if clean
         push_sha = stash_sha if stash_sha else orig_sha
         ref = f"refs/heads/teleport/{worker_name}"
 
-        # Push to bare repo
         if host:
-            # Remote source → push to VPS bare repo via SSH
             r = _remote_run(
                 ["git", "-C", source_cwd, "push", "--force",
                  f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
@@ -1574,7 +1388,6 @@ def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
         _log(_LOG_ERROR, "git-sync", f"push state error: {e}")
         return None
 
-
 def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                     metadata: GitPushStateResult, host: str | None = None) -> bool:
     try:
@@ -1593,26 +1406,22 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
             _log(_LOG_DEBUG, "probe:_git_pull_state", f"{type(exc).__name__}: {exc}")
 
         if not is_existing:
-            # Fresh clone from bare repo
             r = _remote_run(
                 ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
                 host=host, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
             if r.returncode != 0:
                 _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
                 return False
-            # Configure user for the clone
             _remote_run(["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"],
                         host=host, capture_output=True)
             _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"],
                         host=host, capture_output=True)
         else:
-            # Add/update remote pointing to bare repo
             _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"],
                         host=host, capture_output=True)
             _remote_run(
                 ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
                 host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-            # Fetch the teleport branch
             r = _remote_run(
                 ["git", "-C", target_cwd, "fetch", "vps", ref],
                 host=host, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
@@ -1620,7 +1429,6 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                 _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
                 return False
 
-        # Checkout the original branch at the original commit
         if orig_branch and orig_branch != "HEAD":
             _remote_run(
                 ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
@@ -1630,20 +1438,13 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                 ["git", "-C", target_cwd, "checkout", orig_sha],
                 host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
 
-        # Apply the stash if there were uncommitted changes
         if stash_sha:
-            # Fetch the stash commit (it's on the teleport branch)
-            # For fresh clones, it's already available. For existing, we fetched it.
-            # Use FETCH_HEAD or the ref directly
             fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
 
-            # Apply stash: the teleport branch tip IS the stash commit
             r = _remote_run(
                 ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
                 host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
             if r.returncode != 0:
-                # Fallback: try direct SHA if ref doesn't resolve
-                # The stash SHA was pushed as the branch tip
                 _remote_run(
                     ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
                     host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
@@ -1651,9 +1452,7 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
                     ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
                     host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
 
-            # Re-stage originally staged files
             if staged_files:
-                # First reset index to HEAD (stash apply may have staged everything)
                 _remote_run(["git", "-C", target_cwd, "reset", "HEAD"],
                             host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
                 _remote_run(["git", "-C", target_cwd, "add", "--"] + staged_files,
@@ -1664,7 +1463,6 @@ def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
         _log(_LOG_ERROR, "git-sync", f"pull state error: {e}")
         return False
 
-
 def _get_project_name(cwd: str, host: str | None = None) -> str | None:
     try:
         r = _remote_run(
@@ -1673,20 +1471,15 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
         if r.returncode != 0 or not r.stdout.strip():
             return None
         url = r.stdout.strip()
-        # Strip trailing .git
         if url.endswith(".git"):
             url = url[:-4]
-        # Handle SSH (git@host:org/repo) and HTTPS (https://host/org/repo)
         if ":" in url and not url.startswith("http"):
-            # SSH format: git@github.com:Org/repo
             name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
         else:
-            # HTTPS format
             name = url.rsplit("/", 1)[-1]
         return name if name else None
     except (subprocess.SubprocessError, OSError):
         return None
-
 
 def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
     with watchdog.lock:
@@ -1698,7 +1491,6 @@ def _registry_update_teleport(name: str, host: str, home_host: str | None, home_
         data.setdefault("workers", {})[name] = worker
         _save_registry(data)
 
-
 def _registry_clear_teleport(name: str) -> None:
     with watchdog.lock:
         data = _load_registry()
@@ -1708,7 +1500,6 @@ def _registry_clear_teleport(name: str) -> None:
         worker.pop("home_cwd", None)
         data.setdefault("workers", {})[name] = worker
         _save_registry(data)
-
 
 def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
     try:
@@ -1727,7 +1518,6 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
         return None
     return output[0].strip()
 
-
 def _child_count(pid: str, host: str | None = None) -> int:
     if not pid:
         return 0
@@ -1743,7 +1533,6 @@ def _child_count(pid: str, host: str | None = None) -> int:
         return 0
 
     return len([line for line in result.stdout.splitlines() if line.strip()])
-
 
 def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
     pid_list = [str(pid) for pid in pids if pid]
@@ -1775,11 +1564,9 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
         stats[pid] = cast(ProcStatsEntry, {"cpu": cpu, "state": state})
     return stats
 
-
 def mark_hook_event(session_name: str) -> None:
     with watchdog.lock:
         watchdog.last_hook_ts[session_name] = _clock.time()
-
 
 def kill_adapter(name: str) -> None:
     with processes.adapter_pids_lock:
@@ -1800,7 +1587,6 @@ def kill_adapter(name: str) -> None:
         except OSError as exc:
             _log(_LOG_DEBUG, "io:kill_adapter", f"{type(exc).__name__}: {exc}")
 
-
 def _read_learning_reminder(name: str) -> str:
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
@@ -1811,7 +1597,6 @@ def _read_learning_reminder(name: str) -> str:
         _log(_LOG_WARN, "bridge", f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
 
-
 def _new_reminder_state() -> ReminderState:
     now = _clock.time()
     return {
@@ -1821,10 +1606,8 @@ def _new_reminder_state() -> ReminderState:
         "reminder_pending": False,
     }
 
-
 def _learning_reminder_state_file() -> str | None:
     return None
-
 
 def _save_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
@@ -1838,12 +1621,10 @@ def _save_learning_reminder_state() -> None:
     except OSError as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state save error: {e}")
 
-
 def _reset_learning_reminder(name: str) -> None:
     with learning_reminders.lock:
         learning_reminders.state[name] = _new_reminder_state()
         _save_learning_reminder_state()
-
 
 def _fire_reminder(name: str, st: ReminderState) -> None:
     st["response_count"] = 0
@@ -1852,7 +1633,6 @@ def _fire_reminder(name: str, st: ReminderState) -> None:
     _save_learning_reminder_state()
     reminder = _read_learning_reminder(name)
     _task_pool.submit(_send_learning_reminder, name, reminder)
-
 
 def _check_learning_reminder(name: str) -> None:
     with learning_reminders.lock:
@@ -1875,7 +1655,6 @@ def _check_learning_reminder(name: str) -> None:
             _fire_reminder(name, st)
         else:
             _save_learning_reminder_state()
-
 
 def _scan_idle_workers() -> None:
     try:
@@ -1901,7 +1680,6 @@ def _scan_idle_workers() -> None:
     finally:
         _schedule_idle_scan()
 
-
 def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
     with learning_reminders.lock:
         changed = False
@@ -1912,24 +1690,21 @@ def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
         if changed:
             _save_learning_reminder_state()
 
-
 def _schedule_idle_scan() -> None:
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
     learning_reminders.idle_scan_timer.name = "idle-scan"
     learning_reminders.idle_scan_timer.daemon = True
     learning_reminders.idle_scan_timer.start()
 
-
 def _send_learning_reminder(name: str, text: str) -> None:
     try:
-        _clock.sleep(DELAY_RESPONSE_GAP)  # avoid colliding with the response
+        _clock.sleep(DELAY_RESPONSE_GAP)
         if send_to_worker(name, text):
             _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
         else:
             _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
     except (ConnectionError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder error for {name}: {e}")
-
 
 def _load_registry() -> RegistryFileDict:
     try:
@@ -1950,7 +1725,6 @@ def _load_registry() -> RegistryFileDict:
                 _log(_LOG_DEBUG, "io:_load_registry", f"{type(exc).__name__}: {exc}")
         return {}
 
-
 def _save_registry(data: RegistryFileDict) -> None:
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1968,7 +1742,6 @@ def _save_registry(data: RegistryFileDict) -> None:
             raise
     except OSError as e:
         _log(_LOG_WARN, "worker", f"Failed to save worker registry: {e}")
-
 
 def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
                    host: str | None = None) -> None:
@@ -1988,7 +1761,6 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
             entry["host"] = host
         data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
-
 
 def _registry_add_callback(name: str, callback_url: str, host: str = "",
                            version: str = "", tools: dict[str, object] | None = None) -> None:
@@ -2012,7 +1784,6 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
         data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
 
-
 def _registry_remove(name: str) -> None:
     with watchdog.lock:
         data = _load_registry()
@@ -2020,7 +1791,6 @@ def _registry_remove(name: str) -> None:
             return
         data["workers"].pop(name, None)
         _save_registry(data)
-
 
 def _set_worker_cwd(name: str, cwd: str) -> None:
     normalized = normalize_cwd(cwd)
@@ -2030,12 +1800,10 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
         else:
             watchdog.worker_cwds.pop(name, None)
 
-
 def _get_worker_cwd(name: str) -> str:
     with watchdog.lock:
         cwd = watchdog.worker_cwds.get(name)
     return cwd if isinstance(cwd, str) else ""
-
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
     if WORKER_REGISTRY_FILE.exists():
@@ -2053,7 +1821,6 @@ def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
     _save_registry(data)
     _log(_LOG_INFO, "registry", f"Registry bootstrapped with {len(registered)} workers: {', '.join(registered.keys())}")
 
-
 def read_checkin_note() -> str:
     try:
         path = _CHECKIN_NOTE_PATH
@@ -2065,17 +1832,14 @@ def read_checkin_note() -> str:
         _log(_LOG_WARN, "bridge", f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}")
     return ""
 
-
 def get_inbox_dir(session_name: str) -> Path:
     return FILE_INBOX_ROOT / session_name / "inbox"
-
 
 def ensure_inbox_dir(session_name: str) -> Path:
     inbox = get_inbox_dir(session_name)
     inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
     inbox.chmod(0o700)
     return inbox
-
 
 def cleanup_inbox(session_name: str) -> None:
     inbox = get_inbox_dir(session_name)
@@ -2086,25 +1850,20 @@ def cleanup_inbox(session_name: str) -> None:
             except OSError as e:
                 _log(_LOG_WARN, "bridge", f"Failed to delete {f}: {e}")
 
-
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.get_workers(caller_from=caller_from)
 
-
 def get_pending_file(name: str) -> Path:
     return get_session_dir(name) / "pending"
 
-
 def _read_session_file(name: str, filename: str) -> str | None:
-    # Try local first (works for local workers, fast cache for remote)
     f = get_session_dir(name) / filename
     if f.exists():
         val = f.read_text().strip()
         if val:
             return val
-    # For remote workers, try SSH if local is missing
     host = get_worker_host(name)
     if host:
         try:
@@ -2117,7 +1876,6 @@ def _read_session_file(name: str, filename: str) -> str | None:
                             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode == 0:
                 val = r.stdout.strip()
-                # Cache locally for next read
                 try:
                     ensure_session_dir(name)
                     _tmp = f.with_suffix('.tmp')
@@ -2131,7 +1889,6 @@ def _read_session_file(name: str, filename: str) -> str | None:
             _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
     return ""
 
-
 def _ensure_workspace_trusted_remote(
     cwd: str | None,
     host: str | None,
@@ -2141,7 +1898,6 @@ def _ensure_workspace_trusted_remote(
     if not host:
         _ensure_workspace_trusted(cwd)
         return
-    # Run a small Python snippet on the remote machine (with file locking)
     script = (
         "import json, pathlib, os, fcntl; "
         "p = pathlib.Path(os.path.expanduser('~/.claude.json')); "
@@ -2171,7 +1927,6 @@ def _ensure_workspace_trusted_remote(
         _log(_LOG_WARN, "trust",
              f"remote pre-trust {cwd} on {host}: {exc}")
 
-
 def _build_teleport_context(
     name: str,
     source_host: str | None,
@@ -2195,13 +1950,11 @@ def _build_teleport_context(
         lines.append("No previous session was active.")
     return "\n".join(lines)
 
-
 def _get_pending_lock(name: str) -> threading.Lock:
     with processes.pending_locks_guard:
         if name not in processes.pending_locks:
             processes.pending_locks[name] = threading.Lock()
         return processes.pending_locks[name]
-
 
 def set_pending(name: str, chat_id: ChatId) -> None:
     session_dir = ensure_session_dir(name)
@@ -2215,11 +1968,7 @@ def set_pending(name: str, chat_id: ChatId) -> None:
     _tmp_c.write_text(str(chat_id))
     _tmp_c.chmod(0o600)
     os.replace(str(_tmp_c), str(chat_id_file))
-    # Sync chat_id to remote host if worker is teleported.
-    # The Stop hook reads chat_id locally — without this, responses from
-    # teleported workers never reach Telegram.
     _sync_chat_id_to_remote(name, str(chat_id_file))
-
 
 def _remap_sessions_dir(host: str | None) -> str:
     remote_sessions_dir = str(SESSIONS_DIR)
@@ -2228,7 +1977,6 @@ def _remap_sessions_dir(host: str | None) -> str:
     if remote_home and remote_home != local_home and remote_sessions_dir.startswith(local_home):
         remote_sessions_dir = remote_home + remote_sessions_dir[len(local_home):]
     return remote_sessions_dir
-
 
 def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     host = get_worker_host(name)
@@ -2243,7 +1991,6 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_WARN, "set_pending", f"Failed to sync chat_id to {host} for {name}: {e}")
 
-
 def clear_pending(name: str) -> None:
     session_dir = get_session_dir(name)
     pending = session_dir / "pending"
@@ -2251,7 +1998,6 @@ def clear_pending(name: str) -> None:
         pending.unlink()
     except OSError as exc:
         _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
-
 
 def is_pending(name: str) -> bool:
     pending = get_pending_file(name)
@@ -2265,14 +2011,12 @@ def is_pending(name: str) -> bool:
     except (OSError, ValueError):
         return False
 
-
 def try_set_pending(name: str, chat_id: ChatId) -> bool:
     with _get_pending_lock(name):
         if is_pending(name):
             return False
         set_pending(name, chat_id)
         return True
-
 
 def _pending_timestamp(name: str) -> int | None:
     pending = get_pending_file(name)
@@ -2282,7 +2026,6 @@ def _pending_timestamp(name: str) -> int | None:
         return int(pending.read_text().strip())
     except OSError:
         return None
-
 
 def compute_state(
     tmux_exists: bool,
@@ -2344,14 +2087,12 @@ def compute_state(
 
     return "OFFLINE", "tmux alive, claude missing"
 
-
 def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
     if tail_lines <= 0:
         return ""
     host = get_worker_host(name)
     if host:
         try:
-            # Remap path for remote $HOME
             r = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             remote_home = r.stdout.strip() if r.returncode == 0 else ""
@@ -2374,7 +2115,6 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
     except OSError:
         return ""
 
-
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     if admin_chat_id is None:
         return
@@ -2386,7 +2126,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         _log(_LOG_WARN, "watchdog", f"Alert suppressed for {name} ({state}): cooldown {now - last:.0f}s < {ALERT_COOLDOWN}s")
         return
 
-    # Human-friendly alert messages for manager
     if state == "WAITING_INPUT":
         with watchdog.lock:
             details = watchdog.waiting_input_details.get(name)
@@ -2403,7 +2142,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
             parts.append(f"\nReply 1-{max_num} to choose, or \"skip\" to cancel.")
         text = "\n".join(parts)
     elif state == "STUCK":
-        # Parse age from reason like "age=909s cpu=6.3 streak=3/3"
         age_match = re.search(r"age=(\d+)s", reason)
         age_min = int(age_match.group(1)) // 60 if age_match else 0
         age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
@@ -2434,7 +2172,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     except KeyError as e:
         _log(_LOG_ERROR, "watchdog", f"Watchdog alert error: {e}")
 
-
 def _format_watchdog_status(name: str,
                             pending_lookup: Callable[[str], bool] | None = None,
                             state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
@@ -2447,7 +2184,6 @@ def _format_watchdog_status(name: str,
         name, pending_lookup=pending_lookup,
         state_snapshot=state_snapshot, clock_now=_clock.time(),
     )
-
 
 def format_team_lines(  # type: ignore[no-redef]
     registered: dict[str, TmuxSessionDict],
@@ -2466,7 +2202,6 @@ def format_team_lines(  # type: ignore[no-redef]
         normalize_backend_fn=normalize_backend,
     )
 
-
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
     backend = get_backend(backend_name)
     if not backend.is_interactive:
@@ -2481,7 +2216,6 @@ def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 
             return True
         _clock.sleep(DELAY_RETRY)
     return False
-
 
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
     callback_url = (session or {}).get("callback_url", "")
@@ -2506,7 +2240,6 @@ def _send_to_callback_worker(name: str, message: str, from_name: str = "manager"
         _log(_LOG_WARN, "bridge", f"Callback send failed for '{name}' at {msg_url}: {e}")
         return False
 
-
 class WorkerManager:
     def __init__(self, sessions_dir: Path, tmux_prefix: str,
                  runner: SubprocessRunner | None = None,
@@ -2526,8 +2259,6 @@ class WorkerManager:
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
             candidate = normalize_cwd(_get_worker_cwd(name))
-        # claude_session_cwd file removed — tmux pane_current_path is the source of truth.
-        # On restart, tmux session is usually still alive; _get_tmux_pane_cwd covers it.
         if candidate:
             if os.path.isdir(candidate):
                 return candidate
@@ -2557,7 +2288,6 @@ class WorkerManager:
         self._sync_paths()
         registered: dict[str, TmuxSessionDict] = {}
 
-        # Scan local tmux
         try:
             result = self._runner.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
@@ -2575,7 +2305,6 @@ class WorkerManager:
         except (subprocess.SubprocessError, KeyError) as e:
             _log(_LOG_ERROR, "bridge", f"Error scanning local tmux: {e}")
 
-        # Scan remote machines for tmux sessions
         try:
             machines = get_machine_catalog()
         except (subprocess.SubprocessError, OSError):
@@ -2611,14 +2340,10 @@ class WorkerManager:
 
         return registered
 
-    # TTL cache for get_registered_sessions: avoids SSH calls on every message.
-    # When a remote host is down, each scan_tmux_sessions() blocks for 10s per
-    # host on SSH timeout.  With 4+ calls per message routing path, this delays
-    # routing by 40+ seconds and effectively drops messages.
     _sessions_cache = None
     _sessions_cache_ts: float = 0
     _sessions_cache_lock = threading.Lock()
-    _SESSIONS_CACHE_TTL = 15  # seconds
+    _SESSIONS_CACHE_TTL = 15
 
     def invalidate_sessions_cache(self) -> None:
         with self._sessions_cache_lock:
@@ -2631,20 +2356,14 @@ class WorkerManager:
             now = self._clock.time()
             with self._sessions_cache_lock:
                 if self._sessions_cache is not None and (now - self._sessions_cache_ts) < self._SESSIONS_CACHE_TTL:
-                    # Return a shallow copy so callers can mutate without poisoning cache
                     return dict(self._sessions_cache)
-            # Cache miss or expired — do the full scan (outside the lock)
             registered = self.scan_tmux_sessions()
 
-        # Fallback: pick up non-interactive workers from registry but orphaned tmux
         registry = _load_registry()
         for rname, rentry in registry.get("workers", {}).items():
             if rname not in registered and rentry.get("backend") != "claude":
                 registered[rname] = {"backend": rentry.get("backend", "codex")}
 
-        # Merge persistent registry: workers in registry but not in tmux
-        # appear with no "tmux" key (same pattern as non-interactive fallback above).
-        # On first run, bootstrap registry from current tmux sessions.
         _registry_bootstrap(registered)
         registry = _load_registry()
         for name, info in registry.get("workers", {}).items():
@@ -2654,7 +2373,6 @@ class WorkerManager:
                     val = info.get(key)
                     if val:
                         entry[key] = str(val)
-                # Teleported workers: inject tmux name so they don't appear as "exited"
                 if info.get("host") and not info.get("callback_url"):
                     entry["tmux"] = f"{self.tmux_prefix}{name}"
                 registered[name] = entry
@@ -2668,7 +2386,6 @@ class WorkerManager:
         if registered and not state.active:
             state.active = list(registered.keys())[0]
 
-        # Update cache
         with self._sessions_cache_lock:
             self._sessions_cache = dict(registered)
             self._sessions_cache_ts = self._clock.time()
@@ -2690,8 +2407,6 @@ class WorkerManager:
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
-        # For teleported workers, check remote tmux AND claude process
-        # Treat SSH failures as "online" to avoid false OFFLINE from transient network issues
         host = get_worker_host(name)
         if host:
             try:
@@ -2701,10 +2416,10 @@ class WorkerManager:
                     try:
                         return is_claude_running(tmux_name, host=host)
                     except (subprocess.SubprocessError, OSError):
-                        return True  # Probe failure on interactive check — assume online
+                        return True
                 return True
             except (subprocess.SubprocessError, OSError):
-                return True  # SSH failure — assume still online (broad catch intentional)
+                return True
 
         return backend.is_online(tmux_name)
 
@@ -2756,7 +2471,6 @@ class WorkerManager:
             backend = get_backend(backend_name)
             peer_host = get_worker_host(name)
 
-            # Registry-only workers (tmux gone): non-interactive can still serve via pipe
             if "tmux" not in info:
                 if not backend.is_interactive:
                     pipe_path = ensure_worker_pipe(name)
@@ -2783,8 +2497,6 @@ class WorkerManager:
 
             if not backend.is_interactive:
                 if peer_host:
-                    # Non-interactive remote workers use SSH-based adapter spawning
-                    # Worker-to-worker pipes don't work remotely, but bridge send does
                     workers.append(cast(WorkerEndpointInfo, {
                         "name": name,
                         "machine": peer_host,
@@ -2859,7 +2571,6 @@ class WorkerManager:
                 "Each message triggers a blocking CLI call, responses arrive async in Telegram. "
                 "Use nohup/& if calling CLI directly."
             )
-        # Append manager note if set (with {name} and {machine} substitution)
         note = read_checkin_note()
         if note:
             rendered = note.replace("{name}", name)
@@ -2881,7 +2592,6 @@ class WorkerManager:
 
         backend_obj = get_backend(backend)
 
-        # Check binary exists before creating tmux session
         if not _which_binary(backend_obj.binary):
             return False, f"'{backend_obj.binary}' not found in PATH. Install it first."
 
@@ -2889,8 +2599,6 @@ class WorkerManager:
         if tmux_exists(tmux_name):
             return False, f"Worker '{name}' already exists"
 
-        # Strip CLAUDECODE from env so new tmux shell doesn't inherit it
-        # (Claude Code refuses to start if it detects a parent session)
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
@@ -2908,7 +2616,6 @@ class WorkerManager:
         export_hook_env(tmux_name, backend)
         self._clock.sleep(DELAY_TMUX_SEND)
 
-        # Inject tmux env vars then unset CLAUDECODE (prevents nested-session error)
         self._runner.run(["tmux", "send-keys", "-t", tmux_name,
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_TMUX_SEND)
@@ -2922,8 +2629,6 @@ class WorkerManager:
             os.replace(str(_tmp), str(chat_id_file))
         if not backend_obj.is_interactive:
             ensure_worker_pipe(name)
-
-        # Backend stored in workers.json registry only (no per-worker file)
 
         start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
         if startup_cwd:
@@ -2940,8 +2645,6 @@ class WorkerManager:
         if not backend_obj.is_interactive:
             if chat_id:
                 set_pending(name, chat_id)
-            # Echo welcome to tmux (visible for debugging) but don't call backend
-            # to avoid triggering a codex API call on hire
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         else:
             self.send(name, welcome)
@@ -2969,7 +2672,6 @@ class WorkerManager:
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
-        # Clean non-interactive metadata (backend file, session IDs, pending)
         if not backend.is_interactive:
             kill_adapter(name)
             session_dir = self.sessions_dir / name
@@ -2981,7 +2683,6 @@ class WorkerManager:
 
         clear_pending(name)
         _set_worker_cwd(name, "")
-        # Kill tmux session if it exists (may already be gone for registry-only workers)
         host = get_worker_host(name)
         _remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
         cleanup_inbox(name)
@@ -3001,7 +2702,6 @@ class WorkerManager:
         if name not in registered:
             return False, f"Worker '{name}' not found"
 
-        # Teleported workers must be restarted via CommandRouter._restart_remote_worker
         host = get_worker_host(name)
         if host:
             return False, "use_remote_restart"
@@ -3012,20 +2712,16 @@ class WorkerManager:
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
         if not tmux_exists(tmux_name):
-            # Dead worker recovery: re-create tmux session if worker is in registry
             return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
 
-        # Check binary still exists before restarting
         if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
 
         resume_id, startup_cwd = self._prepare_restart_state(name, mode)
 
-        # Clear hook failure signal on clean restart
         if mode != "resume":
             _clear_hook_failures(name)
 
-        # Clean non-interactive state or stop existing Claude
         session_dir = self.sessions_dir / name
         if not backend.is_interactive:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -3034,7 +2730,6 @@ class WorkerManager:
         elif is_claude_running(tmux_name):
             self._stop_running_claude(name, tmux_name)
 
-        # Kill any stray child process (e.g. SSH, vim) before sending start command
         if backend.is_interactive and not is_claude_running(tmux_name):
             self._kill_stray_children(name, tmux_name)
 
@@ -3043,7 +2738,6 @@ class WorkerManager:
 
         self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
 
-        # Wait for Claude to actually start before sending welcome
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
             started = self._wait_for_startup(name, tmux_name, backend, resume_id, startup_cwd)
@@ -3066,7 +2760,6 @@ class WorkerManager:
             resume_id = (get_claude_session_id(name, authoritative=False) or
                          get_claude_session_id(name, authoritative=True) or "")
             resume_cwd = ""
-            # CWD derived from tmux pane_current_path via _get_startup_cwd
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
             for session_id_file in session_dir.glob("*_session_id"):
@@ -3081,14 +2774,12 @@ class WorkerManager:
         self._clock.sleep(DELAY_RETRY)
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_STARTUP)
-        # If still running, force kill
         if is_claude_running(tmux_name):
             pane_pid = _tmux_pane_pids().get(tmux_name)
             if pane_pid:
                 claude_pid = _get_claude_pid(pane_pid)
                 if claude_pid:
                     self._runner.run(["kill", claude_pid], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
-        # Poll until Claude has actually exited (fixed sleep races with slow exits)
         for _ in range(20):
             if not is_claude_running(tmux_name):
                 break
@@ -3175,7 +2866,6 @@ class WorkerManager:
         if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
 
-        # Create new tmux session
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
@@ -3203,7 +2893,6 @@ class WorkerManager:
             resume_id = (get_claude_session_id(name, authoritative=False) or
                          get_claude_session_id(name, authoritative=True) or "")
             resume_cwd = ""
-            # CWD derived from tmux pane_current_path via _get_startup_cwd
         else:
             session_dir = self.sessions_dir / name
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -3262,63 +2951,48 @@ class WorkerManager:
         self.invalidate_sessions_cache()
         return True, None
 
-
 def _sync_worker_manager() -> None:
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
-
 
 def worker_is_online(name: str, session: TmuxSessionDict | None = None) -> bool:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.is_online(name, session)
 
-
 def worker_set_pending(name: str, chat_id: ChatId) -> None:
     set_pending(name, chat_id)
-
 
 def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.send(name, message, chat_id, session)
 
-
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.scan_tmux_sessions()
-
 
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.get_registered_sessions(registered)
 
-
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.send(name, message, chat_id)
 
-
 # ── Control plane singletons ────────────────────────────────────────────
-# WorkerManager instantiation (class is defined above).
-# SESSIONS_DIR and TMUX_PREFIX come from claudecode via star import.
 worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)  # type: ignore[assignment]
-
 
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
 
-# Handler type for EndpointRouter — all handlers receive (request, payload, match).
-# POST handlers get bytes payload; GET/DELETE handlers get ParseResult.
-# match is None for exact-path registrations, re.Match for pattern registrations.
 PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]
 
 GetRouteHandler = Callable[["Handler", ParseResult, re.Match[str] | None], None]
-
 
 # ── Guest / Channel / Relay TypedDicts ──────────────────────────────────
 
@@ -3328,11 +3002,9 @@ class _GuestSessionDictRequired(TypedDict):
     expires_at_unix: float
     notified_workers: set[str] | list[str]
 
-
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
     token_hash: str
     expires_at: str
-
 
 GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
     "id": str,
@@ -3346,14 +3018,9 @@ GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
 
 """Shape of a guest inbox message in storage."""
 
-
 class ChannelMemberDict(TypedDict, total=False):
-    type: str         # "worker", "guest", or "manager"
-    name: str         # omitted for manager members
-
-
-# Note: channel messages and relay messages use the JSON key "from" (a Python keyword).
-# TypedDict functional syntax allows reserved-word keys.
+    type: str
+    name: str
 
 ChannelMessageDict = TypedDict("ChannelMessageDict", {
     "id": str,
@@ -3365,7 +3032,6 @@ ChannelMessageDict = TypedDict("ChannelMessageDict", {
 
 """Shape of a message inside a channel's messages list."""
 
-
 class ChannelDict(TypedDict):
     id: str
     label: str
@@ -3376,7 +3042,6 @@ class ChannelDict(TypedDict):
     members: dict[str, ChannelMemberDict]
     messages: list[ChannelMessageDict]
 
-
 _RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
     "message_id": str,
     "direction": str,
@@ -3386,10 +3051,8 @@ _RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
     "ts": str,
 })
 
-
 class RelayMessageDict(_RelayMessageDictRequired, total=False):
     sender_name: str
-
 
 class RelayChannelDict(TypedDict):
     id: str
@@ -3404,16 +3067,13 @@ class RelayChannelDict(TypedDict):
     reply_token: str
     messages: list[RelayMessageDict]
 
-
 class PostRouteResolution(NamedTuple):
     handler: PostRouteHandler | None
     match: re.Match[str] | None
 
-
 class GetRouteResolution(NamedTuple):
     handler: GetRouteHandler | None
     match: re.Match[str] | None
-
 
 try:
     from connectors import GmailConnector, GitHubConnector
@@ -3425,49 +3085,14 @@ except ImportError as e:
     GMAIL_IMPORT_ERROR = e
     GITHUB_IMPORT_ERROR = e
 
-
 # ── File map ───────────────────────────────────────────────────────────
-#
-#   L1-380      Imports, type aliases, 33 TypedDict/5 NamedTuple/1 type alias models
-#   L~436       Configuration: ReuseAddrServer, dataclasses (WatchdogConfig,
-#               ResourceAlertConfig, MediaConfig), AppContext
-#   L~820       Guest/channel/relay subsystem (GuestSession, RelayStore)
-#   L~1570      Backend Protocol + registry (Backend, SubprocessRunner, Clock, get_backend)
-#   L~1838      OS detection, worker health: _detect_os_family, _machine_health,
-#               normalize_cwd, validate_cwd, parse_hire_args
-#   L~2396      Tmux interaction: tmux_exists, tmux_send_message,
-#               _read_tmux_activity, _wait_for_restart_ready
-#   L~3904      Transport + Telegram API: MessageTransport, TelegramAPI,
-#               send_message, send_photo, send_document, split_message
-#   L~5100      Text/media processing: parse_image_tags, escape_html,
-#               _TelegramHTMLSanitizer, markdown_to_telegram_html
-#   L~8461      WorkerManager class (~820 lines): hire, fire, restart, status
-#               (DI: accepts SubprocessRunner/Clock for testability)
-#   L~10076     TeleportCommandsMixin (~1064 lines)
-#   L~12155     CommandRouter class (~1239 lines)
-#   L~14009     Transcript HTML rendering
-#   L~15247     EndpointRouter, Handler class + endpoint mixins (~2500 lines)
-#   L~17947     main() function, signal handlers, startup
-#
-#   DI coverage (v0.42.0): 68 subprocess + 136 time calls → injectable seams
-#   Only _RealSubprocessRunner/_RealClock and 1 module-init call use direct stdlib
-#   Structured logging: all diagnostics via _log(LEVEL, component, msg)
-#
-# ======================================================================
-# CONFIGURATION
-# ======================================================================
 
 # ── Thread pool for bounded concurrency on per-message/per-task threads ──
-# Replaces unbounded Thread() spawns for webhook/poll update handlers,
-# typing indicators, and short background tasks.  Permanent loops
-# (watchdog, tunnel, connectors) keep their own dedicated threads.
 _message_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="msg")
 _task_pool    = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 
-
 class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
-
 
 class ConnectorRegistry:
     def __init__(self) -> None:
@@ -3501,10 +3126,9 @@ class ConnectorRegistry:
         with self._lock:
             return list(self._log.get(tag, []))
 
-
 connectors = ConnectorRegistry()
 
-tunnel_manager: _tunnel_mod.TunnelManager | None = None  # initialized in main()
+tunnel_manager: _tunnel_mod.TunnelManager | None = None
 
 if not BRIDGE_PUBLIC_URL:
     try:
@@ -3514,10 +3138,8 @@ if not BRIDGE_PUBLIC_URL:
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
     except (subprocess.SubprocessError, OSError):
-        pass  # Tailscale not available — non-critical probe
+        pass
 
-
-# Gmail connector: poll Gmail for manager emails with @worker mentions
 GMAIL_ENABLED = os.environ.get("GMAIL_ENABLED", "0") == "1"
 
 GMAIL_POLL_INTERVAL = int(os.environ.get("GMAIL_POLL_INTERVAL", "45"))
@@ -3529,12 +3151,10 @@ GMAIL_GWS_BIN = os.environ.get("GMAIL_GWS_BIN", os.path.expanduser("~/bin/gws"))
 if GMAIL_ENABLED and not GMAIL_FROM_FILTER.strip():
     raise RuntimeError("GMAIL_FROM_FILTER must be set when GMAIL_ENABLED=1 (security: sender filter required)")
 
-
 GITHUB_ENABLED = os.environ.get("BRIDGE_GHPOLL_ENABLED", "0") == "1"
 
 GITHUB_POLL_INTERVAL = int(os.environ.get("BRIDGE_GHPOLL_INTERVAL", "60"))
 
-# Comma-separated list of repos: "owner/name,owner2/name2"
 _GITHUB_REPO_RAW = os.environ.get("BRIDGE_GHPOLL_REPO", "BasedHardware/omi")
 
 GITHUB_REPOS: list[str] = [r.strip() for r in _GITHUB_REPO_RAW.split(",") if r.strip()]
@@ -3544,17 +3164,7 @@ GITHUB_FROM_USER = os.environ.get("BRIDGE_GHPOLL_USER", "beastoin")
 if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
     raise RuntimeError("BRIDGE_GHPOLL_USER must be set when BRIDGE_GHPOLL_ENABLED=1 (security: sender filter required)")
 
-
-
-# ============================================================
-# GUEST SYSTEM: temporary external agent sessions
-# ============================================================
-
 # ── Typed dataclasses for conversation state ─────────────────
-#
-# These provide typed access to the guest, channel, and relay
-# structures. The underlying storage is still dict-based for
-# JSON serialization compat, but new code should prefer these.
 
 @dataclass
 class GuestSession:
@@ -3589,7 +3199,6 @@ class GuestSession:
     def is_expired(self) -> bool:
         return _clock.time() >= self.expires_at_unix
 
-
 @dataclass
 class GuestInboxMessage:
     id: str
@@ -3606,23 +3215,21 @@ class GuestInboxMessage:
             ts=data.get("ts", 0),
         )
 
-
 @dataclass
 class ChannelMember:
-    key: str          # "manager", "worker:name", "guest:name"
+    key: str
     type: str         # "manager", "worker", "guest"  # noqa: A003 — shadows builtin
-    name: str = ""    # display name (empty for manager)
+    name: str = ""
 
     @classmethod
     def from_dict(cls, key: str, data: ChannelMemberDict) -> "ChannelMember":
         return cls(key=key, type=data["type"], name=data.get("name", ""))
 
-
 @dataclass
 class ChannelMessage:
     id: str
     seq: int
-    sender: str  # member key
+    sender: str
     text: str
     ts: int
 
@@ -3636,11 +3243,10 @@ class ChannelMessage:
             ts=data["ts"],
         )
 
-
 @dataclass
 class RelayMessage:
     id: str
-    sender: str       # "guest" or "worker"
+    sender: str
     text: str
     ts: int
     sender_name: str = ""
@@ -3655,24 +3261,20 @@ class RelayMessage:
             sender_name=d.get("sender_name", ""),
         )
 
-
 class GuestStore:
     def __init__(self) -> None:
         self.guests: dict[str, GuestSessionDict] = {}
         self.inboxes: dict[str, list[GuestInboxMessageDict]] = {}
         self.lock: threading.Lock = threading.Lock()
 
-
 guest_store = GuestStore()
 
-GUEST_TTL = 86400           # 24 hours
+GUEST_TTL = 86400
 
 GUEST_INBOX_CAP = 200
 
-
 def _guest_state_path() -> Path:
     return NODE_DIR / "guest_state.json"
-
 
 def _guest_save() -> None:
     try:
@@ -3682,7 +3284,6 @@ def _guest_save() -> None:
         for k, v in guest_store.guests.items():
             if now <= v.get("expires_at_unix", 0):
                 guest = dict(v)
-                # Convert set to list for JSON
                 if isinstance(guest.get("notified_workers"), set):
                     guest["notified_workers"] = list(cast("set[str] | list[str]", guest.get("notified_workers", [])))
                 active_guests[k] = guest
@@ -3696,7 +3297,6 @@ def _guest_save() -> None:
     except OSError as e:
         _log(_LOG_WARN, "guest", f"Failed to save state: {e}")
 
-
 def _guest_load() -> None:
     path = _guest_state_path()
     if not path.exists():
@@ -3708,7 +3308,6 @@ def _guest_load() -> None:
         restored = 0
         for k, v in data.get("guests", {}).items():
             if now <= v.get("expires_at_unix", 0):
-                # Convert notified_workers list back to set
                 if isinstance(v.get("notified_workers"), list):
                     v["notified_workers"] = set(v["notified_workers"])
                 guest_store.guests[k] = v
@@ -3719,12 +3318,10 @@ def _guest_load() -> None:
     except (json.JSONDecodeError, OSError, KeyError) as e:
         _log(_LOG_WARN, "guest", f"Failed to load state: {e}")
 
-
 def guest_create_token() -> tuple[str, str]:
     token = f"gt_{secrets.token_urlsafe(32)}"
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     return token, token_hash
-
 
 def guest_generate_name(existing_names: set[str] | None = None) -> str:
     if existing_names is None:
@@ -3734,7 +3331,6 @@ def guest_generate_name(existing_names: set[str] | None = None) -> str:
         if len(name) >= 3 and name not in existing_names:
             return name
     return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
-
 
 def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
     if not name or not name.strip():
@@ -3748,10 +3344,8 @@ def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[
         return False, f"name '{name}' already taken by another guest"
     return True, ""
 
-
 def guest_is_expired(expires_at_unix: float) -> bool:
     return _clock.time() >= expires_at_unix
-
 
 def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
     if not after:
@@ -3767,34 +3361,25 @@ def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None 
         return list(messages)
     return result
 
-
 def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
     inbox.append(msg)
     if len(inbox) > GUEST_INBOX_CAP:
         inbox = inbox[-GUEST_INBOX_CAP:]
     return inbox
 
-
-# ============================================================
-# GROUP CHANNELS: data + pure functions
-# ============================================================
-
 class ChannelStore:
     def __init__(self) -> None:
         self.channels: dict[str, ChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
-
 channel_store = ChannelStore()
 
-CHANNEL_TTL = 86400           # 24 hours
+CHANNEL_TTL = 86400
 
 CHANNEL_MSG_CAP = 200
 
-
 def _channel_state_path() -> Path:
     return NODE_DIR / "channel_state.json"
-
 
 def _channel_save() -> None:
     try:
@@ -3808,7 +3393,6 @@ def _channel_save() -> None:
         os.chmod(path, 0o600)
     except OSError as e:
         _log(_LOG_WARN, "channel", f"Failed to save state: {e}")
-
 
 def _channel_load() -> None:
     path = _channel_state_path()
@@ -3827,11 +3411,9 @@ def _channel_load() -> None:
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "channel", f"Failed to load state: {e}")
 
-
 def channel_create_id(label: str = "") -> str:
     short = secrets.token_urlsafe(4).rstrip("=").lower()[:6]
     return f"ch_{short}"
-
 
 def channel_new(channel_id: str, label: str, created_by: str,
                 members: list[str], ttl: int = CHANNEL_TTL) -> ChannelDict:
@@ -3857,7 +3439,6 @@ def channel_new(channel_id: str, label: str, created_by: str,
         "messages": [],
     }
 
-
 def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
     added = []
     for m in members:
@@ -3874,7 +3455,6 @@ def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
         added.append(m)
     return added
 
-
 def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str]:
     removed = []
     for m in members:
@@ -3882,7 +3462,6 @@ def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str
             del channel["members"][m]
             removed.append(m)
     return removed
-
 
 def channel_append_message(channel: ChannelDict, from_member: str, text: str) -> ChannelMessageDict:
     channel["seq"] += 1
@@ -3898,7 +3477,6 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
         channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
     return cast(ChannelMessageDict, msg)
 
-
 def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
     if not after:
         return list(channel["messages"]), False
@@ -3911,40 +3489,28 @@ def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tupl
         return list(channel["messages"]), True
     return channel["messages"][found_idx + 1:], False
 
-
 def channel_is_expired(channel: ChannelDict) -> bool:
     return _clock.time() > channel["expires_at_unix"]
-
 
 def channel_get_member_names(channel: ChannelDict, member_type: str) -> list[str]:
     return [info["name"] for info in channel["members"].values()
             if info["type"] == member_type and "name" in info]
-
-
-# ============================================================
-# RELAY GUIDELINE LINK
-# ============================================================
 
 class RelayStore:
     def __init__(self) -> None:
         self.channels: dict[str, RelayChannelDict] = {}
         self.lock: threading.Lock = threading.Lock()
 
-
 relay_store = RelayStore()
 
-
 RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
-
 
 def _relay_state_path() -> Path:
     return NODE_DIR / "relay_state.json"
 
-
 def _relay_save() -> None:
     try:
         path = _relay_state_path()
-        # Only save non-expired channels
         now = _clock.time()
         active = {cid: ch for cid, ch in relay_store.channels.items()
                   if now <= ch["expires_at_unix"]}
@@ -3955,7 +3521,6 @@ def _relay_save() -> None:
         os.chmod(path, 0o600)
     except OSError as e:
         _log(_LOG_WARN, "relay", f"Failed to save state: {e}")
-
 
 def _relay_load() -> None:
     path = _relay_state_path()
@@ -3974,7 +3539,6 @@ def _relay_load() -> None:
             _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "relay", f"Failed to load state: {e}")
-
 
 def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
     channel_id = channel_create_id(label)
@@ -3996,16 +3560,13 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
     }
     return cast(RelayChannelDict, channel), guest_token, reply_token
 
-
 def _relay_base_url() -> str:
     if BRIDGE_PUBLIC_URL:
         return BRIDGE_PUBLIC_URL
     return f"http://{RELAY_PUBLIC_HOST}:{PORT}"
 
-
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
     return f"{_relay_base_url()}/relay/{channel_id}?token={guest_token}"
-
 
 def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
     base = f"{_relay_base_url()}/relay/{channel['id']}"
@@ -4040,7 +3601,6 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 3. The channel expires at `{channel['expires_at']}`
 """
 
-
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4052,7 +3612,6 @@ def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
         return None
     return channel
 
-
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4063,7 +3622,6 @@ def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"):
         return None
     return channel
-
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
     with relay_store.lock:
@@ -4103,7 +3661,6 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
 
     return envelope, relay_msg
 
-
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4125,7 +3682,6 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
         _relay_save()
     return relay_msg
 
-
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
@@ -4139,15 +3695,12 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayM
             return list(msgs[i + 1:])
     return list(msgs)
 
-
-# Default rsync excludes for teleport directory sync
 TELEPORT_RSYNC_EXCLUDES = [
     "node_modules", ".git", "__pycache__", ".venv", "venv",
     ".next", "build", "dist", "target", ".gradle", ".cache",
     ".tox", ".mypy_cache", ".pytest_cache", "*.pyc",
     ".build", ".claude/worktrees",
 ]
-
 
 def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
     try:
@@ -4166,7 +3719,7 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
         if not line.strip():
             continue
         try:
-            ev = cast(dict[str, object], json.loads(line))  # shape varies per event type
+            ev = cast(dict[str, object], json.loads(line))
         except json.JSONDecodeError:
             continue
 
@@ -4196,7 +3749,6 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
                     messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
     return cast(list[CodexTranscriptEntry], messages)
 
-
 def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
@@ -4204,15 +3756,14 @@ def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
         return []
     return _parse_codex_transcript(path, host=host)
 
-
 # ── Typed dataclasses for health/resource probes ─────────────
 
 @dataclass
 class DiskUsage:
-    pct: float          # usage percentage (0-100)
-    free_gb: float      # free space in GB
-    total_gb: float     # total space in GB
-    ts: float = 0.0     # timestamp of probe
+    pct: float
+    free_gb: float
+    total_gb: float
+    ts: float = 0.0
 
     @classmethod
     def from_dict(cls: type["DiskUsage"], d: DiskUsageDict) -> "DiskUsage":
@@ -4227,12 +3778,11 @@ class DiskUsage:
         return {"pct": self.pct, "free_gb": self.free_gb,
                 "total_gb": self.total_gb, "ts": self.ts}
 
-
 @dataclass
 class MemoryUsage:
-    pct: float          # usage percentage (0-100)
-    used_gb: float      # used memory in GB
-    total_gb: float     # total memory in GB
+    pct: float
+    used_gb: float
+    total_gb: float
     avail_gb: float = 0.0
     ts: float = 0.0
 
@@ -4250,7 +3800,6 @@ class MemoryUsage:
         return {"pct": self.pct, "used_gb": self.used_gb,
                 "total_gb": self.total_gb, "avail_gb": self.avail_gb,
                 "ts": self.ts}
-
 
 @dataclass
 class IoUsage:
@@ -4275,7 +3824,6 @@ class IoUsage:
                 "write_iops": self.write_iops, "util_pct": self.util_pct,
                 "ts": self.ts}
 
-
 @dataclass
 class CpuHog:
     pid: int
@@ -4292,7 +3840,6 @@ class CpuHog:
             user=str(d.get("user", "")),
         )
 
-
 @dataclass
 class WorktreeItem:
     path: str
@@ -4306,7 +3853,6 @@ class WorktreeItem:
             size_mb=float(d.get("size_mb", 0.0)),
             worker=str(d.get("worker", "")),
         )
-
 
 def _load_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
@@ -4324,16 +3870,14 @@ def _load_learning_reminder_state() -> None:
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder state load error: {e}")
 
-
 media_groups = MediaGroupState()
-
 
 # ── Typed token stores ───────────────────────────────────────
 
 @dataclass
 class RewindToken:
-    name: str            # worker name or "__team__"
-    expires_at: float    # unix timestamp
+    name: str
+    expires_at: float
 
     def is_expired(self) -> bool:
         return _clock.time() >= self.expires_at
@@ -4344,7 +3888,6 @@ class RewindToken:
     @classmethod
     def from_dict(cls: type["RewindToken"], d: RewindTokenEntry) -> "RewindToken":
         return cls(name=d["name"], expires_at=d["expires_at"])
-
 
 @dataclass
 class PrReviewToken:
@@ -4365,9 +3908,8 @@ class PrReviewToken:
         return cls(pr_num=d["pr_num"], owner=d["owner"],
                    repo=d["repo"], expires_at=d["expires_at"])
 
-REWIND_TIMEOUT: int = 24 * 60 * 60  # 24 hours (sliding window)
-PR_REVIEW_EXTEND: int = 300  # seconds to extend PR review token on each access
-
+REWIND_TIMEOUT: int = 24 * 60 * 60
+PR_REVIEW_EXTEND: int = 300
 
 class TokenStore:
     def __init__(self) -> None:
@@ -4412,9 +3954,7 @@ class TokenStore:
                 entry["expires_at"] = now + PR_REVIEW_EXTEND
             return entry
 
-
 tokens = TokenStore()
-
 
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
     now = _clock.time()
@@ -4459,11 +3999,9 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "watchdog", f"Host alert error: {e}")
 
-
 def _is_host_down(host: str) -> bool:
     with watchdog.lock:
         return host_health.down.get(host, False)
-
 
 def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
     try:
@@ -4485,7 +4023,6 @@ def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
     except (ValueError, KeyError):
         return None
 
-
 def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
     try:
         r = _remote_run(
@@ -4506,10 +4043,9 @@ def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
     except (ValueError, KeyError):
         return None
 
-
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
     now = _clock.time()
-    hosts_to_check = [None] + list(remote_hosts)  # None = local (VPS)
+    hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
         if host and _is_host_down(host):
@@ -4522,7 +4058,6 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         if usage is None:
             continue
 
-        # Two-tier: critical (95% or <5GB free), warning (85%), ok (below 85%)
         is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
         is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
 
@@ -4534,7 +4069,6 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         else:
             current_level = False
 
-        # Determine alert action under lock, send outside
         alert_text: str | None = None
         with watchdog.lock:
             host_health.disk_usage[host_label] = {**usage, "ts": now}
@@ -4563,14 +4097,12 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                 host_health.disk_alerted[host_label] = False
                 alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
 
-        # Send alerts outside the lock
         if alert_text and admin_chat_id:
             try:
                 transport.send_text(admin_chat_id, alert_text)
                 _log(_LOG_WARN, "watchdog", f"Disk alert: {alert_text.splitlines()[0]}")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_ERROR, "watchdog", f"Disk alert error: {e}")
-
 
 def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
     try:
@@ -4600,7 +4132,6 @@ def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
         return _mem_result
     except (ValueError, KeyError):
         return None
-
 
 def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
     try:
@@ -4641,7 +4172,6 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
     except (ValueError, KeyError):
         return None
 
-
 def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
     try:
         r = _remote_run(
@@ -4664,7 +4194,6 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
         return procs
     except (ValueError, KeyError):
         return []
-
 
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
     now = _clock.time()
@@ -4713,7 +4242,6 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_ERROR, "watchdog", f"Memory alert error: {e}")
 
-
 def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
     try:
         r = _remote_run(
@@ -4721,7 +4249,7 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
             host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode == 0 and r.stdout.strip():
             import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout))  # iostat -xj output
+            data = cast(dict[str, object], _json.loads(r.stdout))
             _sysstat = data.get("sysstat", {})
             _hosts = _sysstat.get("hosts", [{}]) if isinstance(_sysstat, dict) else [{}]
             _host0 = _hosts[0] if isinstance(_hosts, list) and _hosts else {}
@@ -4777,7 +4305,6 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
     except (ValueError, KeyError):
         return None
 
-
 def _check_io_usage_macos(host: str) -> IoUsageDict | None:
     try:
         r = _remote_run(
@@ -4799,7 +4326,6 @@ def _check_io_usage_macos(host: str) -> IoUsageDict | None:
         }
     except (ValueError, KeyError):
         return None
-
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     now = _clock.time()
@@ -4846,7 +4372,6 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_ERROR, "watchdog", f"IO alert error: {e}")
 
-
 def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
     try:
         if is_mac:
@@ -4867,8 +4392,7 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
             except (ValueError, IndexError):
                 continue
             if cpu < CPU_HOG_THRESHOLD_PCT:
-                break  # sorted by CPU desc, no point continuing
-            # Parse etime: [[dd-]hh:]mm:ss
+                break
             etime_str = parts[2]
             etime_min = _parse_etime(etime_str)
             if etime_min is None:
@@ -4878,7 +4402,6 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
         return hogs
     except (ValueError, KeyError):
         return []
-
 
 def _parse_etime(etime: str) -> int | None:
     try:
@@ -4898,7 +4421,6 @@ def _parse_etime(etime: str) -> int | None:
     except (ValueError, IndexError):
         return None
 
-
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
@@ -4911,7 +4433,6 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
         is_mac = bool(host and "mac" in host.lower())
         hogs = _get_cpu_hogs(host, is_mac=is_mac)
 
-        # Filter: only processes running > CPU_HOG_DURATION_MIN minutes
         real_hogs = [h for h in hogs if h["etime_min"] >= CPU_HOG_DURATION_MIN]
 
         with watchdog.lock:
@@ -4936,7 +4457,6 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                     except (urllib.error.URLError, OSError, TimeoutError) as e:
                         _log(_LOG_ERROR, "watchdog", f"CPU hog alert error: {e}")
 
-
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     now = _clock.time()
     hosts_to_check = [None] + list(remote_hosts)
@@ -4948,18 +4468,12 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
         host_label = host or "VPS"
         is_mac = host and "mac" in host.lower()
 
-        # Find worktree directories: common patterns
-        # - ~/.claude/worktrees/
-        # - ~/omi-*/.claude/worktrees/
-        # - ~/*/worktrees/  (any project)
         try:
             if is_mac:
-                # macOS: check common locations, du -sk for KB
                 cmd = ["bash", "-c",
                        "find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | "
                        "while read d; do du -sk \"$d\" 2>/dev/null; done"]
             else:
-                # Linux: du -sb for bytes
                 cmd = ["bash", "-c",
                        "find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | "
                        "while read d; do du -sb \"$d\" 2>/dev/null; done"]
@@ -4978,7 +4492,6 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
                     path = parts[1]
                 except (ValueError, IndexError):
                     continue
-                # macOS du -sk gives KB, Linux du -sb gives bytes
                 size_bytes = size_val * 1024 if is_mac else size_val
                 size_gb = size_bytes / (1024**3)
                 total_bytes += size_bytes
@@ -5020,7 +4533,6 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "watchdog", f"Worktree check error for {host_label}: {e}")
 
-
 def _probe_tailscale() -> None:
     now = _clock.time()
     try:
@@ -5029,7 +4541,7 @@ def _probe_tailscale() -> None:
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode == 0:
             import json as _json
-            data = cast(dict[str, object], _json.loads(r.stdout))  # tailscale status output
+            data = cast(dict[str, object], _json.loads(r.stdout))
             is_up = data.get("BackendState") == "Running"
         else:
             is_up = False
@@ -5057,9 +4569,6 @@ def _probe_tailscale() -> None:
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
 
-
-# (last_resolved_ts moved to watchdog.last_resolved_ts — added to WorkerWatchdogState)
-
 def _send_resolved_alert(name: str, new_state: str) -> None:
     if admin_chat_id is None:
         return
@@ -5071,12 +4580,10 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if prev_state not in bad_states or new_state not in good_states:
         return
 
-    # Suppress if worker was recently restarted (cmd_restart sends its own confirmation)
     restart_ts = watchdog.recent_restarts.get(name)
     if restart_ts and _clock.time() - restart_ts < 30:
         return
 
-    # Cooldown: don't spam "back to normal" for flapping workers
     now = _clock.time()
     last_resolved = watchdog.last_resolved_ts.get(name, 0)
     if now - last_resolved < 180:
@@ -5084,7 +4591,6 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
 
     watchdog.last_resolved_ts[name] = now
 
-    # Edit the old alert to show resolved
     with watchdog.lock:
         alert_info = watchdog.alert_msg_ids.pop(name, None)
     if alert_info:
@@ -5095,14 +4601,13 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
             _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
             return
         except (urllib.error.URLError, OSError, TimeoutError):
-            pass  # intentional no-op: edit failed, fall through to send new message
+            pass
 
     text = f"✅ {name} is back to normal."
     try:
         transport.send_text(admin_chat_id, text)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "watchdog", f"Watchdog resolved alert error: {e}")
-
 
 def _handle_watchdog_transition(
     name: str,
@@ -5120,14 +4625,11 @@ def _handle_watchdog_transition(
         prev_state = watchdog.prev_worker_states.get(name)
     state_changed = prev_state is None or prev_state != state
 
-    # Host-level alerts are sent by _record_host_probe; suppress per-worker spam
     if state == "HOST_OFFLINE":
         with watchdog.lock:
             watchdog.prev_worker_states[name] = state
         return
 
-    # Suppress alerts for workers being teleported (teleport takes 30-60s,
-    # during which the worker appears DEAD/OFFLINE but is expected)
     teleport_state_file = SESSIONS_DIR / name / "teleport_state"
     if state in {"OFFLINE", "DEAD", "EXITED"} and teleport_state_file.exists():
         with watchdog.lock:
@@ -5182,7 +4684,6 @@ def _handle_watchdog_transition(
         watchdog.consecutive_bad_probes[name] = 0
         watchdog.prev_worker_states[name] = state
 
-
 def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
     with watchdog.lock:
         prev = watchdog.worker_states.get(name)
@@ -5192,7 +4693,6 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
             since = now
         watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
     return since
-
 
 def watchdog_loop() -> None:
     _disk_check_counter = 0
@@ -5224,9 +4724,7 @@ def watchdog_loop() -> None:
         except (subprocess.SubprocessError, ValueError, KeyError) as e:
             _log(_LOG_ERROR, "watchdog", f"Watchdog error: {e}")
 
-        # Use stop_event.wait() instead of sleep for responsive shutdown
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)
-
 
 def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
     if probe_failed:
@@ -5235,7 +4733,6 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
     else:
         for name in registered_names:
             watchdog.consecutive_probe_failures[name] = 0
-
 
 def _watchdog_probe_remote_hosts(
     registered: dict[str, TmuxSessionDict]
@@ -5268,7 +4765,6 @@ def _watchdog_probe_remote_hosts(
             _record_host_probe(host, ok=False, error=str(e)[:200])
 
     return remote_workers, remote_pane_pids, failed_hosts
-
 
 def _watchdog_collect_worker_pids(
     registered: dict[str, TmuxSessionDict],
@@ -5306,7 +4802,6 @@ def _watchdog_collect_worker_pids(
 
     return claude_pids, tmux_present, backend_info
 
-
 def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
     pids_by_host: dict[str | None, list[str]] = {}
     for name, pid in claude_pids.items():
@@ -5316,7 +4811,6 @@ def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcSta
     for host, pids in pids_by_host.items():
         stats.update(_ps_stats(pids, host=host))
     return stats
-
 
 def _watchdog_evaluate_workers(
     registered: dict[str, TmuxSessionDict],
@@ -5332,7 +4826,6 @@ def _watchdog_evaluate_workers(
         tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
         tmux_exists = tmux_present.get(name, False)
 
-        # Registry-only worker (tmux gone): mark EXITED directly
         if not tmux_exists and "tmux" not in session:
             since = _record_worker_state(name, "EXITED", "session gone", now)
             _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
@@ -5341,7 +4834,6 @@ def _watchdog_evaluate_workers(
         if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3:
             continue
 
-        # Mark workers on down hosts as HOST_OFFLINE
         host = get_worker_host(name)
         if host and _is_host_down(host):
             reason = f"host {host} offline"
@@ -5429,7 +4921,6 @@ def _watchdog_evaluate_workers(
         since = _record_worker_state(name, worker_state, reason, now)
         _handle_watchdog_transition(name, worker_state, reason, since, now=now)
 
-
 def _watchdog_compute_children(name: str, children_total: int,
                                 is_interactive: bool, claude_pid: str | None,
                                 now: float) -> int:
@@ -5447,7 +4938,6 @@ def _watchdog_compute_children(name: str, children_total: int,
         return max(0, children_total - baseline)
     return children_total
 
-
 def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -> None:
     with watchdog.lock:
         prev_children = watchdog.prev_children.get(name)
@@ -5455,7 +4945,6 @@ def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -
         if activity_increased or cpu >= CPU_ACTIVE:
             watchdog.last_activity_ts[name] = now
         watchdog.prev_children[name] = children
-
 
 def _watchdog_refine_state(
     name: str, tmux_name: str,
@@ -5470,7 +4959,6 @@ def _watchdog_refine_state(
         if streak < IDLE_STREAK_STUCK:
             worker_state = "WAITING"
         else:
-            # Auto-clear stale pending if worker is at idle prompt
             if is_interactive and pending:
                 pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
                 if pane_text:
@@ -5507,7 +4995,6 @@ def _watchdog_refine_state(
     else:
         watchdog.idle_streak[name] = 0
 
-    # Detect WAITING_INPUT: worker is READY but at interactive prompt
     if worker_state == "READY" and is_interactive:
         pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
         if pane_text:
@@ -5521,7 +5008,6 @@ def _watchdog_refine_state(
                 reason = f"question={header}" if header else "interactive prompt"
 
     return worker_state, reason
-
 
 def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
     with watchdog.lock:
@@ -5540,7 +5026,6 @@ def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
         if name not in registered_names:
             watchdog.consecutive_probe_failures.pop(name, None)
 
-
 def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
     checks: list[tuple[str, Callable[[], None]]] = [
         ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
@@ -5555,7 +5040,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
             check_fn()
         except (subprocess.SubprocessError, OSError) as e:
             _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
-
 
 def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     original_name = Path(remote_path).name
@@ -5574,7 +5058,6 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     shutil.rmtree(tmp_dir, ignore_errors=True)
     return None
 
-
 def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
     host = get_worker_host(name)
     if not host:
@@ -5592,7 +5075,6 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
             result.append((None, f"[Fetch failed: {file_path}]"))
     return result
 
-
 def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
     host = get_worker_host(name)
     if host:
@@ -5603,22 +5085,18 @@ def _parse_response_media(name: str, text: str) -> tuple[str, list[tuple[str | N
         clean_text, images = parse_image_tags(text)
         clean_text, files = parse_file_tags(clean_text)
 
-    # Fetch remote files to local temp paths for teleported workers
     images = _localize_media(name, images)
     files = _localize_media(name, files)
 
     return clean_text, images, files
 
-
 def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
-    # Try sendRichMessage first (Bot API 10.1+: native headings, tables, 32K limit)
     rich_sent = False
     rich_failed_at = -1
     rich_chunks: list[str] = []
     prev_msg_id: int | None = None
 
     if hasattr(transport, 'send_rich_text'):
-        # Strip redundant worker name prefix
         rich_text = clean_text.lstrip()
         prefix_lower = f"{name}:".lower()
         if rich_text.lower().startswith(prefix_lower):
@@ -5654,17 +5132,14 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
             if i < len(rich_chunks) - 1:
                 _clock.sleep(DELAY_BRIEF)
 
-    # Partial rich failure: send remaining chunks as HTML
     if not rich_sent and rich_failed_at > 0:
         prev_msg_id = _send_html_fallback_chunks(
             name, rich_chunks[rich_failed_at:], chat_id, log_prefix,
             prev_msg_id, rich_failed_at, len(rich_chunks))
-        rich_sent = True  # handled
+        rich_sent = True
 
-    # Full HTML path (no rich support or rich never tried)
     if not rich_sent:
         _send_text_as_html(name, clean_text, chat_id, log_prefix)
-
 
 def _send_html_fallback_chunks(
     name: str, remaining_chunks: list[str], chat_id: int,
@@ -5692,7 +5167,6 @@ def _send_html_fallback_chunks(
         if i < len(formatted_parts) - 1:
             _clock.sleep(DELAY_BRIEF)
     return prev_msg_id
-
 
 def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
     html_text = markdown_to_telegram_html(clean_text)
@@ -5735,9 +5209,7 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
         if i < len(formatted_parts) - 1:
             _clock.sleep(DELAY_BRIEF)
 
-
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
-    # Send images
     for img_path, img_caption in images:
         if img_path is None:
             transport.send_text(chat_id, f"{name}: {img_caption}")
@@ -5752,7 +5224,6 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
         else:
             transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
 
-    # Send files — route to specialized API method by extension
     for file_path, file_caption in files:
         if file_path is None:
             transport.send_text(chat_id, f"{name}: {file_caption}")
@@ -5774,11 +5245,9 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
         else:
             transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
-
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
     clean_text, images, files = _parse_response_media(name, text)
 
-    # Debug: log very short text (helps trace empty "name:" messages)
     if clean_text and len(clean_text.strip()) <= 5:
         _log(_LOG_DEBUG, "telegram", f"{log_prefix} short msg: {name}, text={repr(clean_text)}, "
              f"images={len(images)}, files={len(files)}")
@@ -5788,14 +5257,13 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
 
     _send_response_media(name, images, files, chat_id)
 
-
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
     try:
         r = _subprocess_runner.run(
             ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
             capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0:
-            data = cast(dict[str, object], json.loads(r.stdout))  # external tool output
+            data = cast(dict[str, object], json.loads(r.stdout))
             url = str(data.get("url", ""))
             if url and "localhost" in url:
                 host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
@@ -5805,24 +5273,20 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
         _log(_LOG_WARN, "bridge", f"beast serve deploy failed for {slug}: {e}")
     return None
 
-
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.hire(name, backend, chat_id=chat_id)
-
 
 def kill_session(name: str) -> tuple[bool, str | None]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.end(name)
 
-
 def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
     _sync_worker_manager()
     assert worker_manager is not None
     return worker_manager.restart(name, mode=mode)
-
 
 def switch_session(name: str) -> tuple[bool, str | None]:
     registered = get_registered_sessions()
@@ -5833,20 +5297,13 @@ def switch_session(name: str) -> tuple[bool, str | None]:
     save_last_active(name)
     return True, None
 
-
-# ============================================================
-# MESSAGE ROUTING
-# ============================================================
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Typing indicator
 # ─────────────────────────────────────────────────────────────────────────────
 
 def send_typing_loop(chat_id: int | str, session_name: str) -> None:
     while is_pending(session_name):
         transport.send_chat_action(chat_id, "typing")
         _clock.sleep(DELAY_CLAUDE_LOAD)
-
 
 def get_all_chat_ids() -> list[ChatId]:
     chat_ids: set[ChatId] = set()
@@ -5861,11 +5318,9 @@ def get_all_chat_ids() -> list[ChatId]:
                             chat_ids.add(int(raw))
                     except (OSError, ValueError) as exc:
                         _log(_LOG_DEBUG, "parse:get_all_chat_ids", f"{type(exc).__name__}: {exc}")
-    # Also include current admin if known
     if admin_chat_id:
         chat_ids.add(admin_chat_id)
     return list(chat_ids)
-
 
 def send_shutdown_message() -> None:
     chat_ids = get_all_chat_ids()
@@ -5878,14 +5333,8 @@ def send_shutdown_message() -> None:
         transport.send_text(chat_id, "Going offline briefly. Your team stays the same.")
     _log(_LOG_INFO, "notify", "Shutdown notifications sent")
 
-
-# ============================================================
-# NON-CORE: CommandRouter
-# ============================================================
-
 class _LegacyTransportProto(Protocol):
     def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse: ...
-
 
 class _LegacyTransportAdapter(MessageTransport):
     def __init__(self, legacy: _LegacyTransportProto) -> None:
@@ -5929,7 +5378,7 @@ class _LegacyTransportAdapter(MessageTransport):
         return False
 
     def send_chat_action(self, chat_id: ChatId, action: str) -> None:
-        pass  # intentional no-op: abstract method
+        pass
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> None:
@@ -5941,17 +5390,14 @@ class _LegacyTransportAdapter(MessageTransport):
         return {"ok": True, "result": {"message_id": message_id}}
 
     def setup_commands(self, commands: list[dict[str, str]]) -> None:
-        pass  # intentional no-op: abstract method
+        pass
 
     def download_file(self, file_id: str, session_name: str) -> str | None:
         return None
 
-
 # ── CommandRouter: dict-based dispatch ──
 
-# Type alias for command handler functions
 CommandFn = Callable[[str, ChatId, MessageId], bool]
-
 
 def _fanout_channel_message(channel_id: str, from_member: str,
                             text: str, msg: ChannelMessageDict,
@@ -5989,7 +5435,6 @@ def _fanout_channel_message(channel_id: str, from_member: str,
             except (urllib.error.URLError, OSError, TimeoutError) as exc:
                 _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
-
 class CommandRouter:
     # ── Teleport Commands ──────────────────────────────────────────────
 
@@ -6010,21 +5455,18 @@ class CommandRouter:
         full_sync = "--full" in target_spec
         target_spec = target_spec.replace("--full", "").strip()
 
-        # Parse target_host:target_cwd
         if ":" in target_spec and not target_spec.startswith("/"):
             target_host, target_cwd = target_spec.split(":", 1)
         else:
             target_host = target_spec
             target_cwd = ""
 
-        # Resolve machine catalog name to ssh_target
         machines = get_machine_catalog()
         if target_host in machines:
             machine = machines[target_host]
             if machine.ssh_target:
                 target_host = machine.ssh_target
 
-        # 1. Worker exists?
         registry = _load_registry()
         worker_entry = registry.get("workers", {}).get(worker_name)
         if not worker_entry:
@@ -6032,7 +5474,6 @@ class CommandRouter:
             return True
         backend_name = worker_entry.get("backend", "claude")
 
-        # 2. Worker not actively busy? (EXITED/OFFLINE/UNKNOWN are all fine)
         with watchdog.lock:
             worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
         current_state = worker_state[0]
@@ -6042,38 +5483,32 @@ class CommandRouter:
                 f"Wait for it to finish or /pause {worker_name} first.")
             return True
 
-        # 3. No teleport in progress?
         teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
         if teleport_file.exists():
             self.reply(chat_id, f"{worker_name} has a teleport in progress.")
             return True
 
-        # 4. Target reachable?
         r = _remote_run(["echo", "ok"], host=target_host,
                         capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode != 0:
             self.reply(chat_id, f"Cannot reach {target_host} via SSH.")
             return True
 
-        # 5. Claude Code on target?
         claude_path = _resolve_remote_tool("claude", target_host)
         if claude_path == "claude":
             self.reply(chat_id, f"claude not found on {target_host}. Install it first.")
             return True
 
-        # 6. tmux on target?
         tmux_path = _resolve_remote_tool("tmux", target_host)
         if tmux_path == "tmux":
             self.reply(chat_id, f"tmux not found on {target_host}. Install it first.")
             return True
 
-        # 6a. rsync on target? (needed for credential/transcript/working-dir sync)
         rsync_path = _resolve_remote_tool("rsync", target_host)
         if rsync_path == "rsync":
             self.reply(chat_id, f"rsync not found on {target_host}. Install it first.")
             return True
 
-        # 6b. Backend-specific binary on target?
         if backend_name != "claude":
             backend_path = _resolve_remote_tool(backend_name, target_host)
             if backend_path == backend_name:
@@ -6082,7 +5517,6 @@ class CommandRouter:
                     f"Worker uses backend '{backend_name}', which must be installed on target.")
                 return True
 
-        # 6c. tmux session collision on target?
         tmux_name = f"{self.workers.tmux_prefix}{worker_name}"
         r = _remote_run(
             ["bash", "-c", f"tmux has-session -t {tmux_name} 2>/dev/null && echo exists || echo none"],
@@ -6091,7 +5525,6 @@ class CommandRouter:
             self._teleport_notify(chat_id,
                 f"⚠️ tmux session '{tmux_name}' already exists on {target_host} — will be replaced.")
 
-        # 7. Need a reachable URL for remote workers
         target_bridge_url = BRIDGE_PUBLIC_URL or BRIDGE_URL
         if "localhost" in target_bridge_url or "127.0.0.1" in target_bridge_url:
             self.reply(chat_id,
@@ -6100,7 +5533,6 @@ class CommandRouter:
                 "(e.g., BRIDGE_PUBLIC_URL=http://100.125.36.102:8271).")
             return True
 
-        # 8. Bridge must be reachable from target
         r = _remote_run(["curl", "-sf", "--connect-timeout", "5",
                          f"{target_bridge_url}/"],
                         host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -6110,11 +5542,9 @@ class CommandRouter:
                 f"Ensure BRIDGE_BIND=0.0.0.0 and network connectivity.")
             return True
 
-        # 9. Claude credentials on target?
         r = _remote_run(["test", "-f", ".claude/.credentials.json"],
                         host=target_host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0:
-            # Try to sync credentials from source
             local_creds = os.path.expanduser("~/.claude/.credentials.json")
             if os.path.exists(local_creds):
                 _remote_run(["mkdir", "-p", ".claude"],
@@ -6132,13 +5562,11 @@ class CommandRouter:
                     f"Run: ssh {target_host} claude login")
                 return True
 
-        # 10. Hooks installed on target?
         r = _remote_run(["test", "-f", ".claude/hooks/claudecode.sh"],
                         host=target_host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode != 0:
             self._teleport_notify(chat_id, "Hooks missing on target — will install during teleport.")
 
-        # 11. Team-defined preflight checks
         preflight_fails = self._run_teleport_preflight(
             target_host, worker_name, backend_name)
         if preflight_fails:
@@ -6146,7 +5574,6 @@ class CommandRouter:
                 f"Preflight failed:\n" + "\n".join(f"  - {f}" for f in preflight_fails))
             return True
 
-        # All checks pass
         if check_only:
             self.reply(chat_id,
                 f"Preflight OK — {worker_name} is clear to teleport to {target_host}.")
@@ -6184,7 +5611,6 @@ class CommandRouter:
             self.reply(chat_id, f"{worker_name} hasn't been teleported.")
             return True
 
-        # Worker must not be actively busy
         with watchdog.lock:
             worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
         if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
@@ -6193,25 +5619,21 @@ class CommandRouter:
                 f"Wait or /pause {worker_name} first.")
             return True
 
-        # No teleport already in progress?
         teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
         if teleport_file.exists():
             self.reply(chat_id, f"{worker_name} has a teleport in progress.")
             return True
 
-        target_host = home_host  # Where we're going back to (None = local)
+        target_host = home_host
         target_cwd = home_cwd or get_claude_session_cwd(worker_name)
 
-        # If target is a remote host, verify essentials
         if target_host:
-            # Target reachable?
             r = _remote_run(["echo", "ok"], host=target_host,
                             capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0:
                 self.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")
                 return True
 
-            # claude/tmux/rsync on target?
             for tool in ("claude", "tmux", "rsync"):
                 tool_path = _resolve_remote_tool(tool, target_host)
                 if tool_path == tool:
@@ -6219,7 +5641,6 @@ class CommandRouter:
                         f"{tool} not found on {target_host}. Install it first.")
                     return True
 
-        # Verify current remote host is reachable (where worker lives now)
         if current_host:
             r = _remote_run(["echo", "ok"], host=current_host,
                             capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -6228,7 +5649,6 @@ class CommandRouter:
                     f"Cannot reach {current_host} where {worker_name} currently is.")
                 return True
 
-        # Conflict check: detect if both sides changed the working directory
         if not full_sync:
             conflicts = self._check_teleback_conflicts(
                 worker_name, current_host, target_cwd)
@@ -6255,12 +5675,10 @@ class CommandRouter:
         if not local_cwd or not remote_host:
             return conflicts
 
-        # Check if it's a git repo locally
         local_is_git = os.path.isdir(os.path.join(local_cwd, ".git"))
         if not local_is_git:
-            return conflicts  # Not a git repo — rsync is the only option
+            return conflicts
 
-        # Get local (VPS) git status — uncommitted changes + recent commits
         local_status = _subprocess_runner.run(
             ["git", "-C", local_cwd, "status", "--porcelain"],
             capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
@@ -6271,8 +5689,6 @@ class CommandRouter:
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
 
-        # Get remote git status
-        # Detect remote CWD (may have different $HOME prefix)
         home_result = _remote_run(
             ["bash", "-c", "echo $HOME"], host=remote_host,
             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
@@ -6293,7 +5709,6 @@ class CommandRouter:
             host=remote_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
         remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
 
-        # Conflict: both sides have uncommitted changes
         if local_changed and remote_changed:
             local_files = [l.strip().split(None, 1)[-1]
                           for l in local_status.stdout.strip().splitlines()[:5]]
@@ -6304,14 +5719,11 @@ class CommandRouter:
             conflicts.append(
                 f"Remote has uncommitted changes: {', '.join(remote_files)}")
 
-        # Conflict: commits diverged
         elif local_commit and remote_commit and local_commit != remote_commit:
             if local_changed:
                 conflicts.append(
                     f"VPS has uncommitted changes AND different commit than remote")
             elif remote_changed:
-                # Remote changed, local has new commits — this is the normal case
-                # (VPS got new commits while worker was away, worker made changes)
                 conflicts.append(
                     f"VPS has new commits since teleport (HEAD: {local_commit[:8]})")
                 conflicts.append(
@@ -6332,8 +5744,6 @@ class CommandRouter:
             _log(_LOG_INFO, "teleport", f"{name}: source_host={source_host}, source_cwd={source_cwd}, target_host={target_host}, target_cwd={target_cwd}")
             if not target_cwd:
                 target_cwd = source_cwd
-                # Remap home directory when source and target have different $HOME
-                # e.g., /home/claude/project → /Users/beastoinagents/project
                 if target_cwd and target_host:
                     local_home = os.path.expanduser("~")
                     home_result = _remote_run(
@@ -6343,7 +5753,6 @@ class CommandRouter:
                     if remote_home and remote_home != local_home and target_cwd.startswith(local_home):
                         target_cwd = remote_home + target_cwd[len(local_home):]
 
-            # Expand ~ in target_cwd to remote $HOME
             if target_cwd and target_cwd.startswith("~") and target_host:
                 home_result = _remote_run(
                     ["bash", "-c", "echo $HOME"], host=target_host,
@@ -6354,7 +5763,6 @@ class CommandRouter:
             elif target_cwd and target_cwd.startswith("~"):
                 target_cwd = os.path.expanduser(target_cwd)
 
-            # Write teleport state for crash recovery
             ensure_session_dir(name)
             state_file = SESSIONS_DIR / name / "teleport_state"
             _tmp_ts = state_file.with_suffix('.tmp')
@@ -6389,8 +5797,6 @@ class CommandRouter:
                     session_id, source_cwd, target_cwd, source_host, target_host)
                 _log(_LOG_INFO, "teleport", f"{name}: transcript sync done")
 
-            # On teleport out: push team configs + install hooks on target
-            # On teleback: skip — VPS is source of truth for team-scope config
             if not is_teleback:
                 self._teleport_notify(chat_id, "Syncing team config and hooks...")
                 sync_warnings = self._sync_shared_repos(target_host, chat_id)
@@ -6413,35 +5819,20 @@ class CommandRouter:
             }))
             os.replace(str(_tmp_ts2), str(state_file))
 
-            # Save remapped CWD BEFORE _start_worker_on_target so that
-            # _sync_session_files_to_target copies the correct (remapped) path
-            # to the target machine, not the stale VPS path.
             save_claude_session_cwd(name, target_cwd)
 
-            # Clear local session ID cache — the target may create a new session
-            # (e.g., different project, expired session). Without clearing, VPS
-            # returns the stale ID instead of SSH-fetching the real one from target.
-            # The hook's /outputs POST will repopulate it on first response.
             clear_claude_session_id(name)
 
-            # Pre-trust the target CWD on the target machine so Claude Code
-            # doesn't show the interactive "trust this folder?" prompt that
-            # blocks non-interactive sessions.
             _ensure_workspace_trusted_remote(target_cwd, target_host)
 
             self._teleport_notify(chat_id,
                 f"Starting {name} on {target_host or 'local'}...")
-            # Cross-machine teleport: session JSONL was synced by
-            # _sync_session_transcript above. _start_worker_on_target validates
-            # the file exists on the target before attempting --resume.
-            # If sync failed, the validation clears resume_id gracefully.
             resume_id = session_id
             _log(_LOG_INFO, "teleport", f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={resume_id}, backend={backend_name})")
             ok = self._start_worker_on_target(
                 name, target_host, target_cwd, resume_id, backend_name)
             _log(_LOG_INFO, "teleport", f"{name}: _start_worker_on_target returned {ok}")
             if not ok:
-                # Clean up target, restart source
                 _remote_run(["tmux", "kill-session", "-t", tmux_name],
                             host=target_host, capture_output=True)
                 self._teleport_rollback(name, tmux_name, source_host, source_cwd,
@@ -6449,8 +5840,6 @@ class CommandRouter:
                                         "failed to start on target")
                 return
 
-            # Update registry BEFORE killing source (crash-safe: if we crash
-            # between here and kill, bridge still knows where the worker is)
             if is_teleback:
                 _registry_clear_teleport(name)
             else:
@@ -6458,25 +5847,18 @@ class CommandRouter:
                     name, host=target_host,
                     home_host=source_host, home_cwd=source_cwd)
 
-            # Point of no return: kill source
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                         host=source_host, capture_output=True)
 
-            # On teleback: sync only worker-scoped data back
-            # VPS is source of truth — workers don't override team-scope config
             if is_teleback:
                 self._sync_worker_data_back(name, source_host)
 
-            # Auto-inject worker context so teleported worker knows about
-            # the Telegram bridge (without waiting for next SessionStart event)
             if not is_teleback:
                 try:
                     backend_obj = get_backend(backend_name)
                     welcome = self.workers._build_welcome(name, backend_obj)
-                    _clock.sleep(DELAY_PROCESS_SETTLE)  # Let Claude finish loading
+                    _clock.sleep(DELAY_PROCESS_SETTLE)
                     self.workers.send(name, welcome)
-                    # Cross-machine: inject teleport context so worker knows
-                    # about previous session and how to retrieve their work
                     if source_host != target_host:
                         ctx = _build_teleport_context(
                             name=name,
@@ -6513,11 +5895,9 @@ class CommandRouter:
     def _stop_worker_for_teleport(self, name: str, tmux_name: str, host: str | None=None) -> str | None:
         session_id = get_claude_session_id(name, authoritative=True)
 
-        # Send /exit for graceful shutdown
         _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"],
                      host=host, capture_output=True)
 
-        # Wait for process to exit (up to 10s)
         for _ in range(20):
             _clock.sleep(DELAY_RETRY)
             r = _remote_run(
@@ -6531,12 +5911,10 @@ class CommandRouter:
                 if not claude_pid:
                     break
         else:
-            # Force stop
             _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""],
                          host=host, capture_output=True)
             _clock.sleep(DELAY_STARTUP)
 
-        # Re-read session ID (hook may have updated it during /exit)
         return get_claude_session_id(name, authoritative=True) or session_id
 
     def _sync_working_directory(self, source_cwd: str, target_cwd: str,
@@ -6620,23 +5998,18 @@ class CommandRouter:
         source_slug = _project_slug(source_cwd)
         target_slug = _project_slug(target_cwd)
 
-        # _remote_run shell-quotes args, so ~ won't expand. Use $HOME instead
-        # for remote commands, and os.path.expanduser for local paths.
         source_dir = f".claude/projects/{source_slug}"
         target_dir = f".claude/projects/{target_slug}"
 
-        # Ensure target directory exists (use bash -c for $HOME expansion)
         if target_host:
             _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"],
                          host=target_host, capture_output=True)
         else:
             os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
 
-        # Sync session JSONL and subdirectory
         jsonl = f"{session_id}.jsonl"
         for item in [jsonl, f"{session_id}/"]:
             if source_host:
-                # rsync handles ~ in remote paths (not shell-quoted by _remote_run)
                 src_path = f"~/{source_dir}/{item}"
                 local_dst = os.path.expanduser(f"~/{target_dir}/")
                 cmd = ["rsync", "-az", f"{source_host}:{src_path}", local_dst]
@@ -6664,7 +6037,6 @@ class CommandRouter:
                 "agent-config": os.path.join(home, "agent-config"),
             }
 
-            # Push local changes to bare repo (VPS side)
             for repo_name, repo_path in git_repos.items():
                 if os.path.isdir(os.path.join(repo_path, ".git")):
                     try:
@@ -6684,7 +6056,6 @@ class CommandRouter:
                         warnings.append(w)
                         _log(_LOG_INFO, "teleport", f"{w}")
 
-            # Pull on target
             for repo_name in git_repos:
                 try:
                     _remote_run(
@@ -6696,7 +6067,6 @@ class CommandRouter:
                     warnings.append(w)
                     _log(_LOG_INFO, "teleport", f"{w}")
 
-            # Deploy agent-config to ~/.claude/ on target (skills, hooks, scripts)
             for subdir in ["skills", "hooks", "scripts"]:
                 try:
                     _remote_run(
@@ -6709,7 +6079,6 @@ class CommandRouter:
                     warnings.append(w)
                     _log(_LOG_INFO, "teleport", f"{w}")
 
-            # Adapt settings.json paths for target $HOME
             home_result = _remote_run(["bash", "-c", "echo $HOME"], host=target_host,
                                   capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
@@ -6744,7 +6113,6 @@ class CommandRouter:
 
         home = os.path.expanduser("~")
 
-        # 1. Sync worker's team dir (~/team/<name>/)
         worker_team_dir = os.path.join(home, "team", name)
         if os.path.isdir(worker_team_dir):
             _subprocess_runner.run(
@@ -6753,15 +6121,12 @@ class CommandRouter:
                  f"{worker_team_dir}/"],
                 capture_output=True, timeout=TIMEOUT_GIT_OP)
 
-        # 2. Sync auto-memory files back
-        # Memory lives in ~/.claude/projects/<slug>/memory/
         r = _remote_run(
             ["bash", "-c",
              "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
             host=source_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode == 0 and r.stdout.strip():
             for remote_file in r.stdout.strip().splitlines():
-                # Convert remote path to local: replace remote $HOME with local
                 home_result = _remote_run(
                     ["bash", "-c", "echo $HOME"], host=source_host,
                     capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
@@ -6788,7 +6153,7 @@ class CommandRouter:
         env["BACKEND"] = backend_name
         env["BRIDGE_URL"] = BRIDGE_PUBLIC_URL or BRIDGE_URL
 
-        seen_scripts = set()  # Deduplicate symlinked scripts
+        seen_scripts = set()
         for pdir in preflight_dirs:
             if not os.path.isdir(pdir):
                 continue
@@ -6821,18 +6186,15 @@ class CommandRouter:
 
         warnings = []
         try:
-            # Ensure hooks dir has correct permissions
             _remote_run(["chmod", "-R", "700", ".claude/hooks"],
                          host=target_host, capture_output=True)
 
-            # Sync .claude.json (onboarding, trust dialogs, project config)
             claude_json = os.path.expanduser("~/.claude.json")
             if os.path.exists(claude_json):
                 _subprocess_runner.run(
                     ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
                     capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
             else:
-                # Create minimal .claude.json to skip first-time prompts
                 _remote_run(
                     ["python3", "-c",
                      'import json,os,pathlib;'
@@ -6869,13 +6231,12 @@ class CommandRouter:
         if not os.path.exists(local_creds):
             return
 
-        # Check if target already has valid credentials with a different token
         try:
             r = _remote_run(["cat", ".claude/.credentials.json"],
                              host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode == 0 and r.stdout.strip():
-                remote_data = cast(dict[str, object], json.loads(r.stdout))  # OAuth credentials shape
-                local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))  # OAuth credentials shape
+                remote_data = cast(dict[str, object], json.loads(r.stdout))
+                local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))
                 _ro = remote_data.get("claudeAiOauth", {})
                 remote_oauth = _ro if isinstance(_ro, dict) else {}
                 _lo = local_data.get("claudeAiOauth", {})
@@ -6884,16 +6245,14 @@ class CommandRouter:
                 local_refresh = str(local_oauth.get("refreshToken", ""))
                 remote_exp = int(remote_oauth.get("expiresAt", 0))
                 now_ms = int(_clock.time() * 1000)
-                # Skip if target has a DIFFERENT refresh token that hasn't expired
                 if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
                     _log(_LOG_INFO, "creds", f"Target {target_host} has independent valid credentials, skipping sync")
                     return
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
-            pass  # intentional no-op: can't verify remote — fall through to sync anyway
+            pass
 
         _remote_run(["mkdir", "-p", ".claude"],
                      host=target_host, capture_output=True)
-        # Atomic: rsync to tmp, then mv (avoids truncated file on crash)
         _subprocess_runner.run(
             ["rsync", "-az", local_creds,
              f"{target_host}:.claude/.credentials.json.tmp"],
@@ -6909,12 +6268,10 @@ class CommandRouter:
                                  session_id: str | None, backend_name: str, skip_session_sync: bool=False) -> bool:
         tmux_name = f"{TMUX_PREFIX}{name}"
 
-        # Clean up any leftover session
         _remote_run(["tmux", "kill-session", "-t", tmux_name],
                      host=target_host, capture_output=True)
         _clock.sleep(DELAY_TMUX_SEND)
 
-        # Create new session
         r = _remote_run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
             host=target_host, capture_output=True, text=True)
@@ -6926,7 +6283,6 @@ class CommandRouter:
 
         _clock.sleep(DELAY_RETRY)
 
-        # Remap SESSIONS_DIR for target $HOME (e.g. /home/claude → /Users/user)
         target_sessions_dir = str(SESSIONS_DIR)
         local_home = os.path.expanduser("~")
         if target_host:
@@ -6937,20 +6293,16 @@ class CommandRouter:
             if remote_home and remote_home != local_home and target_sessions_dir.startswith(local_home):
                 target_sessions_dir = remote_home + target_sessions_dir[len(local_home):]
 
-        # Sync session files (chat_id, session_id, cwd) to target
-        # Skip for remote restarts — worker was already on target, target files are authoritative
         if target_host and not skip_session_sync:
             self._sync_session_files_to_target(name, target_sessions_dir, target_host)
 
-        # Sync credentials if target lacks them
         if target_host:
             self._sync_credentials_to_target(target_host)
 
-        # Export hook env vars (BRIDGE_URL points back to bridge)
         for key, value in {
             "PORT": str(PORT),
             "TMUX_PREFIX": TMUX_PREFIX,
-            "SESSIONS_DIR": target_sessions_dir,  # Remapped for target $HOME
+            "SESSIONS_DIR": target_sessions_dir,
             "WORKER_BACKEND": normalize_backend(backend_name),
             "BRIDGE_URL": BRIDGE_PUBLIC_URL or BRIDGE_URL,
         }.items():
@@ -6959,18 +6311,15 @@ class CommandRouter:
 
         _clock.sleep(DELAY_TMUX_SEND)
 
-        # Source env and unset CLAUDECODE
         _remote_run(
             ["tmux", "send-keys", "-t", tmux_name,
              'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
             host=target_host, capture_output=True)
         _clock.sleep(DELAY_TMUX_SEND)
 
-        # Build and send start command
         backend = get_backend(backend_name)
         cli_cmd = backend.start_cmd(session_id or "")
 
-        # Claude Code refuses --dangerously-skip-permissions as root
         if target_host:
             id_result = _remote_run(["id", "-u"], host=target_host,
                                capture_output=True, text=True)
@@ -6987,16 +6336,12 @@ class CommandRouter:
             host=target_host, capture_output=True)
 
         if backend.is_interactive:
-            # Claude may show first-time prompts (theme picker, permission
-            # mode). Navigate them: Enter accepts defaults, "2" selects
-            # auto-accept permission mode. Multiple Enter presses are safe.
             for delay, key in [(3.0, "Enter"), (2.0, "Enter"),
                                (1.0, "Enter"), (1.0, "Enter")]:
                 _clock.sleep(delay)
                 _remote_run(["tmux", "send-keys", "-t", tmux_name, key],
                              host=target_host, capture_output=True)
 
-        # Verify Claude is running (retry up to 30s for startup)
         for attempt in range(30):
             _clock.sleep(DELAY_STARTUP)
             r = _remote_run(
@@ -7013,7 +6358,6 @@ class CommandRouter:
                 return True
             if attempt % 10 == 0:
                 _log(_LOG_INFO, "teleport", f"verify attempt {attempt}: pane_pid={pane_pid}, no claude yet")
-                # Capture pane to see what's happening
                 cap = _remote_run(
                     ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                     host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
@@ -7026,11 +6370,9 @@ class CommandRouter:
                             session_id: str | None, backend_name: str, chat_id: ChatId | None, reason: str) -> None:
         self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
         try:
-            # Restore source CWD (may have been overwritten with target path)
             if source_cwd:
                 save_claude_session_cwd(name, source_cwd)
 
-            # Ensure tmux session exists on source
             if not tmux_exists(tmux_name, host=source_host):
                 _remote_run(
                     ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
@@ -7038,7 +6380,6 @@ class CommandRouter:
                 _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
                             host=source_host, capture_output=True)
 
-            # Restart Claude Code on source
             backend = get_backend(backend_name)
             start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
             if source_cwd:
@@ -7064,7 +6405,6 @@ class CommandRouter:
             transport.send_text(chat_id, text)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:_teleport_notify", f"{type(exc).__name__}: {exc}")
-
 
     # ── Worker Lifecycle ──────────────────────────────────────────────
 
@@ -7114,7 +6454,6 @@ class CommandRouter:
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
         args = (args or "").strip()
 
-        # Parse flags
         clean = False
         force = False
         tokens = args.split()
@@ -7128,15 +6467,12 @@ class CommandRouter:
                 remaining.append(t)
         name_arg = remaining[0].lower() if remaining else ""
 
-        # Branch: /restart cancel
         if name_arg == "cancel":
             return self._cmd_restart_cancel(chat_id)
 
-        # Branch: /restart all [--clean]
         if name_arg == "all":
             return self._cmd_restart_all(chat_id, clean)
 
-        # Branch: /restart name1 name2 name3 ... (multi-worker restart)
         if len(remaining) > 1:
             names = [n.lower() for n in remaining]
             self.reply(chat_id, f"Restarting {len(names)} workers: {', '.join(names)}...")
@@ -7173,7 +6509,6 @@ class CommandRouter:
             state.active = name
             save_last_active(name)
 
-        # Guard: skip restart if worker is already running (unless --force)
         host = get_worker_host(name)
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
         _log(_LOG_INFO, "cmd_restart", f"{name}: force={force}, clean={clean}, host={host}, tmux={tmux_name}")
@@ -7185,7 +6520,6 @@ class CommandRouter:
             self.reply(chat_id, f"{name.capitalize()} is already running. Use /restart --force {name} to force.")
             return True
 
-        # In-flight dedupe: block if a restart is already in progress (even with --force)
         with watchdog.restart_lock:
             inflight_ts = watchdog.restart_in_progress.get(name)
             if inflight_ts and _clock.time() - inflight_ts < 120:
@@ -7204,7 +6538,6 @@ class CommandRouter:
                 watchdog.restart_in_progress.pop(name, None)
 
     def _do_restart(self, name: str, session: TmuxSessionDict | None, chat_id: ChatId, host: str | None, tmux_name: str, force: bool, clean: bool) -> bool:
-        # Teleported worker: delegate to remote restart
         if host:
             mode = "relaunch" if clean else "resume"
             backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
@@ -7225,7 +6558,6 @@ class CommandRouter:
                            outcome="Needs decision")
             return True
 
-        # --clean: fresh start (clear session IDs)
         if clean:
             ok, err = restart_claude(name, mode="relaunch")
             if ok:
@@ -7236,12 +6568,9 @@ class CommandRouter:
                 self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
 
-        # Default: resume behavior
         backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
         backend = get_backend(backend_name)
 
-        # Non-interactive backends: resume is automatic via saved thread ID
-        # (but only if tmux is still alive — dead workers need full restart)
         tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}") if session else f"{self.workers.tmux_prefix}{name}"
         worker_alive = session and "tmux" in session and tmux_exists(tmux_name)
         if not backend.is_interactive and worker_alive:
@@ -7252,7 +6581,6 @@ class CommandRouter:
                 self.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
             return True
 
-        # Interactive backends: restart with --resume
         session_dir = get_session_dir(name)
         has_session_id = False
         if session_dir.exists():
@@ -7281,8 +6609,6 @@ class CommandRouter:
         resume_id = ""
         target_cwd = get_claude_session_cwd(name)
 
-        # Remap $HOME if CWD still has the VPS path (e.g., /home/claude/...)
-        # This happens when remote session files have a stale VPS CWD.
         if target_cwd and host:
             local_home = os.path.expanduser("~")
             if target_cwd.startswith(local_home):
@@ -7295,14 +6621,11 @@ class CommandRouter:
 
         _log(_LOG_INFO, "_restart_remote", f"{name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
         if mode == "resume":
-            # Respect cached session ID first (may have been set explicitly).
-            # Only fall back to authoritative scan if cache is empty.
             resume_id = get_claude_session_id(name, authoritative=False)
             if not resume_id:
                 resume_id = get_claude_session_id(name, authoritative=True)
             _log(_LOG_INFO, "_restart_remote", f"{name}: resume_id={resume_id}")
         else:
-            # Clear session IDs for relaunch
             session_dir = SESSIONS_DIR / name
             session_dir.mkdir(parents=True, exist_ok=True)
             cleared = list(session_dir.glob("*_session_id"))
@@ -7311,19 +6634,15 @@ class CommandRouter:
             _clear_hook_failures(name)
             _log(_LOG_INFO, "_restart_remote", f"{name}: cleared {len(cleared)} session files for relaunch")
 
-        # Stop the remote Claude process if tmux is still alive
         if tmux_exists(tmux_name, host=host):
             _log(_LOG_INFO, "_restart_remote", f"{name}: stopping remote tmux {tmux_name}")
             self._stop_worker_for_teleport(name, tmux_name, host=host)
-            # Kill tmux — _start_worker_on_target creates a fresh one
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                          host=host, capture_output=True)
             _clock.sleep(DELAY_RETRY)
         else:
             _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
 
-        # Re-read session_id (hook may have updated during /exit)
-        # Prefer cached value — only scan if cache was cleared by the stop hook
         if mode == "resume":
             cached = get_claude_session_id(name, authoritative=False)
             if cached:
@@ -7332,16 +6651,11 @@ class CommandRouter:
                 resume_id = get_claude_session_id(name, authoritative=True) or resume_id
             _log(_LOG_INFO, "_restart_remote", f"{name}: post-stop resume_id={resume_id}")
 
-        # Validate session is resumable on target before attempting --resume
-        # Claude stores sessions under ~/.claude/projects/-<cwd-dashes>/<session_id>.jsonl
-        # If the file doesn't exist on the target, --resume will fail immediately
         if resume_id and target_cwd and host:
-            # Build the project dir path on the remote host
             home_result = _remote_run(["bash", "-c", "echo $HOME"], host=host,
                                   capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
             remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
             if remote_home:
-                # Claude Code project dir: ~/.claude/projects/-<cwd with / replaced by->
                 cwd_slug = target_cwd.replace("/", "-")
                 session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
                 check = _remote_run(["test", "-f", session_file], host=host,
@@ -7349,7 +6663,6 @@ class CommandRouter:
                 if check.returncode != 0:
                     _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} NOT found at {session_file}, starting fresh")
                     resume_id = ""
-                    # Clear stale session ID
                     session_dir = SESSIONS_DIR / name
                     session_dir.mkdir(parents=True, exist_ok=True)
                     for f in session_dir.glob("*_session_id"):
@@ -7357,12 +6670,8 @@ class CommandRouter:
                 else:
                     _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
 
-        # Pre-trust the CWD on the remote machine so Claude Code
-        # doesn't block on the interactive trust prompt.
         _ensure_workspace_trusted_remote(target_cwd, host)
 
-        # Delegate to existing remote start flow
-        # skip_session_sync=True: worker was already on this host, target session files are authoritative
         _log(_LOG_INFO, "_restart_remote", f"{name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
         ok = self._start_worker_on_target(
             name, host, target_cwd, resume_id, backend_name, skip_session_sync=True)
@@ -7370,7 +6679,6 @@ class CommandRouter:
             _log(_LOG_WARN, "_restart_remote", f"{name}: _start_worker_on_target FAILED")
             return False, f"Failed to restart {name} on {host}"
 
-        # Wait for Claude to actually start before sending welcome
         welcome = self.workers._build_welcome(name, backend)
         if backend.is_interactive:
             started = False
@@ -7400,7 +6708,6 @@ class CommandRouter:
             self._restart_all_running = True
             self._restart_all_abort.clear()
 
-        # Snapshot worker names now; sort alphabetically, focused worker last
         names = sorted(registered.keys())
         active = state.active
         if active and active in names:
@@ -7449,7 +6756,6 @@ class CommandRouter:
                     self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} failed: {err}")
 
                 if i < total:
-                    # Interruptible sleep
                     for _ in range(5):
                         if self._restart_all_abort.is_set():
                             break
@@ -7632,7 +6938,6 @@ class CommandRouter:
         if sub in subcommands:
             return subcommands[sub]()
 
-        # /relay <worker> — main flow
         worker = sub
         registered = get_registered_sessions()
         if worker not in registered:
@@ -7660,7 +6965,6 @@ class CommandRouter:
     # ── Media Routing ──────────────────────────────────────────────────
 
     def _extract_reply_media(self, reply_to: TelegramMessageDict, target_worker: str) -> str | None:
-        # Check for media types in priority order
         animation = reply_to.get("animation")
         photo = reply_to.get("photo")
         document = reply_to.get("document")
@@ -7691,7 +6995,6 @@ class CommandRouter:
         elif voice:
             file_id = voice.get("file_id")
             media_label = "voice message"
-            # Will attempt transcription after download below
         elif sticker:
             file_id = sticker.get("file_id")
             media_label = f"sticker: {sticker.get('emoji', '')}"
@@ -7717,7 +7020,6 @@ class CommandRouter:
         reply_text = _extract_msg_text(reply_to)
         if not reply_text:
             return None
-        # Worker messages are formatted as "name:\n..." — extract the name
         first_line = reply_text.split("\n", 1)[0]
         if first_line.endswith(":"):
             candidate = first_line[:-1].strip().lower()
@@ -7733,11 +7035,9 @@ class CommandRouter:
             return
         items = group["items"]
         caption = group.get("caption", "")
-        # Find the first msg dict (for reply-to context)
         first_msg = items[0] if items else {}
         chat_id = first_msg.get("chat", {}).get("id")
         msg_id = first_msg.get("message_id")
-        # Determine target worker from caption (same logic as _resolve_media_target)
         target = None
         if caption:
             targets, _ = self.parse_at_mentions(caption)
@@ -7750,7 +7050,6 @@ class CommandRouter:
         if not target:
             target = state.active
 
-        # Download and route each item to the same target
         all_paths = []
         for msg in items:
             photo = msg.get("photo")
@@ -7806,7 +7105,6 @@ class CommandRouter:
         if not all_paths:
             return
 
-        # Build combined message text
         path_lines = "\n".join(f"Manager sent {mt}: `{p}`" for p, mt in all_paths)
         if caption:
             full_text = f"{caption}\n\n{path_lines}"
@@ -7838,7 +7136,6 @@ class CommandRouter:
                     statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
                 sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
                 offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
-                # Only reply on failure — success is silent
                 if offline:
                     parts = []
                     parts.append(f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline.")
@@ -7846,13 +7143,11 @@ class CommandRouter:
                         parts.append(f"Delivered to {', '.join(sent_to)}.")
                     self.reply(chat_id, " ".join(parts))
                 return
-        # Check reply-to: if replying to a worker's message, route to that worker
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
             self.route_message(reply_worker, media_text, chat_id, msg_id, one_off=True)
             return
         self.route_to_active(media_text, chat_id, msg_id)
-
 
     # ── Mention Routing ──────────────────────────────────────────────
 
@@ -7866,7 +7161,6 @@ class CommandRouter:
                                 reply_to: TelegramMessageDict | None,
                                 reply_context: str,
                                 reply_context_ts: int | None) -> None:
-        # Bare @mention means focus switch only (silent on success)
         if len(targets) == 1 and re.fullmatch(r'\s*@[a-zA-Z0-9-]+\s*', text):
             target = targets[0]
             registered = self.workers.get_registered_sessions()
@@ -7904,7 +7198,6 @@ class CommandRouter:
                 parts.append(f"Delivered to {', '.join(sent_to)}.")
             self.reply(chat_id, " ".join(parts))
 
-        # Auto-focus: same single registered worker mentioned 2+ times within 60s
         registered = self.workers.get_registered_sessions()
         now = _clock.time()
         if len(targets) == 1 and targets[0] in registered:
@@ -7922,8 +7215,6 @@ class CommandRouter:
         else:
             self._reset_mention_streak()
 
-    # @mention regex: negative lookbehind skips @ inside email addresses
-    # (e.g., user@gmail.com → @gmail NOT matched; "@geni hello" → @geni matched)
     _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
 
     def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
@@ -8030,12 +7321,10 @@ class CommandRouter:
             )
         return f"Manager reply:\n{reply_text}"
 
-
     # ── Core Router ─────────────────────────────────────────────────
 
     def __init__(self, transport: MessageTransport | None,
                  workers: "WorkerManager") -> None:
-        # Accept MessageTransport or legacy TelegramAPI-style objects (for test compat)
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
@@ -8045,8 +7334,6 @@ class CommandRouter:
         self._restart_all_abort: threading.Event = threading.Event()
         self._restart_all_thread: threading.Thread | None = None  # type: ignore[no-redef]
 
-        # Each handler takes (arg, chat_id, message_id) and returns True if handled.
-        # To add a new command, add one line here. No dispatch changes needed.
         self._commands: dict[str, CommandFn] = {
             "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),
             "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),
@@ -8054,7 +7341,7 @@ class CommandRouter:
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),
             "/status": lambda arg, cid, mid: self.cmd_status(cid),
-            "/settings": lambda arg, cid, mid: self.cmd_status(cid),  # alias
+            "/settings": lambda arg, cid, mid: self.cmd_status(cid),
             "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),
             "/relay": lambda arg, cid, mid: self.cmd_relay(arg, cid),
             "/rewind": lambda arg, cid, mid: self.cmd_rewind(arg, cid),
@@ -8087,7 +7374,6 @@ class CommandRouter:
         global admin_chat_id
         _log(_LOG_INFO, "handle_message", f"ENTER update_id={update.get('update_id')}")
 
-        # Parse update once into IncomingMessage
         incoming = IncomingMessage.from_update(update)
         msg = incoming.raw_msg
         text = incoming.text
@@ -8095,7 +7381,6 @@ class CommandRouter:
         msg_id = incoming.msg_id
         _log(_LOG_INFO, "handle_message", f"chat_id={chat_id} admin={admin_chat_id} text={repr(text[:40])}")
 
-        # Media group handling: buffer multi-photo messages
         media_group_id = msg.get("media_group_id")
         has_media = (incoming.photo or incoming.document or incoming.animation
                      or incoming.video or incoming.audio or incoming.voice
@@ -8106,12 +7391,10 @@ class CommandRouter:
             self._buffer_media_group(media_group_id, msg, text)
             return
 
-        # Single media message
         if has_media and chat_id:
             if self._handle_single_media(incoming):
                 return
 
-        # Text-only message routing
         if text and chat_id:
             self._route_text_message(incoming)
 
@@ -8152,7 +7435,6 @@ class CommandRouter:
         chat_id = incoming.chat_id
         msg_id = incoming.msg_id
 
-        # Determine media type and file_id
         file_id: str | None = None
         media_label = "media"
 
@@ -8200,10 +7482,9 @@ class CommandRouter:
             self.reply(chat_id, f"Could not download {media_label}. Try again.")
             return True
 
-        # Build the media text based on type
         media_text = self._format_media_text(incoming, local_path, media_label)
         if media_text is None:
-            return True  # Voice with transcript was already handled
+            return True
 
         if text:
             media_text = f"{text}\n\n{media_text}"
@@ -8241,7 +7522,7 @@ class CommandRouter:
                 self.reply(chat_id, f"🎤 _{transcript}_")
                 routed = f"{text}\n\n{transcript}" if text else transcript
                 self._route_media_message(routed, text or transcript, chat_id, msg_id, msg=msg)
-                return None  # Already handled
+                return None
             return f"Manager sent voice message: ({duration}s)\nPath: `{local_path}`"
 
         if incoming.video:
@@ -8292,7 +7573,6 @@ class CommandRouter:
             self._reset_mention_streak()
             return
 
-        # Extract reply context
         reply_context = ""
         reply_context_ts = None
         reply_to = msg.get("reply_to_message")
@@ -8320,7 +7600,6 @@ class CommandRouter:
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
             self._reset_mention_streak()
             return
-        # No @mentions → route to focused worker
         self._reset_mention_streak()
         routed_text = text
         if reply_context:
@@ -8334,7 +7613,6 @@ class CommandRouter:
             cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        # Adding a new command = adding one entry to self._commands in __init__.
         handler = self._commands.get(cmd)
         if handler:
             return handler(arg, chat_id or 0, msg_id or 0)
@@ -8343,7 +7621,6 @@ class CommandRouter:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
             return True
 
-        # Implicit worker focus: /name routes to worker
         worker_name = cmd[1:]
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
@@ -8358,7 +7635,6 @@ class CommandRouter:
             return True
 
         return False
-
 
     def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
         if not name:
@@ -8392,7 +7668,7 @@ class CommandRouter:
                     url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
                 with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                    cast(dict[str, object], _json.loads(resp.read()))  # bridge response, discarded
+                    cast(dict[str, object], _json.loads(resp.read()))
                 enabled.append(n)
                 session_names.append(session_name)
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -8412,7 +7688,7 @@ class CommandRouter:
                 data=payload, method="POST",
                 headers={"Content-Type": "application/json"})
             with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                cast(dict[str, object], _json.loads(resp.read()))  # bridge response, discarded
+                cast(dict[str, object], _json.loads(resp.read()))
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
         host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
@@ -8423,7 +7699,6 @@ class CommandRouter:
             msg += f"\n⚠️ Failed: {'; '.join(errors)}"
         self.reply(chat_id, msg)
         return True
-
 
     def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
         if not name:
@@ -8436,8 +7711,6 @@ class CommandRouter:
         tokens.add_rewind(token, name)
         url = f"{base_url}/transcript/{name}?token={token}"
         try:
-            # Pass live_base_url so pagination/search links point to the bridge
-            # endpoint (the static snapshot can't handle query params itself)
             html_content = _render_transcript_html(
                 name, per_page=200, token=token,
                 live_base_url=f"{base_url}/transcript/{name}")
@@ -8458,11 +7731,9 @@ class CommandRouter:
             self.reply(chat_id, "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
             return True
         arg = arg.strip()
-        # Parse PR URL (supports #issuecomment-XXXXX fragments)
         clean_url = arg.split('#')[0]
         m = re.match(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)', clean_url)
         if not m:
-            # Try bare number (assume BasedHardware/omi)
             try:
                 pr_num = int(clean_url)
                 owner, repo = 'BasedHardware', 'omi'
@@ -8474,7 +7745,6 @@ class CommandRouter:
 
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
 
-        # Run tools/review.py — pass full URL (with fragment) so it can highlight linked comment
         script_path = Path(__file__).parent / "review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
         try:
@@ -8551,22 +7821,17 @@ class CommandRouter:
         self.reply(chat_id, "\n".join(lines))
         return True
 
-
     # ── Remote Restart ──────────────────────────────────────────────
-
 
     # ── Restart All (sequential) ──────────────────────────────────
 
-
     # ── Teleport commands ──────────────────────────────────────────────────
-
 
     def cmd_status(self, chat_id: ChatId) -> bool:
         import time as _time
 
         registered = self.workers.get_registered_sessions()
 
-        # Uptime
         pid = os.getpid()
         try:
             proc_start = os.stat(f"/proc/{pid}").st_mtime
@@ -8583,7 +7848,6 @@ class CommandRouter:
         except (OSError, ValueError):
             uptime_str = "unknown"
 
-        # Connectivity
         tm_status = tunnel_manager.status() if tunnel_manager else {}
         poll_active = tm_status.get("polling_active", False)
         tunnel_url = tm_status.get("tunnel_url", "")
@@ -8594,7 +7858,6 @@ class CommandRouter:
         else:
             inbound = "DOWN"
 
-        # Team counts
         busy = 0
         idle = 0
         offline = 0
@@ -8613,7 +7876,6 @@ class CommandRouter:
 
         total = busy + idle + offline
 
-        # Machines — map ssh_target to display name from catalog
         machine_workers: dict[str, list[str]] = {}
         catalog = get_machine_catalog()
         ssh_to_display: dict[str | None, str] = {None: "local"}
@@ -8625,7 +7887,6 @@ class CommandRouter:
             label = ssh_to_display.get(host, host or "local")
             machine_workers.setdefault(label, []).append(name)
 
-        # Connectors — only show running ones
         conn_status = _get_connectors_status()
         conn_parts: list[str] = []
         for cname, info in conn_status.items():
@@ -8636,7 +7897,6 @@ class CommandRouter:
             elif running:
                 conn_parts.append(f"{cname} ({failures} err)")
 
-        # Build output
         lines = [
             f"<b>v{VERSION}</b> | up {uptime_str} | {inbound}",
             "",
@@ -8647,7 +7907,6 @@ class CommandRouter:
         if busy_names:
             lines.append(f"busy: {', '.join(sorted(busy_names))}")
 
-        # Machine breakdown (only if multiple)
         if len(machine_workers) > 1:
             machine_line = " / ".join(
                 f"{label} {len(ws)}" for label, ws in sorted(machine_workers.items())
@@ -8660,7 +7919,6 @@ class CommandRouter:
         if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
         return True
-
 
     def route_to_active(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
         registered = self.workers.get_registered_sessions()
@@ -8701,7 +7959,6 @@ class CommandRouter:
             return
 
         if not self.workers.is_online(session_name, session):
-            # Check if worker is being teleported before reporting offline
             teleport_state_file = SESSIONS_DIR / session_name / "teleport_state"
             if teleport_state_file.exists():
                 self.reply(chat_id, f"{session_name.capitalize()} is being teleported. Please wait.")
@@ -8712,8 +7969,6 @@ class CommandRouter:
         backend_name = get_worker_backend(session_name, session)
         backend = get_backend(backend_name)
 
-        # Interactive prompt shortcut: if worker is at a selection prompt and
-        # manager sends a single digit or "skip", translate to keystrokes
         shortcut = text.strip().lower()
         if backend.is_interactive and shortcut in (
             "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "cancel"
@@ -8728,13 +7983,10 @@ class CommandRouter:
                         action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
                         self.reply(chat_id, f"{action}.")
                         return
-        # Non-interactive backpressure: atomic check+set to prevent races
         if not backend.is_interactive and chat_id is not None and not try_set_pending(session_name, chat_id):
             self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
             return
 
-        # Prefix manager messages so workers can distinguish from inter-worker messages.
-        # Skip if text already has a "Manager sent ..." prefix (media messages).
         if not text.startswith("Manager sent "):
             text = f"manager: {text}"
 
@@ -8760,16 +8012,9 @@ class CommandRouter:
                 if self.transport and chat_id is not None:
                     self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
-
 assert worker_manager is not None
 command_router = CommandRouter(transport, worker_manager)
 
-
-# ============================================================
-# TRANSCRIPT VIEWER
-# ============================================================
-
-# Background transcript sync tracking: {key: {status, progress, error, path, started}}
 class TranscriptSyncRegistry:
     def __init__(self) -> None:
         self._state: dict[str, TranscriptSyncState] = {}
@@ -8793,13 +8038,9 @@ class TranscriptSyncRegistry:
             entry = self._state.get(key, {})
             return entry.get("started", 0)
 
-
 _transcript_sync = TranscriptSyncRegistry()
 
-
-# Path to indexer script (indexer.py — transcript subcommand)
 INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indexer.py")
-
 
 def _run_transcript_query(jsonl_path: str, sid: str, query: str,
                           host: str | None = None, *,
@@ -8811,7 +8052,6 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = INDEXER_SCRIPT
     if host:
-        # Use script on remote host (deployed via scp/rsync)
         remote_home = _get_remote_home(host) or ""
         if remote_home:
             script_path = f"{remote_home}/claudecode-telegram/indexer.py"
@@ -8829,22 +8069,19 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
         cmd.extend(["--sort", sort])
     try:
         if host:
-            # For remote workers, use the script on the remote host
             r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_LARGE_TRANSFER)
         else:
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
-            return cast(dict[str, object], json.loads(r.stdout))  # external tool output
+            return cast(dict[str, object], json.loads(r.stdout))
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
     return None
-
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
     try:
         _transcript_sync.set(key, {"status": "syncing", "progress": "Connecting to remote host...",
                                    "started": _clock.time(), "path": None, "error": None})
-        # First get remote file size for progress
         r = _subprocess_runner.run(["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
                            capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         remote_size = 0
@@ -8857,13 +8094,11 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
         else:
             _transcript_sync.update(key, progress="Syncing transcript...")
 
-        # Run rsync with --progress (we poll local file size for progress)
         proc = _subprocess_runner.popen(
             ["rsync", "-az", f"{host}:{remote_path}", str(local_tmp)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         try:
-            # Poll local file size while rsync runs
             while proc.poll() is None:
                 _clock.sleep(DELAY_STARTUP)
                 try:
@@ -8894,10 +8129,8 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                                    "started": _transcript_sync.get_started(key),
                                    "path": None, "error": str(e)[:200]})
 
-
 def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
     cwd = get_claude_session_cwd(name)
-    # RAM CWD may be empty after bridge restart — fall back to live tmux pane CWD
     if not cwd:
         host = get_worker_host(name)
         tmux_name = f"{TMUX_PREFIX}{name}"
@@ -8931,19 +8164,16 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                     local_tmp = Path(f"/tmp/transcript-{name}-{sid}.jsonl")
                     sync_key = f"{name}:{sid}"
 
-                    # Check if sync already completed
                     sync_info = _transcript_sync.get(sync_key)
                     if sync_info and sync_info["status"] == "done" and local_tmp.exists():
                         transcript_path = local_tmp
                     elif sync_info and sync_info["status"] == "syncing":
                         return "syncing", sid, cwd
                     elif sync_info and sync_info["status"] == "error":
-                        # Don't retry forever — return None so caller shows error
                         err = sync_info.get("error", "unknown error")
                         _log(_LOG_WARN, "transcript", f"sync failed for {name}:{sid}: {err}")
                         return None, sid, cwd
                     else:
-                        # Start background sync
                         _task_pool.submit(_start_transcript_sync,
                                           name, host, remote_path, local_tmp, sync_key)
                         return "syncing", sid, cwd
@@ -8953,7 +8183,6 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     if transcript_path.exists():
         return str(transcript_path), sid, cwd
     return None, sid, cwd
-
 
 def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
     entries = []
@@ -8974,11 +8203,10 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
             entries.append(entry)
     return entries
 
-
 def _generate_member_avatar(name: str) -> str:
     name_hash = hash(name) & 0xFFFFFFFF
-    hue = (name_hash % 36) * 10  # 0-350 in steps of 10
-    sat = 55 + (name_hash >> 6 & 1) * 15  # 55 or 70
+    hue = (name_hash % 36) * 10
+    sat = 55 + (name_hash >> 6 & 1) * 15
     shape_idx = (name_hash >> 7) % 6
     accent_idx = (name_hash >> 10) % 5
     initials = name[:2].upper() if len(name) >= 2 else name.upper()
@@ -8986,22 +8214,20 @@ def _generate_member_avatar(name: str) -> str:
     bg = f"hsl({hue},{sat}%,42%)"
     fg = f"hsl({hue},{max(sat-20,30)}%,75%)"
 
-    # Base shapes for the background
     shapes = [
-        '<circle cx="14" cy="14" r="14"/>',  # circle
-        '<rect x="1" y="1" width="26" height="26" rx="6"/>',  # rounded rect
-        '<polygon points="14,0 28,7 28,21 14,28 0,21 0,7"/>',  # hexagon
-        '<polygon points="14,1 27,14 14,27 1,14"/>',  # diamond
-        '<polygon points="14,0 28,10 22,28 6,28 0,10"/>',  # pentagon
-        '<rect x="0" y="0" width="28" height="28" rx="10"/>',  # squircle
+        '<circle cx="14" cy="14" r="14"/>',
+        '<rect x="1" y="1" width="26" height="26" rx="6"/>',
+        '<polygon points="14,0 28,7 28,21 14,28 0,21 0,7"/>',
+        '<polygon points="14,1 27,14 14,27 1,14"/>',
+        '<polygon points="14,0 28,10 22,28 6,28 0,10"/>',
+        '<rect x="0" y="0" width="28" height="28" rx="10"/>',
     ]
-    # Accent overlays
     accents = [
-        '',  # none
-        f'<circle cx="14" cy="14" r="8" fill="none" stroke="{fg}" stroke-width="1.5" opacity=".3"/>',  # ring
-        f'<circle cx="7" cy="7" r="2" fill="{fg}" opacity=".2"/><circle cx="21" cy="7" r="2" fill="{fg}" opacity=".2"/>',  # dots
-        f'<line x1="4" y1="4" x2="24" y2="24" stroke="{fg}" stroke-width="1" opacity=".15"/><line x1="4" y1="24" x2="24" y2="4" stroke="{fg}" stroke-width="1" opacity=".15"/>',  # cross
-        f'<rect x="4" y="12" width="20" height="4" rx="2" fill="{fg}" opacity=".15"/>',  # bar
+        '',
+        f'<circle cx="14" cy="14" r="8" fill="none" stroke="{fg}" stroke-width="1.5" opacity=".3"/>',
+        f'<circle cx="7" cy="7" r="2" fill="{fg}" opacity=".2"/><circle cx="21" cy="7" r="2" fill="{fg}" opacity=".2"/>',
+        f'<line x1="4" y1="4" x2="24" y2="24" stroke="{fg}" stroke-width="1" opacity=".15"/><line x1="4" y1="24" x2="24" y2="4" stroke="{fg}" stroke-width="1" opacity=".15"/>',
+        f'<rect x="4" y="12" width="20" height="4" rx="2" fill="{fg}" opacity=".15"/>',
     ]
 
     return (f'<div class="u-av"><svg viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">'
@@ -9011,22 +8237,16 @@ def _generate_member_avatar(name: str) -> str:
             f'fill="#fff" font-family="Inter,system-ui,sans-serif" font-size="11" font-weight="600" '
             f'opacity=".9">{initials}</text></svg></div>')
 
-
-# Known team member prefixes for avatar detection
 _TEAM_MEMBERS = {
     "chen", "geni", "hiro", "jin", "kai", "kelvin", "kenji",
     "lee", "luck", "mon", "noa", "ren", "ryo", "sora", "taro",
     "x", "yuki", "finn",
 }
 
-
-# Manager GitHub avatar
 _MANAGER_AV = '<div class="u-av"><img src="https://avatars.githubusercontent.com/u/4256921" alt="manager"></div>'
-
 
 def _detect_message_author(text: str) -> AuthorDetection:
     stripped = text.strip()
-    # Check for "name: " prefix (1-10 chars before colon)
     colon_pos = stripped.find(":")
     if 0 < colon_pos <= 10:
         prefix = stripped[:colon_pos].lower().strip()
@@ -9035,12 +8255,9 @@ def _detect_message_author(text: str) -> AuthorDetection:
             return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
         if prefix in _TEAM_MEMBERS:
             return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
-    # Default: manager avatar, full text
     return AuthorDetection("manager", _MANAGER_AV, stripped)
 
-
 # ── Transcript rendering SVG constants ──────────────────────────────────
-# Module-level to avoid re-creation on every _transcript_entry_to_html call.
 
 _TRANSCRIPT_CHEVRON_SVG = '<svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z"/></svg>'
 
@@ -9058,7 +8275,6 @@ _TRANSCRIPT_TOOL_SVGS: dict[str, str] = {
 
 _TRANSCRIPT_DEFAULT_TOOL_SVG = '<svg class="t-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M5.433 2.304A4.49 4.49 0 003.5 6c0 1.598.832 3.002 2.09 3.802.518.328.929.923.902 1.64v.008l-.164 3.337a.75.75 0 11-1.498-.073l.163-3.34c.007-.14-.1-.313-.357-.476A5.994 5.994 0 012 6c0-2.033 1.01-3.83 2.555-4.916A1.89 1.89 0 015.433 2.304zM10.567 2.304A4.49 4.49 0 0112.5 6c0 1.598-.832 3.002-2.09 3.802-.518.328-.929.923-.902 1.64v.008l.164 3.337a.75.75 0 101.498-.073l-.163-3.34c-.007-.14.1-.313.357-.476A5.994 5.994 0 0114 6c0-2.033-1.01-3.83-2.555-4.916a1.89 1.89 0 00-.878 1.22z"/></svg>'
 
-
 def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None) -> str:
     import base64 as _b64
     if tool_results is None:
@@ -9073,30 +8289,24 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
     _default_tool_svg = _TRANSCRIPT_DEFAULT_TOOL_SVG
     parts: list[str] = []
 
-    # Timestamp for the entry
     ts_raw = entry.get("timestamp", "")
     ts_html = ""
     if ts_raw:
-        # Store raw ISO timestamp; JS renders in browser timezone
         ts_html = f'<span class="ts" data-ts="{esc(ts_raw)}">{esc(ts_raw[:16].replace("T"," "))}</span>'
 
     if etype == "user" and role == "user":
         if isinstance(content, str) and content.strip():
             raw = content.strip()
-            # Skip system/internal messages (task notifications, hook file/image syntax)
             if raw.startswith("<task-notification>") or raw.startswith("<system-reminder>"):
                 return ""
-            # Detect author from prefix for avatar selection
             _author, _avatar, _display = _detect_message_author(raw)
             text = esc(_display)
             if len(text) > 2000:
                 text = text[:2000] + "\n\n<em>… truncated</em>"
-            # Show author name label for team members
             _name_html = f'<span class="u-name">{esc(_author)}</span>' if _author != "manager" else ""
             parts.append(f'<div class="user-msg">{_avatar}<div class="u-body">{_name_html}<div class="u-text">{text}{ts_html}</div></div></div>')
         elif isinstance(content, list):
-            # tool_result entries are merged into their tool_use blocks — skip here
-            pass  # intentional no-op: tool_result merged into tool_use
+            pass
 
     elif etype == "assistant" and role == "assistant":
         if isinstance(content, list):
@@ -9118,7 +8328,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                     tn = item.get("name", "?")
                     ti = item.get("input", {})
                     tool_svg = _tool_svgs.get(tn, _default_tool_svg)
-                    # Extract compact display info
                     inp = ""
                     is_fp = False
                     if tn in ("Read", "Write"):
@@ -9139,12 +8348,10 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         inp = json.dumps(ti, ensure_ascii=False)[:200]
                     inp = str(inp)[:300]
 
-                    # Look up merged result for this tool call
                     tool_id = item.get("id", "")
                     tr = tool_results.get(tool_id, {})
                     tr_text = tr.get("content", "")
                     tr_err = tr.get("is_error", False)
-                    # Skip empty/noise results
                     _skip_result = (not tr_text or tr_text == "Bash completed with no output"
                                     or tr_text.strip() == "")
                     tr_esc = ""
@@ -9154,7 +8361,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         if len(str(tr_text)) > 5000:
                             tr_esc += "\n… truncated"
 
-                    # Edit tool with old_string/new_string → render as diff
                     if tn == "Edit" and ti.get("old_string") is not None:
                         file_path_esc = esc(ti.get("file_path", "?"))
                         old_s = ti.get("old_string", "")
@@ -9184,7 +8390,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         err_cls = " act-err" if tr_err else ""
                         parts.append(f'<details class="act diff-act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp_html}</span>{stats_html}{_chev}</summary><div class="diff-body">{diff_body}</div></details>')
                     elif tn == "Bash" and inp:
-                        # Bash: single block with command + output merged
                         body_parts = [f'<div class="act-cmd">{esc(inp)}</div>']
                         if tr_esc:
                             body_parts.append(f'<div class="act-out{" act-out-err" if tr_err else ""}">{tr_esc}</div>')
@@ -9196,7 +8401,6 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         bp = esc(pp[-1])
                         file_path_html = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
                         if tr_esc and not _skip_result:
-                            # File tool with result → expandable
                             err_cls = " act-err" if tr_err else ""
                             parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{file_path_html}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
                         else:
@@ -9213,20 +8417,14 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
 
     return "\n".join(parts)
 
-
 def _format_model_name(model_name: str) -> str:
     import re as _re
     s = model_name.replace("claude-", "")
-    # Strip date suffixes like -20251001
     s = _re.sub(r"-\d{8}$", "", s)
-    # Convert version numbers: "opus-4-6" → "opus-4.6" (last dash before final digit = dot)
     s = _re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", s)
-    # Also handle "haiku-4-5" pattern
     s = _re.sub(r"-(\d+)\.(\d+)$", r" \1.\2", s)
-    # Remaining dashes to spaces
     s = s.replace("-", " ").title()
     return s
-
 
 def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
     n_user = sum(1 for e in entries if e.get("type") == "user"
@@ -9276,7 +8474,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             first_ts = ts
         if ts:
             last_ts = ts
-        # Token usage from Claude response entries (in message.usage)
         usage = e.get("message", {}).get("usage", {})
         turn_in = (usage.get("input_tokens", 0)
                    + usage.get("cache_read_input_tokens", 0)
@@ -9284,7 +8481,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
         turn_out = usage.get("output_tokens", 0)
         input_tokens += turn_in
         output_tokens += turn_out
-    # Compute duration
     duration_str = ""
     if first_ts and last_ts:
         try:
@@ -9313,7 +8509,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             "first_ts": first_ts, "last_ts": last_ts,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
             "duration": duration_str}
-
 
 def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
     import html as html_mod
@@ -9363,7 +8558,6 @@ vertical-align:middle;margin-right:8px}}
 <p class="elapsed">{elapsed}s elapsed</p>
 {msg}
 </div></body></html>'''
-
 
 def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
     return f'''<!DOCTYPE html>
@@ -9587,7 +8781,6 @@ a:hover{{text-decoration:underline}}
 <div class="content">
 '''
 
-
 def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
                          prompts_filter_url: str,
                          esc: Callable[[str], str]) -> str:
@@ -9603,7 +8796,6 @@ def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
 </header>
 '''
 
-
 def _transcript_html_entries(page_entries: list[TranscriptEntry],
                              tool_results: dict[str, ToolResultDict],
                              search_val: str,
@@ -9616,15 +8808,11 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
                              session_id: str | None,
                              filter_mode: str) -> str:
     _tool_results = tool_results
-    # Render blocks — group consecutive assistant entries into a turn-body
-    # No avatar/label on assistant turns (matches AmpCode: only user has avatar)
     blocks = []
     in_assistant_turn = False
 
-    # When live_base_url is set (static snapshot), links point to bridge endpoint
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
-    # Build context URL for search mode (click message → jump to full transcript)
     def _ctx_url(entry: TranscriptEntry) -> str:
         if not search_query:
             return ""
@@ -9645,7 +8833,6 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
     for entry in page_entries:
         etype = entry.get("type", "")
         role = entry.get("message", {}).get("role", "")
-        # Skip tool_result entries — they're merged into tool_use blocks
         is_tool_result = (etype == "user" and role == "user" and
                           isinstance(entry.get("message", {}).get("content"), list) and
                           any(c.get("type") == "tool_result" for c in entry.get("message", {}).get("content", []) if isinstance(c, dict)))
@@ -9700,7 +8887,6 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
 {nav_html}
 '''
 
-
 def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
                               file_size_str: str, total: int,
                               page: int, total_pages: int,
@@ -9734,7 +8920,6 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
 <a href="#" title="Bottom" onclick="window.scrollTo(0,document.body.scrollHeight);return false">↓</a>
 </div>
 '''
-
 
 def _transcript_html_search_js() -> str:
     return '''<script>
@@ -9883,7 +9068,6 @@ document.querySelectorAll('.ts[data-ts]').forEach(function(el) {
 </body>
 </html>'''
 
-
 def _render_transcript_html(name: str, session_id: str | None = None,
                             page: int | None = None, per_page: int = 50,
                             search_query: str = "", token: str = "",
@@ -9892,7 +9076,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     import html as html_mod
     esc = html_mod.escape
 
-    # For remote workers, bypass local path resolution and query via SSH directly
     host = get_worker_host(name)
     if host:
         cwd = get_claude_session_cwd(name) or ""
@@ -9908,7 +9091,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             remote_cwd = remote_home + remote_cwd[len(local_home):]
         remote_slug = _project_slug(remote_cwd)
         jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
-        transcript_path = None  # No local file for remote workers
+        transcript_path = None
     else:
         transcript_path, sid, cwd = _resolve_transcript_path(name, session_id)
         if not sid:
@@ -9917,7 +9100,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not found</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
         jsonl_path = str(transcript_path)
 
-    # Query transcript_indexer.py — combined entries+stats in single call (saves SSH round-trip)
     if search_query:
         query_result = _run_transcript_query(
             jsonl_path, sid, "search+stats", host=host,
@@ -9928,7 +9110,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             page=page, per_page=per_page, filter_mode=filter_mode)
     stats_result = query_result.pop("stats", None) if query_result else None
 
-    # Fallback to old parsing if script fails
     if not query_result:
         if not transcript_path or not Path(str(transcript_path)).exists():
             return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>Transcript not available</h1><p>Worker: {esc(name)}</p><p>Session: {esc(sid)}</p></body></html>"
@@ -9945,7 +9126,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         stats = _transcript_stats(all_entries)
         file_size_str = ""
     else:
-        # Reconstruct entry dicts from raw_json
         page_entries = []
         _entries_raw = query_result.get("entries", [])
         for e in (_entries_raw if isinstance(_entries_raw, list) else []):
@@ -9969,7 +9149,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                         "input_tokens": 0, "output_tokens": 0, "duration": ""}
         stats = cast(TranscriptStatsDict, stats_result) if stats_result else _empty_stats
 
-    # File size of the transcript JSONL (local only)
     file_size_str = ""
     if not host:
         try:
@@ -9983,7 +9162,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         except OSError as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
-    # Pre-index tool results by tool_use_id for merging into tool_use blocks
     _tool_results: dict[str, ToolResultDict] = {}
     for entry in page_entries:
         if entry.get("type") == "user":
@@ -9997,11 +9175,8 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                             rt = "\n".join(str(r.get("text", "")) for r in rt if isinstance(r, dict) and r.get("type") == "text")
                         _tool_results[tuid] = cast(ToolResultDict, {"content": str(rt), "is_error": bool(item.get("is_error"))})
 
-
-    # When live_base_url is set (static snapshot), links point to bridge endpoint
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
-    # Build query string for pagination links (token first to preserve auth)
     qs_parts = []
     if token:
         qs_parts.append(f"token={esc(token)}")
@@ -10021,13 +9196,11 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             parts.append(qs_base)
         return _url_prefix + "&".join(parts)
 
-    # Pagination nav
     nav_html = ""
     if total_pages > 1:
         nav_items = []
         nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(1)}">First</a>')
         nav_items.append(f'<a class="pg-btn{" pg-dis" if page <= 1 else ""}" href="{page_url(page-1)}">Prev</a>')
-        # Page numbers: show up to 7 centered on current
         start_p = max(1, page - 3)
         end_p = min(total_pages, start_p + 6)
         start_p = max(1, end_p - 6)
@@ -10059,7 +9232,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>'
         )
 
-    # Build prompts filter URL (toggle on/off)
     _filt_qs = []
     if token:
         _filt_qs.append(f"token={esc(token)}")
@@ -10072,7 +9244,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     prompts_filter_url = _url_prefix + "&".join(_filt_qs) if _filt_qs else _url_prefix.rstrip("?")
     filter_banner = ""
     if filter_mode == "prompts":
-        _clear_qs = [p for p in _filt_qs]  # already excludes filter=prompts
+        _clear_qs = [p for p in _filt_qs]
         _clear_url = _url_prefix + "&".join(_clear_qs) if _clear_qs else _url_prefix.rstrip("?")
         filter_banner = f'<div class="search-info">Showing prompts only — <a href="{_clear_url}">show all</a></div>'
 
@@ -10086,7 +9258,6 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             + _transcript_html_footer(sid, stats, file_size_str, total,
                                        page, total_pages, esc)
             + _transcript_html_search_js())
-
 
 # ── EndpointRouter + Handler: thin HTTP dispatch ──
 
@@ -10147,19 +9318,14 @@ class EndpointRouter:
                 return GetRouteResolution(pat_handler, match)
         return GetRouteResolution(None, None)
 
-
-# Singleton endpoint router — populated after Handler class is defined
 _endpoint_router = EndpointRouter()
-
 
 def _checkin_can_restart(name: str, tmux_name: str,
                          host: str | None, pane_cwd: str,
                          requested_cwd: str) -> tuple[bool, str]:
-    # Cooldown: prevent restart loops from repeated checkins
     last_restart = watchdog.recent_restarts.get(name, 0)
     elapsed = _clock.time() - last_restart
     if elapsed < RESTART_COOLDOWN:
-        # Narrow exemption: allow one CWD repair after force restart
         if watchdog.force_restart_pending_cwd.pop(name, False):
             _log(_LOG_WARN, "checkin", f"{name}: cooldown bypassed (post-force CWD repair)")
         else:
@@ -10167,13 +9333,11 @@ def _checkin_can_restart(name: str, tmux_name: str,
             return False, (f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
                            f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
 
-    # Guard: skip if worker is already running Claude
     if is_claude_running(tmux_name, host=host):
         _log(_LOG_INFO, "checkin", f"{name}: BLOCKED restart (Claude already running in tmux)")
         return False, (f"Checkin restart skipped: {name} has Claude running. "
                        f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}")
 
-    # In-flight dedupe: skip if restart already in progress
     with watchdog.restart_lock:
         inflight_ts = watchdog.restart_in_progress.get(name)
         if inflight_ts and _clock.time() - inflight_ts < 120:
@@ -10182,7 +9346,6 @@ def _checkin_can_restart(name: str, tmux_name: str,
         watchdog.restart_in_progress[name] = _clock.time()
 
     return True, ""
-
 
 def _checkin_do_restart(name: str, backend_name: str,
                         tmux_name: str, host: str | None,
@@ -10230,7 +9393,6 @@ def _checkin_do_restart(name: str, backend_name: str,
         with watchdog.restart_lock:
             watchdog.restart_in_progress.pop(name, None)
 
-
 class Handler(BaseHTTPRequestHandler):
     # ── Guest Endpoints ────────────────────────────────────────────
 
@@ -10254,7 +9416,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_guest_register(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             data = {}
 
@@ -10318,7 +9480,6 @@ class Handler(BaseHTTPRequestHandler):
             f'"'
         )
 
-        # Telegram notification
         try:
             if admin_chat_id:
                 send_telegram_message(admin_chat_id,
@@ -10345,7 +9506,7 @@ class Handler(BaseHTTPRequestHandler):
         if not guest:
             return
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text, to, worker}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -10355,7 +9516,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "text required"})
             return
 
-        # Normalize targets: support "to" (string or list) or legacy "worker"
         raw_to = data.get("to", _str_field(data, "worker"))
         if isinstance(raw_to, str):
             targets = [raw_to.strip()] if raw_to.strip() else []
@@ -10375,7 +9535,6 @@ class Handler(BaseHTTPRequestHandler):
 
         for target in targets:
             if target.startswith("#"):
-                # Channel by label — find channel ID
                 ch_id = None
                 with channel_store.lock:
                     for cid, ch in channel_store.channels.items():
@@ -10396,7 +9555,6 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
 
             elif target.startswith("ch_"):
-                # Channel by ID
                 with channel_store.lock:
                     channel = channel_store.channels.get(target)
                     if not channel or channel_is_expired(channel):
@@ -10411,7 +9569,6 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({"target": target, "ok": True, "channel": target, "message_id": msg["id"]})
 
             elif target.startswith("guest:"):
-                # Send to another guest's inbox
                 target_guest = target.split(":", 1)[1]
                 msg_id = f"gm_{secrets.token_hex(4)}"
                 with guest_store.lock:
@@ -10423,7 +9580,6 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({"target": target, "ok": True, "message_id": msg_id})
 
             else:
-                # Bare name = worker
                 worker = target
                 if worker not in registered:
                     results.append({"target": worker, "ok": False, "error": f"worker '{worker}' not found"})
@@ -10454,7 +9610,6 @@ class Handler(BaseHTTPRequestHandler):
                             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
                 results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
 
-        # Single target: flat response for backwards compat
         if len(results) == 1:
             self._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
         else:
@@ -10462,7 +9617,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {guest}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -10559,7 +9714,6 @@ class Handler(BaseHTTPRequestHandler):
         _log(_LOG_INFO, "guest", f"Guest disconnected: {guest['name']}")
         self._send_json(200, {"ok": True, "name": guest["name"]})
 
-
     # ── Channel Endpoints ──────────────────────────────────────────
 
     def _channel_auth_guest(self, parsed: ParseResult) -> GuestSessionDict | None:
@@ -10578,7 +9732,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_channel_create(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {label, members, include_manager}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -10592,7 +9746,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "members must be a list"})
             return
 
-        # Validate member format
         valid_members = []
         for m in members:
             if isinstance(m, str) and (m == "manager" or ":" in m):
@@ -10600,7 +9753,6 @@ class Handler(BaseHTTPRequestHandler):
         if include_manager and "manager" not in valid_members:
             valid_members.append("manager")
 
-        # Check from query token (guest-created) or admin
         parsed = urlparse(self.path)
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
@@ -10624,7 +9776,6 @@ class Handler(BaseHTTPRequestHandler):
             channel_store.channels[channel_id] = channel
             _channel_save()
 
-        # Telegram notification
         member_str = ", ".join(valid_members)
         try:
             if admin_chat_id:
@@ -10645,7 +9796,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {add, remove}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -10687,7 +9838,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
@@ -10697,7 +9848,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "text required"})
             return
 
-        # Determine sender: from token (guest), from field (worker), or manager
         parsed = urlparse(self.path)
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
@@ -10725,7 +9875,6 @@ class Handler(BaseHTTPRequestHandler):
             msg = channel_append_message(channel, from_member, text)
             members_snapshot = dict(channel["members"])
 
-        # Fan-out to all members except sender
         tagged = f"[{channel_id} from {from_member}] {text}"
         for member_key, info in members_snapshot.items():
             if member_key == from_member:
@@ -10772,7 +9921,6 @@ class Handler(BaseHTTPRequestHandler):
         after = query_params.get("after", [None])[0]
         token = query_params.get("token", [None])[0]
 
-        # If token provided, verify guest is a member
         if token:
             token_hash = hashlib.sha256(token.encode()).hexdigest()
             with guest_store.lock:
@@ -10861,7 +10009,6 @@ class Handler(BaseHTTPRequestHandler):
         _log(_LOG_INFO, "channel", f"Channel deleted: {channel_id}")
         self._send_json(200, {"ok": True, "channel": channel_id})
 
-
     # ── Relay Endpoints ────────────────────────────────────────────
 
     def _relay_get_token(self) -> str | None:
@@ -10922,7 +10069,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -10959,7 +10106,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {text}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"error": "invalid JSON"})
             return
@@ -10978,7 +10125,6 @@ class Handler(BaseHTTPRequestHandler):
             "message_id": msg["message_id"],
             "delivered": True,
         })
-
 
     # ── PR Endpoints ──────────────────────────────────────────────
 
@@ -11091,7 +10237,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"GitHub API timeout")
             return
 
-        # Notify Telegram
         try:
             notify_text = f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}"
             import urllib.request
@@ -11103,7 +10248,6 @@ class Handler(BaseHTTPRequestHandler):
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             _log(_LOG_WARN, "pr-comment", f"Telegram notification failed (best-effort): {exc}")
 
-        # Route to workers via @mentions
         targets, _ = command_router.parse_at_mentions(comment_body)
         if targets:
             worker_msg = (
@@ -11164,7 +10308,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"Merge API timeout")
             return
 
-        # Notify Telegram
         try:
             notify_text = f"\u2705 PR #{pr_num} merged ({merge_method}) via review page"
             import urllib.request
@@ -11185,7 +10328,6 @@ class Handler(BaseHTTPRequestHandler):
         params = dict(parse_qs(parsed.query))
         token = params.get("token", [None])[0]
 
-        # Validate token (also cleans up expired tokens)
         info = tokens.validate_pr_review(token)
         if not info:
             self.send_response(403)
@@ -11238,7 +10380,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"Missing required fields")
             return
 
-        # Post to GitHub via gh api
         try:
             gh_payload = json.dumps({
                 "body": comment_body,
@@ -11264,7 +10405,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"GitHub API timeout")
             return
 
-        # Send to Telegram as manager notification
         if admin_chat_id:
             tg_text = (
                 f"\U0001f4ac PR #{pr_num} comment\n"
@@ -11273,7 +10413,6 @@ class Handler(BaseHTTPRequestHandler):
             )
             transport.send_text(admin_chat_id, tg_text)
 
-        # Route to workers via @mentions (same rule as Telegram messages)
         targets, _ = command_router.parse_at_mentions(comment_body)
         if targets:
             worker_msg = (
@@ -11288,13 +10427,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"ok": True}).encode())
 
-
     # ── Transcript Endpoints ─────────────────────────────────────
 
     def handle_transcript_endpoint(self, parsed: ParseResult) -> None:
         try:
             query_params = parse_qs(parsed.query)
-            # Token auth — clean up expired, validate, extend sliding window
             token = query_params.get("token", [None])[0]
             if not tokens.validate_rewind(token):
                 body = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -11320,13 +10457,11 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 return
 
             parts = parsed.path.rstrip("/").split("/")
-            # /transcript/<name>
             if len(parts) < 3 or not parts[2]:
                 self._send_json(400, {"error": "Usage: /transcript/<worker_name>"})
                 return
             name = parts[2]
 
-            # /transcript/<name>/updates — lightweight poll for new entry count
             if len(parts) >= 4 and parts[3] == "updates":
                 query_params = parse_qs(parsed.query)
                 since = int(query_params.get("since", [0])[0])
@@ -11355,7 +10490,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 total = 0
                 if result:
                     total = _int_field(result, "n_user") + _int_field(result, "n_tool")
-                    # Use a more accurate total from entries query
                     count_result = _run_transcript_query(
                         jsonl_path, sid, "entries", host=host, page=1, per_page=1)
                     if count_result:
@@ -11380,10 +10514,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             if search_sort not in ("relevance", "time"):
                 search_sort = "relevance"
             filter_mode = query_params.get("filter", [""])[0].strip()
-            # Remote workers use SSH via transcript_indexer.py — skip rsync loading page
             host = get_worker_host(name)
             if not host:
-                # Local workers: check if transcript needs remote sync
                 _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
                 if _tp == "syncing":
                     sync_key = f"{name}:{_sid}"
@@ -11405,7 +10537,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
-
 
     # ── Core HTTP Handler ─────────────────────────────────────────
 
@@ -11452,9 +10583,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
         })
 
     def do_POST(self) -> None:
-        # Exact-match and pattern-match POST handlers are registered in
-        # _setup_endpoint_routes() below. Adding a new endpoint means
-        # one registration call, not another if/elif here.
         parsed = urlparse(self.path)
         handler, match = _endpoint_router.resolve_post(parsed.path)
         if handler:
@@ -11462,12 +10590,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             handler(self, body, match)
             return
 
-        # Only accept Telegram webhook on root path — 404 for unknown POST paths
         if parsed.path != "/":
             self._send_unknown_endpoint("POST", parsed.path)
             return
 
-        # Telegram webhook - optional secret verification
         if WEBHOOK_SECRET:
             header_token = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if header_token != WEBHOOK_SECRET:
@@ -11478,9 +10604,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 return
 
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        # Respond 200 immediately so Telegram gets the ACK fast
-        # (prevents missing read receipts and webhook retries during
-        # slow operations like remote restart which blocks 30-60s).
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
@@ -11502,7 +10625,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     def handle_notify(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body))  # body: {text, name, chat_id}
+            data = cast(dict[str, object], json.loads(body))
             text = _str_field(data, "text")
             name = _str_field(data, "name")
 
@@ -11512,7 +10635,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 self.wfile.write(b"Missing text")
                 return
 
-            # Parse media tags (support [[image:]] and [[file:]] in notifications)
             host = get_worker_host(name) if name else None
             if host:
                 _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
@@ -11526,7 +10648,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 images = _localize_media(name, images)
                 files = _localize_media(name, files)
 
-            # Send to all known chat_ids
             chat_ids = get_all_chat_ids()
             sent = 0
             label = name or "notify"
@@ -11653,7 +10774,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     def handle_connectors_restart(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {name}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -11666,7 +10787,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     def handle_send_endpoint(self, body: bytes = b"") -> None:
         try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}  # body: {worker, message, text}
+            data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
@@ -11733,7 +10854,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 self._send_text(403, source_error)
                 return
 
-            # Get chat_id from session's file, fall back to admin_chat_id
             chat_id_file = get_chat_id_file(session_name)
             if chat_id_file.exists():
                 chat_id = chat_id_file.read_text().strip()
@@ -11752,7 +10872,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 self.wfile.write(b"No chat_id for session")
                 return
 
-            # Debug: log short messages to trace source of empty "name:" messages
             if len(text.strip()) <= 5:
                 source_ip = self.client_address[0] if self.client_address else "unknown"
                 hook_sid = _str_field(data, "session_id")
@@ -11765,20 +10884,14 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
             _log(_LOG_INFO, "hook", f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
 
-            # Update session ID cache if provided (keeps VPS in sync with remote workers).
-            # _cache_session_id stores the CWD alongside the session_id, so
-            # get_claude_session_id will self-invalidate if the CWD changes later.
             hook_sid = _str_field(data, "session_id")
             if hook_sid:
                 _cache_session_id(session_name, hook_sid)
 
-            # Send response using shared helper
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
 
-            # Learning reminder check (non-blocking)
             _check_learning_reminder(session_name)
 
-            # Clear pending
             clear_pending(session_name)
             mark_hook_event(session_name)
 
@@ -11793,14 +10906,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
     # ── Guest System Handlers ──────────────────────────────────────────────
 
-
     # ─────────────────────────────────────────────────────────────
-    # GROUP CHANNEL endpoints
     # ─────────────────────────────────────────────────────────────
-
 
     # ── Relay v1 endpoint handlers ──────────────────────────────────────
-
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -11809,7 +10918,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             handler(self, parsed, match)
             return
 
-        # API index (also serves as health check — returns 200)
         if parsed.path == "/":
             self._send_json(200, {
                 "name": "claudecode-telegram bridge",
@@ -11884,7 +10992,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     self.wfile.write(f"Invalid cwd: {cwd_err}".encode())
                     return
 
-            # Resolve backend: use worker's actual backend if registered, else default
             _sync_worker_manager()
             registered = worker_manager.get_registered_sessions()
             tmux_name = ""
@@ -11899,7 +11006,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
 
-            # Handle CWD change: update saved cwd, restart if pane cwd differs
             if requested_cwd:
                 _set_worker_cwd(name, requested_cwd)
                 old_cwd = get_claude_session_cwd(name)
@@ -11908,9 +11014,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 if old_cwd and old_cwd.rstrip("/") != requested_cwd.rstrip("/"):
                     old_sid = get_claude_session_id(name)
                     _log_session_event(name, old_sid or "(none)", requested_cwd, "cwd_change")
-                    # No need to clear session_id — get_claude_session_id()
-                    # self-validates by comparing stored CWD against current CWD.
-                    # Stale session IDs (from old directory) are ignored at read time.
                     _log(_LOG_WARN, "checkin", f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate")
                     notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
                     notify_chat_id = get_manager_chat_id(name)
@@ -11924,7 +11027,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     _log(_LOG_INFO, "checkin", f"{name}: pane_cwd={pane_cwd}, same_cwd={same_cwd}")
 
                     if not same_cwd:
-                        # Check restart guards (cooldown, inflight, Claude running)
                         allowed, block_msg = _checkin_can_restart(
                             name, tmux_name, host, pane_cwd or "", requested_cwd)
                         if not allowed:
@@ -11937,7 +11039,6 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                             self.wfile.write(block_msg.encode())
                             return
 
-                        # Execute the restart
                         _log(_LOG_INFO, "checkin", f"{name}: triggering restart (cwd mismatch: pane={pane_cwd} vs requested={requested_cwd})")
                         ok, err = _checkin_do_restart(
                             name, backend_name, tmux_name, host, requested_cwd)
@@ -12002,21 +11103,17 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             data = {"mode": "none", "state": "disabled", "tunnel_url": "", "polling_active": False}
         self._send_json(200, data)
 
-
 # ── Endpoint registration ──
 
 def _mg(m: re.Match[str] | None, n: int = 1) -> str:
     return m.group(n) if m else ""
 
-
 def _mg2(m: re.Match[str] | None) -> str:
     return m.group(2) if m else None
-
 
 def _setup_endpoint_routes() -> None:
     r = _endpoint_router
 
-    # POST endpoints (exact match — match is always None)
     r.post("/outputs", lambda h, b, _m: h.handle_hook_response(b))
     r.post("/notifications", lambda h, b, _m: h.handle_notify(b))
     r.post("/messages", lambda h, b, _m: h.handle_send_endpoint(b))
@@ -12028,7 +11125,6 @@ def _setup_endpoint_routes() -> None:
     r.post("/alerts", lambda h, b, _m: h.handle_health_alert(b))
     r.post("/connectors/restarts", lambda h, b, _m: h.handle_connectors_restart(b))
 
-    # POST endpoints (prefix/pattern match)
     r.post_pattern(r'^/guests/send', lambda h, b, m: h.handle_guest_send(b))
     r.post_pattern(r'^/guests/reply', lambda h, b, m: h.handle_guest_reply(b))
     r.post_pattern(
@@ -12048,7 +11144,6 @@ def _setup_endpoint_routes() -> None:
         lambda h, b, m: h.handle_relay_reply(_mg(m), b)
     )
 
-    # GET endpoints (exact match — match is always None)
     r.get("/guests", lambda h, p, _m: h.handle_guests_list())
     r.get("/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
     r.get("/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
@@ -12060,7 +11155,6 @@ def _setup_endpoint_routes() -> None:
     r.get("/tools/review/files", lambda h, p, _m: h.handle_pr_file_content(p))
     r.get("/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
 
-    # GET endpoints (pattern match) — order matters for prefix collisions
     r.get_pattern(r'^/guests/inbox', lambda h, p, m: h.handle_guest_inbox(p))
     r.get_pattern(r'^/guests/status', lambda h, p, m: h.handle_guest_status(p))
     r.get_pattern(
@@ -12074,20 +11168,13 @@ def _setup_endpoint_routes() -> None:
     r.get_pattern(r'^/transcript/', lambda h, p, m: h.handle_transcript_endpoint(p))
     r.get_pattern(r'^/tools/review/', lambda h, p, m: h.handle_pr_review_endpoint(p))
 
-    # DELETE endpoints
     r.delete("/guests", lambda h, p, _m: h.handle_guest_disconnect(p))
     r.delete_pattern(
         r'^/channels/([^/]+)$',
         lambda h, p, m: h.handle_channel_delete(_mg(m))
     )
 
-
 _setup_endpoint_routes()
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     from datetime import datetime
@@ -12095,7 +11182,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ppid = os.getppid()
 
-    # Try to get parent process info
     parent_info = f"ppid={ppid}"
     try:
         with open(f"/proc/{ppid}/cmdline", "rb") as f:
@@ -12108,7 +11194,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
 
     connectors.stop_all()
 
-    # Stop tunnel manager
     if tunnel_manager is not None:
         try:
             tunnel_manager.stop()
@@ -12116,17 +11201,14 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "shutdown:tunnel", f"{type(exc).__name__}: {exc}")
 
-    # Signal watchdog thread to stop
     watchdog.stop_event.set()
 
-    # Cancel learning reminder idle scan timer
     if learning_reminders.idle_scan_timer is not None:
         try:
             learning_reminders.idle_scan_timer.cancel()
         except (RuntimeError, OSError) as exc:
             _log(_LOG_DEBUG, "shutdown:timer", f"{type(exc).__name__}: {exc}")
 
-    # Cancel pending media group timers
     with media_groups.lock:
         for _mg_id, _mg_entry in media_groups.buffer.items():
             _mg_timer = _mg_entry.get("timer")
@@ -12137,7 +11219,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
                     _log(_LOG_DEBUG, "shutdown:media_timer", f"{type(exc).__name__}: {exc}")
         media_groups.buffer.clear()
 
-    # Stop tracked adapters
     with processes.adapter_pids_lock:
         adapter_names = list(processes.adapter_pids.keys())
     for name in adapter_names:
@@ -12146,7 +11227,6 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         except (OSError, ProcessLookupError) as exc:
             _log(_LOG_DEBUG, "shutdown:adapter", f"{type(exc).__name__}: {exc}")
 
-    # Stop pipe readers
     with processes.pipe_readers_lock:
         pipe_names = list(processes.pipe_readers.keys())
     for name in pipe_names:
@@ -12155,13 +11235,11 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         except OSError as exc:
             _log(_LOG_DEBUG, "shutdown:pipe", f"{type(exc).__name__}: {exc}")
 
-    # Shutdown thread pools (don't wait for queued tasks)
     _message_pool.shutdown(wait=False, cancel_futures=True)
     _task_pool.shutdown(wait=False, cancel_futures=True)
 
     send_shutdown_message()
     sys.exit(0)
-
 
 def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
     registered = scan_tmux_sessions()
@@ -12169,7 +11247,6 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
     if registered:
         print(f"Discovered sessions: {list(registered.keys())}")
         for name, info in registered.items():
-            # SAFETY: only touch sessions that match OUR prefix
             tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
             if not tmux_name.startswith(TMUX_PREFIX):
                 print(f"  SKIP {name}: tmux '{tmux_name}' doesn't match prefix '{TMUX_PREFIX}'")
@@ -12183,7 +11260,6 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
                 export_hook_env(tmux_name, backend_name, host=host)
     return registered
 
-
 def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     global admin_chat_id
 
@@ -12194,7 +11270,6 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     elif last_active:
         print(f"Last active worker '{last_active}' no longer exists")
 
-    # Log team dir status
     if os.path.isdir(TEAM_DIR):
         print(f"Team dir: {TEAM_DIR}")
         _startup_note = read_checkin_note()
@@ -12215,7 +11290,6 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     _channel_load()
     _guest_load()
     return last_chat_id
-
 
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     setup_bot_commands()
@@ -12239,7 +11313,6 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
 
     print("Execution: direct (--dangerously-skip-permissions)")
 
-
 def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
     state.startup_notified = True
     sessions = list(registered.keys())
@@ -12259,12 +11332,10 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
     else:
         _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
 
-
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
 def _connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     connectors.log_message(tag, html_text, plain_text, targets)
-
 
 def _connector_render_html(tag: str, current_html: str) -> str:
     import html as html_mod
@@ -12358,7 +11429,6 @@ blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;c
 </body>
 </html>'''
 
-
 def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None) -> str:
     import html as _html
     icon = "🔔" if tag == "github" else "📧"
@@ -12383,7 +11453,6 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
         parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
     return "\n".join(parts)
 
-
 def _connector_export_github(number: int, repo: str) -> str | None:
     try:
         r = _subprocess_runner.run(
@@ -12401,7 +11470,6 @@ def _connector_export_github(number: int, repo: str) -> str | None:
     except subprocess.SubprocessError as e:
         _log(_LOG_WARN, "github", f"export failed for #{number}: {e}")
     return None
-
 
 def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[ConnectorAttachmentDict] | None, ConnectorMetadataDict | None], None]:
     def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[ConnectorAttachmentDict] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
@@ -12455,10 +11523,8 @@ def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, lis
             _log(_LOG_INFO, tag, f"-> Telegram only (no mentions): {plain_text[:80]}...")
     return handler
 
-
 def _connector_get_workers() -> set[str]:
     return set(get_registered_sessions().keys())
-
 
 def _connector_on_alert(tag: str) -> Callable[[str], None]:
     def handler(text: str) -> None:
@@ -12468,7 +11534,6 @@ def _connector_on_alert(tag: str) -> Callable[[str], None]:
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 _log(_LOG_WARN, tag, f"Failed to send Telegram alert: {e}")
     return handler
-
 
 def _start_connectors() -> tuple[object, object]:
     gmail_inst = None
@@ -12504,7 +11569,6 @@ def _start_connectors() -> tuple[object, object]:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
 
     return gmail_inst, github_inst
-
 
 def _restart_connector(name: str) -> tuple[bool, str]:
     if name == "gmail":
@@ -12555,7 +11619,6 @@ def _restart_connector(name: str) -> tuple[bool, str]:
     else:
         return False, f"Unknown connector: {name} (valid: gmail, github)"
 
-
 def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
@@ -12573,7 +11636,6 @@ def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     else:
         result["github"] = {"name": "github", "running": False, "enabled": False}
     return result
-
 
 def main() -> None:
     global admin_chat_id, tunnel_manager
@@ -12612,11 +11674,8 @@ def main() -> None:
 
     connectors.gmail, connectors.github = _start_connectors()
 
-    # Create HTTP server (binds port immediately)
     server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
 
-    # Start tunnel manager — its watchdog thread detects the bound port
-    # and handles cloudflared, webhook registration, and poll fallback.
     tunnel_config = _build_tunnel_config()
     if tunnel_config.mode != "none" and BOT_TOKEN:
         def _tunnel_on_update(update: dict[str, object]) -> None:
@@ -12653,23 +11712,10 @@ def main() -> None:
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 
-
 if __name__ == "__main__":
     main()
 
-
 # ── Module proxy: propagate attribute writes to source modules ──────
-# Tests do `bridge.SESSIONS_DIR = tmp` — this must propagate to the source
-# module (claudecode/telegram) so intra-module calls see it.
-#
-# KEY INSIGHT: We change the *class* of the existing module rather than
-# replacing it with a new object.  Functions defined in this file have
-# __globals__ pointing to this module's __dict__.  Creating a new proxy
-# object gives it a DIFFERENT __dict__, so func.__globals__ and
-# proxy.__dict__ diverge — setattr on the proxy never reaches the dict
-# that functions actually resolve names from.  Changing __class__ in
-# place keeps __dict__ (and therefore __globals__) intact while adding
-# the custom __setattr__/__getattr__ behaviour.
 import types as _types_mod
 
 class _BridgeModule(_types_mod.ModuleType):
@@ -12679,7 +11725,6 @@ class _BridgeModule(_types_mod.ModuleType):
         if name == "_sources":
             super().__setattr__(name, value)
             return
-        # Propagate to whichever source module owns this name
         for mod in self._sources:
             if hasattr(mod, name):
                 setattr(mod, name, value)
@@ -12696,7 +11741,6 @@ class _BridgeModule(_types_mod.ModuleType):
 import telegram as _tg_mod
 import claudecode as _cc_mod
 
-# Change the class of the existing module — preserves __dict__ identity
 _this_module = sys.modules[__name__]
 _this_module.__class__ = _BridgeModule
 _this_module._sources = (_tg_mod, _cc_mod)

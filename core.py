@@ -11,18 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Protocol, runtime_checkable
 
-
 # ── Version ────────────────────────────────────────────────────────────
 
 VERSION = "0.47.0"
-
 
 # ── Safe JSON field accessors ──────────────────────────────────────────
 
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
     val = d.get(key, default)
     return str(val) if val is not None else default
-
 
 def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     val = d.get(key, default)
@@ -35,16 +32,13 @@ def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
             return default
     return default
 
-
 def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
     val = d.get(key)
     return val if isinstance(val, dict) else {}
 
-
 def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     val = d.get(key, default)
     return bool(val)
-
 
 # ── Structured logging ─────────────────────────────────────────────────
 
@@ -53,7 +47,6 @@ _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
 _LOG_DEBUG: str = "DEBUG"
 
-
 def _log(level: str, component: str, msg: str | Path, *,
          exc: BaseException | None = None) -> None:
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
@@ -61,14 +54,12 @@ def _log(level: str, component: str, msg: str | Path, *,
         import traceback as _tb
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
 
-
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
     try:
         return func(*args, **kwargs)
     except Exception as exc:
         _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
         return None
-
 
 # ── DI seams (injectable for testing) ──────────────────────────────────
 
@@ -78,14 +69,12 @@ class MarkdownToken(Protocol):
     children: list['MarkdownToken'] | None
     attrs: dict[str, str] | None
 
-
 class SubprocessRunner(Protocol):
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         ...
 
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         ...
-
 
 class Clock(Protocol):
     def time(self) -> float:
@@ -94,14 +83,12 @@ class Clock(Protocol):
     def sleep(self, seconds: float) -> None:
         ...
 
-
 class _RealSubprocessRunner:
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
 
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
-
 
 class _RealClock:
     def time(self) -> float:
@@ -110,11 +97,9 @@ class _RealClock:
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
-
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
-
 
 # ── HTTP client infrastructure ────────────────────────────────────────
 
@@ -130,12 +115,10 @@ class RetryConfig:
     backoff_factor: float = 2.0
     retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
-
 @dataclass(frozen=True)
 class RateLimitConfig:
     requests_per_second: float = 30.0
     burst: int = 30
-
 
 class _TokenBucket:
     def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
@@ -161,7 +144,6 @@ class _TokenBucket:
             if wait <= 0:
                 return False
             self._clock.sleep(wait)
-
 
 class HttpClient:
     def __init__(  # type: ignore[explicit-any]
@@ -253,14 +235,12 @@ class HttpClient:
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="HEAD", timeout=timeout, retry=retry)
 
-
 _http_client: HttpClient = HttpClient()
 
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
     retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
 )
-
 
 # ── Node-derived configuration ─────────────────────────────────────────
 
@@ -317,7 +297,6 @@ MACHINES_CONFIG_FILE = Path(os.environ.get(
     Path.home() / ".config" / "claudecode-telegram" / "machines.json"
 ))
 
-
 # ── Timeouts (seconds) ─────────────────────────────────────────────────
 
 TIMEOUT_TMUX_CHECK = 3
@@ -344,7 +323,6 @@ DELAY_RESPONSE_GAP = 2
 DELAY_PROCESS_SETTLE = 3
 DELAY_CLAUDE_LOAD = 4
 
-
 # ── Worker/session defaults ────────────────────────────────────────────
 
 DEFAULT_BACKEND = "claude"
@@ -366,7 +344,6 @@ STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
-
 # ── Config dataclasses ──────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -382,7 +359,6 @@ class WatchdogConfig:
     alert_cooldown: int = 180
     restart_cooldown: int = 60
     host_down_threshold: int = 3
-
 
 @dataclass(frozen=True)
 class ResourceAlertConfig:
@@ -402,13 +378,11 @@ class ResourceAlertConfig:
     io_cooldown: int = 3600
     infra_cooldown: int = 300
 
-
 @dataclass(frozen=True)
 class MediaConfig:
     max_file_size: int = 50 * 1024 * 1024
     photo_max_sum: int = 10000
     photo_max_dim: int = 5000
-
 
 @dataclass(frozen=True)
 class TunnelConfig:
@@ -425,7 +399,6 @@ class TunnelConfig:
     poll_timeout: int = 30
     poll_error_delay: int = 2
     port_wait_timeout: int = 30
-
 
 # ── Tunnel env vars ────────────────────────────────────────────────────
 
@@ -450,7 +423,6 @@ def _build_tunnel_config() -> TunnelConfig:
         mode = "poll"
     return TunnelConfig(mode=mode, provided_url=tunnel_url)
 
-
 _wd_cfg = WatchdogConfig()
 _res_cfg = ResourceAlertConfig()
 
@@ -464,7 +436,6 @@ CPU_IDLE = _wd_cfg.cpu_idle
 IDLE_STREAK_STUCK = _wd_cfg.idle_streak_stuck
 ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 RESTART_COOLDOWN = _res_cfg.disk_cooldown
-
 
 # ── Derived resource constants ──────────────────────────────────────────
 
@@ -485,7 +456,6 @@ IO_COOLDOWN = _res_cfg.io_cooldown
 INFRA_COOLDOWN = _res_cfg.infra_cooldown
 
 HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
-
 
 # ── AppContext: injectable configuration ────────────────────────────────
 
@@ -517,7 +487,6 @@ class AppContext:
         if not self.bridge_url:
             self.bridge_url = f"http://localhost:{self.port}"
 
-
 def _build_app_context() -> AppContext:
     return AppContext(
         bot_token=BOT_TOKEN,
@@ -536,7 +505,6 @@ def _build_app_context() -> AppContext:
         webhook_secret=WEBHOOK_SECRET,
         transport_mode=TRANSPORT_MODE,
     )
-
 
 _app_context: AppContext | None = None
 

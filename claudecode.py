@@ -77,9 +77,7 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from bridge import Machine
 
-
 # ── Claudecode domain types (owned by this module) ───────────────────
-
 
 class ReminderState(TypedDict):
     response_count: int
@@ -87,40 +85,34 @@ class ReminderState(TypedDict):
     last_response_ts: float
     reminder_pending: bool
 
-
 class WorkerStateEntry(NamedTuple):
     status: str
     reason: str
     since: float
 
-
 class ParsedWorkerTarget(NamedTuple):
     name: str
     host: str | None
-
 
 class TmuxActivityResult(NamedTuple):
     activity: str
     context_pct: str | None
     raw_lines: list[str] | None
 
-
 class AuthorDetection(NamedTuple):
     author: str
     avatar_html: str
     display_text: str
 
-
 class TmuxSessionDict(TypedDict, total=False):
     tmux: str
     backend: str
-    host: str           # optional — present only for remote sessions
-    protocol: str       # optional — relay protocol version
-    callback_url: str   # optional — callback URL for relay workers
-    version: str        # optional — bridge version
-    activity: str       # optional — current activity
-    context_pct: str    # optional — context usage percentage
-
+    host: str
+    protocol: str
+    callback_url: str
+    version: str
+    activity: str
+    context_pct: str
 
 class WorkerSessionDict(TypedDict, total=False):
     backend: str
@@ -130,29 +122,25 @@ class WorkerSessionDict(TypedDict, total=False):
     protocol: str
     version: str
 
-
 class RegistryWorkerDict(TypedDict, total=False):
     backend: str
     chat_id: int | None
     hire_time: int
-    host: str           # optional
-    home_host: str | None  # optional — preserved across re-registrations
-    home_cwd: str | None   # optional — preserved across re-registrations
-    protocol: str       # optional — "http" for callback workers
-    callback_url: str   # optional — for callback workers
-    version: str        # optional — for callback workers
-    tools: dict[str, object]  # optional — for callback workers; shape varies
-
+    host: str
+    home_host: str | None
+    home_cwd: str | None
+    protocol: str
+    callback_url: str
+    version: str
+    tools: dict[str, object]
 
 class RegistryFileDict(TypedDict, total=False):
     version: int
     workers: dict[str, RegistryWorkerDict]
 
-
 class RewindTokenEntry(TypedDict):
     name: str
     expires_at: float
-
 
 class PrReviewTokenEntry(TypedDict):
     pr_num: int
@@ -160,30 +148,25 @@ class PrReviewTokenEntry(TypedDict):
     repo: str
     expires_at: float
 
-
 class ProcStatsEntry(TypedDict):
     cpu: float
     state: str
-
 
 class QuestionOption(TypedDict):
     num: int
     label: str
     selected: bool
 
-
 class QuestionDetails(TypedDict):
     header: str
     options: list[QuestionOption]
     selected_num: int
 
-
 class DiskUsageDict(TypedDict, total=False):
     pct: float
     free_gb: float
     total_gb: float
-    ts: float  # added when stored in HostHealthState
-
+    ts: float
 
 class MemUsageDict(TypedDict, total=False):
     pct: int | float
@@ -193,7 +176,6 @@ class MemUsageDict(TypedDict, total=False):
     top_procs: list[dict[str, object]]
     ts: float
 
-
 class IoUsageDict(TypedDict, total=False):
     iowait_pct: float
     read_iops: int
@@ -201,24 +183,20 @@ class IoUsageDict(TypedDict, total=False):
     util_pct: float
     ts: float
 
-
 class WorktreeItemDict(TypedDict):
     path: str
     size_gb: float
-
 
 class WorktreeUsageDict(TypedDict):
     total_gb: float
     items: list[WorktreeItemDict]
     ts: float
 
-
 class CpuHogEntry(TypedDict, total=False):
     pid: int
     cpu: float
     etime_min: int
     cmd: str
-
 
 class HealthSummaryDict(TypedDict, total=False):
     ssh_down: bool
@@ -229,7 +207,6 @@ class HealthSummaryDict(TypedDict, total=False):
     cpu_hogs: list[CpuHogEntry]
     worktrees: WorktreeUsageDict | None
 
-
 class MachineHealthDict(TypedDict, total=False):
     status: str
     down_since: float | None
@@ -238,19 +215,16 @@ class MachineHealthDict(TypedDict, total=False):
     memory: MemUsageDict | None
     io: IoUsageDict | None
 
-
 class CodexTranscriptEntry(TypedDict, total=False):
     role: str
     text: str
     timestamp: str
-
 
 class GitPushStateResult(TypedDict, total=False):
     orig_sha: str
     orig_branch: str
     staged_files: list[str]
     stash_sha: str | None
-
 
 class ProcessRegistry:
     def __init__(self) -> None:
@@ -260,7 +234,6 @@ class ProcessRegistry:
         self.pipe_readers_lock: threading.Lock = threading.Lock()
         self.pending_locks: dict[str, threading.Lock] = {}
         self.pending_locks_guard: threading.Lock = threading.Lock()
-
 
 class WorkerWatchdogState:
     def __init__(self) -> None:
@@ -305,13 +278,11 @@ class WorkerWatchdogState:
         ):
             store.pop(name, None)
 
-
 class LearningReminderState:
     def __init__(self) -> None:
         self.state: dict[str, ReminderState] = {}
         self.lock: threading.Lock = threading.Lock()
         self.idle_scan_timer: threading.Timer | None = None
-
 
 class HostHealthState:
     def __init__(self) -> None:
@@ -350,7 +321,6 @@ class HostHealthState:
             worktrees=self.worktree_usage.get(host),
         )
 
-
 # ── Backend protocol + implementations ────────────────────────────────
 
 def build_claude_start_cmd(resume_id: str = "") -> str:
@@ -359,7 +329,6 @@ def build_claude_start_cmd(resume_id: str = "") -> str:
         cmd.extend(["--resume", resume_id])
     cmd.append("--dangerously-skip-permissions")
     return " ".join(shlex.quote(part) for part in cmd)
-
 
 class Backend(Protocol):
     name: str
@@ -376,7 +345,6 @@ class Backend(Protocol):
     def is_online(self, tmux_name: str) -> bool:
         ...
 
-
 # ── SSH teleport helpers ──────────────────────────────────────────────
 
 class RemoteCache:
@@ -387,9 +355,7 @@ class RemoteCache:
         self.machines_path: Path | None = None
         self.home_dirs: dict[str, str] = {}
 
-
 remote_cache = RemoteCache()
-
 
 def _resolve_remote_tool(tool: str, host: str) -> str:
     key = f"{host}:{tool}"
@@ -415,8 +381,7 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
             return found
     except (subprocess.SubprocessError, OSError) as exc:
         _log(_LOG_DEBUG, "probe:_resolve_remote_tool", f"{type(exc).__name__}: {exc}")
-    return tool  # fallback to bare name
-
+    return tool
 
 def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
     if host:
@@ -431,24 +396,19 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
     kwargs.setdefault("timeout", 10)
     return _subprocess_runner.run(cmd, **kwargs)
 
-
 from telegram import _extract_msg_text as _extract_msg_text  # noqa: F401
-
 
 def _detect_os_family() -> str:
     if sys.platform == "darwin":
         return "darwin"
     return "linux"
 
-
 def _project_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
-
 
 # ── Git-based teleport sync ───────────────────────────────────────────
 
 GIT_SERVER_DIR = os.path.expanduser("~/git-server")
-
 
 def _is_git_repo(cwd: str, host: str | None = None) -> bool:
     try:
@@ -459,7 +419,6 @@ def _is_git_repo(cwd: str, host: str | None = None) -> bool:
     except (subprocess.SubprocessError, OSError):
         return False
 
-
 # ── Tmux helpers ──────────────────────────────────────────────────────
 
 class TmuxSendState:
@@ -468,9 +427,7 @@ class TmuxSendState:
         self.locks_guard: threading.Lock = threading.Lock()
         self.flock_fds: dict[str, int] = {}
 
-
 tmux_send = TmuxSendState()
-
 
 def _get_tmux_send_lock(tmux_name: str) -> threading.Lock:
     with tmux_send.locks_guard:
@@ -478,10 +435,8 @@ def _get_tmux_send_lock(tmux_name: str) -> threading.Lock:
             tmux_send.locks[tmux_name] = threading.Lock()
         return tmux_send.locks[tmux_name]
 
-
 def tmux_send_lock_path(tmux_name: str) -> Path:
     return Path(f"/tmp/claudecode-telegram/{_node_name}/locks/{tmux_name}.lock")
-
 
 def _acquire_flock(tmux_name: str) -> int:
     lock_file = tmux_send_lock_path(tmux_name)
@@ -495,19 +450,16 @@ def _acquire_flock(tmux_name: str) -> int:
         raise
     return fd
 
-
 def _release_flock(fd: int) -> None:
     import fcntl
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
-
 
 def tmux_exists(tmux_name: str, host: str | None = None, timeout: int = 3) -> bool:
     return _remote_run(
         ["tmux", "has-session", "-t", tmux_name],
         host=host, capture_output=True, timeout=timeout
     ).returncode == 0
-
 
 def tmux_send_message(tmux_name: str, text: str, host: str | None = None, literal: bool = False) -> bool:
     lock = _get_tmux_send_lock(tmux_name)
@@ -563,14 +515,12 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
         finally:
             _release_flock(flock_fd)
 
-
 def get_pane_command(tmux_name: str, host: str | None = None) -> str:
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
         host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
     )
     return result.stdout.strip() if result.returncode == 0 else ""
-
 
 def is_process_running(tmux_name: str, process_name: str, host: str | None = None) -> bool:
     cmd = get_pane_command(tmux_name, host=host)
@@ -594,10 +544,8 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
     )
     return result.returncode == 0
 
-
 def tmux_send_escape(tmux_name: str, host: str | None = None) -> None:
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=TIMEOUT_TMUX_SEND)
-
 
 def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
     try:
@@ -620,7 +568,6 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
         if pane_pid.isdigit():
             pane_map[session_name] = pane_pid
     return pane_map
-
 
 class ClaudeBackend:
     name = "claude"
@@ -657,20 +604,16 @@ class ClaudeBackend:
             return False
         return is_process_running(tmux_name, "claude")
 
-
 # ── Codex adapter ─────────────────────────────────────────────────────
-
 
 def _codex_session_id_path(worker_name: str, sessions_dir: Path) -> Path:
     return sessions_dir / worker_name / "codex_session_id"
-
 
 def _codex_load_session_id(worker_name: str, sessions_dir: Path) -> str:
     p = _codex_session_id_path(worker_name, sessions_dir)
     if p.exists():
         return p.read_text(encoding="utf-8").strip()
     return ""
-
 
 def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str) -> None:
     target = _codex_session_id_path(worker_name, sessions_dir)
@@ -686,7 +629,6 @@ def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str
         if fd >= 0:
             os.close(fd)
         raise
-
 
 def _codex_parse_jsonl(output: str) -> tuple[str, str]:
     response_parts: list[str] = []
@@ -712,7 +654,6 @@ def _codex_parse_jsonl(output: str) -> tuple[str, str]:
 
     return "\n".join(response_parts).strip(), thread_id
 
-
 def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[str, str, int]:
     cmd: list[str] = ["codex", "exec", "--json", "--yolo"]
     if workdir:
@@ -732,7 +673,6 @@ def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[s
     except (OSError, subprocess.SubprocessError) as e:
         return f"Error: {e}", session_id, 1
 
-
 def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool:
     try:
         payload: dict[str, str | bool] = {
@@ -750,7 +690,6 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
         _log(_LOG_WARN, "codex", f"Failed to send to bridge: {e}")
         return False
 
-
 def _codex_adapter_thread(worker_name: str, text: str,
                           bridge_url: str, sessions_dir: Path) -> None:
     try:
@@ -764,7 +703,6 @@ def _codex_adapter_thread(worker_name: str, text: str,
             _codex_send_to_bridge(worker_name, response, bridge_url)
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Adapter thread for '{worker_name}' failed: {e}")
-
 
 def _codex_adapter_remote(worker_name: str, text: str,
                           bridge_url: str, sessions_dir: Path, host: str) -> None:
@@ -814,7 +752,6 @@ def _codex_adapter_remote(worker_name: str, text: str,
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
 
-
 class CodexBackend:
     name = "codex"
     binary = "codex"
@@ -846,12 +783,10 @@ class CodexBackend:
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
 
-
 BACKENDS: dict[str, Backend] = {
     "claude": ClaudeBackend(),
     "codex": CodexBackend(),
 }
-
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
     sid_file = SESSIONS_DIR / worker_name / "codex_session_id"
@@ -884,18 +819,14 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
         return max(jsonl_matches, key=os.path.getmtime)
     return None
 
-
 def get_backend(name: str) -> Backend:
     return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
-
 
 def is_valid_backend(name: str) -> bool:
     return name in BACKENDS
 
-
 def list_backends() -> list[str]:
     return list(BACKENDS.keys())
-
 
 def _which_binary(binary: str) -> str | None:
     found = shutil.which(binary)
@@ -909,10 +840,8 @@ def _which_binary(binary: str) -> str | None:
                 return candidate
     return None
 
-
 def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
     return is_process_running(tmux_name, "claude", host=host)
-
 
 processes = ProcessRegistry()
 watchdog = WorkerWatchdogState()
@@ -923,7 +852,6 @@ worker_manager = None
 LEARNING_REMINDER_RESPONSE_THRESHOLD = 15
 
 LEARNING_REMINDER_IDLE_HOURS = 6
-
 
 _LEARNING_REMINDER_TEXT = (
     "system: Self-Learning Protocol reminder — time to check your learnings.\n\n"
@@ -961,13 +889,11 @@ _LEARNING_REMINDER_TEXT = (
     'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
 )
 
-
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
 
 REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
 
 PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
-
 
 # ── Worker registry ───────────────────────────────────────────────────
 
@@ -978,12 +904,10 @@ RESERVED_NAMES = {
     "all", "cancel", "start", "help",
 }
 
-
 # ── Inter-worker pipes ───────────────────────────────────────────────
 
 def get_worker_pipe_path(name: str) -> Path:
     return WORKER_PIPE_ROOT / name / "in.pipe"
-
 
 def ensure_worker_pipe(name: str) -> Path:
     pipe_path = get_worker_pipe_path(name)
@@ -999,7 +923,6 @@ def ensure_worker_pipe(name: str) -> Path:
     start_pipe_reader(name)
 
     return pipe_path
-
 
 def cleanup_worker_pipe(name: str) -> None:
     stop_pipe_reader(name)
@@ -1019,7 +942,6 @@ def cleanup_worker_pipe(name: str) -> None:
             pipe_dir.rmdir()
         except OSError:
             pass
-
 
 def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     pipe_path = get_worker_pipe_path(name)
@@ -1051,7 +973,6 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
             if stop_event.is_set():
                 break
             _log(_LOG_ERROR, "bridge", f"Pipe reader error for '{name}': {e}")
-            # Wait a bit before retrying
             stop_event.wait(0.5)
 
     with processes.pipe_readers_lock:
@@ -1059,12 +980,10 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
             processes.pipe_readers.pop(name, None)
     _log(_LOG_INFO, "pipe", f"Pipe reader stopped for worker '{name}'")
 
-
 def _forward_pipe_message(name: str, message: str) -> None:
     import bridge
     if bridge.worker_manager is None or not bridge.worker_manager.send(name, message):
         _log(_LOG_WARN, "worker", f"Warning: Cannot forward pipe message to '{name}' - worker not found")
-
 
 def start_pipe_reader(name: str) -> None:
     with processes.pipe_readers_lock:
@@ -1092,7 +1011,6 @@ def start_pipe_reader(name: str) -> None:
     thread.start()
     _log(_LOG_INFO, "pipe", f"Started pipe reader thread for '{name}'")
 
-
 def stop_pipe_reader(name: str) -> None:
     with processes.pipe_readers_lock:
         if name not in processes.pipe_readers:
@@ -1114,12 +1032,10 @@ def stop_pipe_reader(name: str) -> None:
     if thread.is_alive():
         _log(_LOG_WARN, "bridge", f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
-
 # ── Session management ────────────────────────────────────────────────
 
 def get_session_dir(name: str) -> Path:
     return SESSIONS_DIR / name
-
 
 def ensure_session_dir(name: str) -> Path:
     session_dir = get_session_dir(name)
@@ -1128,10 +1044,8 @@ def ensure_session_dir(name: str) -> Path:
     session_dir.chmod(0o700)
     return session_dir
 
-
 def get_chat_id_file(name: str) -> Path:
     return get_session_dir(name) / "chat_id"
-
 
 def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     if not cwd:
@@ -1166,7 +1080,6 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     latest = max(jsonls, key=lambda p: p.stat().st_mtime)
     return latest.stem
 
-
 def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None:
     if not session_id:
         return
@@ -1185,7 +1098,6 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
 
-
 def get_session_history(name: str, event: str | None = None) -> list[dict[str, object]]:
     f = get_session_dir(name) / "session_history.jsonl"
     if not f.exists():
@@ -1195,7 +1107,7 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, o
         if not line:
             continue
         try:
-            e = cast(dict[str, object], json.loads(line))  # shape varies per event type
+            e = cast(dict[str, object], json.loads(line))
             if event and e.get("event") != event:
                 continue
             entries.append(e)
@@ -1203,9 +1115,7 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, o
             continue
     return entries
 
-
 _CLAUDE_JSON_PATH = Path.home() / ".claude.json"
-
 
 def _ensure_workspace_trusted(
     cwd: str,
@@ -1221,7 +1131,7 @@ def _ensure_workspace_trusted(
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 if target.exists():
-                    data = cast(dict[str, object], json.loads(target.read_text()))  # body: {projects}
+                    data = cast(dict[str, object], json.loads(target.read_text()))
                 else:
                     data = {}
                 _projects_raw = data.setdefault("projects", {})
@@ -1229,7 +1139,7 @@ def _ensure_workspace_trusted(
                 _entry_raw = projects.get(cwd, {})
                 entry = _entry_raw if isinstance(_entry_raw, dict) else {}
                 if entry.get("hasTrustDialogAccepted") is True:
-                    return  # already trusted — skip rewrite
+                    return
                 projects[cwd] = {**entry, "hasTrustDialogAccepted": True}
                 _tmp = target.with_suffix('.tmp')
                 _tmp.write_text(json.dumps(data, indent=2))
@@ -1240,9 +1150,7 @@ def _ensure_workspace_trusted(
     except (OSError, json.JSONDecodeError) as exc:
         _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
 
-
 from telegram import _build_cwd_change_notice as _build_cwd_change_notice  # noqa: F401
-
 
 def _cache_session_id(name: str, sid: str) -> None:
     if not sid:
@@ -1256,7 +1164,6 @@ def _cache_session_id(name: str, sid: str) -> None:
         old_sid = old_lines[0].strip() if old_lines else ""
         old_cwd = old_lines[1].strip() if len(old_lines) > 1 else ""
 
-        # Race guard: reject stale session_id write after CWD changed
         if (sid == old_sid and old_cwd and cwd and
                 old_cwd.rstrip("/") != cwd.rstrip("/")):
             _log(_LOG_WARN, "session",
@@ -1272,7 +1179,6 @@ def _cache_session_id(name: str, sid: str) -> None:
         os.replace(str(_tmp), str(id_file))
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
-
 
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     cache_file = get_session_dir(name) / "claude_session_id"
@@ -1310,7 +1216,6 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
             return scanned
     return ""
 
-
 def get_claude_session_cwd(name: str) -> str | None:
     import bridge
     cwd = bridge._get_worker_cwd(name)
@@ -1318,19 +1223,16 @@ def get_claude_session_cwd(name: str) -> str | None:
         return os.path.expanduser(cwd)
     return None
 
-
 def save_claude_session_cwd(name: str, cwd: str) -> None:
     import bridge
     if cwd:
         cwd = os.path.expanduser(cwd)
     bridge._set_worker_cwd(name, cwd)
 
-
 def clear_claude_session_id(name: str) -> None:
     id_file = get_session_dir(name) / "claude_session_id"
     if id_file.exists():
         id_file.unlink()
-
 
 def get_any_session_id(name: str) -> tuple[str, str]:
     session_dir = get_session_dir(name)
@@ -1342,7 +1244,6 @@ def get_any_session_id(name: str) -> tuple[str, str]:
             source = f.name.replace("_session_id", "")
             return val, source
     return "", ""
-
 
 def _get_remote_home(host: str | None) -> str:
     with remote_cache.lock:
@@ -1358,7 +1259,6 @@ def _get_remote_home(host: str | None) -> str:
     with remote_cache.lock:
         remote_cache.home_dirs[host or ""] = home
     return home
-
 
 POISON_PATTERNS = [
     re.compile(r"error.*overloaded", re.IGNORECASE),
@@ -1380,7 +1280,6 @@ POISON_PATTERNS = [
     re.compile(r"error.*503", re.IGNORECASE),
 ]
 
-
 def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None) -> str:
     if lines <= 0:
         return ""
@@ -1395,17 +1294,14 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None)
         return ""
     return result.stdout
 
-
 HOOK_FAILURE_THRESHOLD = 3
 
 HOOK_FAILURE_WINDOW = 120
-
 
 # ── Worker backend helpers ────────────────────────────────────────────
 
 def normalize_backend(backend: str | None) -> str:
     return backend or DEFAULT_BACKEND
-
 
 def normalize_cwd(cwd: str | None) -> str:
     if cwd is None:
@@ -1414,7 +1310,6 @@ def normalize_cwd(cwd: str | None) -> str:
     if not raw:
         return ""
     return os.path.abspath(os.path.expanduser(raw))
-
 
 def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
     normalized = normalize_cwd(cwd)
@@ -1434,7 +1329,6 @@ def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
         if not os.path.isdir(normalized):
             return "", f"cwd is not a directory: {normalized}"
     return normalized, ""
-
 
 _ActivityCheck = Callable[[list[str]], str | None]
 
@@ -1469,7 +1363,6 @@ _INTERACTIVE_CONTENT = [
     "Allow Notebook",
 ]
 
-
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     if session and session.get("backend"):
         return normalize_backend(str(session.get("backend")))
@@ -1479,7 +1372,6 @@ def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict 
     if entry.get("backend"):
         return normalize_backend(str(entry["backend"]))
     return DEFAULT_BACKEND
-
 
 def get_tmux_env_value(tmux_name: str, key: str) -> str:
     result = _subprocess_runner.run(
@@ -1492,7 +1384,6 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
     if "=" not in value:
         return ""
     return value.split("=", 1)[1]
-
 
 def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = None) -> bool:
     import re
@@ -1507,7 +1398,6 @@ def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = Non
                 return True
         _clock.sleep(DELAY_BRIEF * 2)
     return False
-
 
 def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host: str | None = None) -> None:
     our_url = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
