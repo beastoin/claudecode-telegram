@@ -81,6 +81,12 @@ from claudecode import (
     _which_binary,
 )
 
+# ── Load HTML templates from files ───────────────────────────────────
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
+_TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
+_CONNECTOR_CSS = (_TEMPLATE_DIR / "connector.css").read_text() if (_TEMPLATE_DIR / "connector.css").exists() else ""
+
 # ── Bridge-only TypedDict models ─────────────────────────────────────
 
 class WorkerEndpointInfo(TypedDict, total=False):
@@ -8560,7 +8566,7 @@ vertical-align:middle;margin-right:8px}}
 </div></body></html>'''
 
 def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
-    return f'''<!DOCTYPE html>
+    return (f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -8573,213 +8579,13 @@ def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
-<style>
-:root {{
-  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
-  --card:rgba(11,13,11,.02); --user-bg:rgba(255,255,255,.04);
-  --user-border:rgba(135,139,134,.12); --code-bg:#1a1c1a;
-  --green:#22c55e; --red:#bd2b2b; --link:#75dbf0; --radius:6px;
-  --claude:#d4a574; --claude-bg:rgba(212,165,116,.08);
-  --mono:"JetBrains Mono","Berkeley Mono","Fira Code","SF Mono",monospace;
-  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
-  --diff-add-bg:rgba(34,197,94,.1); --diff-add-fg:#22c55e;
-  --diff-del-bg:rgba(239,68,68,.1); --diff-del-fg:#ef4444;
-}}
-@media(prefers-color-scheme:light){{
-  :root{{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
-    --card:rgba(246,255,245,.03);--user-bg:rgba(0,0,0,.03);--user-border:rgba(135,139,134,.2);
-    --code-bg:#f4f4f0;--green:#16a34a;--red:#d44444;--link:#0969da;
-    --claude:#b07d4f;--claude-bg:rgba(176,125,79,.06);
-    --diff-add-bg:rgba(34,197,94,.1);--diff-add-fg:#16a34a;
-    --diff-del-bg:rgba(239,68,68,.1);--diff-del-fg:#dc2626;}}
-}}
-*{{margin:0;padding:0;box-sizing:border-box}}
-html{{font-size:14px}}
-body{{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
-  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}}
-.wrap{{display:flex;flex-direction:column;min-height:100vh}}
-.main{{flex:1;display:flex;justify-content:center;padding:24px 16px 80px;gap:24px}}
-.content{{flex:1;min-width:0;max-width:42rem}}
-/* Sidebar */
-.sidebar{{width:240px;flex-shrink:0;position:sticky;top:24px;align-self:flex-start;
-  font-size:.8rem;color:var(--muted)}}
-.sidebar-inner{{border:1px solid var(--border);border-radius:10px;padding:16px;
-  background:var(--card);display:flex;flex-direction:column;gap:12px}}
-.sb-title{{font-weight:600;color:var(--fg);font-size:.85rem;margin-bottom:4px}}
-.sb-row{{display:flex;justify-content:space-between;align-items:center}}
-.sb-label{{color:var(--muted)}}
-.sb-val{{color:var(--fg);font-weight:500;font-family:var(--mono);font-size:.75rem}}
-.sb-divider{{border-top:1px solid var(--border);margin:4px 0}}
-.sb-lines{{display:flex;gap:10px;font-family:var(--mono);font-size:.75rem;font-weight:600}}
-.sb-lines .plus{{color:var(--green)}}.sb-lines .minus{{color:var(--red)}}.sb-lines .mod{{color:#f59e0b}}
-/* Mobile sidebar toggle (in header) */
-.sb-toggle{{display:none;background:none;border:none;color:var(--muted);cursor:pointer;
-  padding:2px;line-height:0;transition:color .15s}}
-.sb-toggle:hover{{color:var(--fg)}}
-@media(max-width:900px){{
-  .sidebar{{display:none;position:fixed;top:0;right:0;bottom:0;width:260px;z-index:100;
-    padding:16px;background:var(--bg);border-left:1px solid var(--border);
-    overflow-y:auto;box-shadow:-4px 0 20px rgba(0,0,0,.3)}}
-  .sidebar.sb-open{{display:block}}
-  .sb-toggle{{display:inline-flex}}
-  .main{{justify-content:center}}
-}}
-/* Header */
-header{{border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:24px}}
-.h-row{{display:flex;align-items:center;gap:8px}}
-h1{{font-size:1.5rem;font-weight:600;letter-spacing:-.02em}}
-.meta{{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;color:var(--muted);font-size:.8rem}}
-.mi{{display:inline-flex;align-items:center;gap:5px}}
-.mi svg{{width:14px;height:14px;opacity:.7;flex-shrink:0}}
-/* Search */
-.search-bar{{margin-bottom:16px;display:flex;gap:8px}}
-.search-bar input{{flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;
-  background:var(--card);color:var(--fg);font-size:.875rem;font-family:var(--sans);outline:none;
-  transition:border-color .15s}}
-.search-bar input:focus{{border-color:var(--link)}}
-.search-bar button{{padding:8px 16px;border:1px solid var(--border);border-radius:8px;
-  background:var(--card);color:var(--fg);cursor:pointer;font-size:.8rem;transition:all .15s}}
-.search-bar button:hover{{border-color:var(--link);color:var(--link)}}
-.search-info{{color:var(--muted);font-size:.8rem;margin-bottom:12px;padding:8px 12px;
-  border:1px dashed var(--border);border-radius:8px}}
-.ctx-wrap{{display:block;text-decoration:none;color:inherit;border-radius:8px;
-  padding:4px;margin:-4px;transition:background .15s;cursor:pointer}}
-.ctx-wrap:hover{{background:var(--user-bg);text-decoration:none}}
-mark{{background:rgba(250,204,21,.25);color:inherit;border-radius:2px;padding:0 1px}}
-/* Pagination */
-.pg{{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:16px 0;font-size:.8rem}}
-.pg-btn{{padding:5px 12px;border:1px solid var(--border);border-radius:6px;color:var(--fg);
-  text-decoration:none;transition:all .15s}}
-.pg-btn:hover{{border-color:var(--link);color:var(--link);text-decoration:none}}
-.pg-cur{{background:var(--link);color:var(--bg);border-color:var(--link);font-weight:600}}
-.pg-cur:hover{{color:var(--bg)}}
-.pg-dis{{opacity:.3;pointer-events:none}}
-.pg-info{{margin-left:auto;color:var(--muted)}}
-/* Thread */
-.thread{{display:flex;flex-direction:column;gap:20px}}
-/* Assistant turn body (no avatar — matches AmpCode) */
-.turn-body{{display:flex;flex-direction:column;gap:8px;min-width:0}}
-/* User messages */
-.user-msg{{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start}}
-.u-av{{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px;
-  border:1px solid var(--border)}}
-.u-av img{{width:100%;height:100%;object-fit:cover;display:block}}
-.ts{{font-size:.65rem;font-weight:400;color:var(--muted);float:right;margin-left:8px;margin-top:4px}}
-.u-body{{min-width:0}}
-.u-name{{display:block;font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:2px;text-transform:capitalize}}
-.u-text{{white-space:pre-wrap;word-break:break-word;font-size:1rem;line-height:1.6}}
-/* Assistant text (rendered by marked.js) */
-.a-text{{font-size:1rem;line-height:1.6;word-break:break-word}}
-.a-text p{{margin:.5em 0}}
-.a-text ul,.a-text ol{{padding-left:1.5rem;margin:.5em 0}}
-.a-text li{{margin:.3em 0}}
-.a-text strong{{font-weight:600}}
-.a-text h1{{font-size:1.4em;font-weight:600;margin:.8em 0 .4em}}
-.a-text h2{{font-size:1.2em;font-weight:600;margin:.7em 0 .3em}}
-.a-text h3{{font-size:1.1em;font-weight:600;margin:.6em 0 .2em}}
-.a-text blockquote{{border-left:3px solid var(--border);padding-left:12px;color:var(--muted);margin:.5em 0}}
-.a-text .table-wrap{{overflow-x:auto;margin:.75em 0}}
-.a-text .table-wrap table{{margin:0}}
-.a-text table{{border-collapse:collapse;box-shadow:0 0 0 1px var(--border);border-radius:.25rem;overflow:hidden;margin:.75em 0;font-size:.93em}}
-.a-text thead{{background:color-mix(in srgb,var(--muted) 20%,transparent)}}
-.a-text th{{text-align:left;font-weight:600;border-bottom:1px solid var(--border);border-right:1px solid var(--border);padding:.375rem .5rem;white-space:nowrap}}
-.a-text th:last-child{{border-right:none}}
-.a-text td{{border-bottom:1px solid var(--border);border-right:1px solid var(--border);padding:.375rem .5rem;white-space:nowrap}}
-.a-text td:last-child{{border-right:none}}
-.a-text tbody tr:last-child td{{border-bottom:none}}
-.a-text tbody tr:hover{{background:color-mix(in srgb,var(--muted) 15%,transparent)}}
-.a-text a{{color:var(--link)}}
-.a-text img{{max-width:100%;border-radius:8px}}
-/* Code (hljs themed) */
-.a-text pre{{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;
-  padding:12px 14px;overflow-x:auto;font-family:var(--mono);font-size:.8rem;line-height:1.6;margin:.6em 0}}
-.a-text pre code{{background:none!important;padding:0!important;font-size:inherit}}
-.a-text code{{background:var(--code-bg);padding:2px 6px;border-radius:4px;
-  font-family:var(--mono);font-size:.85em}}
-.a-text pre code{{background:none;padding:0;border-radius:0}}
-.hljs{{background:transparent!important;padding:0!important}}
-/* Copy button on code blocks */
-.a-text pre{{position:relative}}
-.copy-btn{{position:absolute;top:6px;right:6px;padding:3px 8px;border:1px solid var(--border);
-  border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-size:.65rem;
-  opacity:0;transition:opacity .15s;font-family:var(--sans)}}
-.a-text pre:hover .copy-btn{{opacity:1}}
-.copy-btn:hover{{color:var(--fg);border-color:var(--muted)}}
-.copy-btn.copied{{color:var(--green);border-color:var(--green)}}
-/* Tool chips */
-.chip{{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:6px;
-  border:1px solid var(--border);background:var(--card);font-size:.875rem;font-weight:400;overflow:hidden;
-  transition:border-color .15s;width:fit-content}}
-.chip:hover{{border-color:var(--muted)}}
-.t-icon{{flex-shrink:0;width:14px;height:14px;color:var(--muted);opacity:.8}}
-.t-det{{color:var(--fg);font-family:var(--mono);font-size:.8rem;font-weight:400;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}}
-.fp{{font-family:var(--mono);font-size:.8rem;font-weight:400}}
-.fp-dir{{opacity:.6}}
-/* Action blocks (Bash, expandable tools) */
-.act{{border-radius:6px;border:1px solid var(--border);overflow:hidden}}
-.act-h{{display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--card);
-  font-size:.875rem;font-weight:400;cursor:pointer;user-select:none;list-style:none;transition:background .1s}}
-.act-h::-webkit-details-marker{{display:none}}
-.act-h:hover{{background:var(--user-bg)}}
-.act-h svg{{width:14px;height:14px;color:var(--muted);flex-shrink:0}}
-.act-body{{border-top:1px solid var(--border);padding:0;font-family:var(--mono);
-  font-size:.75rem;line-height:1.6;white-space:pre-wrap;word-break:break-all;
-  color:var(--muted);background:var(--code-bg)}}
-.act-cmd{{padding:8px 12px;color:var(--fg)}}
-.act-out{{padding:8px 12px;border-top:1px solid var(--border);color:var(--muted)}}
-.act-out-err{{color:var(--red)}}
-.act-err>.act-h .chev{{color:#bd2b2b}}
-.act-body .t-out{{padding:8px 12px;white-space:pre-wrap;word-break:break-word;font-size:.75rem;
-  color:var(--muted);font-family:var(--mono);line-height:1.6;border:0}}
-/* Diff display */
-.diff-act .act-h{{gap:8px}}
-.diff-body{{border-top:1px solid var(--border);padding:0;font-family:var(--mono);
-  font-size:.75rem;line-height:1.7;overflow-x:auto;background:var(--code-bg)}}
-.diff-add,.diff-del,.diff-ctx{{padding:0 12px 0 0;white-space:pre;display:flex}}
-.diff-add{{background:var(--diff-add-bg);color:var(--diff-add-fg)}}
-.diff-del{{background:var(--diff-del-bg);color:var(--diff-del-fg)}}
-.diff-ctx{{color:var(--muted)}}
-.diff-ln{{display:inline-block;width:36px;text-align:right;padding-right:8px;color:var(--muted);
-  opacity:.5;user-select:none;flex-shrink:0}}
-.diff-sign{{display:inline-block;width:16px;text-align:center;flex-shrink:0;font-weight:600}}
-.diff-stat{{display:inline-flex;gap:6px;margin-left:auto;font-family:var(--mono);font-size:.7rem}}
-.diff-plus{{color:var(--green)}}.diff-minus{{color:var(--red)}}.diff-mod{{color:#f59e0b}}
-/* Thinking */
-.think{{border-radius:6px;border:1px solid transparent;background:var(--card)}}
-.think-h{{display:flex;align-items:center;gap:4px;padding:6px 10px;cursor:pointer;
-  user-select:none;color:var(--muted);font-size:.8rem;list-style:none;transition:color .1s}}
-.think-h::-webkit-details-marker{{display:none}}
-.think-h:hover{{color:var(--fg)}}
-.think-t{{padding:10px 12px;white-space:pre-wrap;word-break:break-word;font-size:.8rem;
-  color:var(--muted);font-family:var(--sans);font-style:italic;line-height:1.6}}
-/* (tool outputs merged into tool_use blocks) */
-/* Chevrons */
-.chev{{width:14px;height:14px;transition:transform .15s ease;flex-shrink:0}}
-.act-h .chev{{margin-left:auto}}
-details[open] .chev{{transform:rotate(90deg)}}
-/* Jump buttons */
-.jump{{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:6px;z-index:50}}
-.jump a{{width:36px;height:36px;border-radius:50%;border:1px solid var(--border);
-  background:var(--bg);display:flex;align-items:center;justify-content:center;
-  color:var(--muted);text-decoration:none;font-size:1.1rem;transition:all .15s;
-  box-shadow:0 2px 8px rgba(0,0,0,.15)}}
-.jump a:hover{{border-color:var(--link);color:var(--link)}}
-a{{color:var(--link);text-decoration:none}}
-a:hover{{text-decoration:underline}}
-/* Live updates banner */
-.live-banner{{position:sticky;top:0;z-index:40;padding:10px 16px;
-  background:var(--link);color:#fff;text-align:center;cursor:pointer;
-  font-size:.85rem;font-weight:500;border-radius:0 0 var(--radius) var(--radius);
-  box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .2s}}
-.live-banner:hover{{opacity:.9}}
-</style>
+<style>''' + _TRANSCRIPT_CSS + '''</style>
 </head>
 <body>
 <div class="wrap">
 <div class="main">
 <div class="content">
-'''
+''')
 
 def _transcript_html_nav(name: str, stats: TranscriptStatsDict,
                          prompts_filter_url: str,
@@ -8922,151 +8728,8 @@ def _transcript_html_footer(sid: str, stats: TranscriptStatsDict,
 '''
 
 def _transcript_html_search_js() -> str:
-    return '''<script>
-// Render markdown blocks with marked.js + highlight.js
-marked.setOptions({
-  highlight: function(code, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      return hljs.highlight(code, {language: lang}).value;
-    }
-    return hljs.highlightAuto(code).value;
-  },
-  breaks: true,
-  gfm: true
-});
-function decodeB64Utf8(b64) {
-  var bin = atob(b64);
-  var bytes = new Uint8Array(bin.length);
-  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder('utf-8').decode(bytes);
-}
-document.querySelectorAll('.markdown[data-md]').forEach(function(el) {
-  try {
-    var md = decodeB64Utf8(el.getAttribute('data-md'));
-    el.innerHTML = marked.parse(md);
-  } catch(e) {
-    el.textContent = 'Error rendering markdown: ' + e.message;
-  }
-});
-// Wrap tables in scroll containers
-document.querySelectorAll('.a-text table').forEach(function(table) {
-  var wrap = document.createElement('div');
-  wrap.className = 'table-wrap';
-  table.parentNode.insertBefore(wrap, table);
-  wrap.appendChild(table);
-});
-// Add copy buttons to code blocks
-document.querySelectorAll('.a-text pre').forEach(function(pre) {
-  var btn = document.createElement('button');
-  btn.className = 'copy-btn';
-  btn.textContent = 'Copy';
-  btn.onclick = function() {
-    var code = pre.querySelector('code');
-    navigator.clipboard.writeText(code ? code.textContent : pre.textContent).then(function() {
-      btn.textContent = 'Copied!';
-      btn.classList.add('copied');
-      setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
-    });
-  };
-  pre.appendChild(btn);
-});
-// Keyboard shortcuts
-document.addEventListener('keydown', function(e) {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === '/') { e.preventDefault(); document.querySelector('.search-bar input').focus(); }
-  if (e.key === 'Home') { window.scrollTo(0,0); }
-  if (e.key === 'End') { window.scrollTo(0,document.body.scrollHeight); }
-});
-// Highlight search terms in thread content
-(function() {
-  var thread = document.getElementById('thread');
-  var q = thread && thread.getAttribute('data-search');
-  if (!q) return;
-  var terms = q.split(/\\s+/).filter(function(t) { return t.length > 0; });
-  if (!terms.length) return;
-  var pattern = new RegExp('(' + terms.map(function(t) {
-    return t.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
-  }).join('|') + ')', 'gi');
-  function walk(node) {
-    if (node.nodeType === 3) {
-      var text = node.textContent;
-      if (!pattern.test(text)) return;
-      pattern.lastIndex = 0;
-      var frag = document.createDocumentFragment();
-      var last = 0;
-      var match;
-      while ((match = pattern.exec(text)) !== null) {
-        if (match.index > last) frag.appendChild(document.createTextNode(text.slice(last, match.index)));
-        var mark = document.createElement('mark');
-        mark.textContent = match[0];
-        frag.appendChild(mark);
-        last = pattern.lastIndex;
-      }
-      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-      node.parentNode.replaceChild(frag, node);
-    } else if (node.nodeType === 1 && !/^(script|style|mark|code|pre)$/i.test(node.tagName)) {
-      var children = Array.from(node.childNodes);
-      for (var i = 0; i < children.length; i++) walk(children[i]);
-    }
-  }
-  // Highlight in user messages and assistant text
-  thread.querySelectorAll('.u-text, .a-text').forEach(function(el) { walk(el); });
-})();
-// Render timestamps in browser timezone
-var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-document.querySelectorAll('.ts[data-ts]').forEach(function(el) {
-  try {
-    var d = new Date(el.getAttribute('data-ts'));
-    if (!isNaN(d)) {
-      var mon = months[d.getMonth()];
-      var day = d.getDate();
-      var h = String(d.getHours()).padStart(2,'0');
-      var m = String(d.getMinutes()).padStart(2,'0');
-      el.textContent = mon + ' ' + day + ' ' + h + ':' + m;
-    }
-  } catch(e) {}
-});
-// Live updates: poll for new entries, show banner when available
-(function() {
-  var thread = document.getElementById('thread');
-  if (!thread) return;
-  var total = parseInt(thread.getAttribute('data-total')) || 0;
-  var updatesUrl = thread.getAttribute('data-updates-url');
-  var pageUrl = thread.getAttribute('data-page-url');
-  var token = thread.getAttribute('data-token');
-  var perPage = thread.getAttribute('data-per-page') || '50';
-  var curPage = parseInt(thread.getAttribute('data-page')) || 1;
-  var totalPages = parseInt(thread.getAttribute('data-total-pages')) || 1;
-  if (!updatesUrl || !token) return;
-  // Only poll when viewing the last page (most recent entries)
-  if (curPage < totalPages) return;
-  var banner = document.getElementById('live-banner');
-  var polling = true;
-  var pollUrl = updatesUrl + '?token=' + encodeURIComponent(token) + '&since=' + total;
-  function poll() {
-    if (!polling) return;
-    fetch(pollUrl).then(function(r) { return r.json(); }).then(function(d) {
-      if (d.new > 0) {
-        banner.textContent = d.new + ' new entr' + (d.new === 1 ? 'y' : 'ies') + ' — click to load';
-        banner.style.display = 'block';
-        polling = false;  // Stop polling once banner is shown
-      } else {
-        setTimeout(poll, 5000);
-      }
-    }).catch(function() {
-      setTimeout(poll, 10000);  // Retry slower on error
-    });
-  }
-  banner.addEventListener('click', function() {
-    // Navigate to last page of transcript (fresh render with new entries)
-    var url = pageUrl + '?token=' + encodeURIComponent(token) + '&per_page=' + perPage;
-    window.location.href = url;
-  });
-  setTimeout(poll, 5000);  // Start polling after 5s
-})();
-</script>
-</body>
-</html>'''
+    return '<script>\n' + _TRANSCRIPT_JS + '\n</script>\n</body>\n</html>\n' 
+
 
 def _render_transcript_html(name: str, session_id: str | None = None,
                             page: int | None = None, per_page: int = 50,
@@ -11370,7 +11033,9 @@ def _connector_render_html(tag: str, current_html: str) -> str:
         )
 
     blocks_html = "\n".join(blocks)
-    return f'''<!DOCTYPE html>
+    updated = time.strftime("%b %d, %H:%M UTC", time.gmtime(_clock.time()))
+    count_text = f'{len(msgs)} recent message{"s" if len(msgs) != 1 else ""}'
+    return (f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -11379,55 +11044,20 @@ def _connector_render_html(tag: str, current_html: str) -> str:
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<style>
-:root {{
-  --bg:#0b0d0b; --fg:#e5e5e0; --border:rgba(135,139,134,.12); --muted:#9ca49c;
-  --user-bg:rgba(255,255,255,.04); --code-bg:#1a1c1a; --link:#75dbf0; --radius:6px;
-  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,sans-serif;
-  --accent:#8b5cf6;
-}}
-@media(prefers-color-scheme:light){{
-  :root{{--bg:#fafaf8;--fg:#1a1a1a;--muted:#595959;--border:rgba(135,139,134,.2);
-    --user-bg:rgba(0,0,0,.03);--code-bg:#f4f4f0;--link:#0969da;--accent:#7c3aed;}}
-}}
-*{{margin:0;padding:0;box-sizing:border-box}}
-html{{font-size:14px}}
-body{{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.6;
-  -webkit-font-smoothing:antialiased}}
-.wrap{{max-width:48rem;margin:0 auto;padding:24px 16px 80px}}
-header{{border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}}
-h1{{font-size:1.3rem;font-weight:700}}
-.meta{{color:var(--muted);font-size:.85rem;margin-top:4px}}
-.thread{{display:flex;flex-direction:column;gap:4px}}
-.chat-msg{{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:8px 8px;
-  border-radius:8px;transition:background .2s}}
-.chat-msg:hover{{background:var(--user-bg)}}
-.chat-msg.latest{{background:rgba(117,219,240,.06);border:1px solid rgba(117,219,240,.1)}}
-.chat-body{{min-width:0}}
-.u-av{{width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;margin-top:2px}}
-.u-av svg{{width:100%;height:100%}}
-.u-name{{font-weight:600;font-size:.85rem;margin-right:6px}}
-.ts{{font-size:.75rem;color:var(--muted)}}
-.target{{font-size:.75rem;color:var(--muted);margin-left:6px}}
-.badge{{font-size:.65rem;font-weight:600;color:var(--link);background:rgba(117,219,240,.1);
-  padding:1px 6px;border-radius:3px;margin-left:8px;text-transform:uppercase}}
-.chat-text{{white-space:pre-wrap;word-break:break-word;font-size:.9rem;line-height:1.6;margin-top:2px}}
-.chat-text a{{color:var(--link)}}
-blockquote{{border-left:3px solid var(--border);padding-left:10px;margin:4px 0;color:var(--muted)}}
-</style>
+<style>''' + _CONNECTOR_CSS + f'''</style>
 </head>
 <body>
 <div class="wrap">
 <header>
 <h1>{icon} {title}</h1>
-<div class="meta">{len(msgs)} recent message{"s" if len(msgs) != 1 else ""} &middot; Updated {time.strftime("%b %d, %H:%M UTC", time.gmtime(_clock.time()))}</div>
+<div class="meta">{count_text} &middot; Updated {updated}</div>
 </header>
 <div class="thread">
 {blocks_html}
 </div>
 </div>
 </body>
-</html>'''
+</html>''')
 
 def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None) -> str:
     import html as _html
