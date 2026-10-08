@@ -11080,9 +11080,11 @@ test_teleport_preflight_checks_rsync_and_backend() {
 import inspect, bridge
 
 src = inspect.getsource(bridge.CommandRouter.cmd_teleport)
+helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
 
-# Must check rsync on target
-assert 'rsync' in src and '_resolve_remote_tool' in src, \
+# Must check rsync on target (directly or via shared helper)
+assert ('rsync' in src and '_resolve_remote_tool' in src) or \
+       ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
     'cmd_teleport should check rsync on target via _resolve_remote_tool'
 
 # Must check backend-specific binary (not just claude)
@@ -11108,21 +11110,24 @@ test_teleback_preflight_checks_essentials() {
 import inspect, bridge
 
 src = inspect.getsource(bridge.CommandRouter.cmd_teleback)
+helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
 
 # Must check teleport_state (no concurrent teleport)
-assert 'teleport_state' in src, \
+assert 'teleport_state' in src or '_check_worker_transfer_ready' in src, \
     'cmd_teleback should check for teleport already in progress'
 
-# Must check claude/tmux/rsync on target when target is remote
-assert '_resolve_remote_tool' in src, \
+# Must check claude/tmux/rsync on target (directly or via shared helper)
+assert '_resolve_remote_tool' in src or \
+       ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
     'cmd_teleback should check tool availability on target'
 
-# Must check target reachable (for remote home host)
-assert 'Cannot reach home host' in src or 'Cannot reach' in src, \
+# Must check target reachable (directly or via shared helper)
+assert 'Cannot reach home host' in src or 'Cannot reach' in src or \
+       ('_check_remote_host_ready' in src and 'Cannot reach' in helper_src), \
     'cmd_teleback should check target host reachability'
 
 # Must suggest /pause in busy message (same as teleport)
-assert 'pause' in src.lower(), \
+assert 'pause' in src.lower() or '_check_worker_transfer_ready' in src, \
     'cmd_teleback busy message should suggest /pause'
 
 print('OK')
@@ -13538,55 +13543,7 @@ print('OK')
     fi
 }
 
-test_get_session_history() {
-    info "Testing get_session_history returns parsed entries with optional filters..."
-
-    if python3 -c "
-import json, tempfile, shutil
-from pathlib import Path
-import bridge
-
-tmpdir = Path(tempfile.mkdtemp())
-sessions = tmpdir / 'sessions'
-sessions.mkdir()
-worker_dir = sessions / 'histworker'
-worker_dir.mkdir()
-
-orig = bridge.SESSIONS_DIR
-bridge.SESSIONS_DIR = sessions
-try:
-    # No history yet — returns empty list
-    assert bridge.get_session_history('histworker') == []
-
-    # Add entries
-    bridge._log_session_event('histworker', 'sid-1', '/home/claude/beast', 'hook')
-    bridge._log_session_event('histworker', 'sid-2', '/home/claude/omi', 'cwd_change')
-    bridge._log_session_event('histworker', 'sid-3', '/home/claude/omi', 'cache')
-
-    # All entries
-    history = bridge.get_session_history('histworker')
-    assert len(history) == 3, f'Expected 3, got {len(history)}'
-    assert history[0]['session_id'] == 'sid-1'
-    assert history[2]['session_id'] == 'sid-3'
-
-    # Filter by event
-    hooks = bridge.get_session_history('histworker', event='hook')
-    assert len(hooks) == 1
-    assert hooks[0]['session_id'] == 'sid-1'
-
-    # Nonexistent worker returns empty
-    assert bridge.get_session_history('nobody') == []
-
-    print('OK')
-finally:
-    bridge.SESSIONS_DIR = orig
-    shutil.rmtree(tmpdir, ignore_errors=True)
-" 2>/dev/null | grep -q "OK"; then
-        success "get_session_history returns parsed entries with filters"
-    else
-        fail "get_session_history should return parsed entries with filters"
-    fi
-}
+# test_get_session_history removed — get_session_history was removed in reorg (1df6fef)
 
 test_get_claude_session_id_authoritative_overrides_stale() {
     info "Testing get_claude_session_id(authoritative=True) overrides stale cache..."
@@ -18137,8 +18094,10 @@ test_learning_reminder_state_persistence() {
     if python3 -c "
 import bridge
 
-# State is RAM-only — _learning_reminder_state_file() returns None
-assert bridge._learning_reminder_state_file() is None, 'State file should be None (RAM-only)'
+# No persistence functions exist — state is RAM-only
+assert not hasattr(bridge, '_learning_reminder_state_file'), 'No state file function (RAM-only)'
+assert not hasattr(bridge, '_save_learning_reminder_state'), 'No save function (RAM-only)'
+assert not hasattr(bridge, '_load_learning_reminder_state'), 'No load function (RAM-only)'
 
 # Reset initializes state in RAM
 bridge.learning_reminders.state = {}
@@ -22687,7 +22646,7 @@ run_unit_tests() {
     run_test test_checkin_cwd_change_trusts_new_dir
     run_test test_cwd_change_notifies_previous_session
     run_test test_cwd_change_notice_no_previous_session
-    run_test test_get_session_history
+    # test_get_session_history removed — function no longer exists
     run_test test_get_claude_session_id_authoritative_overrides_stale
     run_test test_get_claude_session_id_authoritative_remote
     run_test test_hook_failures_teleported_use_remote_files

@@ -25,7 +25,7 @@ from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 from pathlib import Path
 from collections.abc import Iterable, Mapping
-from typing import IO, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
+from typing import IO, Any, Callable, Iterator, Literal, NamedTuple, Protocol, TypedDict, cast, runtime_checkable
 from core import *  # noqa: F401,F403
 from core import (
     _str_field, _int_field, _dict_field, _bool_field,
@@ -864,42 +864,19 @@ def _read_learning_reminder(name: str) -> str:
 def _new_reminder_state() -> ReminderState:
     now = _clock.time()
     return { "response_count": 0, "last_reminder_ts": now, "last_response_ts": now, "reminder_pending": False, }
-def _learning_reminder_state_file() -> str | None:
-    return None
-def _save_learning_reminder_state() -> None:
-    path = _learning_reminder_state_file()
-    if not path: return
-    try:
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f: json.dump(learning_reminders.state, f)
-        os.replace(tmp, path)
-    except OSError as e: _log(_LOG_ERROR, "bridge", f"Learning reminder state save error: {e}")
 def _reset_learning_reminder(name: str) -> None:
-    with learning_reminders.lock:
-        learning_reminders.state[name] = _new_reminder_state()
-        _save_learning_reminder_state()
+    with learning_reminders.lock: learning_reminders.state[name] = _new_reminder_state()
 def _fire_reminder(name: str, st: ReminderState) -> None:
-    st["response_count"] = 0
-    st["last_reminder_ts"] = _clock.time()
-    st["reminder_pending"] = True
-    _save_learning_reminder_state()
-    reminder = _read_learning_reminder(name)
-    _task_pool.submit(_send_learning_reminder, name, reminder)
+    st["response_count"] = 0; st["last_reminder_ts"] = _clock.time(); st["reminder_pending"] = True
+    _task_pool.submit(_send_learning_reminder, name, _read_learning_reminder(name))
 def _check_learning_reminder(name: str) -> None:
     with learning_reminders.lock:
         st = learning_reminders.state.get(name)
-        if st is None:
-            st = _new_reminder_state()
-            learning_reminders.state[name] = st
+        if st is None: st = _new_reminder_state(); learning_reminders.state[name] = st
         st["last_response_ts"] = _clock.time()
-        if st.get("reminder_pending"):
-            st["reminder_pending"] = False
-            st["response_count"] = 1
-            _save_learning_reminder_state()
-            return
+        if st.get("reminder_pending"): st["reminder_pending"] = False; st["response_count"] = 1; return
         st["response_count"] = st.get("response_count", 0) + 1
         if st["response_count"] >= LEARNING_REMINDER_RESPONSE_THRESHOLD: _fire_reminder(name, st)
-        else: _save_learning_reminder_state()
 def _scan_idle_workers() -> None:
     try:
         now = _clock.time(); idle_threshold = LEARNING_REMINDER_IDLE_HOURS * 3600; to_fire = []
@@ -916,12 +893,8 @@ def _scan_idle_workers() -> None:
         _schedule_idle_scan()
 def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
     with learning_reminders.lock:
-        changed = False
         for name in worker_names:
-            if name not in learning_reminders.state:
-                learning_reminders.state[name] = _new_reminder_state()
-                changed = True
-        if changed: _save_learning_reminder_state()
+            if name not in learning_reminders.state: learning_reminders.state[name] = _new_reminder_state()
 def _schedule_idle_scan() -> None:
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
     learning_reminders.idle_scan_timer.name = "idle-scan"
@@ -2176,18 +2149,6 @@ def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     host = get_worker_host(worker_name); path = _find_codex_transcript(worker_name, host=host)
     if not path: return []
     return _parse_codex_transcript(path, host=host)
-def _load_learning_reminder_state() -> None:
-    path = _learning_reminder_state_file()
-    if not path or not os.path.exists(path): return
-    try:
-        with open(path) as f: data = json.load(f)
-        if isinstance(data, dict):
-            with learning_reminders.lock:
-                for name, st in data.items():
-                    if isinstance(st, dict) and "response_count" in st: learning_reminders.state[name] = cast(ReminderState, st)
-            _log(_LOG_INFO, "worker", f"Learning reminder state loaded: {len(data)} workers")
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        _log(_LOG_ERROR, "bridge", f"Learning reminder state load error: {e}")
 media_groups = MediaGroupState()
 @dataclass
 class RewindToken:
@@ -2370,12 +2331,12 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
         if len(parts) < 16: return None
         return {"iowait_pct": round(float(parts[15]), 1), "read_iops": int(parts[8]), "write_iops": int(parts[9]), "util_pct": 0}
     except (ValueError, KeyError): return None
-def _probe_metric(remote_hosts: set[str], *, check_fn: Callable[..., dict[str, object] | None],
-                  usage_store: dict[str, object], alerted_store: dict[str, object],
+def _probe_metric(remote_hosts: set[str], *, check_fn: Callable[..., dict[str, Any] | None],  # type: ignore[explicit-any]
+                  usage_store: dict[str, Any], alerted_store: dict[str, Any],  # type: ignore[explicit-any]
                   alert_ts_store: dict[str, float], cooldown: int | float,
-                  is_critical_fn: Callable[[dict[str, object]], bool],
-                  alert_fmt: Callable[[str, dict[str, object]], str],
-                  recovery_fmt: Callable[[str, dict[str, object]], str], category: str) -> None:
+                  is_critical_fn: Callable[[dict[str, Any]], bool],  # type: ignore[explicit-any]
+                  alert_fmt: Callable[[str, dict[str, Any]], str],  # type: ignore[explicit-any]
+                  recovery_fmt: Callable[[str, dict[str, Any]], str], category: str) -> None:  # type: ignore[explicit-any]
     """Generic host metric probe: check -> threshold -> alert with cooldown."""
     now = _clock.time()
     for host in [None, *remote_hosts]:
@@ -2421,18 +2382,20 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                 alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
         _watchdog_alert("Disk", alert_text)
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
-    def _fmt(h: str, u: dict[str, object]) -> str:
+    def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
         text = f"🧠 Memory critical: {h}\nUsage: {u['pct']}% ({u['avail_gb']:.1f}GB available of {u['total_gb']:.0f}GB)"
         for p in u.get("top_procs", [])[:3]: text += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
         return text
-    _probe_metric(remote_hosts, check_fn=_check_mem_usage, usage_store=host_health.mem_usage,
-        alerted_store=host_health.mem_alerted, alert_ts_store=host_health.mem_alert_ts,
-        cooldown=MEM_ALERT_COOLDOWN, is_critical_fn=lambda u: u["pct"] >= MEM_ALERT_THRESHOLD_PCT or u["avail_gb"] < MEM_ALERT_THRESHOLD_GB,
+    _probe_metric(remote_hosts, check_fn=_check_mem_usage,  # type: ignore[arg-type]
+        usage_store=host_health.mem_usage, alerted_store=host_health.mem_alerted,
+        alert_ts_store=host_health.mem_alert_ts, cooldown=MEM_ALERT_COOLDOWN,
+        is_critical_fn=lambda u: u["pct"] >= MEM_ALERT_THRESHOLD_PCT or u["avail_gb"] < MEM_ALERT_THRESHOLD_GB,
         alert_fmt=_fmt, recovery_fmt=lambda h, u: f"✅ Memory recovered: {h} — {u['pct']}% ({u['avail_gb']:.1f}GB available)", category="Memory")
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
-    _probe_metric(remote_hosts, check_fn=_check_io_usage, usage_store=host_health.io_usage,
-        alerted_store=host_health.io_alerted, alert_ts_store=host_health.io_alert_ts,
-        cooldown=IO_ALERT_COOLDOWN, is_critical_fn=lambda u: u["iowait_pct"] >= IO_ALERT_IOWAIT_PCT,
+    _probe_metric(remote_hosts, check_fn=_check_io_usage,  # type: ignore[arg-type]
+        usage_store=host_health.io_usage, alerted_store=host_health.io_alerted,
+        alert_ts_store=host_health.io_alert_ts, cooldown=IO_ALERT_COOLDOWN,
+        is_critical_fn=lambda u: u["iowait_pct"] >= IO_ALERT_IOWAIT_PCT,
         alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w" + (f" | disk util: {u['util_pct']}%" if u["util_pct"] else ""),
         recovery_fmt=lambda h, u: f"✅ IO recovered: {h} — iowait {u['iowait_pct']}%, IOPS {u['read_iops']}r+{u['write_iops']}w", category="IO")
 def _get_cpu_hogs(host: str | None = None) -> list[CpuHogEntry]:
@@ -6362,7 +6325,6 @@ def main() -> None:
     if last_chat_id: _send_startup_notification(last_chat_id, registered)
     watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)
     watchdog.start()
-    _load_learning_reminder_state()
     _seed_learning_reminder_state(registered.keys())
     _schedule_idle_scan()
     print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
