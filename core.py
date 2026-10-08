@@ -21,8 +21,7 @@ def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
 
 def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     val = d.get(key, default)
-    if isinstance(val, int):
-        return val
+    if isinstance(val, int): return val
     if isinstance(val, str):
         try:
             return int(val)
@@ -136,8 +135,7 @@ class _TokenBucket:
                     self._tokens -= 1.0
                     return True
             wait = min(1.0 / self._rate, deadline - self._clock.time())
-            if wait <= 0:
-                return False
+            if wait <= 0: return False
             self._clock.sleep(wait)
 
 class HttpClient:
@@ -184,8 +182,7 @@ class HttpClient:
         host = urlparse(url).hostname or "localhost"
         cfg = retry or self._retry
         limiter = self._get_limiter(host)
-        if not limiter.acquire(timeout=timeout):
-            raise TimeoutError(f"Rate limit timeout for {host}")
+        if not limiter.acquire(timeout=timeout): raise TimeoutError(f"Rate limit timeout for {host}")
 
         req = urllib.request.Request(url, data=data, method=method)
         if headers:
@@ -198,8 +195,7 @@ class HttpClient:
             try:
                 return self._urlopen_fn(req, timeout=timeout)
             except urllib.error.HTTPError as e:
-                if e.code not in cfg.retryable_status:
-                    raise
+                if e.code not in cfg.retryable_status: raise
                 last_exc = e
                 _log(_LOG_WARN, "http", f"{method} {url} -> {e.code} (attempt {attempt+1}/{cfg.max_retries+1})")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -235,35 +231,28 @@ _tg_http_client: HttpClient = HttpClient(
 NODE_NAME = os.environ.get("NODE_NAME", "")
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
 
-if NODE_NAME and not os.environ.get("PORT"):
-    PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
-else:
-    PORT = int(os.environ.get("PORT", "8270"))
+if NODE_NAME and not os.environ.get("PORT"): PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
+else: PORT = int(os.environ.get("PORT", "8270"))
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
 
 if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
     SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
-else:
-    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
+else: SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 
-if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
-    TMUX_PREFIX = f"claude-{NODE_NAME}-"
-else:
-    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
+if NODE_NAME and not os.environ.get("TMUX_PREFIX"): TMUX_PREFIX = f"claude-{NODE_NAME}-"
+else: TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
 if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
     BRIDGE_URL = _bridge_url_env
-else:
-    BRIDGE_URL = f"http://localhost:{PORT}"
+else: BRIDGE_URL = f"http://localhost:{PORT}"
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     from urllib.parse import urlparse as _urlparse_pub
     _pub_host = _urlparse_pub(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    if BRIDGE_BIND != "0.0.0.0":
-        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
+    if BRIDGE_BIND != "0.0.0.0": BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -378,18 +367,12 @@ def _build_tunnel_config() -> TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"]
     tunnel_url = TUNNEL_URL
     raw = TUNNEL_MODE.lower()
-    if raw == "none":
-        mode = "none"
-    elif raw == "poll":
-        mode = "poll"
-    elif tunnel_url:
-        mode = "provided"
-    elif raw == "provided":
-        mode = "provided"
-    elif raw == "auto":
-        mode = "auto"
-    else:
-        mode = "poll"
+    if raw == "none": mode = "none"
+    elif raw == "poll": mode = "poll"
+    elif tunnel_url: mode = "provided"
+    elif raw == "provided": mode = "provided"
+    elif raw == "auto": mode = "auto"
+    else: mode = "poll"
     return TunnelConfig(mode=mode, provided_url=tunnel_url)
 
 _wd_cfg = WatchdogConfig()
@@ -445,12 +428,9 @@ class AppContext:
     transport_mode: str = "telegram"
 
     def __post_init__(self) -> None:
-        if self.sessions_dir is None:
-            self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
-        if self.claude_dir is None:
-            self.claude_dir = Path.home() / ".claude"
-        if not self.bridge_url:
-            self.bridge_url = f"http://localhost:{self.port}"
+        if self.sessions_dir is None: self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
+        if self.claude_dir is None: self.claude_dir = Path.home() / ".claude"
+        if not self.bridge_url: self.bridge_url = f"http://localhost:{self.port}"
 
 def _build_app_context() -> AppContext:
     return AppContext(
@@ -474,6 +454,5 @@ _app_context: AppContext | None = None
 
 def get_app_context() -> AppContext:
     global _app_context
-    if _app_context is None:
-        _app_context = _build_app_context()
+    if _app_context is None: _app_context = _build_app_context()
     return _app_context

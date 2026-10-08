@@ -166,8 +166,7 @@ class MediaGroupEntry(TypedDict):
     timer: threading.Timer | None
 
 # ── Cross-module type annotations (TYPE_CHECKING only) ───────────────
-if TYPE_CHECKING:
-    from claudecode import WorkerStateEntry, TmuxSessionDict
+if TYPE_CHECKING: from claudecode import WorkerStateEntry, TmuxSessionDict
 
 # ── IncomingMessage: parse Telegram update once ──
 
@@ -239,13 +238,10 @@ def _extract_msg_text(msg: TelegramMessageDict) -> str:
         if isinstance(blocks, list):
             parts = []
             for b in blocks:
-                if not isinstance(b, dict):
-                    continue
+                if not isinstance(b, dict): continue
                 bt = b.get("text")
-                if not bt:
-                    continue
-                if isinstance(bt, str):
-                    parts.append(bt)
+                if not bt: continue
+                if isinstance(bt, str): parts.append(bt)
                 elif isinstance(bt, list):
                     parts.append("".join(
                         chunk if isinstance(chunk, str) else chunk.get("text", "")
@@ -261,24 +257,20 @@ def _build_cwd_change_notice(
     old_sid: str,
 ) -> str:
     lines = [f"⚠️ {name}: workspace changed"]
-    if old_sid:
-        lines.append(f"<b>from:</b> <code>{old_cwd}</code> (session <code>{old_sid[:12]}…</code>)")
-    else:
-        lines.append(f"<b>from:</b> <code>{old_cwd}</code> (no previous session)")
+    if old_sid: lines.append(f"<b>from:</b> <code>{old_cwd}</code> (session <code>{old_sid[:12]}…</code>)")
+    else: lines.append(f"<b>from:</b> <code>{old_cwd}</code> (no previous session)")
     lines.append(f"<b>to:</b> <code>{new_cwd}</code> (fresh start)")
     return "\n".join(lines)
 
 # ── Team formatting (pure functions, runtime state injected by caller) ──
 
 def _normalize_activity(raw: str) -> str:
-    if not raw:
-        return raw
+    if not raw: return raw
     m = re.match(r'^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$', raw)
     if m:
         verb = m.group(1)
         dur = m.group(2)
-        if dur:
-            return f"Thinking ({dur})"
+        if dur: return f"Thinking ({dur})"
         return "Thinking"
     return raw
 
@@ -286,22 +278,14 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
     status = (watchdog_status or "").lower()
     act = (activity or "").lower()
 
-    if "rate limit" in act:
-        return "🔴", "rate limit", 0
-    if "error" in act or "traceback" in act or "not running" in act or "failed" in act:
-        return "🔴", "error", 0
-    if "needs input" in status or "needs reply" in status:
-        return "🟡", "needs reply", 1
-    if "stuck" in status or "no progress" in status:
-        return "🔴", "stuck", 0
-    if "poisoned" in status or "error loop" in status:
-        return "🔴", "error loop", 0
-    if "dead" in status or "not responding" in status:
-        return "🔴", "stopped", 0
-    if "offline" in status:
-        return "🔴", "offline", 0
-    if "exited" in status or "session ended" in status:
-        return "🔴", "session ended", 0
+    if "rate limit" in act: return "🔴", "rate limit", 0
+    if "error" in act or "traceback" in act or "not running" in act or "failed" in act: return "🔴", "error", 0
+    if "needs input" in status or "needs reply" in status: return "🟡", "needs reply", 1
+    if "stuck" in status or "no progress" in status: return "🔴", "stuck", 0
+    if "poisoned" in status or "error loop" in status: return "🔴", "error loop", 0
+    if "dead" in status or "not responding" in status: return "🔴", "stopped", 0
+    if "offline" in status: return "🔴", "offline", 0
+    if "exited" in status or "session ended" in status: return "🔴", "session ended", 0
 
     waiting_signals = (
         "waiting for",
@@ -311,8 +295,7 @@ def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, s
         "confirm",
         "in plan mode",
     )
-    if "working (waiting)" in status or any(sig in act for sig in waiting_signals):
-        return "🟡", "needs reply", 1
+    if "working (waiting)" in status or any(sig in act for sig in waiting_signals): return "🟡", "needs reply", 1
 
     return "🟢", "ok", 2
 
@@ -320,31 +303,24 @@ def _format_watchdog_status(name: str,
                             pending_lookup: 'Callable[[str], bool] | None' = None,
                             state_snapshot: 'dict[str, WorkerStateEntry] | None' = None,
                             clock_now: float | None = None) -> str:
-    if pending_lookup is None:
-        pending_lookup = lambda _: False  # noqa: E731
-    if clock_now is None:
-        clock_now = time.time()
+    if pending_lookup is None: pending_lookup = lambda _: False  # noqa: E731
+    if clock_now is None: clock_now = time.time()
     entry = state_snapshot.get(name) if state_snapshot else None
-    if not entry:
-        return "Working" if pending_lookup(name) else "Ready"
+    if not entry: return "Working" if pending_lookup(name) else "Ready"
 
     state, _reason, since = entry
     now = clock_now
     _SIMPLE = {"READY": "Ready", "BUSY_TOOL": "Working", "BUSY_THINKING": "Thinking",
                "WAITING": "Working", "DEAD": "Not responding", "HOST_OFFLINE": "Host offline",
                "OFFLINE": "Offline", "EXITED": "Session ended", "UNTRACKED_BUSY": "Working"}
-    if state in _SIMPLE:
-        return _SIMPLE[state]
+    if state in _SIMPLE: return _SIMPLE[state]
     minutes = max(0, int((now - since) / 60)) if since else 0
-    if state == "WAITING_INPUT":
-        return f"Needs reply ({minutes}m)"
+    if state == "WAITING_INPUT": return f"Needs reply ({minutes}m)"
     if state == "STUCK":
         age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
-        if age_match:
-            minutes = int(age_match.group(1)) // 60
+        if age_match: minutes = int(age_match.group(1)) // 60
         return f"No progress ({minutes}m)"
-    if state == "POISONED":
-        return f"Error loop ({minutes}m)"
+    if state == "POISONED": return f"Error loop ({minutes}m)"
     return state.lower()
 
 def format_team_lines(
@@ -357,16 +333,11 @@ def format_team_lines(
     clock_now: float | None = None,
     normalize_backend_fn: 'Callable[[str | None], str] | None' = None,
 ) -> list[str]:
-    if pending_lookup is None:
-        pending_lookup = lambda _: False  # noqa: E731
-    if worker_live is None:
-        worker_live = {}
-    if state_snapshot is None:
-        state_snapshot = {}
-    if clock_now is None:
-        clock_now = time.time()
-    if normalize_backend_fn is None:
-        normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
+    if pending_lookup is None: pending_lookup = lambda _: False  # noqa: E731
+    if worker_live is None: worker_live = {}
+    if state_snapshot is None: state_snapshot = {}
+    if clock_now is None: clock_now = time.time()
+    if normalize_backend_fn is None: normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
     backend_values = set()
     for name, session in registered.items():
         live = worker_live.get(name, {})
@@ -383,19 +354,16 @@ def format_team_lines(
         live = worker_live.get(name, {})
         backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
         raw_activity = str(live.get("activity") or "").strip()
-        if not raw_activity or raw_activity == "Unknown":
-            raw_activity = watchdog_status
+        if not raw_activity or raw_activity == "Unknown": raw_activity = watchdog_status
         activity = _normalize_activity(raw_activity)
-        if len(activity) > 42:
-            activity = activity[:39].rstrip() + "..."
+        if len(activity) > 42: activity = activity[:39].rstrip() + "..."
         context_pct = str(live.get("context_pct") or "").strip()
         icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
         counts[icon] += 1
         name_cell = f"{name} 🎯" if name == active else name
         ctx_part = f" | ctx {context_pct}" if context_pct and context_pct != "--" else ""
         row = f"{icon} {name_cell} — {activity}{ctx_part}"
-        if show_backend:
-            row += f" | backend={backend}"
+        if show_backend: row += f" | backend={backend}"
         focus_rank = 0 if name == active else 1
         rows.append((severity_rank, focus_rank, name, blocker, row))
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -406,8 +374,7 @@ def format_team_lines(
         f"Team: {len(registered)} agents · focused: {focused} | "
         f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked"
     )
-    if attention_rows:
-        lines.append("Needs your reply: " + ", ".join(attention_rows))
+    if attention_rows: lines.append("Needs your reply: " + ", ".join(attention_rows))
     lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
     return lines
 
@@ -442,8 +409,7 @@ BLOCKED_COMMANDS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_last_chat_id(chat_id: ChatId | None) -> None:
-    if chat_id is None:
-        return
+    if chat_id is None: return
     try:
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         _tmp = LAST_CHAT_ID_FILE.with_suffix('.tmp')
@@ -457,8 +423,7 @@ def load_last_chat_id() -> int | None:
     try:
         if LAST_CHAT_ID_FILE.exists():
             chat_id = LAST_CHAT_ID_FILE.read_text().strip()
-            if chat_id:
-                return int(chat_id)
+            if chat_id: return int(chat_id)
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to load last_chat_id: {e}")
     return None
@@ -477,8 +442,7 @@ def load_last_active() -> str | None:
     try:
         if LAST_ACTIVE_FILE.exists():
             name = LAST_ACTIVE_FILE.read_text().strip()
-            if name:
-                return name
+            if name: return name
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to load last_active: {e}")
     return None
@@ -551,8 +515,7 @@ class TelegramAPI:
         self.token: str = token
 
     def api(self, method: str, data: Mapping[str, object] | dict[str, object]) -> TelegramApiResponse:
-        if not self.token:
-            return None
+        if not self.token: return None
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         payload = json.dumps(data).encode()
         headers = {"Content-Type": "application/json"}
@@ -611,8 +574,7 @@ class TelegramAPI:
     # ── Webhook management ────────────────────────────────────────────
     def set_webhook(self, url: str, secret_token: str = "") -> TelegramApiResponse:
         payload: dict[str, object] = {"url": url}
-        if secret_token:
-            payload["secret_token"] = secret_token
+        if secret_token: payload["secret_token"] = secret_token
         return self.api("setWebhook", payload)
 
     def delete_webhook(self) -> TelegramApiResponse:
@@ -637,10 +599,8 @@ class TelegramTransport(MessageTransport):
                   parse_mode: ParseMode = None,
                   reply_to: MessageId | None = None) -> TelegramApiResponse:
         payload = {"chat_id": chat_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        if reply_to:
-            payload["reply_to_message_id"] = reply_to
+        if parse_mode: payload["parse_mode"] = parse_mode
+        if reply_to: payload["reply_to_message_id"] = reply_to
         return telegram_api("sendMessage", payload)
 
     def send_rich_text(self, chat_id: ChatId, markdown: str,
@@ -649,8 +609,7 @@ class TelegramTransport(MessageTransport):
             "chat_id": chat_id,
             "rich_message": {"markdown": markdown},
         }
-        if reply_to:
-            payload["reply_to_message_id"] = reply_to
+        if reply_to: payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
     _MEDIA_DISPATCH: dict[str, tuple[str, str, str, bool]] = {
@@ -665,8 +624,7 @@ class TelegramTransport(MessageTransport):
 
     def _dispatch_media(self, kind: str, chat_id: ChatId, path: str | Path,
                         caption: str | None = None) -> bool:
-        if not BOT_TOKEN:
-            return False
+        if not BOT_TOKEN: return False
         api_method, field, vkey, _ = self._MEDIA_DISPATCH[kind]
         ok, validated = self._VALIDATORS[vkey](path)
         if not ok:
@@ -678,8 +636,7 @@ class TelegramTransport(MessageTransport):
         if kind == "photo":
             file_data, filename = _prepare_photo_for_telegram(validated)
             mime_type = mimetypes.guess_type(str(validated))[0] or "image/jpeg"
-        elif kind == "animation":
-            mime_type = "video/mp4" if Path(validated).suffix.lower() == ".mp4" else "image/gif"
+        elif kind == "animation": mime_type = "video/mp4" if Path(validated).suffix.lower() == ".mp4" else "image/gif"
         return self._send_media_multipart(chat_id, validated, field, api_method, caption,
                                           file_data=file_data, filename=filename, mime_type=mime_type)
 
@@ -701,8 +658,7 @@ class TelegramTransport(MessageTransport):
                               file_data: bytes | None = None,
                               filename: str | None = None,
                               mime_type: str | None = None) -> bool:
-        if not BOT_TOKEN:
-            return False
+        if not BOT_TOKEN: return False
         file_path = Path(file_path)
         data = file_data if file_data is not None else file_path.read_bytes()
         fname = filename or file_path.name
@@ -776,16 +732,14 @@ class TelegramTransport(MessageTransport):
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode = None) -> TelegramApiResponse:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+        if parse_mode: payload["parse_mode"] = parse_mode
         return telegram_api("editMessageText", payload)
 
     def setup_commands(self, commands: list[dict[str, str]]) -> None:
         telegram_api("setMyCommands", {"commands": commands})
 
     def download_file(self, file_id: str, session_name: str) -> str | None:
-        if not BOT_TOKEN:
-            return None
+        if not BOT_TOKEN: return None
         try:
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
@@ -854,8 +808,7 @@ class LocalTransport(MessageTransport):
     def _log(self, method: str, chat_id: ChatId, **kwargs: object) -> None:
         msg = f"{method} chat_id={chat_id}"
         for k, v in kwargs.items():
-            if v is not None:
-                msg += f" {k}={v}"
+            if v is not None: msg += f" {k}={v}"
         _log(_LOG_DEBUG, "local-transport", msg)
         if self._log_file:
             with open(self._log_file, "a") as f:
@@ -892,8 +845,7 @@ class LocalTransport(MessageTransport):
         self._log("download_file", 0, file_id=file_id); return None
 
 def _init_transport() -> MessageTransport:
-    if TRANSPORT_MODE == "local":
-        return LocalTransport()
+    if TRANSPORT_MODE == "local": return LocalTransport()
     return TelegramTransport(BOT_TOKEN)
 
 transport = _init_transport()
@@ -902,8 +854,7 @@ def telegram_api(method: str, data: Mapping[str, object]) -> TelegramApiResponse
     if TRANSPORT_MODE == "local":
         _log(_LOG_INFO, "local-transport", f"telegram_api {method} {str(data)[:100]}")
         return {"ok": True, "result": {"message_id": 1}}
-    if isinstance(transport, TelegramTransport):
-        return transport._api.api(method, data)
+    if isinstance(transport, TelegramTransport): return transport._api.api(method, data)
     return None
 
 def send_telegram_message(chat_id: ChatId, text: str,
@@ -911,8 +862,7 @@ def send_telegram_message(chat_id: ChatId, text: str,
     return transport.send_text(chat_id, text, parse_mode=parse_mode)
 
 def download_telegram_file(file_id: str, session_name: str | None) -> str | None:
-    if session_name is None:
-        return None
+    if session_name is None: return None
     return transport.download_file(file_id, session_name)
 
 def send_voice(chat_id: ChatId, path: str, caption: str | None = None) -> bool: return transport.send_voice(chat_id, path, caption)
@@ -954,23 +904,17 @@ BLOCKED_FILENAMES = {
 }
 
 def format_file_size(size_bytes: int) -> str:
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    if size_bytes < 1024: return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024: return f"{size_bytes / 1024:.1f} KB"
+    else: return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 def transcribe_voice(file_path: str, timeout: int | None = None) -> str | None:
-    if not STT_ENDPOINT:
-        return None
-    if timeout is None:
-        timeout = STT_TIMEOUT
+    if not STT_ENDPOINT: return None
+    if timeout is None: timeout = STT_TIMEOUT
 
     try:
         file_path_obj = Path(file_path)
-        if not file_path_obj.exists():
-            return None
+        if not file_path_obj.exists(): return None
 
         boundary = uuid.uuid4().hex
         body_parts = []
@@ -1026,10 +970,8 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                 import io
                 buf = io.BytesIO()
                 fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
-                if fmt == "PNG" and resized.mode not in ("RGBA", "P", "L", "LA"):
-                    resized = resized.convert("RGBA")
-                elif fmt == "JPEG" and resized.mode != "RGB":
-                    resized = resized.convert("RGB")
+                if fmt == "PNG" and resized.mode not in ("RGBA", "P", "L", "LA"): resized = resized.convert("RGBA")
+                elif fmt == "JPEG" and resized.mode != "RGB": resized = resized.convert("RGB")
                 resized.save(buf, format=fmt)
                 _log(_LOG_INFO, "telegram", f"Photo auto-resized: {w}x{h} -> {new_w}x{new_h} for Telegram")
                 return buf.getvalue(), photo_path.name
@@ -1042,15 +984,12 @@ def _validate_file_path(path: str | Path, label: str,
                         blocked_exts: set[str] | None = None,
                         check_blocked_name: bool = False) -> FileValidation:
     p = Path(path)
-    if not p.exists():
-        return FileValidation(False, f"{label} not found: {p}")
-    if not p.is_file():
-        return FileValidation(False, f"Not a file: {p}")
+    if not p.exists(): return FileValidation(False, f"{label} not found: {p}")
+    if not p.is_file(): return FileValidation(False, f"Not a file: {p}")
     ext = p.suffix.lower()
     if allowed_exts and ext not in allowed_exts:
         return FileValidation(False, f"Invalid {label.lower()} extension: {p.suffix}")
-    if blocked_exts and ext in blocked_exts:
-        return FileValidation(False, f"Blocked extension (sensitive): {p.suffix}")
+    if blocked_exts and ext in blocked_exts: return FileValidation(False, f"Blocked extension (sensitive): {p.suffix}")
     if check_blocked_name and is_blocked_filename(p.name):
         return FileValidation(False, f"Blocked filename (sensitive): {p.name}")
     if p.stat().st_size > MAX_FILE_SIZE:
@@ -1078,12 +1017,10 @@ def _split_protected_segments(text: str, pattern: re.Pattern[str]) -> list[tuple
     segments = []
     last = 0
     for match in pattern.finditer(text):
-        if match.start() > last:
-            segments.append((text[last:match.start()], False))
+        if match.start() > last: segments.append((text[last:match.start()], False))
         segments.append((match.group(0), True))
         last = match.end()
-    if last < len(text):
-        segments.append((text[last:], False))
+    if last < len(text): segments.append((text[last:], False))
     return segments
 
 def _collapse_excess_newlines(text: str) -> str:
@@ -1093,10 +1030,8 @@ def _collapse_excess_newlines(text: str) -> str:
             output.append(segment)
             continue
         for inline_segment, inline_protected in _split_protected_segments(segment, INLINE_CODE_RE):
-            if inline_protected:
-                output.append(inline_segment)
-            else:
-                output.append(re.sub(r"\n{3,}", "\n\n", inline_segment))
+            if inline_protected: output.append(inline_segment)
+            else: output.append(re.sub(r"\n{3,}", "\n\n", inline_segment))
     return "".join(output)
 
 def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | Path], FileValidation]) -> tuple[str, list[tuple[str | None, str]]]:
@@ -1106,8 +1041,7 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
 
     def replace_tag(match: re.Match[str]) -> str:
         nonlocal removed
-        if match.group(1):
-            return match.group(0)[1:]
+        if match.group(1): return match.group(0)[1:]
         path = match.group(2).strip()
         caption = (match.group(3) or "").strip()
         ok, _ = validate_func(path)
@@ -1123,13 +1057,10 @@ def _parse_media_tags(text: str, tag_name: str, validate_func: Callable[[str | P
             output.append(segment)
             continue
         for inline_segment, inline_protected in _split_protected_segments(segment, INLINE_CODE_RE):
-            if inline_protected:
-                output.append(inline_segment)
-            else:
-                output.append(pattern.sub(replace_tag, inline_segment))
+            if inline_protected: output.append(inline_segment)
+            else: output.append(pattern.sub(replace_tag, inline_segment))
     clean_text = "".join(output)
-    if removed:
-        clean_text = _collapse_excess_newlines(clean_text).strip()
+    if removed: clean_text = _collapse_excess_newlines(clean_text).strip()
     return clean_text, items
 
 def parse_image_tags(text: str) -> tuple[str, list[tuple[str | None, str]]]:
@@ -1166,41 +1097,31 @@ class _TelegramHTMLSanitizer(HTMLParser):
         allowed = self.SAFE_ATTRS.get(tag, frozenset())
         seen: set[str] = set()
         for name, value in attrs:
-            if name in seen or name not in allowed:
-                return False
+            if name in seen or name not in allowed: return False
             seen.add(name)
             if tag == "a" and name == "href":
-                if value is None:
-                    return False
+                if value is None: return False
             elif tag == "code" and name == "class":
-                if value is None or not value.startswith("language-"):
-                    return False
+                if value is None or not value.startswith("language-"): return False
             elif tag == "blockquote" and name == "expandable":
-                if value not in (None, "", "expandable"):
-                    return False
+                if value not in (None, "", "expandable"): return False
             elif tag == "span" and name == "class":
-                if value != "tg-spoiler":
-                    return False
+                if value != "tg-spoiler": return False
             elif tag == "tg-emoji" and name == "emoji-id":
-                if value is None:
-                    return False
+                if value is None: return False
         return True
 
     def _render_start_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
-        if not attrs:
-            return f"<{tag}>"
+        if not attrs: return f"<{tag}>"
         rendered = []
         for name, value in attrs:
-            if value is None:
-                rendered.append(name)
-            else:
-                rendered.append(f'{name}="{self._escape_attr(value)}"')
+            if value is None: rendered.append(name)
+            else: rendered.append(f'{name}="{self._escape_attr(value)}"')
         return f"<{tag} {' '.join(rendered)}>"
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
-        if accepted:
-            self._out.append(self._render_start_tag(tag, attrs))
+        if accepted: self._out.append(self._render_start_tag(tag, attrs))
         else:
             self._out.append(escape_html(self.get_starttag_text() or f"<{tag}>"))
             self._rejected_open_tags.append(tag)
@@ -1212,18 +1133,15 @@ class _TelegramHTMLSanitizer(HTMLParser):
                 rejected_match = True
                 del self._rejected_open_tags[idx]
                 break
-        if tag in self.SAFE_TAGS and not rejected_match:
-            self._out.append(f"</{tag}>")
-        else:
-            self._out.append(escape_html(f"</{tag}>"))
+        if tag in self.SAFE_TAGS and not rejected_match: self._out.append(f"</{tag}>")
+        else: self._out.append(escape_html(f"</{tag}>"))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         accepted = tag in self.SAFE_TAGS and self._attrs_are_safe(tag, attrs)
         if accepted:
             start = self._render_start_tag(tag, attrs)
             self._out.append(f"{start[:-1]}/>")
-        else:
-            self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
+        else: self._out.append(escape_html(self.get_starttag_text() or f"<{tag}/>"))
 
     def handle_data(self, data: str) -> None:
         self._out.append(escape_html(data))
@@ -1241,8 +1159,7 @@ class _TelegramHTMLSanitizer(HTMLParser):
         return "".join(self._out)
 
 def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
-    if not raw:
-        return ""
+    if not raw: return ""
     sanitizer = _TelegramHTMLSanitizer(rejected_open_tags)
     sanitizer.feed(raw)
     sanitizer.close()
@@ -1251,19 +1168,15 @@ def _sanitize_telegram_html(raw: str, rejected_open_tags: list[str]) -> str:
 def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
     out: list[str] = []
     for tok in children:
-        if tok.type in ("text", "code_inline"):
-            out.append(tok.content)
-        elif tok.type in ("softbreak", "hardbreak"):
-            out.append(" ")
-        elif tok.type == "image":
-            out.append(tok.content or "image")
+        if tok.type in ("text", "code_inline"): out.append(tok.content)
+        elif tok.type in ("softbreak", "hardbreak"): out.append(" ")
+        elif tok.type == "image": out.append(tok.content or "image")
         elif tok.type in ("strong_open", "strong_close", "em_open", "em_close",
                           "s_open", "s_close", "link_open", "link_close",
                           "html_inline"):
             pass
         else:
-            if tok.content:
-                out.append(tok.content)
+            if tok.content: out.append(tok.content)
     return "".join(out)
 
 _INLINE_TAG_MAP = {"strong_open": "<b>", "strong_close": "</b>", "em_open": "<i>",
@@ -1273,12 +1186,9 @@ _INLINE_TAG_MAP = {"strong_open": "<b>", "strong_close": "</b>", "em_open": "<i>
 def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: list[str]) -> str:
     out: list[str] = []
     for tok in children:
-        if tok.type == "text":
-            out.append(escape_html(tok.content))
-        elif tok.type == "code_inline":
-            out.append(f"<code>{escape_html(tok.content)}</code>")
-        elif tok.type in _INLINE_TAG_MAP:
-            out.append(_INLINE_TAG_MAP[tok.type])
+        if tok.type == "text": out.append(escape_html(tok.content))
+        elif tok.type == "code_inline": out.append(f"<code>{escape_html(tok.content)}</code>")
+        elif tok.type in _INLINE_TAG_MAP: out.append(_INLINE_TAG_MAP[tok.type])
         elif tok.type == "link_open":
             href = escape_html((tok.attrs or {}).get("href", ""))
             out.append(f'<a href="{href}">')
@@ -1286,22 +1196,18 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
             alt = escape_html(tok.content or "image")
             src = escape_html((tok.attrs or {}).get("src", ""))
             out.append(f'[{alt}]({src})')
-        elif tok.type == "html_inline":
-            out.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
-        elif tok.content:
-            out.append(escape_html(tok.content))
+        elif tok.type == "html_inline": out.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
+        elif tok.content: out.append(escape_html(tok.content))
     return "".join(out)
 
 def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
     all_rows = [headers] + rows
-    if not all_rows or not all_rows[0]:
-        return ""
+    if not all_rows or not all_rows[0]: return ""
     num_cols = max(len(r) for r in all_rows)
     col_widths = [0] * num_cols
     for row in all_rows:
         for ci, cell in enumerate(row):
-            if ci < num_cols:
-                col_widths[ci] = max(col_widths[ci], len(cell))
+            if ci < num_cols: col_widths[ci] = max(col_widths[ci], len(cell))
     lines: list[str] = []
     for ri, row in enumerate(all_rows):
         cols = []
@@ -1309,8 +1215,7 @@ def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
             cell = row[ci] if ci < len(row) else ""
             cols.append(escape_html(cell.ljust(col_widths[ci])))
         lines.append("  ".join(cols).rstrip())
-        if ri == 0:
-            lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
+        if ri == 0: lines.append("\u2550" * (sum(col_widths) + 2 * (num_cols - 1)))
     return f"<pre>{chr(10).join(lines)}</pre>\n"
 
 _MULTI_SPACE_RE = re.compile(r'\S  +\S.*\S  +\S')
@@ -1369,46 +1274,35 @@ def markdown_to_telegram_html(text: str) -> str:
     while i < len(tokens):
         tok = tokens[i]
 
-        if tok.type == "paragraph_open":
-            pass
+        if tok.type == "paragraph_open": pass
         elif tok.type == "paragraph_close":
-            if not in_table:
-                result.append("\n")
+            if not in_table: result.append("\n")
         elif tok.type == "inline":
-            if in_table:
-                table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))
+            if in_table: table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))
             else:
                 result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
 
-        elif tok.type == "heading_open":
-            result.append("<b>")
-        elif tok.type == "heading_close":
-            result.append("</b>\n")
+        elif tok.type == "heading_open": result.append("<b>")
+        elif tok.type == "heading_close": result.append("</b>\n")
 
         elif tok.type == "fence":
             lang = tok.info.strip() if tok.info else ""
             code = escape_html(tok.content.rstrip("\n"))
-            if lang:
-                result.append(f'<pre><code class="language-{escape_html(lang)}">{code}</code></pre>\n')
-            else:
-                result.append(f"<pre>{code}</pre>\n")
+            if lang: result.append(f'<pre><code class="language-{escape_html(lang)}">{code}</code></pre>\n')
+            else: result.append(f"<pre>{code}</pre>\n")
         elif tok.type == "code_block":
             code = escape_html(tok.content.rstrip("\n"))
             result.append(f"<pre>{code}</pre>\n")
 
-        elif tok.type == "blockquote_open":
-            result.append("<blockquote>")
+        elif tok.type == "blockquote_open": result.append("<blockquote>")
         elif tok.type == "blockquote_close":
-            if result and result[-1].endswith("\n"):
-                result[-1] = result[-1][:-1]
+            if result and result[-1].endswith("\n"): result[-1] = result[-1][:-1]
             result.append("</blockquote>\n")
 
-        elif tok.type == "bullet_list_open":
-            list_depth += 1
+        elif tok.type == "bullet_list_open": list_depth += 1
         elif tok.type == "bullet_list_close":
             list_depth -= 1
-            if list_depth == 0:
-                result.append("\n")
+            if list_depth == 0: result.append("\n")
 
         elif tok.type == "ordered_list_open":
             list_depth += 1
@@ -1416,19 +1310,16 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "ordered_list_close":
             list_depth -= 1
             ordered_counter.pop()
-            if list_depth == 0:
-                result.append("\n")
+            if list_depth == 0: result.append("\n")
 
         elif tok.type == "list_item_open":
             indent = "  " * (list_depth - 1)
             if ordered_counter:
                 ordered_counter[-1] += 1
                 result.append(f"{indent}{ordered_counter[-1]}. ")
-            else:
-                result.append(f"{indent}\u2022 ")
+            else: result.append(f"{indent}\u2022 ")
         elif tok.type == "list_item_close":
-            if result and not result[-1].endswith("\n"):
-                result.append("\n")
+            if result and not result[-1].endswith("\n"): result.append("\n")
 
         elif tok.type == "table_open":
             in_table = True
@@ -1437,36 +1328,25 @@ def markdown_to_telegram_html(text: str) -> str:
         elif tok.type == "table_close":
             in_table = False
             pre_block = _render_table_as_pre(table_headers, table_rows)
-            if pre_block:
-                result.append(pre_block)
+            if pre_block: result.append(pre_block)
             table_headers = []
             table_rows = []
-        elif tok.type == "thead_open":
-            in_thead = True
-        elif tok.type == "thead_close":
-            in_thead = False
-        elif tok.type in ("tbody_open", "tbody_close"):
-            pass
-        elif tok.type == "tr_open":
-            table_row = []
+        elif tok.type == "thead_open": in_thead = True
+        elif tok.type == "thead_close": in_thead = False
+        elif tok.type in ("tbody_open", "tbody_close"): pass
+        elif tok.type == "tr_open": table_row = []
         elif tok.type == "tr_close":
-            if in_thead:
-                table_headers = table_row[:]
-            else:
-                table_rows.append(table_row[:])
+            if in_thead: table_headers = table_row[:]
+            else: table_rows.append(table_row[:])
             table_row = []
-        elif tok.type in ("th_open", "th_close", "td_open", "td_close"):
-            pass
+        elif tok.type in ("th_open", "th_close", "td_open", "td_close"): pass
 
-        elif tok.type == "hr":
-            result.append("\u2014\u2014\u2014\u2014\n")
+        elif tok.type == "hr": result.append("\u2014\u2014\u2014\u2014\n")
 
-        elif tok.type == "html_block":
-            result.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
+        elif tok.type == "html_block": result.append(_sanitize_telegram_html(tok.content, rejected_open_tags))
 
         else:
-            if tok.content:
-                result.append(escape_html(tok.content))
+            if tok.content: result.append(escape_html(tok.content))
         i += 1
     output = "".join(result).strip()
     while "\n\n\n" in output:
@@ -1478,10 +1358,8 @@ def _pipe_tables_to_html(text: str) -> str:
 
     def _parse_row(line: str) -> list[str] | None:
         line = line.strip()
-        if line.startswith('|'):
-            line = line[1:]
-        if line.endswith('|'):
-            line = line[:-1]
+        if line.startswith('|'): line = line[1:]
+        if line.endswith('|'): line = line[:-1]
         return [cell.strip() for cell in line.split('|')]
 
     def _esc(s: str) -> str:
@@ -1516,12 +1394,9 @@ def _pipe_tables_to_html(text: str) -> str:
             aligns = []
             for cell in (_parse_row(lines[i + 1]) or []):
                 cell = cell.strip()
-                if cell.startswith(':') and cell.endswith(':'):
-                    aligns.append(' style="text-align:center"')
-                elif cell.endswith(':'):
-                    aligns.append(' style="text-align:right"')
-                else:
-                    aligns.append('')
+                if cell.startswith(':') and cell.endswith(':'): aligns.append(' style="text-align:center"')
+                elif cell.endswith(':'): aligns.append(' style="text-align:right"')
+                else: aligns.append('')
             html = ['<table>']
             html.append('<tr>')
             for j, h in enumerate(headers or []):
@@ -1547,8 +1422,7 @@ def _pipe_tables_to_html(text: str) -> str:
 def format_response_text(session_name: str, text: str) -> str:
     stripped = text.lstrip()
     prefix = f"{session_name}:"
-    if stripped.lower().startswith(prefix.lower()):
-        text = stripped[len(prefix):].lstrip()
+    if stripped.lower().startswith(prefix.lower()): text = stripped[len(prefix):].lstrip()
     return f"<b>{session_name}:</b>\n{text}"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1558,8 +1432,7 @@ TELEGRAM_RICH_MAX_LENGTH = 32768
 
 def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     import re
-    if len(text) <= max_len:
-        return [text]
+    if len(text) <= max_len: return [text]
 
     TAG_RE = re.compile(r'<(/?)(\w+)([^>]*)>')
     TRACKED_TAGS = frozenset(('b', 'i', 's', 'u', 'code', 'pre', 'a',
@@ -1576,20 +1449,17 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
         for m in TAG_RE.finditer(text):
             is_close = m.group(1) == '/'
             tag_name = m.group(2).lower()
-            if tag_name not in TRACKED_TAGS:
-                continue
+            if tag_name not in TRACKED_TAGS: continue
             if is_close:
                 for j in range(len(stack) - 1, -1, -1):
                     if stack[j][0] == tag_name:
                         stack.pop(j)
                         break
-            else:
-                stack.append((tag_name, m.group(0)))
+            else: stack.append((tag_name, m.group(0)))
         return stack
 
     def _find_split(text: str, budget: int) -> int:
-        if budget <= 0:
-            budget = 1
+        if budget <= 0: budget = 1
         search = text[:budget]
         last_tag_start = search.rfind('<')
         last_tag_end = search.rfind('>')
@@ -1599,8 +1469,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
 
         for sep in ('\n\n', '\n', ' '):
             pos = search.rfind(sep)
-            if pos > budget // 3:
-                return pos + 1
+            if pos > budget // 3: return pos + 1
 
         return max(budget, 1)
 
@@ -1618,8 +1487,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
             break
 
         budget = available - 100
-        if budget < 100:
-            budget = 100
+        if budget < 100: budget = 100
 
         for _attempt in range(5):
             split_at = _find_split(remaining, budget)
@@ -1628,14 +1496,12 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
             open_stack = _scan_tags(full_chunk)
             suffix = _closing_tags(open_stack)
 
-            if len(full_chunk) + len(suffix) <= max_len:
-                break
+            if len(full_chunk) + len(suffix) <= max_len: break
             overshoot = len(full_chunk) + len(suffix) - max_len
             budget = max(budget - overshoot - 20, 100)
         else:
             hard_limit = max_len - len(prefix) - len(suffix) - 10
-            if hard_limit < 1:
-                hard_limit = 1
+            if hard_limit < 1: hard_limit = 1
             chunk_text = remaining[:hard_limit].rstrip()
             full_chunk = prefix + chunk_text
             open_stack = _scan_tags(full_chunk)
@@ -1645,8 +1511,7 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
         carry_stack = open_stack
         remaining = remaining[split_at:].lstrip()
 
-        if split_at == 0:
-            remaining = remaining[1:]
+        if split_at == 0: remaining = remaining[1:]
     return chunks
 
 def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]:
@@ -1666,13 +1531,11 @@ def update_bot_commands() -> None:
     _log(_LOG_INFO, "telegram", f"Bot commands updated ({len(BOT_COMMANDS)} + {worker_count} workers)")
 
 def get_manager_chat_id(name: str) -> ChatId | None:
-    if admin_chat_id is not None:
-        return admin_chat_id
+    if admin_chat_id is not None: return admin_chat_id
 
     import claudecode as _cc
     chat_id_file = _cc.get_chat_id_file(name)
-    if not chat_id_file.exists():
-        return None
+    if not chat_id_file.exists(): return None
 
     try:
         value = chat_id_file.read_text().strip()
@@ -1742,10 +1605,8 @@ class TunnelManager:
     def stop(self) -> None:
         self._stop_event.set()
         self._poll_stop.set()
-        if self._poll_thread and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=5)
-        if self._watchdog_thread and self._watchdog_thread.is_alive():
-            self._watchdog_thread.join(timeout=10)
+        if self._poll_thread and self._poll_thread.is_alive(): self._poll_thread.join(timeout=5)
+        if self._watchdog_thread and self._watchdog_thread.is_alive(): self._watchdog_thread.join(timeout=10)
         self._kill_cloudflared()
         self._state = TunnelState.STOPPED
         _log(_LOG_INFO, "tunnel", "Tunnel manager stopped")
@@ -1785,8 +1646,7 @@ class TunnelManager:
 
     def _tg_set_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, object]:
         payload: dict[str, object] = {"url": webhook_url}
-        if secret_token:
-            payload["secret_token"] = secret_token
+        if secret_token: payload["secret_token"] = secret_token
         return self._telegram_api("setWebhook", payload)
 
     def _tg_delete_webhook(self) -> dict[str, object]:
@@ -1828,14 +1688,12 @@ class TunnelManager:
             if not self._set_webhook_with_retry(self._tunnel_url):
                 _log(_LOG_WARN, "tunnel", "Webhook DNS not ready — using poll fallback")
                 self._start_poll_fallback()
-            else:
-                self._state = TunnelState.RUNNING
+            else: self._state = TunnelState.RUNNING
         self._save_bot_info()
         check_counter = 0
         while not self._stop_event.is_set():
             self._stop_event.wait(self._config.watchdog_interval)
-            if self._stop_event.is_set():
-                break
+            if self._stop_event.is_set(): break
 
             if self._tunnel_proc is not None:
                 problem = self._check_tunnel_health()
@@ -1871,8 +1729,7 @@ class TunnelManager:
                 self._start_poll_fallback()
             check_counter = (check_counter + 1) % self._config.webhook_check_cycles
             if check_counter == 0:
-                if self._tunnel_url:
-                    self._periodic_webhook_check()
+                if self._tunnel_url: self._periodic_webhook_check()
                 elif self._polling_active and self._tunnel_proc is None and self._config.mode == "auto":
                     _log(_LOG_INFO, "tunnel", "Retrying cloudflared start...")
                     url = self._start_cloudflared()
@@ -1907,8 +1764,7 @@ class TunnelManager:
         self._tunnel_proc = proc
         self._save_pid(proc.pid)
         url = self._wait_for_url(log_file, self._config.startup_timeout)
-        if not url:
-            self._kill_cloudflared()
+        if not url: self._kill_cloudflared()
         return url
 
     def _wait_for_url(self, log_file: Path, timeout: int) -> str:
@@ -1941,8 +1797,7 @@ class TunnelManager:
         return proc is not None and proc.poll() is None
 
     def _is_tunnel_reachable(self) -> bool:
-        if not self._tunnel_url:
-            return False
+        if not self._tunnel_url: return False
         try:
             req = urllib.request.Request(self._tunnel_url, method="HEAD")
             self._urlopen(req, timeout=self._config.reachability_timeout)
@@ -1953,10 +1808,8 @@ class TunnelManager:
             return False
 
     def _check_tunnel_health(self) -> str:
-        if not self._is_tunnel_alive():
-            return "process died"
-        if not self._is_tunnel_reachable():
-            return "unreachable"
+        if not self._is_tunnel_alive(): return "process died"
+        if not self._is_tunnel_reachable(): return "unreachable"
         return ""
 
     def _restart_with_retry(self) -> str:
@@ -1968,8 +1821,7 @@ class TunnelManager:
                 backoff *= 2
             self._kill_cloudflared()
             url = self._start_cloudflared()
-            if url:
-                return url
+            if url: return url
 
         return ""
 
@@ -1980,8 +1832,7 @@ class TunnelManager:
             if delay > 0:
                 _log(_LOG_INFO, "tunnel", f"Webhook not ready, retrying in {delay}s...")
                 self._clock.sleep(delay)
-            if self._stop_event.is_set():
-                return False
+            if self._stop_event.is_set(): return False
 
             resp = self._tg_set_webhook(url, secret_token=self._webhook_secret)
             if resp.get("ok"):
@@ -2016,8 +1867,7 @@ class TunnelManager:
     # ── Poll fallback ─────────────────────────────────────────────────
 
     def _start_poll_fallback(self) -> None:
-        if self._polling_active:
-            return
+        if self._polling_active: return
 
         self._tg_delete_webhook()
         self._clock.sleep(1)
@@ -2031,11 +1881,9 @@ class TunnelManager:
         _log(_LOG_INFO, "tunnel", "Poll fallback started")
 
     def _stop_poll_fallback(self) -> None:
-        if not self._polling_active:
-            return
+        if not self._polling_active: return
         self._poll_stop.set()
-        if self._poll_thread and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=5)
+        if self._poll_thread and self._poll_thread.is_alive(): self._poll_thread.join(timeout=5)
         self._polling_active = False
         _log(_LOG_INFO, "tunnel", "Poll fallback stopped")
 
@@ -2061,8 +1909,7 @@ class TunnelManager:
                             self._on_update(update)
                         except Exception as exc:
                             _log(_LOG_ERROR, "tunnel:poll", f"Forward failed update_id={uid}: {exc}")
-                    else:
-                        self._forward_to_localhost(update)
+                    else: self._forward_to_localhost(update)
                     offset = uid + 1
 
             except Exception as exc:
@@ -2139,10 +1986,8 @@ class TunnelManager:
                 if isinstance(result, dict):
                     bot_id = result.get("id")
                     username = result.get("username", "")
-                    if bot_id:
-                        (self._node_dir / "bot_id").write_text(str(bot_id))
-                    if username:
-                        (self._node_dir / "bot_username").write_text(username)
+                    if bot_id: (self._node_dir / "bot_id").write_text(str(bot_id))
+                    if username: (self._node_dir / "bot_username").write_text(username)
         except Exception:
             pass
 

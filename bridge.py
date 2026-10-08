@@ -313,37 +313,30 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 NODE_NAME = os.environ.get("NODE_NAME", "")
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
 
-if NODE_NAME and not os.environ.get("PORT"):
-    PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
-else:
-    PORT = int(os.environ.get("PORT", "8270"))
+if NODE_NAME and not os.environ.get("PORT"): PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
+else: PORT = int(os.environ.get("PORT", "8270"))
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
     SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
-else:
-    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
+else: SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
 
-if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
-    TMUX_PREFIX = f"claude-{NODE_NAME}-"
-else:
-    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
+if NODE_NAME and not os.environ.get("TMUX_PREFIX"): TMUX_PREFIX = f"claude-{NODE_NAME}-"
+else: TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
 
 if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
     BRIDGE_URL = _bridge_url_env
-else:
-    BRIDGE_URL = f"http://localhost:{PORT}"
+else: BRIDGE_URL = f"http://localhost:{PORT}"
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     _pub_host = urlparse(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    if BRIDGE_BIND != "0.0.0.0":
-        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
+    if BRIDGE_BIND != "0.0.0.0": BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 MACHINES_CONFIG_FILE = Path(os.environ.get(
     "MACHINES_CONFIG_FILE",
@@ -453,8 +446,7 @@ class WorkerRegistryEntry:
         for field_name in ("protocol", "callback_url", "host", "version", "chat_id",
                            "hire_time", "tools", "home_host", "home_cwd"):
             value = getattr(self, field_name)
-            if value is not None and value != "" and value != 0:
-                result[field_name] = value
+            if value is not None and value != "" and value != 0: result[field_name] = value
         return result
 
     @classmethod
@@ -507,15 +499,12 @@ class WorkerRecord:
 
     def to_session_dict(self) -> WorkerSessionDict:
         result: WorkerSessionDict = {"backend": self.backend}
-        if self.tmux_name:
-            result["tmux"] = self.tmux_name
-        if self.host:
-            result["host"] = self.host
+        if self.tmux_name: result["tmux"] = self.tmux_name
+        if self.host: result["host"] = self.host
         if self.callback_url:
             result["callback_url"] = self.callback_url
             result["protocol"] = "http"
-        if self.version:
-            result["version"] = self.version
+        if self.version: result["version"] = self.version
         return result
 
     @classmethod
@@ -575,10 +564,8 @@ def _validate_machine_id(machine_id: str) -> str:
     return machine_id
 
 def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
+    if value is None: return ""
+    if not isinstance(value, str): raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
     return value
 
 def _implicit_local_machine() -> Machine:
@@ -595,8 +582,7 @@ def _implicit_local_machine() -> Machine:
 
 def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
     config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
-    if not config_path.exists():
-        return {_implicit_local_machine().id: _implicit_local_machine()}
+    if not config_path.exists(): return {_implicit_local_machine().id: _implicit_local_machine()}
 
     try:
         data = cast(NodeConfigDict, json.loads(config_path.read_text()))
@@ -605,10 +591,8 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
     except OSError as e:
         raise MachineConfigError(f"{config_path}: cannot read: {e}") from e
 
-    if not isinstance(data, dict):
-        raise MachineConfigError(f"{config_path}: root must be an object")
-    if data.get("version") != 1:
-        raise MachineConfigError(f"{config_path}: version must be 1")
+    if not isinstance(data, dict): raise MachineConfigError(f"{config_path}: root must be an object")
+    if data.get("version") != 1: raise MachineConfigError(f"{config_path}: version must be 1")
     raw_machines = data.get("machines")
     if not isinstance(raw_machines, dict) or not raw_machines:
         raise MachineConfigError(f"{config_path}: machines must be a non-empty object")
@@ -622,23 +606,20 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
             raise MachineConfigError(f"{config_path}: machine {machine_id!r} must be an object")
 
         missing = [k for k in ("ssh_target", "bridge_base_url", "home_root", "os_family") if k not in raw]
-        if missing:
-            raise MachineConfigError(f"{config_path}: machine {machine_id!r} missing {', '.join(missing)}")
+        if missing: raise MachineConfigError(f"{config_path}: machine {machine_id!r} missing {', '.join(missing)}")
 
         ssh_target = raw.get("ssh_target")
         if ssh_target is not None and not isinstance(ssh_target, str):
             raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target must be string or null")
         if ssh_target == "":
             raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target cannot be empty")
-        if ssh_target is None:
-            local_count += 1
+        if ssh_target is None: local_count += 1
         elif ssh_target in ssh_targets:
             raise MachineConfigError(
                 f"{config_path}: ssh_target {ssh_target!r} used by both "
                 f"{ssh_targets[ssh_target]!r} and {machine_id!r}"
             )
-        else:
-            ssh_targets[ssh_target] = machine_id
+        else: ssh_targets[ssh_target] = machine_id
         bridge_base_url = _coerce_optional_str(raw.get("bridge_base_url"), "bridge_base_url", machine_id).rstrip("/")
         home_root = _coerce_optional_str(raw.get("home_root"), "home_root", machine_id).rstrip("/")
         os_family = _coerce_optional_str(raw.get("os_family"), "os_family", machine_id)
@@ -674,12 +655,10 @@ def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
 def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
     if host is None:
         for machine in machines.values():
-            if machine.is_local:
-                return machine
+            if machine.is_local: return machine
         return _implicit_local_machine()
     for machine in machines.values():
-        if machine.ssh_target == host:
-            return machine
+        if machine.ssh_target == host: return machine
     machine_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", host).strip("-") or "unknown"
     return Machine(
         id=machine_id,
@@ -719,10 +698,8 @@ def _machine_health(machine: Machine) -> MachineHealthDict:
 
 def _machine_access(machine: Machine, caller_host: str | None) -> str:
     target_host = machine.ssh_target
-    if caller_host == target_host:
-        return "local"
-    if target_host is None:
-        return f"ssh {BRIDGE_SSH_TARGET}"
+    if caller_host == target_host: return "local"
+    if target_host is None: return f"ssh {BRIDGE_SSH_TARGET}"
     return f"ssh {target_host}"
 
 def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
@@ -777,8 +754,7 @@ def _read_noninteractive_activity(worker_name: str) -> str:
         entry = processes.adapter_pids.get(worker_name)
     if entry:
         proc, _ = entry
-        if proc.poll() is None:
-            return "adapter running"
+        if proc.poll() is None: return "adapter running"
 
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
@@ -790,18 +766,14 @@ def _read_noninteractive_activity(worker_name: str) -> str:
                 if r.returncode == 0:
                     mtime = float(r.stdout.strip())
                     age = int(_clock.time() - mtime)
-                else:
-                    age = -1
+                else: age = -1
             else:
                 mtime = os.path.getmtime(path)
                 age = int(_clock.time() - mtime)
             if age >= 0:
-                if age < 60:
-                    return f"idle (last response {age}s ago)"
-                elif age < 3600:
-                    return f"idle (last response {age // 60}m ago)"
-                else:
-                    return f"idle (last response {age // 3600}h ago)"
+                if age < 60: return f"idle (last response {age}s ago)"
+                elif age < 3600: return f"idle (last response {age // 60}m ago)"
+                else: return f"idle (last response {age // 3600}h ago)"
         except (subprocess.SubprocessError, OSError, ValueError) as exc:
             _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
     return "idle"
@@ -814,38 +786,32 @@ def _check_hook_failure_signal(name: str) -> str | None:
         try:
             r = _remote_run(["cat", signal_path], host=host,
                             capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-            if r.returncode != 0:
-                return None
+            if r.returncode != 0: return None
             raw = r.stdout.strip()
         except (subprocess.SubprocessError, OSError):
             return None
     else:
         signal_file = Path(signal_path)
-        if not signal_file.exists():
-            return None
+        if not signal_file.exists(): return None
         try:
             raw = signal_file.read_text().strip()
         except OSError:
             return None
 
-    if not raw:
-        return None
+    if not raw: return None
     lines = raw.splitlines()
     cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW
     recent = 0
     for line in lines:
         parts = line.split(None, 1)
-        if not parts:
-            continue
+        if not parts: continue
         try:
             ts = int(parts[0])
         except ValueError:
             continue
-        if ts >= cutoff:
-            recent += 1
+        if ts >= cutoff: recent += 1
 
-    if recent >= HOOK_FAILURE_THRESHOLD:
-        return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
+    if recent >= HOOK_FAILURE_THRESHOLD: return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
     return None
 
 def _clear_hook_failures(name: str) -> None:
@@ -865,23 +831,18 @@ def _clear_hook_failures(name: str) -> None:
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
     hook_reason = _check_hook_failure_signal(name)
-    if hook_reason:
-        return hook_reason
+    if hook_reason: return hook_reason
 
     backend_name = get_worker_backend(name)
     backend = get_backend(backend_name)
     host = get_worker_host(name)
     text_parts = []
-    if backend.is_interactive:
-        text_parts.append(_capture_pane_text(tmux_name, host=host))
-    else:
-        text_parts.append(_check_adapter_log(name))
+    if backend.is_interactive: text_parts.append(_capture_pane_text(tmux_name, host=host))
+    else: text_parts.append(_check_adapter_log(name))
     combined = "\n".join([part for part in text_parts if part])
-    if not combined:
-        return None
+    if not combined: return None
     for pattern in POISON_PATTERNS:
-        if len(pattern.findall(combined)) >= 3:
-            return pattern.pattern
+        if len(pattern.findall(combined)) >= 3: return pattern.pattern
     return None
 
 def parse_hire_args(raw: str) -> tuple[str, str]:
@@ -895,16 +856,12 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
             backend = parts[i + 1]
             i += 2
             continue
-        elif part == "--codex":
-            backend = "codex"
-        elif part.startswith("--"):
-            pass
-        else:
-            name_parts.append(part)
+        elif part == "--codex": backend = "codex"
+        elif part.startswith("--"): pass
+        else: name_parts.append(part)
         i += 1
 
-    if len(name_parts) != 1:
-        return "", backend
+    if len(name_parts) != 1: return "", backend
 
     name = name_parts[0]
 
@@ -915,8 +872,7 @@ def parse_hire_args(raw: str) -> tuple[str, str]:
             name = name[len(prefix):]
             break
 
-    if not is_valid_backend(backend):
-        return name, backend
+    if not is_valid_backend(backend): return name, backend
 
     return name, backend
 
@@ -924,10 +880,8 @@ def _activity_from_spinner(stripped: list[str]) -> str | None:
     _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
     for raw in reversed(stripped):
         first = raw[0] if raw else ""
-        if first == "✻" and "…" not in raw and "..." not in raw:
-            continue
-        if first not in _ACTIVE_SPINNER_CHARS:
-            continue
+        if first == "✻" and "…" not in raw and "..." not in raw: continue
+        if first not in _ACTIVE_SPINNER_CHARS: continue
         match = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
         if match:
             verb = match.group(1).strip()
@@ -944,16 +898,13 @@ def _activity_from_tool(stripped: list[str]) -> str | None:
     last_running_tool = None
     for i, raw in enumerate(stripped):
         tool_match = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
-        if not tool_match:
-            continue
+        if not tool_match: continue
         tool = tool_match.group(1)
         for j in range(i + 1, min(i + 6, len(stripped))):
             line = stripped[j]
-            if not line:
-                continue
+            if not line: continue
             if line.startswith("⎿"):
-                if "Running" in line and "background" not in line:
-                    last_running_tool = tool
+                if "Running" in line and "background" not in line: last_running_tool = tool
                 break
     if last_running_tool:
         if last_running_tool.startswith("mcp__"):
@@ -965,12 +916,9 @@ def _activity_from_tool(stripped: list[str]) -> str | None:
 def _activity_from_rate_limit(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
         lower = raw.lower()
-        if "rate limit" in lower:
-            return "Rate limited — waiting to retry"
-        if "connection error" in lower and "retrying" in lower:
-            return "Connection error — retrying"
-        if lower.startswith("retrying") or "retrying in" in lower:
-            return "Retrying API request"
+        if "rate limit" in lower: return "Rate limited — waiting to retry"
+        if "connection error" in lower and "retrying" in lower: return "Connection error — retrying"
+        if lower.startswith("retrying") or "retrying in" in lower: return "Retrying API request"
     return None
 
 def _activity_from_interactive(stripped: list[str]) -> str | None:
@@ -980,8 +928,7 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
                 for question_line in stripped:
                     if "☐" in question_line:
                         question = question_line.replace("☐", "").strip()
-                        if question:
-                            return f"Waiting for input: {question}"
+                        if question: return f"Waiting for input: {question}"
                 return "Waiting for user input"
 
     for raw in stripped:
@@ -989,10 +936,8 @@ def _activity_from_interactive(stripped: list[str]) -> str | None:
             if pattern in raw:
                 if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
                     return "Waiting for plan approval"
-                if "plan mode" in raw.lower():
-                    return "Waiting for plan mode decision"
-                if raw.startswith("Allow "):
-                    return "Waiting for tool permission"
+                if "plan mode" in raw.lower(): return "Waiting for plan mode decision"
+                if raw.startswith("Allow "): return "Waiting for tool permission"
                 return "Waiting for user input"
     return None
 
@@ -1000,41 +945,31 @@ def _activity_from_prompt(stripped: list[str]) -> str | None:
     last_prompt_idx = None
     last_plan_bar_idx = None
     for i, raw in enumerate(stripped):
-        if raw.startswith("❯"):
-            last_prompt_idx = i
-        if raw.startswith("⏸"):
-            last_plan_bar_idx = i
+        if raw.startswith("❯"): last_prompt_idx = i
+        if raw.startswith("⏸"): last_plan_bar_idx = i
 
     if last_plan_bar_idx is not None:
-        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
-            return "In plan mode"
+        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx: return "In plan mode"
 
-    if last_prompt_idx is not None:
-        return "Ready"
+    if last_prompt_idx is not None: return "Ready"
     return None
 
 def _activity_from_editor(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
-        if "Save and close editor to continue" in raw:
-            return "Waiting for external editor"
+        if "Save and close editor to continue" in raw: return "Waiting for external editor"
     return None
 
 def _activity_from_hooks(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
-        if "Running SessionStart" in raw:
-            return "Running SessionStart hooks"
-        if "Running PreCompact" in raw:
-            return "Running PreCompact hooks"
+        if "Running SessionStart" in raw: return "Running SessionStart hooks"
+        if "Running PreCompact" in raw: return "Running PreCompact hooks"
     return None
 
 def _activity_from_confirmation(stripped: list[str]) -> str | None:
     for raw in reversed(stripped):
-        if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw:
-            return "Waiting for plan approval"
-        if "Exit plan mode?" in raw or "Entering plan mode" in raw:
-            return "In plan mode"
-        if "Waiting for team lead" in raw:
-            return "Waiting for team lead approval"
+        if "Do you want to proceed?" in raw or "Would you like to proceed?" in raw: return "Waiting for plan approval"
+        if "Exit plan mode?" in raw or "Entering plan mode" in raw: return "In plan mode"
+        if "Waiting for team lead" in raw: return "Waiting for team lead approval"
     return None
 
 def _activity_from_tasks(stripped: list[str]) -> str | None:
@@ -1045,42 +980,33 @@ def _activity_from_tasks(stripped: list[str]) -> str | None:
         if line.startswith("✔") or line.startswith("✅"):
             done += 1
             total += 1
-        elif line.startswith("◻"):
-            total += 1
-    if total >= 2:
-        return f"Tasks ({done}/{total} done)"
+        elif line.startswith("◻"): total += 1
+    if total >= 2: return f"Tasks ({done}/{total} done)"
     return None
 
 def _is_output_block_end(text: str) -> bool:
     trimmed = text.lstrip()
-    if trimmed.startswith("Context left until auto-compact:"):
-        return True
+    if trimmed.startswith("Context left until auto-compact:"): return True
     return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
 
 def _activity_from_output_block(stripped: list[str]) -> str | None:
     for i in range(len(stripped) - 1, -1, -1):
         raw = stripped[i]
-        if not raw.startswith("●"):
-            continue
-        if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw):
-            continue
+        if not raw.startswith("●"): continue
+        if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw): continue
         parts: list[str] = []
         head = re.sub(r'^●\s*', '', raw).strip()
-        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
-            parts.append(head)
+        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"): parts.append(head)
         j = i + 1
         while j < len(stripped):
             nxt = stripped[j]
-            if _is_output_block_end(nxt):
-                break
+            if _is_output_block_end(nxt): break
             text = nxt.strip()
-            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"):
-                parts.append(text)
+            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"): parts.append(text)
             j += 1
         if parts:
             msg = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
-            if len(msg) > 120:
-                msg = msg[:117].rstrip() + "..."
+            if len(msg) > 120: msg = msg[:117].rstrip() + "..."
             return msg
     return None
 
@@ -1095,12 +1021,10 @@ def _activity_from_error(stripped: list[str]) -> str | None:
     return None
 
 def _extract_activity(lines: list[str]) -> str:
-    if not lines:
-        return "Active"
+    if not lines: return "Active"
 
     stripped = [line.strip() for line in lines if line.strip()]
-    if not stripped:
-        return "Idle"
+    if not stripped: return "Idle"
 
     _CHECKS: list[Callable[[list[str]], str | None]] = [
         _activity_from_spinner,
@@ -1117,16 +1041,14 @@ def _extract_activity(lines: list[str]) -> str:
     ]
     for check in _CHECKS:
         result: str | None = check(stripped)
-        if result is not None:
-            return result
+        if result is not None: return result
 
     return "Active"
 
 def _extract_context_pct(lines: list[str]) -> str | None:
     for line in reversed(lines):
         m = re.search(r'Context left.*?(\d+)%', line)
-        if m:
-            return f"{m.group(1)}%"
+        if m: return f"{m.group(1)}%"
     return None
 
 def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
@@ -1141,8 +1063,7 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
             )
-        if proc.returncode != 0:
-            return TmuxActivityResult("Unknown", None, None)
+        if proc.returncode != 0: return TmuxActivityResult("Unknown", None, None)
         lines = proc.stdout.split("\n")
         tail = lines[-40:]
         return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
@@ -1150,16 +1071,13 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
         return TmuxActivityResult("Unknown", None, None)
 
 def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
-    if not lines:
-        return None
+    if not lines: return None
 
     stripped = [l.strip() for l in lines if l.strip()]
-    if not stripped:
-        return None
+    if not stripped: return None
 
     tail = stripped[-5:]
-    if any(line == "❯" for line in tail):
-        return None
+    if any(line == "❯" for line in tail): return None
 
     has_interactive = False
     for raw in reversed(stripped):
@@ -1167,18 +1085,15 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
             if footer in raw:
                 has_interactive = True
                 break
-        if has_interactive:
-            break
+        if has_interactive: break
     if not has_interactive:
         for raw in stripped:
             for pattern in _INTERACTIVE_CONTENT:
                 if pattern in raw:
                     has_interactive = True
                     break
-            if has_interactive:
-                break
-    if not has_interactive:
-        return None
+            if has_interactive: break
+    if not has_interactive: return None
 
     header = ""
     for raw in stripped:
@@ -1196,11 +1111,9 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
             num = int(m.group(2))
             label = m.group(3).strip()
             options.append({"num": num, "label": label, "selected": is_selected})
-            if is_selected:
-                selected_num = num
+            if is_selected: selected_num = num
 
-    if not options:
-        return None
+    if not options: return None
 
     return cast(QuestionDetails, {
         "header": header,
@@ -1218,8 +1131,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
     if reply.isdigit():
         target_num = int(reply)
         option_nums = [o["num"] for o in details["options"]]
-        if target_num not in option_nums:
-            return False
+        if target_num not in option_nums: return False
 
         target_idx = option_nums.index(target_num)
         current_idx = 0
@@ -1230,10 +1142,8 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 
         diff = target_idx - current_idx
         keys = []
-        if diff > 0:
-            keys = ["Down"] * diff
-        elif diff < 0:
-            keys = ["Up"] * abs(diff)
+        if diff > 0: keys = ["Down"] * diff
+        elif diff < 0: keys = ["Up"] * abs(diff)
         keys.append("Enter")
 
         for key in keys:
@@ -1246,8 +1156,7 @@ def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails
 # ── Control plane functions (moved from claudecode.py) ───────────────
 
 def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
-    if not host:
-        shutil.copy2(src, dst)
+    if not host: shutil.copy2(src, dst)
     elif direction == "push":
         _subprocess_runner.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
     else:
@@ -1260,8 +1169,7 @@ def parse_worker_target(target: str) -> ParsedWorkerTarget:
     return ParsedWorkerTarget(target, None)
 
 def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
-    if target_host:
-        return f"claude@100.125.36.102:{bare_repo_path}"
+    if target_host: return f"claude@100.125.36.102:{bare_repo_path}"
     return bare_repo_path
 
 def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
@@ -1396,15 +1304,12 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
         r = _remote_run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
+        if r.returncode != 0 or not r.stdout.strip(): return None
         url = r.stdout.strip()
-        if url.endswith(".git"):
-            url = url[:-4]
+        if url.endswith(".git"): url = url[:-4]
         if ":" in url and not url.startswith("http"):
             name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
-        else:
-            name = url.rsplit("/", 1)[-1]
+        else: name = url.rsplit("/", 1)[-1]
         return name if name else None
     except (subprocess.SubprocessError, OSError):
         return None
@@ -1438,17 +1343,14 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
     except (subprocess.SubprocessError, OSError):
         return None
 
-    if result.returncode != 0:
-        return None
+    if result.returncode != 0: return None
 
     output = result.stdout.strip().splitlines()
-    if not output:
-        return None
+    if not output: return None
     return output[0].strip()
 
 def _child_count(pid: str, host: str | None = None) -> int:
-    if not pid:
-        return 0
+    if not pid: return 0
     try:
         result = _remote_run(
             ["pgrep", "-P", str(pid)],
@@ -1457,15 +1359,13 @@ def _child_count(pid: str, host: str | None = None) -> int:
     except (subprocess.SubprocessError, OSError):
         return 0
 
-    if result.returncode != 0:
-        return 0
+    if result.returncode != 0: return 0
 
     return len([line for line in result.stdout.splitlines() if line.strip()])
 
 def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
     pid_list = [str(pid) for pid in pids if pid]
-    if not pid_list:
-        return {}
+    if not pid_list: return {}
 
     try:
         result = _remote_run(
@@ -1475,14 +1375,12 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
     except (subprocess.SubprocessError, OSError):
         return {}
 
-    if result.returncode != 0:
-        return {}
+    if result.returncode != 0: return {}
 
     stats = {}
     for line in result.stdout.splitlines():
         parts = line.strip().split()
-        if len(parts) < 3:
-            continue
+        if len(parts) < 3: continue
         pid = parts[0]
         try:
             cpu = float(parts[1])
@@ -1499,8 +1397,7 @@ def mark_hook_event(session_name: str) -> None:
 def kill_adapter(name: str) -> None:
     with processes.adapter_pids_lock:
         entry = processes.adapter_pids.pop(name, None)
-    if entry is None:
-        return
+    if entry is None: return
     proc, stderr_fh = entry
     if proc and proc.poll() is None:
         proc.terminate()
@@ -1519,8 +1416,7 @@ def _read_learning_reminder(name: str) -> str:
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
             text = Path(_LEARNING_REMINDER_PATH).read_text().strip()
-            if text:
-                return text.replace("{name}", name)
+            if text: return text.replace("{name}", name)
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
     return _LEARNING_REMINDER_TEXT.replace("{name}", name)
@@ -1539,8 +1435,7 @@ def _learning_reminder_state_file() -> str | None:
 
 def _save_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
-    if not path:
-        return
+    if not path: return
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -1578,10 +1473,8 @@ def _check_learning_reminder(name: str) -> None:
 
         st["response_count"] = st.get("response_count", 0) + 1
 
-        if st["response_count"] >= LEARNING_REMINDER_RESPONSE_THRESHOLD:
-            _fire_reminder(name, st)
-        else:
-            _save_learning_reminder_state()
+        if st["response_count"] >= LEARNING_REMINDER_RESPONSE_THRESHOLD: _fire_reminder(name, st)
+        else: _save_learning_reminder_state()
 
 def _scan_idle_workers() -> None:
     try:
@@ -1591,14 +1484,11 @@ def _scan_idle_workers() -> None:
 
         with learning_reminders.lock:
             for name, st in learning_reminders.state.items():
-                if st.get("reminder_pending"):
-                    continue
-                if st.get("response_count", 0) <= 1:
-                    continue
+                if st.get("reminder_pending"): continue
+                if st.get("response_count", 0) <= 1: continue
                 idle_seconds = now - st.get("last_response_ts", now)
                 since_reminder = now - st.get("last_reminder_ts", now)
-                if idle_seconds >= idle_threshold and since_reminder >= idle_threshold:
-                    to_fire.append(name)
+                if idle_seconds >= idle_threshold and since_reminder >= idle_threshold: to_fire.append(name)
 
             for name in to_fire:
                 _fire_reminder(name, learning_reminders.state[name])
@@ -1614,8 +1504,7 @@ def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
             if name not in learning_reminders.state:
                 learning_reminders.state[name] = _new_reminder_state()
                 changed = True
-        if changed:
-            _save_learning_reminder_state()
+        if changed: _save_learning_reminder_state()
 
 def _schedule_idle_scan() -> None:
     learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
@@ -1626,21 +1515,17 @@ def _schedule_idle_scan() -> None:
 def _send_learning_reminder(name: str, text: str) -> None:
     try:
         _clock.sleep(DELAY_RESPONSE_GAP)
-        if send_to_worker(name, text):
-            _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
-        else:
-            _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
+        if send_to_worker(name, text): _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
+        else: _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
     except (ConnectionError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Learning reminder error for {name}: {e}")
 
 def _load_registry() -> RegistryFileDict:
     try:
-        if not WORKER_REGISTRY_FILE.exists():
-            return {}
+        if not WORKER_REGISTRY_FILE.exists(): return {}
         raw = WORKER_REGISTRY_FILE.read_text()
         data = cast(RegistryFileDict, json.loads(raw))
-        if not isinstance(data, dict) or "workers" not in data:
-            raise ValueError("invalid registry format")
+        if not isinstance(data, dict) or "workers" not in data: raise ValueError("invalid registry format")
         return data
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         if WORKER_REGISTRY_FILE.exists():
@@ -1674,8 +1559,7 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
                    host: str | None = None) -> None:
     with watchdog.lock:
         data = _load_registry()
-        if "workers" not in data:
-            data = {"version": 1, "workers": {}}
+        if "workers" not in data: data = {"version": 1, "workers": {}}
         existing = data.get("workers", {}).get(name, {})
         preserved_keys = {"host", "home_host", "home_cwd"}
         entry = {k: v for k, v in existing.items() if k in preserved_keys}
@@ -1684,8 +1568,7 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None,
             "chat_id": chat_id,
             "hire_time": int(_clock.time()),
         })
-        if host:
-            entry["host"] = host
+        if host: entry["host"] = host
         data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
 
@@ -1693,8 +1576,7 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
                            version: str = "", tools: dict[str, object] | None = None) -> None:
     with watchdog.lock:
         data = _load_registry()
-        if "workers" not in data:
-            data = {"version": 1, "workers": {}}
+        if "workers" not in data: data = {"version": 1, "workers": {}}
         entry: dict[str, object] = {
             "backend": DEFAULT_BACKEND,
             "protocol": "http",
@@ -1702,30 +1584,24 @@ def _registry_add_callback(name: str, callback_url: str, host: str = "",
             "chat_id": None,
             "hire_time": int(_clock.time()),
         }
-        if host:
-            entry["host"] = host
-        if version:
-            entry["version"] = version
-        if isinstance(tools, dict):
-            entry["tools"] = tools
+        if host: entry["host"] = host
+        if version: entry["version"] = version
+        if isinstance(tools, dict): entry["tools"] = tools
         data["workers"][name] = cast(RegistryWorkerDict, entry)
         _save_registry(data)
 
 def _registry_remove(name: str) -> None:
     with watchdog.lock:
         data = _load_registry()
-        if "workers" not in data:
-            return
+        if "workers" not in data: return
         data["workers"].pop(name, None)
         _save_registry(data)
 
 def _set_worker_cwd(name: str, cwd: str) -> None:
     normalized = normalize_cwd(cwd)
     with watchdog.lock:
-        if normalized:
-            watchdog.worker_cwds[name] = normalized
-        else:
-            watchdog.worker_cwds.pop(name, None)
+        if normalized: watchdog.worker_cwds[name] = normalized
+        else: watchdog.worker_cwds.pop(name, None)
 
 def _get_worker_cwd(name: str) -> str:
     with watchdog.lock:
@@ -1733,10 +1609,8 @@ def _get_worker_cwd(name: str) -> str:
     return cwd if isinstance(cwd, str) else ""
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
-    if WORKER_REGISTRY_FILE.exists():
-        return
-    if not registered:
-        return
+    if WORKER_REGISTRY_FILE.exists(): return
+    if not registered: return
     data: RegistryFileDict = {"version": 1, "workers": {}}
     for name, session in registered.items():
         backend = normalize_backend(session.get("backend"))
@@ -1753,8 +1627,7 @@ def read_checkin_note() -> str:
         path = _CHECKIN_NOTE_PATH
         if os.path.isfile(path):
             text = Path(path).read_text().strip()
-            if text:
-                return text
+            if text: return text
     except OSError as e:
         _log(_LOG_WARN, "bridge", f"Failed to read checkin note from {_CHECKIN_NOTE_PATH}: {e}")
     return ""
@@ -1789,8 +1662,7 @@ def _read_session_file(name: str, filename: str) -> str | None:
     f = get_session_dir(name) / filename
     if f.exists():
         val = f.read_text().strip()
-        if val:
-            return val
+        if val: return val
     host = get_worker_host(name)
     if host:
         try:
@@ -1820,8 +1692,7 @@ def _ensure_workspace_trusted_remote(
     cwd: str | None,
     host: str | None,
 ) -> None:
-    if not cwd:
-        return
+    if not cwd: return
     if not host:
         _ensure_workspace_trusted(cwd)
         return
@@ -1873,14 +1744,12 @@ def _build_teleport_context(
             "To retrieve your previous work context, run:\n"
             f"  beast transcript search --session {session_id} --last 20 --full"
         )
-    else:
-        lines.append("No previous session was active.")
+    else: lines.append("No previous session was active.")
     return "\n".join(lines)
 
 def _get_pending_lock(name: str) -> threading.Lock:
     with processes.pending_locks_guard:
-        if name not in processes.pending_locks:
-            processes.pending_locks[name] = threading.Lock()
+        if name not in processes.pending_locks: processes.pending_locks[name] = threading.Lock()
         return processes.pending_locks[name]
 
 def set_pending(name: str, chat_id: ChatId) -> None:
@@ -1907,8 +1776,7 @@ def _remap_sessions_dir(host: str | None) -> str:
 
 def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     host = get_worker_host(name)
-    if not host:
-        return
+    if not host: return
     try:
         remote_sessions_dir = _remap_sessions_dir(host)
         _remote_run(["mkdir", "-p", f"{remote_sessions_dir}/{name}"],
@@ -1928,27 +1796,23 @@ def clear_pending(name: str) -> None:
 
 def is_pending(name: str) -> bool:
     pending = get_pending_file(name)
-    if not pending.exists():
-        return False
+    if not pending.exists(): return False
     try:
         ts = int(pending.read_text().strip())
-        if (_clock.time() - ts) > PENDING_TIMEOUT:
-            return False
+        if (_clock.time() - ts) > PENDING_TIMEOUT: return False
         return True
     except (OSError, ValueError):
         return False
 
 def try_set_pending(name: str, chat_id: ChatId) -> bool:
     with _get_pending_lock(name):
-        if is_pending(name):
-            return False
+        if is_pending(name): return False
         set_pending(name, chat_id)
         return True
 
 def _pending_timestamp(name: str) -> int | None:
     pending = get_pending_file(name)
-    if not pending.exists():
-        return None
+    if not pending.exists(): return None
     try:
         return int(pending.read_text().strip())
     except OSError:
@@ -1970,53 +1834,42 @@ def compute_state(
     adapter_alive: bool = False,
     poisoned_reason: str | None = None,
 ) -> tuple[str, str]:
-    if not tmux_exists:
-        return "OFFLINE", "tmux missing"
+    if not tmux_exists: return "OFFLINE", "tmux missing"
 
     if not is_interactive:
-        if adapter_alive:
-            return "BUSY_TOOL", "adapter running"
+        if adapter_alive: return "BUSY_TOOL", "adapter running"
         if pending:
-            if pending_age < STALE_PENDING:
-                return "WAITING", f"age={int(pending_age)}s"
+            if pending_age < STALE_PENDING: return "WAITING", f"age={int(pending_age)}s"
             hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
             if pending_age >= STALE_PENDING and not hook_since_pending:
-                if poisoned_reason is not None:
-                    return "POISONED", f"{poisoned_reason}"
+                if poisoned_reason is not None: return "POISONED", f"{poisoned_reason}"
                 return "STUCK", f"age={int(pending_age)}s"
             return "WAITING", f"age={int(pending_age)}s"
         return "READY", "idle"
 
     if not claude_pid and last_seen_claude is not None:
-        if (now - last_seen_claude) > START_GRACE:
-            return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
+        if (now - last_seen_claude) > START_GRACE: return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
 
-    if pending and children > 0:
-        return "BUSY_TOOL", f"children={children}"
+    if pending and children > 0: return "BUSY_TOOL", f"children={children}"
 
     if pending and children == 0:
         if (pending_age <= THINK_GRACE) or ((now - last_child_ts) <= TOOL_GAP_GRACE) or (cpu >= CPU_ACTIVE):
             return "BUSY_THINKING", f"age={int(pending_age)}s cpu={cpu:.1f}"
-        if pending_age < STALE_PENDING:
-            return "WAITING", f"age={int(pending_age)}s"
+        if pending_age < STALE_PENDING: return "WAITING", f"age={int(pending_age)}s"
         hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
         if pending_age >= STALE_PENDING and cpu < CPU_IDLE and not hook_since_pending:
-            if poisoned_reason is not None:
-                return "POISONED", f"{poisoned_reason}"
+            if poisoned_reason is not None: return "POISONED", f"{poisoned_reason}"
             return "STUCK", f"age={int(pending_age)}s cpu={cpu:.1f}"
         return "WAITING", f"age={int(pending_age)}s"
 
-    if not pending and children > 0:
-        return "UNTRACKED_BUSY", f"children={children}"
+    if not pending and children > 0: return "UNTRACKED_BUSY", f"children={children}"
 
-    if claude_pid and not pending:
-        return "READY", "idle"
+    if claude_pid and not pending: return "READY", "idle"
 
     return "OFFLINE", "tmux alive, claude missing"
 
 def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
-    if tail_lines <= 0:
-        return ""
+    if tail_lines <= 0: return ""
     host = get_worker_host(name)
     if host:
         try:
@@ -2033,8 +1886,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         except (subprocess.SubprocessError, OSError):
             return ""
     log_path = get_session_dir(name) / "adapter.log"
-    if not log_path.exists():
-        return ""
+    if not log_path.exists(): return ""
     try:
         with log_path.open("r", errors="ignore") as fh:
             lines = fh.readlines()
@@ -2043,8 +1895,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         return ""
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
-    if admin_chat_id is None:
-        return
+    if admin_chat_id is None: return
 
     now = _clock.time()
     with watchdog.lock:
@@ -2058,8 +1909,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
             details = watchdog.waiting_input_details.get(name)
         header = details.get("header", "") if details else ""
         title = f"🟡 {name} needs your reply"
-        if header:
-            title += f": {header}"
+        if header: title += f": {header}"
         parts = [title]
         if details and details.get("options"):
             for o in details["options"]:
@@ -2073,16 +1923,11 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         age_min = int(age_match.group(1)) // 60 if age_match else 0
         age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
         text = f"🔴 {name} has made no progress for {age_str}.\n/restart --clean {name} (starts fresh)"
-    elif state == "POISONED":
-        text = f"🔴 {name} is stuck in an error loop.\n/restart --clean {name} (starts fresh)"
-    elif state == "DEAD":
-        text = f"🔴 {name} stopped unexpectedly.\n/restart --clean {name} (starts fresh)"
-    elif state == "EXITED":
-        text = f"🟡 {name}'s session ended.\n/restart {name}"
-    elif state == "OFFLINE":
-        text = f"🔴 {name} is not running.\n/hire {name}"
-    else:
-        text = f"{name}: {state} ({reason}). Check /team"
+    elif state == "POISONED": text = f"🔴 {name} is stuck in an error loop.\n/restart --clean {name} (starts fresh)"
+    elif state == "DEAD": text = f"🔴 {name} stopped unexpectedly.\n/restart --clean {name} (starts fresh)"
+    elif state == "EXITED": text = f"🟡 {name}'s session ended.\n/restart {name}"
+    elif state == "OFFLINE": text = f"🔴 {name} is not running.\n/hire {name}"
+    else: text = f"{name}: {state} ({reason}). Check /team"
     try:
         import telegram as _tg
         result = _tg.transport.send_text(admin_chat_id, text)
@@ -2092,18 +1937,15 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
             msg_id = _res.get("message_id") if isinstance(_res, dict) else None
             with watchdog.lock:
                 watchdog.last_alert_ts[name] = now
-                if msg_id:
-                    watchdog.alert_msg_ids[name] = (msg_id, text)
-        else:
-            _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
+                if msg_id: watchdog.alert_msg_ids[name] = (msg_id, text)
+        else: _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
     except KeyError as e:
         _log(_LOG_ERROR, "watchdog", f"Watchdog alert error: {e}")
 
 def _format_watchdog_status(name: str,
                             pending_lookup: Callable[[str], bool] | None = None,
                             state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
-    if pending_lookup is None:
-        pending_lookup = is_pending
+    if pending_lookup is None: pending_lookup = is_pending
     if state_snapshot is None:
         with watchdog.lock:
             state_snapshot = dict(watchdog.worker_states)
@@ -2118,8 +1960,7 @@ def format_team_lines(  # type: ignore[no-redef]
     pending_lookup: Callable[[str], bool] | None = None,
     worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None
 ) -> list[str]:
-    if pending_lookup is None:
-        pending_lookup = is_pending
+    if pending_lookup is None: pending_lookup = is_pending
     with watchdog.lock:
         state_snapshot = dict(watchdog.worker_states)
     return _format_team_lines_pure(
@@ -2131,28 +1972,22 @@ def format_team_lines(  # type: ignore[no-redef]
 
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
     backend = get_backend(backend_name)
-    if not backend.is_interactive:
-        return tmux_exists(tmux_name, host=host)
+    if not backend.is_interactive: return tmux_exists(tmux_name, host=host)
 
     deadline = _clock.time() + timeout
     while _clock.time() < deadline:
-        if not tmux_exists(tmux_name, host=host):
-            return False
+        if not tmux_exists(tmux_name, host=host): return False
         activity, _, _ = _read_tmux_activity(tmux_name, host=host)
-        if activity == "Idle at prompt":
-            return True
+        if activity == "Idle at prompt": return True
         _clock.sleep(DELAY_RETRY)
     return False
 
 def _send_to_callback_worker(name: str, message: str, from_name: str = "manager", session: TmuxSessionDict | None = None) -> bool:
     callback_url = (session or {}).get("callback_url", "")
-    if not callback_url:
-        callback_url = _load_registry().get("workers", {}).get(name, {}).get("callback_url", "")
-    if not callback_url:
-        return False
+    if not callback_url: callback_url = _load_registry().get("workers", {}).get(name, {}).get("callback_url", "")
+    if not callback_url: return False
     msg_url = callback_url.rstrip("/")
-    if not msg_url.endswith("/msg"):
-        msg_url = f"{msg_url}/msg"
+    if not msg_url.endswith("/msg"): msg_url = f"{msg_url}/msg"
     body = json.dumps({"from": from_name, "text": message}).encode()
     req = urllib.request.Request(
         msg_url,
@@ -2177,22 +2012,17 @@ class WorkerManager:
         self._clock: Clock = clock or _clock
 
     def _sync_paths(self) -> None:
-        if self.sessions_dir != SESSIONS_DIR:
-            self.sessions_dir = SESSIONS_DIR
-        if self.tmux_prefix != TMUX_PREFIX:
-            self.tmux_prefix = TMUX_PREFIX
+        if self.sessions_dir != SESSIONS_DIR: self.sessions_dir = SESSIONS_DIR
+        if self.tmux_prefix != TMUX_PREFIX: self.tmux_prefix = TMUX_PREFIX
 
     def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
         candidate = normalize_cwd(requested_cwd)
-        if not candidate:
-            candidate = normalize_cwd(_get_worker_cwd(name))
+        if not candidate: candidate = normalize_cwd(_get_worker_cwd(name))
         if candidate:
-            if os.path.isdir(candidate):
-                return candidate
+            if os.path.isdir(candidate): return candidate
             _log(_LOG_WARN, "bridge", f"Ignoring invalid startup cwd for {name}: {candidate}")
         fallback = normalize_cwd(fallback_cwd)
-        if fallback and os.path.isdir(fallback):
-            return fallback
+        if fallback and os.path.isdir(fallback): return fallback
         return ""
 
     def _get_tmux_pane_cwd(self, tmux_name: str, host: str | None = None) -> str:
@@ -2200,13 +2030,11 @@ class WorkerManager:
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        if result.returncode == 0: return result.stdout.strip()
         return ""
 
     def _cd_tmux_to_cwd(self, tmux_name: str, cwd: str) -> None:
-        if not cwd:
-            return
+        if not cwd: return
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_SHORT)
 
@@ -2221,8 +2049,7 @@ class WorkerManager:
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
-                    if not line:
-                        continue
+                    if not line: continue
                     session_name = line.strip()
                     if session_name.startswith(self.tmux_prefix):
                         name = session_name[len(self.tmux_prefix):]
@@ -2236,21 +2063,17 @@ class WorkerManager:
         except (subprocess.SubprocessError, OSError):
             machines = {}
         for machine in machines.values():
-            if machine.is_local or not machine.ssh_target:
-                continue
-            if machine.role not in ("worker-host", ""):
-                continue
+            if machine.is_local or not machine.ssh_target: continue
+            if machine.role not in ("worker-host", ""): continue
             try:
                 r = _remote_run(
                     ["tmux", "list-sessions", "-F", "#{session_name}"],
                     host=machine.ssh_target,
                     capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
                 )
-                if r.returncode != 0:
-                    continue
+                if r.returncode != 0: continue
                 for line in r.stdout.strip().split("\n"):
-                    if not line:
-                        continue
+                    if not line: continue
                     session_name = line.strip()
                     if session_name.startswith(self.tmux_prefix):
                         name = session_name[len(self.tmux_prefix):]
@@ -2294,20 +2117,15 @@ class WorkerManager:
                 entry: TmuxSessionDict = {"backend": str(info.get("backend", DEFAULT_BACKEND))}
                 for key in ("protocol", "callback_url", "host", "version"):
                     val = info.get(key)
-                    if val:
-                        entry[key] = str(val)
-                if info.get("host") and not info.get("callback_url"):
-                    entry["tmux"] = f"{self.tmux_prefix}{name}"
+                    if val: entry[key] = str(val)
+                if info.get("host") and not info.get("callback_url"): entry["tmux"] = f"{self.tmux_prefix}{name}"
                 registered[name] = entry
             else:
                 for key in ("protocol", "callback_url", "host", "version"):
-                    if info.get(key):
-                        registered[name][key] = info.get(key)  # type: ignore[literal-required]
+                    if info.get(key): registered[name][key] = info.get(key)  # type: ignore[literal-required]
 
-        if state.active and state.active not in registered:
-            state.active = None
-        if registered and not state.active:
-            state.active = list(registered.keys())[0]
+        if state.active and state.active not in registered: state.active = None
+        if registered and not state.active: state.active = list(registered.keys())[0]
 
         with self._sessions_cache_lock:
             self._sessions_cache = dict(registered)
@@ -2319,11 +2137,9 @@ class WorkerManager:
         if not session:
             sessions = self.get_registered_sessions()
             session = sessions.get(name)
-        if not session:
-            return False
+        if not session: return False
 
-        if session.get("callback_url"):
-            return True
+        if session.get("callback_url"): return True
 
         backend_name = normalize_backend(session.get("backend"))
         backend = get_backend(backend_name)
@@ -2331,8 +2147,7 @@ class WorkerManager:
         host = get_worker_host(name)
         if host:
             try:
-                if not tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK):
-                    return False
+                if not tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK): return False
                 if backend.is_interactive:
                     try:
                         return is_claude_running(tmux_name, host=host)
@@ -2349,11 +2164,9 @@ class WorkerManager:
         if not session:
             sessions = self.get_registered_sessions()
             session = sessions.get(name)
-        if not session:
-            return False
+        if not session: return False
 
-        if session.get("callback_url"):
-            return _send_to_callback_worker(name, message, "manager", session)
+        if session.get("callback_url"): return _send_to_callback_worker(name, message, "manager", session)
 
         backend_name = normalize_backend(session.get("backend"))
         backend = get_backend(backend_name)
@@ -2369,8 +2182,7 @@ class WorkerManager:
             callback_url = info.get("callback_url", "")
             if callback_url:
                 msg_url = callback_url.rstrip("/")
-                if not msg_url.endswith("/msg"):
-                    msg_url = f"{msg_url}/msg"
+                if not msg_url.endswith("/msg"): msg_url = f"{msg_url}/msg"
                 payload = json.dumps({"from": "YOUR_NAME", "text": "your message here"})
                 send_example = (
                     f"curl -sS -X POST {shlex.quote(msg_url)} "
@@ -2464,12 +2276,9 @@ class WorkerManager:
         return workers
 
     def _wrap_for_caller(self, cmd: str, peer_host: str | None, caller_host: str | None) -> str:
-        if caller_host == peer_host:
-            return cmd
-        if peer_host is None:
-            ssh_target = BRIDGE_SSH_TARGET
-        else:
-            ssh_target = peer_host
+        if caller_host == peer_host: return cmd
+        if peer_host is None: ssh_target = BRIDGE_SSH_TARGET
+        else: ssh_target = peer_host
         escaped = cmd.replace('"', '\\"')
         return f'ssh {ssh_target} "{escaped}"'
 
@@ -2495,10 +2304,8 @@ class WorkerManager:
         if note:
             rendered = note.replace("{name}", name)
             host = get_worker_host(name)
-            if host:
-                machine = f"Mac Mini ({host})"
-            else:
-                machine = "VPS (100.125.36.102)"
+            if host: machine = f"Mac Mini ({host})"
+            else: machine = "VPS (100.125.36.102)"
             rendered = rendered.replace("{machine}", machine)
             welcome += f"\n\nMANAGER NOTE:\n{rendered}"
             _log(_LOG_INFO, "checkin", f"Checkin note included for {name}")
@@ -2515,21 +2322,18 @@ class WorkerManager:
             return False, f"'{backend_obj.binary}' not found in PATH. Install it first."
 
         tmux_name = f"{self.tmux_prefix}{name}"
-        if tmux_exists(tmux_name):
-            return False, f"Worker '{name}' already exists"
+        if tmux_exists(tmux_name): return False, f"Worker '{name}' already exists"
 
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
             capture_output=True, env=clean_env, timeout=TIMEOUT_REMOTE_CMD
         )
-        if result.returncode != 0:
-            return False, "Could not start the worker workspace"
+        if result.returncode != 0: return False, "Could not start the worker workspace"
         self._runner.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_RETRY)
         startup_cwd = self._get_startup_cwd(name)
-        if startup_cwd:
-            self._cd_tmux_to_cwd(tmux_name, startup_cwd)
+        if startup_cwd: self._cd_tmux_to_cwd(tmux_name, startup_cwd)
         export_hook_env(tmux_name, backend)
         self._clock.sleep(DELAY_TMUX_SEND)
         self._runner.run(["tmux", "send-keys", "-t", tmux_name,
@@ -2542,25 +2346,20 @@ class WorkerManager:
             _tmp.write_text(str(chat_id))
             _tmp.chmod(0o600)
             os.replace(str(_tmp), str(chat_id_file))
-        if not backend_obj.is_interactive:
-            ensure_worker_pipe(name)
+        if not backend_obj.is_interactive: ensure_worker_pipe(name)
         start_cmd = f'unset CLAUDECODE && {backend_obj.start_cmd()}'
-        if startup_cwd:
-            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        if startup_cwd: start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
         if backend_obj.is_interactive:
             self._clock.sleep(DELAY_STARTUP_LONG)
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
 
-        if backend_obj.is_interactive:
-            self._clock.sleep(DELAY_RESPONSE_GAP)
+        if backend_obj.is_interactive: self._clock.sleep(DELAY_RESPONSE_GAP)
         welcome = self._build_welcome(name, backend_obj)
         if not backend_obj.is_interactive:
-            if chat_id:
-                set_pending(name, chat_id)
+            if chat_id: set_pending(name, chat_id)
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND)
-        else:
-            self.send(name, welcome)
+        else: self.send(name, welcome)
         state.active = name
         import telegram as _tg
         _tg.save_last_active(name)
@@ -2575,8 +2374,7 @@ class WorkerManager:
     def end(self, name: str) -> tuple[bool, str | None]:
         self._sync_paths()
         registered = self.get_registered_sessions()
-        if name not in registered:
-            return False, f"Worker '{name}' not found"
+        if name not in registered: return False, f"Worker '{name}' not found"
 
         session = registered[name]
         backend_name = get_worker_backend(name, session)
@@ -2609,48 +2407,39 @@ class WorkerManager:
     def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
         self._sync_paths()
         registered = self.get_registered_sessions()
-        if name not in registered:
-            return False, f"Worker '{name}' not found"
+        if name not in registered: return False, f"Worker '{name}' not found"
 
         host = get_worker_host(name)
-        if host:
-            return False, "use_remote_restart"
+        if host: return False, "use_remote_restart"
 
         session = registered[name]
         backend_name = get_worker_backend(name, session)
         backend = get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
 
-        if not tmux_exists(tmux_name):
-            return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
+        if not tmux_exists(tmux_name): return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
 
-        if not _which_binary(backend.binary):
-            return False, f"'{backend.binary}' not found in PATH. Install it first."
+        if not _which_binary(backend.binary): return False, f"'{backend.binary}' not found in PATH. Install it first."
 
         resume_id, startup_cwd = self._prepare_restart_state(name, mode)
 
-        if mode != "resume":
-            _clear_hook_failures(name)
+        if mode != "resume": _clear_hook_failures(name)
         session_dir = self.sessions_dir / name
         if not backend.is_interactive:
             session_dir.mkdir(parents=True, exist_ok=True)
             ensure_worker_pipe(name)
             clear_pending(name)
-        elif is_claude_running(tmux_name):
-            self._stop_running_claude(name, tmux_name)
+        elif is_claude_running(tmux_name): self._stop_running_claude(name, tmux_name)
 
-        if backend.is_interactive and not is_claude_running(tmux_name):
-            self._kill_stray_children(name, tmux_name)
+        if backend.is_interactive and not is_claude_running(tmux_name): self._kill_stray_children(name, tmux_name)
         export_hook_env(tmux_name, backend_name)
         self._clock.sleep(DELAY_TMUX_SEND)
         self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
         welcome = self._build_welcome(name, backend)
         if backend.is_interactive:
             started = self._wait_for_startup(name, tmux_name, backend, resume_id, startup_cwd)
-            if started:
-                self.send(name, welcome)
-            else:
-                _log(_LOG_WARN, "restart", f"{name}: Claude did not start within 10s, skipping welcome")
+            if started: self.send(name, welcome)
+            else: _log(_LOG_WARN, "restart", f"{name}: Claude did not start within 10s, skipping welcome")
         else:
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         _reset_learning_reminder(name)
@@ -2670,8 +2459,7 @@ class WorkerManager:
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
-        if startup_cwd:
-            _ensure_workspace_trusted(startup_cwd)
+        if startup_cwd: _ensure_workspace_trusted(startup_cwd)
         return resume_id, startup_cwd
 
     def _stop_running_claude(self, name: str, tmux_name: str) -> None:
@@ -2683,14 +2471,11 @@ class WorkerManager:
             pane_pid = _tmux_pane_pids().get(tmux_name)
             if pane_pid:
                 claude_pid = _get_claude_pid(pane_pid)
-                if claude_pid:
-                    self._runner.run(["kill", claude_pid], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+                if claude_pid: self._runner.run(["kill", claude_pid], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
         for _ in range(20):
-            if not is_claude_running(tmux_name):
-                break
+            if not is_claude_running(tmux_name): break
             self._clock.sleep(DELAY_SHORT)
-        else:
-            _log(_LOG_WARN, "restart", f"{name}: Claude still running after 5s kill wait")
+        else: _log(_LOG_WARN, "restart", f"{name}: Claude still running after 5s kill wait")
 
     def _kill_stray_children(self, name: str, tmux_name: str) -> None:
         pane_pids = _tmux_pane_pids()
@@ -2715,8 +2500,7 @@ class WorkerManager:
         self._clock.sleep(DELAY_TMUX_SEND)
         start_cmd = backend.start_cmd(resume_id)
         start_cmd = f'unset CLAUDECODE && {start_cmd}'
-        if startup_cwd:
-            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        if startup_cwd: start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
 
     def _wait_for_startup(self, name: str, tmux_name: str, backend: Backend,
@@ -2738,8 +2522,7 @@ class WorkerManager:
         _clear_hook_failures(name)
         start_cmd = backend.start_cmd("")
         start_cmd = f'unset CLAUDECODE && {start_cmd}'
-        if startup_cwd:
-            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        if startup_cwd: start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
         started = False
         for _ in range(10):
@@ -2767,16 +2550,14 @@ class WorkerManager:
         return started
 
     def _restart_dead_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str) -> tuple[bool, str | None]:
-        if not _which_binary(backend.binary):
-            return False, f"'{backend.binary}' not found in PATH. Install it first."
+        if not _which_binary(backend.binary): return False, f"'{backend.binary}' not found in PATH. Install it first."
 
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
             capture_output=True, env=clean_env, timeout=TIMEOUT_REMOTE_CMD
         )
-        if result.returncode != 0:
-            return False, "Could not create worker workspace"
+        if result.returncode != 0: return False, "Could not create worker workspace"
         self._runner.run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_RETRY)
         export_hook_env(tmux_name, backend_name)
@@ -2785,8 +2566,7 @@ class WorkerManager:
                         'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"], timeout=TIMEOUT_TMUX_SEND)
         self._clock.sleep(DELAY_TMUX_SEND)
         ensure_session_dir(name)
-        if not backend.is_interactive:
-            ensure_worker_pipe(name)
+        if not backend.is_interactive: ensure_worker_pipe(name)
         resume_id = ""
         resume_cwd = ""
         if mode == "resume":
@@ -2799,12 +2579,10 @@ class WorkerManager:
             for session_id_file in session_dir.glob("*_session_id"):
                 session_id_file.unlink()
         startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
-        if startup_cwd:
-            _ensure_workspace_trusted(startup_cwd)
+        if startup_cwd: _ensure_workspace_trusted(startup_cwd)
         start_cmd = backend.start_cmd(resume_id)
         start_cmd = f'unset CLAUDECODE && {start_cmd}'
-        if startup_cwd:
-            start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+        if startup_cwd: start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
         self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
         if backend.is_interactive:
             self._clock.sleep(DELAY_STARTUP_LONG)
@@ -2822,8 +2600,7 @@ class WorkerManager:
                 clear_claude_session_id(name)
                 start_cmd = backend.start_cmd("")
                 start_cmd = f'unset CLAUDECODE && {start_cmd}'
-                if startup_cwd:
-                    start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
+                if startup_cwd: start_cmd = f'cd {shlex.quote(startup_cwd)} && {start_cmd}'
                 self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
                 for _ in range(10):
                     self._clock.sleep(DELAY_STARTUP)
@@ -2838,10 +2615,8 @@ class WorkerManager:
                             admin_chat_id,
                             f"⚠️ {name}: stale session ID {resume_id[:8]}… — auto-restarted fresh ✓"
                         )
-            if started:
-                self.send(name, welcome)
-            else:
-                _log(_LOG_WARN, "restart", f"{name}: dead worker did not start within 10s, skipping welcome")
+            if started: self.send(name, welcome)
+            else: _log(_LOG_WARN, "restart", f"{name}: dead worker did not start within 10s, skipping welcome")
         else:
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND)
         _log(_LOG_INFO, "worker", f"Dead worker '{name}' recovered from registry (mode={mode})")
@@ -3002,8 +2777,7 @@ class ConnectorRegistry:
 
     def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
         with self._lock:
-            if tag not in self._log:
-                self._log[tag] = collections.deque(maxlen=20)
+            if tag not in self._log: self._log[tag] = collections.deque(maxlen=20)
             self._log[tag].append({
                 "ts": _clock.time(),
                 "html": html_text,
@@ -3023,8 +2797,7 @@ if not BRIDGE_PUBLIC_URL:
         _ts_ip = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True,
             text=True, timeout=3).stdout.strip()  # noqa: direct call — runs before constants init
-        if _ts_ip:
-            BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
+        if _ts_ip: BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
     except (subprocess.SubprocessError, OSError):
         pass
 
@@ -3058,8 +2831,7 @@ class GuestSession:
     @classmethod
     def from_dict(cls: type["GuestSession"], token_hash: str, data: GuestSessionDict) -> "GuestSession":
         notified = data.get("notified_workers", set())
-        if isinstance(notified, list):
-            notified = set(notified)
+        if isinstance(notified, list): notified = set(notified)
         return cls(
             name=data["name"],
             token_hash=token_hash,
@@ -3177,8 +2949,7 @@ def _guest_save() -> None:
 
 def _guest_load() -> None:
     path = _guest_state_path()
-    if not path.exists():
-        return
+    if not path.exists(): return
     try:
         with open(path) as f:
             data = json.load(f)
@@ -3186,13 +2957,11 @@ def _guest_load() -> None:
         restored = 0
         for k, v in data.get("guests", {}).items():
             if now <= v.get("expires_at_unix", 0):
-                if isinstance(v.get("notified_workers"), list):
-                    v["notified_workers"] = set(v["notified_workers"])
+                if isinstance(v.get("notified_workers"), list): v["notified_workers"] = set(v["notified_workers"])
                 guest_store.guests[k] = v
                 restored += 1
         guest_store.inboxes.update(data.get("inboxes", {}))
-        if restored:
-            _log(_LOG_INFO, "guest", f"Restored {restored} active guest(s) from disk")
+        if restored: _log(_LOG_INFO, "guest", f"Restored {restored} active guest(s) from disk")
     except (json.JSONDecodeError, OSError, KeyError) as e:
         _log(_LOG_WARN, "guest", f"Failed to load state: {e}")
 
@@ -3202,47 +2971,36 @@ def guest_create_token() -> tuple[str, str]:
     return token, token_hash
 
 def guest_generate_name(existing_names: set[str] | None = None) -> str:
-    if existing_names is None:
-        existing_names = set()
+    if existing_names is None: existing_names = set()
     for _ in range(100):
         name = secrets.token_urlsafe(3).rstrip("=").lower()[:5]
-        if len(name) >= 3 and name not in existing_names:
-            return name
+        if len(name) >= 3 and name not in existing_names: return name
     return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
 
 def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
-    if not name or not name.strip():
-        return False, "name is required"
+    if not name or not name.strip(): return False, "name is required"
     name = name.strip().lower()
-    if len(name) > 20:
-        return False, "name too long (max 20 chars)"
-    if name in team_workers:
-        return False, f"name '{name}' conflicts with a team worker"
-    if name in existing_guests:
-        return False, f"name '{name}' already taken by another guest"
+    if len(name) > 20: return False, "name too long (max 20 chars)"
+    if name in team_workers: return False, f"name '{name}' conflicts with a team worker"
+    if name in existing_guests: return False, f"name '{name}' already taken by another guest"
     return True, ""
 
 def guest_is_expired(expires_at_unix: float) -> bool:
     return _clock.time() >= expires_at_unix
 
 def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
-    if not after:
-        return list(messages)
+    if not after: return list(messages)
     found = False
     result = []
     for m in messages:
-        if found:
-            result.append(m)
-        elif m.get("id") == after:
-            found = True
-    if not found:
-        return list(messages)
+        if found: result.append(m)
+        elif m.get("id") == after: found = True
+    if not found: return list(messages)
     return result
 
 def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
     inbox.append(msg)
-    if len(inbox) > GUEST_INBOX_CAP:
-        inbox = inbox[-GUEST_INBOX_CAP:]
+    if len(inbox) > GUEST_INBOX_CAP: inbox = inbox[-GUEST_INBOX_CAP:]
     return inbox
 
 class ChannelStore:
@@ -3271,8 +3029,7 @@ def _channel_save() -> None:
 
 def _channel_load() -> None:
     path = _channel_state_path()
-    if not path.exists():
-        return
+    if not path.exists(): return
     try:
         with open(path) as f:
             data = json.load(f)
@@ -3281,8 +3038,7 @@ def _channel_load() -> None:
             if not channel_is_expired(ch):
                 channel_store.channels[cid] = ch
                 restored += 1
-        if restored:
-            _log(_LOG_INFO, "channel", f"Restored {restored} active channel(s) from disk")
+        if restored: _log(_LOG_INFO, "channel", f"Restored {restored} active channel(s) from disk")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "channel", f"Failed to load state: {e}")
 
@@ -3295,8 +3051,7 @@ def channel_new(channel_id: str, label: str, created_by: str,
     now = _clock.time()
     member_dict = {}
     for m in members:
-        if m == "manager":
-            member_dict["manager"] = {"type": "manager"}
+        if m == "manager": member_dict["manager"] = {"type": "manager"}
         elif m.startswith("worker:"):
             name = m.split(":", 1)[1]
             member_dict[m] = {"type": "worker", "name": name}
@@ -3317,16 +3072,11 @@ def channel_new(channel_id: str, label: str, created_by: str,
 def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
     added = []
     for m in members:
-        if m in channel["members"]:
-            continue
-        if m == "manager":
-            channel["members"]["manager"] = {"type": "manager"}
-        elif m.startswith("worker:"):
-            channel["members"][m] = {"type": "worker", "name": m.split(":", 1)[1]}
-        elif m.startswith("guest:"):
-            channel["members"][m] = {"type": "guest", "name": m.split(":", 1)[1]}
-        else:
-            continue
+        if m in channel["members"]: continue
+        if m == "manager": channel["members"]["manager"] = {"type": "manager"}
+        elif m.startswith("worker:"): channel["members"][m] = {"type": "worker", "name": m.split(":", 1)[1]}
+        elif m.startswith("guest:"): channel["members"][m] = {"type": "guest", "name": m.split(":", 1)[1]}
+        else: continue
         added.append(m)
     return added
 
@@ -3348,20 +3098,17 @@ def channel_append_message(channel: ChannelDict, from_member: str, text: str) ->
         "ts": int(_clock.time()),
     }
     channel["messages"].append(cast(ChannelMessageDict, msg))
-    if len(channel["messages"]) > CHANNEL_MSG_CAP:
-        channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
+    if len(channel["messages"]) > CHANNEL_MSG_CAP: channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
     return cast(ChannelMessageDict, msg)
 
 def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
-    if not after:
-        return list(channel["messages"]), False
+    if not after: return list(channel["messages"]), False
     found_idx = -1
     for i, m in enumerate(channel["messages"]):
         if m["id"] == after:
             found_idx = i
             break
-    if found_idx == -1:
-        return list(channel["messages"]), True
+    if found_idx == -1: return list(channel["messages"]), True
     return channel["messages"][found_idx + 1:], False
 
 def channel_is_expired(channel: ChannelDict) -> bool:
@@ -3397,8 +3144,7 @@ def _relay_save() -> None:
 
 def _relay_load() -> None:
     path = _relay_state_path()
-    if not path.exists():
-        return
+    if not path.exists(): return
     try:
         with open(path) as f:
             data = json.load(f)
@@ -3408,8 +3154,7 @@ def _relay_load() -> None:
             if now <= ch.get("expires_at_unix", 0):
                 relay_store.channels[cid] = ch
                 restored += 1
-        if restored:
-            _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
+        if restored: _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         _log(_LOG_WARN, "relay", f"Failed to load state: {e}")
 
@@ -3434,8 +3179,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
     return cast(RelayChannelDict, channel), guest_token, reply_token
 
 def _relay_base_url() -> str:
-    if BRIDGE_PUBLIC_URL:
-        return BRIDGE_PUBLIC_URL
+    if BRIDGE_PUBLIC_URL: return BRIDGE_PUBLIC_URL
     return f"http://{RELAY_PUBLIC_HOST}:{PORT}"
 
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
@@ -3469,30 +3213,23 @@ curl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"
 def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
-    if not channel:
-        return None
-    if _clock.time() > channel.get("expires_at_unix", 0):
-        return None
-    if hashlib.sha256(token.encode()).hexdigest() != channel.get("guest_token_hash"):
-        return None
+    if not channel: return None
+    if _clock.time() > channel.get("expires_at_unix", 0): return None
+    if hashlib.sha256(token.encode()).hexdigest() != channel.get("guest_token_hash"): return None
     return channel
 
 def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
-    if not channel:
-        return None
-    if _clock.time() > channel.get("expires_at_unix", 0):
-        return None
-    if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"):
-        return None
+    if not channel: return None
+    if _clock.time() > channel.get("expires_at_unix", 0): return None
+    if hashlib.sha256(token.encode()).hexdigest() != channel.get("reply_token_hash"): return None
     return channel
 
 def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
-    if not channel:
-        return None, None
+    if not channel: return None, None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
     base = f"{_relay_base_url()}/relay/{channel_id}"
@@ -3526,8 +3263,7 @@ def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessa
 def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
-    if not channel:
-        return None
+    if not channel: return None
 
     msg_id = f"msg_{secrets.token_urlsafe(4)}"
     msg = {
@@ -3547,14 +3283,11 @@ def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
 def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
     with relay_store.lock:
         channel = relay_store.channels.get(channel_id)
-    if not channel:
-        return []
+    if not channel: return []
     msgs = channel["messages"]
-    if not after:
-        return list(msgs)
+    if not after: return list(msgs)
     for i, m in enumerate(msgs):
-        if m["message_id"] == after:
-            return list(msgs[i + 1:])
+        if m["message_id"] == after: return list(msgs[i + 1:])
     return list(msgs)
 
 TELEPORT_RSYNC_EXCLUDES = [
@@ -3568,18 +3301,15 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
     try:
         if host:
             r = _remote_run(["cat", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            if r.returncode != 0:
-                return []
+            if r.returncode != 0: return []
             content = r.stdout
-        else:
-            content = Path(path).read_text()
+        else: content = Path(path).read_text()
     except (subprocess.SubprocessError, OSError):
         return []
 
     messages = []
     for line in content.strip().split("\n"):
-        if not line.strip():
-            continue
+        if not line.strip(): continue
         try:
             ev = cast(dict[str, object], json.loads(line))
         except json.JSONDecodeError:
@@ -3600,22 +3330,19 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
                     if isinstance(c, dict) and c.get("type") in ("output_text", "input_text") and c.get("text"):
                         text_parts.append(str(c["text"]))
                 text = "\n".join(text_parts).strip()
-                if text and role != "developer":
-                    messages.append({"role": role, "text": text, "timestamp": ts})
+                if text and role != "developer": messages.append({"role": role, "text": text, "timestamp": ts})
             elif item_type == "function_call":
                 name = str(payload.get("name", ""))
                 messages.append({"role": "tool_use", "text": f"[{name}]", "timestamp": ts})
             elif item_type == "function_call_output":
                 output = str(payload.get("output", ""))
-                if output:
-                    messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
+                if output: messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
     return cast(list[CodexTranscriptEntry], messages)
 
 def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     host = get_worker_host(worker_name)
     path = _find_codex_transcript(worker_name, host=host)
-    if not path:
-        return []
+    if not path: return []
     return _parse_codex_transcript(path, host=host)
 
 # ── Typed dataclasses for health/resource probes ─────────────
@@ -3718,8 +3445,7 @@ class WorktreeItem:
 
 def _load_learning_reminder_state() -> None:
     path = _learning_reminder_state_file()
-    if not path or not os.path.exists(path):
-        return
+    if not path or not os.path.exists(path): return
     try:
         with open(path) as f:
             data = json.load(f)
@@ -3780,16 +3506,14 @@ class TokenStore:
             REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
 
     def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
-        if not token:
-            return None
+        if not token: return None
         now = _clock.time()
         with self._lock:
             expired = [k for k, v in REWIND_TOKENS.items() if v["expires_at"] <= now]
             for k in expired:
                 del REWIND_TOKENS[k]
             entry = REWIND_TOKENS.get(token)
-            if entry and extend:
-                entry["expires_at"] = now + REWIND_TIMEOUT
+            if entry and extend: entry["expires_at"] = now + REWIND_TIMEOUT
             return entry
 
     def add_pr_review(self, token: str, pr_num: int, owner: str, repo: str) -> None:
@@ -3798,20 +3522,16 @@ class TokenStore:
                                        "expires_at": _clock.time() + PR_REVIEW_EXTEND}
 
     def validate_pr_review(self, token: str | None, extend: bool = True) -> PrReviewTokenEntry | None:
-        if not token:
-            return None
+        if not token: return None
         now = _clock.time()
         with self._lock:
             expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
             for k in expired:
                 del PR_REVIEW_TOKENS[k]
-            if token not in PR_REVIEW_TOKENS:
-                return None
+            if token not in PR_REVIEW_TOKENS: return None
             entry = PR_REVIEW_TOKENS[token]
-            if entry.get("expires_at", 0) <= now:
-                return None
-            if extend:
-                entry["expires_at"] = now + PR_REVIEW_EXTEND
+            if entry.get("expires_at", 0) <= now: return None
+            if extend: entry["expires_at"] = now + PR_REVIEW_EXTEND
             return entry
 
 tokens = TokenStore()
@@ -3868,14 +3588,11 @@ def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
         r = _remote_run(
             ["df", "-BG", "--output=size,used,avail,pcent", "/"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
-        if len(lines) < 2:
-            return None
+        if len(lines) < 2: return None
         parts = lines[1].split()
-        if len(parts) < 4:
-            return None
+        if len(parts) < 4: return None
         total_gb = float(parts[0].rstrip("G"))
         free_gb = float(parts[2].rstrip("G"))
         pct = int(parts[3].rstrip("%"))
@@ -3888,14 +3605,11 @@ def _check_disk_usage_macos(host: str) -> DiskUsageDict | None:
         r = _remote_run(
             ["df", "-g", "/"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
-        if len(lines) < 2:
-            return None
+        if len(lines) < 2: return None
         parts = lines[1].split()
-        if len(parts) < 6:
-            return None
+        if len(parts) < 6: return None
         total_gb = float(parts[1])
         free_gb = float(parts[3])
         pct = int(parts[4].rstrip("%"))
@@ -3908,25 +3622,20 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
-        if host and _is_host_down(host):
-            continue
+        if host and _is_host_down(host): continue
 
         host_label = host or "VPS"
         is_mac = bool(host and "mac" in host.lower())
         usage = _check_disk_usage_macos(host) if is_mac and host else _check_disk_usage(host)
 
-        if usage is None:
-            continue
+        if usage is None: continue
 
         is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
         is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
         current_level: str | bool
-        if is_critical:
-            current_level = "critical"
-        elif is_warning:
-            current_level = "warning"
-        else:
-            current_level = False
+        if is_critical: current_level = "critical"
+        elif is_warning: current_level = "warning"
+        else: current_level = False
         alert_text: str | None = None
         with watchdog.lock:
             host_health.disk_usage[host_label] = {**usage, "ts": now}
@@ -3949,8 +3658,7 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
                             )
                         host_health.disk_alert_ts[host_label] = now
                         host_health.disk_alerted[host_label] = current_level
-                else:
-                    host_health.disk_alerted[host_label] = current_level
+                else: host_health.disk_alerted[host_label] = current_level
             elif not current_level and prev_level:
                 host_health.disk_alerted[host_label] = False
                 alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
@@ -3967,16 +3675,14 @@ def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
         r = _remote_run(
             ["free", "-b"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
         mem_line = None
         for line in lines:
             if line.startswith("Mem:"):
                 mem_line = line
                 break
-        if not mem_line:
-            return None
+        if not mem_line: return None
         parts = mem_line.split()
         total = int(parts[1])
         used = int(parts[2])
@@ -3996,11 +3702,9 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
         r = _remote_run(
             ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
-        if len(lines) < 2:
-            return None
+        if len(lines) < 2: return None
         total = int(lines[0])
         page_size = 16384
         free_pages = 0
@@ -4012,12 +3716,9 @@ def _check_mem_usage_macos(host: str) -> MemUsageDict | None:
                     page_size = int(line.split("page size of")[1].strip().rstrip("."))
                 except (ValueError, IndexError) as exc:
                     _log(_LOG_DEBUG, "parse:_check_mem_usage_macos", f"{type(exc).__name__}: {exc}")
-            elif "Pages free:" in line:
-                free_pages = int(line.split(":")[1].strip().rstrip("."))
-            elif "Pages inactive:" in line:
-                inactive_pages = int(line.split(":")[1].strip().rstrip("."))
-            elif "Pages speculative:" in line:
-                speculative_pages = int(line.split(":")[1].strip().rstrip("."))
+            elif "Pages free:" in line: free_pages = int(line.split(":")[1].strip().rstrip("."))
+            elif "Pages inactive:" in line: inactive_pages = int(line.split(":")[1].strip().rstrip("."))
+            elif "Pages speculative:" in line: speculative_pages = int(line.split(":")[1].strip().rstrip("."))
         avail = (free_pages + inactive_pages + speculative_pages) * page_size
         used = total - avail
         total_gb = total / (1024**3)
@@ -4035,8 +3736,7 @@ def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
         r = _remote_run(
             ["ps", "aux", "--sort=-rss"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return []
+        if r.returncode != 0: return []
         lines = r.stdout.strip().splitlines()
         procs = []
         for line in lines[1:6]:
@@ -4058,15 +3758,13 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
-        if host and _is_host_down(host):
-            continue
+        if host and _is_host_down(host): continue
 
         host_label = host or "VPS"
         is_mac = bool(host and "mac" in host.lower())
         usage = _check_mem_usage_macos(host) if is_mac and host else _check_mem_usage(host)
 
-        if usage is None:
-            continue
+        if usage is None: continue
 
         is_critical = usage["pct"] >= MEM_ALERT_THRESHOLD_PCT or usage["avail_gb"] < MEM_ALERT_THRESHOLD_GB
         alert_text = None
@@ -4084,8 +3782,7 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
                         f"🧠 Memory critical: {host_label}\n"
                         f"Usage: {usage['pct']}% ({usage['avail_gb']:.1f}GB available of {usage['total_gb']:.0f}GB)"
                     )
-                    if top_lines:
-                        alert_text += f"\nTop consumers:{top_lines}"
+                    if top_lines: alert_text += f"\nTop consumers:{top_lines}"
                     host_health.mem_alert_ts[host_label] = now
                     host_health.mem_alerted[host_label] = True
             elif not is_critical and was_alerted:
@@ -4128,8 +3825,7 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
                     lines = r2.stdout.strip().splitlines()
                     if len(lines) >= 3:
                         parts = lines[-1].split()
-                        if len(parts) >= 16:
-                            iowait = float(parts[15])
+                        if len(parts) >= 16: iowait = float(parts[15])
                 return {
                     "iowait_pct": round(iowait, 1),
                     "read_iops": round(total_r_iops),
@@ -4142,14 +3838,11 @@ def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
         r = _remote_run(
             ["vmstat", "1", "2"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
-        if len(lines) < 3:
-            return None
+        if len(lines) < 3: return None
         parts = lines[-1].split()
-        if len(parts) < 16:
-            return None
+        if len(parts) < 16: return None
         iowait = float(parts[15])
         bi = int(parts[8])
         bo = int(parts[9])
@@ -4167,14 +3860,11 @@ def _check_io_usage_macos(host: str) -> IoUsageDict | None:
         r = _remote_run(
             ["iostat", "-c", "2", "-w", "1"],
             host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
+        if r.returncode != 0: return None
         lines = r.stdout.strip().splitlines()
-        if len(lines) < 3:
-            return None
+        if len(lines) < 3: return None
         parts = lines[-1].split()
-        if len(parts) < 6:
-            return None
+        if len(parts) < 6: return None
         return {
             "iowait_pct": 0,
             "read_iops": int(float(parts[0])),
@@ -4189,15 +3879,13 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
-        if host and _is_host_down(host):
-            continue
+        if host and _is_host_down(host): continue
 
         host_label = host or "VPS"
         is_mac = bool(host and "mac" in host.lower())
         usage = _check_io_usage_macos(host) if is_mac and host else _check_io_usage(host)
 
-        if usage is None:
-            continue
+        if usage is None: continue
 
         is_critical = usage["iowait_pct"] >= IO_ALERT_IOWAIT_PCT
         alert_text = None
@@ -4213,8 +3901,7 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
                         f"IO wait: {usage['iowait_pct']}%\n"
                         f"IOPS: {usage['read_iops']}r + {usage['write_iops']}w"
                     )
-                    if usage["util_pct"]:
-                        alert_text += f" | disk util: {usage['util_pct']}%"
+                    if usage["util_pct"]: alert_text += f" | disk util: {usage['util_pct']}%"
                     host_health.io_alert_ts[host_label] = now
                     host_health.io_alerted[host_label] = True
             elif not is_critical and was_alerted:
@@ -4230,29 +3917,23 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
 
 def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogEntry]:
     try:
-        if is_mac:
-            cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
-        else:
-            cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
+        if is_mac: cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
+        else: cmd = ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
         r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return []
+        if r.returncode != 0: return []
         hogs: list[CpuHogEntry] = []
         for line in r.stdout.strip().splitlines()[1:]:
             parts = line.split(None, 3)
-            if len(parts) < 4:
-                continue
+            if len(parts) < 4: continue
             try:
                 pid = int(parts[0])
                 cpu = float(parts[1])
             except (ValueError, IndexError):
                 continue
-            if cpu < CPU_HOG_THRESHOLD_PCT:
-                break
+            if cpu < CPU_HOG_THRESHOLD_PCT: break
             etime_str = parts[2]
             etime_min = _parse_etime(etime_str)
-            if etime_min is None:
-                continue
+            if etime_min is None: continue
             cmd_name = parts[3][:80] if len(parts) > 3 else "?"
             hogs.append({"pid": pid, "cpu": cpu, "etime_min": etime_min, "cmd": cmd_name})
         return hogs
@@ -4267,12 +3948,9 @@ def _parse_etime(etime: str) -> int | None:
             days = int(day_part)
             etime = rest
         parts = etime.split(":")
-        if len(parts) == 3:
-            hours, mins, _secs = int(parts[0]), int(parts[1]), int(parts[2])
-        elif len(parts) == 2:
-            hours, mins, _secs = 0, int(parts[0]), int(parts[1])
-        else:
-            return None
+        if len(parts) == 3: hours, mins, _secs = int(parts[0]), int(parts[1]), int(parts[2])
+        elif len(parts) == 2: hours, mins, _secs = 0, int(parts[0]), int(parts[1])
+        else: return None
         return days * 24 * 60 + hours * 60 + mins
     except (ValueError, IndexError):
         return None
@@ -4282,8 +3960,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
-        if host and _is_host_down(host):
-            continue
+        if host and _is_host_down(host): continue
 
         host_label = host or "VPS"
         is_mac = bool(host and "mac" in host.lower())
@@ -4317,8 +3994,7 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     hosts_to_check = [None] + list(remote_hosts)
 
     for host in hosts_to_check:
-        if host and _is_host_down(host):
-            continue
+        if host and _is_host_down(host): continue
 
         host_label = host or "VPS"
         is_mac = host and "mac" in host.lower()
@@ -4333,15 +4009,13 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
                        "find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | "
                        "while read d; do du -sb \"$d\" 2>/dev/null; done"]
             r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            if r.returncode != 0 or not r.stdout.strip():
-                continue
+            if r.returncode != 0 or not r.stdout.strip(): continue
 
             items: list[WorktreeItemDict] = []
             total_bytes = 0
             for line in r.stdout.strip().splitlines():
                 parts = line.split(None, 1)
-                if len(parts) < 2:
-                    continue
+                if len(parts) < 2: continue
                 try:
                     size_val = int(parts[0])
                     path = parts[1]
@@ -4396,8 +4070,7 @@ def _probe_tailscale() -> None:
             import json as _json
             data = cast(dict[str, object], _json.loads(r.stdout))
             is_up = data.get("BackendState") == "Running"
-        else:
-            is_up = False
+        else: is_up = False
     except (subprocess.SubprocessError, OSError):
         is_up = False
     alert_text = None
@@ -4422,24 +4095,20 @@ def _probe_tailscale() -> None:
             _log(_LOG_ERROR, "watchdog", f"Tailscale alert error: {e}")
 
 def _send_resolved_alert(name: str, new_state: str) -> None:
-    if admin_chat_id is None:
-        return
+    if admin_chat_id is None: return
 
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     with watchdog.lock:
         prev_state = watchdog.prev_worker_states.get(name)
-    if prev_state not in bad_states or new_state not in good_states:
-        return
+    if prev_state not in bad_states or new_state not in good_states: return
 
     restart_ts = watchdog.recent_restarts.get(name)
-    if restart_ts and _clock.time() - restart_ts < 30:
-        return
+    if restart_ts and _clock.time() - restart_ts < 30: return
 
     now = _clock.time()
     last_resolved = watchdog.last_resolved_ts.get(name, 0)
-    if now - last_resolved < 180:
-        return
+    if now - last_resolved < 180: return
 
     watchdog.last_resolved_ts[name] = now
 
@@ -4468,8 +4137,7 @@ def _handle_watchdog_transition(
     since: float,
     now: float | None = None,
 ) -> None:
-    if now is None:
-        now = _clock.time()
+    if now is None: now = _clock.time()
     bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
     good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
     with watchdog.lock:
@@ -4488,8 +4156,7 @@ def _handle_watchdog_transition(
         return
 
     def eligible_for_alert() -> bool:
-        if state in {"OFFLINE", "DEAD", "EXITED"}:
-            return since is not None and (now - since) >= START_GRACE
+        if state in {"OFFLINE", "DEAD", "EXITED"}: return since is not None and (now - since) >= START_GRACE
         return True
 
     GOOD_PROBE_THRESHOLD = 3
@@ -4504,15 +4171,13 @@ def _handle_watchdog_transition(
             with watchdog.lock:
                 watchdog.consecutive_bad_probes[name] = watchdog.consecutive_bad_probes.get(name, 0) + 1
                 bad_count = watchdog.consecutive_bad_probes[name]
-            if bad_count < BAD_PROBE_THRESHOLD:
-                return
+            if bad_count < BAD_PROBE_THRESHOLD: return
 
         if state_changed or prev_state is None:
             if eligible_for_alert():
                 _log(_LOG_WARN, "watchdog", f"State change {name}: {prev_state} -> {state} ({reason}), sending alert")
                 _send_watchdog_alert(name, state, reason)
-        elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert():
-            _send_watchdog_alert(name, state, reason)
+        elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert(): _send_watchdog_alert(name, state, reason)
         with watchdog.lock:
             watchdog.prev_worker_states[name] = state
         return
@@ -4537,10 +4202,8 @@ def _handle_watchdog_transition(
 def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
     with watchdog.lock:
         prev = watchdog.worker_states.get(name)
-        if prev and prev[0] == state:
-            since = prev[2]
-        else:
-            since = now
+        if prev and prev[0] == state: since = prev[2]
+        else: since = now
         watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
     return since
 
@@ -4598,8 +4261,7 @@ def _watchdog_probe_remote_hosts(
             if r.returncode == 0:
                 for line in r.stdout.splitlines():
                     parts = line.strip().split()
-                    if len(parts) >= 2 and parts[1].isdigit():
-                        remote_pane_pids[parts[0]] = parts[1]
+                    if len(parts) >= 2 and parts[1].isdigit(): remote_pane_pids[parts[0]] = parts[1]
                 _record_host_probe(host, ok=True)
             else:
                 failed_hosts.add(host)
@@ -4629,8 +4291,7 @@ def _watchdog_collect_worker_pids(
         tmux_exists = bool(pane_pid)
         tmux_present[name] = tmux_exists
 
-        if not tmux_exists:
-            continue
+        if not tmux_exists: continue
 
         if backend.is_interactive and pane_pid:
             claude_pid = _get_claude_pid(pane_pid, host=host)
@@ -4640,8 +4301,7 @@ def _watchdog_collect_worker_pids(
                     watchdog.last_seen_claude[name] = now
             else:
                 with watchdog.lock:
-                    if name not in watchdog.last_seen_claude:
-                        watchdog.last_seen_claude[name] = now
+                    if name not in watchdog.last_seen_claude: watchdog.last_seen_claude[name] = now
     return claude_pids, tmux_present, backend_info
 
 def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
@@ -4673,8 +4333,7 @@ def _watchdog_evaluate_workers(
             _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
             continue
 
-        if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3:
-            continue
+        if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3: continue
 
         host = get_worker_host(name)
         if host and _is_host_down(host):
@@ -4682,8 +4341,7 @@ def _watchdog_evaluate_workers(
             since = _record_worker_state(name, "HOST_OFFLINE", reason, now)
             _handle_watchdog_transition(name, "HOST_OFFLINE", reason, since, now=now)
             continue
-        if host and host in failed_hosts and not tmux_exists:
-            continue
+        if host and host in failed_hosts and not tmux_exists: continue
 
         backend = backend_info.get(name)
         if backend is None:
@@ -4700,8 +4358,7 @@ def _watchdog_evaluate_workers(
         host = get_worker_host(name)
         claude_pid = claude_pids.get(name) if is_interactive else None
         cpu = 0.0
-        if claude_pid and claude_pid in stats:
-            cpu = stats[claude_pid].get("cpu", 0.0)
+        if claude_pid and claude_pid in stats: cpu = stats[claude_pid].get("cpu", 0.0)
         children_total = _child_count(claude_pid, host=host) if claude_pid else 0
         children = _watchdog_compute_children(name, children_total, is_interactive, claude_pid, now)
 
@@ -4717,14 +4374,12 @@ def _watchdog_evaluate_workers(
         if pending_ts:
             effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
             pending_age = now - effective_start
-        else:
-            pending_age = 0.0
+        else: pending_age = 0.0
         with watchdog.lock:
             last_child_ts = watchdog.last_child_ts.get(name, 0.0)
             last_hook_ts = watchdog.last_hook_ts.get(name)
             last_seen_claude = watchdog.last_seen_claude.get(name)
-        if not is_interactive:
-            last_seen_claude = None
+        if not is_interactive: last_seen_claude = None
         worker_state, reason = compute_state(
             tmux_exists=tmux_exists,
             claude_pid=claude_pid,
@@ -4776,8 +4431,7 @@ def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -
     with watchdog.lock:
         prev_children = watchdog.prev_children.get(name)
         activity_increased = (prev_children is not None and children > prev_children)
-        if activity_increased or cpu >= CPU_ACTIVE:
-            watchdog.last_activity_ts[name] = now
+        if activity_increased or cpu >= CPU_ACTIVE: watchdog.last_activity_ts[name] = now
         watchdog.prev_children[name] = children
 
 def _watchdog_refine_state(
@@ -4790,8 +4444,7 @@ def _watchdog_refine_state(
     if worker_state == "STUCK":
         watchdog.idle_streak[name] = watchdog.idle_streak.get(name, 0) + 1
         streak = watchdog.idle_streak[name]
-        if streak < IDLE_STREAK_STUCK:
-            worker_state = "WAITING"
+        if streak < IDLE_STREAK_STUCK: worker_state = "WAITING"
         else:
             if is_interactive and pending:
                 pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
@@ -4824,10 +4477,8 @@ def _watchdog_refine_state(
         reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
     elif worker_state == "POISONED":
         streak = watchdog.idle_streak.get(name, 0)
-        if streak:
-            reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
-    else:
-        watchdog.idle_streak[name] = 0
+        if streak: reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+    else: watchdog.idle_streak[name] = 0
 
     if worker_state == "READY" and is_interactive:
         pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
@@ -4853,11 +4504,9 @@ def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
         ])
         for d in stale_dicts:
             for name in list(d.keys()):
-                if name not in registered_names:
-                    d.pop(name, None)
+                if name not in registered_names: d.pop(name, None)
     for name in list(watchdog.consecutive_probe_failures.keys()):
-        if name not in registered_names:
-            watchdog.consecutive_probe_failures.pop(name, None)
+        if name not in registered_names: watchdog.consecutive_probe_failures.pop(name, None)
 
 def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
     checks: list[tuple[str, Callable[[], None]]] = [
@@ -4882,8 +4531,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
         r = _subprocess_runner.run(
             ["rsync", "-az", f"{host}:{remote_path}", local_path],
             capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
-        if r.returncode == 0 and os.path.getsize(local_path) > 0:
-            return local_path
+        if r.returncode == 0 and os.path.getsize(local_path) > 0: return local_path
         if r.returncode != 0:
             _log(_LOG_ERROR, "bridge", f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.strip()}")
     except (subprocess.SubprocessError, OSError) as e:
@@ -4893,16 +4541,14 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
 
 def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
     host = get_worker_host(name)
-    if not host:
-        return media_list
+    if not host: return media_list
     result: list[tuple[str | None, str]] = []
     for file_path, caption in media_list:
         if not file_path:
             result.append((file_path, caption))
             continue
         local = _fetch_remote_file(host, file_path)
-        if local:
-            result.append((local, caption))
+        if local: result.append((local, caption))
         else:
             _log(_LOG_WARN, "bridge", f"Cannot fetch remote file {host}:{file_path} for {name}")
             result.append((None, f"[Fetch failed: {file_path}]"))
@@ -4930,16 +4576,14 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
     if hasattr(transport, 'send_rich_text'):
         rich_text = clean_text.lstrip()
         prefix_lower = f"{name}:".lower()
-        if rich_text.lower().startswith(prefix_lower):
-            rich_text = rich_text[len(prefix_lower):].lstrip()
+        if rich_text.lower().startswith(prefix_lower): rich_text = rich_text[len(prefix_lower):].lstrip()
         rich_text = _pipe_tables_to_html(rich_text)
         rich_md = f"**{name}:**\n{rich_text}"
         prefix_reserve = len(name) + 30
         rich_chunks = split_message(rich_md, TELEGRAM_RICH_MAX_LENGTH - prefix_reserve)
         rich_sent = True
         for i, chunk in enumerate(rich_chunks):
-            if i > 0:
-                chunk = f"**{name}:** _(continued)_\n{chunk}"
+            if i > 0: chunk = f"**{name}:** _(continued)_\n{chunk}"
             result = transport.send_rich_text(
                 chat_id, chunk,
                 reply_to=prev_msg_id if prev_msg_id else None
@@ -4949,8 +4593,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
                 if len(rich_chunks) > 1:
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK")
-                else:
-                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
+                else: _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
             else:
                 error_code = (result or {}).get("error_code", 0)
                 desc = (result or {}).get("description", "")
@@ -4958,8 +4601,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 rich_sent = False
                 rich_failed_at = i
                 break
-            if i < len(rich_chunks) - 1:
-                _clock.sleep(DELAY_BRIEF)
+            if i < len(rich_chunks) - 1: _clock.sleep(DELAY_BRIEF)
 
     if not rich_sent and rich_failed_at > 0:
         prev_msg_id = _send_html_fallback_chunks(
@@ -4967,8 +4609,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
             prev_msg_id, rich_failed_at, len(rich_chunks))
         rich_sent = True
 
-    if not rich_sent:
-        _send_text_as_html(name, clean_text, chat_id, log_prefix)
+    if not rich_sent: _send_text_as_html(name, clean_text, chat_id, log_prefix)
 
 def _send_html_fallback_chunks(
     name: str, remaining_chunks: list[str], chat_id: int,
@@ -4993,8 +4634,7 @@ def _send_html_fallback_chunks(
             plain_text = re.sub(r'<[^>]+>', '', part)
             plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
             transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
-        if i < len(formatted_parts) - 1:
-            _clock.sleep(DELAY_BRIEF)
+        if i < len(formatted_parts) - 1: _clock.sleep(DELAY_BRIEF)
     return prev_msg_id
 
 def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
@@ -5013,8 +4653,7 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
             prev_msg_id = _rr3.get("message_id") if isinstance(_rr3, dict) else None
             if len(formatted_parts) > 1:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
-            else:
-                _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
+            else: _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
             desc = str((result or {}).get("description", ""))
             error_code = int((result or {}).get("error_code", 0))
@@ -5029,13 +4668,10 @@ def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str
                 if result and result.get("ok"):
                     prev_msg_id = cast(int | None, _dict_field(result, "result").get("message_id"))
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (plain): {name} -> Telegram OK")
-                else:
-                    _log(_LOG_WARN, "bridge", f"{log_prefix} failed (plain): {name} -> {result}")
-            else:
-                _log(_LOG_WARN, "bridge", f"{log_prefix} failed: {name} -> {result}")
+                else: _log(_LOG_WARN, "bridge", f"{log_prefix} failed (plain): {name} -> {result}")
+            else: _log(_LOG_WARN, "bridge", f"{log_prefix} failed: {name} -> {result}")
 
-        if i < len(formatted_parts) - 1:
-            _clock.sleep(DELAY_BRIEF)
+        if i < len(formatted_parts) - 1: _clock.sleep(DELAY_BRIEF)
 
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
     for img_path, img_caption in images:
@@ -5043,14 +4679,10 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
             transport.send_text(chat_id, f"{name}: {img_caption}")
             continue
         full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
-        if Path(img_path).suffix.lower() in (".gif", ".mp4"):
-            sent = send_animation(chat_id, img_path, full_caption)
-        else:
-            sent = send_photo(chat_id, img_path, full_caption)
-        if sent:
-            _log(_LOG_INFO, "telegram", f"Image sent: {name} -> {img_path}")
-        else:
-            transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
+        if Path(img_path).suffix.lower() in (".gif", ".mp4"): sent = send_animation(chat_id, img_path, full_caption)
+        else: sent = send_photo(chat_id, img_path, full_caption)
+        if sent: _log(_LOG_INFO, "telegram", f"Image sent: {name} -> {img_path}")
+        else: transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
 
     for file_path, file_caption in files:
         if file_path is None:
@@ -5058,20 +4690,13 @@ def _send_response_media(name: str, images: list[tuple[str | None, str]], files:
             continue
         full_caption = f"{name}: {file_caption}" if file_caption else f"{name}:"
         ext = Path(file_path).suffix.lower()
-        if ext in VIDEO_EXTENSIONS:
-            sent = send_video(chat_id, file_path, full_caption)
-        elif ext in AUDIO_EXTENSIONS:
-            sent = send_audio(chat_id, file_path, full_caption)
-        elif ext in VOICE_EXTENSIONS:
-            sent = send_voice(chat_id, file_path, full_caption)
-        elif ext in STICKER_EXTENSIONS:
-            sent = send_sticker(chat_id, file_path)
-        else:
-            sent = send_document(chat_id, file_path, full_caption)
-        if sent:
-            _log(_LOG_INFO, "telegram", f"File sent: {name} -> {file_path}")
-        else:
-            transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
+        if ext in VIDEO_EXTENSIONS: sent = send_video(chat_id, file_path, full_caption)
+        elif ext in AUDIO_EXTENSIONS: sent = send_audio(chat_id, file_path, full_caption)
+        elif ext in VOICE_EXTENSIONS: sent = send_voice(chat_id, file_path, full_caption)
+        elif ext in STICKER_EXTENSIONS: sent = send_sticker(chat_id, file_path)
+        else: sent = send_document(chat_id, file_path, full_caption)
+        if sent: _log(_LOG_INFO, "telegram", f"File sent: {name} -> {file_path}")
+        else: transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
 
 def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
     clean_text, images, files = _parse_response_media(name, text)
@@ -5080,8 +4705,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         _log(_LOG_DEBUG, "telegram", f"{log_prefix} short msg: {name}, text={repr(clean_text)}, "
              f"images={len(images)}, files={len(files)}")
 
-    if clean_text:
-        _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
+    if clean_text: _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
     _send_response_media(name, images, files, chat_id)
 
 def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
@@ -5117,8 +4741,7 @@ def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]
 
 def switch_session(name: str) -> tuple[bool, str | None]:
     registered = get_registered_sessions()
-    if name not in registered:
-        return False, f"Worker '{name}' not found"
+    if name not in registered: return False, f"Worker '{name}' not found"
 
     state.active = name
     save_last_active(name)
@@ -5141,12 +4764,10 @@ def get_all_chat_ids() -> list[ChatId]:
                 if chat_id_file.exists():
                     try:
                         raw = chat_id_file.read_text().strip()
-                        if raw:
-                            chat_ids.add(int(raw))
+                        if raw: chat_ids.add(int(raw))
                     except (OSError, ValueError) as exc:
                         _log(_LOG_DEBUG, "parse:get_all_chat_ids", f"{type(exc).__name__}: {exc}")
-    if admin_chat_id:
-        chat_ids.add(admin_chat_id)
+    if admin_chat_id: chat_ids.add(admin_chat_id)
     return list(chat_ids)
 
 def send_shutdown_message() -> None:
@@ -5209,8 +4830,7 @@ class _LegacyTransportAdapter(MessageTransport):
 
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> None:
-        if hasattr(self._legacy, 'set_reaction'):
-            self._legacy.set_reaction(chat_id, message_id, reaction)
+        if hasattr(self._legacy, 'set_reaction'): self._legacy.set_reaction(chat_id, message_id, reaction)
 
     def edit_message(self, chat_id: ChatId, message_id: MessageId, text: str,
                      parse_mode: ParseMode = None) -> TelegramApiResponse:
@@ -5231,8 +4851,7 @@ def _fanout_channel_message(channel_id: str, from_member: str,
                             registered: dict[str, TmuxSessionDict]) -> None:
     tagged = f"[{channel_id} from {from_member}] {text}"
     for member_key, minfo in members_snapshot.items():
-        if member_key == from_member:
-            continue
+        if member_key == from_member: continue
         if minfo["type"] == "worker":
             wname = minfo.get("name", "")
             if wname and wname in registered:
@@ -5281,16 +4900,14 @@ class CommandRouter:
         full_sync = "--full" in target_spec
         target_spec = target_spec.replace("--full", "").strip()
 
-        if ":" in target_spec and not target_spec.startswith("/"):
-            target_host, target_cwd = target_spec.split(":", 1)
+        if ":" in target_spec and not target_spec.startswith("/"): target_host, target_cwd = target_spec.split(":", 1)
         else:
             target_host = target_spec
             target_cwd = ""
         machines = get_machine_catalog()
         if target_host in machines:
             machine = machines[target_host]
-            if machine.ssh_target:
-                target_host = machine.ssh_target
+            if machine.ssh_target: target_host = machine.ssh_target
         registry = _load_registry()
         worker_entry = registry.get("workers", {}).get(worker_name)
         if not worker_entry:
@@ -5387,8 +5004,7 @@ class CommandRouter:
 
         r = _remote_run(["test", "-f", ".claude/hooks/claudecode.sh"],
                         host=target_host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            self._teleport_notify(chat_id, "Hooks missing on target — will install during teleport.")
+        if r.returncode != 0: self._teleport_notify(chat_id, "Hooks missing on target — will install during teleport.")
         preflight_fails = self._run_teleport_preflight(
             target_host, worker_name, backend_name)
         if preflight_fails:
@@ -5494,12 +5110,10 @@ class CommandRouter:
 
     def _check_teleback_conflicts(self, name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
         conflicts: list[str] = []
-        if not local_cwd or not remote_host:
-            return conflicts
+        if not local_cwd or not remote_host: return conflicts
 
         local_is_git = os.path.isdir(os.path.join(local_cwd, ".git"))
-        if not local_is_git:
-            return conflicts
+        if not local_is_git: return conflicts
 
         local_status = _subprocess_runner.run(
             ["git", "-C", local_cwd, "status", "--porcelain"],
@@ -5573,10 +5187,8 @@ class CommandRouter:
                     ["bash", "-c", "echo $HOME"], host=target_host,
                     capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
                 remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
-                if remote_home:
-                    target_cwd = remote_home + target_cwd[1:]
-            elif target_cwd and target_cwd.startswith("~"):
-                target_cwd = os.path.expanduser(target_cwd)
+                if remote_home: target_cwd = remote_home + target_cwd[1:]
+            elif target_cwd and target_cwd.startswith("~"): target_cwd = os.path.expanduser(target_cwd)
             ensure_session_dir(name)
             state_file = SESSIONS_DIR / name / "teleport_state"
             _tmp_ts = state_file.with_suffix('.tmp')
@@ -5648,8 +5260,7 @@ class CommandRouter:
                                         "failed to start on target")
                 return
 
-            if is_teleback:
-                _registry_clear_teleport(name)
+            if is_teleback: _registry_clear_teleport(name)
             else:
                 _registry_update_teleport(
                     name, host=target_host,
@@ -5657,8 +5268,7 @@ class CommandRouter:
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                         host=source_host, capture_output=True)
 
-            if is_teleback:
-                self._sync_worker_data_back(name, source_host)
+            if is_teleback: self._sync_worker_data_back(name, source_host)
 
             if not is_teleback:
                 try:
@@ -5682,10 +5292,8 @@ class CommandRouter:
             dest_label = target_host or "local"
             action = "teleported back" if is_teleback else "teleported"
             msg = f"{name} {action} to {dest_label}:{target_cwd}"
-            if session_id:
-                msg += f"\nSession resumed ({session_id[:8]}...)."
-            if not is_teleback:
-                msg += f"\nUse /teleback {name} to bring it back."
+            if session_id: msg += f"\nSession resumed ({session_id[:8]}...)."
+            if not is_teleback: msg += f"\nUse /teleback {name} to bring it back."
             self._teleport_notify(chat_id, msg)
 
         except (subprocess.SubprocessError, ConnectionError, TimeoutError, TypeError, AttributeError, OSError, ValueError, KeyError) as e:
@@ -5707,13 +5315,11 @@ class CommandRouter:
             r = _remote_run(
                 ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
                 host=host, capture_output=True, text=True)
-            if r.returncode != 0:
-                break
+            if r.returncode != 0: break
             pane_pid = r.stdout.strip()
             if pane_pid:
                 claude_pid = _get_claude_pid(pane_pid, host=host)
-                if not claude_pid:
-                    break
+                if not claude_pid: break
         else:
             _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""],
                          host=host, capture_output=True)
@@ -5737,8 +5343,7 @@ class CommandRouter:
                             _log(_LOG_INFO, "teleport", f"git sync succeeded for {project}")
                             return True
                         _log(_LOG_WARN, "teleport", f"git pull failed, falling back to rsync")
-                    else:
-                        _log(_LOG_WARN, "teleport", f"git push failed, falling back to rsync")
+                    else: _log(_LOG_WARN, "teleport", f"git push failed, falling back to rsync")
                 except (subprocess.SubprocessError, OSError, KeyError) as e:
                     _log(_LOG_ERROR, "teleport", f"git sync error, falling back to rsync: {e}")
         return self._rsync_working_directory(
@@ -5774,12 +5379,9 @@ class CommandRouter:
         src = source_cwd.rstrip("/") + "/"
         dst = target_cwd.rstrip("/") + "/"
 
-        if source_host:
-            cmd.extend([f"{source_host}:{src}", dst])
-        elif target_host:
-            cmd.extend([src, f"{target_host}:{dst}"])
-        else:
-            cmd.extend([src, dst])
+        if source_host: cmd.extend([f"{source_host}:{src}", dst])
+        elif target_host: cmd.extend([src, f"{target_host}:{dst}"])
+        else: cmd.extend([src, dst])
 
         try:
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_FULL_SYNC)
@@ -5787,13 +5389,11 @@ class CommandRouter:
                 _log(_LOG_WARN, "teleport", f"rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
             return r.returncode == 0
         finally:
-            if gitignore_tmpfile and os.path.exists(gitignore_tmpfile):
-                os.unlink(gitignore_tmpfile)
+            if gitignore_tmpfile and os.path.exists(gitignore_tmpfile): os.unlink(gitignore_tmpfile)
 
     def _sync_session_transcript(self, session_id: str, source_cwd: str, target_cwd: str,
                                   source_host: str | None=None, target_host: str | None=None) -> None:
-        if not session_id:
-            return
+        if not session_id: return
 
         source_slug = _project_slug(source_cwd)
         target_slug = _project_slug(target_cwd)
@@ -5803,8 +5403,7 @@ class CommandRouter:
         if target_host:
             _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"],
                          host=target_host, capture_output=True)
-        else:
-            os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
+        else: os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
         jsonl = f"{session_id}.jsonl"
         for item in [jsonl, f"{session_id}/"]:
             if source_host:
@@ -5820,12 +5419,10 @@ class CommandRouter:
                 local_dst = os.path.expanduser(f"~/{target_dir}/")
                 cmd = ["rsync", "-az", local_src, local_dst]
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
-            if r.returncode != 0:
-                _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
+            if r.returncode != 0: _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
 
     def _sync_shared_repos(self, target_host: str, chat_id: int | str | None = None) -> list[str]:
-        if not target_host:
-            return []
+        if not target_host: return []
 
         warnings = []
         try:
@@ -5904,8 +5501,7 @@ class CommandRouter:
         return warnings
 
     def _sync_worker_data_back(self, name: str, source_host: str | None) -> None:
-        if not source_host:
-            return
+        if not source_host: return
 
         home = os.path.expanduser("~")
         worker_team_dir = os.path.join(home, "team", name)
@@ -5947,16 +5543,14 @@ class CommandRouter:
         env["BRIDGE_URL"] = BRIDGE_PUBLIC_URL or BRIDGE_URL
         seen_scripts = set()
         for pdir in preflight_dirs:
-            if not os.path.isdir(pdir):
-                continue
+            if not os.path.isdir(pdir): continue
             scripts = sorted(
                 f for f in os.listdir(pdir)
                 if f.endswith(".sh") and os.access(os.path.join(pdir, f), os.X_OK))
             for script in scripts:
                 script_path = os.path.join(pdir, script)
                 real_path = os.path.realpath(script_path)
-                if real_path in seen_scripts:
-                    continue
+                if real_path in seen_scripts: continue
                 seen_scripts.add(real_path)
                 try:
                     r = _subprocess_runner.run(
@@ -5972,8 +5566,7 @@ class CommandRouter:
         return fails
 
     def _install_hooks_on_target(self, target_host: str) -> list[str]:
-        if not target_host:
-            return []
+        if not target_host: return []
 
         warnings = []
         try:
@@ -6002,8 +5595,7 @@ class CommandRouter:
 
     def _sync_session_files_to_target(self, name: str, target_sessions_dir: str, target_host: str) -> None:
         local_session_dir = SESSIONS_DIR / name
-        if not local_session_dir.is_dir():
-            return
+        if not local_session_dir.is_dir(): return
         remote_session_dir = f"{target_sessions_dir}/{name}"
         _remote_run(["mkdir", "-p", remote_session_dir],
                      host=target_host, capture_output=True)
@@ -6017,8 +5609,7 @@ class CommandRouter:
 
     def _sync_credentials_to_target(self, target_host: str) -> None:
         local_creds = os.path.expanduser("~/.claude/.credentials.json")
-        if not os.path.exists(local_creds):
-            return
+        if not os.path.exists(local_creds): return
 
         try:
             r = _remote_run(["cat", ".claude/.credentials.json"],
@@ -6081,8 +5672,7 @@ class CommandRouter:
         if target_host and not skip_session_sync:
             self._sync_session_files_to_target(name, target_sessions_dir, target_host)
 
-        if target_host:
-            self._sync_credentials_to_target(target_host)
+        if target_host: self._sync_credentials_to_target(target_host)
 
         for key, value in {
             "PORT": str(PORT),
@@ -6108,8 +5698,7 @@ class CommandRouter:
             if id_result.returncode == 0 and id_result.stdout.strip() == "0":
                 cli_cmd = cli_cmd.replace(" --dangerously-skip-permissions", "")
         start_cmd = f'unset CLAUDECODE && {cli_cmd}'
-        if target_cwd:
-            start_cmd = f'cd {shlex.quote(target_cwd)} && {start_cmd}'
+        if target_cwd: start_cmd = f'cd {shlex.quote(target_cwd)} && {start_cmd}'
         _log(_LOG_INFO, "teleport", f"start_cmd={start_cmd}")
         _remote_run(
             ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
@@ -6141,8 +5730,7 @@ class CommandRouter:
                 cap = _remote_run(
                     ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                     host=target_host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-                if cap.returncode == 0:
-                    _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
+                if cap.returncode == 0: _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
         _log(_LOG_WARN, "teleport", f"verify FAILED after 30 attempts")
         return False
 
@@ -6150,8 +5738,7 @@ class CommandRouter:
                             session_id: str | None, backend_name: str, chat_id: ChatId | None, reason: str) -> None:
         self._teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
         try:
-            if source_cwd:
-                save_claude_session_cwd(name, source_cwd)
+            if source_cwd: save_claude_session_cwd(name, source_cwd)
 
             if not tmux_exists(tmux_name, host=source_host):
                 _remote_run(
@@ -6161,8 +5748,7 @@ class CommandRouter:
                             host=source_host, capture_output=True)
             backend = get_backend(backend_name)
             start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
-            if source_cwd:
-                start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'
+            if source_cwd: start_cmd = f'cd {shlex.quote(source_cwd)} && {start_cmd}'
             _remote_run(
                 ["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"],
                 host=source_host, capture_output=True)
@@ -6177,8 +5763,7 @@ class CommandRouter:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
     def _teleport_notify(self, chat_id: ChatId | None, text: str) -> None:
-        if chat_id is None:
-            return
+        if chat_id is None: return
         try:
             transport.send_text(chat_id, text)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
@@ -6211,8 +5796,7 @@ class CommandRouter:
         if ok:
             self.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
             update_bot_commands()
-        else:
-            self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
+        else: self.reply(chat_id, f"Could not hire \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_end(self, name: str, chat_id: ChatId) -> bool:
@@ -6225,8 +5809,7 @@ class CommandRouter:
         if ok:
             self.reply(chat_id, f"{name.capitalize()} removed from your team.")
             update_bot_commands()
-        else:
-            self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
+        else: self.reply(chat_id, f"Could not remove \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
@@ -6236,19 +5819,14 @@ class CommandRouter:
         tokens = args.split()
         remaining = []
         for t in tokens:
-            if t == "--clean":
-                clean = True
-            elif t == "--force":
-                force = True
-            else:
-                remaining.append(t)
+            if t == "--clean": clean = True
+            elif t == "--force": force = True
+            else: remaining.append(t)
         name_arg = remaining[0].lower() if remaining else ""
 
-        if name_arg == "cancel":
-            return self._cmd_restart_cancel(chat_id)
+        if name_arg == "cancel": return self._cmd_restart_cancel(chat_id)
 
-        if name_arg == "all":
-            return self._cmd_restart_all(chat_id, clean)
+        if name_arg == "all": return self._cmd_restart_all(chat_id, clean)
 
         if len(remaining) > 1:
             names = [n.lower() for n in remaining]
@@ -6257,8 +5835,7 @@ class CommandRouter:
                 self.cmd_restart(chat_id, f"{'--clean ' if clean else ''}{'--force ' if force else ''}{n}")
             return True
 
-        if name_arg:
-            name = name_arg
+        if name_arg: name = name_arg
         else:
             if not state.active:
                 registered = self.workers.get_registered_sessions()
@@ -6269,16 +5846,14 @@ class CommandRouter:
                 else:
                     self.reply(chat_id, "No one assigned.")
                     return True
-            else:
-                name = state.active
+            else: name = state.active
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if name not in registered:
             if registered:
                 names_str = ", ".join(registered.keys())
                 self.reply(chat_id, f"Can't find \"{name}\". Available workers: {names_str}")
-            else:
-                self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+            else: self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
             return True
 
         if name_arg:
@@ -6305,8 +5880,7 @@ class CommandRouter:
 
         try:
             result = self._do_restart(name, session, chat_id, host, tmux_name, force, clean)
-            if force:
-                watchdog.force_restart_pending_cwd[name] = True
+            if force: watchdog.force_restart_pending_cwd[name] = True
             return result
         finally:
             with watchdog.restart_lock:
@@ -6326,8 +5900,7 @@ class CommandRouter:
                 name, backend_name, backend_obj, tmux_name, host, mode)
             watchdog.recent_restarts[name] = _clock.time()
             _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart result ok={ok}, err={err}")
-            if ok:
-                self.reply(chat_id, f"{name.capitalize()} is back and ready.")
+            if ok: self.reply(chat_id, f"{name.capitalize()} is back and ready.")
             else:
                 self.reply(chat_id, f"Could not restart \"{name}\" on {host}. {err}",
                            outcome="Needs decision")
@@ -6339,8 +5912,7 @@ class CommandRouter:
                 watchdog.recent_restarts[name] = _clock.time()
                 self.reply(chat_id, f"Bringing {name.capitalize()} back online...")
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-            else:
-                self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+            else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
 
         backend_name = get_worker_backend(name, session) if session else DEFAULT_BACKEND
@@ -6351,14 +5923,12 @@ class CommandRouter:
             session_id, source = get_any_session_id(name)
             if session_id:
                 self.reply(chat_id, f"{name.capitalize()} is still active. Next message continues where you left off.")
-            else:
-                self.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
+            else: self.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
             return True
 
         session_dir = get_session_dir(name)
         has_session_id = False
-        if session_dir.exists():
-            has_session_id = any(session_dir.glob("*_session_id"))
+        if session_dir.exists(): has_session_id = any(session_dir.glob("*_session_id"))
 
         if not has_session_id:
             ok, err = restart_claude(name, mode="relaunch")
@@ -6366,8 +5936,7 @@ class CommandRouter:
                 watchdog.recent_restarts[name] = _clock.time()
                 self.reply(chat_id, f"Restarting {name.capitalize()} fresh...")
                 self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-            else:
-                self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+            else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
             return True
 
         ok, err = restart_claude(name, mode="resume")
@@ -6375,8 +5944,7 @@ class CommandRouter:
             watchdog.recent_restarts[name] = _clock.time()
             self.reply(chat_id, f"Resuming {name.capitalize()}...")
             self.reply(chat_id, f"{name.capitalize()} is back and ready.")
-        else:
-            self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
+        else: self.reply(chat_id, f"Could not restart \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def _restart_remote_worker(self, name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str) -> tuple[bool, str | None]:
@@ -6390,13 +5958,11 @@ class CommandRouter:
                     ["bash", "-c", "echo $HOME"], host=host,
                     capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
                 remote_home = home_result.stdout.strip() if home_result.returncode == 0 else ""
-                if remote_home and remote_home != local_home:
-                    target_cwd = remote_home + target_cwd[len(local_home):]
+                if remote_home and remote_home != local_home: target_cwd = remote_home + target_cwd[len(local_home):]
         _log(_LOG_INFO, "_restart_remote", f"{name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
         if mode == "resume":
             resume_id = get_claude_session_id(name, authoritative=False)
-            if not resume_id:
-                resume_id = get_claude_session_id(name, authoritative=True)
+            if not resume_id: resume_id = get_claude_session_id(name, authoritative=True)
             _log(_LOG_INFO, "_restart_remote", f"{name}: resume_id={resume_id}")
         else:
             session_dir = SESSIONS_DIR / name
@@ -6413,15 +5979,12 @@ class CommandRouter:
             _remote_run(["tmux", "kill-session", "-t", tmux_name],
                          host=host, capture_output=True)
             _clock.sleep(DELAY_RETRY)
-        else:
-            _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
+        else: _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
 
         if mode == "resume":
             cached = get_claude_session_id(name, authoritative=False)
-            if cached:
-                resume_id = cached
-            else:
-                resume_id = get_claude_session_id(name, authoritative=True) or resume_id
+            if cached: resume_id = cached
+            else: resume_id = get_claude_session_id(name, authoritative=True) or resume_id
             _log(_LOG_INFO, "_restart_remote", f"{name}: post-stop resume_id={resume_id}")
 
         if resume_id and target_cwd and host:
@@ -6440,8 +6003,7 @@ class CommandRouter:
                     session_dir.mkdir(parents=True, exist_ok=True)
                     for f in session_dir.glob("*_session_id"):
                         f.unlink()
-                else:
-                    _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
+                else: _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
         _ensure_workspace_trusted_remote(target_cwd, host)
         _log(_LOG_INFO, "_restart_remote", f"{name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
         ok = self._start_worker_on_target(
@@ -6458,10 +6020,8 @@ class CommandRouter:
                 if is_claude_running(tmux_name, host=host):
                     started = True
                     break
-            if started:
-                self.workers.send(name, welcome)
-            else:
-                _log(_LOG_WARN, "_restart_remote", f"{name}: Claude did not start within 10s, skipping welcome")
+            if started: self.workers.send(name, welcome)
+            else: _log(_LOG_WARN, "_restart_remote", f"{name}: Claude did not start within 10s, skipping welcome")
         _log(_LOG_INFO, "_restart_remote", f"{name}: restarted successfully (mode={mode})")
         return True, None
 
@@ -6514,25 +6074,21 @@ class CommandRouter:
                     tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{name}")
                     ok, err = self._restart_remote_worker(
                         name, backend_name, backend_obj, tmux_name, host, mode)
-                else:
-                    ok, err = restart_claude(name, mode=mode)
-                if ok:
-                    self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} restarted.")
+                else: ok, err = restart_claude(name, mode=mode)
+                if ok: self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} restarted.")
                 else:
                     failed.append((name, err))
                     self.reply(chat_id, f"[{i}/{total}] {name.capitalize()} failed: {err}")
 
                 if i < total:
                     for _ in range(5):
-                        if self._restart_all_abort.is_set():
-                            break
+                        if self._restart_all_abort.is_set(): break
                         _clock.sleep(delay_s / 5)
 
             if failed:
                 summary = ", ".join(n for n, _ in failed)
                 self.reply(chat_id, f"Restart all done. {len(failed)} failed: {summary}")
-            else:
-                self.reply(chat_id, f"Restart all done. All {total} workers restarted.")
+            else: self.reply(chat_id, f"Restart all done. All {total} workers restarted.")
         finally:
             with self._restart_all_lock:
                 self._restart_all_running = False
@@ -6562,8 +6118,7 @@ class CommandRouter:
                 worker_str = ", ".join(workers)
                 lines.append(f"• {cid} → {worker_str} ({msg_count} msgs, expires {ch['expires_at']})")
             self.reply(chat_id, "\U0001f4e1 Active relays:\n" + "\n".join(lines))
-        else:
-            self.reply(chat_id, "No active relays.")
+        else: self.reply(chat_id, "No active relays.")
         return True
 
     def _cmd_relay_add(self, parts: list[str], chat_id: ChatId) -> bool:
@@ -6578,8 +6133,7 @@ class CommandRouter:
             return True
         with relay_store.lock:
             found = relay_store.channels.get(channel_id)
-            if not found or _clock.time() > found["expires_at_unix"]:
-                found = None
+            if not found or _clock.time() > found["expires_at_unix"]: found = None
         if not found:
             self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
             return True
@@ -6601,8 +6155,7 @@ class CommandRouter:
         rm_worker = parts[2].lower()
         with relay_store.lock:
             found = relay_store.channels.get(channel_id)
-            if not found or _clock.time() > found["expires_at_unix"]:
-                found = None
+            if not found or _clock.time() > found["expires_at_unix"]: found = None
         if not found:
             self.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels.")
             return True
@@ -6656,8 +6209,7 @@ class CommandRouter:
         removed = False
         with relay_store.lock:
             to_remove = None
-            if target in relay_store.channels:
-                to_remove = target
+            if target in relay_store.channels: to_remove = target
             else:
                 target_lower = target.lower()
                 for cid, ch in relay_store.channels.items():
@@ -6668,10 +6220,8 @@ class CommandRouter:
                 del relay_store.channels[to_remove]
                 _relay_save()
                 removed = True
-        if removed:
-            self.reply(chat_id, f"\U0001f4e1 Relay \"{target}\" closed.")
-        else:
-            self.reply(chat_id, f"Relay \"{target}\" not found.")
+        if removed: self.reply(chat_id, f"\U0001f4e1 Relay \"{target}\" closed.")
+        else: self.reply(chat_id, f"Relay \"{target}\" not found.")
         return True
 
     def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
@@ -6686,8 +6236,7 @@ class CommandRouter:
             lines.append("/relay list — active relays")
             lines.append("/relay status — counts for relays, channels, guests")
             lines.append("/relay stop <name> — close relay")
-            if active:
-                lines.append(f"\nActive: {', '.join(ch['label'] for ch in active)}")
+            if active: lines.append(f"\nActive: {', '.join(ch['label'] for ch in active)}")
             self.reply(chat_id, "\n".join(lines))
             return True
 
@@ -6700,8 +6249,7 @@ class CommandRouter:
             "status": lambda: self._cmd_relay_status(chat_id),
             "stop": lambda: self._cmd_relay_stop(parts, chat_id),
         }
-        if sub in subcommands:
-            return subcommands[sub]()
+        if sub in subcommands: return subcommands[sub]()
 
         worker = sub
         registered = get_registered_sessions()
@@ -6762,40 +6310,33 @@ class CommandRouter:
             file_id = sticker.get("file_id")
             media_label = f"sticker: {sticker.get('emoji', '')}"
 
-        if not file_id:
-            return None
+        if not file_id: return None
 
         local_path = download_telegram_file(file_id, target_worker)
-        if not local_path:
-            return None
+        if not local_path: return None
 
         if voice:
             transcript = transcribe_voice(local_path)
-            if transcript:
-                return transcript
+            if transcript: return transcript
 
         return f"Manager forwarded {media_label}: {local_path}"
 
     def _worker_from_reply(self, msg: TelegramMessageDict | None) -> str | None:
         reply_to = msg.get("reply_to_message") if msg else None
-        if not reply_to:
-            return None
+        if not reply_to: return None
         reply_text = _extract_msg_text(reply_to)
-        if not reply_text:
-            return None
+        if not reply_text: return None
         first_line = reply_text.split("\n", 1)[0]
         if first_line.endswith(":"):
             candidate = first_line[:-1].strip().lower()
             registered = self.workers.get_registered_sessions()
-            if candidate in registered:
-                return candidate
+            if candidate in registered: return candidate
         return None
 
     def _handle_media_group_flush(self, group_id: str) -> None:
         with media_groups.lock:
             group = media_groups.buffer.pop(group_id, None)
-        if not group:
-            return
+        if not group: return
         items = group["items"]
         caption = group.get("caption", "")
         first_msg = items[0] if items else {}
@@ -6804,14 +6345,11 @@ class CommandRouter:
         target = None
         if caption:
             targets, _ = self.parse_at_mentions(caption)
-            if targets:
-                target = targets[0]
+            if targets: target = targets[0]
         if not target:
             reply_worker = self._worker_from_reply(first_msg)
-            if reply_worker:
-                target = reply_worker
-        if not target:
-            target = state.active
+            if reply_worker: target = reply_worker
+        if not target: target = state.active
         all_paths = []
         for msg in items:
             photo = msg.get("photo")
@@ -6859,27 +6397,21 @@ class CommandRouter:
 
             if file_id:
                 local_path = download_telegram_file(file_id, target)
-                if local_path:
-                    all_paths.append((local_path, media_type))
+                if local_path: all_paths.append((local_path, media_type))
 
-        if not all_paths:
-            return
+        if not all_paths: return
 
         path_lines = "\n".join(f"Manager sent {mt}: `{p}`" for p, mt in all_paths)
-        if caption:
-            full_text = f"{caption}\n\n{path_lines}"
-        else:
-            full_text = path_lines
+        if caption: full_text = f"{caption}\n\n{path_lines}"
+        else: full_text = path_lines
         self._route_media_message(full_text, caption, chat_id, msg_id, msg=first_msg)
 
     def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> str | None:
         if caption:
             targets, _ = self.parse_at_mentions(caption)
-            if targets:
-                return targets[0]
+            if targets: return targets[0]
         reply_worker = self._worker_from_reply(msg)
-        if reply_worker:
-            return reply_worker
+        if reply_worker: return reply_worker
         return state.active
 
     def _route_media_message(self, media_text: str, caption: str, chat_id: ChatId | None, msg_id: int | None, msg: TelegramMessageDict | None=None) -> None:
@@ -6898,8 +6430,7 @@ class CommandRouter:
                 if offline:
                     parts = []
                     parts.append(f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline.")
-                    if sent_to:
-                        parts.append(f"Delivered to {', '.join(sent_to)}.")
+                    if sent_to: parts.append(f"Delivered to {', '.join(sent_to)}.")
                     self.reply(chat_id, " ".join(parts))
                 return
         reply_worker = self._worker_from_reply(msg)
@@ -6926,19 +6457,16 @@ class CommandRouter:
             if target in registered:
                 state.active = target
                 save_last_active(target)
-            else:
-                self.reply(chat_id, f"Can't focus guest {target}.")
+            else: self.reply(chat_id, f"Can't focus guest {target}.")
             self._reset_mention_streak()
             return
-        if reply_context:
-            message = self.format_reply_context(message, reply_context, reply_context_ts)
+        if reply_context: message = self.format_reply_context(message, reply_context, reply_context_ts)
         statuses = []
         if reply_to:
             reply_media = self._extract_reply_media(reply_to, targets[0])
             if reply_media:
                 media_text = reply_media
-                if message:
-                    media_text = f"{message}\n\n{reply_media}"
+                if message: media_text = f"{message}\n\n{reply_media}"
                 for name in targets:
                     statuses.append(self._route_mention(name, media_text, chat_id, msg_id))
             else:
@@ -6951,15 +6479,13 @@ class CommandRouter:
         offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
         if offline:
             parts = [f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline."]
-            if sent_to:
-                parts.append(f"Delivered to {', '.join(sent_to)}.")
+            if sent_to: parts.append(f"Delivered to {', '.join(sent_to)}.")
             self.reply(chat_id, " ".join(parts))
         registered = self.workers.get_registered_sessions()
         now = _clock.time()
         if len(targets) == 1 and targets[0] in registered:
             target = targets[0]
-            if _last_mention.target == target and now - _last_mention.ts <= 60:
-                _last_mention.count += 1
+            if _last_mention.target == target and now - _last_mention.ts <= 60: _last_mention.count += 1
             else:
                 _last_mention.target = target
                 _last_mention.count = 1
@@ -6968,13 +6494,11 @@ class CommandRouter:
                 state.active = target
                 save_last_active(target)
                 self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
-        else:
-            self._reset_mention_streak()
+        else: self._reset_mention_streak()
     _mention_re = re.compile(r'(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)')
 
     def parse_at_mentions(self, text: str) -> tuple[list[str], str]:
-        if not text:
-            return [], ""
+        if not text: return [], ""
         registered = self.workers.get_registered_sessions()
         with guest_store.lock:
             guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
@@ -6982,13 +6506,11 @@ class CommandRouter:
         found = []
         for match in self._mention_re.finditer(text):
             name = match.group(1).lower()
-            if name in known and name not in found:
-                found.append(name)
+            if name in known and name not in found: found.append(name)
         return found, text
 
     def unknown_at_mentions(self, text: str) -> list[str]:
-        if not text:
-            return []
+        if not text: return []
         registered = self.workers.get_registered_sessions()
         with guest_store.lock:
             guest_names = {g["name"] for g in guest_store.guests.values() if not guest_is_expired(g["expires_at_unix"])}
@@ -6996,8 +6518,7 @@ class CommandRouter:
         unknown = []
         for match in self._mention_re.finditer(text):
             name = match.group(1).lower()
-            if name not in known and name not in unknown:
-                unknown.append(name)
+            if name not in known and name not in unknown: unknown.append(name)
         return unknown
 
     def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
@@ -7009,18 +6530,15 @@ class CommandRouter:
         parts = []
         for name in unknown_mentions:
             suggestions = difflib.get_close_matches(name, known, n=3, cutoff=0.5)
-            if suggestions:
-                parts.append(f"@{name}. Did you mean {', '.join('@' + s for s in suggestions)}?")
-            else:
-                parts.append(f"@{name}.")
+            if suggestions: parts.append(f"@{name}. Did you mean {', '.join('@' + s for s in suggestions)}?")
+            else: parts.append(f"@{name}.")
         return f"⚠️ Unknown: {' '.join(parts)}"
 
     def _route_mention(self, name: str, message: str, chat_id: ChatId | None, msg_id: int | None) -> MentionRouteResult | None:
         registered = self.workers.get_registered_sessions()
         session = registered.get(name)
         if session:
-            if not self.workers.is_online(name, session):
-                return {"name": name, "status": "offline"}
+            if not self.workers.is_online(name, session): return {"name": name, "status": "offline"}
             self.route_message(name, message, chat_id, msg_id, one_off=True)
             return {"name": name, "status": "sent"}
 
@@ -7041,21 +6559,17 @@ class CommandRouter:
         return {"name": name, "status": "unknown"}
 
     def parse_worker_prefix(self, text: str) -> tuple[str | None, str]:
-        if not text:
-            return None, ""
+        if not text: return None, ""
         match = re.match(r'^\s*([a-zA-Z0-9-]+):\s*(.*)$', text, re.DOTALL)
-        if not match:
-            return None, ""
+        if not match: return None, ""
         name = match.group(1).lower()
         message = match.group(2).strip()
         registered = self.workers.get_registered_sessions()
-        if name not in registered:
-            return None, ""
+        if name not in registered: return None, ""
         return name, message
 
     def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
-        if not reply_msg:
-            return "", None
+        if not reply_msg: return "", None
         text = _extract_msg_text(reply_msg)
         ts = reply_msg.get("date")
         return text, ts
@@ -7065,8 +6579,7 @@ class CommandRouter:
         context_text = (context_text or "").strip()
         if context_text:
             ts_str = ""
-            if context_ts:
-                ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
+            if context_ts: ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
             return (
                 "Manager reply:\n"
                 f"{reply_text}\n\n"
@@ -7105,8 +6618,7 @@ class CommandRouter:
         }
 
     def reply(self, chat_id: ChatId | None, text: str, outcome: str | None = None) -> None:
-        if self.transport is not None and chat_id is not None:
-            self.transport.send_text(chat_id, text)
+        if self.transport is not None and chat_id is not None: self.transport.send_text(chat_id, text)
 
     def send_startup_message(self, chat_id: ChatId | None) -> None:
         registered = self.workers.get_registered_sessions()
@@ -7115,10 +6627,8 @@ class CommandRouter:
         lines = ["I'm online and ready."]
         if sessions:
             lines.append(f"Team: {', '.join(sessions)}")
-            if active:
-                lines.append(f"Focused: {active}")
-        else:
-            lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
+            if active: lines.append(f"Focused: {active}")
+        else: lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
         self.reply(chat_id, "\n".join(lines))
 
     def handle_message(self, update: TelegramUpdate) -> None:
@@ -7135,22 +6645,18 @@ class CommandRouter:
                      or incoming.video or incoming.audio or incoming.voice
                      or incoming.video_note or incoming.sticker)
         if media_group_id and has_media and chat_id:
-            if not self._check_admin(chat_id):
-                return
+            if not self._check_admin(chat_id): return
             self._buffer_media_group(media_group_id, msg, text)
             return
 
         if has_media and chat_id:
-            if self._handle_single_media(incoming):
-                return
+            if self._handle_single_media(incoming): return
 
-        if text and chat_id:
-            self._route_text_message(incoming)
+        if text and chat_id: self._route_text_message(incoming)
 
     def _check_admin(self, chat_id: ChatId | None) -> bool:
         global admin_chat_id
-        if chat_id is None:
-            return False
+        if chat_id is None: return False
         if admin_chat_id is None:
             admin_chat_id = chat_id  # type: ignore[assignment]
             return True
@@ -7166,10 +6672,8 @@ class CommandRouter:
                 }
             group = media_groups.buffer[media_group_id]
             group["items"].append(msg)
-            if text:
-                group["caption"] = text
-            if group["timer"]:
-                group["timer"].cancel()
+            if text: group["caption"] = text
+            if group["timer"]: group["timer"].cancel()
             t = threading.Timer(_MEDIA_GROUP_WAIT,
                                 self._handle_media_group_flush, args=[media_group_id])
             t.name = f"media-flush-{media_group_id}"
@@ -7193,8 +6697,7 @@ class CommandRouter:
             if incoming.photo:
                 largest = max(incoming.photo, key=lambda p: p.get("file_size", 0))
                 file_id = largest.get("file_id")
-            else:
-                file_id = incoming.document.get("file_id") if incoming.document else None
+            else: file_id = incoming.document.get("file_id") if incoming.document else None
             media_label = "image"
         elif incoming.document and not incoming.doc_is_image:
             file_id = incoming.document.get("file_id")
@@ -7203,22 +6706,15 @@ class CommandRouter:
             media_item = (incoming.audio or incoming.voice or incoming.video
                           or incoming.video_note or incoming.sticker)
             file_id = media_item.get("file_id") if media_item else None
-            if incoming.audio:
-                media_label = "audio"
-            elif incoming.voice:
-                media_label = "voice"
-            elif incoming.video:
-                media_label = "video"
-            elif incoming.video_note:
-                media_label = "video note"
-            elif incoming.sticker:
-                media_label = "sticker"
+            if incoming.audio: media_label = "audio"
+            elif incoming.voice: media_label = "voice"
+            elif incoming.video: media_label = "video"
+            elif incoming.video_note: media_label = "video note"
+            elif incoming.sticker: media_label = "sticker"
 
-        if not file_id:
-            return False
+        if not file_id: return False
 
-        if not self._check_admin(chat_id):
-            return True
+        if not self._check_admin(chat_id): return True
 
         if not state.active and not self.parse_at_mentions(text)[0]:
             self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
@@ -7231,11 +6727,9 @@ class CommandRouter:
             return True
 
         media_text = self._format_media_text(incoming, local_path, media_label)
-        if media_text is None:
-            return True
+        if media_text is None: return True
 
-        if text:
-            media_text = f"{text}\n\n{media_text}"
+        if text: media_text = f"{text}\n\n{media_text}"
         self._route_media_message(media_text, text, chat_id, msg_id, msg=msg)
         return True
 
@@ -7246,11 +6740,9 @@ class CommandRouter:
         msg_id = incoming.msg_id
         msg = incoming.raw_msg
 
-        if media_label == "GIF":
-            return f"Manager sent GIF: `{local_path}`"
+        if media_label == "GIF": return f"Manager sent GIF: `{local_path}`"
 
-        if media_label == "image":
-            return f"Manager sent image: `{local_path}`"
+        if media_label == "image": return f"Manager sent image: `{local_path}`"
 
         if media_label == "file" and incoming.document:
             file_name = incoming.document.get("file_name", "unknown")
@@ -7324,8 +6816,7 @@ class CommandRouter:
         reply_context = ""
         reply_context_ts = None
         reply_to = msg.get("reply_to_message")
-        if reply_to:
-            reply_context, reply_context_ts = self.get_reply_context(reply_to)
+        if reply_to: reply_context, reply_context_ts = self.get_reply_context(reply_to)
         unknown_mentions = self.unknown_at_mentions(text)
         if unknown_mentions:
             self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
@@ -7342,26 +6833,22 @@ class CommandRouter:
         reply_worker = self._worker_from_reply(msg)
         if reply_worker:
             routed_text = text
-            if reply_context:
-                routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
+            if reply_context: routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
             self._reset_mention_streak()
             return
         self._reset_mention_streak()
         routed_text = text
-        if reply_context:
-            routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
+        if reply_context: routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
         self.route_to_active(routed_text, chat_id, msg_id)
 
     def handle_command(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> bool:
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
-        if "@" in cmd:
-            cmd = cmd.split("@")[0]
+        if "@" in cmd: cmd = cmd.split("@")[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
         handler = self._commands.get(cmd)
-        if handler:
-            return handler(arg, chat_id or 0, msg_id or 0)
+        if handler: return handler(arg, chat_id or 0, msg_id or 0)
 
         if cmd in BLOCKED_COMMANDS:
             self.reply(chat_id, f"{cmd} is interactive and not supported here.", outcome="Needs decision")
@@ -7373,8 +6860,7 @@ class CommandRouter:
             prev_focus = state.active
             state.active = worker_name
             save_last_active(worker_name)
-            if not arg:
-                return True
+            if not arg: return True
             if prev_focus != worker_name and self.transport and chat_id is not None:
                 self.transport.send_text(chat_id, f"Now talking to {worker_name.capitalize()}.")
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
@@ -7410,8 +6896,7 @@ class CommandRouter:
             try:
                 worker_host = get_worker_host(n)
                 url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
-                if worker_host:
-                    url += f"&host={_urlquote(worker_host)}"
+                if worker_host: url += f"&host={_urlquote(worker_host)}"
                 req = urllib.request.Request(url, method="POST")
                 with _urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
                     cast(dict[str, object], _json.loads(resp.read()))
@@ -7423,10 +6908,8 @@ class CommandRouter:
             self.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
             return True
         ts = time.strftime("%m%d-%H%M", time.gmtime(_clock.time()))
-        if len(enabled) <= 3:
-            slug = "-".join(enabled) + "-" + ts
-        else:
-            slug = f"team{len(enabled)}-{ts}"
+        if len(enabled) <= 3: slug = "-".join(enabled) + "-" + ts
+        else: slug = f"team{len(enabled)}-{ts}"
         try:
             payload = _json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
             req = urllib.request.Request(
@@ -7441,8 +6924,7 @@ class CommandRouter:
         pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
         names_str = ", ".join(enabled)
         msg = f"✈️ Pilot: {names_str} (30min)\n{pilot_url}"
-        if errors:
-            msg += f"\n⚠️ Failed: {'; '.join(errors)}"
+        if errors: msg += f"\n⚠️ Failed: {'; '.join(errors)}"
         self.reply(chat_id, msg)
         return True
 
@@ -7486,8 +6968,7 @@ class CommandRouter:
             except ValueError:
                 self.reply(chat_id, "Invalid PR URL. Example: /pr https://github.com/BasedHardware/omi/pull/6426", outcome="Needs decision")
                 return True
-        else:
-            owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
+        else: owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
         self.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
         script_path = Path(__file__).parent / "review.py"
         out_path = f"/tmp/pr-review-{pr_num}.html"
@@ -7504,8 +6985,7 @@ class CommandRouter:
 
         slug = f"pr-{pr_num}"
         serve_url = _beast_serve_deploy(out_path, slug)
-        if serve_url:
-            self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
+        if serve_url: self.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
         else:
             import secrets
             token = secrets.token_urlsafe(32)
@@ -7522,10 +7002,8 @@ class CommandRouter:
 
         name = name.lower().strip()
         ok, err = switch_session(name)
-        if ok:
-            self.reply(chat_id, f"Now talking to {name.capitalize()}.")
-        else:
-            self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
+        if ok: self.reply(chat_id, f"Now talking to {name.capitalize()}.")
+        else: self.reply(chat_id, f"Could not focus \"{name}\". {err}", outcome="Needs decision")
         return True
 
     def cmd_team(self, chat_id: ChatId) -> bool:
@@ -7549,10 +7027,8 @@ class CommandRouter:
                 if backend.is_interactive:
                     if is_claude_running(tmux_name, host=host):
                         activity, context_pct, _ = _read_tmux_activity(tmux_name, host=host)
-                    else:
-                        activity = "worker app not running"
-                else:
-                    activity = _read_noninteractive_activity(name)
+                    else: activity = "worker app not running"
+                else: activity = _read_noninteractive_activity(name)
             worker_live[name] = {
                 "backend": backend_name,
                 "activity": activity,
@@ -7578,23 +7054,17 @@ class CommandRouter:
             days, rem = divmod(uptime_sec, 86400)
             hours, rem = divmod(rem, 3600)
             mins, _ = divmod(rem, 60)
-            if days > 0:
-                uptime_str = f"{days}d {hours}h {mins}m"
-            elif hours > 0:
-                uptime_str = f"{hours}h {mins}m"
-            else:
-                uptime_str = f"{mins}m"
+            if days > 0: uptime_str = f"{days}d {hours}h {mins}m"
+            elif hours > 0: uptime_str = f"{hours}h {mins}m"
+            else: uptime_str = f"{mins}m"
         except (OSError, ValueError):
             uptime_str = "unknown"
         tm_status = tunnel_manager.status() if tunnel_manager else {}
         poll_active = tm_status.get("polling_active", False)
         tunnel_url = tm_status.get("tunnel_url", "")
-        if tunnel_url:
-            inbound = f"webhook ({tunnel_url})"
-        elif poll_active:
-            inbound = "poll"
-        else:
-            inbound = "DOWN"
+        if tunnel_url: inbound = f"webhook ({tunnel_url})"
+        elif poll_active: inbound = "poll"
+        else: inbound = "DOWN"
         busy = 0
         idle = 0
         offline = 0
@@ -7606,17 +7076,14 @@ class CommandRouter:
                     if wd and wd.status == "BUSY":
                         busy += 1
                         busy_names.append(name)
-                    else:
-                        idle += 1
-                else:
-                    offline += 1
+                    else: idle += 1
+                else: offline += 1
         total = busy + idle + offline
         machine_workers: dict[str, list[str]] = {}
         catalog = get_machine_catalog()
         ssh_to_display: dict[str | None, str] = {None: "local"}
         for m in catalog.values():
-            if m.ssh_target:
-                ssh_to_display[m.ssh_target] = m.display_name or m.id
+            if m.ssh_target: ssh_to_display[m.ssh_target] = m.display_name or m.id
         for name in registered:
             host = get_worker_host(name)
             label = ssh_to_display.get(host, host or "local")
@@ -7626,10 +7093,8 @@ class CommandRouter:
         for cname, info in conn_status.items():
             running = info.get("running", False)
             failures = info.get("consecutive_failures", 0)
-            if running and failures == 0:
-                conn_parts.append(cname)
-            elif running:
-                conn_parts.append(f"{cname} ({failures} err)")
+            if running and failures == 0: conn_parts.append(cname)
+            elif running: conn_parts.append(f"{cname} ({failures} err)")
         lines = [
             f"<b>v{VERSION}</b> | up {uptime_str} | {inbound}",
             "",
@@ -7637,8 +7102,7 @@ class CommandRouter:
             f"focus: <b>{state.active or 'none'}</b>",
         ]
 
-        if busy_names:
-            lines.append(f"busy: {', '.join(sorted(busy_names))}")
+        if busy_names: lines.append(f"busy: {', '.join(sorted(busy_names))}")
 
         if len(machine_workers) > 1:
             machine_line = " / ".join(
@@ -7646,8 +7110,7 @@ class CommandRouter:
             )
             lines.append(machine_line)
 
-        if conn_parts:
-            lines.append(", ".join(conn_parts))
+        if conn_parts: lines.append(", ".join(conn_parts))
 
         if self.transport is not None and chat_id is not None:
             self.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
@@ -7681,8 +7144,7 @@ class CommandRouter:
                 self.route_message(name, text, chat_id, msg_id, one_off=True)
                 sent_to.append(name)
 
-        if not sent_to:
-            self.reply(chat_id, "No one's online to share with.")
+        if not sent_to: self.reply(chat_id, "No one's online to share with.")
 
     def route_message(self, session_name: str, text: str, chat_id: ChatId | None, msg_id: int | None, one_off: bool=False) -> None:
         registered = self.workers.get_registered_sessions()
@@ -7702,8 +7164,7 @@ class CommandRouter:
         backend_name = get_worker_backend(session_name, session)
         backend = get_backend(backend_name)
         shortcut = text.strip().lower()
-        if backend.is_interactive and shortcut in (
-            "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "cancel"
+        if backend.is_interactive and shortcut in ( "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "cancel"
         ):
             tmux_name = session.get("tmux", f"{self.workers.tmux_prefix}{session_name}")
             host = get_worker_host(session_name)
@@ -7719,13 +7180,10 @@ class CommandRouter:
             self.reply(chat_id, f"{session_name.capitalize()} is still working on the previous request. Wait for a response or use /pause.")
             return
 
-        if not text.startswith("Manager sent "):
-            text = f"manager: {text}"
+        if not text.startswith("Manager sent "): text = f"manager: {text}"
         _log(_LOG_INFO, "dispatch", f"chat_id={chat_id} -> {session_name}: {text[:50]}...")
-        if backend.is_interactive and chat_id is not None:
-            worker_set_pending(session_name, chat_id)
-        if chat_id is not None:
-            _task_pool.submit(send_typing_loop, chat_id, session_name)
+        if backend.is_interactive and chat_id is not None: worker_set_pending(session_name, chat_id)
+        if chat_id is not None: _task_pool.submit(send_typing_loop, chat_id, session_name)
         send_ok = self.workers.send(session_name, text, chat_id, session)
         if not send_ok:
             clear_pending(session_name)
@@ -7759,8 +7217,7 @@ class TranscriptSyncRegistry:
 
     def update(self, key: str, **fields: object) -> None:
         with self._lock:
-            if key in self._state:
-                self._state[key].update(fields)
+            if key in self._state: self._state[key].update(fields)
 
     def get_started(self, key: str) -> float:
         with self._lock:
@@ -7781,27 +7238,18 @@ def _run_transcript_query(jsonl_path: str, sid: str, query: str,
     script_path = INDEXER_SCRIPT
     if host:
         remote_home = _get_remote_home(host) or ""
-        if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/indexer.py"
+        if remote_home: script_path = f"{remote_home}/claudecode-telegram/indexer.py"
     cmd = ["python3", script_path, "transcript", "--jsonl", str(jsonl_path),
            "--db", db_path, "--query", query]
-    if page is not None:
-        cmd.extend(["--page", str(page)])
-    if per_page is not None:
-        cmd.extend(["--per-page", str(per_page)])
-    if search:
-        cmd.extend(["--search", search])
-    if filter_mode:
-        cmd.extend(["--filter", filter_mode])
-    if sort and sort != "relevance":
-        cmd.extend(["--sort", sort])
+    if page is not None: cmd.extend(["--page", str(page)])
+    if per_page is not None: cmd.extend(["--per-page", str(per_page)])
+    if search: cmd.extend(["--search", search])
+    if filter_mode: cmd.extend(["--filter", filter_mode])
+    if sort and sort != "relevance": cmd.extend(["--sort", sort])
     try:
-        if host:
-            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_LARGE_TRANSFER)
-        else:
-            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        if r.returncode == 0 and r.stdout.strip():
-            return cast(dict[str, object], json.loads(r.stdout))
+        if host: r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_LARGE_TRANSFER)
+        else: r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+        if r.returncode == 0 and r.stdout.strip(): return cast(dict[str, object], json.loads(r.stdout))
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
     return None
@@ -7813,14 +7261,12 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
         r = _subprocess_runner.run(["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
                            capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
         remote_size = 0
-        if r.returncode == 0 and r.stdout.strip().isdigit():
-            remote_size = int(r.stdout.strip())
+        if r.returncode == 0 and r.stdout.strip().isdigit(): remote_size = int(r.stdout.strip())
 
         if remote_size > 0:
             size_mb = remote_size / 1_048_576
             _transcript_sync.update(key, progress=f"Syncing transcript ({size_mb:.1f} MB)...", remote_size=remote_size)
-        else:
-            _transcript_sync.update(key, progress="Syncing transcript...")
+        else: _transcript_sync.update(key, progress="Syncing transcript...")
         proc = _subprocess_runner.popen(
             ["rsync", "-az", f"{host}:{remote_path}", str(local_tmp)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -7847,10 +7293,8 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
                                            "started": _transcript_sync.get_started(key),
                                            "path": None, "error": stderr[:200] or "rsync failed"})
         finally:
-            if proc.stdout:
-                proc.stdout.close()
-            if proc.stderr:
-                proc.stderr.close()
+            if proc.stdout: proc.stdout.close()
+            if proc.stderr: proc.stderr.close()
     except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
         _transcript_sync.set(key, {"status": "error", "progress": "Sync failed",
                                    "started": _transcript_sync.get_started(key),
@@ -7868,8 +7312,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
             pass
     cwd = cwd or os.path.expanduser("~")
     sid = session_id or get_claude_session_id(name, authoritative=True)
-    if not sid:
-        return None, "", cwd
+    if not sid: return None, "", cwd
 
     slug = _project_slug(cwd)
     transcript_path = Path.home() / ".claude" / "projects" / slug / f"{sid}.jsonl"
@@ -7891,10 +7334,8 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                     local_tmp = Path(f"/tmp/transcript-{name}-{sid}.jsonl")
                     sync_key = f"{name}:{sid}"
                     sync_info = _transcript_sync.get(sync_key)
-                    if sync_info and sync_info["status"] == "done" and local_tmp.exists():
-                        transcript_path = local_tmp
-                    elif sync_info and sync_info["status"] == "syncing":
-                        return "syncing", sid, cwd
+                    if sync_info and sync_info["status"] == "done" and local_tmp.exists(): transcript_path = local_tmp
+                    elif sync_info and sync_info["status"] == "syncing": return "syncing", sid, cwd
                     elif sync_info and sync_info["status"] == "error":
                         err = sync_info.get("error", "unknown error")
                         _log(_LOG_WARN, "transcript", f"sync failed for {name}:{sid}: {err}")
@@ -7906,8 +7347,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
             except (OSError, subprocess.SubprocessError) as exc:
                 _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
 
-    if transcript_path.exists():
-        return str(transcript_path), sid, cwd
+    if transcript_path.exists(): return str(transcript_path), sid, cwd
     return None, sid, cwd
 
 def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
@@ -7915,17 +7355,14 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             try:
                 entry = cast(TranscriptEntry, json.loads(line))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             etype = entry.get("type", "")
-            if etype in ("progress", "queue-operation", "file-history-snapshot"):
-                continue
-            if etype == "system":
-                continue
+            if etype in ("progress", "queue-operation", "file-history-snapshot"): continue
+            if etype == "system": continue
             entries.append(entry)
     return entries
 
@@ -7972,10 +7409,8 @@ def _detect_message_author(text: str) -> AuthorDetection:
     if 0 < colon_pos <= 10:
         prefix = stripped[:colon_pos].lower().strip()
         rest = stripped[colon_pos + 1:].strip()
-        if prefix == "manager":
-            return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
-        if prefix in _TEAM_MEMBERS:
-            return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
+        if prefix == "manager": return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
+        if prefix in _TEAM_MEMBERS: return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
     return AuthorDetection("manager", _MANAGER_AV, stripped)
 
 # ── Transcript rendering SVG constants ──────────────────────────────────
@@ -7994,8 +7429,7 @@ _TRANSCRIPT_DEFAULT_TOOL_SVG = '<svg class="t-icon" viewBox="0 0 16 16" fill="cu
 
 def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None) -> str:
     import base64 as _b64
-    if tool_results is None:
-        tool_results = {}
+    if tool_results is None: tool_results = {}
     etype = entry.get("type", "")
     msg = entry.get("message", {})
     role = msg.get("role", "")
@@ -8007,22 +7441,18 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
     parts: list[str] = []
     ts_raw = entry.get("timestamp", "")
     ts_html = ""
-    if ts_raw:
-        ts_html = f'<span class="ts" data-ts="{esc(ts_raw)}">{esc(ts_raw[:16].replace("T"," "))}</span>'
+    if ts_raw: ts_html = f'<span class="ts" data-ts="{esc(ts_raw)}">{esc(ts_raw[:16].replace("T"," "))}</span>'
 
     if etype == "user" and role == "user":
         if isinstance(content, str) and content.strip():
             raw = content.strip()
-            if raw.startswith("<task-notification>") or raw.startswith("<system-reminder>"):
-                return ""
+            if raw.startswith("<task-notification>") or raw.startswith("<system-reminder>"): return ""
             _author, _avatar, _display = _detect_message_author(raw)
             text = esc(_display)
-            if len(text) > 2000:
-                text = text[:2000] + "\n\n<em>… truncated</em>"
+            if len(text) > 2000: text = text[:2000] + "\n\n<em>… truncated</em>"
             _name_html = f'<span class="u-name">{esc(_author)}</span>' if _author != "manager" else ""
             parts.append(f'<div class="user-msg">{_avatar}<div class="u-body">{_name_html}<div class="u-text">{text}{ts_html}</div></div></div>')
-        elif isinstance(content, list):
-            pass
+        elif isinstance(content, list): pass
 
     elif etype == "assistant" and role == "assistant":
         if isinstance(content, list):
@@ -8032,8 +7462,7 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                     raw_thinking = str(item.get("thinking", ""))
                     if raw_thinking and raw_thinking.strip():
                         tt = esc(raw_thinking[:3000])
-                        if len(raw_thinking) > 3000:
-                            tt += "\n… truncated"
+                        if len(raw_thinking) > 3000: tt += "\n… truncated"
                         parts.append(f'<details class="think"><summary class="think-h">{_chev} Thinking</summary><div class="think-t">{tt}</div></details>')
                 elif ct == "text":
                     text = item.get("text", "")
@@ -8052,16 +7481,11 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                     elif tn == "Edit":
                         inp = ti.get("file_path", "")
                         is_fp = bool(inp and "/" in inp)
-                    elif tn == "Glob":
-                        inp = ti.get("pattern", "")
-                    elif tn == "Bash":
-                        inp = ti.get("command", "")
-                    elif tn in ("Grep", "Search"):
-                        inp = ti.get("pattern", "")
-                    elif tn == "Agent":
-                        inp = ti.get("description", "") or str(ti.get("prompt", ""))[:80]
-                    else:
-                        inp = json.dumps(ti, ensure_ascii=False)[:200]
+                    elif tn == "Glob": inp = ti.get("pattern", "")
+                    elif tn == "Bash": inp = ti.get("command", "")
+                    elif tn in ("Grep", "Search"): inp = ti.get("pattern", "")
+                    elif tn == "Agent": inp = ti.get("description", "") or str(ti.get("prompt", ""))[:80]
+                    else: inp = json.dumps(ti, ensure_ascii=False)[:200]
                     inp = str(inp)[:300]
                     tool_id = item.get("id", "")
                     tr = tool_results.get(tool_id, {})
@@ -8073,8 +7497,7 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                     if not _skip_result:
                         tr_str = str(tr_text)[:5000]
                         tr_esc = esc(tr_str)
-                        if len(str(tr_text)) > 5000:
-                            tr_esc += "\n… truncated"
+                        if len(str(tr_text)) > 5000: tr_esc += "\n… truncated"
 
                     if tn == "Edit" and ti.get("old_string") is not None:
                         file_path_esc = esc(ti.get("file_path", "?"))
@@ -8124,8 +7547,7 @@ def _transcript_entry_to_html(entry: TranscriptEntry, esc: Callable[[str], str],
                         if tr_esc and not _skip_result:
                             err_cls = " act-err" if tr_err else ""
                             parts.append(f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="t-det">{esc(inp[:80])}</span>{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>')
-                        else:
-                            parts.append(f'<div class="chip">{tool_svg}<span class="t-det">{esc(inp)}</span></div>')
+                        else: parts.append(f'<div class="chip">{tool_svg}<span class="t-det">{esc(inp)}</span></div>')
         elif isinstance(content, str) and content.strip():
             b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
             parts.append(f'<div class="a-text markdown" data-md="{b64}"></div>')
@@ -8151,18 +7573,15 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
     lines_mod = 0
     files_modified = set()
     for e in entries:
-        if e.get("type") != "assistant":
-            continue
+        if e.get("type") != "assistant": continue
         for c in (e.get("message", {}).get("content") or []):
-            if not isinstance(c, dict) or c.get("type") != "tool_use":
-                continue
+            if not isinstance(c, dict) or c.get("type") != "tool_use": continue
             n_tool += 1
             ti = c.get("input", {})
             if c.get("name") == "Edit" and ti.get("old_string") is not None:
                 n_edit += 1
                 file_path = ti.get("file_path", "")
-                if file_path:
-                    files_modified.add(file_path)
+                if file_path: files_modified.add(file_path)
                 n_old = len(ti.get("old_string", "").splitlines(True))
                 n_new = len(ti.get("new_string", "").splitlines(True))
                 overlap = min(n_old, n_new)
@@ -8171,23 +7590,17 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
                 lines_add += n_new - overlap
             elif c.get("name") in ("Write", "Read", "Edit"):
                 file_path = ti.get("file_path", "")
-                if file_path:
-                    files_modified.add(file_path)
+                if file_path: files_modified.add(file_path)
     model = version = git_branch = ""
     first_ts = last_ts = ""
     input_tokens = output_tokens = 0
     for e in entries:
-        if not model:
-            model = e.get("message", {}).get("model", "")
-        if not version:
-            version = e.get("version", "")
-        if not git_branch:
-            git_branch = e.get("gitBranch", "")
+        if not model: model = e.get("message", {}).get("model", "")
+        if not version: version = e.get("version", "")
+        if not git_branch: git_branch = e.get("gitBranch", "")
         ts = e.get("timestamp", "")
-        if ts and not first_ts:
-            first_ts = ts
-        if ts:
-            last_ts = ts
+        if ts and not first_ts: first_ts = ts
+        if ts: last_ts = ts
         usage = e.get("message", {}).get("usage", {})
         turn_in = (usage.get("input_tokens", 0)
                    + usage.get("cache_read_input_tokens", 0)
@@ -8203,17 +7616,13 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             t1 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
             delta = t1 - t0
             total_s = int(delta.total_seconds())
-            if total_s < 0:
-                total_s = 0
+            if total_s < 0: total_s = 0
             days = total_s // 86400
             hours = (total_s % 86400) // 3600
             mins = (total_s % 3600) // 60
-            if days > 0:
-                duration_str = f"{days}d {hours}h"
-            elif hours > 0:
-                duration_str = f"{hours}h {mins}m"
-            else:
-                duration_str = f"{mins}m"
+            if days > 0: duration_str = f"{days}d {hours}h"
+            elif hours > 0: duration_str = f"{hours}h {mins}m"
+            else: duration_str = f"{mins}m"
         except (ValueError, TypeError, KeyError) as exc:
             _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
     return {"n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
@@ -8326,19 +7735,14 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
     _url_prefix = live_base_url + "?" if live_base_url else "?"
 
     def _ctx_url(entry: TranscriptEntry) -> str:
-        if not search_query:
-            return ""
+        if not search_query: return ""
         idx = entry.get("_idx", -1)
-        if idx < 0:
-            return ""
+        if idx < 0: return ""
         ctx_page = (idx // per_page) + 1
         ctx_qs = []
-        if token:
-            ctx_qs.append(f"token={esc(token)}")
-        if session_id:
-            ctx_qs.append(f"sid={esc(session_id)}")
-        if per_page != 50:
-            ctx_qs.append(f"per_page={per_page}")
+        if token: ctx_qs.append(f"token={esc(token)}")
+        if session_id: ctx_qs.append(f"sid={esc(session_id)}")
+        if per_page != 50: ctx_qs.append(f"per_page={per_page}")
         ctx_qs.append(f"page={ctx_page}")
         return f'{_url_prefix}{"&".join(ctx_qs)}#e-{idx}'
 
@@ -8348,11 +7752,9 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
         is_tool_result = (etype == "user" and role == "user" and
                           isinstance(entry.get("message", {}).get("content"), list) and
                           any(c.get("type") == "tool_result" for c in entry.get("message", {}).get("content", []) if isinstance(c, dict)))
-        if is_tool_result:
-            continue
+        if is_tool_result: continue
         entry_html = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
-        if not entry_html:
-            continue
+        if not entry_html: continue
         eidx = entry.get("_idx", -1)
         anchor = f' id="e-{eidx}"' if eidx >= 0 else ""
         curl = _ctx_url(entry)
@@ -8373,13 +7775,10 @@ def _transcript_html_entries(page_entries: list[TranscriptEntry],
             if in_assistant_turn:
                 blocks.append('</div>')
                 in_assistant_turn = False
-            if curl:
-                entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
-            elif anchor:
-                entry_html = f'<div{anchor}>{entry_html}</div>'
+            if curl: entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
+            elif anchor: entry_html = f'<div{anchor}>{entry_html}</div>'
             blocks.append(entry_html)
-    if in_assistant_turn:
-        blocks.append('</div>')
+    if in_assistant_turn: blocks.append('</div>')
     return f'''<form class="search-bar" method="get"{' action="' + esc(live_base_url) + '"' if live_base_url else ''}>
 <input type="text" name="q" placeholder="Search transcript…" value="{search_val}">
 <button type="submit">Search</button>
@@ -8485,8 +7884,7 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         for _i, _e in enumerate(all_entries):
             _e["_idx"] = _i
         total_pages = max(1, (total + per_page - 1) // per_page)
-        if page is None:
-            page = total_pages
+        if page is None: page = total_pages
         page = max(1, min(page, total_pages))
         start = (page - 1) * per_page
         page_entries = all_entries[start:start + per_page]
@@ -8503,10 +7901,8 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             except (json.JSONDecodeError, KeyError):
                 continue
 
-        if search_query:
-            total = _int_field(query_result, "total_results")
-        else:
-            total = _int_field(query_result, "total")
+        if search_query: total = _int_field(query_result, "total_results")
+        else: total = _int_field(query_result, "total")
         total_pages = _int_field(query_result, "total_pages", 1)
         page = _int_field(query_result, "page", 1)
         _empty_stats: TranscriptStatsDict = {"n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0,
@@ -8518,12 +7914,9 @@ def _render_transcript_html(name: str, session_id: str | None = None,
     if not host:
         try:
             file_size_bytes = os.path.getsize(transcript_path) if transcript_path else 0
-            if file_size_bytes >= 1_048_576:
-                file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
-            elif file_size_bytes >= 1024:
-                file_size_str = f"{file_size_bytes / 1024:.0f} KB"
-            else:
-                file_size_str = f"{file_size_bytes} B"
+            if file_size_bytes >= 1_048_576: file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
+            elif file_size_bytes >= 1024: file_size_str = f"{file_size_bytes / 1024:.0f} KB"
+            else: file_size_str = f"{file_size_bytes} B"
         except OSError as exc:
             _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
     _tool_results: dict[str, ToolResultDict] = {}
@@ -8540,22 +7933,16 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                         _tool_results[tuid] = cast(ToolResultDict, {"content": str(rt), "is_error": bool(item.get("is_error"))})
     _url_prefix = live_base_url + "?" if live_base_url else "?"
     qs_parts = []
-    if token:
-        qs_parts.append(f"token={esc(token)}")
-    if session_id:
-        qs_parts.append(f"sid={esc(session_id)}")
-    if per_page != 50:
-        qs_parts.append(f"per_page={per_page}")
-    if search_query:
-        qs_parts.append(f"q={esc(search_query)}")
-    if filter_mode:
-        qs_parts.append(f"filter={esc(filter_mode)}")
+    if token: qs_parts.append(f"token={esc(token)}")
+    if session_id: qs_parts.append(f"sid={esc(session_id)}")
+    if per_page != 50: qs_parts.append(f"per_page={per_page}")
+    if search_query: qs_parts.append(f"q={esc(search_query)}")
+    if filter_mode: qs_parts.append(f"filter={esc(filter_mode)}")
     qs_base = "&".join(qs_parts)
 
     def page_url(p: int | str) -> str:
         parts = [f"page={p}"]
-        if qs_base:
-            parts.append(qs_base)
+        if qs_base: parts.append(qs_base)
         return _url_prefix + "&".join(parts)
 
     nav_html = ""
@@ -8579,13 +7966,10 @@ def _render_transcript_html(name: str, session_id: str | None = None,
         alt_sort = "time" if search_sort == "relevance" else "relevance"
         alt_label = "time" if search_sort == "relevance" else "relevance"
         sort_qs = []
-        if token:
-            sort_qs.append(f"token={esc(token)}")
-        if session_id:
-            sort_qs.append(f"sid={esc(session_id)}")
+        if token: sort_qs.append(f"token={esc(token)}")
+        if session_id: sort_qs.append(f"sid={esc(session_id)}")
         sort_qs.append(f"q={esc(search_query)}")
-        if per_page != 50:
-            sort_qs.append(f"per_page={per_page}")
+        if per_page != 50: sort_qs.append(f"per_page={per_page}")
         sort_qs.append(f"sort={alt_sort}")
         sort_url = f'{_url_prefix}{"&".join(sort_qs)}'
         search_result = (
@@ -8593,14 +7977,10 @@ def _render_transcript_html(name: str, session_id: str | None = None,
             f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_label}</a></div>'
         )
     _filt_qs = []
-    if token:
-        _filt_qs.append(f"token={esc(token)}")
-    if session_id:
-        _filt_qs.append(f"sid={esc(session_id)}")
-    if per_page != 50:
-        _filt_qs.append(f"per_page={per_page}")
-    if filter_mode != "prompts":
-        _filt_qs.append("filter=prompts")
+    if token: _filt_qs.append(f"token={esc(token)}")
+    if session_id: _filt_qs.append(f"sid={esc(session_id)}")
+    if per_page != 50: _filt_qs.append(f"per_page={per_page}")
+    if filter_mode != "prompts": _filt_qs.append("filter=prompts")
     prompts_filter_url = _url_prefix + "&".join(_filt_qs) if _filt_qs else _url_prefix.rstrip("?")
     filter_banner = ""
     if filter_mode == "prompts":
@@ -8649,32 +8029,26 @@ class EndpointRouter:
 
     def resolve_post(self, path: str) -> PostRouteResolution:
         handler = self._post_exact.get(path)
-        if handler:
-            return PostRouteResolution(handler, None)
+        if handler: return PostRouteResolution(handler, None)
         for regex, pat_handler in self._post_patterns:
             match = regex.match(path)
-            if match:
-                return PostRouteResolution(pat_handler, match)
+            if match: return PostRouteResolution(pat_handler, match)
         return PostRouteResolution(None, None)
 
     def resolve_get(self, path: str) -> GetRouteResolution:
         handler = self._get_exact.get(path)
-        if handler:
-            return GetRouteResolution(handler, None)
+        if handler: return GetRouteResolution(handler, None)
         for regex, pat_handler in self._get_patterns:
             match = regex.match(path)
-            if match:
-                return GetRouteResolution(pat_handler, match)
+            if match: return GetRouteResolution(pat_handler, match)
         return GetRouteResolution(None, None)
 
     def resolve_delete(self, path: str) -> GetRouteResolution:
         handler = self._delete_exact.get(path)
-        if handler:
-            return GetRouteResolution(handler, None)
+        if handler: return GetRouteResolution(handler, None)
         for regex, pat_handler in self._delete_patterns:
             match = regex.match(path)
-            if match:
-                return GetRouteResolution(pat_handler, match)
+            if match: return GetRouteResolution(pat_handler, match)
         return GetRouteResolution(None, None)
 
 _endpoint_router = EndpointRouter()
@@ -8721,8 +8095,7 @@ def _checkin_do_restart(name: str, backend_name: str,
             restart_backend = get_backend(backend_name)
             ok, err = command_router._restart_remote_worker(
                 name, backend_name, restart_backend, tmux_name, host, "relaunch")
-        else:
-            ok, err = worker_manager.restart(name, mode="relaunch")
+        else: ok, err = worker_manager.restart(name, mode="relaunch")
         watchdog.recent_restarts[name] = _clock.time()
         _log(_LOG_INFO, "checkin", f"{name}: restart result ok={ok}, err={err}")
 
@@ -8788,8 +8161,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(status, {"ok": False, "error": err})
                 return
             name = requested_name
-        else:
-            name = guest_generate_name(existing_names=team_workers | existing_guests)
+        else: name = guest_generate_name(existing_names=team_workers | existing_guests)
         token, token_hash = guest_create_token()
         now = _clock.time()
         expires_at_unix = now + GUEST_TTL
@@ -8852,8 +8224,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_guest_send(self, body: bytes = b"") -> None:
         parsed = urlparse(self.path)
         guest = self._guest_auth(parsed)
-        if not guest:
-            return
+        if not guest: return
         try:
             data = cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError):
@@ -8866,12 +8237,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         raw_to = data.get("to", _str_field(data, "worker"))
-        if isinstance(raw_to, str):
-            targets = [raw_to.strip()] if raw_to.strip() else []
-        elif isinstance(raw_to, list):
-            targets = [t.strip() for t in raw_to if isinstance(t, str) and t.strip()]
-        else:
-            targets = []
+        if isinstance(raw_to, str): targets = [raw_to.strip()] if raw_to.strip() else []
+        elif isinstance(raw_to, list): targets = [t.strip() for t in raw_to if isinstance(t, str) and t.strip()]
+        else: targets = []
         if not targets:
             self._send_error_json(400, "to (or worker) required")
             return
@@ -8948,8 +8316,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     notified = guest.get("notified_workers", set())
                     if worker not in notified:
-                        if isinstance(notified, set):
-                            notified.add(worker)
+                        if isinstance(notified, set): notified.add(worker)
                         guest["notified_workers"] = notified
                         try:
                             if admin_chat_id:
@@ -8959,10 +8326,8 @@ class Handler(BaseHTTPRequestHandler):
                             _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
                 results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
 
-        if len(results) == 1:
-            self._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
-        else:
-            self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
+        if len(results) == 1: self._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
+        else: self._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
         try:
@@ -8980,8 +8345,7 @@ class Handler(BaseHTTPRequestHandler):
 
         msg_id = f"gm_{secrets.token_hex(4)}"
         with guest_store.lock:
-            if guest_name not in guest_store.inboxes:
-                guest_store.inboxes[guest_name] = []
+            if guest_name not in guest_store.inboxes: guest_store.inboxes[guest_name] = []
             guest_store.inboxes[guest_name] = guest_inbox_append(
                 guest_store.inboxes[guest_name],
                 {"id": msg_id, "from": from_worker or "worker",
@@ -8991,8 +8355,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_guest_inbox(self, parsed: ParseResult) -> None:
         guest = self._guest_auth(parsed)
-        if not guest:
-            return
+        if not guest: return
         query_params = parse_qs(parsed.query)
         after = query_params.get("after", [None])[0]
         guest_name = guest["name"]
@@ -9005,8 +8368,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_guest_status(self, parsed: ParseResult) -> None:
         guest = self._guest_auth(parsed)
-        if not guest:
-            return
+        if not guest: return
         with guest_store.lock:
             workers = list(guest.get("notified_workers", set()))
         self._send_json(200, {
@@ -9020,8 +8382,7 @@ class Handler(BaseHTTPRequestHandler):
             guests_list = []
             expired = []
             for token_hash, g in guest_store.guests.items():
-                if guest_is_expired(g["expires_at_unix"]):
-                    expired.append(token_hash)
+                if guest_is_expired(g["expires_at_unix"]): expired.append(token_hash)
                 else:
                     guests_list.append({
                         "name": g["name"],
@@ -9032,8 +8393,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = guest_store.guests[th]["name"]
                 guest_store.guests.pop(th, None)
                 guest_store.inboxes.pop(name, None)
-            if expired:
-                _guest_save()
+            if expired: _guest_save()
         self._send_json(200, {"ok": True, "guests": guests_list})
 
     def handle_guest_disconnect(self, parsed: ParseResult) -> None:
@@ -9095,10 +8455,8 @@ class Handler(BaseHTTPRequestHandler):
 
         valid_members = []
         for m in members:
-            if isinstance(m, str) and (m == "manager" or ":" in m):
-                valid_members.append(m)
-        if include_manager and "manager" not in valid_members:
-            valid_members.append("manager")
+            if isinstance(m, str) and (m == "manager" or ":" in m): valid_members.append(m)
+        if include_manager and "manager" not in valid_members: valid_members.append("manager")
         parsed = urlparse(self.path)
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
@@ -9110,10 +8468,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error_json(403, "invalid or expired token")
                 return
             created_by = f"guest:{guest['name']}"
-            if created_by not in valid_members:
-                valid_members.append(created_by)
-        else:
-            created_by = "manager"
+            if created_by not in valid_members: valid_members.append(created_by)
+        else: created_by = "manager"
         channel_id = channel_create_id(label)
         channel = channel_new(channel_id, label, created_by, valid_members, ttl)
 
@@ -9162,10 +8518,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if admin_chat_id:
                     parts = []
-                    if added:
-                        parts.append(f"added {', '.join(added)}")
-                    if removed:
-                        parts.append(f"removed {', '.join(removed)}")
+                    if added: parts.append(f"added {', '.join(added)}")
+                    if removed: parts.append(f"removed {', '.join(removed)}")
                     send_telegram_message(admin_chat_id,
                         f"\U0001f4e2 Channel {channel_id}: {'; '.join(parts)}")
             except (urllib.error.URLError, OSError, TimeoutError) as exc:
@@ -9203,8 +8557,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error_json(403, "invalid or expired token")
                 return
             from_member = f"guest:{guest['name']}"
-        elif not from_member:
-            from_member = "manager"
+        elif not from_member: from_member = "manager"
 
         with channel_store.lock:
             channel = channel_store.channels.get(channel_id)
@@ -9218,8 +8571,7 @@ class Handler(BaseHTTPRequestHandler):
             members_snapshot = dict(channel["members"])
         tagged = f"[{channel_id} from {from_member}] {text}"
         for member_key, info in members_snapshot.items():
-            if member_key == from_member:
-                continue
+            if member_key == from_member: continue
             if info["type"] == "worker":
                 worker_name = info["name"]
                 registered = get_registered_sessions()
@@ -9290,8 +8642,7 @@ class Handler(BaseHTTPRequestHandler):
             "channel": channel_id,
             "messages": msgs,
         }
-        if truncated:
-            resp["truncated"] = True
+        if truncated: resp["truncated"] = True
         self._send_json(200, resp)
 
     def handle_channels_list(self, parsed: ParseResult | None = None) -> None:
@@ -9311,11 +8662,9 @@ class Handler(BaseHTTPRequestHandler):
             active = []
             expired_ids = []
             for cid, ch in channel_store.channels.items():
-                if channel_is_expired(ch):
-                    expired_ids.append(cid)
+                if channel_is_expired(ch): expired_ids.append(cid)
                 else:
-                    if filter_member and filter_member not in ch["members"]:
-                        continue
+                    if filter_member and filter_member not in ch["members"]: continue
                     active.append({
                         "id": ch["id"],
                         "label": ch["label"],
@@ -9327,15 +8676,13 @@ class Handler(BaseHTTPRequestHandler):
                     })
             for cid in expired_ids:
                 del channel_store.channels[cid]
-            if expired_ids:
-                _channel_save()
+            if expired_ids: _channel_save()
         self._send_json(200, {"ok": True, "channels": active})
 
     def handle_channel_delete(self, channel_id: str) -> None:
         with channel_store.lock:
             channel = channel_store.channels.pop(channel_id, None)
-            if channel:
-                _channel_save()
+            if channel: _channel_save()
         if not channel:
             self._send_error_json(404, "channel not found")
             return
@@ -9352,8 +8699,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _relay_get_token(self) -> str | None:
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return auth[7:].strip()
+        if auth.startswith("Bearer "): return auth[7:].strip()
         parsed = urlparse(self.path)
         params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
         return params.get("token", "")
@@ -9527,10 +8873,8 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             self._send_text(400, "Invalid JSON")
             return
-        if _str_field(data, "path") and _int_field(data, "line"):
-            self.handle_pr_comment(body)
-        else:
-            self.handle_pr_general_comment(body)
+        if _str_field(data, "path") and _int_field(data, "line"): self.handle_pr_comment(body)
+        else: self.handle_pr_general_comment(body)
 
     def handle_pr_general_comment(self, body: bytes) -> None:
         try:
@@ -9603,8 +8947,7 @@ class Handler(BaseHTTPRequestHandler):
         repo = _str_field(data, "repo")
         pr_num = _int_field(data, "pr_num")
         merge_method = _str_field(data, "merge_method", "merge")
-        if merge_method not in ("merge", "squash", "rebase"):
-            merge_method = "merge"
+        if merge_method not in ("merge", "squash", "rebase"): merge_method = "merge"
 
         if not all([owner, repo, pr_num]):
             self._send_text(400, "Missing required fields")
@@ -9793,8 +9136,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     total = _int_field(result, "n_user") + _int_field(result, "n_tool")
                     count_result = _run_transcript_query(
                         jsonl_path, sid, "entries", host=host, page=1, per_page=1)
-                    if count_result:
-                        total = _int_field(count_result, "total", total)
+                    if count_result: total = _int_field(count_result, "total", total)
                 new_count = max(0, total - since)
                 self._send_json(200, {"total": total, "new": new_count})
                 return
@@ -9812,8 +9154,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 per_page = 50
             search_query = query_params.get("q", [""])[0].strip()
             search_sort = query_params.get("sort", ["relevance"])[0].strip()
-            if search_sort not in ("relevance", "time"):
-                search_sort = "relevance"
+            if search_sort not in ("relevance", "time"): search_sort = "relevance"
             filter_mode = query_params.get("filter", [""])[0].strip()
             host = get_worker_host(name)
             if not host:
@@ -9946,8 +9287,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             for chat_id in chat_ids:
                 if clean_text:
                     result = transport.send_text(chat_id, clean_text)
-                    if result and result.get("ok"):
-                        sent += 1
+                    if result and result.get("ok"): sent += 1
                 for img_path, caption in images:
                     if img_path is None:
                         transport.send_text(chat_id, f"{label}: {caption}")
@@ -9955,22 +9295,17 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     full_caption = f"{label}: {caption}" if caption else f"{label}:"
                     if Path(img_path).suffix.lower() in (".gif", ".mp4"):
                         send_animation(chat_id, img_path, full_caption)
-                    else:
-                        send_photo(chat_id, img_path, full_caption)
+                    else: send_photo(chat_id, img_path, full_caption)
                 for fpath, caption in files:
                     if fpath is None:
                         transport.send_text(chat_id, f"{label}: {caption}")
                         continue
                     full_caption = f"{label}: {caption}" if caption else f"{label}:"
                     ext = Path(fpath).suffix.lower()
-                    if ext in VIDEO_EXTENSIONS:
-                        send_video(chat_id, fpath, full_caption)
-                    elif ext in AUDIO_EXTENSIONS:
-                        send_audio(chat_id, fpath, full_caption)
-                    elif ext in VOICE_EXTENSIONS:
-                        send_voice(chat_id, fpath, full_caption)
-                    else:
-                        send_document(chat_id, fpath, full_caption)
+                    if ext in VIDEO_EXTENSIONS: send_video(chat_id, fpath, full_caption)
+                    elif ext in AUDIO_EXTENSIONS: send_audio(chat_id, fpath, full_caption)
+                    elif ext in VOICE_EXTENSIONS: send_voice(chat_id, fpath, full_caption)
+                    else: send_document(chat_id, fpath, full_caption)
             has_media = len(images) + len(files)
             _log(_LOG_INFO, "notify", f"sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
                  f"{f' ({has_media} media)' if has_media else ''}")
@@ -10014,8 +9349,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 backend_name = get_worker_backend(name, {"host": host})
                 tmux_name = f"{TMUX_PREFIX}{name}"
                 reg_host = host or None
-                if tmux_exists(tmux_name, host=reg_host):
-                    export_hook_env(tmux_name, backend_name, host=reg_host)
+                if tmux_exists(tmux_name, host=reg_host): export_hook_env(tmux_name, backend_name, host=reg_host)
                 ensure_session_dir(name)
                 if admin_chat_id is not None:
                     cid_file = get_chat_id_file(name)
@@ -10135,8 +9469,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 return
 
             chat_id_file = get_chat_id_file(session_name)
-            if chat_id_file.exists():
-                chat_id = chat_id_file.read_text().strip()
+            if chat_id_file.exists(): chat_id = chat_id_file.read_text().strip()
             elif admin_chat_id is not None:
                 chat_id = str(admin_chat_id)
                 ensure_session_dir(session_name)
@@ -10161,8 +9494,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                      f"escape={escape_flag}, ip={source_ip}")
             _log(_LOG_INFO, "hook", f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
             hook_sid = _str_field(data, "session_id")
-            if hook_sid:
-                _cache_session_id(session_name, hook_sid)
+            if hook_sid: _cache_session_id(session_name, hook_sid)
             send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
             _check_learning_reminder(session_name)
             clear_pending(session_name)
@@ -10216,8 +9548,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_workers_endpoint(self, parsed: ParseResult | None = None) -> None:
         try:
             caller_from = None
-            if parsed is not None:
-                caller_from = parse_qs(parsed.query).get("from", [None])[0]
+            if parsed is not None: caller_from = parse_qs(parsed.query).get("from", [None])[0]
             workers = get_workers(caller_from=caller_from)
             response = {"workers": workers}
             self.send_response(200)
@@ -10231,8 +9562,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
     def handle_machines_endpoint(self, parsed: ParseResult | None = None) -> None:
         try:
             caller_from = None
-            if parsed is not None:
-                caller_from = parse_qs(parsed.query).get("from", [None])[0]
+            if parsed is not None: caller_from = parse_qs(parsed.query).get("from", [None])[0]
             self._send_json(200, get_machines(caller_from=caller_from))
         except MachineConfigError as e:
             _log(_LOG_ERROR, "bridge", f"Machines endpoint config error: {e}")
@@ -10265,10 +9595,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                 backend_name = get_worker_backend(name, registered[name])
                 tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
                 host = get_worker_host(name)
-                if tmux_exists(tmux_name, host=host):
-                    export_hook_env(tmux_name, backend_name, host=host)
-            else:
-                backend_name = DEFAULT_BACKEND
+                if tmux_exists(tmux_name, host=host): export_hook_env(tmux_name, backend_name, host=host)
+            else: backend_name = DEFAULT_BACKEND
             backend_obj = get_backend(backend_name)
 
             if requested_cwd:
@@ -10282,8 +9610,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                     _log(_LOG_WARN, "checkin", f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate")
                     notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
                     notify_chat_id = get_manager_chat_id(name)
-                    if notify_chat_id is not None:
-                        send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
+                    if notify_chat_id is not None: send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
                 _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
 
                 if tmux_name and tmux_exists(tmux_name, host=host):
@@ -10296,8 +9623,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                             name, tmux_name, host, pane_cwd or "", requested_cwd)
                         if not allowed:
                             notify_chat_id = get_manager_chat_id(name)
-                            if notify_chat_id is not None:
-                                send_telegram_message(notify_chat_id, block_msg)
+                            if notify_chat_id is not None: send_telegram_message(notify_chat_id, block_msg)
                             self.send_response(200)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
@@ -10345,8 +9671,7 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
                         "since": since,
                         "age_sec": int(now - since) if since else None,
                     }
-                else:
-                    workers[name] = {"state": "unknown"}
+                else: workers[name] = {"state": "unknown"}
             response = {"workers": workers}
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -10357,10 +9682,8 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
             self._send_text(500, str(e))
 
     def handle_health_tunnel_endpoint(self) -> None:
-        if tunnel_manager is not None:
-            data = tunnel_manager.status()
-        else:
-            data = {"mode": "none", "state": "disabled", "tunnel_url": "", "polling_active": False}
+        if tunnel_manager is not None: data = tunnel_manager.status()
+        else: data = {"mode": "none", "state": "disabled", "tunnel_url": "", "polling_active": False}
         self._send_json(200, data)
 
 # ── Endpoint registration ──
@@ -10501,11 +9824,9 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
                 continue
             backend_name = get_worker_backend(name, info)
             backend_obj = get_backend(backend_name)
-            if not backend_obj.is_interactive:
-                ensure_worker_pipe(name)
+            if not backend_obj.is_interactive: ensure_worker_pipe(name)
             host = info.get("host") or get_worker_host(name)
-            if tmux_exists(tmux_name, host=host):
-                export_hook_env(tmux_name, backend_name, host=host)
+            if tmux_exists(tmux_name, host=host): export_hook_env(tmux_name, backend_name, host=host)
     return registered
 
 def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
@@ -10514,18 +9835,14 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     if last_active and last_active in registered:
         state.active = last_active
         print(f"Restored last active worker: {last_active}")
-    elif last_active:
-        print(f"Last active worker '{last_active}' no longer exists")
+    elif last_active: print(f"Last active worker '{last_active}' no longer exists")
 
     if os.path.isdir(TEAM_DIR):
         print(f"Team dir: {TEAM_DIR}")
         _startup_note = read_checkin_note()
-        if _startup_note:
-            print(f"  Checkin note: {_CHECKIN_NOTE_PATH} ({len(_startup_note)} chars)")
-        else:
-            print(f"  No checkin note at {_CHECKIN_NOTE_PATH}")
-    else:
-        print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
+        if _startup_note: print(f"  Checkin note: {_CHECKIN_NOTE_PATH} ({len(_startup_note)} chars)")
+        else: print(f"  No checkin note at {_CHECKIN_NOTE_PATH}")
+    else: print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
     last_chat_id = load_last_chat_id()
     if last_chat_id:
         if admin_chat_id is None:
@@ -10546,15 +9863,11 @@ def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     print(f"Hook endpoint: http://{BRIDGE_BIND}:{PORT}/outputs")
     print(f"Active: {state.active or 'none'}")
     print(f"Sessions: {list(registered.keys()) or 'none'}")
-    if WEBHOOK_SECRET:
-        print("Webhook verification: enabled")
-    else:
-        print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
+    if WEBHOOK_SECRET: print("Webhook verification: enabled")
+    else: print("Webhook verification: disabled (set TELEGRAM_WEBHOOK_SECRET to enable)")
     print(f"Hook endpoint auth: disabled (localhost-only)")
-    if admin_chat_id:
-        print(f"Admin: {admin_chat_id} (pre-configured)")
-    else:
-        print("Admin: auto-learn (first user to message becomes admin)")
+    if admin_chat_id: print(f"Admin: {admin_chat_id} (pre-configured)")
+    else: print("Admin: auto-learn (first user to message becomes admin)")
     print("Execution: direct (--dangerously-skip-permissions)")
 
 def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSessionDict]) -> None:
@@ -10564,15 +9877,11 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
     lines = ["I'm online and ready."]
     if sessions:
         lines.append(f"Team: {', '.join(sessions)}")
-        if active:
-            lines.append(f"Focused: {active}")
-    else:
-        lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
+        if active: lines.append(f"Focused: {active}")
+    else: lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
     result = transport.send_text(last_chat_id, "\n".join(lines))
-    if result and result.get("ok"):
-        print(f"Sent startup notification to chat {last_chat_id}")
-    else:
-        _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
+    if result and result.get("ok"): print(f"Sent startup notification to chat {last_chat_id}")
+    else: _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
 
 # ── Connector infrastructure (Gmail/GitHub) ────────────────────────
 
@@ -10643,8 +9952,7 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
     body = re.sub(r'^manager\s*\(via\s+\w+[^)]*\):\s*', '', body)
     body = re.sub(r'\[thread:[^\]]+\]\s*', '', body)
     body = " ".join(body.split())
-    if len(body) > 200:
-        body = body[:197] + "…"
+    if len(body) > 200: body = body[:197] + "…"
     ref_match = re.search(r'#(\d+)', plain_text)
     thread_match = re.search(r'\[thread:([^\]]+)\]', plain_text)
     header = f"{icon} <b>{tag.title()}</b>"
@@ -10653,11 +9961,9 @@ def _connector_short_summary(tag: str, plain_text: str, serve_url: str | None = 
         repo = (metadata or {}).get("repo", "BasedHardware/omi")
         gh_url = f"https://github.com/{repo}/issues/{num}"
         header += f' <a href="{gh_url}">#{num}</a>'
-    elif thread_match:
-        header += f" {_html.escape('thread:' + thread_match.group(1))}"
+    elif thread_match: header += f" {_html.escape('thread:' + thread_match.group(1))}"
     parts = [header, _html.escape(body)]
-    if serve_url:
-        parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
+    if serve_url: parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
     return "\n".join(parts)
 
 def _connector_export_github(number: int, repo: str) -> str | None:
@@ -10680,8 +9986,7 @@ def _connector_export_github(number: int, repo: str) -> str | None:
 
 def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, list[ConnectorAttachmentDict] | None, ConnectorMetadataDict | None], None]:
     def handler(targets: list[str], html_text: str, plain_text: str | None = None, attachments: list[ConnectorAttachmentDict] | None = None, metadata: ConnectorMetadataDict | None = None) -> None:
-        if plain_text is None:
-            plain_text = html_text
+        if plain_text is None: plain_text = html_text
         _connector_log_message(tag, html_text, plain_text, targets)
         if admin_chat_id:
             serve_url: str | None = None
@@ -10711,23 +10016,18 @@ def _connector_on_message(tag: str) -> Callable[[list[str], str, str | None, lis
             for att in (attachments or []):
                 fpath = att.get("path", "")
                 fname = att.get("filename", "")
-                if not fpath or not os.path.isfile(fpath):
-                    continue
+                if not fpath or not os.path.isfile(fpath): continue
                 ext = os.path.splitext(fname)[1].lower()
                 caption = f"📧 {fname}"
-                if ext in ALLOWED_IMAGE_EXTENSIONS:
-                    send_photo(admin_chat_id, fpath, caption)
-                elif ext in VIDEO_EXTENSIONS:
-                    send_video(admin_chat_id, fpath, caption)
-                else:
-                    send_document(admin_chat_id, fpath, caption)
+                if ext in ALLOWED_IMAGE_EXTENSIONS: send_photo(admin_chat_id, fpath, caption)
+                elif ext in VIDEO_EXTENSIONS: send_video(admin_chat_id, fpath, caption)
+                else: send_document(admin_chat_id, fpath, caption)
                 _log(_LOG_INFO, tag, f"attachment -> Telegram: {fname}")
         if targets:
             for name in targets:
                 send_to_worker(name, plain_text)
                 _log(_LOG_INFO, tag, f"-> {name}: {plain_text[:80]}...")
-        else:
-            _log(_LOG_INFO, tag, f"-> Telegram only (no mentions): {plain_text[:80]}...")
+        else: _log(_LOG_INFO, tag, f"-> Telegram only (no mentions): {plain_text[:80]}...")
     return handler
 
 def _connector_get_workers() -> set[str]:
@@ -10777,12 +10077,9 @@ def _start_connectors() -> tuple[object, object]:
 
 def _restart_connector(name: str) -> tuple[bool, str]:
     if name == "gmail":
-        if not GMAIL_ENABLED:
-            return False, "Gmail connector not enabled (GMAIL_ENABLED=0)"
-        if GmailConnector is None:
-            return False, f"Gmail connector import failed: {GMAIL_IMPORT_ERROR}"
-        if connectors.gmail is not None:
-            connectors.gmail.stop()
+        if not GMAIL_ENABLED: return False, "Gmail connector not enabled (GMAIL_ENABLED=0)"
+        if GmailConnector is None: return False, f"Gmail connector import failed: {GMAIL_IMPORT_ERROR}"
+        if connectors.gmail is not None: connectors.gmail.stop()
         connectors.gmail = GmailConnector(
             gws_bin=GMAIL_GWS_BIN,
             from_filter=GMAIL_FROM_FILTER,
@@ -10792,19 +10089,14 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             on_alert=_connector_on_alert("gmail"),
         )
         ok, msg = connectors.gmail.restart()
-        if ok:
-            print(f"Gmail connector restarted: {msg}")
-        else:
-            print(f"Gmail connector restart failed: {msg}")
+        if ok: print(f"Gmail connector restarted: {msg}")
+        else: print(f"Gmail connector restart failed: {msg}")
         return ok, msg
 
     elif name == "github":
-        if not GITHUB_ENABLED:
-            return False, "GitHub connector not enabled (BRIDGE_GHPOLL_ENABLED=0)"
-        if GitHubConnector is None:
-            return False, f"GitHub connector import failed: {GITHUB_IMPORT_ERROR}"
-        if connectors.github is not None:
-            connectors.github.stop()
+        if not GITHUB_ENABLED: return False, "GitHub connector not enabled (BRIDGE_GHPOLL_ENABLED=0)"
+        if GitHubConnector is None: return False, f"GitHub connector import failed: {GITHUB_IMPORT_ERROR}"
+        if connectors.github is not None: connectors.github.stop()
         connectors.github = GitHubConnector(
             repo=GITHUB_REPOS,
             from_user=GITHUB_FROM_USER,
@@ -10815,31 +10107,22 @@ def _restart_connector(name: str) -> tuple[bool, str]:
             state_file=str(NODE_DIR / "github_state.json"),
         )
         ok, msg = connectors.github.restart()
-        if ok:
-            print(f"GitHub connector restarted: {msg}")
-        else:
-            print(f"GitHub connector restart failed: {msg}")
+        if ok: print(f"GitHub connector restarted: {msg}")
+        else: print(f"GitHub connector restart failed: {msg}")
         return ok, msg
 
-    else:
-        return False, f"Unknown connector: {name} (valid: gmail, github)"
+    else: return False, f"Unknown connector: {name} (valid: gmail, github)"
 
 def _get_connectors_status() -> dict[str, ConnectorStatusDict]:
     result: dict[str, ConnectorStatusDict] = {}
     if GMAIL_ENABLED:
-        if connectors.gmail is not None:
-            result["gmail"] = cast(ConnectorStatusDict, connectors.gmail.status())
-        else:
-            result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}
-    else:
-        result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
+        if connectors.gmail is not None: result["gmail"] = cast(ConnectorStatusDict, connectors.gmail.status())
+        else: result["gmail"] = {"name": "gmail", "running": False, "error": "not initialized"}
+    else: result["gmail"] = {"name": "gmail", "running": False, "enabled": False}
     if GITHUB_ENABLED:
-        if connectors.github is not None:
-            result["github"] = cast(ConnectorStatusDict, connectors.github.status())
-        else:
-            result["github"] = {"name": "github", "running": False, "error": "not initialized"}
-    else:
-        result["github"] = {"name": "github", "running": False, "enabled": False}
+        if connectors.github is not None: result["github"] = cast(ConnectorStatusDict, connectors.github.status())
+        else: result["github"] = {"name": "github", "running": False, "error": "not initialized"}
+    else: result["github"] = {"name": "github", "running": False, "enabled": False}
     return result
 
 def main() -> None:
@@ -10864,8 +10147,7 @@ def main() -> None:
     last_chat_id = _restore_bridge_state(registered)
     _log_startup_info(registered)
 
-    if last_chat_id:
-        _send_startup_notification(last_chat_id, registered)
+    if last_chat_id: _send_startup_notification(last_chat_id, registered)
     watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)
     watchdog.start()
     _load_learning_reminder_state()
@@ -10910,8 +10192,7 @@ def main() -> None:
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
 
 # ── Module proxy: propagate attribute writes to source modules ──────
 import types as _types_mod
@@ -10924,8 +10205,7 @@ class _BridgeModule(_types_mod.ModuleType):
             super().__setattr__(name, value)
             return
         for mod in self._sources:
-            if hasattr(mod, name):
-                setattr(mod, name, value)
+            if hasattr(mod, name): setattr(mod, name, value)
         super().__setattr__(name, value)
 
     def __getattr__(self, name: str) -> object:
