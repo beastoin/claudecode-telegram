@@ -14,11 +14,9 @@ from typing import Callable, Literal, Protocol, runtime_checkable
 VERSION = "0.47.0"
 
 # ── Safe JSON field accessors ──────────────────────────────────────────
-
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
     val = d.get(key, default)
     return str(val) if val is not None else default
-
 def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     val = d.get(key, default)
     if isinstance(val, int): return val
@@ -26,11 +24,9 @@ def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
         try: return int(val)
         except ValueError: return default
     return default
-
 def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
     val = d.get(key)
     return val if isinstance(val, dict) else {}
-
 def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     val = d.get(key, default)
     return bool(val)
@@ -40,14 +36,12 @@ _LOG_ERROR: str = "ERROR"
 _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
 _LOG_DEBUG: str = "DEBUG"
-
 def _log(level: str, component: str, msg: str | Path, *,
          exc: BaseException | None = None) -> None:
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         import traceback as _tb
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
     try:
         return func(*args, **kwargs)
@@ -56,38 +50,29 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
         return None
 
 # ── DI seams (injectable for testing) ──────────────────────────────────
-
 class MarkdownToken(Protocol):
     type: str
     content: str
     children: list['MarkdownToken'] | None
     attrs: dict[str, str] | None
-
 class SubprocessRunner(Protocol):
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         ...
-
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         ...
-
 class Clock(Protocol):
     def time(self) -> float:
         ...
-
     def sleep(self, seconds: float) -> None:
         ...
-
 class _RealSubprocessRunner:
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
-
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
-
 class _RealClock:
     def time(self) -> float:
         return time.time()
-
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
@@ -98,7 +83,6 @@ _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # ty
 import http.cookiejar
 import threading
 import urllib.error
-
 @dataclass(frozen=True)
 class RetryConfig:
     max_retries: int = 3
@@ -106,17 +90,14 @@ class RetryConfig:
     max_delay: float = 60.0
     backoff_factor: float = 2.0
     retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-
 @dataclass(frozen=True)
 class RateLimitConfig:
     requests_per_second: float = 30.0
     burst: int = 30
-
 class _TokenBucket:
     def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
         self._rate = rate; self._burst = burst; self._clock = clock or _RealClock(); self._tokens = float(burst)
         self._last_refill = self._clock.time(); self._lock = threading.Lock()
-
     def acquire(self, timeout: float = 30.0) -> bool:
         deadline = self._clock.time() + timeout
         while True:
@@ -129,7 +110,6 @@ class _TokenBucket:
             wait = min(1.0 / self._rate, deadline - self._clock.time())
             if wait <= 0: return False
             self._clock.sleep(wait)
-
 class HttpClient:
     def __init__(  # type: ignore[explicit-any]
         self,
@@ -146,7 +126,6 @@ class HttpClient:
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), )
         self._limiters: dict[str, _TokenBucket] = {}
         self._limiters_lock = threading.Lock()
-
     def _get_limiter(self, host: str) -> _TokenBucket:
         with self._limiters_lock:
             if host not in self._limiters:
@@ -155,7 +134,6 @@ class HttpClient:
                     burst=self._rate_config.burst,
                     clock=self._clock, )
             return self._limiters[host]
-
     def request(
         self,
         url: str,
@@ -188,17 +166,14 @@ class HttpClient:
                 self._clock.sleep(min(delay, cfg.max_delay))
                 delay *= cfg.backoff_factor
         raise last_exc  # type: ignore[misc]
-
     def get(self, url: str, *, timeout: float = 30.0,
             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="GET", timeout=timeout, retry=retry)
-
     def post(self, url: str, data: bytes, *, headers: dict[str, str] | None = None,
              timeout: float = 30.0,
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="POST", data=data, headers=headers,
                             timeout=timeout, retry=retry)
-
     def head(self, url: str, *, timeout: float = 30.0,
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="HEAD", timeout=timeout, retry=retry)
@@ -285,7 +260,6 @@ ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
 
 # ── Config dataclasses ──────────────────────────────────────────────────
-
 @dataclass(frozen=True)
 class WatchdogConfig:
     interval: int = 4
@@ -299,7 +273,6 @@ class WatchdogConfig:
     alert_cooldown: int = 180
     restart_cooldown: int = 60
     host_down_threshold: int = 3
-
 @dataclass(frozen=True)
 class ResourceAlertConfig:
     disk_warn_pct: int = 85
@@ -317,13 +290,11 @@ class ResourceAlertConfig:
     io_iowait_pct: int = 30
     io_cooldown: int = 3600
     infra_cooldown: int = 300
-
 @dataclass(frozen=True)
 class MediaConfig:
     max_file_size: int = 50 * 1024 * 1024
     photo_max_sum: int = 10000
     photo_max_dim: int = 5000
-
 @dataclass(frozen=True)
 class TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"] = "poll"
@@ -343,7 +314,6 @@ class TunnelConfig:
 # ── Tunnel env vars ────────────────────────────────────────────────────
 TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
-
 def _build_tunnel_config() -> TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"]
     tunnel_url = TUNNEL_URL; raw = TUNNEL_MODE.lower()
@@ -388,7 +358,6 @@ HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
 
 # ── AppContext: injectable configuration ────────────────────────────────
 TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
-
 @dataclass
 class AppContext:
     bot_token: str = ""
@@ -406,12 +375,10 @@ class AppContext:
     watchdog_interval: int = 4
     webhook_secret: str = ""
     transport_mode: str = "telegram"
-
     def __post_init__(self) -> None:
         if self.sessions_dir is None: self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
         if self.claude_dir is None: self.claude_dir = Path.home() / ".claude"
         if not self.bridge_url: self.bridge_url = f"http://localhost:{self.port}"
-
 def _build_app_context() -> AppContext:
     return AppContext(
         bot_token=BOT_TOKEN,
@@ -430,7 +397,6 @@ def _build_app_context() -> AppContext:
         webhook_secret=WEBHOOK_SECRET,
         transport_mode=TRANSPORT_MODE, )
 _app_context: AppContext | None = None
-
 def get_app_context() -> AppContext:
     global _app_context
     if _app_context is None: _app_context = _build_app_context()

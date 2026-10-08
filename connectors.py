@@ -20,18 +20,15 @@ from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
 # Types — strongly typed data structures for all external API shapes
 # ---------------------------------------------------------------------------
 # -- Gmail API types --
-
 class GmailHeader(TypedDict, total=False):
     """A single Gmail message header (name/value pair)."""
     name: str
     value: str
-
 class GmailBody(TypedDict, total=False):
     """Body of a Gmail MIME part."""
     data: str
     size: int
     attachmentId: str
-
 class GmailPayloadPart(TypedDict, total=False):
     """A MIME part in a Gmail message payload (recursive via 'parts')."""
     mimeType: str
@@ -39,7 +36,6 @@ class GmailPayloadPart(TypedDict, total=False):
     body: GmailBody
     headers: list[GmailHeader]
     parts: list[GmailPayloadPart]
-
 class GmailMessage(TypedDict, total=False):
     """A Gmail message as returned by messages.get (format=full)."""
     id: str
@@ -47,34 +43,27 @@ class GmailMessage(TypedDict, total=False):
     labelIds: list[str]
     payload: GmailPayloadPart
     historyId: str
-
 class GmailMessageRef(TypedDict, total=False):
     """Lightweight message reference inside history entries."""
     message: GmailMessage
-
 class GmailHistoryEntry(TypedDict, total=False):
     """One entry in a Gmail history list response."""
     messagesAdded: list[GmailMessageRef]
-
 class GmailHistoryResponse(TypedDict, total=False):
     """Response from Gmail history.list API."""
     history: list[GmailHistoryEntry]
     historyId: str
-
 class GmailProfile(TypedDict, total=False):
     """Response from Gmail users.getProfile."""
     emailAddress: str
     historyId: str
-
 class GmailAttachmentData(TypedDict, total=False):
     """Response from Gmail messages.attachments.get."""
     data: str
-
 class GmailMessageListResponse(TypedDict, total=False):
     """Response from Gmail messages.list."""
     messages: list[GmailMessage]
 # -- Gmail internal types --
-
 class GmailAttachmentInfo(TypedDict):
     """Parsed attachment metadata extracted from a Gmail message."""
     filename: str
@@ -82,11 +71,9 @@ class GmailAttachmentInfo(TypedDict):
     size: int
     attachmentId: str
 # -- GitHub API types --
-
 class GithubUser(TypedDict, total=False):
     """GitHub user object (only login used)."""
     login: str
-
 class GithubComment(TypedDict, total=False):
     """A GitHub issue or PR review comment."""
     id: int
@@ -99,31 +86,26 @@ class GithubComment(TypedDict, total=False):
     issue_num: str
     kind: str
 # -- GitHub internal types --
-
 class GithubState(TypedDict):
     """Persisted state for GitHubConnector."""
     last_poll_time: Optional[str]
     seen_ids: list[int]
 # -- Connector output types --
-
 class Attachment(TypedDict, total=False):
     """A downloaded file attachment."""
     path: str
     filename: str
     mimeType: str
-
 class ConnectorMetadata(TypedDict, total=False):
     """Metadata passed alongside connector messages."""
     number: Optional[str]
     repo: str
     comment_id: int
-
 class IssueContext(TypedDict):
     """Context extracted from a GitHub comment."""
     number: str
     kind: str
     url: str
-
 class ConnectorStatus(TypedDict):
     """Status dict returned by BaseConnector.status()."""
     name: str
@@ -132,7 +114,6 @@ class ConnectorStatus(TypedDict):
     poll_interval: int
     consecutive_failures: int
     alert_sent: bool
-
 class GmailStatus(TypedDict):
     """Status dict returned by GmailConnector.status()."""
     name: str
@@ -142,7 +123,6 @@ class GmailStatus(TypedDict):
     consecutive_failures: int
     alert_sent: bool
     history_id: Optional[str]
-
 class GithubStatus(TypedDict):
     """Status dict returned by GitHubConnector.status()."""
     name: str
@@ -155,7 +135,6 @@ class GithubStatus(TypedDict):
     last_poll_time: Optional[str]
     seen_ids_count: int
 # -- Callback protocols --
-
 class MessageCallback(Protocol):
     """on_message(targets, html_text, plain_text, attachments, metadata=None)."""
     def __call__(
@@ -166,18 +145,15 @@ class MessageCallback(Protocol):
         attachments: list[Attachment],
         metadata: Optional[ConnectorMetadata] = None,
     ) -> None: ...
-
 class AlertCallback(Protocol):
     """Callback for sending alert notifications."""
     def __call__(self, text: str) -> None: ...
-
 class WorkerListCallback(Protocol):
     """Callback that returns the set of registered worker names."""
     def __call__(self) -> set[str]: ...
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
 def _atomic_write_text(path: str, content: str) -> None:
     """Write content atomically: tmp (0o600) + fsync + rename + dir fsync."""
     dirname = os.path.dirname(path) or "."
@@ -206,7 +182,6 @@ def _atomic_write_text(path: str, content: str) -> None:
             try: os.unlink(tmp)
             except OSError: pass
         raise
-
 def _atomic_write_bytes(path: str, data: bytes) -> None:
     """Write bytes atomically: tmp (0o600) + fsync + rename + dir fsync."""
     dirname = os.path.dirname(path) or "."
@@ -254,11 +229,9 @@ M = TypeVar("M")
 # ---------------------------------------------------------------------------
 # BaseConnector
 # ---------------------------------------------------------------------------
-
 class BaseConnector(abc.ABC, Generic[M]):
     """Abstract polling connector with preflight, failure tracking, and alerts."""
     connector_name: str = "base"
-
     def __init__(
         self,
         sender_filter: str,
@@ -282,23 +255,18 @@ class BaseConnector(abc.ABC, Generic[M]):
         self._alert_sent: bool = False
         self._lock: threading.RLock = threading.RLock()
     # -- Abstract interface (subclasses MUST override) --
-
     @abc.abstractmethod
     def preflight_check(self) -> tuple[bool, str]:
         """Check if the connector can reach its external service."""
-
     @abc.abstractmethod
     def poll_once(self) -> None:
         """Run one polling cycle."""
-
     @abc.abstractmethod
     def extract_sender(self, message: M) -> str:
         """Return the lowercased sender identity from a message."""
     # -- Lifecycle --
-
     def _on_preflight_ok(self) -> None:
         """Called after successful preflight, before poll loop starts."""
-
     def start(self) -> threading.Thread:
         """Spawn the polling thread. Returns the thread."""
         with self._lock:
@@ -309,13 +277,11 @@ class BaseConnector(abc.ABC, Generic[M]):
             )
             self._thread.start()
             return self._thread
-
     def stop(self) -> None:
         """Signal the polling thread to stop and wait up to 5s."""
         self._stop_event.set()
         with self._lock: t = self._thread
         if t is not None: t.join(timeout=5)
-
     def restart(self) -> tuple[bool, str]:
         """Stop, reset, re-preflight, start. Returns (ok, message)."""
         self.stop()
@@ -333,11 +299,9 @@ class BaseConnector(abc.ABC, Generic[M]):
                 daemon=True, name=f"{self.connector_name}-poller", )
             self._thread.start()
         return True, msg
-
     @property
     def running(self) -> bool:
         with self._lock: return self._thread is not None and self._thread.is_alive()
-
     def status(self) -> ConnectorStatus:
         """Return a status dict for API responses."""
         with self._lock:
@@ -349,12 +313,10 @@ class BaseConnector(abc.ABC, Generic[M]):
                 consecutive_failures=self._consecutive_failures,
                 alert_sent=self._alert_sent, )
     # -- Sender filtering --
-
     def is_allowed_sender(self, message: M) -> bool:
         return self.extract_sender(message) == self.sender_filter
 
     # -- Mention parsing --
-
     def parse_mentions(self, text: str) -> tuple[list[str], str]:
         """Parse @worker mentions from text, return (targets, cleaned_text)."""
         if not text: return [], ""
@@ -370,7 +332,6 @@ class BaseConnector(abc.ABC, Generic[M]):
         return found, cleaned
 
     # -- Alert lifecycle --
-
     def _send_alert(self, text: str) -> None:
         tag = f"[{self.connector_name}]"
         print(f"{tag} ALERT: {text}")
@@ -385,7 +346,6 @@ class BaseConnector(abc.ABC, Generic[M]):
         except Exception as e:
             print(f"{tag} Failed to send alert: {e}")
             with self._lock: self._alert_sent = False  # Rollback — allow retry
-
     def _clear_alert(self) -> None:
         with self._lock: was_alerted = self._alert_sent; self._alert_sent = False
         if was_alerted:
@@ -394,18 +354,15 @@ class BaseConnector(abc.ABC, Generic[M]):
                 try: self.on_alert(f"{tag} Recovered — polling resumed")
                 except Exception as e: print(f"{tag} Failed to send recovery alert: {e}")
     # -- Failure tracking --
-
     def track_failure(self) -> None:
         with self._lock:
             self._consecutive_failures += 1
             should_alert = self._consecutive_failures >= CONSECUTIVE_FAIL_WARN and not self._alert_sent
         if should_alert: self._send_alert(f"Polling failing ({self._consecutive_failures} consecutive errors)")
-
     def track_success(self) -> None:
         with self._lock: was_failing = self._consecutive_failures > 0; self._consecutive_failures = 0
         if was_failing: self._clear_alert()
     # -- Poll loop --
-
     def _poll_loop(self, skip_preflight: bool = False) -> None:
         """Main polling loop. skip_preflight=True when called from restart()."""
         tag = f"[{self.connector_name}]"
@@ -432,7 +389,6 @@ class BaseConnector(abc.ABC, Generic[M]):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _escape_html(text: str) -> str:
     """Escape all HTML-significant characters including quotes."""
     return (text
@@ -440,7 +396,6 @@ def _escape_html(text: str) -> str:
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace('"', "&quot;"))
-
 def _sanitize_filename(name: str) -> str:
     """Strip path separators, traversal, and limit length."""
     name = os.path.basename(name)  # strip directory components
@@ -451,8 +406,6 @@ def _sanitize_filename(name: str) -> str:
         if len(ext) >= _MAX_FILENAME_LEN: ext = ext[:10]  # Truncate absurdly long extensions
         name = root[:_MAX_FILENAME_LEN - len(ext)] + ext
     return name
-
-
 def _truncate(text: str, limit: int = 1500) -> str:
     """Truncate text at a line boundary, with marker."""
     if len(text) <= limit: return text
@@ -461,8 +414,6 @@ def _truncate(text: str, limit: int = 1500) -> str:
     nl = cut.rfind('\n')
     if nl > limit // 2: cut = cut[:nl]
     return cut + "\n… (truncated)"
-
-
 def _get_header(headers: list[GmailHeader], name: str) -> str:
     """Safely extract a header value from Gmail headers list."""
     target = name.lower()
@@ -474,8 +425,6 @@ def _get_header(headers: list[GmailHeader], name: str) -> str:
             h_value = h.get("value")
             return str(h_value) if isinstance(h_value, str) else ""
     return ""
-
-
 def _safe_json_loads_list(raw: str) -> list[GithubComment]:
     """Parse JSON that might be a single array or multiple concatenated arrays
     (gh --paginate emits one JSON array per page). Validates each item."""
@@ -509,26 +458,19 @@ def _safe_json_loads_list(raw: str) -> list[GithubComment]:
 # ---------------------------------------------------------------------------
 # Validation — narrow dict[str, object] to concrete TypedDicts at boundaries
 # ---------------------------------------------------------------------------
-
 def _str_val(raw: dict[str, object], key: str) -> str:
     """Extract a string value from a raw dict, or return empty string."""
     val = raw.get(key)
     return str(val) if isinstance(val, str) else ""
-
-
 def _int_val(raw: dict[str, object], key: str) -> int:
     """Extract an int value from a raw dict, or return 0. Rejects bool."""
     val = raw.get(key)
     return int(val) if isinstance(val, int) and not isinstance(val, bool) else 0
-
-
 def _str_list_val(raw: dict[str, object], key: str) -> list[str]:
     """Extract a list[str] from a raw dict, validating each element."""
     val = raw.get(key)
     if not isinstance(val, list): return []
     return [str(item) for item in val if isinstance(item, str)]
-
-
 def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
     """Validate and narrow a raw dict into a GmailBody."""
     body = GmailBody(); data = _str_val(raw, "data")
@@ -538,8 +480,6 @@ def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
     att_id = _str_val(raw, "attachmentId")
     if att_id: body["attachmentId"] = att_id
     return body
-
-
 def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
     """Validate and narrow a raw dict into a GmailHeader."""
     header = GmailHeader(); name = _str_val(raw, "name")
@@ -547,8 +487,6 @@ def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
     value = _str_val(raw, "value")
     if value: header["value"] = value
     return header
-
-
 def _validate_payload_part( raw: dict[str, object], depth: int = 0, counter: Optional[list[int]] = None,
 ) -> GmailPayloadPart:
     """Validate and narrow a raw dict into a GmailPayloadPart. Depth+count limited."""
@@ -576,8 +514,6 @@ def _validate_payload_part( raw: dict[str, object], depth: int = 0, counter: Opt
             if isinstance(p, dict): parts.append(_validate_payload_part(cast(dict[str, object], p), depth + 1, counter))
         result["parts"] = parts
     return result
-
-
 def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
     """Validate and narrow a raw API dict into a GmailMessage TypedDict."""
     result = GmailMessage(); msg_id = _str_val(raw, "id")
@@ -591,8 +527,6 @@ def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
     payload_raw = raw.get("payload")
     if isinstance(payload_raw, dict): result["payload"] = _validate_payload_part(cast(dict[str, object], payload_raw))
     return result
-
-
 def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResponse:
     """Validate and narrow a raw dict into a GmailHistoryResponse."""
     result = GmailHistoryResponse(); hid = _str_val(raw, "historyId")
@@ -616,15 +550,11 @@ def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResp
             entries.append(entry)
         result["history"] = entries
     return result
-
-
 def _validate_gmail_attachment_data(raw: dict[str, object]) -> GmailAttachmentData:
     """Validate and narrow a raw dict into a GmailAttachmentData."""
     result = GmailAttachmentData(); data = _str_val(raw, "data")
     if data: result["data"] = data
     return result
-
-
 def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessageListResponse:
     """Validate and narrow a raw dict into a GmailMessageListResponse."""
     result = GmailMessageListResponse(); msgs_raw = raw.get("messages")
@@ -634,12 +564,9 @@ def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessag
             if isinstance(m, dict): msgs.append(_validate_gmail_message(cast(dict[str, object], m)))
         result["messages"] = msgs
     return result
-
-
 def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
     """Validate and narrow a raw dict into a GmailProfile."""
     return GmailProfile( emailAddress=_str_val(raw, "emailAddress"), historyId=_str_val(raw, "historyId"), )
-
 def _validate_github_state(raw: dict[str, object]) -> GithubState:
     """Validate and narrow a raw dict into a GithubState."""
     lpt_raw = raw.get("last_poll_time")
@@ -649,8 +576,6 @@ def _validate_github_state(raw: dict[str, object]) -> GithubState:
     if isinstance(seen_raw, list):
         seen = [int(sid) for sid in seen_raw if isinstance(sid, int) and not isinstance(sid, bool)]
     return GithubState(last_poll_time=lpt, seen_ids=seen)
-
-
 def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
     """Validate and narrow a raw API dict into a GithubComment TypedDict."""
     result = GithubComment(); cid = _int_val(raw, "id")
@@ -677,11 +602,9 @@ def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
 # ---------------------------------------------------------------------------
 # GmailConnector
 # ---------------------------------------------------------------------------
-
 class GmailConnector(BaseConnector[GmailMessage]):
     """Polls Gmail via gws CLI for new emails from a whitelisted sender."""
     connector_name: str = "gmail"
-
     def __init__(
         self,
         gws_bin: str,
@@ -702,7 +625,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         self._history_id: Optional[str] = None
         self._history_file_path: str = history_file or os.path.join(
             os.path.expanduser("~"), ".cache", "beast", "email", "gmail_history_id", )
-
     def preflight_check(self) -> tuple[bool, str]:
         if not os.path.isfile(self.gws_bin): return False, f"gws binary not found at {self.gws_bin}"
         if not os.access(self.gws_bin, os.X_OK): return False, f"gws binary not executable: {self.gws_bin}"
@@ -711,7 +633,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         email = profile.get("emailAddress")
         email_str: str = str(email) if isinstance(email, str) else "?"
         return True, f"OK (email={email_str})"
-
     def status(self) -> GmailStatus:
         with self._lock:
             return GmailStatus(
@@ -723,7 +644,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 alert_sent=self._alert_sent,
                 history_id=self._history_id, )
     # -- gws CLI wrapper --
-
     def _run_gws(self, *args: str, json_body: Optional[str] = None) -> Optional[dict[str, object]]:
         """Run a gws CLI command and return parsed JSON dict, or None on failure."""
         cmd: list[str] = [self.gws_bin, "gmail", "users"] + list(args)
@@ -752,49 +672,41 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return None
 
     # -- Typed API wrappers (narrow _run_gws output to concrete types) --
-
     def _get_profile(self) -> Optional[GmailProfile]:
         raw = self._run_gws("getProfile", "--params", '{"userId":"me"}')
         if raw is None: return None
         return _validate_gmail_profile(raw)
-
     def get_message(self, msg_id: str) -> Optional[GmailMessage]:
         params = json.dumps({"userId": "me", "id": msg_id, "format": "full"})
         raw = self._run_gws("messages", "get", "--params", params)
         if raw is None: return None
         return _validate_gmail_message(raw)
-
     def _get_history(self, start_history_id: str) -> Optional[GmailHistoryResponse]:
         params = json.dumps({"userId": "me", "startHistoryId": start_history_id})
         raw = self._run_gws("history", "list", "--params", params)
         if raw is None: return None
         return _validate_gmail_history_response(raw)
-
     def _get_attachment_data(self, msg_id: str, att_id: str) -> Optional[GmailAttachmentData]:
         params = json.dumps({"userId": "me", "messageId": msg_id, "id": att_id})
         raw = self._run_gws("messages", "attachments", "get", "--params", params)
         if raw is None: return None
         return _validate_gmail_attachment_data(raw)
-
     def _list_messages(self, query: str, max_results: int = 5) -> Optional[GmailMessageListResponse]:
         params = json.dumps({"userId": "me", "maxResults": max_results, "q": query})
         raw = self._run_gws("messages", "list", "--params", params)
         if raw is None: return None
         return _validate_gmail_message_list_response(raw)
-
     def mark_as_read(self, msg_id: str) -> bool:
         params = json.dumps({"userId": "me", "id": msg_id}); body = json.dumps({"removeLabelIds": ["UNREAD"]})
         result = self._run_gws("messages", "modify", "--params", params, json_body=body)
         return result is not None
 
     # -- History ID persistence (atomic write) --
-
     def _save_history_id(self) -> None:
         with self._lock: hid = self._history_id
         if not hid: return
         try: _atomic_write_text(self._history_file_path, hid)
         except OSError as e: print(f"[gmail] Failed to save historyId: {e}")
-
     def _load_history_id(self) -> Optional[str]:
         try:
             with open(self._history_file_path, "r") as f:
@@ -805,7 +717,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         except OSError as e:
             print(f"[gmail] Failed to load historyId: {e}")
         return None
-
     def _bootstrap_history_id(self, skip_disk: bool = False) -> Optional[str]:
         if not skip_disk:
             saved = self._load_history_id()
@@ -821,7 +732,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         return None
 
     # -- Message extraction (safe header access) --
-
     def extract_sender(self, message: GmailMessage) -> str:
         payload = message.get("payload")
         if not isinstance(payload, dict): return ""
@@ -832,7 +742,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         match = re.search(r'<([^>]+)>', from_val)
         if match: return match.group(1).lower()
         return from_val.strip().lower()
-
     def extract_sender_name(self, message: GmailMessage) -> str:
         payload = message.get("payload")
         if not isinstance(payload, dict): return ""
@@ -843,31 +752,26 @@ class GmailConnector(BaseConnector[GmailMessage]):
         match = re.match(r'^([^<]+)\s*<', from_val)
         if match: return match.group(1).strip().strip('"')
         return from_val.split("@")[0]
-
     def extract_subject(self, message: GmailMessage) -> str:
         payload = message.get("payload")
         if not isinstance(payload, dict): return ""
         headers = payload.get("headers")
         if not isinstance(headers, list): return ""
         return _get_header(headers, "subject")
-
     def extract_message_id(self, message: GmailMessage) -> str:
         payload = message.get("payload")
         if not isinstance(payload, dict): return ""
         headers = payload.get("headers")
         if not isinstance(headers, list): return ""
         return _get_header(headers, "message-id")
-
     def is_sent_message(self, message: GmailMessage) -> bool:
         label_ids = message.get("labelIds")
         if not isinstance(label_ids, list): return False
         return "SENT" in label_ids
-
     def extract_body_text(self, message: GmailMessage) -> str:
         payload = message.get("payload")
         if not isinstance(payload, dict): return ""
         return self._find_text_part(payload)
-
     def _find_text_part( self, part: GmailPayloadPart, depth: int = 0, counter: Optional[list[int]] = None,
     ) -> str:
         if counter is None: counter = [0]
@@ -895,13 +799,11 @@ class GmailConnector(BaseConnector[GmailMessage]):
                     text = self._find_text_part(sub, depth + 1, counter)
                     if text: return text
         return ""
-
     def extract_attachments(self, message: GmailMessage) -> list[GmailAttachmentInfo]:
         attachments: list[GmailAttachmentInfo] = []
         payload = message.get("payload")
         if isinstance(payload, dict): self._find_attachments(payload, attachments)
         return attachments
-
     def _find_attachments(
         self, part: GmailPayloadPart, result: list[GmailAttachmentInfo],
         depth: int = 0, counter: Optional[list[int]] = None,
@@ -934,18 +836,15 @@ class GmailConnector(BaseConnector[GmailMessage]):
             for sub in parts:
                 if counter[0] > _MAX_MIME_PARTS: break
                 if isinstance(sub, dict): self._find_attachments(sub, result, depth + 1, counter)
-
     def is_inbox_unread(self, label_ids: list[str]) -> bool:
         return "INBOX" in label_ids and "UNREAD" in label_ids
 
     # -- Body cleaning --
-
     def _clean_body(self, text: str) -> str:
         text = text.replace('\r\n', '\n'); text = re.sub(r'<https?://[^>]+>', '', text)
         text = re.sub(r'\[image:[^\]]*\]', '', text); text = re.sub(r'Get Outlook for iOS\s*', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
-
     def _strip_reply_chain(self, text: str) -> str:
         patterns = [
             r'\s+On \w{3}, \w{3,9} \d{1,2}, \d{4}[ ,].{5,80} wrote:',
@@ -957,7 +856,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
             m = re.search(pat, text, re.DOTALL)
             if m: text = text[:m.start()]
         return text.strip()
-
     def _detect_forward_split(self, body: str) -> tuple[Optional[str], Optional[str]]:
         gmail_marker = "---------- Forwarded message ---------"
         if gmail_marker in body:
@@ -970,7 +868,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         return None, None
 
     # -- Formatting --
-
     def format_email_message(self, body: str, subject: str, thread_id: str = "") -> tuple[str, str]:
         """Returns (html_text, plain_text) for Telegram and worker delivery."""
         body = self._clean_body(body)
@@ -994,7 +891,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         html = f"📧 <b>{_escape_html(subject)}</b>{thread_tag}\n\n{_escape_html(body)}"
         plain = f"manager (via email):{thread_tag} {body}"
         return html, plain
-
     def _format_sent_reply(self, body: str, subject: str, thread_id: str, message: GmailMessage) -> tuple[str, str]:
         body = self._clean_body(body); body = self._strip_reply_chain(body); body = _truncate(body)
         sender_name = self.extract_sender_name(message); thread_tag = f" [thread:{thread_id}]" if thread_id else ""
@@ -1003,7 +899,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         return html, plain
 
     # -- Gmail API operations --
-
     def _get_new_message_ids(self) -> tuple[Optional[list[str]], Optional[str]]:
         """Return (message_ids, new_history_id). Caller advances historyId after processing."""
         with self._lock: current_hid = self._history_id
@@ -1033,7 +928,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         raw_hid = data.get("historyId")
         new_hid: Optional[str] = str(raw_hid) if raw_hid is not None else None
         return msg_ids, new_hid
-
     def _format_attachment_line(self, attachments: list[GmailAttachmentInfo]) -> str:
         if not attachments: return ""
         names: list[str] = []
@@ -1041,7 +935,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
             fn = a.get("filename")
             names.append(str(fn) if isinstance(fn, str) and fn else "?")
         return f"\n[{len(attachments)} attachment(s): {', '.join(names)}]"
-
     def _download_attachment(self, msg_id: str, att: GmailAttachmentInfo) -> Optional[str]:
         raw_att_id = att.get("attachmentId")
         att_id: str = str(raw_att_id) if isinstance(raw_att_id, str) else ""
@@ -1082,7 +975,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return None
 
     # -- Message processing --
-
     def _process_message(self, msg_id: str) -> None:
         message = self.get_message(msg_id)
         if not message: raise RuntimeError(f"get_message({msg_id}) returned None — transient API failure")
@@ -1123,7 +1015,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
         self.on_message(targets, html_text, plain_text, downloaded_atts)
         if not self.mark_as_read(msg_id): print(f"[gmail] Warning: failed to mark message {msg_id} as read")
     # -- Polling --
-
     def poll_once(self) -> None:
         msg_ids, new_hid = self._get_new_message_ids()
         if msg_ids is None:
@@ -1152,7 +1043,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
             with self._lock: self._history_id = new_hid
             self._save_history_id()
         elif had_errors: print("[gmail] historyId NOT advanced — some messages failed, will retry next poll")
-
     def _on_preflight_ok(self) -> None:
         hid = self._bootstrap_history_id()
         with self._lock: self._history_id = hid
@@ -1167,7 +1057,6 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 return
         print(f"[gmail] Started (interval={self.poll_interval}s, from={self.sender_filter}, historyId={hid})")
         self._catchup_unread()
-
     def _catchup_unread(self) -> None:
         q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"; data = self._list_messages(q, max_results=5)
         if not data: return
@@ -1183,18 +1072,15 @@ class GmailConnector(BaseConnector[GmailMessage]):
         for msg_id in msg_ids:
             try: self._process_message(msg_id)
             except Exception as e: print(f"[gmail] Catch-up error {msg_id}: {e}")
-
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
         self._save_history_id()
 # ---------------------------------------------------------------------------
 # GitHubConnector
 # ---------------------------------------------------------------------------
-
 class GitHubConnector(BaseConnector[GithubComment]):
     """Polls GitHub issue/PR comments via gh CLI for a configured user."""
     connector_name: str = "github"
-
     def __init__(
         self,
         repo: str | list[str],
@@ -1223,7 +1109,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         self._state_file: str = state_file
         self._last_poll_time: Optional[str] = None
         self._seen_ids: set[int] = set()
-
     def preflight_check(self) -> tuple[bool, str]:
         for repo in self.repos:
             try:
@@ -1238,7 +1123,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
             except OSError as e:
                 return False, f"gh error: {e}"
         return True, "OK"
-
     def status(self) -> GithubStatus:
         with self._lock:
             return GithubStatus(
@@ -1252,7 +1136,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 last_poll_time=self._last_poll_time,
                 seen_ids_count=len(self._seen_ids), )
     # -- State persistence --
-
     def _load_state(self) -> bool:
         if not self._state_file: return False
         try:
@@ -1265,7 +1148,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 return bool(self._last_poll_time)
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return False
-
     def _save_state(self) -> None:
         if not self._state_file: return
         with self._lock:
@@ -1273,7 +1155,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
             )
         try: _atomic_write_text(self._state_file, json.dumps(state))
         except OSError as e: print(f"[github] Failed to save state: {e}")
-
     def _on_preflight_ok(self) -> None:
         restored = self._load_state()
         if restored:
@@ -1295,7 +1176,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         repos_str = ", ".join(self.repos)
         print(f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})")
     # -- GitHub API --
-
     def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
         try:
             result = subprocess.run(
@@ -1311,7 +1191,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         except OSError as e:
             print(f"[github] gh api exception: {e}")
             return None
-
     def _get_all_comments(self, since: str) -> tuple[Optional[list[GithubComment]], bool]:
         """Returns (comments, is_complete). is_complete=False means partial fetch."""
         all_raws: list[Optional[str]] = []
@@ -1341,13 +1220,11 @@ class GitHubConnector(BaseConnector[GithubComment]):
         return merged, is_complete
 
     # -- Message extraction --
-
     def extract_sender(self, comment: GithubComment) -> str:
         user = comment.get("user")
         if not isinstance(user, dict): return ""
         login = user.get("login")
         return str(login).lower() if isinstance(login, str) and login else ""
-
     def extract_issue_context(self, comment: GithubComment) -> IssueContext:
         if comment.get("issue_num") and comment.get("kind"):
             return IssueContext(
@@ -1379,7 +1256,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         return IssueContext(number=number, kind=kind, url=html_url)
 
     # -- Formatting --
-
     def _md_to_telegram_html(self, md: str) -> str:
         text = _escape_html(md)
         text = re.sub(r'```[a-zA-Z]*\n(.*?)```', lambda m: f'<pre>{m.group(1).rstrip()}</pre>', text, flags=re.DOTALL)
@@ -1405,7 +1281,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         if in_quote: result.append(f'<blockquote>{chr(10).join(quote_lines)}</blockquote>')
         text = '\n'.join(result); text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
-
     def format_comment(self, body: str, context: IssueContext) -> tuple[str, str]:
         body = _truncate(body); kind = context["kind"]; number = context["number"]; url = context["url"]
         tag = f"#{number}" if number else ""
@@ -1415,7 +1290,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         return html, plain
 
     # -- Comment processing --
-
     @staticmethod
     def _extract_repo_from_comment(comment: GithubComment) -> str:
         """Extract owner/name from a comment's issue_url or html_url."""
@@ -1429,7 +1303,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
             m = re.search(r'github\.com/([^/]+/[^/]+)/', url)
             if m: return m.group(1)
         return ""
-
     def _process_comment(self, comment: GithubComment) -> None:
         cid = comment.get("id", 0)
         if not isinstance(cid, int) or isinstance(cid, bool) or cid == 0: return
@@ -1463,7 +1336,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         with self._lock: self._seen_ids.add(cid)
         print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
     # -- Polling --
-
     def poll_once(self) -> None:
         with self._lock: poll_time = self._last_poll_time
         if not poll_time: return
@@ -1490,11 +1362,9 @@ class GitHubConnector(BaseConnector[GithubComment]):
             print(f"[github] poll_time NOT advanced — {', '.join(reasons)}, will retry")
         self._prune_seen_ids()
         self._save_state()
-
     def _prune_seen_ids(self) -> None:
         with self._lock:
             if len(self._seen_ids) > _MAX_SEEN_IDS: self._seen_ids = set(sorted(self._seen_ids)[-_PRUNE_KEEP:])
-
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
         self._save_state()

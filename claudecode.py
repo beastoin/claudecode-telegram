@@ -74,7 +74,6 @@ from urllib.parse import urlparse
 if TYPE_CHECKING: from bridge import Machine
 
 # ── Claudecode domain types (owned by this module) ───────────────────
-
 class ReminderState(TypedDict):
     response_count: int
     last_reminder_ts: float
@@ -88,7 +87,6 @@ class TmuxActivityResult(NamedTuple):
     activity: str; context_pct: str | None; raw_lines: list[str] | None
 class AuthorDetection(NamedTuple):
     author: str; avatar_html: str; display_text: str
-
 class TmuxSessionDict(TypedDict, total=False):
     tmux: str
     backend: str
@@ -98,7 +96,6 @@ class TmuxSessionDict(TypedDict, total=False):
     version: str
     activity: str
     context_pct: str
-
 class WorkerSessionDict(TypedDict, total=False):
     backend: str
     tmux: str
@@ -106,7 +103,6 @@ class WorkerSessionDict(TypedDict, total=False):
     callback_url: str
     protocol: str
     version: str
-
 class RegistryWorkerDict(TypedDict, total=False):
     backend: str
     chat_id: int | None
@@ -118,11 +114,9 @@ class RegistryWorkerDict(TypedDict, total=False):
     callback_url: str
     version: str
     tools: dict[str, object]
-
 class RegistryFileDict(TypedDict, total=False):
     version: int
     workers: dict[str, RegistryWorkerDict]
-
 class RewindTokenEntry(TypedDict):
     name: str; expires_at: float
 class PrReviewTokenEntry(TypedDict):
@@ -131,7 +125,6 @@ class ProcStatsEntry(TypedDict):
     cpu: float; state: str
 class QuestionOption(TypedDict):
     num: int; label: str; selected: bool
-
 class QuestionDetails(TypedDict):
     header: str; options: list[QuestionOption]; selected_num: int
 class DiskUsageDict(TypedDict, total=False):
@@ -158,7 +151,6 @@ class CodexTranscriptEntry(TypedDict, total=False):
     role: str; text: str; timestamp: str
 class GitPushStateResult(TypedDict, total=False):
     orig_sha: str; orig_branch: str; staged_files: list[str]; stash_sha: str | None
-
 class ProcessRegistry:
     def __init__(self) -> None:
         self.adapter_pids: dict[str, tuple[subprocess.Popen[str], IO[str] | None]] = {}
@@ -167,7 +159,6 @@ class ProcessRegistry:
         self.pipe_readers_lock: threading.Lock = threading.Lock()
         self.pending_locks: dict[str, threading.Lock] = {}
         self.pending_locks_guard: threading.Lock = threading.Lock()
-
 class WorkerWatchdogState:
     def __init__(self) -> None:
         self.worker_states: dict[str, WorkerStateEntry] = {}
@@ -192,10 +183,8 @@ class WorkerWatchdogState:
         self.waiting_input_details: dict[str, QuestionDetails] = {}
         self.last_resolved_ts: dict[str, float] = {}
         self.lock = threading.Lock(); self.stop_event = threading.Event()
-
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
-
     def clear_worker(self, name: str) -> None:
         for store in (
             self.worker_states, self.last_child_ts, self.last_seen_claude,
@@ -208,13 +197,11 @@ class WorkerWatchdogState:
             self.force_restart_pending_cwd, self.waiting_input_details,
             self.last_resolved_ts, ):
             store.pop(name, None)
-
 class LearningReminderState:
     def __init__(self) -> None:
         self.state: dict[str, ReminderState] = {}
         self.lock: threading.Lock = threading.Lock()
         self.idle_scan_timer: threading.Timer | None = None
-
 class HostHealthState:
     def __init__(self) -> None:
         self.ssh_failures: dict[str, int] = {}
@@ -237,10 +224,8 @@ class HostHealthState:
         self.io_alerted: dict[str, bool] = {}
         self.tailscale_down: bool = False
         self.tailscale_alert_ts: float = 0.0
-
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]
-
     def to_health_summary(self, host: str) -> HealthSummaryDict:
         return HealthSummaryDict(
             ssh_down=self.down.get(host, False),
@@ -252,30 +237,24 @@ class HostHealthState:
             worktrees=self.worktree_usage.get(host), )
 
 # ── Backend protocol + implementations ────────────────────────────────
-
 def build_claude_start_cmd(resume_id: str = "") -> str:
     cmd = ["claude"]
     if resume_id: cmd.extend(["--resume", resume_id])
     cmd.append("--dangerously-skip-permissions")
     return " ".join(shlex.quote(part) for part in cmd)
-
 class Backend(Protocol):
     name: str
     binary: str
     is_interactive: bool
-
     def start_cmd(self, resume_id: str = "") -> str:
         ...
-
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         ...
-
     def is_online(self, tmux_name: str) -> bool:
         ...
 
 # ── SSH teleport helpers ──────────────────────────────────────────────
-
 class RemoteCache:
     def __init__(self) -> None:
         self.lock: threading.Lock = threading.Lock()
@@ -284,7 +263,6 @@ class RemoteCache:
         self.machines_path: Path | None = None
         self.home_dirs: dict[str, str] = {}
 remote_cache = RemoteCache()
-
 def _resolve_remote_tool(tool: str, host: str) -> str:
     key = f"{host}:{tool}"
     with remote_cache.lock: cached = remote_cache.tools.get(key)
@@ -305,7 +283,6 @@ def _resolve_remote_tool(tool: str, host: str) -> str:
     except (subprocess.SubprocessError, OSError) as exc:
         _log(_LOG_DEBUG, "probe:_resolve_remote_tool", f"{type(exc).__name__}: {exc}")
     return tool
-
 def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
     if host:
         cmd = list(cmd); tool = str(cmd[0])
@@ -317,17 +294,14 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
     return _subprocess_runner.run(cmd, **kwargs)
 
 from telegram import _extract_msg_text as _extract_msg_text  # noqa: F401
-
 def _detect_os_family() -> str:
     if sys.platform == "darwin": return "darwin"
     return "linux"
-
 def _project_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 # ── Git-based teleport sync ───────────────────────────────────────────
 GIT_SERVER_DIR = os.path.expanduser("~/git-server")
-
 def _is_git_repo(cwd: str, host: str | None = None) -> bool:
     try:
         r = _remote_run(
@@ -338,22 +312,18 @@ def _is_git_repo(cwd: str, host: str | None = None) -> bool:
         return False
 
 # ── Tmux helpers ──────────────────────────────────────────────────────
-
 class TmuxSendState:
     def __init__(self) -> None:
         self.locks: dict[str, threading.Lock] = {}
         self.locks_guard: threading.Lock = threading.Lock()
         self.flock_fds: dict[str, int] = {}
 tmux_send = TmuxSendState()
-
 def _get_tmux_send_lock(tmux_name: str) -> threading.Lock:
     with tmux_send.locks_guard:
         if tmux_name not in tmux_send.locks: tmux_send.locks[tmux_name] = threading.Lock()
         return tmux_send.locks[tmux_name]
-
 def tmux_send_lock_path(tmux_name: str) -> Path:
     return Path(f"/tmp/claudecode-telegram/{_node_name}/locks/{tmux_name}.lock")
-
 def _acquire_flock(tmux_name: str) -> int:
     lock_file = tmux_send_lock_path(tmux_name)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -365,16 +335,13 @@ def _acquire_flock(tmux_name: str) -> int:
         os.close(fd)
         raise
     return fd
-
 def _release_flock(fd: int) -> None:
     import fcntl
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
-
 def tmux_exists(tmux_name: str, host: str | None = None, timeout: int = 3) -> bool:
     return _remote_run( ["tmux", "has-session", "-t", tmux_name], host=host, capture_output=True, timeout=timeout
     ).returncode == 0
-
 def tmux_send_message(tmux_name: str, text: str, host: str | None = None, literal: bool = False) -> bool:
     lock = _get_tmux_send_lock(tmux_name)
     with lock:
@@ -416,13 +383,11 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             return r.returncode == 0
         finally:
             _release_flock(flock_fd)
-
 def get_pane_command(tmux_name: str, host: str | None = None) -> str:
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
         host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
     return result.stdout.strip() if result.returncode == 0 else ""
-
 def is_process_running(tmux_name: str, process_name: str, host: str | None = None) -> bool:
     cmd = get_pane_command(tmux_name, host=host)
     if process_name.lower() in cmd.lower(): return True
@@ -436,10 +401,8 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
         ["pgrep", "-P", pane_pid, process_name],
         host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK )
     return result.returncode == 0
-
 def tmux_send_escape(tmux_name: str, host: str | None = None) -> None:
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=TIMEOUT_TMUX_SEND)
-
 def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
     try:
         result = _remote_run(
@@ -455,13 +418,10 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
         session_name, pane_pid = parts[0], parts[1]
         if pane_pid.isdigit(): pane_map[session_name] = pane_pid
     return pane_map
-
 class ClaudeBackend:
     name = "claude"; binary = "claude"; is_interactive = True
-
     def start_cmd(self, resume_id: str = "") -> str:
         return build_claude_start_cmd(resume_id)
-
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         import bridge
@@ -479,21 +439,17 @@ class ClaudeBackend:
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:send", f"{type(exc).__name__}: {exc}")
         return tmux_send_message(tmux_name, text, host=host, literal=literal)
-
     def is_online(self, tmux_name: str) -> bool:
         if not tmux_exists(tmux_name): return False
         return is_process_running(tmux_name, "claude")
 
 # ── Codex adapter ─────────────────────────────────────────────────────
-
 def _codex_session_id_path(worker_name: str, sessions_dir: Path) -> Path:
     return sessions_dir / worker_name / "codex_session_id"
-
 def _codex_load_session_id(worker_name: str, sessions_dir: Path) -> str:
     p = _codex_session_id_path(worker_name, sessions_dir)
     if p.exists(): return p.read_text(encoding="utf-8").strip()
     return ""
-
 def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str) -> None:
     target = _codex_session_id_path(worker_name, sessions_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -507,7 +463,6 @@ def _codex_save_session_id(worker_name: str, sessions_dir: Path, session_id: str
     except BaseException:
         if fd >= 0: os.close(fd)
         raise
-
 def _codex_parse_jsonl(output: str) -> tuple[str, str]:
     response_parts: list[str] = []
     thread_id: str = ""
@@ -523,7 +478,6 @@ def _codex_parse_jsonl(output: str) -> tuple[str, str]:
                 text = _str_field(item, "text")
                 if text: response_parts.append(text)
     return "\n".join(response_parts).strip(), thread_id
-
 def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[str, str, int]:
     cmd: list[str] = ["codex", "exec", "--json", "--yolo"]
     if workdir: cmd.extend(["-C", workdir])
@@ -537,7 +491,6 @@ def _codex_run(message: str, session_id: str = "", workdir: str = "") -> tuple[s
         return response, new_session_id or session_id, result.returncode
     except (OSError, subprocess.SubprocessError) as e:
         return f"Error: {e}", session_id, 1
-
 def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool:
     try:
         payload: dict[str, str | bool] = {
@@ -550,7 +503,6 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
     except (urllib.error.URLError, OSError) as e:
         _log(_LOG_WARN, "codex", f"Failed to send to bridge: {e}")
         return False
-
 def _codex_adapter_thread(worker_name: str, text: str,
                           bridge_url: str, sessions_dir: Path) -> None:
     try:
@@ -560,7 +512,6 @@ def _codex_adapter_thread(worker_name: str, text: str,
         if response: _codex_send_to_bridge(worker_name, response, bridge_url)
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Adapter thread for '{worker_name}' failed: {e}")
-
 def _codex_adapter_remote(worker_name: str, text: str,
                           bridge_url: str, sessions_dir: Path, host: str) -> None:
     try:
@@ -595,13 +546,10 @@ def _codex_adapter_remote(worker_name: str, text: str,
             _codex_send_to_bridge(worker_name, response, target_url)
     except Exception as e:
         _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
-
 class CodexBackend:
     name = "codex"; binary = "codex"; is_interactive = False; is_exec = True
-
     def start_cmd(self, resume_id: str = "") -> str:
         return "echo 'Codex worker ready (non-interactive)'"
-
     def send(self, worker_name: str, tmux_name: str, text: str,
              bridge_url: str, sessions_dir: Path) -> bool:
         import bridge
@@ -618,12 +566,10 @@ class CodexBackend:
                 daemon=True, )
         t.start()
         return True
-
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
 
 BACKENDS: dict[str, Backend] = { "claude": ClaudeBackend(), "codex": CodexBackend(), }
-
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
     sid_file = SESSIONS_DIR / worker_name / "codex_session_id"
     if not sid_file.exists(): return None
@@ -646,16 +592,12 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
     jsonl_matches = [m for m in matches if m.endswith(".jsonl")]
     if jsonl_matches: return max(jsonl_matches, key=os.path.getmtime)
     return None
-
 def get_backend(name: str) -> Backend:
     return BACKENDS.get(name, BACKENDS[DEFAULT_BACKEND])
-
 def is_valid_backend(name: str) -> bool:
     return name in BACKENDS
-
 def list_backends() -> list[str]:
     return list(BACKENDS.keys())
-
 def _which_binary(binary: str) -> str | None:
     found = shutil.which(binary)
     if found: return found
@@ -665,7 +607,6 @@ def _which_binary(binary: str) -> str | None:
             candidate = os.path.join(extra_dir, binary)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK): return candidate
     return None
-
 def is_claude_running(tmux_name: str, host: str | None = None) -> bool:
     return is_process_running(tmux_name, "claude", host=host)
 
@@ -719,10 +660,8 @@ WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 RESERVED_NAMES = { "team", "focus", "restart", "settings", "hire", "end", "all", "cancel", "start", "help", }
 
 # ── Inter-worker pipes ───────────────────────────────────────────────
-
 def get_worker_pipe_path(name: str) -> Path:
     return WORKER_PIPE_ROOT / name / "in.pipe"
-
 def ensure_worker_pipe(name: str) -> Path:
     pipe_path = get_worker_pipe_path(name); pipe_dir = pipe_path.parent
     pipe_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -732,7 +671,6 @@ def ensure_worker_pipe(name: str) -> Path:
         _log(_LOG_INFO, "pipe", f"Created worker pipe: {pipe_path}")
     start_pipe_reader(name)
     return pipe_path
-
 def cleanup_worker_pipe(name: str) -> None:
     stop_pipe_reader(name)
     pipe_path = get_worker_pipe_path(name)
@@ -746,7 +684,6 @@ def cleanup_worker_pipe(name: str) -> None:
     if pipe_dir.exists():
         try: pipe_dir.rmdir()
         except OSError: pass
-
 def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     pipe_path = get_worker_pipe_path(name)
     _log(_LOG_INFO, "pipe", f"Pipe reader started for worker '{name}' at {pipe_path}")
@@ -774,12 +711,10 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     with processes.pipe_readers_lock:
         if name in processes.pipe_readers: processes.pipe_readers.pop(name, None)
     _log(_LOG_INFO, "pipe", f"Pipe reader stopped for worker '{name}'")
-
 def _forward_pipe_message(name: str, message: str) -> None:
     import bridge
     if bridge.worker_manager is None or not bridge.worker_manager.send(name, message):
         _log(_LOG_WARN, "worker", f"Warning: Cannot forward pipe message to '{name}' - worker not found")
-
 def start_pipe_reader(name: str) -> None:
     with processes.pipe_readers_lock:
         if name in processes.pipe_readers:
@@ -797,7 +732,6 @@ def start_pipe_reader(name: str) -> None:
     with processes.pipe_readers_lock: processes.pipe_readers[name] = (thread, stop_event)
     thread.start()
     _log(_LOG_INFO, "pipe", f"Started pipe reader thread for '{name}'")
-
 def stop_pipe_reader(name: str) -> None:
     with processes.pipe_readers_lock:
         if name not in processes.pipe_readers: return
@@ -817,20 +751,16 @@ def stop_pipe_reader(name: str) -> None:
     if thread.is_alive(): _log(_LOG_WARN, "bridge", f"Warning: pipe reader thread for '{name}' did not stop gracefully")
 
 # ── Session management ────────────────────────────────────────────────
-
 def get_session_dir(name: str) -> Path:
     return SESSIONS_DIR / name
-
 def ensure_session_dir(name: str) -> Path:
     session_dir = get_session_dir(name)
     session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     SESSIONS_DIR.chmod(0o700)
     session_dir.chmod(0o700)
     return session_dir
-
 def get_chat_id_file(name: str) -> Path:
     return get_session_dir(name) / "chat_id"
-
 def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     if not cwd: return ""
     slug = _project_slug(cwd)
@@ -854,7 +784,6 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
     if not jsonls: return ""
     latest = max(jsonls, key=lambda p: p.stat().st_mtime)
     return latest.stem
-
 def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None:
     if not session_id: return
     try:
@@ -869,7 +798,6 @@ def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None
         history_file.chmod(0o600)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_log_session_event", f"{type(exc).__name__}: {exc}")
-
 def get_session_history(name: str, event: str | None = None) -> list[dict[str, object]]:
     f = get_session_dir(name) / "session_history.jsonl"
     if not f.exists(): return []
@@ -885,7 +813,6 @@ def get_session_history(name: str, event: str | None = None) -> list[dict[str, o
     return entries
 
 _CLAUDE_JSON_PATH = Path.home() / ".claude.json"
-
 def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
 ) -> None:
     if not cwd: return
@@ -912,7 +839,6 @@ def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
     except (OSError, json.JSONDecodeError) as exc:
         _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
 from telegram import _build_cwd_change_notice as _build_cwd_change_notice  # noqa: F401
-
 def _cache_session_id(name: str, sid: str) -> None:
     if not sid: return
     try:
@@ -934,7 +860,6 @@ def _cache_session_id(name: str, sid: str) -> None:
         os.replace(str(_tmp), str(id_file))
     except OSError as exc:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
-
 def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     cache_file = get_session_dir(name) / "claude_session_id"; current_cwd = get_claude_session_cwd(name)
     def _read_cache() -> str:
@@ -961,22 +886,18 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
             _cache_session_id(name, scanned)
             return scanned
     return ""
-
 def get_claude_session_cwd(name: str) -> str | None:
     import bridge
     cwd = bridge._get_worker_cwd(name)
     if cwd: return os.path.expanduser(cwd)
     return None
-
 def save_claude_session_cwd(name: str, cwd: str) -> None:
     import bridge
     if cwd: cwd = os.path.expanduser(cwd)
     bridge._set_worker_cwd(name, cwd)
-
 def clear_claude_session_id(name: str) -> None:
     id_file = get_session_dir(name) / "claude_session_id"
     if id_file.exists(): id_file.unlink()
-
 def get_any_session_id(name: str) -> tuple[str, str]:
     session_dir = get_session_dir(name)
     if not session_dir.exists(): return "", ""
@@ -986,14 +907,12 @@ def get_any_session_id(name: str) -> tuple[str, str]:
             source = f.name.replace("_session_id", "")
             return val, source
     return "", ""
-
 def _remap_path(local_path: str, host: str | None) -> str:
     if not host or not local_path: return local_path
     remote_home = _get_remote_home(host); local_home = os.path.expanduser("~")
     if remote_home and remote_home != local_home and local_path.startswith(local_home):
         return remote_home + local_path[len(local_home):]
     return local_path
-
 def _get_remote_home(host: str | None) -> str:
     with remote_cache.lock: cached = remote_cache.home_dirs.get(host or "")
     if cached is not None: return cached
@@ -1013,7 +932,6 @@ POISON_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
     r"invalid_request_error", r"insufficient_quota", r"model.*not.*found",
     r"APIError", r"connection.*reset", r"timeout.*error",
 )]
-
 def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None) -> str:
     if lines <= 0: return ""
     try:
@@ -1029,16 +947,13 @@ HOOK_FAILURE_THRESHOLD = 3
 HOOK_FAILURE_WINDOW = 120
 
 # ── Worker backend helpers ────────────────────────────────────────────
-
 def normalize_backend(backend: str | None) -> str:
     return backend or DEFAULT_BACKEND
-
 def normalize_cwd(cwd: str | None) -> str:
     if cwd is None: return ""
     raw = cwd.strip()
     if not raw: return ""
     return os.path.abspath(os.path.expanduser(raw))
-
 def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
     normalized = normalize_cwd(cwd)
     if not normalized: return "", "cwd is empty"
@@ -1081,14 +996,12 @@ _INTERACTIVE_CONTENT = [
     "Allow Grep",
     "Allow Agent",
     "Allow Notebook", ]
-
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     if session and session.get("backend"): return normalize_backend(str(session.get("backend")))
     import bridge
     registry = bridge._load_registry(); entry = registry.get("workers", {}).get(name, {})
     if entry.get("backend"): return normalize_backend(str(entry["backend"]))
     return DEFAULT_BACKEND
-
 def get_tmux_env_value(tmux_name: str, key: str) -> str:
     result = _subprocess_runner.run(
         ["tmux", "show-environment", "-t", tmux_name, key],
@@ -1097,7 +1010,6 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
     value = result.stdout.strip()
     if "=" not in value: return ""
     return value.split("=", 1)[1]
-
 def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = None) -> bool:
     import re
     start = _clock.time()
@@ -1109,7 +1021,6 @@ def tmux_prompt_empty(tmux_name: str, timeout: float=0.5, host: str | None = Non
             if re.search(r'^❯\s*$', result.stdout, re.MULTILINE): return True
         _clock.sleep(DELAY_BRIEF * 2)
     return False
-
 def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host: str | None = None) -> None:
     our_url = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
     try:
