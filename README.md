@@ -121,7 +121,7 @@ claudecode-telegram/
 
 ## Acknowledgments
 
-This project started as a fork of [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram) by Han Xiao, which provided the original single-session Telegram-to-Claude bridge concept. The project has since been rewritten into a multi-worker, multi-machine, multi-backend team orchestration platform.
+This project began as a fork of [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram) by Han Xiao, which introduced the original Telegram-to-Claude bridge concept. It has since been rewritten as a multi-worker, multi-machine, multi-backend orchestration platform.
 
 ## License
 
