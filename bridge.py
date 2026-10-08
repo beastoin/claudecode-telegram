@@ -569,10 +569,8 @@ def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
     config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
     if not config_path.exists(): return {_implicit_local_machine().id: _implicit_local_machine()}
 
-    try:
-        data = cast(NodeConfigDict, json.loads(config_path.read_text()))
-    except json.JSONDecodeError as e:
-        raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
+    try: data = cast(NodeConfigDict, json.loads(config_path.read_text()))
+    except json.JSONDecodeError as e: raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
     except OSError as e:
         raise MachineConfigError(f"{config_path}: cannot read: {e}") from e
 
@@ -764,20 +762,16 @@ def _check_hook_failure_signal(name: str) -> str | None:
     else:
         signal_file = Path(signal_path)
         if not signal_file.exists(): return None
-        try:
-            raw = signal_file.read_text().strip()
-        except OSError:
-            return None
+        try: raw = signal_file.read_text().strip()
+        except OSError: return None
 
     if not raw: return None
     lines = raw.splitlines(); cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW; recent = 0
     for line in lines:
         parts = line.split(None, 1)
         if not parts: continue
-        try:
-            ts = int(parts[0])
-        except ValueError:
-            continue
+        try: ts = int(parts[0])
+        except ValueError: continue
         if ts >= cutoff: recent += 1
 
     if recent >= HOOK_FAILURE_THRESHOLD: return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
@@ -791,10 +785,8 @@ def _clear_hook_failures(name: str) -> None:
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
     else:
-        try:
-            Path(signal_path).unlink(missing_ok=True)
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+        try: Path(signal_path).unlink(missing_ok=True)
+        except OSError as exc: _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
     hook_reason = _check_hook_failure_signal(name)
@@ -1309,10 +1301,8 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
         parts = line.strip().split()
         if len(parts) < 3: continue
         pid = parts[0]
-        try:
-            cpu = float(parts[1])
-        except ValueError:
-            cpu = 0.0
+        try: cpu = float(parts[1])
+        except ValueError: cpu = 0.0
         state = parts[2]
         stats[pid] = cast(ProcStatsEntry, {"cpu": cpu, "state": state})
     return stats
@@ -1332,10 +1322,8 @@ def kill_adapter(name: str) -> None:
             proc.kill()
             proc.wait(timeout=TIMEOUT_THREAD_JOIN)
     if stderr_fh:
-        try:
-            stderr_fh.close()
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:kill_adapter", f"{type(exc).__name__}: {exc}")
+        try: stderr_fh.close()
+        except OSError as exc: _log(_LOG_DEBUG, "io:kill_adapter", f"{type(exc).__name__}: {exc}")
 
 def _read_learning_reminder(name: str) -> str:
     try:
@@ -1446,10 +1434,8 @@ def _load_registry() -> RegistryFileDict:
         if WORKER_REGISTRY_FILE.exists():
             corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(_clock.time())}")
             _log(_LOG_INFO, "worker", f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
-            try:
-                WORKER_REGISTRY_FILE.rename(corrupt_path)
-            except OSError as exc:
-                _log(_LOG_DEBUG, "io:_load_registry", f"{type(exc).__name__}: {exc}")
+            try: WORKER_REGISTRY_FILE.rename(corrupt_path)
+            except OSError as exc: _log(_LOG_DEBUG, "io:_load_registry", f"{type(exc).__name__}: {exc}")
         return {}
 
 def _save_registry(data: RegistryFileDict) -> None:
@@ -1461,10 +1447,8 @@ def _save_registry(data: RegistryFileDict) -> None:
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, str(WORKER_REGISTRY_FILE))
         except OSError:
-            try:
-                os.unlink(tmp_path)
-            except OSError as exc:
-                _log(_LOG_DEBUG, "io:_save_registry", f"{type(exc).__name__}: {exc}")
+            try: os.unlink(tmp_path)
+            except OSError as exc: _log(_LOG_DEBUG, "io:_save_registry", f"{type(exc).__name__}: {exc}")
             raise
     except OSError as e:
         _log(_LOG_WARN, "worker", f"Failed to save worker registry: {e}")
@@ -1549,10 +1533,8 @@ def cleanup_inbox(session_name: str) -> None:
     inbox = get_inbox_dir(session_name)
     if inbox.exists():
         for f in inbox.iterdir():
-            try:
-                f.unlink()
-            except OSError as e:
-                _log(_LOG_WARN, "bridge", f"Failed to delete {f}: {e}")
+            try: f.unlink()
+            except OSError as e: _log(_LOG_WARN, "bridge", f"Failed to delete {f}: {e}")
 
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     _sync_worker_manager()
@@ -1676,10 +1658,8 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
 
 def clear_pending(name: str) -> None:
     session_dir = get_session_dir(name); pending = session_dir / "pending"
-    try:
-        pending.unlink()
-    except OSError as exc:
-        _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
+    try: pending.unlink()
+    except OSError as exc: _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
 
 def is_pending(name: str) -> bool:
     pending = get_pending_file(name)
@@ -1700,10 +1680,8 @@ def try_set_pending(name: str, chat_id: ChatId) -> bool:
 def _pending_timestamp(name: str) -> int | None:
     pending = get_pending_file(name)
     if not pending.exists(): return None
-    try:
-        return int(pending.read_text().strip())
-    except OSError:
-        return None
+    try: return int(pending.read_text().strip())
+    except OSError: return None
 
 def compute_state(
     tmux_exists: bool,
@@ -1925,10 +1903,8 @@ class WorkerManager:
         except (subprocess.SubprocessError, KeyError) as e:
             _log(_LOG_ERROR, "bridge", f"Error scanning local tmux: {e}")
 
-        try:
-            machines = get_machine_catalog()
-        except (subprocess.SubprocessError, OSError):
-            machines = {}
+        try: machines = get_machine_catalog()
+        except (subprocess.SubprocessError, OSError): machines = {}
         for machine in machines.values():
             if machine.is_local or not machine.ssh_target: continue
             if machine.role not in ("worker-host", ""): continue
@@ -2007,10 +1983,8 @@ class WorkerManager:
             try:
                 if not tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK): return False
                 if backend.is_interactive:
-                    try:
-                        return is_claude_running(tmux_name, host=host)
-                    except (subprocess.SubprocessError, OSError):
-                        return True
+                    try: return is_claude_running(tmux_name, host=host)
+                    except (subprocess.SubprocessError, OSError): return True
                 return True
             except (subprocess.SubprocessError, OSError):
                 return True
@@ -3087,10 +3061,8 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
     messages = []
     for line in content.strip().split("\n"):
         if not line.strip(): continue
-        try:
-            ev = cast(dict[str, object], json.loads(line))
-        except json.JSONDecodeError:
-            continue
+        try: ev = cast(dict[str, object], json.loads(line))
+        except json.JSONDecodeError: continue
 
         ev_type = str(ev.get("type", "")); raw_payload = ev.get("payload", {})
         payload = cast(dict[str, object], raw_payload) if isinstance(raw_payload, dict) else {}
@@ -3633,10 +3605,8 @@ def _get_cpu_hogs(host: str | None = None, is_mac: bool = False) -> list[CpuHogE
         for line in r.stdout.strip().splitlines()[1:]:
             parts = line.split(None, 3)
             if len(parts) < 4: continue
-            try:
-                pid = int(parts[0]); cpu = float(parts[1])
-            except (ValueError, IndexError):
-                continue
+            try: pid = int(parts[0]); cpu = float(parts[1])
+            except (ValueError, IndexError): continue
             if cpu < CPU_HOG_THRESHOLD_PCT: break
             etime_str = parts[2]; etime_min = _parse_etime(etime_str)
             if etime_min is None: continue
@@ -3715,10 +3685,8 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
             for line in r.stdout.strip().splitlines():
                 parts = line.split(None, 1)
                 if len(parts) < 2: continue
-                try:
-                    size_val = int(parts[0]); path = parts[1]
-                except (ValueError, IndexError):
-                    continue
+                try: size_val = int(parts[0]); path = parts[1]
+                except (ValueError, IndexError): continue
                 size_bytes = size_val * 1024 if is_mac else size_val; size_gb = size_bytes / (1024**3)
                 total_bytes += size_bytes
                 items.append({"path": path, "size_gb": round(size_gb, 1)})
@@ -4166,10 +4134,8 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
         ("Worktree", lambda: _probe_worktree_sizes(remote_hosts)),
         ("Tailscale", lambda: _probe_tailscale()), ]
     for label, check_fn in checks:
-        try:
-            check_fn()
-        except (subprocess.SubprocessError, OSError) as e:
-            _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
+        try: check_fn()
+        except (subprocess.SubprocessError, OSError) as e: _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
 
 def _fetch_remote_file(host: str, remote_path: str) -> str | None:
     original_name = Path(remote_path).name; tmp_dir = tempfile.mkdtemp(prefix="remote-file-")
@@ -6712,10 +6678,8 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
         for line in f:
             line = line.strip()
             if not line: continue
-            try:
-                entry = cast(TranscriptEntry, json.loads(line))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
+            try: entry = cast(TranscriptEntry, json.loads(line))
+            except (json.JSONDecodeError, UnicodeDecodeError): continue
             etype = entry.get("type", "")
             if etype in ("progress", "queue-operation", "file-history-snapshot"): continue
             if etype == "system": continue
@@ -7411,10 +7375,8 @@ class Handler(BaseHTTPRequestHandler):
         return guest
 
     def handle_guest_register(self, body: bytes = b"") -> None:
-        try:
-            data = cast(dict[str, object], json.loads(body)) if body else {}
-        except (json.JSONDecodeError, ValueError):
-            data = {}
+        try: data = cast(dict[str, object], json.loads(body)) if body else {}
+        except (json.JSONDecodeError, ValueError): data = {}
         requested_name = _str_field(data, "name").strip().lower(); team_workers = set(get_registered_sessions().keys())
 
         with guest_store.lock: existing_guests = {g["name"] for g in guest_store.guests.values()}
@@ -8310,14 +8272,10 @@ code{background:#1a1c1a;padding:3px 8px;border-radius:4px;font-size:.9em}
 
             query_params = parse_qs(parsed.query); session_id = query_params.get("sid", [None])[0]
             page_raw = query_params.get("page", [None])[0]
-            try:
-                page = max(1, int(page_raw)) if page_raw is not None else None
-            except (ValueError, TypeError):
-                page = None
-            try:
-                per_page = max(1, min(500, int(query_params.get("per_page", [50])[0])))
-            except (ValueError, TypeError):
-                per_page = 50
+            try: page = max(1, int(page_raw)) if page_raw is not None else None
+            except (ValueError, TypeError): page = None
+            try: per_page = max(1, min(500, int(query_params.get("per_page", [50])[0])))
+            except (ValueError, TypeError): per_page = 50
             search_query = query_params.get("q", [""])[0].strip()
             search_sort = query_params.get("sort", ["relevance"])[0].strip()
             if search_sort not in ("relevance", "time"): search_sort = "relevance"
@@ -8886,10 +8844,8 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     watchdog.stop_event.set()
 
     if learning_reminders.idle_scan_timer is not None:
-        try:
-            learning_reminders.idle_scan_timer.cancel()
-        except (RuntimeError, OSError) as exc:
-            _log(_LOG_DEBUG, "shutdown:timer", f"{type(exc).__name__}: {exc}")
+        try: learning_reminders.idle_scan_timer.cancel()
+        except (RuntimeError, OSError) as exc: _log(_LOG_DEBUG, "shutdown:timer", f"{type(exc).__name__}: {exc}")
 
     with media_groups.lock:
         for _mg_id, _mg_entry in media_groups.buffer.items():
@@ -8910,10 +8866,8 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
 
     with processes.pipe_readers_lock: pipe_names = list(processes.pipe_readers.keys())
     for name in pipe_names:
-        try:
-            stop_pipe_reader(name)
-        except OSError as exc:
-            _log(_LOG_DEBUG, "shutdown:pipe", f"{type(exc).__name__}: {exc}")
+        try: stop_pipe_reader(name)
+        except OSError as exc: _log(_LOG_DEBUG, "shutdown:pipe", f"{type(exc).__name__}: {exc}")
     _message_pool.shutdown(wait=False, cancel_futures=True)
     _task_pool.shutdown(wait=False, cancel_futures=True)
     send_shutdown_message()
@@ -9247,10 +9201,8 @@ def main() -> None:
 
         def _tunnel_on_notify(msg: str) -> None:
             if admin_chat_id:
-                try:
-                    transport.send_text(admin_chat_id, msg)
-                except Exception:
-                    pass
+                try: transport.send_text(admin_chat_id, msg)
+                except Exception: pass
 
         tunnel_manager = _tunnel_mod.TunnelManager(
             config=tunnel_config,
@@ -9264,10 +9216,8 @@ def main() -> None:
         tunnel_manager.start()
         _log(_LOG_INFO, "tunnel", f"Tunnel manager started (mode={tunnel_config.mode})")
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        graceful_shutdown(signal.SIGINT, None)
+    try: server.serve_forever()
+    except KeyboardInterrupt: graceful_shutdown(signal.SIGINT, None)
 
 if __name__ == "__main__": main()
 
@@ -9287,10 +9237,8 @@ class _BridgeModule(_types_mod.ModuleType):
 
     def __getattr__(self, name: str) -> object:
         for mod in self._sources:
-            try:
-                return getattr(mod, name)
-            except AttributeError:
-                pass
+            try: return getattr(mod, name)
+            except AttributeError: pass
         raise AttributeError(f"module 'bridge' has no attribute {name}")
 
 import telegram as _tg_mod

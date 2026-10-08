@@ -1652,10 +1652,8 @@ class TunnelManager:
         while elapsed < timeout and not self._stop_event.is_set():
             self._clock.sleep(1)
             elapsed += 1
-            try:
-                text = log_file.read_text()
-            except OSError:
-                continue
+            try: text = log_file.read_text()
+            except OSError: continue
             for line in text.splitlines():
                 for word in line.split():
                     if word.startswith("https://") and ".trycloudflare.com" in word and "api.trycloudflare.com" not in word:
@@ -1823,32 +1821,24 @@ class TunnelManager:
     # ── File persistence ──────────────────────────────────────────────
 
     def _save_tunnel_url(self, url: str) -> None:
-        try:
-            (self._node_dir / "tunnel_url").write_text(url)
-        except OSError:
-            pass
+        try: (self._node_dir / "tunnel_url").write_text(url)
+        except OSError: pass
 
     def _kill_stale_tunnel(self) -> None:
         pid_file = self._node_dir / "tunnel.pid"
-        try:
-            pid = int(pid_file.read_text().strip())
-        except (OSError, ValueError):
-            return
+        try: pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError): return
         try:
             os.kill(pid, 9)
             _log(_LOG_WARN, "tunnel", f"Killed stale cloudflared (pid={pid})")
         except (OSError, ProcessLookupError):
             pass
-        try:
-            pid_file.unlink()
-        except OSError:
-            pass
+        try: pid_file.unlink()
+        except OSError: pass
 
     def _save_pid(self, pid: int) -> None:
-        try:
-            (self._node_dir / "tunnel.pid").write_text(str(pid))
-        except OSError:
-            pass
+        try: (self._node_dir / "tunnel.pid").write_text(str(pid))
+        except OSError: pass
 
     def _save_bot_info(self) -> None:
         try:

@@ -203,10 +203,8 @@ def _atomic_write_text(path: str, content: str) -> None:
             pass  # Rename succeeded; dir fsync failure is non-fatal
     except BaseException:
         if not renamed:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            try: os.unlink(tmp)
+            except OSError: pass
         raise
 
 def _atomic_write_bytes(path: str, data: bytes) -> None:
@@ -234,10 +232,8 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             pass  # Rename succeeded; dir fsync failure is non-fatal
     except BaseException:
         if not renamed:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            try: os.unlink(tmp)
+            except OSError: pass
         raise
 # Repo name pattern: owner/name (GitHub: start/end with alnum, no ".." or "." runs)
 _REPO_SEGMENT = r'[a-zA-Z0-9](?:[a-zA-Z0-9_-]|\.(?!\.))*[a-zA-Z0-9]'
@@ -395,10 +391,8 @@ class BaseConnector(abc.ABC, Generic[M]):
         if was_alerted:
             tag = f"[{self.connector_name}]"
             if self.on_alert:
-                try:
-                    self.on_alert(f"{tag} Recovered — polling resumed")
-                except Exception as e:
-                    print(f"{tag} Failed to send recovery alert: {e}")
+                try: self.on_alert(f"{tag} Recovered — polling resumed")
+                except Exception as e: print(f"{tag} Failed to send recovery alert: {e}")
     # -- Failure tracking --
 
     def track_failure(self) -> None:
@@ -798,10 +792,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
     def _save_history_id(self) -> None:
         with self._lock: hid = self._history_id
         if not hid: return
-        try:
-            _atomic_write_text(self._history_file_path, hid)
-        except OSError as e:
-            print(f"[gmail] Failed to save historyId: {e}")
+        try: _atomic_write_text(self._history_file_path, hid)
+        except OSError as e: print(f"[gmail] Failed to save historyId: {e}")
 
     def _load_history_id(self) -> Optional[str]:
         try:
@@ -892,10 +884,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 # Validate base64 alphabet and padding position
                 padded = data + "=" * (-len(data) % 4)
                 if not _B64_URLSAFE.match(padded): return ""
-                try:
-                    return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
-                except (ValueError, binascii.Error):
-                    return ""
+                try: return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+                except (ValueError, binascii.Error): return ""
             return ""
         parts = part.get("parts")
         if isinstance(parts, list):
@@ -1198,10 +1188,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if not msg_ids: return
         print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
         for msg_id in msg_ids:
-            try:
-                self._process_message(msg_id)
-            except Exception as e:
-                print(f"[gmail] Catch-up error {msg_id}: {e}")
+            try: self._process_message(msg_id)
+            except Exception as e: print(f"[gmail] Catch-up error {msg_id}: {e}")
 
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
@@ -1290,10 +1278,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
         with self._lock:
             state = GithubState( last_poll_time=self._last_poll_time, seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
             )
-        try:
-            _atomic_write_text(self._state_file, json.dumps(state))
-        except OSError as e:
-            print(f"[github] Failed to save state: {e}")
+        try: _atomic_write_text(self._state_file, json.dumps(state))
+        except OSError as e: print(f"[github] Failed to save state: {e}")
 
     def _on_preflight_ok(self) -> None:
         restored = self._load_state()

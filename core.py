@@ -23,10 +23,8 @@ def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     val = d.get(key, default)
     if isinstance(val, int): return val
     if isinstance(val, str):
-        try:
-            return int(val)
-        except ValueError:
-            return default
+        try: return int(val)
+        except ValueError: return default
     return default
 
 def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:

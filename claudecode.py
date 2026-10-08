@@ -406,10 +406,8 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile],
                         capture_output=True, timeout=TIMEOUT_TMUX_SEND, )
                 finally:
-                    try:
-                        os.unlink(tmpfile)
-                    except OSError as exc:
-                        _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+                    try: os.unlink(tmpfile)
+                    except OSError as exc: _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
             if r.returncode != 0: return False
             r = _remote_run(
@@ -524,10 +522,8 @@ def _codex_parse_jsonl(output: str) -> tuple[str, str]:
 
     for line in output.strip().split("\n"):
         if not line.strip(): continue
-        try:
-            event: dict[str, object] = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        try: event: dict[str, object] = json.loads(line)
+        except json.JSONDecodeError: continue
 
         event_type = _str_field(event, "type")
         if event_type == "thread.started": thread_id = _str_field(event, "thread_id")
@@ -771,10 +767,8 @@ def cleanup_worker_pipe(name: str) -> None:
             _log(_LOG_WARN, "worker", f"Failed to remove worker pipe {pipe_path}: {e}")
     pipe_dir = pipe_path.parent
     if pipe_dir.exists():
-        try:
-            pipe_dir.rmdir()
-        except OSError:
-            pass
+        try: pipe_dir.rmdir()
+        except OSError: pass
 
 def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
     pipe_path = get_worker_pipe_path(name)
