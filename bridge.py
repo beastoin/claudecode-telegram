@@ -2356,31 +2356,12 @@ def _probe_metric(remote_hosts: set[str], *, check_fn: Callable[..., dict[str, A
                 alerted_store[host_label] = False; alert_text = recovery_fmt(host_label, usage)
         _watchdog_alert(category, alert_text)
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
-    now = _clock.time()
-    for host in [None, *remote_hosts]:
-        if host and _is_host_down(host): continue
-        host_label = host or "VPS"
-        usage = _check_disk_usage(host)
-        if usage is None: continue
-        is_critical = usage["pct"] >= DISK_ALERT_THRESHOLD_PCT or usage["free_gb"] < DISK_ALERT_THRESHOLD_GB
-        is_warning = usage["pct"] >= DISK_WARN_THRESHOLD_PCT
-        level = "critical" if is_critical else ("warning" if is_warning else False)
-        alert_text: str | None = None
-        with watchdog.lock:
-            host_health.disk_usage[host_label] = {**usage, "ts": now}
-            prev = host_health.disk_alerted.get(host_label, False)
-            if level and level != prev:
-                if level == "critical" or not prev:
-                    if now - host_health.disk_alert_ts.get(host_label, 0) >= DISK_ALERT_COOLDOWN:
-                        emoji = "🔴 Disk space CRITICAL" if level == "critical" else "⚠️ Disk space warning"
-                        alert_text = f"{emoji}: {host_label}\nUsage: {usage['pct']}% ({usage['free_gb']:.1f}GB free of {usage['total_gb']:.0f}GB)"
-                        if level == "critical": alert_text += "\nAction needed: clean up old files, worktrees, or logs"
-                        host_health.disk_alert_ts[host_label] = now; host_health.disk_alerted[host_label] = level
-                else: host_health.disk_alerted[host_label] = level
-            elif not level and prev:
-                host_health.disk_alerted[host_label] = False
-                alert_text = f"✅ Disk space recovered: {host_label} — {usage['pct']}% ({usage['free_gb']:.1f}GB free)"
-        _watchdog_alert("Disk", alert_text)
+    _probe_metric(remote_hosts, check_fn=_check_disk_usage,  # type: ignore[arg-type]
+        usage_store=host_health.disk_usage, alerted_store=host_health.disk_alerted,
+        alert_ts_store=host_health.disk_alert_ts, cooldown=DISK_ALERT_COOLDOWN,
+        is_critical_fn=lambda u: u["pct"] >= DISK_ALERT_THRESHOLD_PCT or u["free_gb"] < DISK_ALERT_THRESHOLD_GB,
+        alert_fmt=lambda h, u: f"🔴 Disk space critical: {h}\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
+        recovery_fmt=lambda h, u: f"✅ Disk space recovered: {h} — {u['pct']}% ({u['free_gb']:.1f}GB free)", category="Disk")
 def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
     def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
         text = f"🧠 Memory critical: {h}\nUsage: {u['pct']}% ({u['avail_gb']:.1f}GB available of {u['total_gb']:.0f}GB)"
@@ -2435,37 +2416,32 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
                 lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
             host_health.cpu_hog_alert_ts[host_label] = now
             _watchdog_alert("CPU hog", f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines))
+def _check_worktree_usage(host: str | None = None) -> dict[str, Any] | None:  # type: ignore[explicit-any]
+    is_mac = bool(host and "mac" in host.lower())
+    try:
+        du_flag = "-sk" if is_mac else "-sb"
+        cmd = ["bash", "-c", f"find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | while read d; do du {du_flag} \"$d\" 2>/dev/null; done"]
+        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+        if r.returncode != 0: return None
+        items: list[WorktreeItemDict] = []; total_bytes = 0
+        for line in (r.stdout.strip().splitlines() if r.stdout.strip() else []):
+            parts = line.split(None, 1)
+            if len(parts) < 2: continue
+            try: size_val = int(parts[0])
+            except (ValueError, IndexError): continue
+            size_bytes = size_val * 1024 if is_mac else size_val; total_bytes += size_bytes
+            items.append({"path": parts[1], "size_gb": round(size_bytes / (1024**3), 1)})
+        return {"total_gb": round(total_bytes / (1024**3), 1), "items": items}
+    except (urllib.error.URLError, OSError, TimeoutError): return None
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
-    now = _clock.time()
-    for host in [None, *remote_hosts]:
-        if host and _is_host_down(host): continue
-        host_label = host or "VPS"; is_mac = bool(host and "mac" in host.lower())
-        try:
-            du_flag = "-sk" if is_mac else "-sb"
-            cmd = ["bash", "-c", f"find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | while read d; do du {du_flag} \"$d\" 2>/dev/null; done"]
-            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            if r.returncode != 0 or not r.stdout.strip(): continue
-            items: list[WorktreeItemDict] = []; total_bytes = 0
-            for line in r.stdout.strip().splitlines():
-                parts = line.split(None, 1)
-                if len(parts) < 2: continue
-                try: size_val = int(parts[0])
-                except (ValueError, IndexError): continue
-                size_bytes = size_val * 1024 if is_mac else size_val; total_bytes += size_bytes
-                items.append({"path": parts[1], "size_gb": round(size_bytes / (1024**3), 1)})
-            total_gb = total_bytes / (1024**3)
-            with watchdog.lock: host_health.worktree_usage[host_label] = {"total_gb": round(total_gb, 1), "items": items, "ts": now}
-            was_alerted = host_health.worktree_alerted.get(host_label, False)
-            if total_gb >= WORKTREE_ALERT_THRESHOLD_GB and not was_alerted:
-                if now - host_health.worktree_alert_ts.get(host_label, 0) >= WORKTREE_ALERT_COOLDOWN:
-                    top = sorted(items, key=lambda x: x["size_gb"], reverse=True)[:5]
-                    host_health.worktree_alert_ts[host_label] = now; host_health.worktree_alerted[host_label] = True
-                    _watchdog_alert("Worktree", f"📁 Worktree bloat on {host_label}: {total_gb:.1f}GB total (threshold: {WORKTREE_ALERT_THRESHOLD_GB}GB)\nTop directories:\n" + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top))
-            elif total_gb < WORKTREE_ALERT_THRESHOLD_GB and was_alerted:
-                host_health.worktree_alerted[host_label] = False
-                _watchdog_alert("Worktree", f"✅ Worktree size recovered: {host_label} — {total_gb:.1f}GB (below {WORKTREE_ALERT_THRESHOLD_GB}GB)")
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            _log(_LOG_ERROR, "watchdog", f"Worktree check error for {host_label}: {e}")
+    def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
+        top = sorted(u.get("items", []), key=lambda x: x["size_gb"], reverse=True)[:5]
+        return f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {WORKTREE_ALERT_THRESHOLD_GB}GB)\nTop directories:\n" + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
+    _probe_metric(remote_hosts, check_fn=_check_worktree_usage,
+        usage_store=host_health.worktree_usage, alerted_store=host_health.worktree_alerted,
+        alert_ts_store=host_health.worktree_alert_ts, cooldown=WORKTREE_ALERT_COOLDOWN,
+        is_critical_fn=lambda u: u["total_gb"] >= WORKTREE_ALERT_THRESHOLD_GB,
+        alert_fmt=_fmt, recovery_fmt=lambda h, u: f"✅ Worktree size recovered: {h} — {u['total_gb']:.1f}GB (below {WORKTREE_ALERT_THRESHOLD_GB}GB)", category="Worktree")
 def _probe_tailscale() -> None:
     now = _clock.time()
     try:
