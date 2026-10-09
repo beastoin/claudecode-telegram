@@ -29,7 +29,7 @@ from core import (
     TEAM_DIR,
     MACHINES_CONFIG_FILE,
     WEBHOOK_SECRET,
-    WatchdogConfig, ResourceAlertConfig, MediaConfig,
+    WatchdogConfig, ResourceAlertConfig,
     WATCHDOG_INTERVAL, START_GRACE, THINK_GRACE, TOOL_GAP_GRACE,
     STALE_PENDING, CPU_ACTIVE, CPU_IDLE, IDLE_STREAK_STUCK, ALERT_COOLDOWN,
     RESTART_COOLDOWN,
@@ -81,8 +81,6 @@ class AuthorDetection(NamedTuple):
     author: str; avatar_html: str; display_text: str
 class TmuxSessionDict(TypedDict, total=False):
     tmux: str; backend: str; host: str; protocol: str; callback_url: str; version: str; activity: str; context_pct: str
-class WorkerSessionDict(TypedDict, total=False):
-    backend: str; tmux: str; host: str; callback_url: str; protocol: str; version: str
 class RegistryWorkerDict(TypedDict, total=False):
     backend: str; chat_id: int | None; hire_time: int; host: str; home_host: str | None; home_cwd: str | None; protocol: str
     callback_url: str; version: str; tools: dict[str, object]
@@ -198,7 +196,6 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
         timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     kwargs.setdefault("timeout", 10); return _subprocess_runner.run(cmd, **kwargs)
-from telegram import _extract_msg_text as _extract_msg_text  # noqa: F401
 def _detect_os_family() -> str:
     if sys.platform == "darwin": return "darwin"
     return "linux"
@@ -629,7 +626,6 @@ def _ensure_workspace_trusted( cwd: str, config_path: Path | None = None,
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
     except (OSError, json.JSONDecodeError) as exc: _log(_LOG_WARN, "trust", f"could not pre-trust {cwd}: {exc}")
-from telegram import _build_cwd_change_notice as _build_cwd_change_notice  # noqa: F401
 def _cache_session_id(name: str, sid: str) -> None:
     if not sid: return
     try:

@@ -2176,10 +2176,8 @@ class TokenStore:
         with self._lock:
             expired = [k for k, v in PR_REVIEW_TOKENS.items() if v["expires_at"] <= now]
             for k in expired: del PR_REVIEW_TOKENS[k]
-            if token not in PR_REVIEW_TOKENS: return None
-            entry = PR_REVIEW_TOKENS[token]
-            if entry.get("expires_at", 0) <= now: return None
-            if extend: entry["expires_at"] = now + PR_REVIEW_EXTEND
+            entry = PR_REVIEW_TOKENS.get(token)
+            if entry and extend: entry["expires_at"] = now + PR_REVIEW_EXTEND
             return entry
 tokens = TokenStore()
 def _watchdog_alert(category: str, text: str | None) -> None:

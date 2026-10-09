@@ -174,11 +174,6 @@ class HttpClient:
              retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="POST", data=data, headers=headers,
                             timeout=timeout, retry=retry)
-    def head(self, url: str, *, timeout: float = 30.0,
-             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
-        return self.request(url, method="HEAD", timeout=timeout, retry=retry)
-
-_http_client: HttpClient = HttpClient()
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
     retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})), )
@@ -290,11 +285,6 @@ class ResourceAlertConfig:
     io_iowait_pct: int = 30
     io_cooldown: int = 3600
     infra_cooldown: int = 300
-@dataclass(frozen=True)
-class MediaConfig:
-    max_file_size: int = 50 * 1024 * 1024
-    photo_max_sum: int = 10000
-    photo_max_dim: int = 5000
 @dataclass(frozen=True)
 class TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"] = "poll"
