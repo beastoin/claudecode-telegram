@@ -2850,55 +2850,31 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 break
             if i < len(rich_chunks) - 1: _clock.sleep(DELAY_BRIEF)
     if not rich_sent and rich_failed_at > 0:
-        prev_msg_id = _send_html_fallback_chunks(
-            name, rich_chunks[rich_failed_at:], chat_id, log_prefix,
-            prev_msg_id, rich_failed_at, len(rich_chunks))
+        _send_as_html(name, '\n'.join(rich_chunks[rich_failed_at:]), chat_id, log_prefix, prev_msg_id)
         rich_sent = True
-    if not rich_sent: _send_text_as_html(name, clean_text, chat_id, log_prefix)
-def _send_html_fallback_chunks(
-    name: str, remaining_chunks: list[str], chat_id: int,
-    log_prefix: str, prev_msg_id: int | None,
-    start_index: int, total_chunks: int
-) -> int | None:
-    remaining_md = '\n'.join(remaining_chunks); remaining_html = markdown_to_telegram_html(remaining_md)
-    prefix_reserve = len(name) + 30; chunks = split_message(remaining_html, TELEGRAM_MAX_LENGTH - prefix_reserve)
-    formatted_parts = format_multipart_messages(name, chunks)
-    for i, part in enumerate(formatted_parts):
-        result = transport.send_text( chat_id, part, parse_mode="HTML", reply_to=prev_msg_id if prev_msg_id else None )
-        if result and result.get("ok"):
-            _rr2 = result.get("result", {}); prev_msg_id = _rr2.get("message_id") if isinstance(_rr2, dict) else None
-            _log(_LOG_INFO, "telegram", f"{log_prefix} sent (html fallback): {name} part {start_index + i + 1}/{total_chunks} -> Telegram OK")
-        else:
-            plain_text = re.sub(r'<[^>]+>', '', part)
-            plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-            transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
-        if i < len(formatted_parts) - 1: _clock.sleep(DELAY_BRIEF)
-    return prev_msg_id
-def _send_text_as_html(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
-    html_text = markdown_to_telegram_html(clean_text); prefix_reserve = len(name) + 30
+    if not rich_sent: _send_as_html(name, clean_text, chat_id, log_prefix)
+def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str,
+                  prev_msg_id: int | None = None) -> int | None:
+    html_text = markdown_to_telegram_html(text); prefix_reserve = len(name) + 30
     chunks = split_message(html_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
     formatted_parts = format_multipart_messages(name, chunks)
-    prev_msg_id: int | None = None
     for i, part in enumerate(formatted_parts):
         result = transport.send_text( chat_id, part, parse_mode="HTML", reply_to=prev_msg_id if prev_msg_id else None )
         if result and result.get("ok"):
-            _rr3 = result.get("result", {}); prev_msg_id = _rr3.get("message_id") if isinstance(_rr3, dict) else None
+            _rr = result.get("result", {}); prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
             if len(formatted_parts) > 1:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK")
             else: _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
-            desc = str((result or {}).get("description", "")); error_code = int((result or {}).get("error_code", 0))
-            if error_code == 400:
-                _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed (400: {desc}), retrying as plain text")
-                plain_text = re.sub(r'<[^>]+>', '', part)
-                plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-                result = transport.send_text( chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None )
-                if result and result.get("ok"):
-                    prev_msg_id = cast(int | None, _dict_field(result, "result").get("message_id"))
-                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (plain): {name} -> Telegram OK")
-                else: _log(_LOG_WARN, "bridge", f"{log_prefix} failed (plain): {name} -> {result}")
-            else: _log(_LOG_WARN, "bridge", f"{log_prefix} failed: {name} -> {result}")
+            desc = str((result or {}).get("description", ""))
+            _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed ({desc}), retrying as plain text")
+            plain_text = re.sub(r'<[^>]+>', '', part)
+            plain_text = plain_text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+            result = transport.send_text( chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None )
+            if result and result.get("ok"):
+                _rr = result.get("result", {}); prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
         if i < len(formatted_parts) - 1: _clock.sleep(DELAY_BRIEF)
+    return prev_msg_id
 def _send_response_media(name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int) -> None:
     for img_path, img_caption in images:
         if img_path is None:
@@ -5785,36 +5761,13 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self._send_text(400, "Missing text")
                 return
-            host = get_worker_host(name) if name else None
-            if host:
-                _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
-                clean_text, images = _parse_media_tags(text, "image", _accept_all)
-                clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
-            else:
-                clean_text, images = parse_image_tags(text)
-                clean_text, files = parse_file_tags(clean_text)
-            if name and (images or files): images = _localize_media(name, images); files = _localize_media(name, files)
+            clean_text, images, files = _parse_response_media(name or "", text)
             chat_ids = get_all_chat_ids(); sent = 0; label = name or "notify"
             for chat_id in chat_ids:
                 if clean_text:
                     result = transport.send_text(chat_id, clean_text)
                     if result and result.get("ok"): sent += 1
-                for img_path, caption in images:
-                    if img_path is None:
-                        transport.send_text(chat_id, f"{label}: {caption}")
-                        continue
-                    full_caption = f"{label}: {caption}" if caption else f"{label}:"
-                    if Path(img_path).suffix.lower() in (".gif", ".mp4"): send_animation(chat_id, img_path, full_caption)
-                    else: send_photo(chat_id, img_path, full_caption)
-                for fpath, caption in files:
-                    if fpath is None:
-                        transport.send_text(chat_id, f"{label}: {caption}")
-                        continue
-                    full_caption = f"{label}: {caption}" if caption else f"{label}:"; ext = Path(fpath).suffix.lower()
-                    if ext in VIDEO_EXTENSIONS: send_video(chat_id, fpath, full_caption)
-                    elif ext in AUDIO_EXTENSIONS: send_audio(chat_id, fpath, full_caption)
-                    elif ext in VOICE_EXTENSIONS: send_voice(chat_id, fpath, full_caption)
-                    else: send_document(chat_id, fpath, full_caption)
+                _send_response_media(label, images, files, chat_id)
             has_media = len(images) + len(files)
             _log(_LOG_INFO, "notify", f"sent to {sent}/{len(chat_ids)} chats: {text[:50]}..."
                  f"{f' ({has_media} media)' if has_media else ''}")
