@@ -56,7 +56,7 @@ from telegram import (
     _team_attention_summary,
     _format_watchdog_status as _format_watchdog_status_pure,
     format_team_lines as _format_team_lines_pure, )
-import telegram as _tunnel_mod
+import tunnel as _tunnel_mod
 from core import _build_tunnel_config
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
