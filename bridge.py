@@ -51,11 +51,7 @@ from telegram import (
     _pipe_tables_to_html,
     _MEDIA_GROUP_WAIT,
     _extract_msg_text,
-    _build_cwd_change_notice,
-    _normalize_activity,
-    _team_attention_summary,
-    _format_watchdog_status as _format_watchdog_status_pure,
-    format_team_lines as _format_team_lines_pure, )
+    _build_cwd_change_notice, )
 import tunnel as _tunnel_mod
 from core import _build_tunnel_config
 from claudecode import *  # noqa: F401,F403
@@ -3634,6 +3630,8 @@ from health import (  # noqa: E402
     _clear_hook_failures, _extract_question_details, _get_claude_pid,
     _read_noninteractive_activity, _read_tmux_activity, _send_interactive_reply,
     compute_state, format_team_lines, _format_watchdog_status,
+    _normalize_activity, _team_attention_summary,
+    _format_watchdog_status_pure, _format_team_lines_pure,
     _check_adapter_log, _detect_poisoned, _extract_activity,
     watchdog_loop,
 )

@@ -219,105 +219,6 @@ def _build_cwd_change_notice( name: str, old_cwd: str, new_cwd: str, old_sid: st
     lines.append(f"<b>to:</b> <code>{new_cwd}</code> (fresh start)")
     return "\n".join(lines)
 
-# ── Team formatting (pure functions, runtime state injected by caller) ──
-def _normalize_activity(raw: str) -> str:
-    if not raw: return raw
-    m = re.match(r'^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$', raw)
-    if m:
-        verb = m.group(1); dur = m.group(2)
-        if dur: return f"Thinking ({dur})"
-        return "Thinking"
-    return raw
-def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, str, int]:
-    status = (watchdog_status or "").lower(); act = (activity or "").lower()
-    if "rate limit" in act: return "🔴", "rate limit", 0
-    if "error" in act or "traceback" in act or "not running" in act or "failed" in act: return "🔴", "error", 0
-    if "needs input" in status or "needs reply" in status: return "🟡", "needs reply", 1
-    if "stuck" in status or "no progress" in status: return "🔴", "stuck", 0
-    if "poisoned" in status or "error loop" in status: return "🔴", "error loop", 0
-    if "dead" in status or "not responding" in status: return "🔴", "stopped", 0
-    if "offline" in status: return "🔴", "offline", 0
-    if "exited" in status or "session ended" in status: return "🔴", "session ended", 0
-    waiting_signals = (
-        "waiting for",
-        "awaiting",
-        "approval",
-        "accept edits",
-        "confirm",
-        "in plan mode", )
-    if "working (waiting)" in status or any(sig in act for sig in waiting_signals): return "🟡", "needs reply", 1
-    return "🟢", "ok", 2
-def _format_watchdog_status(name: str,
-                            pending_lookup: 'Callable[[str], bool] | None' = None,
-                            state_snapshot: 'dict[str, WorkerStateEntry] | None' = None,
-                            clock_now: float | None = None) -> str:
-    if pending_lookup is None: pending_lookup = lambda _: False  # noqa: E731
-    if clock_now is None: clock_now = time.time()
-    entry = state_snapshot.get(name) if state_snapshot else None
-    if not entry: return "Working" if pending_lookup(name) else "Ready"
-    state, _reason, since = entry
-    now = clock_now
-    _SIMPLE = {"READY": "Ready", "BUSY_TOOL": "Working", "BUSY_THINKING": "Thinking",
-               "WAITING": "Working", "DEAD": "Not responding", "HOST_OFFLINE": "Host offline",
-               "OFFLINE": "Offline", "EXITED": "Session ended", "UNTRACKED_BUSY": "Working"}
-    if state in _SIMPLE: return _SIMPLE[state]
-    minutes = max(0, int((now - since) / 60)) if since else 0
-    if state == "WAITING_INPUT": return f"Needs reply ({minutes}m)"
-    if state == "STUCK":
-        age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
-        if age_match: minutes = int(age_match.group(1)) // 60
-        return f"No progress ({minutes}m)"
-    if state == "POISONED": return f"Error loop ({minutes}m)"
-    return state.lower()
-def format_team_lines(
-    registered: 'dict[str, TmuxSessionDict]',
-    active: str | None,
-    pending_lookup: 'Callable[[str], bool] | None' = None,
-    worker_live: 'dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None' = None,
-    *,
-    state_snapshot: 'dict[str, WorkerStateEntry] | None' = None,
-    clock_now: float | None = None,
-    normalize_backend_fn: 'Callable[[str | None], str] | None' = None,
-) -> list[str]:
-    if pending_lookup is None: pending_lookup = lambda _: False  # noqa: E731
-    if worker_live is None: worker_live = {}
-    if state_snapshot is None: state_snapshot = {}
-    if clock_now is None: clock_now = time.time()
-    if normalize_backend_fn is None: normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
-    backend_values = set()
-    for name, session in registered.items():
-        live = worker_live.get(name, {}); backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
-        backend_values.add(backend)
-    show_backend = len(backend_values) > 1; rows = []; counts = {"🔴": 0, "🟡": 0, "🟢": 0}
-    for name in sorted(registered.keys()):
-        session = registered[name]
-        watchdog_status = _format_watchdog_status(name, pending_lookup,
-                                                  state_snapshot=state_snapshot,
-                                                  clock_now=clock_now)
-        live = worker_live.get(name, {}); backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
-        raw_activity = str(live.get("activity") or "").strip()
-        if not raw_activity or raw_activity == "Unknown": raw_activity = watchdog_status
-        activity = _normalize_activity(raw_activity)
-        if len(activity) > 42: activity = activity[:39].rstrip() + "..."
-        context_pct = str(live.get("context_pct") or "").strip()
-        icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
-        counts[icon] += 1
-        name_cell = f"{name} 🎯" if name == active else name
-        ctx_part = f" | ctx {context_pct}" if context_pct and context_pct != "--" else ""
-        row = f"{icon} {name_cell} — {activity}{ctx_part}"
-        if show_backend: row += f" | backend={backend}"
-        focus_rank = 0 if name == active else 1
-        rows.append((severity_rank, focus_rank, name, blocker, row))
-    rows.sort(key=lambda item: (item[0], item[1], item[2]))
-    attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]; lines = []
-    focused = active or "(none)"
-    lines.append(
-        f"Team: {len(registered)} agents · focused: {focused} | "
-        f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked" )
-    if attention_rows: lines.append("Needs your reply: " + ", ".join(attention_rows))
-    lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
-    return lines
-
 LAST_CHAT_ID_FILE = NODE_DIR / "last_chat_id"
 LAST_ACTIVE_FILE = NODE_DIR / "last_active"
 class MediaGroupState:
@@ -446,10 +347,6 @@ class TelegramAPI:
         except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             _log(_LOG_ERROR, "telegram", f"Telegram API error: {e}")
             return None
-    def send_message(self, chat_id: ChatId, text: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = {"chat_id": chat_id, "text": text}
-        payload.update(kwargs)
-        return self.api("sendMessage", payload)
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> TelegramApiResponse:
         payload: dict[str, object] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
@@ -705,19 +602,6 @@ def send_sticker(chat_id: ChatId, path: str) -> bool: return transport.send_stic
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_IMAGE_EXTENSIONS = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4", }
-ALLOWED_DOC_EXTENSIONS = {
-    ".md", ".txt", ".rst", ".pdf",
-    ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml",
-    ".log", ".sql", ".patch", ".diff",
-    ".py", ".js", ".ts", ".jsx", ".tsx",
-    ".go", ".rs", ".java", ".kt", ".swift",
-    ".rb", ".php", ".c", ".cpp", ".h", ".hpp",
-    ".sh", ".html", ".css", ".scss",
-    ".zip", ".tar", ".gz",
-    ".mp3", ".m4a", ".flac", ".aac", ".wav",
-    ".ogg", ".opus", ".oga",
-    ".mp4", ".mov", ".avi", ".mkv", ".webm",
-    ".tgs", }
 BLOCKED_DOC_EXTENSIONS = {
     ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
     ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc", }
