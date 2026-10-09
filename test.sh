@@ -1972,7 +1972,9 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
     tpath = f.name
 
 from unittest.mock import patch
-with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+import transcript
+with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
+     patch.object(transcript, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
     # Without filter: shows all entries
     html_all = bridge._render_transcript_html('test')
     assert 'hello world' in html_all
@@ -2072,7 +2074,9 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
     tpath = f.name
 
 from unittest.mock import patch
-with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+import transcript
+with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
+     patch.object(transcript, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
     html = bridge._render_transcript_html('test')
     # Duration should show 2h 30m
     assert '2h 30m' in html, f'Expected 2h 30m duration in sidebar'

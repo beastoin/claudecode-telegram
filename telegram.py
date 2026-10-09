@@ -455,40 +455,10 @@ class TelegramAPI:
         payload: dict[str, object] = {"chat_id": chat_id, "text": text}
         payload.update(kwargs)
         return self.api("sendMessage", payload)
-    def send_rich_message(self, chat_id: ChatId, markdown: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = { "chat_id": chat_id, "rich_message": {"markdown": markdown}, }
-        payload.update(kwargs)
-        return self.api("sendRichMessage", payload)
-    def send_photo(self, chat_id: ChatId, photo: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = {"chat_id": chat_id, "photo": photo}
-        payload.update(kwargs)
-        return self.api("sendPhoto", payload)
-    def send_document(self, chat_id: ChatId, document: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = {"chat_id": chat_id, "document": document}
-        payload.update(kwargs)
-        return self.api("sendDocument", payload)
-    def send_animation(self, chat_id: ChatId, animation: str, **kwargs: object) -> TelegramApiResponse:
-        payload: dict[str, object] = {"chat_id": chat_id, "animation": animation}
-        payload.update(kwargs)
-        return self.api("sendAnimation", payload)
     def set_reaction(self, chat_id: ChatId, message_id: MessageId,
                      reaction: list[dict[str, str]]) -> TelegramApiResponse:
         payload: dict[str, object] = {"chat_id": chat_id, "message_id": message_id, "reaction": reaction}
         return self.api("setMessageReaction", payload)
-    def send_chat_action(self, chat_id: ChatId, action: str) -> TelegramApiResponse:
-        return self.api("sendChatAction", {"chat_id": chat_id, "action": action})
-
-    # ── Webhook management ────────────────────────────────────────────
-    def set_webhook(self, url: str, secret_token: str = "") -> TelegramApiResponse:
-        payload: dict[str, object] = {"url": url}
-        if secret_token: payload["secret_token"] = secret_token
-        return self.api("setWebhook", payload)
-    def delete_webhook(self) -> TelegramApiResponse:
-        return self.api("deleteWebhook", {})
-    def get_webhook_info(self) -> TelegramApiResponse:
-        return self.api("getWebhookInfo", {})
-    def get_me(self) -> TelegramApiResponse:
-        return self.api("getMe", {})
 class TelegramTransport(MessageTransport):
 
     def __init__(self, token: str) -> None:
@@ -970,8 +940,6 @@ def split_message(text: str, max_len: int=TELEGRAM_MAX_LENGTH) -> list[str]:
     return chunks
 def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]:
     return [format_response_text(session_name, chunk) for chunk in chunks]
-def setup_bot_commands() -> None:
-    update_bot_commands()
 def update_bot_commands() -> None:
     commands = list(BOT_COMMANDS)
     import bridge as _br

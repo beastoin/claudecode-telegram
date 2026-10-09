@@ -416,7 +416,8 @@ def test_transcript_prompts_filter():
         tpath = f.name
 
     try:
-        with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+        with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
+             patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             # Without filter: shows all entries
             html_all = bridge._render_transcript_html('test')
             assert 'hello world' in html_all
@@ -500,7 +501,8 @@ def test_transcript_sidebar_stats():
         tpath = f.name
 
     try:
-        with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+        with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
+             patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             html = bridge._render_transcript_html('test')
             # Duration should show 2h 30m
             assert '2h 30m' in html, 'Expected 2h 30m duration in sidebar'
