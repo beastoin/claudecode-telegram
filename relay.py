@@ -2,16 +2,66 @@
 from __future__ import annotations
 import hashlib, json, os, secrets, time, threading
 from pathlib import Path
-from typing import cast, TYPE_CHECKING
+from typing import TypedDict, cast
 
 from core import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
 
-if TYPE_CHECKING:
-    from bridge import (
-        GuestSessionDict, GuestInboxMessageDict,
-        ChannelDict, ChannelMemberDict, ChannelMessageDict,
-        RelayChannelDict, RelayMessageDict,
-    )
+# ---------------------------------------------------------------------------
+# TypedDicts for guest/channel/relay data (authoritative definitions)
+# ---------------------------------------------------------------------------
+class _GuestSessionDictRequired(TypedDict):
+    name: str
+    created_at: str
+    expires_at_unix: float
+    notified_workers: set[str] | list[str]
+class GuestSessionDict(_GuestSessionDictRequired, total=False):
+    token_hash: str
+    expires_at: str
+GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
+    "id": str,
+    "from": str,
+    "sender": str,
+    "text": str,
+    "ts": int,
+    "to": str,
+    "channel": str,
+}, total=False)
+class ChannelMemberDict(TypedDict, total=False):
+    type: str
+    name: str
+ChannelMessageDict = TypedDict("ChannelMessageDict", { "id": str, "seq": int, "from": str, "text": str, "ts": int,
+})
+class ChannelDict(TypedDict):
+    id: str
+    label: str
+    created_at: str
+    expires_at_unix: float
+    seq: int
+    created_by: str
+    members: dict[str, ChannelMemberDict]
+    messages: list[ChannelMessageDict]
+_RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
+    "message_id": str,
+    "direction": str,
+    "from": str,
+    "to": str,
+    "text": str,
+    "ts": str,
+})
+class RelayMessageDict(_RelayMessageDictRequired, total=False):
+    sender_name: str
+class RelayChannelDict(TypedDict):
+    id: str
+    label: str
+    worker: str
+    workers: list[str]
+    created_at: str
+    expires_at: str
+    expires_at_unix: float
+    guest_token_hash: str
+    reply_token_hash: str
+    reply_token: str
+    messages: list[RelayMessageDict]
 
 # ---------------------------------------------------------------------------
 # Shared state-file helpers

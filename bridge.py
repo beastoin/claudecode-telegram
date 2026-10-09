@@ -1070,61 +1070,6 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
 PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]
 GetRouteHandler = Callable[["Handler", ParseResult, re.Match[str] | None], None]
-class _GuestSessionDictRequired(TypedDict):
-    name: str
-    created_at: str
-    expires_at_unix: float
-    notified_workers: set[str] | list[str]
-class GuestSessionDict(_GuestSessionDictRequired, total=False):
-    token_hash: str
-    expires_at: str
-GuestInboxMessageDict = TypedDict("GuestInboxMessageDict", {
-    "id": str,
-    "from": str,
-    "sender": str,
-    "text": str,
-    "ts": int,
-    "to": str,
-    "channel": str,
-}, total=False)
-"""Shape of a guest inbox message in storage."""
-class ChannelMemberDict(TypedDict, total=False):
-    type: str
-    name: str
-ChannelMessageDict = TypedDict("ChannelMessageDict", { "id": str, "seq": int, "from": str, "text": str, "ts": int,
-})
-"""Shape of a message inside a channel's messages list."""
-class ChannelDict(TypedDict):
-    id: str
-    label: str
-    created_at: str
-    expires_at_unix: float
-    seq: int
-    created_by: str
-    members: dict[str, ChannelMemberDict]
-    messages: list[ChannelMessageDict]
-_RelayMessageDictRequired = TypedDict("_RelayMessageDictRequired", {
-    "message_id": str,
-    "direction": str,
-    "from": str,
-    "to": str,
-    "text": str,
-    "ts": str,
-})
-class RelayMessageDict(_RelayMessageDictRequired, total=False):
-    sender_name: str
-class RelayChannelDict(TypedDict):
-    id: str
-    label: str
-    worker: str
-    workers: list[str]
-    created_at: str
-    expires_at: str
-    expires_at_unix: float
-    guest_token_hash: str
-    reply_token_hash: str
-    reply_token: str
-    messages: list[RelayMessageDict]
 class PostRouteResolution(NamedTuple):
     handler: PostRouteHandler | None
     match: re.Match[str] | None
@@ -1465,8 +1410,8 @@ class _LegacyTransportAdapter(MessageTransport):
     def download_file(self, file_id: str, session_name: str) -> str | None: return None
 CommandFn = Callable[[str, ChatId, MessageId], bool]
 def _fanout_channel_message(channel_id: str, from_member: str,
-                            text: str, msg: ChannelMessageDict,
-                            members_snapshot: dict[str, ChannelMemberDict],
+                            text: str, msg: "ChannelMessageDict",
+                            members_snapshot: "dict[str, ChannelMemberDict]",
                             registered: dict[str, TmuxSessionDict]) -> None:
     tagged = f"[{channel_id} from {from_member}] {text}"
     for member_key, minfo in members_snapshot.items():
@@ -2016,7 +1961,7 @@ class CommandRouter:
                 "ts": int(_clock.time()), }
             with guest_store.lock:
                 inbox = guest_store.inboxes.get(name, [])
-                guest_store.inboxes[name] = guest_inbox_append(inbox, cast(GuestInboxMessageDict, msg_obj))
+                guest_store.inboxes[name] = guest_inbox_append(inbox, cast("GuestInboxMessageDict", msg_obj))
             return {"name": name, "status": "sent"}
         return {"name": name, "status": "unknown"}
     def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
@@ -2549,7 +2494,7 @@ class Handler(BaseHTTPRequestHandler):
     def _parse_body(self, body: bytes) -> dict[str, object] | None:
         try: return cast(dict[str, object], json.loads(body)) if body else {}
         except (json.JSONDecodeError, ValueError): self._send_error_json(400, "invalid JSON"); return None
-    def _guest_auth(self, parsed: ParseResult | None = None) -> GuestSessionDict | None:
+    def _guest_auth(self, parsed: ParseResult | None = None) -> "GuestSessionDict | None":
         query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(self.path).query)
         token = query_params.get("token", [""])[0]
         if not token: self._send_error_json(403, "token required"); return None
@@ -2588,7 +2533,7 @@ class Handler(BaseHTTPRequestHandler):
         now = _clock.time(); expires_at_unix = now + GUEST_TTL
         expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_unix))
         created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-        guest = cast(GuestSessionDict, {"name": name, "token_hash": token_hash, "created_at": created_at,
+        guest = cast("GuestSessionDict", {"name": name, "token_hash": token_hash, "created_at": created_at,
             "expires_at": expires_at, "expires_at_unix": expires_at_unix, "notified_workers": set()})
         with guest_store.lock: guest_store.guests[token_hash] = guest; guest_store.inboxes[name] = []; _guest_save()
         base_url = _relay_base_url()
@@ -3637,6 +3582,9 @@ from health import (  # noqa: E402
 )
 # Re-export relay/guest/channel for LOAD_GLOBAL lookups
 from relay import (  # noqa: E402
+    GuestSessionDict, GuestInboxMessageDict,
+    ChannelMemberDict, ChannelMessageDict, ChannelDict,
+    RelayMessageDict, RelayChannelDict,
     _save_state_json, _load_state_json,
     GuestStore, guest_store, GUEST_TTL, GUEST_INBOX_CAP,
     _guest_state_path, _guest_save, _guest_load,
