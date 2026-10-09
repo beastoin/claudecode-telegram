@@ -321,3 +321,200 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayM
     for i, m in enumerate(msgs):
         if m["message_id"] == after: return list(msgs[i + 1:])
     return list(msgs)
+
+# --- HTTP handler functions (extracted from bridge.py Handler class) ---
+def _relay_get_token(handler) -> str | None:
+    from urllib.parse import urlparse
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer "): return auth[7:].strip()
+    parsed = urlparse(handler.path); params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+    return params.get("token", "")
+
+def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
+    import json
+    from typing import cast
+    token = _relay_get_token(handler)
+    if not token: handler._send_json(401, {"error": "missing token"}); return None, "", None
+    channel = auth_fn(channel_id, token)
+    if not channel: handler._send_json(403, {"error": "invalid or expired channel/token"}); return None, "", None
+    try: data = cast(dict[str, object], json.loads(body)) if body else {}
+    except (json.JSONDecodeError, ValueError): handler._send_json(400, {"error": "invalid JSON"}); return None, "", None
+    import bridge as _b
+    text = _b._str_field(data, "text").strip()
+    if not text: handler._send_json(400, {"error": "missing text"}); return None, "", None
+    return data, text, channel
+
+def handle_relay_get(handler, channel_id: str, action, parsed) -> None:
+    token = _relay_get_token(handler)
+    if not token: handler._send_json(401, {"error": "missing token"}); return
+    channel = relay_auth_guest(channel_id, token)
+    if not channel: handler._send_json(403, {"error": "invalid or expired channel/token"}); return
+    if action is None: handler._send_text(200, relay_guide_text(channel, token)); return
+    if action == "messages":
+        params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+        handler._send_json(200, {"messages": relay_get_messages(channel_id, after=params.get("after"))}); return
+    if action == "status":
+        handler._send_json(200, {"channel_id": channel_id, "worker": channel["worker"], "label": channel["label"],
+            "expires_at": channel["expires_at"], "message_count": len(channel["messages"])}); return
+    handler._send_json(404, {"error": f"unknown action: {action}"})
+
+def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
+    import bridge as _b
+    data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_guest, body)
+    if not data: return
+    envelope, msg = relay_guest_send(channel_id, text)
+    if not envelope: handler._send_json(500, {"error": "channel not found"}); return
+    workers = channel.get("workers", [channel["worker"]]); delivered = {w: _b.send_to_worker(w, envelope) for w in workers}
+    handler._send_json(200, {"message_id": msg["message_id"], "delivered": all(delivered.values()), "workers": delivered})
+
+def handle_relay_reply(handler, channel_id: str, body: bytes = b"") -> None:
+    data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_reply, body)
+    if not data: return
+    msg = relay_worker_reply(channel_id, text)
+    if not msg: handler._send_json(500, {"error": "channel not found"}); return
+    handler._send_json(200, {"message_id": msg["message_id"], "delivered": True})
+
+# --- CommandRouter relay command functions (extracted from bridge.py CommandRouter) ---
+def cmd_relay_list(router, chat_id) -> bool:
+    import bridge as _b
+    with relay_store.lock:
+        active = [(cid, ch) for cid, ch in relay_store.channels.items()
+                  if _b._clock.time() <= ch["expires_at_unix"]]
+    if active:
+        lines = []
+        for cid, ch in active:
+            msg_count = len(ch.get("messages", [])); workers = ch.get("workers", [ch["worker"]])
+            worker_str = ", ".join(workers)
+            lines.append(f"• {cid} → {worker_str} ({msg_count} msgs, expires {ch['expires_at']})")
+        router.reply(chat_id, "📡 Active relays:\n" + "\n".join(lines))
+    else: router.reply(chat_id, "No active relays.")
+    return True
+
+def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+    if len(parts) < 3:
+        router.reply(chat_id, "Usage: /relay add <channel_id> <worker>"); return True
+    channel_id = parts[1]; new_worker = parts[2].lower(); registered = _b.get_registered_sessions()
+    if new_worker not in registered:
+        router.reply(chat_id, f"Worker \"{new_worker}\" not found."); return True
+    with relay_store.lock:
+        found = relay_store.channels.get(channel_id)
+        if not found or _b._clock.time() > found["expires_at_unix"]: found = None
+    if not found:
+        router.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels."); return True
+    workers = found.get("workers", [found["worker"]])
+    if new_worker in workers:
+        router.reply(chat_id, f"{new_worker} is already in {channel_id}."); return True
+    with relay_store.lock:
+        found.setdefault("workers", [found["worker"]]).append(new_worker); _relay_save()
+    router.reply(chat_id, f"📡 Added {new_worker} to {channel_id}. Workers: {', '.join(found['workers'])}")
+    return True
+
+def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+    if len(parts) < 3:
+        router.reply(chat_id, "Usage: /relay remove <channel_id> <worker>"); return True
+    channel_id = parts[1]; rm_worker = parts[2].lower()
+    with relay_store.lock:
+        found = relay_store.channels.get(channel_id)
+        if not found or _b._clock.time() > found["expires_at_unix"]: found = None
+    if not found:
+        router.reply(chat_id, f"Relay \"{channel_id}\" not found. Use /relay list to see active channels."); return True
+    workers = found.get("workers", [found["worker"]])
+    if rm_worker not in workers:
+        router.reply(chat_id, f"{rm_worker} is not in {channel_id}."); return True
+    if len(workers) <= 1:
+        router.reply(chat_id, f"Can't remove the last worker. Use /relay stop {channel_id} to close it."); return True
+    with relay_store.lock:
+        found["workers"].remove(rm_worker); _relay_save()
+    router.reply(chat_id, f"📡 Removed {rm_worker} from {channel_id}. Workers: {', '.join(found['workers'])}")
+    return True
+
+def cmd_relay_status(router, chat_id) -> bool:
+    import bridge as _b
+    now = _b._clock.time()
+    with relay_store.lock:
+        relay_active = [(cid, ch) for cid, ch in relay_store.channels.items()
+                        if now <= ch["expires_at_unix"]]
+    with _b.channel_store.lock:
+        ch_active = [(cid, ch) for cid, ch in _b.channel_store.channels.items()
+                     if not _b.channel_is_expired(ch)]
+    with _b.guest_store.lock:
+        guest_active = [g for g in _b.guest_store.guests.values()
+                        if now <= g.get("expires_at_unix", 0)]
+    lines = ["📡 System Status\n"]
+    lines.append(f"Relays: {len(relay_active)}")
+    for cid, ch in relay_active:
+        msg_count = len(ch.get("messages", [])); workers = ch.get("workers", [ch["worker"]])
+        lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
+    lines.append(f"\nChannels: {len(ch_active)}")
+    for cid, chan in ch_active:
+        members_str = ", ".join(chan["members"].keys()); msg_count = len(chan.get("messages", []))
+        lines.append(f"  • {cid} ({chan['label']}) — {members_str} ({msg_count} msgs)")
+    lines.append(f"\nGuests: {len(guest_active)}")
+    for g in guest_active:
+        inbox_count = len(_b.guest_store.inboxes.get(g["name"], []))
+        lines.append(f"  • {g['name']} (inbox: {inbox_count} msgs)")
+    router.reply(chat_id, "\n".join(lines))
+    return True
+
+def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+    if len(parts) < 2:
+        router.reply(chat_id, "Usage: /relay stop <label>"); return True
+    target = parts[1]; removed = False
+    with relay_store.lock:
+        to_remove = None
+        if target in relay_store.channels: to_remove = target
+        else:
+            target_lower = target.lower()
+            for cid, ch in relay_store.channels.items():
+                if ch["label"] == target_lower or ch["worker"] == target_lower:
+                    to_remove = cid; break
+        if to_remove:
+            del relay_store.channels[to_remove]; _relay_save(); removed = True
+    if removed: router.reply(chat_id, f"📡 Relay \"{target}\" closed.")
+    else: router.reply(chat_id, f"Relay \"{target}\" not found.")
+    return True
+
+def cmd_relay(router, arg: str, chat_id) -> bool:
+    import bridge as _b
+    if not arg:
+        with relay_store.lock:
+            active = [ch for ch in relay_store.channels.values()
+                      if _b._clock.time() <= ch["expires_at_unix"]]
+        lines = ["📡 Relay — connect any agent to the team\n"]
+        lines.append("/relay <worker> — create relay, get a guideline link")
+        lines.append("/relay add <channel_id> <worker> — add worker to relay")
+        lines.append("/relay remove <channel_id> <worker> — remove worker")
+        lines.append("/relay list — active relays")
+        lines.append("/relay status — counts for relays, channels, guests")
+        lines.append("/relay stop <name> — close relay")
+        if active: lines.append(f"\nActive: {', '.join(ch['label'] for ch in active)}")
+        router.reply(chat_id, "\n".join(lines))
+        return True
+    parts = arg.strip().split(); sub = parts[0].lower()
+    subcommands = {
+        "list": lambda: cmd_relay_list(router, chat_id),
+        "add": lambda: cmd_relay_add(router, parts, chat_id),
+        "remove": lambda: cmd_relay_remove(router, parts, chat_id),
+        "status": lambda: cmd_relay_status(router, chat_id),
+        "stop": lambda: cmd_relay_stop(router, parts, chat_id), }
+    if sub in subcommands: return subcommands[sub]()
+    worker = sub; registered = _b.get_registered_sessions()
+    if worker not in registered:
+        router.reply(chat_id, f"Worker \"{worker}\" not found."); return True
+    label = f"relay-{worker}"
+    ch, guest_token, reply_token = relay_channel_create(worker, label)
+    with relay_store.lock:
+        relay_store.channels[ch["id"]] = ch; _relay_save()
+    url = relay_guide_url(ch["id"], guest_token); lines = [f"📡 Relay to {worker} (24h) — {ch['id']}"]
+    lines.append(f"\nManage: /relay add {ch['id']} <worker> to add more workers")
+    lines.append(f"\nPaste this to the external agent:\n")
+    lines.append(f"---")
+    lines.append(f"You have a direct channel to {worker}. Open this link to see the API guide (setup + curl commands):")
+    lines.append(f"{url}")
+    lines.append(f"Steps: (1) open the link, (2) copy the env vars and curl commands from the page, (3) send your message via the /send endpoint, (4) poll /messages for replies. Channel expires in 24h.")
+    lines.append(f"---")
+    router.reply(chat_id, "\n".join(lines))
+    return True

@@ -595,3 +595,62 @@ def _render_transcript_html(name: str, session_id: str | None = None,
                 page, total_pages, esc, session_id, filter_mode)
             + _transcript_html_footer(sid, stats, file_size_str, total, page, total_pages, esc)
             + _transcript_html_search_js())
+
+# --- HTTP handler function (extracted from bridge.py Handler class) ---
+def handle_transcript_endpoint(handler, parsed) -> None:
+    import bridge as _b
+    try:
+        from urllib.parse import parse_qs
+        query_params = parse_qs(parsed.query); token = query_params.get("token", [None])[0]
+        if not _b.tokens.validate_rewind(token):
+            handler._send_html(_err_page("Session Expired", "This link has expired or is invalid. Send <code>/rewind &lt;name&gt;</code> in Telegram to get a fresh 5-minute link.").encode("utf-8"), 403); return
+        parts = parsed.path.rstrip("/").split("/")
+        if len(parts) < 3 or not parts[2]:
+            handler._send_json(400, {"error": "Usage: /transcript/<worker_name>"}); return
+        name = parts[2]
+        if len(parts) >= 4 and parts[3] == "updates":
+            query_params = parse_qs(parsed.query); since = int(query_params.get("since", [0])[0])
+            session_id = query_params.get("sid", [None])[0]; host = _b.get_worker_host(name)
+            if host:
+                cwd = _b.get_claude_session_cwd(name) or ""
+                sid = session_id or _b.get_claude_session_id(name)
+                if not sid:
+                    handler._send_json(200, {"total": 0, "new": 0}); return
+                remote_home = _b._get_remote_home(host) or ""
+                remote_cwd = _b._remap_path(cwd, host); remote_slug = _b._project_slug(remote_cwd)
+                jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+            else:
+                _tp, sid, _cwd = _resolve_transcript_path(name, session_id)
+                if not _tp or not sid:
+                    handler._send_json(200, {"total": 0, "new": 0}); return
+                jsonl_path = str(_tp)
+            result = _run_transcript_query(jsonl_path, sid, "stats", host=host); total = 0
+            if result:
+                total = _b._int_field(result, "n_user") + _b._int_field(result, "n_tool")
+                count_result = _run_transcript_query(jsonl_path, sid, "entries", host=host, page=1, per_page=1)
+                if count_result: total = _b._int_field(count_result, "total", total)
+            new_count = max(0, total - since)
+            handler._send_json(200, {"total": total, "new": new_count}); return
+        query_params = parse_qs(parsed.query); session_id = query_params.get("sid", [None])[0]
+        page_raw = query_params.get("page", [None])[0]
+        try: page = max(1, int(page_raw)) if page_raw is not None else None
+        except (ValueError, TypeError): page = None
+        try: per_page = max(1, min(500, int(query_params.get("per_page", [50])[0])))
+        except (ValueError, TypeError): per_page = 50
+        search_query = query_params.get("q", [""])[0].strip()
+        search_sort = query_params.get("sort", ["relevance"])[0].strip()
+        if search_sort not in ("relevance", "time"): search_sort = "relevance"
+        filter_mode = query_params.get("filter", [""])[0].strip(); host = _b.get_worker_host(name)
+        if not host:
+            _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
+            if _tp == "syncing":
+                sync_key = f"{name}:{_sid}"
+                handler._send_html(_render_transcript_loading(name, _sid, token or "", sync_key).encode("utf-8")); return
+        html_content = _render_transcript_html(
+                name, session_id=session_id,
+                page=page, per_page=per_page, search_query=search_query,
+                token=token or "", filter_mode=filter_mode, search_sort=search_sort)
+        handler._send_html(html_content.encode("utf-8"))
+    except (OSError, ValueError, KeyError) as e:
+        _b._log(_b._LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
+        handler._send_text(500, str(e))
