@@ -1,5 +1,25 @@
 ## Changelog
 
+### v0.51.0 - Feature-based module extraction for readability
+
+**Feature-based extraction from bridge.py:**
+- Extracted `WorkerManager` class → `worker_manager.py` (489 LOC)
+- Extracted command handlers → `command_handlers.py` (389 LOC)
+- Extracted guest/channel handlers → `guest_handlers.py` (345 LOC)
+- Extracted API handlers → `api_handlers.py` (170 LOC)
+- Extracted connector glue → `connector_glue.py` (188 LOC)
+- Extracted markdown formatting → `markdown_fmt.py` (from telegram.py)
+- Extracted PR review handlers → `pr_handlers.py` (from bridge.py)
+- Appended relay HTTP handlers to `relay.py`
+- Appended transcript HTTP handler to `transcript.py`
+
+**Hybrid import pattern for readability + test compatibility:**
+- Direct imports for constants/logging (never mocked)
+- Module-level `import X` + `X.func()` for mockable items (dynamic lookup sees test mocks)
+- Lazy `from bridge import X` inside function bodies for bridge-native functions (avoids circular imports)
+
+**LOC reduction:** 5 core files total 4,995 LOC (under 5K target). bridge.py reduced from ~3,400 to 2,021 LOC.
+
 ### v0.50.0 - Thread pool, sandbox removal, polling default, security model
 
 **Thread pool for bounded concurrency:**

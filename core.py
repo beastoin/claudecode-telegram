@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, runtime_checkable
 
 # ── Version ────────────────────────────────────────────────────────────
-VERSION = "0.47.0"
+VERSION = "0.51.0"
 
 # ── Safe JSON field accessors ──────────────────────────────────────────
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
