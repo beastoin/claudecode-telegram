@@ -168,6 +168,7 @@ def test_git_push_state_remote_host():
     import subprocess
     from unittest.mock import patch
     import bridge
+    import teleport
 
     calls = []
 
@@ -189,8 +190,8 @@ def test_git_push_state_remote_host():
             return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch.object(bridge, '_remote_run', side_effect=mock_remote_run):
-        meta = bridge._git_push_state('/remote/src', 'w1', '/home/claude/git-server/test.git',
+    with patch.object(teleport, '_remote_run', side_effect=mock_remote_run):
+        meta = teleport._git_push_state('/remote/src', 'w1', '/home/claude/git-server/test.git',
                                        host='remote-mac')
 
     assert meta is not None, f'push should succeed: {meta}'
@@ -209,7 +210,7 @@ def test_git_push_state_remote_host():
 def test_git_pull_state_remote_host():
     import subprocess
     from unittest.mock import patch
-    import bridge
+    import teleport
 
     calls = []
 
@@ -227,8 +228,8 @@ def test_git_pull_state_remote_host():
 
     meta = {'orig_sha': 'abc123', 'orig_branch': 'main', 'staged_files': [], 'stash_sha': None}
 
-    with patch.object(bridge, '_remote_run', side_effect=mock_remote_run):
-        ok = bridge._git_pull_state('/remote/target', 'w1',
+    with patch.object(teleport, '_remote_run', side_effect=mock_remote_run):
+        ok = teleport._git_pull_state('/remote/target', 'w1',
                                      'claude@100.125.36.102:/home/claude/git-server/test.git',
                                      meta, host='remote-mac')
 
@@ -449,10 +450,10 @@ def test_teleport_cross_machine_passes_session_for_resume():
 
 
 def test_teleport_context_message_has_session_and_search_cmd():
-    import bridge
+    import teleport
 
     # Build teleport context for a cross-machine move with a known session
-    msg = bridge._build_teleport_context(
+    msg = teleport._build_teleport_context(
         name='nex',
         source_host=None,
         target_host='beastoin-agents-f1-mac-mini',
@@ -499,25 +500,25 @@ def test_teleport_context_wired_into_do_teleport():
 
 
 def test_ensure_workspace_trusted_remote_runs_on_target():
-    import bridge
+    import teleport
     import types
 
     # Capture remote commands
     remote_cmds = []
-    orig_remote_run = bridge._remote_run
+    orig_remote_run = teleport._remote_run
 
     def fake_remote_run(cmd, host=None, **kw):
         remote_cmds.append((cmd, host))
         return types.SimpleNamespace(returncode=0, stdout='trusted', stderr='')
 
-    bridge._remote_run = fake_remote_run
+    teleport._remote_run = fake_remote_run
 
-    bridge._ensure_workspace_trusted_remote(
+    teleport._ensure_workspace_trusted_remote(
         cwd='/Users/beastoinagents/mira-nex',
         host='beastoin-agents-f1-mac-mini',
     )
 
-    bridge._remote_run = orig_remote_run
+    teleport._remote_run = orig_remote_run
 
     # Should have run a python3 command on the remote host
     assert len(remote_cmds) == 1, f'expected 1 remote command, got {len(remote_cmds)}'
@@ -568,6 +569,7 @@ def test_teleport_trusts_target_cwd_before_start():
 
 def test_ensure_workspace_trusted_remote_delegates_local():
     import bridge
+    import teleport
     import json
     import tempfile
     import pathlib
@@ -579,8 +581,8 @@ def test_ensure_workspace_trusted_remote_delegates_local():
     orig_path = bridge._CLAUDE_JSON_PATH
     bridge._CLAUDE_JSON_PATH = pathlib.Path(tmp.name)
 
-    # host=None should use local _ensure_workspace_trusted
-    bridge._ensure_workspace_trusted_remote('/some/local/path', host=None)
+    # host=None should use local _ensure_workspace_trusted (delegated via bridge)
+    teleport._ensure_workspace_trusted_remote('/some/local/path', host=None)
 
     data = json.loads(pathlib.Path(tmp.name).read_text())
     trusted = data.get('projects', {}).get('/some/local/path', {}).get('hasTrustDialogAccepted')
@@ -591,10 +593,10 @@ def test_ensure_workspace_trusted_remote_delegates_local():
 
 
 def test_teleport_context_message_no_session():
-    import bridge
+    import teleport
 
     # No previous session
-    msg = bridge._build_teleport_context(
+    msg = teleport._build_teleport_context(
         name='nex',
         source_host=None,
         target_host='mac-mini',

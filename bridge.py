@@ -346,14 +346,6 @@ def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
             "status": "online" if info.get("tmux") or info.get("callback_url") else "exited"})
         rows[machine.id]["worker_count"] += 1
     return {"version": 1, "config_path": str(MACHINES_CONFIG_FILE), "caller": caller_from or None, "machines": list(rows.values())}
-def _ensure_bare_repo(project_name: str) -> str:
-    bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
-    if not os.path.isdir(bare_path):
-        os.makedirs(GIT_SERVER_DIR, exist_ok=True)
-        _subprocess_runner.run(
-            ["git", "init", "--bare", bare_path],
-            capture_output=True, text=True, check=True, timeout=TIMEOUT_REMOTE_CMD)
-    return bare_path
 def _read_noninteractive_activity(worker_name: str) -> str:
     with processes.adapter_pids_lock: entry = processes.adapter_pids.get(worker_name)
     if entry:
@@ -650,125 +642,6 @@ def parse_worker_target(target: str) -> ParsedWorkerTarget:
         name, host = target.rsplit("@", 1)
         return ParsedWorkerTarget(name, host)
     return ParsedWorkerTarget(target, None)
-def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
-    if target_host: return f"claude@100.125.36.102:{bare_repo_path}"
-    return bare_repo_path
-def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
-                    host: str | None = None) -> GitPushStateResult | None:
-    try:
-        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "HEAD"],
-                        host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-        if r.returncode != 0:
-            _log(_LOG_WARN, "git-sync", f"rev-parse HEAD failed: {r.stderr[:200]}")
-            return None
-        orig_sha = r.stdout.strip()
-        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-                        host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-        orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
-        r = _remote_run(["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
-                        host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-        staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
-        _remote_run(["git", "-C", source_cwd, "add", "-A"],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        try:
-            r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
-                            host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            stash_sha = r.stdout.strip() if r.returncode == 0 else ""
-        finally:
-            _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
-                        host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-            if staged_files:
-                _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
-                            host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-        push_sha = stash_sha if stash_sha else orig_sha; ref = f"refs/heads/teleport/{worker_name}"
-        if host:
-            r = _remote_run(
-                ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_LARGE_TRANSFER)
-        else:
-            r = _remote_run(
-                ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_LARGE_TRANSFER)
-        if r.returncode != 0:
-            _log(_LOG_WARN, "git-sync", f"push failed: {r.stderr[:200]}")
-            return None
-        return {"orig_sha": orig_sha, "orig_branch": orig_branch, "staged_files": staged_files, "stash_sha": stash_sha or None}
-    except (subprocess.SubprocessError, OSError) as e:
-        _log(_LOG_ERROR, "git-sync", f"push state error: {e}")
-        return None
-def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
-                    metadata: GitPushStateResult, host: str | None = None) -> bool:
-    try:
-        orig_sha = metadata["orig_sha"]; orig_branch = metadata["orig_branch"]
-        staged_files = metadata.get("staged_files", []); stash_sha = metadata.get("stash_sha")
-        ref = f"teleport/{worker_name}"; is_existing = False
-        try:
-            r = _remote_run(["git", "-C", target_cwd, "rev-parse", "--git-dir"],
-                            host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-            is_existing = r.returncode == 0
-        except (subprocess.SubprocessError, OSError) as exc: _log(_LOG_DEBUG, "probe:_git_pull_state", f"{type(exc).__name__}: {exc}")
-        if not is_existing:
-            r = _remote_run(
-                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
-            if r.returncode != 0:
-                _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
-                return False
-            _remote_run(["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"],
-                        host=host, capture_output=True)
-            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host, capture_output=True)
-        else:
-            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host, capture_output=True)
-            _remote_run(
-                ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-            r = _remote_run(
-                ["git", "-C", target_cwd, "fetch", "vps", ref],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
-            if r.returncode != 0:
-                _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
-                return False
-        if orig_branch and orig_branch != "HEAD":
-            _remote_run(
-                ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        else:
-            _remote_run(
-                ["git", "-C", target_cwd, "checkout", orig_sha],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        if stash_sha:
-            fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
-            r = _remote_run(
-                ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
-                host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            if r.returncode != 0:
-                _remote_run(
-                    ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-                r = _remote_run(
-                    ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
-                    host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-            if staged_files:
-                _remote_run(["git", "-C", target_cwd, "reset", "HEAD"],
-                            host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-                _remote_run(["git", "-C", target_cwd, "add", "--"] + staged_files,
-                            host=host, capture_output=True, text=True, timeout=TIMEOUT_FILE_TRANSFER)
-        return True
-    except (subprocess.SubprocessError, OSError) as e:
-        _log(_LOG_ERROR, "git-sync", f"pull state error: {e}")
-        return False
-def _get_project_name(cwd: str, host: str | None = None) -> str | None:
-    try:
-        r = _remote_run(
-            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
-        if r.returncode != 0 or not r.stdout.strip(): return None
-        url = r.stdout.strip()
-        if url.endswith(".git"): url = url[:-4]
-        if ":" in url and not url.startswith("http"): name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
-        else: name = url.rsplit("/", 1)[-1]
-        return name if name else None
-    except (subprocess.SubprocessError, OSError): return None
 def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
     with watchdog.lock:
         data = _load_registry(); worker = data.get("workers", {}).get(name, {})
@@ -991,52 +864,6 @@ def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
     return worker_manager.get_workers(caller_from=caller_from)
 def get_pending_file(name: str) -> Path:
     return get_session_dir(name) / "pending"
-def _ensure_workspace_trusted_remote( cwd: str | None, host: str | None,
-) -> None:
-    if not cwd: return
-    if not host:
-        _ensure_workspace_trusted(cwd)
-        return
-    script = (
-        "import json, pathlib, os, fcntl; "
-        "p = pathlib.Path(os.path.expanduser('~/.claude.json')); "
-        "lk = open(str(p) + '.lock', 'w'); "
-        "fcntl.flock(lk, fcntl.LOCK_EX); "
-        "d = json.loads(p.read_text()) if p.exists() else {}; "
-        "proj = d.setdefault('projects', {}); "
-        f"e = proj.get({cwd!r}, {{}}); "
-        "changed = e.get('hasTrustDialogAccepted') is not True; "
-        f"proj[{cwd!r}] = {{**e, 'hasTrustDialogAccepted': True}} if changed else e; "
-        "p.write_text(json.dumps(d, indent=2)) if changed else None; "
-        "fcntl.flock(lk, fcntl.LOCK_UN); lk.close(); "
-        "print('trusted' if changed else 'already')" )
-    try:
-        r = _remote_run(
-            ["python3", "-c", script],
-            host=host, capture_output=True, text=True,
-            timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode == 0: _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
-        else: _log(_LOG_WARN, "trust", f"remote pre-trust failed on {host}: {r.stderr[:200]}")
-    except (OSError, TimeoutError) as exc:
-        _log(_LOG_WARN, "trust",
-             f"remote pre-trust {cwd} on {host}: {exc}")
-def _build_teleport_context(
-    name: str,
-    source_host: str | None,
-    target_host: str,
-    source_cwd: str | None,
-    session_id: str | None,
-) -> str:
-    src_label = source_host or "VPS (local)"
-    lines = [ f"📦 You were teleported from {src_label} to {target_host}.", f"Previous workspace: {source_cwd}", ]
-    if session_id:
-        lines.append(f"Previous session: {session_id}")
-        lines.append("")
-        lines.append(
-            "To retrieve your previous work context, run:\n"
-            f"  beast transcript search --session {session_id} --last 20 --full" )
-    else: lines.append("No previous session was active.")
-    return "\n".join(lines)
 def _get_pending_lock(name: str) -> threading.Lock:
     with processes.pending_locks_guard:
         if name not in processes.pending_locks: processes.pending_locks[name] = threading.Lock()

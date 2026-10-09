@@ -21,6 +21,7 @@ from core import (
     _subprocess_runner, _clock,
 )
 from claudecode import (
+    GIT_SERVER_DIR, GitPushStateResult,
     _get_remote_home, _is_git_repo, _project_slug, _remap_path,
     _remote_run, _resolve_remote_tool,
     ensure_session_dir, get_claude_session_cwd, get_claude_session_id,
@@ -39,6 +40,188 @@ def get_worker_host(name: str) -> str | None:
 if TYPE_CHECKING:
     from claudecode import Backend, TmuxSessionDict
     from telegram import ChatId
+
+# ---------------------------------------------------------------------------
+# Git state sync (used only by teleport)
+# ---------------------------------------------------------------------------
+
+def _ensure_bare_repo(project_name: str) -> str:
+    bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
+    if not os.path.isdir(bare_path):
+        os.makedirs(GIT_SERVER_DIR, exist_ok=True)
+        _subprocess_runner.run(
+            ["git", "init", "--bare", bare_path],
+            capture_output=True, text=True, check=True, timeout=10)
+    return bare_path
+def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
+    if target_host: return f"claude@100.125.36.102:{bare_repo_path}"
+    return bare_repo_path
+def _git_push_state(source_cwd: str, worker_name: str, bare_repo: str,
+                    host: str | None = None) -> GitPushStateResult | None:
+    import bridge
+    try:
+        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "HEAD"],
+                        host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+        if r.returncode != 0:
+            _log(_LOG_WARN, "git-sync", f"rev-parse HEAD failed: {r.stderr[:200]}")
+            return None
+        orig_sha = r.stdout.strip()
+        r = _remote_run(["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                        host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+        orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
+        r = _remote_run(["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
+                        host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+        staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
+        _remote_run(["git", "-C", source_cwd, "add", "-A"],
+                    host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+        try:
+            r = _remote_run(["git", "-C", source_cwd, "stash", "create"],
+                            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+            stash_sha = r.stdout.strip() if r.returncode == 0 else ""
+        finally:
+            _remote_run(["git", "-C", source_cwd, "reset", "HEAD"],
+                        host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+            if staged_files:
+                _remote_run(["git", "-C", source_cwd, "add", "--"] + staged_files,
+                            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+        push_sha = stash_sha if stash_sha else orig_sha; ref = f"refs/heads/teleport/{worker_name}"
+        if host:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_LARGE_TRANSFER)
+        else:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_LARGE_TRANSFER)
+        if r.returncode != 0:
+            _log(_LOG_WARN, "git-sync", f"push failed: {r.stderr[:200]}")
+            return None
+        return {"orig_sha": orig_sha, "orig_branch": orig_branch, "staged_files": staged_files, "stash_sha": stash_sha or None}
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_ERROR, "git-sync", f"push state error: {e}")
+        return None
+def _git_pull_state(target_cwd: str, worker_name: str, bare_repo_url: str,
+                    metadata: GitPushStateResult, host: str | None = None) -> bool:
+    import bridge
+    try:
+        orig_sha = metadata["orig_sha"]; orig_branch = metadata["orig_branch"]
+        staged_files = metadata.get("staged_files", []); stash_sha = metadata.get("stash_sha")
+        ref = f"teleport/{worker_name}"; is_existing = False
+        try:
+            r = _remote_run(["git", "-C", target_cwd, "rev-parse", "--git-dir"],
+                            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+            is_existing = r.returncode == 0
+        except (subprocess.SubprocessError, OSError) as exc: _log(_LOG_DEBUG, "probe:_git_pull_state", f"{type(exc).__name__}: {exc}")
+        if not is_existing:
+            r = _remote_run(
+                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_RSYNC)
+            if r.returncode != 0:
+                _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
+                return False
+            _remote_run(["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"],
+                        host=host, capture_output=True)
+            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host, capture_output=True)
+        else:
+            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host, capture_output=True)
+            _remote_run(
+                ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+            r = _remote_run(
+                ["git", "-C", target_cwd, "fetch", "vps", ref],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_RSYNC)
+            if r.returncode != 0:
+                _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
+                return False
+        if orig_branch and orig_branch != "HEAD":
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+        else:
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", orig_sha],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+        if stash_sha:
+            fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
+            r = _remote_run(
+                ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
+                host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+            if r.returncode != 0:
+                _remote_run(
+                    ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
+                    host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+                r = _remote_run(
+                    ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
+                    host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_GIT_OP)
+            if staged_files:
+                _remote_run(["git", "-C", target_cwd, "reset", "HEAD"],
+                            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+                _remote_run(["git", "-C", target_cwd, "add", "--"] + staged_files,
+                            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_FILE_TRANSFER)
+        return True
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_ERROR, "git-sync", f"pull state error: {e}")
+        return False
+def _get_project_name(cwd: str, host: str | None = None) -> str | None:
+    import bridge
+    try:
+        r = _remote_run(
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+        if r.returncode != 0 or not r.stdout.strip(): return None
+        url = r.stdout.strip()
+        if url.endswith(".git"): url = url[:-4]
+        if ":" in url and not url.startswith("http"): name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
+        else: name = url.rsplit("/", 1)[-1]
+        return name if name else None
+    except (subprocess.SubprocessError, OSError): return None
+def _ensure_workspace_trusted_remote( cwd: str | None, host: str | None,
+) -> None:
+    import bridge
+    if not cwd: return
+    if not host:
+        bridge._ensure_workspace_trusted(cwd)
+        return
+    script = (
+        "import json, pathlib, os, fcntl; "
+        "p = pathlib.Path(os.path.expanduser('~/.claude.json')); "
+        "lk = open(str(p) + '.lock', 'w'); "
+        "fcntl.flock(lk, fcntl.LOCK_EX); "
+        "d = json.loads(p.read_text()) if p.exists() else {}; "
+        "proj = d.setdefault('projects', {}); "
+        f"e = proj.get({cwd!r}, {{}}); "
+        "changed = e.get('hasTrustDialogAccepted') is not True; "
+        f"proj[{cwd!r}] = {{**e, 'hasTrustDialogAccepted': True}} if changed else e; "
+        "p.write_text(json.dumps(d, indent=2)) if changed else None; "
+        "fcntl.flock(lk, fcntl.LOCK_UN); lk.close(); "
+        "print('trusted' if changed else 'already')" )
+    try:
+        r = _remote_run(
+            ["python3", "-c", script],
+            host=host, capture_output=True, text=True,
+            timeout=bridge.TIMEOUT_TMUX_SEND)
+        if r.returncode == 0: _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
+        else: _log(_LOG_WARN, "trust", f"remote pre-trust failed on {host}: {r.stderr[:200]}")
+    except (OSError, TimeoutError) as exc:
+        _log(_LOG_WARN, "trust",
+             f"remote pre-trust {cwd} on {host}: {exc}")
+def _build_teleport_context(
+    name: str,
+    source_host: str | None,
+    target_host: str,
+    source_cwd: str | None,
+    session_id: str | None,
+) -> str:
+    src_label = source_host or "VPS (local)"
+    lines = [ f"📦 You were teleported from {src_label} to {target_host}.", f"Previous workspace: {source_cwd}", ]
+    if session_id:
+        lines.append(f"Previous session: {session_id}")
+        lines.append("")
+        lines.append(
+            "To retrieve your previous work context, run:\n"
+            f"  beast transcript search --session {session_id} --last 20 --full" )
+    else: lines.append("No previous session was active.")
+    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # Notification helper
@@ -139,14 +322,14 @@ def sync_working_directory(source_cwd: str, target_cwd: str,
                            full: bool = False) -> bool:
     import bridge
     if not full and _is_git_repo(source_cwd, host=source_host):
-        project = bridge._get_project_name(source_cwd, host=source_host)
+        project = _get_project_name(source_cwd, host=source_host)
         if project:
             try:
-                bare_repo = bridge._ensure_bare_repo(project)
-                meta = bridge._git_push_state(source_cwd, project, bare_repo, host=source_host)
+                bare_repo = _ensure_bare_repo(project)
+                meta = _git_push_state(source_cwd, project, bare_repo, host=source_host)
                 if meta:
-                    bare_url = bridge._bare_repo_url(bare_repo, target_host=target_host)
-                    if bridge._git_pull_state(target_cwd, project, bare_url, meta,
+                    bare_url = _bare_repo_url(bare_repo, target_host=target_host)
+                    if _git_pull_state(target_cwd, project, bare_url, meta,
                                               host=target_host):
                         _log(_LOG_INFO, "teleport", f"git sync succeeded for {project}")
                         return True
@@ -524,7 +707,7 @@ def do_teleport(name: str, target_host: str, target_cwd: str, full_sync: bool,
         os.replace(str(_tmp_ts2), str(state_file))
         save_claude_session_cwd(name, target_cwd)
         clear_claude_session_id(name)
-        bridge._ensure_workspace_trusted_remote(target_cwd, target_host)
+        _ensure_workspace_trusted_remote(target_cwd, target_host)
         teleport_notify(chat_id, f"Starting {name} on {target_host or 'local'}...")
         resume_id = session_id
         _log(_LOG_INFO, "teleport", f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={resume_id}, backend={backend_name})")
@@ -547,7 +730,7 @@ def do_teleport(name: str, target_host: str, target_cwd: str, full_sync: bool,
                 _clock.sleep(bridge.DELAY_PROCESS_SETTLE)
                 workers.send(name, welcome)  # type: ignore[attr-defined]
                 if source_host != target_host:
-                    ctx = bridge._build_teleport_context(
+                    ctx = _build_teleport_context(
                         name=name,
                         source_host=source_host,
                         target_host=target_host,
@@ -784,7 +967,7 @@ def restart_remote_worker(name: str, backend_name: str, backend: "Backend", tmux
                 session_dir.mkdir(parents=True, exist_ok=True)
                 for f in session_dir.glob("*_session_id"): f.unlink()
             else: _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
-    bridge._ensure_workspace_trusted_remote(target_cwd, host)
+    _ensure_workspace_trusted_remote(target_cwd, host)
     _log(_LOG_INFO, "_restart_remote", f"{name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})")
     ok = start_worker_on_target( name, host, target_cwd, resume_id, backend_name, skip_session_sync=True)
     if not ok:
