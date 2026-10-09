@@ -392,16 +392,13 @@ def test_workers_from_caller_local_to_remote_peer():
 
 def test_teleport_preflight_checks_rsync_and_backend():
     import inspect
-    import bridge
+    import teleport
 
-    src = inspect.getsource(bridge.CommandRouter.cmd_teleport)
-    # _check_remote_host_ready is the shared helper that checks tool availability
-    helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
+    src = inspect.getsource(teleport.cmd_teleport)
 
-    # Must check rsync on target (directly or via helper)
-    assert ('rsync' in src and '_resolve_remote_tool' in src) or \
-           ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
-        'cmd_teleport should check rsync on target via _resolve_remote_tool'
+    # Must check rsync on target via _resolve_remote_tool (inline in cmd_teleport)
+    assert '_resolve_remote_tool' in src, \
+        'cmd_teleport should check tools via _resolve_remote_tool'
 
     # Must check backend-specific binary (not just claude)
     assert 'backend_name' in src and 'backend_name != "claude"' in src, \
@@ -414,31 +411,32 @@ def test_teleport_preflight_checks_rsync_and_backend():
 
 def test_teleport_cross_machine_passes_session_for_resume():
     import bridge
+    import teleport
     import inspect
 
-    # v0.44.5+: _do_teleport no longer blanket-skips --resume for cross-machine.
-    # Instead, _sync_session_transcript copies the JSONL to the target first,
-    # and _start_worker_on_target validates the file exists before --resume.
+    # v0.44.5+: do_teleport no longer blanket-skips --resume for cross-machine.
+    # Instead, sync_session_transcript copies the JSONL to the target first,
+    # and start_worker_on_target validates the file exists before --resume.
     #
-    # Verify _do_teleport passes session_id straight through (no cross-machine skip)
+    # Verify do_teleport passes session_id straight through (no cross-machine skip)
 
-    src = inspect.getsource(bridge.CommandRouter._do_teleport)
+    src = inspect.getsource(teleport.do_teleport)
 
     # Should NOT have the old blanket skip logic
     assert 'skipping --resume' not in src, \
-        '_do_teleport should not blanket-skip --resume for cross-machine'
+        'do_teleport should not blanket-skip --resume for cross-machine'
 
     # Should still assign resume_id from session_id
     assert 'resume_id = session_id' in src, \
-        '_do_teleport should pass session_id through as resume_id'
+        'do_teleport should pass session_id through as resume_id'
 
-    # Should call _sync_session_transcript before _start_worker_on_target
-    sync_pos = src.find('_sync_session_transcript')
-    start_pos = src.find('_start_worker_on_target')
-    assert sync_pos > 0, '_do_teleport must call _sync_session_transcript'
-    assert start_pos > 0, '_do_teleport must call _start_worker_on_target'
+    # Should call sync_session_transcript before start_worker_on_target
+    sync_pos = src.find('sync_session_transcript')
+    start_pos = src.find('start_worker_on_target')
+    assert sync_pos > 0, 'do_teleport must call sync_session_transcript'
+    assert start_pos > 0, 'do_teleport must call start_worker_on_target'
     assert sync_pos < start_pos, \
-        '_sync_session_transcript must run before _start_worker_on_target'
+        'sync_session_transcript must run before start_worker_on_target'
 
     # Verify backend.start_cmd with session_id produces --resume
     backend = bridge.get_backend('claude')
@@ -477,27 +475,27 @@ def test_teleport_context_message_has_session_and_search_cmd():
 
 def test_teleport_context_wired_into_do_teleport():
     import inspect
-    import bridge
+    import teleport
 
-    # Verify the wiring: _do_teleport code calls _build_teleport_context
+    # Verify the wiring: do_teleport code calls _build_teleport_context
     # when source_host != target_host
-    src = inspect.getsource(bridge.CommandRouter._do_teleport)
+    src = inspect.getsource(teleport.do_teleport)
 
     # Must call _build_teleport_context
     assert '_build_teleport_context' in src, \
-        '_do_teleport should call _build_teleport_context'
+        'do_teleport should call _build_teleport_context'
 
     # Must guard on cross-machine (source_host != target_host)
     assert 'source_host != target_host' in src, \
-        '_do_teleport should check source_host != target_host'
+        'do_teleport should check source_host != target_host'
 
     # Must pass session_id to the builder
     assert 'session_id' in src, \
-        '_do_teleport should pass session_id to context builder'
+        'do_teleport should pass session_id to context builder'
 
-    # Must send the context via self.workers.send
-    assert 'self.workers.send' in src, \
-        '_do_teleport should send context via self.workers.send'
+    # Must send the context via workers.send
+    assert 'workers.send' in src, \
+        'do_teleport should send context via workers.send'
 
 
 def test_ensure_workspace_trusted_remote_runs_on_target():
@@ -535,16 +533,16 @@ def test_ensure_workspace_trusted_remote_runs_on_target():
 
 def test_restart_remote_trusts_cwd_before_start():
     import inspect
-    import bridge
+    import teleport
 
-    src = inspect.getsource(bridge.CommandRouter._restart_remote_worker)
+    src = inspect.getsource(teleport.restart_remote_worker)
 
-    # Must call _ensure_workspace_trusted_remote before _start_worker_on_target
+    # Must call _ensure_workspace_trusted_remote before start_worker_on_target
     assert '_ensure_workspace_trusted_remote' in src, \
-        '_restart_remote_worker should call _ensure_workspace_trusted_remote'
+        'restart_remote_worker should call _ensure_workspace_trusted_remote'
 
     trust_pos = src.find('_ensure_workspace_trusted_remote(')
-    start_pos = src.find('self._start_worker_on_target(')
+    start_pos = src.find('start_worker_on_target(')
     assert trust_pos > 0 and start_pos > 0, 'both calls must exist'
     assert trust_pos < start_pos, \
         f'trust ({trust_pos}) must run before start ({start_pos})'
@@ -552,18 +550,17 @@ def test_restart_remote_trusts_cwd_before_start():
 
 def test_teleport_trusts_target_cwd_before_start():
     import inspect
-    import bridge
+    import teleport
 
-    src = inspect.getsource(bridge.CommandRouter._do_teleport)
+    src = inspect.getsource(teleport.do_teleport)
 
     # Must call _ensure_workspace_trusted_remote
     assert '_ensure_workspace_trusted_remote' in src, \
-        '_do_teleport should call _ensure_workspace_trusted_remote'
+        'do_teleport should call _ensure_workspace_trusted_remote'
 
-    # Trust must happen before the actual _start_worker_on_target call
-    # (not the mention in comments). Actual calls use 'self._start_worker_on_target'
+    # Trust must happen before start_worker_on_target
     trust_pos = src.find('_ensure_workspace_trusted_remote(')
-    start_pos = src.find('self._start_worker_on_target(')
+    start_pos = src.find('start_worker_on_target(')
     assert trust_pos > 0 and start_pos > 0, 'both function calls must appear in source'
     assert trust_pos < start_pos, \
         f'trust ({trust_pos}) must run before start ({start_pos})'
@@ -654,9 +651,7 @@ def test_restart_teleported_worker():
             r = MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
         return r
 
-    orig_start = bridge.CommandRouter._start_worker_on_target
-
-    def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_name, skip_session_sync=False):
+    def mock_start_worker(name, target_host, target_cwd, session_id, backend_name, skip_session_sync=False):
         start_worker_calls.append({
             'name': name, 'host': target_host, 'cwd': target_cwd,
             'session_id': session_id, 'backend': backend_name,
@@ -665,9 +660,7 @@ def test_restart_teleported_worker():
         claude_started[0] = True
         return True
 
-    orig_stop = bridge.CommandRouter._stop_worker_for_teleport
-
-    def mock_stop(self, name, tmux_name, host=None):
+    def mock_stop(name, tmux_name, host=None):
         stop_calls.append({'name': name, 'tmux': tmux_name, 'host': host})
         return 'sess-uuid-123'
 
@@ -700,8 +693,10 @@ def test_restart_teleported_worker():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start_worker), \
-         patch.object(bridge.CommandRouter, '_stop_worker_for_teleport', mock_stop), \
+         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('claudecode._remote_run', side_effect=mock_remote_run), \
+         patch('teleport.start_worker_on_target', side_effect=mock_start_worker), \
+         patch('teleport.stop_worker_for_teleport', side_effect=mock_stop), \
          patch('time.sleep'):
 
         # Call _restart_remote_worker directly on CommandRouter
@@ -767,7 +762,7 @@ def test_restart_remote_validates_session_exists():
             r.returncode = 1  # no tmux session
         return r
 
-    def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
+    def mock_start(name, host, cwd, session_id, backend, skip_session_sync=False):
         start_calls.append({'session_id': session_id})
         return True
 
@@ -790,7 +785,9 @@ def test_restart_remote_validates_session_exists():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('claudecode._remote_run', side_effect=mock_remote_run), \
+         patch('teleport.start_worker_on_target', side_effect=mock_start), \
          patch('time.sleep'):
         ok, err = router._restart_remote_worker(
             'ren', 'claude', bridge.get_backend('claude'),
@@ -846,7 +843,7 @@ def test_restart_remote_remaps_cwd_home():
             r.returncode = 1  # no tmux
         return r
 
-    def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
+    def mock_start(name, host, cwd, session_id, backend, skip_session_sync=False):
         start_calls.append({'cwd': cwd})
         return True
 
@@ -870,7 +867,9 @@ def test_restart_remote_remaps_cwd_home():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('claudecode._remote_run', side_effect=mock_remote_run), \
+         patch('teleport.start_worker_on_target', side_effect=mock_start), \
          patch('time.sleep'):
         ok, err = router._restart_remote_worker(
             'x', 'claude', bridge.get_backend('claude'),

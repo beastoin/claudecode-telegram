@@ -874,12 +874,12 @@ def test_tindex_stats(tmp_path):
 
 
 def test_sync_session_transcript_targets_single_session():
-    import bridge
+    import teleport
     import types
+    from unittest.mock import patch
 
     # Capture rsync commands
     rsync_cmds = []
-    orig_runner = bridge._subprocess_runner
 
     class FakeRunner:
         def run(self, cmd, **kw):
@@ -889,18 +889,10 @@ def test_sync_session_transcript_targets_single_session():
         def Popen(self, *a, **kw):
             return types.SimpleNamespace(pid=1, communicate=lambda: ('', ''))
 
-    bridge._subprocess_runner = FakeRunner()
-
-    try:
-        # Create a fake CommandRouter-like object to call the method
-        class FakeRouter:
-            _sync_session_transcript = bridge.CommandRouter._sync_session_transcript
-
-        router = FakeRouter()
-
-        # Sync a specific session
-        sid = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
-        router._sync_session_transcript(
+    # Sync a specific session — patch teleport's _subprocess_runner
+    sid = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
+    with patch.object(teleport, '_subprocess_runner', FakeRunner()):
+        teleport.sync_session_transcript(
             sid,
             source_cwd='/home/claude/mira-nex',
             target_cwd='/Users/agent/mira-nex',
@@ -908,26 +900,24 @@ def test_sync_session_transcript_targets_single_session():
             target_host='mac-mini',
         )
 
-        # Filter to only rsync commands (skip the mkdir ssh command)
-        rsync_only = [c for c in rsync_cmds if c[0] == 'rsync']
+    # Filter to only rsync commands (skip the mkdir ssh command)
+    rsync_only = [c for c in rsync_cmds if c[0] == 'rsync']
 
-        # Should have exactly 2 rsync calls: one for .jsonl, one for subdir
-        assert len(rsync_only) == 2, f"expected 2 rsync calls, got {len(rsync_only)}"
+    # Should have exactly 2 rsync calls: one for .jsonl, one for subdir
+    assert len(rsync_only) == 2, f"expected 2 rsync calls, got {len(rsync_only)}"
 
-        # First: the JSONL file itself
-        cmd1 = ' '.join(rsync_only[0])
-        assert f'{sid}.jsonl' in cmd1, f"first rsync should target session JSONL, got {cmd1!r}"
+    # First: the JSONL file itself
+    cmd1 = ' '.join(rsync_only[0])
+    assert f'{sid}.jsonl' in cmd1, f"first rsync should target session JSONL, got {cmd1!r}"
 
-        # Second: the session subdirectory
-        cmd2 = ' '.join(rsync_only[1])
-        assert f'{sid}/' in cmd2, f"second rsync should target session subdir, got {cmd2!r}"
+    # Second: the session subdirectory
+    cmd2 = ' '.join(rsync_only[1])
+    assert f'{sid}/' in cmd2, f"second rsync should target session subdir, got {cmd2!r}"
 
-        # Neither should glob all .jsonl files
-        for cmd in rsync_only:
-            cmd_str = ' '.join(cmd)
-            assert '*.jsonl' not in cmd_str, f"should NOT sync all jsonl files, got {cmd_str!r}"
-    finally:
-        bridge._subprocess_runner = orig_runner
+    # Neither should glob all .jsonl files
+    for cmd in rsync_only:
+        cmd_str = ' '.join(cmd)
+        assert '*.jsonl' not in cmd_str, f"should NOT sync all jsonl files, got {cmd_str!r}"
 
 
 def test_codex_native_transcript_parsing():
