@@ -2150,31 +2150,6 @@ def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
     if not path: return []
     return _parse_codex_transcript(path, host=host)
 media_groups = MediaGroupState()
-@dataclass
-class RewindToken:
-    name: str
-    expires_at: float
-    def is_expired(self) -> bool:
-        return _clock.time() >= self.expires_at
-    def to_dict(self) -> RewindTokenEntry:
-        return {"name": self.name, "expires_at": self.expires_at}
-    @classmethod
-    def from_dict(cls: type["RewindToken"], d: RewindTokenEntry) -> "RewindToken":
-        return cls(name=d["name"], expires_at=d["expires_at"])
-@dataclass
-class PrReviewToken:
-    pr_num: int
-    owner: str
-    repo: str
-    expires_at: float
-    def is_expired(self) -> bool:
-        return _clock.time() >= self.expires_at
-    def to_dict(self) -> PrReviewTokenEntry:
-        return {"pr_num": self.pr_num, "owner": self.owner,
-                "repo": self.repo, "expires_at": self.expires_at}
-    @classmethod
-    def from_dict(cls: type["PrReviewToken"], d: PrReviewTokenEntry) -> "PrReviewToken":
-        return cls(pr_num=d["pr_num"], owner=d["owner"], repo=d["repo"], expires_at=d["expires_at"])
 REWIND_TIMEOUT: int = 24 * 60 * 60
 PR_REVIEW_EXTEND: int = 300
 class TokenStore:
