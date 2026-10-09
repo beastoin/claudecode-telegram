@@ -6,27 +6,39 @@ forwards bridge.X lookups and patches here automatically.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import urllib.error
+from pathlib import Path
 from typing import Any, Callable, cast
 
 from core import (
     _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG,
     _clock, _subprocess_runner,
-    admin_chat_id,
-    ALERT_COOLDOWN, CPU_ACTIVE, CPU_HOG_DURATION_MIN,
-    HOST_DOWN_THRESHOLD, IDLE_STREAK_STUCK, START_GRACE,
-    TIMEOUT_GIT_OP, TIMEOUT_REMOTE_CMD, TIMEOUT_TMUX_SEND,
+    admin_chat_id, _node_name,
+    ALERT_COOLDOWN, CPU_ACTIVE, CPU_HOG_DURATION_MIN, CPU_IDLE,
+    DELAY_BRIEF, HOST_DOWN_THRESHOLD, IDLE_STREAK_STUCK, START_GRACE,
+    STALE_PENDING, THINK_GRACE, TIMEOUT_GIT_OP, TIMEOUT_REMOTE_CMD,
+    TIMEOUT_TMUX_CHECK, TIMEOUT_TMUX_SEND, TOOL_GAP_GRACE,
     WATCHDOG_INTERVAL, SESSIONS_DIR, TMUX_PREFIX,
     _res_cfg,
 )
 from claudecode import (
     CpuHogEntry, DiskUsageDict, IoUsageDict, MemUsageDict,
-    ProcStatsEntry, TmuxSessionDict, WorkerStateEntry, WorktreeItemDict,
-    _capture_pane_text, _remote_run, _tmux_pane_pids,
-    get_backend, get_worker_backend,
+    ProcStatsEntry, QuestionDetails, TmuxActivityResult,
+    TmuxSessionDict, WorkerStateEntry, WorktreeItemDict,
+    _capture_pane_text, _find_codex_transcript,
+    _INTERACTIVE_CONTENT, _INTERACTIVE_FOOTERS,
+    _remote_run, _remap_path, _tmux_pane_pids,
+    get_backend, get_session_dir, get_worker_backend,
+    HOOK_FAILURE_THRESHOLD, HOOK_FAILURE_WINDOW, normalize_backend,
+    POISON_PATTERNS,
     host_health, processes, watchdog,
+)
+from telegram import (
+    _format_watchdog_status as _format_watchdog_status_pure,
+    format_team_lines as _format_team_lines_pure,
 )
 
 # Resource thresholds — derived from _res_cfg (same source as bridge.py)
@@ -49,20 +61,11 @@ INFRA_ALERT_COOLDOWN = _res_cfg.infra_cooldown
 # Late-import helpers for bridge-resident functions
 # ---------------------------------------------------------------------------
 
-def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
-    import bridge as _b; return _b._get_claude_pid(pane_pid, host=host)
-
 def get_worker_host(name: str) -> str | None:
     import bridge as _b; return _b.get_worker_host(name)
 
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
     import bridge as _b; return _b.get_registered_sessions(registered)
-
-def _child_count(pid: str, host: str | None = None) -> int:
-    import bridge as _b; return _b._child_count(pid, host=host)
-
-def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
-    import bridge as _b; return _b._ps_stats(pids, host=host)
 
 def _pending_timestamp(name: str) -> float | None:
     import bridge as _b; return _b._pending_timestamp(name)
@@ -70,17 +73,411 @@ def _pending_timestamp(name: str) -> float | None:
 def clear_pending(name: str) -> None:
     import bridge as _b; _b.clear_pending(name)
 
+def is_pending(name: str) -> bool:
+    import bridge as _b; return _b.is_pending(name)
+
+# ---------------------------------------------------------------------------
+# Activity detection helpers
+# ---------------------------------------------------------------------------
+
+def _read_noninteractive_activity(worker_name: str) -> str:
+    with processes.adapter_pids_lock: entry = processes.adapter_pids.get(worker_name)
+    if entry:
+        proc, _ = entry
+        if proc.poll() is None: return "adapter running"
+    host = get_worker_host(worker_name); path = _find_codex_transcript(worker_name, host=host)
+    if path:
+        try:
+            if host:
+                r = _remote_run(["stat", "-c", "%Y", path], host=host,
+                                capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+                if r.returncode == 0: mtime = float(r.stdout.strip()); age = int(_clock.time() - mtime)
+                else: age = -1
+            else: mtime = os.path.getmtime(path); age = int(_clock.time() - mtime)
+            if age >= 0:
+                if age < 60: return f"idle (last response {age}s ago)"
+                elif age < 3600: return f"idle (last response {age // 60}m ago)"
+                else: return f"idle (last response {age // 3600}h ago)"
+        except (subprocess.SubprocessError, OSError, ValueError) as exc: _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+    return "idle"
+def _check_hook_failure_signal(name: str) -> str | None:
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"; host = get_worker_host(name)
+    if host:
+        try:
+            r = _remote_run(["cat", signal_path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0: return None
+            raw = r.stdout.strip()
+        except (subprocess.SubprocessError, OSError): return None
+    else:
+        signal_file = Path(signal_path)
+        if not signal_file.exists(): return None
+        try: raw = signal_file.read_text().strip()
+        except OSError: return None
+    if not raw: return None
+    lines = raw.splitlines(); cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW; recent = 0
+    for line in lines:
+        parts = line.split(None, 1)
+        if not parts: continue
+        try: ts = int(parts[0])
+        except ValueError: continue
+        if ts >= cutoff: recent += 1
+    if recent >= HOOK_FAILURE_THRESHOLD: return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
+    return None
+def _clear_hook_failures(name: str) -> None:
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"; host = get_worker_host(name)
+    if host:
+        try:
+            _remote_run(["rm", "-f", signal_path], host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+        except (subprocess.SubprocessError, OSError) as exc: _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+    else:
+        try: Path(signal_path).unlink(missing_ok=True)
+        except OSError as exc: _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
-    import bridge as _b; return _b._detect_poisoned(name, tmux_name)
-
+    hook_reason = _check_hook_failure_signal(name)
+    if hook_reason: return hook_reason
+    backend_name = get_worker_backend(name); backend = get_backend(backend_name); host = get_worker_host(name); text_parts = []
+    if backend.is_interactive: text_parts.append(_capture_pane_text(tmux_name, host=host))
+    else: text_parts.append(_check_adapter_log(name))
+    combined = "\n".join([part for part in text_parts if part])
+    if not combined: return None
+    for pattern in POISON_PATTERNS:
+        if len(pattern.findall(combined)) >= 3: return pattern.pattern
+    return None
+def _activity_from_spinner(stripped: list[str]) -> str | None:
+    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
+    for raw in reversed(stripped):
+        first = raw[0] if raw else ""
+        if first == "✻" and "…" not in raw and "..." not in raw: continue
+        if first not in _ACTIVE_SPINNER_CHARS: continue
+        match = re.match(r'^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$', raw)
+        if match: verb = match.group(1).strip(); dur = match.group(2).split('·')[0].strip(); return f"{verb} ({dur})"
+        verb_match = re.match(r'^.\s+(.+?)(?:…|\.{3})?\s*$', raw)
+        if verb_match:
+            verb = verb_match.group(1).strip(); dur_match = re.search(r'(\d+m?\s*\d*\.?\d*s)', raw)
+            return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
+    return None
+def _activity_from_tool(stripped: list[str]) -> str | None:
+    last_running_tool = None
+    for i, raw in enumerate(stripped):
+        tool_match = re.match(r'^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(', raw)
+        if not tool_match: continue
+        tool = tool_match.group(1)
+        for j in range(i + 1, min(i + 6, len(stripped))):
+            line = stripped[j]
+            if not line: continue
+            if line.startswith("⎿"):
+                if "Running" in line and "background" not in line: last_running_tool = tool
+                break
+    if last_running_tool:
+        if last_running_tool.startswith("mcp__"):
+            parts = last_running_tool.split("__")
+            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
+        return f"Running {last_running_tool}"
+    return None
+def _activity_from_rate_limit(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        lower = raw.lower()
+        if "rate limit" in lower: return "Rate limited — waiting to retry"
+        if "connection error" in lower and "retrying" in lower: return "Connection error — retrying"
+        if lower.startswith("retrying") or "retrying in" in lower: return "Retrying API request"
+    return None
+def _activity_from_interactive(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                for question_line in stripped:
+                    if "☐" in question_line:
+                        question = question_line.replace("☐", "").strip()
+                        if question: return f"Waiting for input: {question}"
+                return "Waiting for user input"
+    for raw in stripped:
+        for pattern in _INTERACTIVE_CONTENT:
+            if pattern in raw:
+                if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()): return "Waiting for plan approval"
+                if "plan mode" in raw.lower(): return "Waiting for plan mode decision"
+                if raw.startswith("Allow "): return "Waiting for tool permission"
+                return "Waiting for user input"
+    return None
+def _activity_from_prompt(stripped: list[str]) -> str | None:
+    last_prompt_idx = None; last_plan_bar_idx = None
+    for i, raw in enumerate(stripped):
+        if raw.startswith("❯"): last_prompt_idx = i
+        if raw.startswith("⏸"): last_plan_bar_idx = i
+    if last_plan_bar_idx is not None:
+        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx: return "In plan mode"
+    if last_prompt_idx is not None: return "Ready"
+    return None
+_REVERSE_SCAN_PATTERNS: list[tuple[str, str]] = [
+    ("Save and close editor to continue", "Waiting for external editor"),
+    ("Running SessionStart", "Running SessionStart hooks"),
+    ("Running PreCompact", "Running PreCompact hooks"),
+    ("Do you want to proceed?", "Waiting for plan approval"),
+    ("Would you like to proceed?", "Waiting for plan approval"),
+    ("Exit plan mode?", "In plan mode"), ("Entering plan mode", "In plan mode"),
+    ("Waiting for team lead", "Waiting for team lead approval"), ]
+def _activity_from_reverse_scan(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        for needle, result in _REVERSE_SCAN_PATTERNS:
+            if needle in raw: return result
+    return None
+def _activity_from_tasks(stripped: list[str]) -> str | None:
+    done = 0; total = 0
+    for raw in stripped:
+        line = raw.lstrip()
+        if line.startswith("✔") or line.startswith("✅"): done += 1; total += 1
+        elif line.startswith("◻"): total += 1
+    if total >= 2: return f"Tasks ({done}/{total} done)"
+    return None
+def _is_output_block_end(text: str) -> bool:
+    trimmed = text.lstrip()
+    if trimmed.startswith("Context left until auto-compact:"): return True
+    return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
+def _activity_from_output_block(stripped: list[str]) -> str | None:
+    for i in range(len(stripped) - 1, -1, -1):
+        raw = stripped[i]
+        if not raw.startswith("●"): continue
+        if re.match(r'^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(', raw): continue
+        parts: list[str] = []
+        head = re.sub(r'^●\s*', '', raw).strip()
+        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"): parts.append(head)
+        j = i + 1
+        while j < len(stripped):
+            nxt = stripped[j]
+            if _is_output_block_end(nxt): break
+            text = nxt.strip()
+            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"): parts.append(text)
+            j += 1
+        if parts:
+            msg = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+            if len(msg) > 120: msg = msg[:117].rstrip() + "..."
+            return msg
+    return None
+def _activity_from_error(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        if re.match(r'^(FAIL|ERROR|Error|Traceback|Fail)\b', raw, re.IGNORECASE):
+            lower = raw.lower()
+            if lower.startswith("error"):
+                tail = raw[len("Error"):].lstrip(": ").strip()
+                return f"Error: {tail}" if tail else "Error"
+            return f"Error: {raw[:60]}"
+    return None
 def _extract_activity(lines: list[str]) -> str:
-    import bridge as _b; return _b._extract_activity(lines)
+    if not lines: return "Active"
+    stripped = [line.strip() for line in lines if line.strip()]
+    if not stripped: return "Idle"
+    _CHECKS: list[Callable[[list[str]], str | None]] = [
+        _activity_from_spinner, _activity_from_tool, _activity_from_rate_limit,
+        _activity_from_interactive, _activity_from_prompt, _activity_from_reverse_scan,
+        _activity_from_tasks, _activity_from_output_block, _activity_from_error]
+    for check in _CHECKS:
+        result: str | None = check(stripped)
+        if result is not None: return result
+    return "Active"
+def _extract_context_pct(lines: list[str]) -> str | None:
+    for line in reversed(lines):
+        m = re.search(r'Context left.*?(\d+)%', line)
+        if m: return f"{m.group(1)}%"
+    return None
+def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
+    try:
+        if host:
+            proc = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
+        else:
+            proc = _subprocess_runner.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                capture_output=True, text=True, timeout=TIMEOUT_TMUX_CHECK )
+        if proc.returncode != 0: return TmuxActivityResult("Unknown", None, None)
+        lines = proc.stdout.split("\n"); tail = lines[-40:]
+        return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
+    except (subprocess.SubprocessError, OSError): return TmuxActivityResult("Unknown", None, None)
+def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
+    if not lines: return None
+    stripped = [l.strip() for l in lines if l.strip()]
+    if not stripped: return None
+    tail = stripped[-5:]
+    if any(line == "❯" for line in tail): return None
+    has_interactive = False
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                has_interactive = True
+                break
+        if has_interactive: break
+    if not has_interactive:
+        for raw in stripped:
+            for pattern in _INTERACTIVE_CONTENT:
+                if pattern in raw:
+                    has_interactive = True
+                    break
+            if has_interactive: break
+    if not has_interactive: return None
+    header = ""
+    for raw in stripped:
+        if "☐" in raw:
+            header = raw.replace("☐", "").strip()
+            break
+    options = []; selected_num = 0; opt_re = re.compile(r'^(❯)?\s*(\d+)\.\s+(.+)')
+    for raw in stripped:
+        m = opt_re.match(raw)
+        if m:
+            is_selected = m.group(1) == "❯"; num = int(m.group(2)); label = m.group(3).strip()
+            options.append({"num": num, "label": label, "selected": is_selected})
+            if is_selected: selected_num = num
+    if not options: return None
+    return cast(QuestionDetails, { "header": header, "options": options, "selected_num": selected_num,
+    })
+def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
+    reply = reply.strip().lower()
+    if reply in ("skip", "cancel", "esc"):
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=TIMEOUT_TMUX_SEND)
+        return True
+    if reply.isdigit():
+        target_num = int(reply); option_nums = [o["num"] for o in details["options"]]
+        if target_num not in option_nums: return False
+        target_idx = option_nums.index(target_num); current_idx = 0
+        for i, o in enumerate(details["options"]):
+            if o["selected"]:
+                current_idx = i
+                break
+        diff = target_idx - current_idx; keys = []
+        if diff > 0: keys = ["Down"] * diff
+        elif diff < 0: keys = ["Up"] * abs(diff)
+        keys.append("Enter")
+        for key in keys:
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host, timeout=TIMEOUT_TMUX_SEND)
+            _clock.sleep(DELAY_BRIEF)
+        return True
+    return False
 
-def _extract_question_details(lines: list[str]) -> dict[str, Any] | None:
-    import bridge as _b; return _b._extract_question_details(lines)
+# ---------------------------------------------------------------------------
+# Process inspection helpers
+# ---------------------------------------------------------------------------
 
-def compute_state(**kwargs: object) -> tuple[str, str]:
-    import bridge as _b; return _b.compute_state(**kwargs)
+def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
+    try:
+        result = _remote_run(
+            ["pgrep", "-P", str(pane_pid), "-f", "claude"],
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
+    except (subprocess.SubprocessError, OSError): return None
+    if result.returncode != 0: return None
+    output = result.stdout.strip().splitlines()
+    if not output: return None
+    return output[0].strip()
+def _child_count(pid: str, host: str | None = None) -> int:
+    if not pid: return 0
+    try:
+        result = _remote_run(
+            ["pgrep", "-P", str(pid)],
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
+    except (subprocess.SubprocessError, OSError): return 0
+    if result.returncode != 0: return 0
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
+    pid_list = [str(pid) for pid in pids if pid]
+    if not pid_list: return {}
+    try:
+        result = _remote_run(
+            ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND )
+    except (subprocess.SubprocessError, OSError): return {}
+    if result.returncode != 0: return {}
+    stats = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3: continue
+        pid = parts[0]
+        try: cpu = float(parts[1])
+        except ValueError: cpu = 0.0
+        state = parts[2]
+        stats[pid] = cast(ProcStatsEntry, {"cpu": cpu, "state": state})
+    return stats
+
+# ---------------------------------------------------------------------------
+# Worker state computation
+# ---------------------------------------------------------------------------
+
+def compute_state(
+    tmux_exists: bool,
+    claude_pid: str | None,
+    pending: bool,
+    pending_ts: int | None,
+    pending_age: float,
+    children: int,
+    last_child_ts: float,
+    cpu: float,
+    last_hook_ts: float | None,
+    last_seen_claude: float | None,
+    now: float,
+    is_interactive: bool = True,
+    adapter_alive: bool = False,
+    poisoned_reason: str | None = None,
+) -> tuple[str, str]:
+    if not tmux_exists: return "OFFLINE", "tmux missing"
+    if not is_interactive:
+        if adapter_alive: return "BUSY_TOOL", "adapter running"
+        if pending:
+            if pending_age < STALE_PENDING: return "WAITING", f"age={int(pending_age)}s"
+            hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+            if pending_age >= STALE_PENDING and not hook_since_pending:
+                if poisoned_reason is not None: return "POISONED", f"{poisoned_reason}"
+                return "STUCK", f"age={int(pending_age)}s"
+            return "WAITING", f"age={int(pending_age)}s"
+        return "READY", "idle"
+    if not claude_pid and last_seen_claude is not None:
+        if (now - last_seen_claude) > START_GRACE: return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
+    if pending and children > 0: return "BUSY_TOOL", f"children={children}"
+    if pending and children == 0:
+        if (pending_age <= THINK_GRACE) or ((now - last_child_ts) <= TOOL_GAP_GRACE) or (cpu >= CPU_ACTIVE):
+            return "BUSY_THINKING", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        if pending_age < STALE_PENDING: return "WAITING", f"age={int(pending_age)}s"
+        hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+        if pending_age >= STALE_PENDING and cpu < CPU_IDLE and not hook_since_pending:
+            if poisoned_reason is not None: return "POISONED", f"{poisoned_reason}"
+            return "STUCK", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        return "WAITING", f"age={int(pending_age)}s"
+    if not pending and children > 0: return "UNTRACKED_BUSY", f"children={children}"
+    if claude_pid and not pending: return "READY", "idle"
+    return "OFFLINE", "tmux alive, claude missing"
+def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
+    if tail_lines <= 0: return ""
+    host = get_worker_host(name)
+    if host:
+        try:
+            remote_log = _remap_path(str(get_session_dir(name) / "adapter.log"), host)
+            r = _remote_run(["tail", "-n", str(tail_lines), remote_log], host=host,
+                            capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            return r.stdout if r.returncode == 0 else ""
+        except (subprocess.SubprocessError, OSError): return ""
+    log_path = get_session_dir(name) / "adapter.log"
+    if not log_path.exists(): return ""
+    try:
+        with log_path.open("r", errors="ignore") as fh: lines = fh.readlines()
+        return "".join(lines[-tail_lines:])
+    except OSError: return ""
+def _format_watchdog_status(name: str,
+                            pending_lookup: Callable[[str], bool] | None = None,
+                            state_snapshot: dict[str, WorkerStateEntry] | None = None) -> str:
+    if pending_lookup is None: pending_lookup = is_pending
+    if state_snapshot is None:
+        with watchdog.lock: state_snapshot = dict(watchdog.worker_states)
+    return _format_watchdog_status_pure(
+        name, pending_lookup=pending_lookup,
+        state_snapshot=state_snapshot, clock_now=_clock.time(), )
+def format_team_lines(  # type: ignore[no-redef]
+    registered: dict[str, TmuxSessionDict],
+    active: str | None,
+    pending_lookup: Callable[[str], bool] | None = None,
+    worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None
+) -> list[str]:
+    if pending_lookup is None: pending_lookup = is_pending
+    with watchdog.lock: state_snapshot = dict(watchdog.worker_states)
+    return _format_team_lines_pure(
+        registered, active,
+        pending_lookup=pending_lookup, worker_live=worker_live,
+        state_snapshot=state_snapshot, clock_now=_clock.time(),
+        normalize_backend_fn=normalize_backend, )
 
 # ---------------------------------------------------------------------------
 # Watchdog alert sending
