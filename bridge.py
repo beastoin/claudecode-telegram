@@ -8,6 +8,11 @@ import shutil
 import signal
 import subprocess
 import sys
+# Prevent double-module: when run as __main__, satellite modules that
+# do "from bridge import X" must see the SAME module instance, not a
+# second copy with its own globals (connectors, workers, etc.).
+if __name__ == "__main__":
+    sys.modules.setdefault("bridge", sys.modules[__name__])
 import tempfile
 import threading
 import types
