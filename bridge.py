@@ -1894,7 +1894,6 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     else: print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
     last_chat_id = load_last_chat_id()
     if last_chat_id and admin_chat_id is None: admin_chat_id = last_chat_id; print(f"Restored admin from last_chat_id: {admin_chat_id}")
-    from relay import _relay_load, _channel_load, _guest_load
     _relay_load(); _channel_load(); _guest_load()
     return last_chat_id
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
@@ -1965,7 +1964,6 @@ def main() -> None:
         _log(_LOG_INFO, "tunnel", f"Tunnel manager started (mode={tunnel_config.mode})")
     try: server.serve_forever()
     except KeyboardInterrupt: graceful_shutdown(signal.SIGINT, None)
-if __name__ == "__main__": main()
 import types as _types_mod
 class _BridgeModule(_types_mod.ModuleType):
     _sources: tuple[_types_mod.ModuleType, ...] = ()
@@ -2020,3 +2018,4 @@ from relay import (  # noqa: E402
 _this_module = sys.modules[__name__]
 _this_module.__class__ = _BridgeModule
 _this_module._sources = (_core_mod, _tg_mod, _cc_mod, _health_mod, _relay_mod)
+if __name__ == "__main__": main()
