@@ -1894,6 +1894,7 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     else: print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
     last_chat_id = load_last_chat_id()
     if last_chat_id and admin_chat_id is None: admin_chat_id = last_chat_id; print(f"Restored admin from last_chat_id: {admin_chat_id}")
+    from relay import _relay_load, _channel_load, _guest_load
     _relay_load(); _channel_load(); _guest_load()
     return last_chat_id
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
