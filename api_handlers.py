@@ -1,4 +1,3 @@
-"""Miscellaneous API HTTP handlers — extracted from bridge.py Handler class."""
 from __future__ import annotations
 import json
 import os
@@ -6,7 +5,6 @@ import subprocess
 import urllib.error
 from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qs
-
 import core
 import claudecode
 import health
@@ -22,10 +20,7 @@ from claudecode import (
     _ensure_workspace_trusted, _log_session_event,
 )
 from telegram import _build_cwd_change_notice
-
-if TYPE_CHECKING:
-    from urllib.parse import ParseResult
-
+if TYPE_CHECKING: from urllib.parse import ParseResult
 def handle_notify(handler, body: bytes = b"") -> None:
     from bridge import _parse_response_media, _send_response_media, get_all_chat_ids
     try:
@@ -46,7 +41,6 @@ def handle_notify(handler, body: bytes = b"") -> None:
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Notify error: {e}")
         handler._send_text(500, str(e))
-
 def handle_health_alert(handler, body: bytes = b"") -> None:
     from bridge import get_all_chat_ids
     try:
@@ -62,7 +56,6 @@ def handle_health_alert(handler, body: bytes = b"") -> None:
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")
         handler._send_json(500, {"ok": False, "error": str(e)})
-
 def handle_forge_register(handler, body: bytes = b"") -> None:
     from bridge import _registry_add, _registry_add_callback, worker_manager
     try:
@@ -103,7 +96,6 @@ def handle_forge_register(handler, body: bytes = b"") -> None:
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError, KeyError) as e:
         _log(_LOG_ERROR, "bridge", f"Register error: {e}")
         handler._send_json(500, {"ok": False, "error": str(e)})
-
 def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
     from bridge import _sync_worker_manager, worker_manager, _set_worker_cwd, _checkin_can_restart, _checkin_do_restart
     try:
@@ -154,7 +146,6 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
     except (subprocess.SubprocessError, OSError, KeyError) as exc:
         _log(_LOG_ERROR, "bridge", f"Checkin endpoint error: {exc}")
         handler._send_text(500, str(exc))
-
 def handle_health_workers_endpoint(handler) -> None:
     from bridge import watchdog
     try:
@@ -166,5 +157,4 @@ def handle_health_workers_endpoint(handler) -> None:
             if entry: workers[name] = {"state": entry.status, "reason": entry.reason, "since": entry.since, "age_sec": int(now - entry.since) if entry.since else None}
             else: workers[name] = {"state": "unknown"}
         handler._send_json(200, {"workers": workers})
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        _log(_LOG_ERROR, "worker", f"Health workers endpoint error: {e}"); handler._send_text(500, str(e))
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e: _log(_LOG_ERROR, "worker", f"Health workers endpoint error: {e}"); handler._send_text(500, str(e))

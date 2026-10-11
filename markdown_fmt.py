@@ -1,16 +1,8 @@
-"""Markdown-to-Telegram-HTML conversion utilities.
-
-Extracted from telegram.py to reduce LOC in the core module.
-"""
 from __future__ import annotations
-
 import re
 from html.parser import HTMLParser
 from typing import cast
-
 from core import MarkdownToken
-
-
 def escape_html(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 class _TelegramHTMLSanitizer(HTMLParser):
@@ -104,7 +96,6 @@ def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
         else:
             if tok.content: out.append(tok.content)
     return "".join(out)
-
 _INLINE_TAG_MAP = {"strong_open": "<b>", "strong_close": "</b>", "em_open": "<i>",
                    "em_close": "</i>", "s_open": "<s>", "s_close": "</s>",
                    "link_close": "</a>", "softbreak": "\n", "hardbreak": "\n"}
@@ -139,7 +130,6 @@ def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
         lines.append("  ".join(cols).rstrip())
         if ri == 0: lines.append("═" * (sum(col_widths) + 2 * (num_cols - 1)))
     return f"<pre>{chr(10).join(lines)}</pre>\n"
-
 _MULTI_SPACE_RE = re.compile(r'\S  +\S.*\S  +\S')
 def _wrap_plain_tables(text: str) -> str:
     parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
@@ -195,8 +185,7 @@ def markdown_to_telegram_html(text: str) -> str:
             if not in_table: result.append("\n")
         elif tok.type == "inline":
             if in_table: table_row.append(_render_md_inline_plain(cast(list[MarkdownToken], tok.children or [])))
-            else:
-                result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
+            else: result.append(_render_md_inline_html(cast(list[MarkdownToken], tok.children or []), rejected_open_tags))
         elif tok.type == "heading_open": result.append("<b>")
         elif tok.type == "heading_close": result.append("</b>\n")
         elif tok.type == "fence":
@@ -229,8 +218,7 @@ def markdown_to_telegram_html(text: str) -> str:
             else: result.append(f"{indent}• ")
         elif tok.type == "list_item_close":
             if result and not result[-1].endswith("\n"): result.append("\n")
-        elif tok.type == "table_open":
-            in_table = True; table_headers = []; table_rows = []
+        elif tok.type == "table_open": in_table = True; table_headers = []; table_rows = []
         elif tok.type == "table_close":
             in_table = False; pre_block = _render_table_as_pre(table_headers, table_rows)
             if pre_block: result.append(pre_block)

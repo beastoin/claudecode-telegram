@@ -1,6 +1,4 @@
-"""Tunnel management — cloudflared, webhook, and poll fallback."""
 from __future__ import annotations
-
 import enum
 import http.client
 import json
@@ -12,22 +10,18 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Protocol, cast
-
 from core import (
     _log, _LOG_ERROR, _LOG_INFO, _LOG_WARN,
     SubprocessRunner, Clock, TunnelConfig,
     _RealSubprocessRunner, _RealClock,
     _urlopen,
 )
-
 class UrlOpenFn(Protocol):
     def __call__(self, req: urllib.request.Request, *, timeout: float) -> http.client.HTTPResponse: ...
-
 class TunnelState(enum.Enum):
     STOPPED = "stopped"; STARTING = "starting"; RUNNING = "running"; RESTARTING = "restarting"
     POLL_FALLBACK = "poll_fallback"; FAILED = "failed"
 class TunnelManager:
-
     def __init__(
         self,
         config: TunnelConfig,
@@ -55,8 +49,6 @@ class TunnelManager:
         self._watchdog_thread: threading.Thread | None = None
         self._poll_stop = threading.Event()
         self._poll_thread: threading.Thread | None = None
-
-    # ── Public API ────────────────────────────────────────────────────
     def start(self) -> None:
         if self._config.mode == "none":
             _log(_LOG_INFO, "tunnel", "Tunnel disabled (mode=none)")
@@ -88,8 +80,6 @@ class TunnelManager:
             "state": self._state.value,
             "tunnel_url": self._tunnel_url,
             "polling_active": self._polling_active, }
-
-    # ── Telegram API helpers (use injected urlopen) ────────────────────
     def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
         url = f"https://api.telegram.org/bot{self._token}/{method}"; data = json.dumps(payload or {}).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -97,8 +87,7 @@ class TunnelManager:
             with self._urlopen(req, timeout=10) as resp:
                 result: dict[str, object] = json.loads(resp.read())
                 return result
-        except Exception:
-            return {}
+        except Exception: return {}
     def _tg_set_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, object]:
         payload: dict[str, object] = {"url": webhook_url}
         if secret_token: payload["secret_token"] = secret_token
@@ -109,8 +98,6 @@ class TunnelManager:
         return self._telegram_api("getWebhookInfo")
     def _tg_get_me(self) -> dict[str, object]:
         return self._telegram_api("getMe")
-
-    # ── Watchdog loop ─────────────────────────────────────────────────
     def _watchdog_loop(self) -> None:
         self._state = TunnelState.STARTING
         if not self._wait_for_port():
@@ -189,8 +176,6 @@ class TunnelManager:
                         else:
                             _log(_LOG_WARN, "tunnel", "Webhook DNS not ready after tunnel start")
                             self._start_poll_fallback()
-
-    # ── Cloudflared management ────────────────────────────────────────
     def _start_cloudflared(self) -> str:
         log_file = self._node_dir / "tunnel.log"
         log_file.write_text("")
@@ -216,8 +201,7 @@ class TunnelManager:
             except OSError: continue
             for line in text.splitlines():
                 for word in line.split():
-                    if word.startswith("https://") and ".trycloudflare.com" in word and "api.trycloudflare.com" not in word:
-                        return word.rstrip("/")
+                    if word.startswith("https://") and ".trycloudflare.com" in word and "api.trycloudflare.com" not in word: return word.rstrip("/")
         return ""
     def _kill_cloudflared(self) -> None:
         proc = self._tunnel_proc
@@ -225,8 +209,7 @@ class TunnelManager:
             try:
                 proc.kill()
                 proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            except (OSError, subprocess.TimeoutExpired): pass
             self._tunnel_proc = None
     def _is_tunnel_alive(self) -> bool:
         proc = self._tunnel_proc
@@ -237,10 +220,8 @@ class TunnelManager:
             req = urllib.request.Request(self._tunnel_url, method="HEAD")
             self._urlopen(req, timeout=self._config.reachability_timeout)
             return True
-        except urllib.error.HTTPError:
-            return True
-        except (urllib.error.URLError, OSError, TimeoutError):
-            return False
+        except urllib.error.HTTPError: return True
+        except (urllib.error.URLError, OSError, TimeoutError): return False
     def _check_tunnel_health(self) -> str:
         if not self._is_tunnel_alive(): return "process died"
         if not self._is_tunnel_reachable(): return "unreachable"
@@ -256,8 +237,6 @@ class TunnelManager:
             url = self._start_cloudflared()
             if url: return url
         return ""
-
-    # ── Webhook management ────────────────────────────────────────────
     def _set_webhook_with_retry(self, url: str) -> bool:
         for delay in self._config.webhook_retry_delays:
             if delay > 0:
@@ -290,8 +269,6 @@ class TunnelManager:
                     if resp.get("ok"):
                         _log(_LOG_INFO, "tunnel", "Webhook re-registered (was stale)")
                         self._on_notify("✅ Webhook re-registered")
-
-    # ── Poll fallback ─────────────────────────────────────────────────
     def _start_poll_fallback(self) -> None:
         if self._polling_active: return
         self._tg_delete_webhook()
@@ -321,10 +298,8 @@ class TunnelManager:
                 for update in data.get("result", []):
                     uid = update.get("update_id", 0)
                     if self._on_update:
-                        try:
-                            self._on_update(update)
-                        except Exception as exc:
-                            _log(_LOG_ERROR, "tunnel:poll", f"Forward failed update_id={uid}: {exc}")
+                        try: self._on_update(update)
+                        except Exception as exc: _log(_LOG_ERROR, "tunnel:poll", f"Forward failed update_id={uid}: {exc}")
                     else: self._forward_to_localhost(update)
                     offset = uid + 1
             except Exception as exc:
@@ -340,10 +315,7 @@ class TunnelManager:
                 headers={"Content-Type": "application/json"},
                 method="POST", )
             self._urlopen(req, timeout=5)
-        except Exception as exc:
-            _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")
-
-    # ── Port wait ─────────────────────────────────────────────────────
+        except Exception as exc: _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")
     def _wait_for_port(self) -> bool:
         elapsed = 0; bind_host = self._bind_host or "127.0.0.1"
         while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
@@ -353,13 +325,10 @@ class TunnelManager:
                     s.connect((bind_host, self._port))
                     _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
                     return True
-            except (ConnectionRefusedError, OSError):
-                pass
+            except (ConnectionRefusedError, OSError): pass
             self._clock.sleep(1)
             elapsed += 1
         return False
-
-    # ── File persistence ──────────────────────────────────────────────
     def _save_tunnel_url(self, url: str) -> None:
         try: (self._node_dir / "tunnel_url").write_text(url)
         except OSError: pass
@@ -370,8 +339,7 @@ class TunnelManager:
         try:
             os.kill(pid, 9)
             _log(_LOG_WARN, "tunnel", f"Killed stale cloudflared (pid={pid})")
-        except (OSError, ProcessLookupError):
-            pass
+        except (OSError, ProcessLookupError): pass
         try: pid_file.unlink()
         except OSError: pass
     def _save_pid(self, pid: int) -> None:
@@ -386,5 +354,4 @@ class TunnelManager:
                     bot_id = result.get("id"); username = result.get("username", "")
                     if bot_id: (self._node_dir / "bot_id").write_text(str(bot_id))
                     if username: (self._node_dir / "bot_username").write_text(username)
-        except Exception:
-            pass
+        except Exception: pass

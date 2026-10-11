@@ -9,11 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Protocol, runtime_checkable
-
-# ── Version ────────────────────────────────────────────────────────────
 VERSION = "0.51.0"
-
-# ── Safe JSON field accessors ──────────────────────────────────────────
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
     val = d.get(key, default)
     return str(val) if val is not None else default
@@ -30,8 +26,6 @@ def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
 def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     val = d.get(key, default)
     return bool(val)
-
-# ── Structured logging ─────────────────────────────────────────────────
 _LOG_ERROR: str = "ERROR"
 _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
@@ -43,13 +37,10 @@ def _log(level: str, component: str, msg: str | Path, *,
         import traceback as _tb
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
-    try:
-        return func(*args, **kwargs)
+    try: return func(*args, **kwargs)
     except Exception as exc:
         _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
         return None
-
-# ── DI seams (injectable for testing) ──────────────────────────────────
 class MarkdownToken(Protocol):
     type: str
     content: str
@@ -78,8 +69,6 @@ class _RealClock:
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
-
-# ── HTTP client infrastructure ────────────────────────────────────────
 import http.cookiejar
 import threading
 import urllib.error
@@ -153,8 +142,7 @@ class HttpClient:
         last_exc: BaseException | None = None
         delay = cfg.initial_delay
         for attempt in range(cfg.max_retries + 1):
-            try:
-                return self._urlopen_fn(req, timeout=timeout)
+            try: return self._urlopen_fn(req, timeout=timeout)
             except urllib.error.HTTPError as e:
                 if e.code not in cfg.retryable_status: raise
                 last_exc = e
@@ -177,26 +165,19 @@ class HttpClient:
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
     retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})), )
-
-# ── Node-derived configuration ─────────────────────────────────────────
 NODE_NAME = os.environ.get("NODE_NAME", "")
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
-
 if NODE_NAME and not os.environ.get("PORT"): PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
 else: PORT = int(os.environ.get("PORT", "8270"))
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
-
-if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
-    SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
+if NODE_NAME and not os.environ.get("SESSIONS_DIR"): SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
 else: SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
-
 if NODE_NAME and not os.environ.get("TMUX_PREFIX"): TMUX_PREFIX = f"claude-{NODE_NAME}-"
 else: TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
-if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
-    BRIDGE_URL = _bridge_url_env
+if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")): BRIDGE_URL = _bridge_url_env
 else: BRIDGE_URL = f"http://localhost:{PORT}"
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
@@ -213,8 +194,6 @@ MACHINES_CONFIG_FILE = Path(os.environ.get(
     "MACHINES_CONFIG_FILE",
     Path.home() / ".config" / "claudecode-telegram" / "machines.json"
 ))
-
-# ── Timeouts (seconds) ─────────────────────────────────────────────────
 TIMEOUT_TMUX_CHECK = 3
 TIMEOUT_TMUX_SEND = 5
 TIMEOUT_REMOTE_CMD = 10
@@ -238,8 +217,6 @@ DELAY_SHORT = 0.2
 DELAY_RESPONSE_GAP = 2
 DELAY_PROCESS_SETTLE = 3
 DELAY_CLAUDE_LOAD = 4
-
-# ── Worker/session defaults ────────────────────────────────────────────
 DEFAULT_BACKEND = "claude"
 DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
 PENDING_TIMEOUT = 600
@@ -253,8 +230,6 @@ STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/tran
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
-
-# ── Config dataclasses ──────────────────────────────────────────────────
 @dataclass(frozen=True)
 class WatchdogConfig:
     interval: int = 4
@@ -300,8 +275,6 @@ class TunnelConfig:
     poll_timeout: int = 30
     poll_error_delay: int = 2
     port_wait_timeout: int = 30
-
-# ── Tunnel env vars ────────────────────────────────────────────────────
 TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
 def _build_tunnel_config() -> TunnelConfig:
@@ -314,7 +287,6 @@ def _build_tunnel_config() -> TunnelConfig:
     elif raw == "auto": mode = "auto"
     else: mode = "poll"
     return TunnelConfig(mode=mode, provided_url=tunnel_url)
-
 _wd_cfg = WatchdogConfig()
 _res_cfg = ResourceAlertConfig()
 WATCHDOG_INTERVAL = _wd_cfg.interval
@@ -327,8 +299,6 @@ CPU_IDLE = _wd_cfg.cpu_idle
 IDLE_STREAK_STUCK = _wd_cfg.idle_streak_stuck
 ALERT_COOLDOWN = _wd_cfg.alert_cooldown
 RESTART_COOLDOWN = _res_cfg.disk_cooldown
-
-# ── Derived resource constants ──────────────────────────────────────────
 DISK_WARN_PCT = _res_cfg.disk_warn_pct
 DISK_ALERT_PCT = _res_cfg.disk_alert_pct
 DISK_ALERT_GB = _res_cfg.disk_alert_gb
@@ -345,8 +315,6 @@ IO_IOWAIT_PCT = _res_cfg.io_iowait_pct
 IO_COOLDOWN = _res_cfg.io_cooldown
 INFRA_COOLDOWN = _res_cfg.infra_cooldown
 HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
-
-# ── AppContext: injectable configuration ────────────────────────────────
 TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
 @dataclass
 class AppContext:
@@ -386,6 +354,8 @@ def _build_app_context() -> AppContext:
         watchdog_interval=WATCHDOG_INTERVAL,
         webhook_secret=WEBHOOK_SECRET,
         transport_mode=TRANSPORT_MODE, )
+_CLAUDE_JSON_PATH = Path.home() / ".claude.json"
+CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
 _app_context: AppContext | None = None
 def get_app_context() -> AppContext:
     global _app_context

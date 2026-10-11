@@ -1,8 +1,3 @@
-"""Guest and channel HTTP handler implementations.
-
-Extracted from bridge.py Handler class to reduce core LOC.
-All functions take (handler, ...) where handler is the BaseHTTPRequestHandler.
-"""
 from __future__ import annotations
 import hashlib
 import json
@@ -25,10 +20,7 @@ from relay import (
     channel_append_message, channel_get_messages, _channel_save,
     GUEST_TTL, CHANNEL_TTL, GuestSessionDict,
 )
-
-if TYPE_CHECKING:
-    from http.server import BaseHTTPRequestHandler
-
+if TYPE_CHECKING: from http.server import BaseHTTPRequestHandler
 def _fanout_channel_message(channel_id: str, from_member: str,
                             text: str, msg: dict,
                             members_snapshot: dict,
@@ -41,8 +33,7 @@ def _fanout_channel_message(channel_id: str, from_member: str,
             if wname and wname in registered:
                 winfo = registered[wname]; backend_name = claudecode.get_worker_backend(wname, winfo)
                 backend = claudecode.get_backend(backend_name)
-                try:
-                    backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged, BRIDGE_URL, SESSIONS_DIR)
+                try: backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged, BRIDGE_URL, SESSIONS_DIR)
                 except (ConnectionError, TimeoutError) as e: _log(_LOG_WARN, "bridge", f"Channel fan-out to {wname} failed: {e}")
         elif minfo["type"] == "guest":
             gname = minfo.get("name", "")
@@ -56,10 +47,7 @@ def _fanout_channel_message(channel_id: str, from_member: str,
         elif minfo["type"] == "manager":
             from bridge import _notify_admin
             _notify_admin(f"[{channel_id}] {from_member}: {text}")
-
-
 def _guest_auth(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> dict | None:
-    """Authenticate guest via token. Returns guest dict or None (sends error)."""
     query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
     token = query_params.get("token", [""])[0]
     if not token: handler._send_error_json(403, "token required"); return None
@@ -73,19 +61,13 @@ def _guest_auth(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = 
         handler._send_error_json(403, "invalid or expired guest session")
         return None
     return guest
-
-
 def _channel_guest_auth(handler: "BaseHTTPRequestHandler", query_params: dict) -> str | None:
-    """Authenticate guest for channel context. Returns member string, '' on auth failure, None if no token."""
     token = query_params.get("token", [None])[0]
     if not token: return None
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with guest_store.lock: guest = guest_store.guests.get(token_hash)
-    if not guest or guest_is_expired(guest["expires_at_unix"]):
-        handler._send_error_json(403, "invalid or expired token"); return ""
+    if not guest or guest_is_expired(guest["expires_at_unix"]): handler._send_error_json(403, "invalid or expired token"); return ""
     return f"guest:{guest['name']}"
-
-
 def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
     from bridge import _notify_admin, _relay_base_url
     try: data = cast(dict, json.loads(body)) if body else {}
@@ -118,8 +100,6 @@ def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
         "inbox_url": f"/guests/inbox?token={token}", "send_url": f"/guests/send?token={token}",
         "channels_url": f"/channels?token={token}", "channel_create_url": f"/channels?token={token}",
         "listen_script": listen_script})
-
-
 def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
     from bridge import _notify_admin
     parsed = urlparse(handler.path); guest = _guest_auth(handler, parsed)
@@ -185,8 +165,6 @@ def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> N
             results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
     if len(results) == 1: handler._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
     else: handler._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
-
-
 def handle_guest_reply(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None: return
@@ -200,8 +178,6 @@ def handle_guest_reply(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> 
             guest_store.inboxes[guest_name],
             {"id": msg_id, "from": from_worker or "worker", "text": text, "ts": int(_clock.time())}, )
     handler._send_json(200, {"ok": True, "message_id": msg_id})
-
-
 def handle_guest_inbox(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
     guest = _guest_auth(handler, parsed)
     if not guest: return
@@ -209,15 +185,11 @@ def handle_guest_inbox(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -
     with guest_store.lock: msgs = list(guest_store.inboxes.get(guest_name, []))
     filtered = guest_inbox_filter(msgs, after=after)
     handler._send_json(200, { "ok": True, "name": guest_name, "messages": filtered, })
-
-
 def handle_guest_status(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
     guest = _guest_auth(handler, parsed)
     if not guest: return
     with guest_store.lock: workers = list(guest.get("notified_workers", set()))
     handler._send_json(200, {"ok": True, "name": guest["name"], "expires": guest["expires_at"], "connected_workers": workers})
-
-
 def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
     with guest_store.lock:
         guests_list = []; expired = []
@@ -227,8 +199,6 @@ def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
         for th in expired: guest_store.inboxes.pop(guest_store.guests.pop(th, {}).get("name", ""), None)
         if expired: _guest_save()
     handler._send_json(200, {"ok": True, "guests": guests_list})
-
-
 def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
     from bridge import _notify_admin
     query_params = parse_qs(parsed.query); token = query_params.get("token", [""])[0]
@@ -240,8 +210,6 @@ def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResu
     if not guest: handler._send_error_json(403, "invalid token"); return
     _notify_admin(f"\U0001f514 Guest \"{guest['name']}\" disconnected"); _log(_LOG_INFO, "guest", f"Guest disconnected: {guest['name']}")
     handler._send_json(200, {"ok": True, "name": guest["name"]})
-
-
 def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
     from bridge import _notify_admin
     data = handler._parse_body(body)
@@ -268,8 +236,6 @@ def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
     _log(_LOG_INFO, "channel", f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
     handler._send_json(200, {"ok": True, "channel": channel_id, "label": label, "members": valid_members,
         "send_url": f"/channels/{channel_id}/send", "messages_url": f"/channels/{channel_id}/messages"})
-
-
 def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
     from bridge import _notify_admin
     data = handler._parse_body(body)
@@ -283,8 +249,6 @@ def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, b
     if added or removed:
         _notify_admin(f"\U0001f4e2 Channel {channel_id}: {'; '.join((['added ' + ', '.join(added)] if added else []) + (['removed ' + ', '.join(removed)] if removed else []))}")
     handler._send_json(200, {"ok": True, "channel": channel_id, "added": added, "removed": removed, "members": current})
-
-
 def handle_channel_send(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None: return
@@ -301,8 +265,6 @@ def handle_channel_send(handler: "BaseHTTPRequestHandler", channel_id: str, body
         msg = channel_append_message(channel, from_member, text); members_snapshot = dict(channel["members"])
     _fanout_channel_message(channel_id, from_member, text, msg, members_snapshot, health.get_registered_sessions())
     handler._send_json(200, {"ok": True, "channel": channel_id, "message_id": msg["id"], "seq": msg["seq"]})
-
-
 def handle_channel_messages(handler: "BaseHTTPRequestHandler", channel_id: str, parsed: ParseResult) -> None:
     query_params = parse_qs(parsed.query); after = query_params.get("after", [None])[0]
     from_member = _channel_guest_auth(handler, query_params)
@@ -315,8 +277,6 @@ def handle_channel_messages(handler: "BaseHTTPRequestHandler", channel_id: str, 
     resp: dict = {"ok": True, "channel": channel_id, "messages": msgs}
     if truncated: resp["truncated"] = True
     handler._send_json(200, resp)
-
-
 def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> None:
     query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
     filter_member = _channel_guest_auth(handler, query_params)
@@ -333,8 +293,6 @@ def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult 
         for cid in expired_ids: del channel_store.channels[cid]
         if expired_ids: _channel_save()
     handler._send_json(200, {"ok": True, "channels": active})
-
-
 def handle_channel_delete(handler: "BaseHTTPRequestHandler", channel_id: str) -> None:
     from bridge import _notify_admin
     with channel_store.lock:
