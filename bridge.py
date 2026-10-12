@@ -2771,7 +2771,7 @@ def _read_noninteractive_activity(worker_name: str) -> str:
         try:
             if host:
                 r = _remote_run(
-                    ["stat", "-c", "%Y", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+                    ["stat", "-c", "%Y", path], host=host, timeout=TIMEOUT_TMUX_SEND
                 )
                 if r.returncode == 0:
                     mtime = float(r.stdout.strip())
@@ -2798,7 +2798,7 @@ def _check_hook_failure_signal(name: str) -> str | None:
     host = get_worker_host(name)
     if host:
         try:
-            r = _remote_run(["cat", signal_path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            r = _remote_run(["cat", signal_path], host=host, timeout=TIMEOUT_TMUX_SEND)
             if r.returncode != 0:
                 return None
             raw = r.stdout.strip()
@@ -2837,7 +2837,7 @@ def _clear_hook_failures(name: str) -> None:
     host = get_worker_host(name)
     if host:
         try:
-            _remote_run(["rm", "-f", signal_path], host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+            _remote_run(["rm", "-f", signal_path], host=host, timeout=TIMEOUT_TMUX_SEND)
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
     else:
@@ -3019,8 +3019,6 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
             proc = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT_TMUX_SEND,
             )
         else:
@@ -3130,8 +3128,6 @@ def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
         result = _remote_run(
             ["pgrep", "-P", str(pane_pid), "-f", "claude"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_SEND,
         )
     except (subprocess.SubprocessError, OSError):
@@ -3149,7 +3145,7 @@ def _child_count(pid: str, host: str | None = None) -> int:
         return 0
     try:
         result = _remote_run(
-            ["pgrep", "-P", str(pid)], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            ["pgrep", "-P", str(pid)], host=host, timeout=TIMEOUT_TMUX_SEND
         )
     except (subprocess.SubprocessError, OSError):
         return 0
@@ -3166,8 +3162,6 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
         result = _remote_run(
             ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_SEND,
         )
     except (subprocess.SubprocessError, OSError):
@@ -3197,7 +3191,7 @@ def _run_metric(metric: str, host: str | None = None) -> dict[str, Any] | None: 
     try:
         r = _remote_run(
             ["bash", _METRICS_SCRIPT, metric],
-            host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD,
+            host=host, timeout=TIMEOUT_REMOTE_CMD,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -3554,8 +3548,6 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
             r = _remote_run(
                 ["tail", "-n", str(tail_lines), remote_log],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT_TMUX_SEND,
             )
             return r.stdout if r.returncode == 0 else ""
@@ -3856,8 +3848,6 @@ def _watchdog_probe_remote_hosts(
             r = _remote_run(
                 ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT_TMUX_SEND,
             )
             if r.returncode == 0:
@@ -4558,7 +4548,7 @@ def _run_transcript_query(
         cmd.extend(["--sort", sort])
     try:
         if host:
-            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=_b.TIMEOUT_LARGE_TRANSFER)
+            r = _remote_run(cmd, host=host, timeout=_b.TIMEOUT_LARGE_TRANSFER)
         else:
             r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=_b.TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
@@ -6700,7 +6690,7 @@ class ConnectorRegistry:
 def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
     try:
         if host:
-            r = _remote_run(["cat", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+            r = _remote_run(["cat", path], host=host, timeout=TIMEOUT_GIT_OP)
             if r.returncode != 0:
                 return []
             content = r.stdout
@@ -7256,8 +7246,6 @@ class WorkerManager:
         result = claudecode._remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_CHECK,
         )
         if result.returncode == 0:
@@ -7308,8 +7296,6 @@ class WorkerManager:
                 r = claudecode._remote_run(
                     ["tmux", "list-sessions", "-F", "#{session_name}"],
                     host=machine.ssh_target,
-                    capture_output=True,
-                    text=True,
                     timeout=TIMEOUT_REMOTE_CMD,
                 )
                 if r.returncode != 0:
@@ -7678,7 +7664,7 @@ class WorkerManager:
         clear_pending(name)
         _set_worker_cwd(name, "")
         host = get_worker_host(name)
-        claudecode._remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
+        claudecode._remote_run(["tmux", "kill-session", "-t", tmux_name], host=host)
         cleanup_inbox(name)
         cleanup_worker_pipe(name)
         _registry_remove(name)
@@ -8511,8 +8497,6 @@ def _git_push_state(
         r = _remote_run(
             ["git", "-C", source_cwd, "rev-parse", "HEAD"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_FILE_TRANSFER,
         )
         if r.returncode != 0:
@@ -8522,32 +8506,24 @@ def _git_push_state(
         r = _remote_run(
             ["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_REMOTE_CMD,
         )
         orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
         r = _remote_run(
             ["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_FILE_TRANSFER,
         )
         staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
         _remote_run(
             ["git", "-C", source_cwd, "add", "-A"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_GIT_OP,
         )
         try:
             r = _remote_run(
                 ["git", "-C", source_cwd, "stash", "create"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_GIT_OP,
             )
             stash_sha = r.stdout.strip() if r.returncode == 0 else ""
@@ -8555,16 +8531,12 @@ def _git_push_state(
             _remote_run(
                 ["git", "-C", source_cwd, "reset", "HEAD"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_FILE_TRANSFER,
             )
             if staged_files:
                 _remote_run(
                     ["git", "-C", source_cwd, "add", "--"] + staged_files,
                     host=host,
-                    capture_output=True,
-                    text=True,
                     timeout=bridge.TIMEOUT_FILE_TRANSFER,
                 )
         push_sha = stash_sha if stash_sha else orig_sha
@@ -8573,16 +8545,12 @@ def _git_push_state(
             r = _remote_run(
                 ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_LARGE_TRANSFER,
             )
         else:
             r = _remote_run(
                 ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_LARGE_TRANSFER,
             )
         if r.returncode != 0:
@@ -8615,8 +8583,6 @@ def _git_pull_state(
             r = _remote_run(
                 ["git", "-C", target_cwd, "rev-parse", "--git-dir"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_REMOTE_CMD,
             )
             is_existing = r.returncode == 0
@@ -8626,8 +8592,6 @@ def _git_pull_state(
             r = _remote_run(
                 ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_RSYNC,
             )
             if r.returncode != 0:
@@ -8636,21 +8600,17 @@ def _git_pull_state(
             _remote_run(
                 ["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"], host=host, capture_output=True
             )
-            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host, capture_output=True)
+            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host)
         else:
-            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host, capture_output=True)
+            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host)
             _remote_run(
                 ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_REMOTE_CMD,
             )
             r = _remote_run(
                 ["git", "-C", target_cwd, "fetch", "vps", ref],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_RSYNC,
             )
             if r.returncode != 0:
@@ -8660,16 +8620,12 @@ def _git_pull_state(
             _remote_run(
                 ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_GIT_OP,
             )
         else:
             _remote_run(
                 ["git", "-C", target_cwd, "checkout", orig_sha],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_GIT_OP,
             )
         if stash_sha:
@@ -8677,38 +8633,28 @@ def _git_pull_state(
             r = _remote_run(
                 ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_GIT_OP,
             )
             if r.returncode != 0:
                 _remote_run(
                     ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
                     host=host,
-                    capture_output=True,
-                    text=True,
                     timeout=bridge.TIMEOUT_FILE_TRANSFER,
                 )
                 r = _remote_run(
                     ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
                     host=host,
-                    capture_output=True,
-                    text=True,
                     timeout=bridge.TIMEOUT_GIT_OP,
                 )
             if staged_files:
                 _remote_run(
                     ["git", "-C", target_cwd, "reset", "HEAD"],
                     host=host,
-                    capture_output=True,
-                    text=True,
                     timeout=bridge.TIMEOUT_FILE_TRANSFER,
                 )
                 _remote_run(
                     ["git", "-C", target_cwd, "add", "--"] + staged_files,
                     host=host,
-                    capture_output=True,
-                    text=True,
                     timeout=bridge.TIMEOUT_FILE_TRANSFER,
                 )
         return True
@@ -8724,8 +8670,6 @@ def _get_project_name(cwd: str, host: str | None = None) -> str | None:
         r = _remote_run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_REMOTE_CMD,
         )
         if r.returncode != 0 or not r.stdout.strip():
@@ -8769,7 +8713,7 @@ def _ensure_workspace_trusted_remote(
     )
     try:
         r = _remote_run(
-            ["python3", "-c", script], host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_TMUX_SEND
+            ["python3", "-c", script], host=host, timeout=bridge.TIMEOUT_TMUX_SEND
         )
         if r.returncode == 0:
             _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
@@ -8838,16 +8782,12 @@ def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str 
     r_status = _remote_run(
         ["git", "-C", remote_cwd, "status", "--porcelain"],
         host=remote_host,
-        capture_output=True,
-        text=True,
         timeout=bridge.TIMEOUT_REMOTE_CMD,
     )
     remote_changed = bool(r_status.stdout.strip()) if r_status.returncode == 0 else False
     r_head = _remote_run(
         ["git", "-C", remote_cwd, "rev-parse", "HEAD"],
         host=remote_host,
-        capture_output=True,
-        text=True,
         timeout=bridge.TIMEOUT_TMUX_SEND,
     )
     remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
@@ -8932,7 +8872,7 @@ def rsync_working_directory(
 ) -> bool:
     import bridge
 
-    _remote_run(["mkdir", "-p", target_cwd], host=target_host, capture_output=True)
+    _remote_run(["mkdir", "-p", target_cwd], host=target_host)
     cmd = ["rsync", "-az", "--delete"]
     gitignore_tmpfile = None
     if not full:
@@ -8940,8 +8880,6 @@ def rsync_working_directory(
             gi_result = _remote_run(
                 ["git", "-C", source_cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
                 host=source_host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_FILE_TRANSFER,
             )
             if gi_result.returncode == 0 and gi_result.stdout.strip():
@@ -8985,7 +8923,7 @@ def sync_session_transcript(
     source_dir = f".claude/projects/{source_slug}"
     target_dir = f".claude/projects/{target_slug}"
     if target_host:
-        _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"], host=target_host, capture_output=True)
+        _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"], host=target_host)
     else:
         os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
     jsonl = f"{session_id}.jsonl"
@@ -9041,7 +8979,6 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                 _remote_run(
                     ["bash", "-c", f"cd ~/{rn} 2>/dev/null && git pull origin master 2>/dev/null || true"],
                     host=target_host,
-                    capture_output=True,
                     timeout=bridge.TIMEOUT_LARGE_TRANSFER,
                 )
             except (subprocess.SubprocessError, OSError) as e:
@@ -9055,7 +8992,6 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                         f"[ -d ~/agent-config/.claude/{subdir} ] && rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/",
                     ],
                     host=target_host,
-                    capture_output=True,
                     timeout=bridge.TIMEOUT_LARGE_TRANSFER,
                 )
             except (subprocess.SubprocessError, OSError) as e:
@@ -9100,8 +9036,6 @@ def sync_worker_data_back(name: str, source_host: str | None) -> None:
     r = _remote_run(
         ["bash", "-c", "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
         host=source_host,
-        capture_output=True,
-        text=True,
         timeout=bridge.TIMEOUT_REMOTE_CMD,
     )
     if r.returncode == 0 and r.stdout.strip():
@@ -9125,7 +9059,7 @@ def install_hooks_on_target(target_host: str) -> list[str]:
         return []
     warnings = []
     try:
-        _remote_run(["chmod", "-R", "700", ".claude/hooks"], host=target_host, capture_output=True)
+        _remote_run(["chmod", "-R", "700", ".claude/hooks"], host=target_host)
         claude_json = os.path.expanduser("~/.claude.json")
         if os.path.exists(claude_json):
             _subprocess_runner.run(
@@ -9146,7 +9080,6 @@ def install_hooks_on_target(target_host: str) -> list[str]:
                     "p.write_text(json.dumps(d))",
                 ],
                 host=target_host,
-                capture_output=True,
                 timeout=bridge.TIMEOUT_REMOTE_CMD,
             )
     except (subprocess.SubprocessError, OSError) as e:
@@ -9163,7 +9096,7 @@ def sync_session_files_to_target(name: str, target_sessions_dir: str, target_hos
     if not local_session_dir.is_dir():
         return
     remote_session_dir = f"{target_sessions_dir}/{name}"
-    _remote_run(["mkdir", "-p", remote_session_dir], host=target_host, capture_output=True)
+    _remote_run(["mkdir", "-p", remote_session_dir], host=target_host)
     for fname in ["chat_id", "claude_session_id"]:
         local_file = local_session_dir / fname
         if local_file.exists():
@@ -9184,8 +9117,6 @@ def sync_credentials_to_target(target_host: str) -> None:
         r = _remote_run(
             ["cat", ".claude/.credentials.json"],
             host=target_host,
-            capture_output=True,
-            text=True,
             timeout=bridge.TIMEOUT_TMUX_SEND,
         )
         if r.returncode == 0 and r.stdout.strip():
@@ -9204,7 +9135,7 @@ def sync_credentials_to_target(target_host: str) -> None:
                 return
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
         pass
-    _remote_run(["mkdir", "-p", ".claude"], host=target_host, capture_output=True)
+    _remote_run(["mkdir", "-p", ".claude"], host=target_host)
     _subprocess_runner.run(
         ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json.tmp"],
         capture_output=True,
@@ -9213,7 +9144,7 @@ def sync_credentials_to_target(target_host: str) -> None:
     _remote_run(
         ["mv", ".claude/.credentials.json.tmp", ".claude/.credentials.json"], host=target_host, capture_output=True
     )
-    _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host, capture_output=True)
+    _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host)
     _log(_LOG_INFO, "creds", f"Synced credentials to {target_host}")
 
 
@@ -9221,11 +9152,11 @@ def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None)
     import bridge
 
     session_id = get_claude_session_id(name, authoritative=True)
-    _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host, capture_output=True)
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host)
     for _ in range(20):
         _clock.sleep(bridge.DELAY_RETRY)
         r = _remote_run(
-            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host, capture_output=True, text=True
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host
         )
         if r.returncode != 0:
             break
@@ -9235,7 +9166,7 @@ def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None)
             if not claude_pid:
                 break
     else:
-        _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], host=host, capture_output=True)
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], host=host)
         _clock.sleep(bridge.DELAY_STARTUP)
     return get_claude_session_id(name, authoritative=True) or session_id
 
@@ -9251,13 +9182,11 @@ def start_worker_on_target(
     import bridge
 
     tmux_name = f"{bridge.TMUX_PREFIX}{name}"
-    _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host, capture_output=True)
+    _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host)
     _clock.sleep(bridge.DELAY_TMUX_SEND)
     r = _remote_run(
         ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
         host=target_host,
-        capture_output=True,
-        text=True,
     )
     if r.returncode != 0:
         _log(
@@ -9266,7 +9195,7 @@ def start_worker_on_target(
             f"tmux new-session failed: rc={r.returncode} stderr={r.stderr[:200] if r.stderr else ''}",
         )
         return False
-    _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=target_host, capture_output=True)
+    _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=target_host)
     _clock.sleep(bridge.DELAY_RETRY)
     target_sessions_dir = _remap_path(str(bridge.SESSIONS_DIR), target_host)
     if target_host and not skip_session_sync:
@@ -9280,36 +9209,33 @@ def start_worker_on_target(
         "WORKER_BACKEND": normalize_backend(backend_name),
         "BRIDGE_URL": bridge.BRIDGE_PUBLIC_URL or bridge.BRIDGE_URL,
     }.items():
-        _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value], host=target_host, capture_output=True)
+        _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value], host=target_host)
     _clock.sleep(bridge.DELAY_TMUX_SEND)
     _remote_run(
         ["tmux", "send-keys", "-t", tmux_name, 'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
         host=target_host,
-        capture_output=True,
     )
     _clock.sleep(bridge.DELAY_TMUX_SEND)
     backend = get_backend(backend_name)
     cli_cmd = backend.start_cmd(session_id or "")
     if target_host:
-        id_result = _remote_run(["id", "-u"], host=target_host, capture_output=True, text=True)
+        id_result = _remote_run(["id", "-u"], host=target_host)
         if id_result.returncode == 0 and id_result.stdout.strip() == "0":
             cli_cmd = cli_cmd.replace(" --dangerously-skip-permissions", "")
     start_cmd = f"unset CLAUDECODE && {cli_cmd}"
     if target_cwd:
         start_cmd = f"cd {shlex.quote(target_cwd)} && {start_cmd}"
     _log(_LOG_INFO, "teleport", f"start_cmd={start_cmd}")
-    _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=target_host, capture_output=True)
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=target_host)
     if backend.is_interactive:
         for delay, key in [(3.0, "Enter"), (2.0, "Enter"), (1.0, "Enter"), (1.0, "Enter")]:
             _clock.sleep(delay)
-            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=target_host, capture_output=True)
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=target_host)
     for attempt in range(30):
         _clock.sleep(bridge.DELAY_STARTUP)
         r = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
             host=target_host,
-            capture_output=True,
-            text=True,
         )
         if r.returncode != 0:
             if attempt % 10 == 0:
@@ -9325,8 +9251,6 @@ def start_worker_on_target(
             cap = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 host=target_host,
-                capture_output=True,
-                text=True,
                 timeout=bridge.TIMEOUT_TMUX_SEND,
             )
             if cap.returncode == 0:
@@ -9355,7 +9279,6 @@ def teleport_rollback(
             _remote_run(
                 ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
                 host=source_host,
-                capture_output=True,
             )
             _remote_run(
                 ["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=source_host, capture_output=True
@@ -9364,7 +9287,7 @@ def teleport_rollback(
         start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
         if source_cwd:
             start_cmd = f"cd {shlex.quote(source_cwd)} && {start_cmd}"
-        _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=source_host, capture_output=True)
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=source_host)
         teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
     except (subprocess.SubprocessError, OSError) as e:
         teleport_notify(chat_id, f"Rollback also failed: {e}")
@@ -10655,7 +10578,7 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     try:
         remote_sessions_dir = _remap_sessions_dir(host)
         _remote_run(
-            ["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK
+            ["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, timeout=TIMEOUT_TMUX_CHECK
         )
         _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id", host=host, direction="push")
     except (subprocess.SubprocessError, OSError) as e:
@@ -10874,7 +10797,7 @@ def do_teleport(
         ok = start_worker_on_target(name, target_host, target_cwd, resume_id, backend_name)
         _log(_LOG_INFO, "teleport", f"{name}: _start_worker_on_target returned {ok}")
         if not ok:
-            _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host, capture_output=True)
+            _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host)
             teleport_rollback(
                 name, tmux_name, source_host, source_cwd, session_id, backend_name, chat_id, "failed to start on target"
             )
@@ -10883,7 +10806,7 @@ def do_teleport(
             _registry_clear_teleport(name)
         else:
             _registry_update_teleport(name, host=target_host, home_host=source_host, home_cwd=source_cwd)
-        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=source_host, capture_output=True)
+        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=source_host)
         if is_teleback:
             sync_worker_data_back(name, source_host)
         if not is_teleback:
@@ -10976,7 +10899,7 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     if teleport_file.exists():
         router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
         return True
-    r = _remote_run(["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+    r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)
     if r.returncode != 0:
         router.reply(chat_id, f"Cannot reach {target_host} via SSH.")  # type: ignore[attr-defined]
         return True
@@ -10989,8 +10912,6 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     r = _remote_run(
         ["bash", "-c", f"tmux has-session -t {tmux_name} 2>/dev/null && echo exists || echo none"],
         host=target_host,
-        capture_output=True,
-        text=True,
         timeout=TIMEOUT_TMUX_SEND,
     )
     if r.returncode == 0 and "exists" in r.stdout:
@@ -11007,8 +10928,6 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     r = _remote_run(
         ["curl", "-sf", "--connect-timeout", "5", f"{target_bridge_url}/"],
         host=target_host,
-        capture_output=True,
-        text=True,
         timeout=TIMEOUT_REMOTE_CMD,
     )
     if r.returncode != 0:
@@ -11021,19 +10940,18 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     r = _remote_run(
         ["test", "-f", ".claude/.credentials.json"],
         host=target_host,
-        capture_output=True,
         timeout=TIMEOUT_TMUX_SEND,
     )
     if r.returncode != 0:
         local_creds = os.path.expanduser("~/.claude/.credentials.json")
         if os.path.exists(local_creds):
-            _remote_run(["mkdir", "-p", ".claude"], host=target_host, capture_output=True)
+            _remote_run(["mkdir", "-p", ".claude"], host=target_host)
             _subprocess_runner.run(
                 ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json"],
                 capture_output=True,
                 timeout=TIMEOUT_REMOTE_CMD,
             )
-            _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host, capture_output=True)
+            _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host)
             teleport_notify(chat_id, "Synced credentials to target.")
         else:
             router.reply(
@@ -11044,7 +10962,6 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     r = _remote_run(
         ["test", "-f", ".claude/hooks/claudecode.sh"],
         host=target_host,
-        capture_output=True,
         timeout=TIMEOUT_TMUX_SEND,
     )
     if r.returncode != 0:
@@ -11101,7 +11018,7 @@ def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
     target_cwd = home_cwd or get_claude_session_cwd(worker_name)
     if target_host:
         r = _remote_run(
-            ["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
+            ["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD
         )
         if r.returncode != 0:
             router.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")  # type: ignore[attr-defined]
@@ -11113,7 +11030,7 @@ def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
                 return True
     if current_host:
         r = _remote_run(
-            ["echo", "ok"], host=current_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
+            ["echo", "ok"], host=current_host, timeout=TIMEOUT_REMOTE_CMD
         )
         if r.returncode != 0:
             router.reply(chat_id, f"Cannot reach {current_host} where {worker_name} currently is.")  # type: ignore[attr-defined]
@@ -11167,7 +11084,7 @@ def restart_remote_worker(
     if tmux_exists(tmux_name, host=host):
         _log(_LOG_INFO, "_restart_remote", f"{name}: stopping remote tmux {tmux_name}")
         stop_worker_for_teleport(name, tmux_name, host=host)
-        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
+        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=host)
         _clock.sleep(DELAY_RETRY)
     else:
         _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
@@ -11184,7 +11101,7 @@ def restart_remote_worker(
             cwd_slug = target_cwd.replace("/", "-")
             session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
             check = _remote_run(
-                ["test", "-f", session_file], host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND
+                ["test", "-f", session_file], host=host, timeout=TIMEOUT_TMUX_SEND
             )
             if check.returncode != 0:
                 _log(

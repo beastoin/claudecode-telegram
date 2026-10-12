@@ -312,6 +312,8 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
         timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10
         cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
     kwargs.setdefault("timeout", 10)
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
     return _subprocess_runner.run(cmd, **kwargs)
 
 
@@ -333,8 +335,6 @@ def _is_git_repo(cwd: str, host: str | None = None) -> bool:
         r = _remote_run(
             ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_REMOTE_CMD,
         )
         return r.returncode == 0
@@ -387,7 +387,7 @@ def _release_flock(fd: int) -> None:
 def tmux_exists(tmux_name: str, host: str | None = None, timeout: int = 3) -> bool:
     return (
         _remote_run(
-            ["tmux", "has-session", "-t", tmux_name], host=host, capture_output=True, timeout=timeout
+            ["tmux", "has-session", "-t", tmux_name], host=host, timeout=timeout
         ).returncode
         == 0
     )
@@ -402,7 +402,6 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 r = _remote_run(
                     ["tmux", "send-keys", "-t", tmux_name, "-l", text],
                     host=host,
-                    capture_output=True,
                     timeout=TIMEOUT_TMUX_SEND,
                 )
                 if r.returncode != 0:
@@ -416,7 +415,6 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                     ["tmux", "load-buffer", "-b", buf_name, "-"],
                     host=host,
                     input=text.encode(),
-                    capture_output=True,
                     timeout=TIMEOUT_TMUX_SEND,
                 )
             else:
@@ -437,7 +435,6 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
             r = _remote_run(
                 ["tmux", "paste-buffer", "-p", "-r", "-t", tmux_name, "-b", buf_name, "-d"],
                 host=host,
-                capture_output=True,
                 timeout=TIMEOUT_TMUX_SEND,
             )
             if r.returncode != 0:
@@ -453,8 +450,6 @@ def get_pane_command(tmux_name: str, host: str | None = None) -> str:
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_command}"],
         host=host,
-        capture_output=True,
-        text=True,
         timeout=TIMEOUT_TMUX_CHECK,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -467,8 +462,6 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
     result = _remote_run(
         ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
         host=host,
-        capture_output=True,
-        text=True,
         timeout=TIMEOUT_TMUX_CHECK,
     )
     if result.returncode != 0:
@@ -477,7 +470,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
     if not pane_pid:
         return False
     result = _remote_run(
-        ["pgrep", "-P", pane_pid, process_name], host=host, capture_output=True, timeout=TIMEOUT_TMUX_CHECK
+        ["pgrep", "-P", pane_pid, process_name], host=host, timeout=TIMEOUT_TMUX_CHECK
     )
     return result.returncode == 0
 
@@ -491,8 +484,6 @@ def _tmux_pane_pids(host: str | None = None) -> dict[str, str]:
         result = _remote_run(
             ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_SEND,
         )
     except (subprocess.SubprocessError, OSError):
@@ -533,8 +524,6 @@ class ClaudeBackend:
             r = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT_TMUX_SEND,
             )
             if r.returncode == 0 and "Paste code here" in r.stdout:
@@ -775,8 +764,6 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
             r = _remote_run(
                 ["find", codex_dir, "-name", f"*{session_id}*", "-name", "*.jsonl"],
                 host=host,
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT_REMOTE_CMD,
             )
             if r.returncode == 0 and r.stdout.strip():
@@ -938,7 +925,7 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
                 "-c",
                 f'ls -1t "$HOME/.claude/projects/{slug}"/*.jsonl 2>/dev/null | head -1',
             ]
-            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+            r = _remote_run(cmd, host=host, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0:
                 return ""
             path = (r.stdout or "").strip()
@@ -1137,7 +1124,7 @@ def _get_remote_home(host: str | None) -> str:
         return cached
     try:
         r = _remote_run(
-            ["bash", "-c", "echo $HOME"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            ["bash", "-c", "echo $HOME"], host=host, timeout=TIMEOUT_TMUX_SEND
         )
         home = r.stdout.strip() if r.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
@@ -1154,8 +1141,6 @@ def _capture_pane_text(tmux_name: str, lines: int = 50, host: str | None = None)
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", f"-{lines}"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_SEND,
         )
     except (subprocess.SubprocessError, OSError):
@@ -1184,7 +1169,7 @@ def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
         return "", "cwd is empty"
     if host:
         try:
-            r = _remote_run(["test", "-d", normalized], host=host, capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
+            r = _remote_run(["test", "-d", normalized], host=host, timeout=TIMEOUT_REMOTE_CMD)
             if r.returncode != 0:
                 return "", f"cwd does not exist on {host}: {normalized}"
         except (subprocess.SubprocessError, OSError) as e:
@@ -1229,8 +1214,6 @@ def tmux_prompt_empty(tmux_name: str, timeout: float = 0.5, host: str | None = N
         result = _remote_run(
             ["tmux", "capture-pane", "-t", tmux_name, "-p"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_CHECK,
         )
         if result.returncode == 0:
@@ -1246,8 +1229,6 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
         r = _remote_run(
             ["tmux", "show-environment", "-t", tmux_name, "BRIDGE_URL"],
             host=host,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_TMUX_CHECK,
         )
         existing = r.stdout.strip().split("=", 1)[-1] if r.returncode == 0 else ""
