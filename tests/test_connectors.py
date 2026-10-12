@@ -10,6 +10,7 @@ import threading
 import pytest
 from unittest.mock import patch, MagicMock
 from bridge import GmailConnector, GitHubConnector, CONSECUTIVE_FAIL_WARN
+from telegram import markdown_to_telegram_html
 
 
 # ── Gmail Connector ─────────────────────────────────────────────────
@@ -934,58 +935,46 @@ class TestGitHubFormatComment:
 
 class TestGitHubMdToTelegramHtml:
     def test_headers_to_bold(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("## CP9 Live Test Evidence")
+        result = markdown_to_telegram_html("## CP9 Live Test Evidence")
         assert "<b>CP9 Live Test Evidence</b>" in result
 
     def test_code_fences_to_pre(self):
-        gc = make_github_connector()
-        md = "```bash\necho hello\n```"
-        result = gc._md_to_telegram_html(md)
+        result = markdown_to_telegram_html("```bash\necho hello\n```")
         assert "<pre>" in result
         assert "echo hello" in result
         assert "```" not in result
 
     def test_inline_code(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("run `beast github show 100`")
+        result = markdown_to_telegram_html("run `beast github show 100`")
         assert "<code>beast github show 100</code>" in result
 
     def test_bold_stars(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("this is **important**")
+        result = markdown_to_telegram_html("this is **important**")
         assert "<b>important</b>" in result
 
     def test_italic(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("this is *italic* text")
+        result = markdown_to_telegram_html("this is *italic* text")
         assert "<i>italic</i>" in result
 
-    def test_image_links_stripped(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("![App launch](https://storage.example.com/img.png)")
-        assert "https://storage" not in result
+    def test_image_links_preserved(self):
+        result = markdown_to_telegram_html("![App launch](https://storage.example.com/img.png)")
         assert "App launch" in result
 
     def test_links_converted(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("[click here](https://example.com)")
+        result = markdown_to_telegram_html("[click here](https://example.com)")
         assert '<a href="https://example.com">click here</a>' in result
 
     def test_blockquotes(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("> quoted text\n> more quote")
+        result = markdown_to_telegram_html("> quoted text\n> more quote")
         assert "<blockquote>" in result
         assert "quoted text" in result
 
     def test_html_still_escaped(self):
-        gc = make_github_connector()
-        result = gc._md_to_telegram_html("a < b & c > d")
+        result = markdown_to_telegram_html("a < b & c > d")
         assert "&lt;" in result
         assert "&amp;" in result
 
     def test_real_github_comment(self):
-        gc = make_github_connector()
         md = """## CP9 — Live Test Evidence
 
 ### CP9A — Build and run
@@ -1002,7 +991,7 @@ Executed 8 tests, with 0 failures
 ```
 
 ![screenshot](https://storage.example.com/img.png)"""
-        result = gc._md_to_telegram_html(md)
+        result = markdown_to_telegram_html(md)
         assert "<b>CP9 — Live Test Evidence</b>" in result
         assert "<pre>" in result
         assert "Build complete!" in result

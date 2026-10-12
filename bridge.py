@@ -1578,93 +1578,71 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return ""
         return self._find_text_part(payload)
 
-    def _find_text_part(
-        self,
-        part: GmailPayloadPart,
-        depth: int = 0,
-        counter: Optional[list[int]] = None,
-    ) -> str:
-        if counter is None:
-            counter = [0]
-        counter[0] += 1
-        if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
-            return ""
-        raw_mime = part.get("mimeType")
-        mime_type: str = str(raw_mime) if isinstance(raw_mime, str) else ""
-        if mime_type == "text/plain":
-            body = part.get("body")
-            if not isinstance(body, dict):
-                return ""
-            raw_data = body.get("data")
-            data: str = str(raw_data) if isinstance(raw_data, str) else ""
-            if data:
-                padded = data + "=" * (-len(data) % 4)
-                if not _B64_URLSAFE.match(padded):
-                    return ""
-                try:
-                    return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
-                except (ValueError, binascii.Error):
-                    return ""
-            return ""
-        parts = part.get("parts")
-        if isinstance(parts, list):
-            for sub in parts:
-                if counter[0] > _MAX_MIME_PARTS:
-                    break
-                if isinstance(sub, dict):
-                    text = self._find_text_part(sub, depth + 1, counter)
-                    if text:
-                        return text
-        return ""
-
-    def extract_attachments(self, message: GmailMessage) -> list[GmailAttachmentInfo]:
-        attachments: list[GmailAttachmentInfo] = []
-        payload = message.get("payload")
-        if isinstance(payload, dict):
-            self._find_attachments(payload, attachments)
-        return attachments
-
-    def _find_attachments(
-        self,
-        part: GmailPayloadPart,
-        result: list[GmailAttachmentInfo],
-        depth: int = 0,
-        counter: Optional[list[int]] = None,
-    ) -> None:
+    @staticmethod
+    def _walk_mime(part: GmailPayloadPart, visitor: Callable[[GmailPayloadPart], None], depth: int = 0, counter: Optional[list[int]] = None) -> None:
         if counter is None:
             counter = [0]
         counter[0] += 1
         if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
             return
-        raw_fn = part.get("filename")
-        filename: str = str(raw_fn) if isinstance(raw_fn, str) else ""
-        body = part.get("body")
-        if isinstance(body, dict):
-            raw_att_id = body.get("attachmentId")
-            att_id: str = str(raw_att_id) if isinstance(raw_att_id, str) else ""
-            raw_size = body.get("size")
-            size: int = int(raw_size) if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
-            if filename and att_id:
-                if size > _MAX_ATTACHMENT_BYTES:
-                    print(f"[gmail] Skipping oversized attachment: {filename} ({size} bytes)")
-                else:
-                    raw_mime = part.get("mimeType")
-                    mime: str = str(raw_mime) if isinstance(raw_mime, str) else ""
-                    result.append(
-                        GmailAttachmentInfo(
-                            filename=_sanitize_filename(filename),
-                            mimeType=mime,
-                            size=size,
-                            attachmentId=att_id,
-                        )
-                    )
+        visitor(part)
         parts = part.get("parts")
         if isinstance(parts, list):
             for sub in parts:
                 if counter[0] > _MAX_MIME_PARTS:
                     break
                 if isinstance(sub, dict):
-                    self._find_attachments(sub, result, depth + 1, counter)
+                    GmailConnector._walk_mime(sub, visitor, depth + 1, counter)
+
+    def _find_text_part(self, part: GmailPayloadPart) -> str:
+        found: list[str] = []
+        def _visit(p: GmailPayloadPart) -> None:
+            if found:
+                return
+            raw_mime = p.get("mimeType")
+            if (str(raw_mime) if isinstance(raw_mime, str) else "") != "text/plain":
+                return
+            body = p.get("body")
+            if not isinstance(body, dict):
+                return
+            raw_data = body.get("data")
+            data = str(raw_data) if isinstance(raw_data, str) else ""
+            if not data:
+                return
+            padded = data + "=" * (-len(data) % 4)
+            if not _B64_URLSAFE.match(padded):
+                return
+            try:
+                found.append(base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace"))
+            except (ValueError, binascii.Error):
+                pass
+        self._walk_mime(part, _visit)
+        return found[0] if found else ""
+
+    def extract_attachments(self, message: GmailMessage) -> list[GmailAttachmentInfo]:
+        attachments: list[GmailAttachmentInfo] = []
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return attachments
+        def _visit(p: GmailPayloadPart) -> None:
+            raw_fn = p.get("filename")
+            filename = str(raw_fn) if isinstance(raw_fn, str) else ""
+            body = p.get("body")
+            if not isinstance(body, dict):
+                return
+            raw_att_id = body.get("attachmentId")
+            att_id = str(raw_att_id) if isinstance(raw_att_id, str) else ""
+            raw_size = body.get("size")
+            size = int(raw_size) if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
+            if not (filename and att_id):
+                return
+            if size > _MAX_ATTACHMENT_BYTES:
+                print(f"[gmail] Skipping oversized attachment: {filename} ({size} bytes)")
+                return
+            raw_mime = p.get("mimeType")
+            attachments.append(GmailAttachmentInfo(filename=_sanitize_filename(filename), mimeType=str(raw_mime) if isinstance(raw_mime, str) else "", size=size, attachmentId=att_id))
+        self._walk_mime(payload, _visit)
+        return attachments
 
     def is_inbox_unread(self, label_ids: list[str]) -> bool:
         return "INBOX" in label_ids and "UNREAD" in label_ids
@@ -1781,8 +1759,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         )
 
     def _download_attachment(self, msg_id: str, att: GmailAttachmentInfo) -> Optional[str]:
-        raw_att_id = att.get("attachmentId")
-        att_id: str = str(raw_att_id) if isinstance(raw_att_id, str) else ""
+        att_id = str(att.get("attachmentId") or "")
         if not att_id:
             return None
         data = self._get_attachment_data(msg_id, att_id)
@@ -1793,31 +1770,20 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return None
         padded_b64 = raw_b64 + "=" * (-len(raw_b64) % 4)
         if not _B64_URLSAFE.match(padded_b64):
-            print(f"[gmail] Invalid base64 characters in attachment data")
             return None
         try:
             decoded = base64.urlsafe_b64decode(padded_b64)
-        except (ValueError, binascii.Error) as e:
-            print(f"[gmail] decode attachment failed: {e}")
+        except (ValueError, binascii.Error):
             return None
         if len(decoded) > _MAX_ATTACHMENT_BYTES:
-            print(f"[gmail] Attachment too large: {len(decoded)} bytes")
             return None
-        raw_fn = att.get("filename")
-        raw_name = _sanitize_filename(str(raw_fn) if isinstance(raw_fn, str) else "attachment")
-        safe_prefix = re.sub(r"[^\w]", "", msg_id[:8]) if msg_id else ""
-        filename = f"{safe_prefix}_{raw_name}" if safe_prefix else raw_name
-        if len(filename) > _MAX_FILENAME_LEN:
-            root, ext = os.path.splitext(filename)
-            if len(ext) > 10:
-                ext = ext[:10]
-            filename = root[: _MAX_FILENAME_LEN - len(ext)] + ext
+        prefix = re.sub(r"[^\w]", "", msg_id[:8]) if msg_id else ""
+        filename = _sanitize_filename(f"{prefix}_{att.get('filename', 'attachment')}" if prefix else str(att.get("filename", "attachment")))
         att_dir = os.path.join(os.path.expanduser("~"), ".cache", "beast", "email", "attachments")
         try:
             _atomic_write_bytes(os.path.join(att_dir, filename), decoded)
             return os.path.join(att_dir, filename)
-        except OSError as e:
-            print(f"[gmail] save attachment failed: {e}")
+        except OSError:
             return None
 
     def _process_message(self, msg_id: str) -> None:
@@ -2145,73 +2111,18 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def extract_issue_context(self, comment: GithubComment) -> IssueContext:
         if comment.get("issue_num") and comment.get("kind"):
-            return IssueContext(
-                number=str(comment["issue_num"]),
-                kind=str(comment["kind"]),
-                url=str(comment.get("html_url", "")),
-            )
-        raw_issue_url = comment.get("issue_url")
-        raw_pr_url = comment.get("pull_request_url")
-        issue_url: str = str(raw_issue_url) if isinstance(raw_issue_url, str) else ""
-        if not issue_url and isinstance(raw_pr_url, str):
-            issue_url = str(raw_pr_url)
-        raw_html_url = comment.get("html_url")
-        html_url: str = str(raw_html_url) if isinstance(raw_html_url, str) else ""
-        number: str = ""
-        kind: str = "comment"
-        if "/issues/" in issue_url:
-            candidate = issue_url.rsplit("/", 1)[-1]
-            if candidate.isdigit():
-                number = candidate
-            kind = "issue"
-        elif "/pulls/" in issue_url or "/pull/" in html_url:
-            if "/pulls/" in issue_url:
-                candidate = issue_url.rsplit("/", 1)[-1]
-                if candidate.isdigit():
-                    number = candidate
-            elif "/pull/" in html_url:
-                parts = html_url.split("/pull/")
-                if len(parts) > 1:
-                    candidate = parts[1].split("/")[0]
-                    if "#" in candidate:
-                        candidate = candidate.split("#")[0]
-                    if candidate.isdigit():
-                        number = candidate
-            kind = "PR"
-        return IssueContext(number=number, kind=kind, url=html_url)
-
-    def _md_to_telegram_html(self, md: str) -> str:
-        text = _escape_html(md)
-        text = re.sub(r"```[a-zA-Z]*\n(.*?)```", lambda m: f"<pre>{m.group(1).rstrip()}</pre>", text, flags=re.DOTALL)
-        text = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", text)
-        text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", lambda m: m.group(1) or "(image)", text)
-        text = re.sub(
-            r"\[([^\]]+)\]\(([^)]+)\)", lambda m: f'<a href="{_escape_html(m.group(2))}">{m.group(1)}</a>', text
-        )
-        text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-        text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
-        text = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"<i>\1</i>", text)
-        text = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"<i>\1</i>", text)
-        lines = text.split("\n")
-        result: list[str] = []
-        in_quote = False
-        quote_lines: list[str] = []
-        for line in lines:
-            if re.match(r"&gt;\s?", line):
-                in_quote = True
-                quote_lines.append(re.sub(r"^&gt;\s?", "", line))
-            else:
-                if in_quote:
-                    result.append(f"<blockquote>{chr(10).join(quote_lines)}</blockquote>")
-                    quote_lines = []
-                    in_quote = False
-                result.append(line)
-        if in_quote:
-            result.append(f"<blockquote>{chr(10).join(quote_lines)}</blockquote>")
-        text = "\n".join(result)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
+            return IssueContext(number=str(comment["issue_num"]), kind=str(comment["kind"]), url=str(comment.get("html_url", "")))
+        def _str(key: str) -> str:
+            v = comment.get(key)
+            return str(v) if isinstance(v, str) else ""
+        issue_url = _str("issue_url") or _str("pull_request_url")
+        html_url = _str("html_url")
+        number = ""
+        for url, kind_val, pattern in [(issue_url, "issue", r"/issues/(\d+)"), (issue_url, "PR", r"/pulls/(\d+)"), (html_url, "PR", r"/pull/(\d+)")]:
+            m = re.search(pattern, url)
+            if m:
+                return IssueContext(number=m.group(1), kind=kind_val, url=html_url)
+        return IssueContext(number="", kind="comment", url=html_url)
 
     def format_comment(self, body: str, context: IssueContext) -> tuple[str, str]:
         body = _truncate(body)
@@ -2220,7 +2131,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         url = context["url"]
         tag = f"#{number}" if number else ""
         link = f'<a href="{_escape_html(url)}">#{number}</a>' if url and number else tag
-        html = f"🔔 <b>GitHub {kind} {link}</b>\n\n{self._md_to_telegram_html(body)}"
+        html = f"🔔 <b>GitHub {kind} {link}</b>\n\n{markdown_to_telegram_html(body)}"
         plain = f"manager (via GitHub {kind} {tag}): {body}"
         return html, plain
 
@@ -4610,18 +4521,6 @@ class PRCache:
             )
         self.conn.commit()
 
-    def get_comments(self, pr_key: str) -> list[dict[str, object]]:
-        return self._get_id_list("pr_comments", pr_key)
-
-    def set_comments(self, pr_key: str, comments: list[dict[str, object]]) -> None:
-        self._set_id_list("pr_comments", pr_key, comments)
-
-    def get_reviews(self, pr_key: str) -> list[dict[str, object]]:
-        return self._get_id_list("pr_reviews", pr_key)
-
-    def set_reviews(self, pr_key: str, reviews: list[dict[str, object]]) -> None:
-        self._set_id_list("pr_reviews", pr_key, reviews)
-
     def get_user_profile(self, username: str) -> dict[str, object] | None:
         row = self.conn.execute("SELECT data, fetched_at FROM user_profiles WHERE username=?", (username,)).fetchone()
         if not row:
@@ -4684,8 +4583,8 @@ def fetch_pr_cached(
     else:
         files = cache.get_files(pr_key, new_head_sha)
         print(f"  Files: cached ({len(files)} files)")
-    cached_comments = cache.get_comments(pr_key) if cached else []
-    cached_reviews = cache.get_reviews(pr_key) if cached else []
+    cached_comments = cache._get_id_list("pr_comments", pr_key) if cached else []
+    cached_reviews = cache._get_id_list("pr_reviews", pr_key) if cached else []
     comments = results["comments"].result()
     reviews = results["reviews"].result()
     if len(comments) != len(cached_comments) or len(reviews) != len(cached_reviews):
@@ -4696,8 +4595,8 @@ def fetch_pr_cached(
             )
         else:
             print(f"  Fetched {len(comments)} comments, {len(reviews)} reviews")
-        cache.set_comments(pr_key, comments)
-        cache.set_reviews(pr_key, reviews)
+        cache._set_id_list("pr_comments", pr_key, comments)
+        cache._set_id_list("pr_reviews", pr_key, reviews)
     else:
         print(f"  Comments: cached ({len(comments)}), Reviews: cached ({len(reviews)})")
         comments = cached_comments

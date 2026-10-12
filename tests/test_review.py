@@ -89,8 +89,8 @@ def test_cache_comments_round_trip(tmp_path):
         {"id": 10, "body": "first"},
         {"id": 20, "body": "second"},
     ]
-    cache.set_comments("owner/repo/42", comments)
-    result = cache.get_comments("owner/repo/42")
+    cache._set_id_list("pr_comments","owner/repo/42", comments)
+    result = cache._get_id_list("pr_comments","owner/repo/42")
     cache.close()
 
     # Should be ordered by id (10, 20, 30), not insertion order
@@ -105,8 +105,8 @@ def test_cache_reviews_round_trip(tmp_path):
         {"id": 1, "state": "APPROVED", "body": "LGTM"},
         {"id": 2, "state": "CHANGES_REQUESTED", "body": "Needs fix"},
     ]
-    cache.set_reviews("owner/repo/42", reviews)
-    result = cache.get_reviews("owner/repo/42")
+    cache._set_id_list("pr_reviews","owner/repo/42", reviews)
+    result = cache._get_id_list("pr_reviews","owner/repo/42")
     cache.close()
 
     assert len(result) == 2
@@ -143,8 +143,8 @@ def test_cache_clear_pr(tmp_path):
     cache.set_files("owner/repo/1", "a", [{"filename": "f1.py"}])
     cache.set_files("owner/repo/2", "b", [{"filename": "f2.py"}])
     cache.set_commit("owner/repo/1", "c1", {"msg": "commit1"})
-    cache.set_comments("owner/repo/1", [{"id": 1, "body": "hi"}])
-    cache.set_reviews("owner/repo/1", [{"id": 1, "state": "APPROVED"}])
+    cache._set_id_list("pr_comments","owner/repo/1", [{"id": 1, "body": "hi"}])
+    cache._set_id_list("pr_reviews","owner/repo/1", [{"id": 1, "state": "APPROVED"}])
 
     # Clear PR 1
     cache.clear_pr("owner/repo/1")
@@ -153,8 +153,8 @@ def test_cache_clear_pr(tmp_path):
     assert cache.get_meta("owner/repo/1") is None
     assert cache.get_files("owner/repo/1", "a") is None
     assert cache.get_commits("owner/repo/1") == {}
-    assert cache.get_comments("owner/repo/1") == []
-    assert cache.get_reviews("owner/repo/1") == []
+    assert cache._get_id_list("pr_comments","owner/repo/1") == []
+    assert cache._get_id_list("pr_reviews","owner/repo/1") == []
 
     # PR 2 survives
     assert cache.get_meta("owner/repo/2") is not None

@@ -543,33 +543,9 @@ class TranscriptSyncState(TypedDict, total=False):
     remote_size: int
 
 
-class TranscriptMessageUsage(TypedDict, total=False):
-    input_tokens: int
-    output_tokens: int
-    cache_read_input_tokens: int
-    cache_creation_input_tokens: int
-
-
-class TranscriptMessageContent(TypedDict, total=False):
-    type: str
-    text: str
-    name: str
-    id: str
-    input: dict[str, str]
-    content: str | list[object]
-    is_error: bool
-
-
-class TranscriptMessage(TypedDict, total=False):
-    role: str
-    content: str | list[TranscriptMessageContent]
-    model: str
-    usage: TranscriptMessageUsage
-
-
 class TranscriptEntry(TypedDict, total=False):
     type: str
-    message: TranscriptMessage
+    message: dict[str, object]
     timestamp: str
     version: str
     gitBranch: str
