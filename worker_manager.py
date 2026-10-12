@@ -1,1 +1,3 @@
-from _worker_impl import WorkerManager  # noqa: F401
+"""Shim: all content merged into bridge.py."""
+
+from bridge import *  # noqa: F401,F403

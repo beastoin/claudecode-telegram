@@ -85,7 +85,6 @@ from telegram import (
     _extract_msg_text,
     _build_cwd_change_notice,
 )
-import tunnel as _tunnel_mod
 from core import _build_tunnel_config
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
@@ -115,52 +114,12007 @@ from claudecode import (
     _tmux_pane_pids,
     _which_binary,
 )
-from _bridge_helpers import (
-    ConnectorRegistry,
-    Machine,
-    MachineConfigError,
-    TokenStore,
-    _LegacyTransportAdapter,
-    _beast_serve_deploy,
-    _check_learning_reminder,
-    _checkin_can_restart,
-    _checkin_do_restart,
-    _coerce_optional_str,
-    _extract_file_id,
-    _fetch_remote_file,
-    _fire_reminder,
-    _format_offline_warning,
-    _gh_api_call,
-    _implicit_local_machine,
-    _localize_media,
-    _machine_access,
-    _machine_for_worker_host,
-    _machine_health,
-    _new_reminder_state,
-    _parse_codex_transcript,
-    _parse_response_media,
-    _read_codex_transcript,
-    _read_learning_reminder,
-    _remote_copy,
-    _reset_learning_reminder,
-    _scan_idle_workers,
-    _schedule_idle_scan,
-    _seed_learning_reminder_state,
-    _send_as_html,
-    _send_learning_reminder,
-    _send_response_media,
-    _send_text_via_telegram,
-    _validate_machine_id,
-    get_machine_catalog,
-    get_machines,
-    load_machines_config,
-    parse_hire_args,
-    parse_worker_target,
-    send_response_to_telegram,
-    REWIND_TIMEOUT,
-    PR_REVIEW_EXTEND,
+
+
+# ============================================================
+# _review_render
+# ============================================================
+
+
+import html
+import json
+import re
+from pathlib import Path
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_REVIEW_CSS = (_TEMPLATE_DIR / "review.css").read_text() if (_TEMPLATE_DIR / "review.css").exists() else ""
+_REVIEW_JS = (_TEMPLATE_DIR / "review.js").read_text() if (_TEMPLATE_DIR / "review.js").exists() else ""
+
+
+def parse_patch(patch_text: str | None) -> list[dict[str, object]]:
+    if not patch_text:
+        return []
+    hunks = []
+    current_hunk = None
+    for line in patch_text.split("\n"):
+        if line.startswith("@@"):
+            if current_hunk:
+                hunks.append(current_hunk)
+            m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)", line)
+            if m:
+                current_hunk = {
+                    "header": line,
+                    "old_start": int(m.group(1)),
+                    "old_count": int(m.group(2) or 1),
+                    "new_start": int(m.group(3)),
+                    "new_count": int(m.group(4) or 1),
+                    "context": m.group(5),
+                    "lines": [],
+                }
+            else:
+                current_hunk = {
+                    "header": line,
+                    "old_start": 0,
+                    "old_count": 0,
+                    "new_start": 0,
+                    "new_count": 0,
+                    "context": "",
+                    "lines": [],
+                }
+        elif current_hunk is not None:
+            if line.startswith("+"):
+                current_hunk["lines"].append(("add", line[1:]))
+            elif line.startswith("-"):
+                current_hunk["lines"].append(("del", line[1:]))
+            else:
+                current_hunk["lines"].append(("ctx", line[1:] if line.startswith(" ") else line))
+    if current_hunk:
+        hunks.append(current_hunk)
+    return hunks
+
+
+def generate_html(
+    meta: dict[str, object],
+    files: list[dict[str, object]],
+    pr_num: int,
+    owner: str,
+    repo: str,
+    comments: list[dict[str, object]] | None = None,
+    reviews: list[dict[str, object]] | None = None,
+    user_profiles: dict[str, dict[str, object]] | None = None,
+    highlight_comment_id: str | int | None = None,
+    commits: list[dict[str, object]] | None = None,
+) -> str:
+    comments = comments or []
+    reviews = reviews or []
+    commits = commits or []
+    user_profiles = user_profiles or {}
+
+    def _user_badge(username: str) -> str:
+        p = user_profiles.get(username, {})
+        if not p:
+            return f"<strong>{html.escape(username)}</strong>"
+        name = html.escape(p.get("name", "") or username)
+        joined = (p.get("created_at", "") or "")[:10]
+        followers = p.get("followers", 0)
+        repos = p.get("public_repos", 0)
+        bio = html.escape((p.get("bio", "") or "")[:80])
+        avatar = html.escape(p.get("avatar_url", "") or "")
+        avatar_img = f'<img src="{avatar}" class="disc-av">' if avatar else ""
+        return (
+            f'{avatar_img}<span class="disc-user-info"><strong>{name}</strong>'
+            f' <span class="disc-user-meta">@{html.escape(username)} &middot; '
+            f"joined {joined} &middot; {followers:,} followers &middot; "
+            f"{repos} repos</span>"
+            f'{"<br><span class=disc-user-bio>" + bio + "</span>" if bio else ""}'
+            f"</span>"
+        )
+
+    discussion_html = ""
+    active_reviews = [r for r in reviews if r.get("body") or r.get("state") != "COMMENTED"]
+    disc_count = 1 + len(active_reviews) + len(comments)
+    pr_author = meta.get("user", "")
+    pr_body_escaped = html.escape(meta.get("body", "") or "(no description)", quote=True)
+    discussion_html += f"""<div class="disc-card" id="disc-pr-desc">
+        <div class="disc-head">
+            {_user_badge(pr_author)}
+            <span class="disc-label">author</span>
+        </div>
+        <div class="disc-body" data-body="{pr_body_escaped}"></div>
+    </div>\n"""
+    for ci, commit in enumerate(commits):
+        sha = commit.get("sha", "")[:8]
+        sha_full = commit.get("sha", "")
+        msg = commit.get("message", "")
+        msg_first = msg.split("\n")[0] if msg else "(no message)"
+        msg_rest = "\n".join(msg.split("\n")[1:]).strip() if "\n" in msg else ""
+        author = commit.get("author", "")
+        author_login = commit.get("author_login", "")
+        date = (commit.get("date", "") or "")[:10]
+        commit_files = commit.get("files", [])
+        total_add = sum(cf.get("additions", 0) for cf in commit_files)
+        total_del = sum(cf.get("deletions", 0) for cf in commit_files)
+        commit_diff_html = ""
+        for cf in commit_files:
+            cf_status = cf.get("status", "modified")
+            cf_class = {"added": "added", "modified": "modified", "removed": "removed"}.get(cf_status, "")
+            cf_patch = cf.get("patch", "")
+            cf_lines = ""
+            if cf_patch:
+                for line in cf_patch.split("\n"):
+                    escaped = html.escape(line[1:] if len(line) > 0 and line[0] in ("+", "-", " ") else line)
+                    if line.startswith("@@"):
+                        cf_lines += f'<div class="cdiff-hunk">' f"{html.escape(line)}</div>"
+                    elif line.startswith("+"):
+                        cf_lines += f'<div class="cdiff-add">+{escaped}</div>'
+                    elif line.startswith("-"):
+                        cf_lines += f'<div class="cdiff-del">-{escaped}</div>'
+                    else:
+                        cf_lines += f'<div class="cdiff-ctx"> {escaped}</div>'
+            commit_diff_html += (
+                f'<details class="cdiff-file">'
+                f'<summary class="cdiff-file-head">'
+                f'<svg class="chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" '
+                f'fill="none" stroke="currentColor" stroke-width="1.5" '
+                f'stroke-linecap="round"/></svg>'
+                f'<span class="file-path">{html.escape(cf["filename"])}</span>'
+                f'<span class="file-badge {cf_class}">{cf_status}</span>'
+                f'<span class="diff-stat">'
+                f'<span class="plus">+{cf.get("additions", 0)}</span> '
+                f'<span class="minus">-{cf.get("deletions", 0)}</span></span>'
+                f"</summary>"
+                f'<div class="cdiff-body">{cf_lines}</div>'
+                f"</details>\n"
+            )
+        msg_body = ""
+        if msg_rest:
+            msg_escaped = html.escape(msg_rest, quote=True)
+            msg_body = f'<div class="disc-body" data-body="{msg_escaped}"></div>'
+        badge_user = _user_badge(author_login) if author_login else f"<strong>{html.escape(author)}</strong>"
+        discussion_html += (
+            f'<div class="disc-card disc-commit" id="disc-commit-{sha}">'
+            f'<div class="disc-head">'
+            f"{badge_user}"
+            f'<span class="disc-label">commit</span>'
+            f'<span class="disc-date">{date}</span>'
+            f"</div>"
+            f'<div class="commit-title">'
+            f'<code class="commit-sha">{sha}</code> {html.escape(msg_first)}'
+            f'<span class="diff-stat" style="margin-left:8px">'
+            f'<span class="plus">+{total_add}</span> '
+            f'<span class="minus">-{total_del}</span> '
+            f'<span style="color:var(--muted)">{len(commit_files)} files</span>'
+            f"</span></div>"
+            f"{msg_body}"
+            f'<div class="commit-files">{commit_diff_html}</div>'
+            f"</div>\n"
+        )
+    disc_count += len(commits)
+    for rv in reviews:
+        if not rv.get("body") and rv.get("state") == "COMMENTED":
+            continue
+        rid = rv.get("id", 0)
+        user = rv.get("user", "")
+        state = rv.get("state", "")
+        state_class = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes", "COMMENTED": "commented"}.get(state, "")
+        state_label = state.lower().replace("_", " ")
+        date = (rv.get("submitted_at", "") or "")[:10]
+        body_escaped = html.escape(rv.get("body", "") or "(no comment)", quote=True)
+        discussion_html += f"""<div class="disc-card" id="disc-review-{rid}">
+            <div class="disc-head">
+                {_user_badge(user)}
+                <span class="disc-label {state_class}">{state_label}</span>
+                <span class="disc-date">{date}</span>
+            </div>
+            <div class="disc-body" data-body="{body_escaped}"></div>
+        </div>\n"""
+    for c in comments:
+        cid = c.get("id", 0)
+        is_highlighted = str(cid) == str(highlight_comment_id)
+        hl_class = " disc-highlight" if is_highlighted else ""
+        user = c.get("user", "")
+        date = (c.get("created_at", "") or "")[:10]
+        body_escaped = html.escape(c.get("body", "") or "", quote=True)
+        ctype = c.get("type", "issue")
+        file_context = ""
+        if ctype == "review" and c.get("path"):
+            line_info = f":{c['line']}" if c.get("line") else ""
+            file_context = f'<div class="disc-file"><code>' f'{html.escape(c["path"])}{line_info}</code></div>'
+        discussion_html += f"""<div class="disc-card{hl_class}" id="disc-comment-{cid}">
+            <div class="disc-head">
+                {_user_badge(user)}
+                <span class="disc-label">{ctype}</span>
+                <span class="disc-date">{date}</span>
+            </div>
+            {file_context}
+            <div class="disc-body" data-body="{body_escaped}"></div>
+        </div>\n"""
+    file_list_html = ""
+    for f in files:
+        status_badge = {"added": "+", "modified": "~", "removed": "-", "renamed": "R"}.get(f["status"], "?")
+        status_class = {"added": "added", "modified": "modified", "removed": "removed"}.get(f["status"], "")
+        file_id = f["filename"].replace("/", "_").replace(".", "_")
+        stats = f'+{f["additions"]}' if f["additions"] else ""
+        if f["deletions"]:
+            stats += f' -{f["deletions"]}'
+        file_list_html += (
+            f'<div class="file-item {status_class}" '
+            f'data-filename="{html.escape(f["filename"])}" '
+            f'data-dir="{html.escape("/".join(f["filename"].split("/")[:-1]))}" '
+            f'data-target="{file_id}" onclick="jumpToFile(\'{file_id}\')">'
+            f'<span class="status-badge {status_class}">{status_badge}</span>'
+            f'<span class="filename" title="{html.escape(f["filename"])}">'
+            f'{html.escape(f["filename"].split("/")[-1])}</span>'
+            f'<span class="file-stats">{stats}</span>'
+            f'<button class="review-btn" '
+            f"onclick=\"event.stopPropagation();toggleReviewed(this,'{file_id}')\" "
+            f'title="Mark reviewed">&#10003;</button>'
+            f"</div>\n"
+        )
+    diff_sections = ""
+    for f in files:
+        file_id = f["filename"].replace("/", "_").replace(".", "_")
+        status_class = {"added": "added", "modified": "modified", "removed": "removed"}.get(f["status"], "")
+        if f.get("patch"):
+            hunks = parse_patch(f["patch"])
+            total_lines = sum(len(h["lines"]) + 1 for h in hunks)
+            is_large = total_lines > 300
+            hunks_html = ""
+            line_count = 0
+            fn_js = html.escape(f["filename"].replace("'", "\\'"), quote=True)
+            fn_attr = html.escape(f["filename"], quote=True)
+            f_status = f.get("status", "modified")
+            for hi, hunk in enumerate(hunks):
+                if hi == 0 and hunk["new_start"] > 1:
+                    hidden = hunk["new_start"] - 1
+                    hunks_html += (
+                        f'<tr class="expand-row"><td colspan="4">'
+                        f'<button class="expand-btn" onclick="expandCtx(\'{fn_js}\','
+                        f'1,{hunk["new_start"]},1,\'{f_status}\',this)">'
+                        f"↕ {hidden} hidden lines (top)</button></td></tr>\n"
+                    )
+                elif hi > 0:
+                    prev = hunks[hi - 1]
+                    gap_new_s = prev["new_start"] + prev["new_count"]
+                    gap_old_s = prev["old_start"] + prev["old_count"]
+                    gap_new_e = hunk["new_start"]
+                    hidden = gap_new_e - gap_new_s
+                    if hidden > 0:
+                        hunks_html += (
+                            f'<tr class="expand-row"><td colspan="4">'
+                            f'<button class="expand-btn" onclick="expandCtx(\'{fn_js}\','
+                            f"{gap_new_s},{gap_new_e},{gap_old_s},'{f_status}',this)\">"
+                            f"↕ {hidden} hidden lines</button></td></tr>\n"
+                        )
+                old_num = hunk["old_start"]
+                new_num = hunk["new_start"]
+                lines_html = f'<tr class="hunk-header"><td colspan="4">' f'{html.escape(hunk["header"])}</td></tr>\n'
+                line_count += 1
+                for ltype, text in hunk["lines"]:
+                    escaped = html.escape(text)
+                    if is_large and line_count == 300:
+                        lines_html += (
+                            f'</tbody></table><div class="show-more-wrap" '
+                            f'id="showmore-{file_id}"><button class="show-more-btn" '
+                            f"onclick=\"showAllLines(this, '{file_id}')\">"
+                            f"Show all {total_lines:,} lines "
+                            f'({f["additions"]:,}+ / {f["deletions"]:,}-)</button></div>'
+                            f'<table class="diff-table diff-hidden" id="rest-{file_id}">'
+                            f"<tbody>"
+                        )
+                    if ltype == "add":
+                        lines_html += (
+                            f'<tr class="line-add" data-path="{fn_attr}" '
+                            f'data-line="{new_num}" data-side="RIGHT">'
+                            f'<td class="ln"></td><td class="ln">{new_num}</td>'
+                            f'<td class="sign">+</td><td class="code">{escaped}</td></tr>\n'
+                        )
+                        new_num += 1
+                    elif ltype == "del":
+                        lines_html += (
+                            f'<tr class="line-del" data-path="{fn_attr}" '
+                            f'data-line="{old_num}" data-side="LEFT">'
+                            f'<td class="ln">{old_num}</td><td class="ln"></td>'
+                            f'<td class="sign">-</td><td class="code">{escaped}</td></tr>\n'
+                        )
+                        old_num += 1
+                    else:
+                        lines_html += (
+                            f'<tr class="line-ctx" data-path="{fn_attr}" '
+                            f'data-line="{new_num}" data-side="RIGHT">'
+                            f'<td class="ln">{old_num}</td><td class="ln">{new_num}</td>'
+                            f'<td class="sign"> </td><td class="code">{escaped}</td></tr>\n'
+                        )
+                        old_num += 1
+                        new_num += 1
+                    line_count += 1
+                hunks_html += lines_html
+            diff_content = f'<table class="diff-table"><tbody>{hunks_html}</tbody></table>'
+        else:
+            diff_content = '<div class="large-file-notice">' "No diff available &mdash; binary or empty file</div>"
+        dir_part = "/".join(f["filename"].split("/")[:-1])
+        base_part = f["filename"].split("/")[-1]
+        dir_prefix = html.escape(dir_part + "/") if dir_part else ""
+        diff_sections += (
+            f'<div class="file-section" id="file-{file_id}" '
+            f'data-filename="{html.escape(f["filename"])}">'
+            f'<div class="file-header {status_class}" onclick="toggleSection(this)">'
+            f'<svg class="chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" '
+            f'fill="none" stroke="currentColor" stroke-width="1.5" '
+            f'stroke-linecap="round"/></svg>'
+            f'<span class="file-path"><span class="fp-dir">{dir_prefix}</span>'
+            f"{html.escape(base_part)}</span>"
+            f'<span class="file-badge {status_class}">{f["status"]}</span>'
+            f'<span class="diff-stat"><span class="plus">+{f["additions"]}</span> '
+            f'<span class="minus">-{f["deletions"]}</span></span></div>'
+            f'<div class="file-body">{diff_content}</div></div>\n'
+        )
+    pr_meta_json = json.dumps(
+        {
+            "owner": owner,
+            "repo": repo,
+            "pr_num": pr_num,
+            "head_sha": meta.get("head_sha", ""),
+            "base_sha": meta.get("base_sha", ""),
+        }
+    )
+    file_index_json = json.dumps(
+        [
+            {
+                "id": f["filename"].replace("/", "_").replace(".", "_"),
+                "filename": f["filename"],
+                "basename": f["filename"].split("/")[-1],
+                "dir": "/".join(f["filename"].split("/")[:-1]),
+                "status": f["status"],
+            }
+            for f in files
+        ]
+    )
+    merge_bar_html = ""
+    pr_state = meta.get("state", "open")
+    pr_merged = meta.get("merged", False)
+    pr_draft = meta.get("draft", False)
+    pr_mergeable = meta.get("mergeable")
+    pr_mergeable_state = meta.get("mergeable_state", "")
+    checks = meta.get("checks", [])
+    if pr_merged:
+        badge_class, badge_text = "merged", "Merged"
+    elif pr_state == "closed":
+        badge_class, badge_text = "closed", "Closed"
+    elif pr_draft:
+        badge_class, badge_text = "draft", "Draft"
+    elif pr_mergeable is False:
+        badge_class, badge_text = "conflict", "Has conflicts"
+    elif pr_mergeable_state == "blocked":
+        badge_class, badge_text = "blocked", "Blocked"
+    elif pr_mergeable_state == "clean" or (pr_mergeable and pr_mergeable_state != "unstable"):
+        badge_class, badge_text = "ready", "Ready to merge"
+    else:
+        badge_class, badge_text = "blocked", pr_mergeable_state.replace("_", " ").title() or "Checking..."
+    checks_html = ""
+    for ck in checks:
+        cstatus = ck.get("conclusion") or ck.get("status", "pending")
+        cclass = {
+            "success": "success",
+            "failure": "failure",
+            "action_required": "failure",
+            "cancelled": "failure",
+            "timed_out": "failure",
+        }.get(cstatus, "pending")
+        csym = {"success": "✓", "failure": "✗"}.get(cclass, "○")
+        checks_html += f'<span class="check-item {cclass}">{csym} {html.escape(ck.get("name", ""))}</span>'
+    can_merge = pr_state == "open" and not pr_merged and not pr_draft and pr_mergeable is not False
+    sidebar_merge_html = (
+        f'<div class="sb-row"><span class="sb-label">Status</span>'
+        f'<span class="merge-badge {badge_class}">{badge_text}</span></div>'
+    )
+    if checks_html:
+        sidebar_merge_html += f'<div class="sb-checks">{checks_html}</div>'
+    if can_merge:
+        sidebar_merge_html += (
+            '<div class="sb-merge" id="sbMerge">'
+            '<select class="merge-select" id="mergeMethod">'
+            '<option value="squash">Squash</option>'
+            '<option value="merge">Merge</option>'
+            '<option value="rebase">Rebase</option></select>'
+            '<button class="merge-btn merge" id="mergeBtn" onclick="doMerge()">Merge</button>'
+            "</div>"
+        )
+    _hl_js = (
+        f'setTimeout(function(){{switchTab("discussion");var el=document.getElementById("disc-comment-{highlight_comment_id}");if(el)el.scrollIntoView({{behavior:"smooth",block:"center"}})}},600);'
+        if highlight_comment_id
+        else ""
+    )
+    _rjs = (
+        _REVIEW_JS.replace("__TOTAL_FILES__", str(len(files)))
+        .replace("__FILE_INDEX_JSON__", file_index_json)
+        .replace("__HIGHLIGHT_SCROLL__", _hl_js)
+    )
+    page_html = (
+        f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR #{pr_num}: {html.escape(meta.get("title", ""))}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>"""
+        + _REVIEW_CSS
+        + f"""</style>
+</head>
+<body>
+<div class="wrap">
+<div class="main">
+<div class="content">
+<header>
+<div class="h-row">
+    <h1><a href="{meta.get('html_url','')}" target="_blank">{html.escape(meta.get('title',''))}</a></h1>
+    <button class="sb-toggle" onclick="document.querySelector('.sidebar').classList.toggle('sb-open')" title="Files">
+        <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M1.5 3.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13zm0 4a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13zm0 4a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13z"/></svg>
+    </button>
+</div>
+<div class="meta">
+    <span class="mi"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.93 8.5a4.002 4.002 0 01-7.86 0H.75a.75.75 0 010-1.5h3.32a4.002 4.002 0 017.86 0h3.32a.75.75 0 010 1.5h-3.32zm-1.43-.75a2.5 2.5 0 10-5 0 2.5 2.5 0 005 0z"/></svg>{html.escape(meta.get('head',''))} &rarr; {html.escape(meta.get('base',''))}</span>
+    <span class="mi"><span class="stat-add">+{meta.get('additions',0):,}</span></span>
+    <span class="mi"><span class="stat-del">-{meta.get('deletions',0):,}</span></span>
+    <span class="mi"><span class="stat-neutral">{meta.get('changed_files',0)} files</span></span>
+    <span class="mi"><span class="stat-neutral">{meta.get('commits',0)} commits</span></span>
+    <span class="mi"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0110.25 10H7.061l-2.574 2.573A1.458 1.458 0 012 11.543V10h-.25A1.75 1.75 0 010 8.25v-5.5C0 1.784.784 1 1.75 1z"/></svg>{len(comments) + len(reviews)} comments</span>
+</div>
+</header>
+<div class="tabs">
+    <button class="tab active" onclick="switchTab('diff')">Diff ({len(files)})</button>
+    <button class="tab" onclick="switchTab('discussion')">Discussion ({disc_count})</button>
+</div>
+<div class="tab-content active" id="tab-diff">
+    <div class="search-results" id="searchResults">
+        <h3 id="searchResultsTitle"></h3>
+        <div id="searchResultsList"></div>
+    </div>
+    {diff_sections}
+</div>
+<div class="tab-content" id="tab-discussion">
+    <div class="disc-thread">
+        {discussion_html}
+    </div>
+</div>
+</div>
+<aside class="sidebar" id="sidebar">
+<div class="sidebar-inner">
+    <div class="sb-title">PR #{pr_num}</div>
+    <div class="sb-row"><span class="sb-label">{html.escape(meta.get('head',''))}</span><span class="sb-val">&rarr; {html.escape(meta.get('base',''))}</span></div>
+    <div class="sb-row"><span class="sb-label">Files</span><span class="sb-val">{len(files)}</span></div>
+    <div class="sb-row"><span class="sb-label">Changes</span><span class="sb-val" style="color:var(--green)">+{meta.get('additions',0):,}</span></div>
+    <div class="sb-divider"></div>
+    {sidebar_merge_html}
+    <div class="sb-divider"></div>
+    <div class="progress-bar">
+        <span id="progressText">0 / {len(files)} reviewed</span>
+        <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="Search code, files..." oninput="debounceSearch()">
+    </div>
+    <div class="bulk-actions">
+        <button onclick="expandAll()">Expand</button>
+        <button onclick="collapseAll()">Collapse</button>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="file-list">
+        {file_list_html}
+    </div>
+</div>
+</aside>
+</div>
+</div>
+<div class="chat-input" id="chatInput">
+    <div class="chat-status" id="chatStatus">&check; Comment posted</div>
+    <textarea id="generalCommentText" placeholder="Comment on this PR... (Shift+Enter for new line)" rows="3"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){{event.preventDefault();submitGeneralComment();}}"
+      oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,200)+'px'"></textarea>
+    <button class="chat-send" onclick="submitGeneralComment()" id="chatSendBtn" title="Send comment">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M.989 2.524a.75.75 0 01.87-.206l13 6a.75.75 0 010 1.364l-13 6A.75.75 0 01.855 14.3l1.573-5.26a.25.25 0 01.2-.18L7.3 8.11a.25.25 0 000-.486L2.628 6.88a.25.25 0 01-.2-.18L.855 1.443a.75.75 0 01.134-.92z"/></svg>
+    </button>
+</div>
+<div class="jump">
+<a href="#" title="Top" onclick="window.scrollTo(0,0);return false">&uarr;</a>
+<a href="#" title="Next file" onclick="jumpNext();return false">&darr;</a>
+</div>
+<script type="application/json" id="pr-meta">{pr_meta_json}</script>
+<script>"""
+        + _rjs
+        + """</script>
+</body>
+</html>"""
+    )
+    return page_html
+
+
+# ============================================================
+# indexer
+# ============================================================
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Any, Optional, Sequence
+
+
+@dataclass
+class PaginatedResult:
+    total: int = 0
+    total_pages: int = 0
+    page: int = 1
+    per_page: int = 50
+
+
+@dataclass
+class EntriesResult(PaginatedResult):
+    entries: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class SearchResult(PaginatedResult):
+    query: str = ""
+    total_results: int = 0
+
+
+@dataclass
+class TranscriptSearchResult(SearchResult):
+    entries: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class TranscriptStats:
+    n_user: int = 0
+    n_tool: int = 0
+    n_edit: int = 0
+    lines_add: int = 0
+    lines_del: int = 0
+    lines_mod: int = 0
+    n_files: int = 0
+    model: str = ""
+    version: str = ""
+    git_branch: str = ""
+    first_ts: str = ""
+    last_ts: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    duration: str = ""
+
+
+def _sanitize_fts5_query(term: str) -> str:
+    if re.search(r"\b(AND|OR|NOT|NEAR)\b", term):
+        return term
+    if re.search(r'[.*:^(){}"\-]', term):
+        tokens = term.split()
+        quoted = []
+        for t in tokens:
+            t = t.strip('"')
+            if t:
+                quoted.append(f'"{t}"')
+        return " ".join(quoted)
+    return term
+
+
+def _setup_db(db_path: str) -> sqlite3.Connection:
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    db = sqlite3.connect(db_path)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA busy_timeout=5000")
+    return db
+
+
+def _check_incremental(
+    db: sqlite3.Connection,
+    jsonl_path: str,
+    table: str,
+    meta_table: str = "meta",
+) -> tuple[int, bool]:
+    file_size = os.path.getsize(jsonl_path)
+    if file_size == 0:
+        return 0, False
+    row = db.execute(f"SELECT value FROM {meta_table} WHERE key='file_size'").fetchone()
+    old_size = int(row[0]) if row else 0
+    path_row = db.execute(f"SELECT value FROM {meta_table} WHERE key='jsonl_path'").fetchone()
+    old_path = path_row[0] if path_row else ""
+    abs_path = os.path.abspath(jsonl_path)
+    fts_table = f"{table}_fts"
+    if old_path and old_path != abs_path:
+        db.execute(f"DELETE FROM {table}")
+        db.execute(f"DELETE FROM {fts_table}")
+        db.execute(f"DELETE FROM {meta_table}")
+        return 0, True
+    if old_size == file_size:
+        return old_size, False  # No changes
+    if old_size > file_size:
+        db.execute(f"DELETE FROM {table}")
+        db.execute(f"DELETE FROM {fts_table}")
+        db.execute(f"DELETE FROM {meta_table}")
+        return 0, True
+    return old_size, True
+
+
+def _update_meta(
+    db: sqlite3.Connection,
+    jsonl_path: str,
+    next_idx: int,
+    meta_table: str = "meta",
+) -> None:
+    file_size = os.path.getsize(jsonl_path)
+    abs_path = os.path.abspath(jsonl_path)
+    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('file_size', ?)", (str(file_size),))
+    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('entry_count', ?)", (str(next_idx),))
+    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('jsonl_path', ?)", (abs_path,))
+    db.commit()
+
+
+def _paginate(total: int, page: Optional[int], per_page: int) -> tuple[int, int, int]:
+    total_pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 0
+    if page is None:
+        page = total_pages  # Default to last page
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * per_page
+    return page, total_pages, offset
+
+
+_SKIP_TYPES = frozenset(("progress", "queue-operation", "file-history-snapshot", "system"))
+
+
+def _transcript_create_tables(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS entries (
+        idx INTEGER PRIMARY KEY,
+        byte_offset INTEGER,
+        type TEXT,
+        role TEXT,
+        timestamp TEXT,
+        model TEXT,
+        version TEXT,
+        git_branch TEXT,
+        raw_json TEXT,
+        plain_text TEXT,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0
+    )"""
+    )
+    has_fts = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries_fts'").fetchone()
+    if not has_fts:
+        db.execute(
+            """CREATE VIRTUAL TABLE entries_fts USING fts5(
+            plain_text, content=entries, content_rowid=idx,
+            tokenize='unicode61'
+        )"""
+        )
+    db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+
+def _extract_plain_text(entry: dict[str, Any]) -> str:
+    msg = entry.get("message", {})
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    if isinstance(content, list):
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if c.get("text"):
+                parts.append(c["text"])
+            if c.get("thinking"):
+                parts.append(c["thinking"])
+            if isinstance(c.get("content"), str):
+                parts.append(c["content"])
+            if c.get("type") == "tool_use":
+                parts.append(json.dumps(c.get("input", {}), ensure_ascii=False))
+    return " ".join(parts)
+
+
+def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
+    old_size, needs_work = _check_incremental(db, jsonl_path, "entries")
+    if not needs_work and old_size == os.path.getsize(jsonl_path):
+        return 0
+    row = db.execute("SELECT MAX(idx) FROM entries").fetchone()
+    next_idx: int = (row[0] + 1) if row[0] is not None else 0
+    new_count = 0
+    with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+        if old_size > 0:
+            f.seek(old_size)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry: dict[str, Any] = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            etype: str = entry.get("type", "")
+            if etype in _SKIP_TYPES:
+                continue
+            msg = entry.get("message", {})
+            plain_text = _extract_plain_text(entry)
+            usage = msg.get("usage", {})
+            input_tokens = (
+                usage.get("input_tokens", 0)
+                + usage.get("cache_read_input_tokens", 0)
+                + usage.get("cache_creation_input_tokens", 0)
+            )
+            output_tokens: int = usage.get("output_tokens", 0)
+            db.execute(
+                "INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    next_idx,
+                    old_size,
+                    etype,
+                    msg.get("role", ""),
+                    entry.get("timestamp", ""),
+                    msg.get("model", ""),
+                    entry.get("version", ""),
+                    entry.get("gitBranch", ""),
+                    json.dumps(entry, ensure_ascii=False),
+                    plain_text,
+                    input_tokens,
+                    output_tokens,
+                ),
+            )
+            db.execute(
+                "INSERT INTO entries_fts(rowid, plain_text) VALUES (?, ?)",
+                (next_idx, plain_text),
+            )
+            next_idx += 1
+            new_count += 1
+    _update_meta(db, jsonl_path, next_idx)
+    return new_count
+
+
+def _transcript_query_entries(
+    db: sqlite3.Connection,
+    page: Optional[int] = None,
+    per_page: int = 50,
+    filter_mode: str = "",
+) -> dict[str, Any]:
+    where = ""
+    if filter_mode == "prompts":
+        where = (
+            "WHERE type='user' AND role='user' "
+            "AND plain_text != '' AND plain_text NOT LIKE '<%' "
+            "AND json_type(raw_json, '$.message.content') = 'text'"
+        )
+    total: int = db.execute(f"SELECT COUNT(*) FROM entries {where}").fetchone()[0]
+    if total == 0:
+        return asdict(EntriesResult(per_page=per_page))
+    page_num, total_pages, offset = _paginate(total, page, per_page)
+    rows = db.execute(
+        f"SELECT idx, type, role, timestamp, raw_json FROM entries {where} " "ORDER BY idx LIMIT ? OFFSET ?",
+        (per_page, offset),
+    ).fetchall()
+    entries = [{"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4]} for r in rows]
+    return asdict(
+        EntriesResult(
+            entries=entries,
+            total=total,
+            total_pages=total_pages,
+            page=page_num,
+            per_page=per_page,
+        )
+    )
+
+
+def _transcript_query_search(
+    db: sqlite3.Connection,
+    search_term: str,
+    page: int = 1,
+    per_page: int = 50,
+    sort: str = "relevance",
+) -> dict[str, Any]:
+    if not search_term:
+        return asdict(TranscriptSearchResult(per_page=per_page))
+    safe_term = _sanitize_fts5_query(search_term)
+    try:
+        total_results: int = db.execute(
+            "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
+            (safe_term,),
+        ).fetchone()[0]
+    except Exception:
+        safe_term = f'"{search_term}"'
+        total_results = db.execute(
+            "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
+            (safe_term,),
+        ).fetchone()[0]
+    if total_results == 0:
+        return asdict(TranscriptSearchResult(query=search_term, per_page=per_page))
+    page_num, total_pages, offset = _paginate(total_results, page, per_page)
+    order = "ORDER BY e.idx" if sort == "time" else "ORDER BY f.rank"
+    rows = db.execute(
+        f"""SELECT e.idx, e.type, e.role, e.timestamp, e.raw_json, f.rank
+           FROM entries_fts f JOIN entries e ON f.rowid = e.idx
+           WHERE entries_fts MATCH ? {order} LIMIT ? OFFSET ?""",
+        (safe_term, per_page, offset),
+    ).fetchall()
+    entries = [
+        {"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4], "rank": r[5]} for r in rows
+    ]
+    return asdict(
+        TranscriptSearchResult(
+            entries=entries,
+            total_results=total_results,
+            total_pages=total_pages,
+            page=page_num,
+            per_page=per_page,
+            query=search_term,
+        )
+    )
+
+
+def _transcript_query_stats(db: sqlite3.Connection) -> dict[str, Any]:
+    agg = db.execute(
+        """SELECT
+        SUM(input_tokens), SUM(output_tokens),
+        MIN(timestamp), MAX(timestamp),
+        (SELECT model FROM entries WHERE type='assistant' AND model != '' LIMIT 1),
+        (SELECT version FROM entries WHERE version != '' LIMIT 1),
+        (SELECT git_branch FROM entries WHERE git_branch != '' LIMIT 1)
+    FROM entries"""
+    ).fetchone()
+    if not agg or agg[0] is None:
+        return asdict(TranscriptStats())
+    stats = TranscriptStats(
+        input_tokens=agg[0] or 0,
+        output_tokens=agg[1] or 0,
+        first_ts=agg[2] or "",
+        last_ts=agg[3] or "",
+        model=agg[4] or "",
+        version=agg[5] or "",
+        git_branch=agg[6] or "",
+    )
+    stats.n_user = db.execute(
+        "SELECT COUNT(*) FROM entries WHERE type='user' AND role='user' "
+        "AND plain_text != '' AND json_type(raw_json, '$.message.content') = 'text'"
+    ).fetchone()[0]
+    files_modified: set[str] = set()
+    for (raw,) in db.execute("SELECT raw_json FROM entries WHERE type='assistant'").fetchall():
+        try:
+            entry = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        content = entry.get("message", {}).get("content", [])
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                stats.n_tool += 1
+                name = item.get("name", "")
+                ti = item.get("input", {})
+                fp = ti.get("file_path", "") or ti.get("path", "")
+                if fp:
+                    files_modified.add(fp)
+                if name == "Edit":
+                    stats.n_edit += 1
+                    n_old = len(ti.get("old_string", "").splitlines(True))
+                    n_new = len(ti.get("new_string", "").splitlines(True))
+                    overlap = min(n_old, n_new)
+                    stats.lines_mod += overlap
+                    stats.lines_add += n_new - overlap
+                    stats.lines_del += n_old - overlap
+    stats.n_files = len(files_modified)
+    if stats.first_ts and stats.last_ts:
+        try:
+            fmt = "%Y-%m-%dT%H:%M:%S"
+            t0 = datetime.strptime(stats.first_ts[:19], fmt)
+            t1 = datetime.strptime(stats.last_ts[:19], fmt)
+            delta = int((t1 - t0).total_seconds())
+            if delta > 0:
+                days, rem = divmod(delta, 86400)
+                hours, rem = divmod(rem, 3600)
+                mins = rem // 60
+                if days > 0:
+                    stats.duration = f"{days}d {hours}h"
+                elif hours > 0:
+                    stats.duration = f"{hours}h {mins}m"
+                else:
+                    stats.duration = f"{mins}m"
+        except (ValueError, TypeError):
+            pass
+    return asdict(stats)
+
+
+def _run_transcript(args: argparse.Namespace) -> None:
+    if not os.path.exists(args.jsonl):
+        empty: dict[str, Any]
+        if args.query == "entries":
+            empty = asdict(EntriesResult(per_page=args.per_page))
+        elif args.query == "search":
+            empty = asdict(TranscriptSearchResult(query=args.search, per_page=args.per_page))
+        elif args.query == "stats":
+            empty = asdict(TranscriptStats())
+        elif args.query in ("entries+stats", "search+stats"):
+            empty = asdict(TranscriptStats())
+        else:
+            empty = {}
+        json.dump(empty, sys.stdout)
+        return
+    db = _setup_db(args.db)
+    _transcript_create_tables(db)
+    if os.path.getsize(args.jsonl) > 0:
+        _transcript_index(db, args.jsonl)
+    result: dict[str, Any]
+    if args.query == "entries":
+        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
+    elif args.query == "search":
+        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
+    elif args.query == "stats":
+        result = _transcript_query_stats(db)
+    elif args.query == "entries+stats":
+        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
+        result["stats"] = _transcript_query_stats(db)
+    elif args.query == "search+stats":
+        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
+        result["stats"] = _transcript_query_stats(db)
+    else:
+        result = {}
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    db.close()
+
+
+def _indexer_main() -> None:
+    parser = argparse.ArgumentParser(
+        description="JSONL transcript indexer with SQLite FTS5",
+    )
+    sub = parser.add_subparsers(dest="mode", required=True)
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--jsonl", required=True, help="Path to JSONL file")
+    shared.add_argument("--db", required=True, help="Path to SQLite database")
+    shared.add_argument("--page", type=int, default=None, help="Page number (default: last)")
+    shared.add_argument("--per-page", type=int, default=50, help="Items per page")
+    shared.add_argument("--search", type=str, default="", help="Search term")
+    t = sub.add_parser("transcript", parents=[shared], help="Index Claude transcripts")
+    t.add_argument("--query", required=True, choices=["entries", "search", "stats", "entries+stats", "search+stats"])
+    t.add_argument("--filter", type=str, default="", dest="filter_mode", help="Filter mode (e.g., 'prompts')")
+    t.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"])
+    args = parser.parse_args()
+    if args.mode == "transcript":
+        _run_transcript(args)
+
+
+# ============================================================
+# tunnel
+# ============================================================
+
+import enum
+import http.client
+import json
+import os
+import socket
+import subprocess
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Callable, Protocol, cast
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_INFO,
+    _LOG_WARN,
+    SubprocessRunner,
+    Clock,
+    TunnelConfig,
+    _RealSubprocessRunner,
+    _RealClock,
+    _urlopen,
 )
 
+
+class UrlOpenFn(Protocol):
+    def __call__(self, req: urllib.request.Request, *, timeout: float) -> http.client.HTTPResponse: ...
+class TunnelState(enum.Enum):
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    RESTARTING = "restarting"
+    POLL_FALLBACK = "poll_fallback"
+    FAILED = "failed"
+
+
+class TunnelManager:
+    def __init__(
+        self,
+        config: TunnelConfig,
+        bot_token: str,
+        port: int,
+        node_dir: Path,
+        webhook_secret: str = "",
+        bind_host: str = "",
+        subprocess_runner: SubprocessRunner | None = None,
+        clock: Clock | None = None,
+        urlopen: "UrlOpenFn | None" = None,
+        on_notify: Callable[[str], None] | None = None,
+        on_update: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        self._config = config
+        self._token = bot_token
+        self._port = port
+        self._node_dir = node_dir
+        self._bind_host = bind_host
+        self._webhook_secret = webhook_secret
+        self._runner = subprocess_runner or _RealSubprocessRunner()
+        self._clock = clock or _RealClock()
+        self._urlopen: UrlOpenFn = urlopen or cast(UrlOpenFn, _urlopen)
+        self._on_notify = on_notify or (lambda _msg: None)
+        self._on_update = on_update
+        self._lock = threading.Lock()
+        self._state = TunnelState.STOPPED
+        self._tunnel_url: str = ""
+        self._tunnel_proc: subprocess.Popen[str] | None = None
+        self._polling_active: bool = False
+        self._stop_event = threading.Event()
+        self._watchdog_thread: threading.Thread | None = None
+        self._poll_stop = threading.Event()
+        self._poll_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._config.mode == "none":
+            _log(_LOG_INFO, "tunnel", "Tunnel disabled (mode=none)")
+            return
+        self._kill_stale_tunnel()
+        self._stop_event.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            name="tunnel-watchdog",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._poll_stop.set()
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=5)
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            self._watchdog_thread.join(timeout=10)
+        self._kill_cloudflared()
+        self._state = TunnelState.STOPPED
+        _log(_LOG_INFO, "tunnel", "Tunnel manager stopped")
+
+    @property
+    def state(self) -> TunnelState:
+        return self._state
+
+    @property
+    def tunnel_url(self) -> str:
+        return self._tunnel_url
+
+    @property
+    def polling_active(self) -> bool:
+        return self._polling_active
+
+    def status(self) -> dict[str, str | bool]:
+        return {
+            "mode": self._config.mode,
+            "state": self._state.value,
+            "tunnel_url": self._tunnel_url,
+            "polling_active": self._polling_active,
+        }
+
+    def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        url = f"https://api.telegram.org/bot{self._token}/{method}"
+        data = json.dumps(payload or {}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            with self._urlopen(req, timeout=10) as resp:
+                result: dict[str, object] = json.loads(resp.read())
+                return result
+        except Exception:
+            return {}
+
+    def _tg_set_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, object]:
+        payload: dict[str, object] = {"url": webhook_url}
+        if secret_token:
+            payload["secret_token"] = secret_token
+        return self._telegram_api("setWebhook", payload)
+
+    def _tg_delete_webhook(self) -> dict[str, object]:
+        return self._telegram_api("deleteWebhook")
+
+    def _tg_get_webhook_info(self) -> dict[str, object]:
+        return self._telegram_api("getWebhookInfo")
+
+    def _tg_get_me(self) -> dict[str, object]:
+        return self._telegram_api("getMe")
+
+    def _watchdog_loop(self) -> None:
+        self._state = TunnelState.STARTING
+        if not self._wait_for_port():
+            _log(_LOG_ERROR, "tunnel", f"Bridge did not bind to port {self._port}")
+            self._state = TunnelState.FAILED
+            return
+        if self._config.mode == "poll":
+            _log(_LOG_INFO, "tunnel", "Poll mode — using getUpdates long-polling (no tunnel)")
+            self._start_poll_fallback()
+        elif self._config.mode == "provided":
+            self._tunnel_url = self._config.provided_url
+            _log(_LOG_INFO, "tunnel", f"Using provided tunnel URL: {self._tunnel_url}")
+        elif self._config.mode == "auto":
+            url = self._start_cloudflared()
+            if url:
+                self._tunnel_url = url
+                _log(_LOG_INFO, "tunnel", f"Tunnel ready: {self._tunnel_url}")
+                self._save_tunnel_url(url)
+            else:
+                _log(_LOG_WARN, "tunnel", "Tunnel failed to start — using poll fallback")
+                self._start_poll_fallback()
+        if self._tunnel_url and not self._polling_active:
+            if not self._set_webhook_with_retry(self._tunnel_url):
+                _log(_LOG_WARN, "tunnel", "Webhook DNS not ready — using poll fallback")
+                self._start_poll_fallback()
+            else:
+                self._state = TunnelState.RUNNING
+        self._save_bot_info()
+        check_counter = 0
+        while not self._stop_event.is_set():
+            self._stop_event.wait(self._config.watchdog_interval)
+            if self._stop_event.is_set():
+                break
+            if self._tunnel_proc is not None:
+                problem = self._check_tunnel_health()
+                if problem == "process died":
+                    _log(_LOG_WARN, "tunnel", "Tunnel process died, restarting...")
+                    self._on_notify("⚠️ Tunnel process died. Reconnecting...")
+                    self._state = TunnelState.RESTARTING
+                    new_url = self._restart_with_retry()
+                    if new_url:
+                        self._tunnel_url = new_url
+                        self._save_tunnel_url(new_url)
+                        _log(_LOG_INFO, "tunnel", f"Tunnel restarted: {new_url}")
+                        self._stop_poll_fallback()
+                        if self._set_webhook_with_retry(new_url):
+                            self._state = TunnelState.RUNNING
+                            self._on_notify("✅ Tunnel reconnected")
+                        else:
+                            _log(_LOG_WARN, "tunnel", "Webhook DNS not ready after restart")
+                            self._start_poll_fallback()
+                            self._on_notify("📡 Using poll fallback while DNS propagates...")
+                    else:
+                        _log(_LOG_WARN, "tunnel", "Tunnel restart failed after retries")
+                        self._start_poll_fallback()
+                        continue
+                elif problem == "unreachable":
+                    if not self._polling_active:
+                        _log(_LOG_WARN, "tunnel", "Tunnel URL unreachable (DNS?), falling back to polling")
+                        self._start_poll_fallback()
+            if self._polling_active and self._poll_thread and not self._poll_thread.is_alive():
+                _log(_LOG_WARN, "tunnel", "Poll fallback thread died, restarting...")
+                self._poll_stop.clear()
+                self._start_poll_fallback()
+            check_counter = (check_counter + 1) % self._config.webhook_check_cycles
+            if check_counter == 0:
+                if self._tunnel_url:
+                    self._periodic_webhook_check()
+                elif self._polling_active and self._tunnel_proc is None and self._config.mode == "auto":
+                    _log(_LOG_INFO, "tunnel", "Retrying cloudflared start...")
+                    url = self._start_cloudflared()
+                    if url:
+                        self._tunnel_url = url
+                        self._save_tunnel_url(url)
+                        _log(_LOG_INFO, "tunnel", f"Tunnel established: {url}")
+                        self._stop_poll_fallback()
+                        if self._set_webhook_with_retry(url):
+                            self._state = TunnelState.RUNNING
+                            self._on_notify("✅ Tunnel established (webhook active)")
+                        else:
+                            _log(_LOG_WARN, "tunnel", "Webhook DNS not ready after tunnel start")
+                            self._start_poll_fallback()
+
+    def _start_cloudflared(self) -> str:
+        log_file = self._node_dir / "tunnel.log"
+        log_file.write_text("")
+        try:
+            proc = self._runner.popen(
+                [self._config.cloudflared_binary, "tunnel", "--url", f"http://localhost:{self._port}"],
+                stdout=open(log_file, "w"),
+                stderr=subprocess.STDOUT,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            _log(_LOG_ERROR, "tunnel", f"Failed to start cloudflared: {exc}")
+            return ""
+        self._tunnel_proc = proc
+        self._save_pid(proc.pid)
+        url = self._wait_for_url(log_file, self._config.startup_timeout)
+        if not url:
+            self._kill_cloudflared()
+        return url
+
+    def _wait_for_url(self, log_file: Path, timeout: int) -> str:
+        elapsed = 0
+        while elapsed < timeout and not self._stop_event.is_set():
+            self._clock.sleep(1)
+            elapsed += 1
+            try:
+                text = log_file.read_text()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                for word in line.split():
+                    if (
+                        word.startswith("https://")
+                        and ".trycloudflare.com" in word
+                        and "api.trycloudflare.com" not in word
+                    ):
+                        return word.rstrip("/")
+        return ""
+
+    def _kill_cloudflared(self) -> None:
+        proc = self._tunnel_proc
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self._tunnel_proc = None
+
+    def _is_tunnel_alive(self) -> bool:
+        proc = self._tunnel_proc
+        return proc is not None and proc.poll() is None
+
+    def _is_tunnel_reachable(self) -> bool:
+        if not self._tunnel_url:
+            return False
+        try:
+            req = urllib.request.Request(self._tunnel_url, method="HEAD")
+            self._urlopen(req, timeout=self._config.reachability_timeout)
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return False
+
+    def _check_tunnel_health(self) -> str:
+        if not self._is_tunnel_alive():
+            return "process died"
+        if not self._is_tunnel_reachable():
+            return "unreachable"
+        return ""
+
+    def _restart_with_retry(self) -> str:
+        backoff = self._config.initial_backoff
+        for attempt in range(1, self._config.max_restart_attempts + 1):
+            if attempt > 1:
+                _log(
+                    _LOG_INFO,
+                    "tunnel",
+                    f"Restart attempt {attempt}/{self._config.max_restart_attempts} (backoff {backoff}s)",
+                )
+                self._clock.sleep(backoff)
+                backoff *= 2
+            self._kill_cloudflared()
+            url = self._start_cloudflared()
+            if url:
+                return url
+        return ""
+
+    def _set_webhook_with_retry(self, url: str) -> bool:
+        for delay in self._config.webhook_retry_delays:
+            if delay > 0:
+                _log(_LOG_INFO, "tunnel", f"Webhook not ready, retrying in {delay}s...")
+                self._clock.sleep(delay)
+            if self._stop_event.is_set():
+                return False
+            resp = self._tg_set_webhook(url, secret_token=self._webhook_secret)
+            if resp.get("ok"):
+                _log(_LOG_INFO, "tunnel", "Webhook configured")
+                return True
+        self._tg_delete_webhook()
+        return False
+
+    def _periodic_webhook_check(self) -> None:
+        if self._polling_active:
+            self._stop_poll_fallback()
+            resp = self._tg_set_webhook(self._tunnel_url, secret_token=self._webhook_secret)
+            if resp.get("ok"):
+                self._state = TunnelState.RUNNING
+                _log(_LOG_INFO, "tunnel", "Webhook restored, poll fallback stopped")
+                self._on_notify("✅ Webhook restored (DNS resolved)")
+            else:
+                self._tg_delete_webhook()
+                self._start_poll_fallback()
+        else:
+            info = self._tg_get_webhook_info()
+            if info:
+                result = info.get("result", {})
+                current_url = result.get("url", "") if isinstance(result, dict) else ""
+                if not current_url or self._tunnel_url not in current_url:
+                    resp = self._tg_set_webhook(self._tunnel_url, secret_token=self._webhook_secret)
+                    if resp.get("ok"):
+                        _log(_LOG_INFO, "tunnel", "Webhook re-registered (was stale)")
+                        self._on_notify("✅ Webhook re-registered")
+
+    def _start_poll_fallback(self) -> None:
+        if self._polling_active:
+            return
+        self._tg_delete_webhook()
+        self._clock.sleep(1)
+        self._poll_stop.clear()
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop,
+            name="tunnel-poll",
+            daemon=True,
+        )
+        self._poll_thread.start()
+        self._polling_active = True
+        self._state = TunnelState.POLL_FALLBACK
+        _log(_LOG_INFO, "tunnel", "Poll fallback started")
+
+    def _stop_poll_fallback(self) -> None:
+        if not self._polling_active:
+            return
+        self._poll_stop.set()
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=5)
+        self._polling_active = False
+        _log(_LOG_INFO, "tunnel", "Poll fallback stopped")
+
+    def _poll_loop(self) -> None:
+        offset = 0
+        _bridge_host = self._bind_host or "127.0.0.1"
+        _log(_LOG_INFO, "tunnel:poll", f"Poll loop started (bridge={_bridge_host}:{self._port})")
+        while not self._poll_stop.is_set():
+            try:
+                url = f"https://api.telegram.org/bot{self._token}/getUpdates?offset={offset}&timeout={self._config.poll_timeout}"
+                req = urllib.request.Request(url)
+                with self._urlopen(req, timeout=self._config.poll_timeout + 5) as resp:
+                    data = json.loads(resp.read())
+                if not data.get("ok"):
+                    self._clock.sleep(1)
+                    continue
+                for update in data.get("result", []):
+                    uid = update.get("update_id", 0)
+                    if self._on_update:
+                        try:
+                            self._on_update(update)
+                        except Exception as exc:
+                            _log(_LOG_ERROR, "tunnel:poll", f"Forward failed update_id={uid}: {exc}")
+                    else:
+                        self._forward_to_localhost(update)
+                    offset = uid + 1
+            except Exception as exc:
+                if not self._poll_stop.is_set():
+                    _log(_LOG_WARN, "tunnel:poll", f"Poll error: {exc}")
+                    self._clock.sleep(self._config.poll_error_delay)
+
+    def _forward_to_localhost(self, update: dict[str, object]) -> None:
+        _bridge_host = self._bind_host or "127.0.0.1"
+        try:
+            req = urllib.request.Request(
+                f"http://{_bridge_host}:{self._port}/",
+                data=json.dumps(update).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            self._urlopen(req, timeout=5)
+        except Exception as exc:
+            _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")
+
+    def _wait_for_port(self) -> bool:
+        elapsed = 0
+        bind_host = self._bind_host or "127.0.0.1"
+        while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1)
+                    s.connect((bind_host, self._port))
+                    _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
+                    return True
+            except (ConnectionRefusedError, OSError):
+                pass
+            self._clock.sleep(1)
+            elapsed += 1
+        return False
+
+    def _save_tunnel_url(self, url: str) -> None:
+        try:
+            (self._node_dir / "tunnel_url").write_text(url)
+        except OSError:
+            pass
+
+    def _kill_stale_tunnel(self) -> None:
+        pid_file = self._node_dir / "tunnel.pid"
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            return
+        try:
+            os.kill(pid, 9)
+            _log(_LOG_WARN, "tunnel", f"Killed stale cloudflared (pid={pid})")
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+
+    def _save_pid(self, pid: int) -> None:
+        try:
+            (self._node_dir / "tunnel.pid").write_text(str(pid))
+        except OSError:
+            pass
+
+    def _save_bot_info(self) -> None:
+        try:
+            info = self._tg_get_me()
+            if info.get("ok"):
+                result = info.get("result", {})
+                if isinstance(result, dict):
+                    bot_id = result.get("id")
+                    username = result.get("username", "")
+                    if bot_id:
+                        (self._node_dir / "bot_id").write_text(str(bot_id))
+                    if username:
+                        (self._node_dir / "bot_username").write_text(username)
+        except Exception:
+            pass
+
+
+# ============================================================
+# connectors
+# ============================================================
+
+import abc
+import base64
+import binascii
+import json
+import os
+import re
+import subprocess
+import tempfile
+import threading
+from datetime import datetime, timezone, timedelta
+from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
+from _types import (
+    GmailHeader,
+    GmailBody,
+    GmailPayloadPart,
+    GmailMessage,
+    GmailMessageRef,
+    GmailHistoryEntry,
+    GmailHistoryResponse,
+    GmailProfile,
+    GmailAttachmentData,
+    GmailMessageListResponse,
+    GmailAttachmentInfo,
+    GithubUser,
+    GithubComment,
+    GithubState,
+    Attachment,
+    ConnectorMetadata,
+    IssueContext,
+    ConnectorStatus,
+    GmailStatus,
+    GithubStatus,
+)
+
+
+class MessageCallback(Protocol):
+    def __call__(
+        self,
+        targets: list[str],
+        html_text: str,
+        plain_text: str,
+        attachments: list[Attachment],
+        metadata: Optional[ConnectorMetadata] = None,
+    ) -> None: ...
+class AlertCallback(Protocol):
+    def __call__(self, text: str) -> None: ...
+class WorkerListCallback(Protocol):
+    def __call__(self) -> set[str]: ...
+
+
+_REPO_SEGMENT = r"[a-zA-Z0-9](?:[a-zA-Z0-9_-]|\.(?!\.))*[a-zA-Z0-9]"
+_REPO_PATTERN = re.compile(rf"^(?:{_REPO_SEGMENT}|[a-zA-Z0-9])/(?:{_REPO_SEGMENT}|[a-zA-Z0-9])$")
+_MAX_FILENAME_LEN = 200  # Limit attachment filename length
+_B64_URLSAFE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+_MAX_MIME_DEPTH = 10  # Max recursion depth for MIME part traversal
+_MAX_MIME_PARTS = 100  # Max total MIME parts to process
+CONSECUTIVE_FAIL_WARN = 3
+CONSECUTIVE_FAIL_REBOOTSTRAP = 5
+_MAX_POLL_INTERVAL = 3600
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
+_MAX_SEEN_IDS = 500
+_PRUNE_KEEP = 200
+M = TypeVar("M")
+
+
+# ============================================================
+# _connector_impl
+# ============================================================
+
+
+import abc
+import base64
+import binascii
+import json
+import os
+import re
+import subprocess
+import tempfile
+import threading
+from datetime import datetime, timezone, timedelta
+from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
+from _types import (
+    GmailHeader,
+    GmailBody,
+    GmailPayloadPart,
+    GmailMessage,
+    GmailMessageRef,
+    GmailHistoryEntry,
+    GmailHistoryResponse,
+    GmailProfile,
+    GmailAttachmentData,
+    GmailMessageListResponse,
+    GmailAttachmentInfo,
+    GithubUser,
+    GithubComment,
+    GithubState,
+    Attachment,
+    ConnectorMetadata,
+    IssueContext,
+    ConnectorStatus,
+    GmailStatus,
+    GithubStatus,
+)
+
+
+def _atomic_write(path: str, payload: str | bytes) -> None:
+    dirname = os.path.dirname(path) or "."
+    os.makedirs(dirname, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirname, prefix=".tmp_", suffix=".tmp")
+    renamed = False
+    try:
+        os.fchmod(fd, 0o600)
+        mode = "wb" if isinstance(payload, bytes) else "w"
+        with os.fdopen(fd, mode) as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        renamed = True
+        try:
+            dir_fd = os.open(dirname, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    except BaseException:
+        if not renamed:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+
+
+def _atomic_write_text(path: str, content: str) -> None:
+    _atomic_write(path, content)
+
+
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    _atomic_write(path, data)
+
+
+class BaseConnector(abc.ABC, Generic[M]):
+    connector_name: str = "base"
+
+    def __init__(
+        self,
+        sender_filter: str,
+        poll_interval: int,
+        on_message: MessageCallback,
+        get_registered_workers: WorkerListCallback,
+        on_alert: Optional[AlertCallback] = None,
+    ) -> None:
+        if not sender_filter or not sender_filter.strip():
+            raise ValueError(f"{self.connector_name}: sender_filter is required (security: cannot be empty)")
+        if isinstance(poll_interval, bool) or poll_interval < 1 or poll_interval > _MAX_POLL_INTERVAL:
+            raise ValueError(
+                f"{self.connector_name}: poll_interval must be 1–{_MAX_POLL_INTERVAL}, got {poll_interval}"
+            )
+        self.sender_filter: str = sender_filter.strip().lower()
+        self.poll_interval: int = poll_interval
+        self.on_message: MessageCallback = on_message
+        self.get_registered_workers: WorkerListCallback = get_registered_workers
+        self.on_alert: Optional[AlertCallback] = on_alert
+        self._stop_event: threading.Event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._consecutive_failures: int = 0
+        self._alert_sent: bool = False
+        self._lock: threading.RLock = threading.RLock()
+
+    @abc.abstractmethod
+    def preflight_check(self) -> tuple[bool, str]: ...
+    @abc.abstractmethod
+    def poll_once(self) -> None: ...
+    @abc.abstractmethod
+    def extract_sender(self, message: M) -> str: ...
+    def _on_preflight_ok(self) -> None:
+        pass
+
+    def start(self) -> threading.Thread:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError(f"{self.connector_name}: already running (call stop() first)")
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._poll_loop,
+                daemon=True,
+                name=f"{self.connector_name}-poller",
+            )
+            self._thread.start()
+            return self._thread
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            t = self._thread
+        if t is not None:
+            t.join(timeout=5)
+
+    def restart(self) -> tuple[bool, str]:
+        self.stop()
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False, f"{self.connector_name}: old thread did not exit in time"
+            self._stop_event.clear()
+            self._consecutive_failures = 0
+            self._alert_sent = False
+        ok, msg = self.preflight_check()
+        if not ok:
+            return False, msg
+        with self._lock:
+            self._thread = threading.Thread(
+                target=self._poll_loop,
+                kwargs={"skip_preflight": True},
+                daemon=True,
+                name=f"{self.connector_name}-poller",
+            )
+            self._thread.start()
+        return True, msg
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def status(self) -> ConnectorStatus:
+        with self._lock:
+            return ConnectorStatus(
+                name=self.connector_name,
+                running=self.running,
+                sender_filter=self.sender_filter,
+                poll_interval=self.poll_interval,
+                consecutive_failures=self._consecutive_failures,
+                alert_sent=self._alert_sent,
+            )
+
+    def is_allowed_sender(self, message: M) -> bool:
+        return self.extract_sender(message) == self.sender_filter
+
+    def parse_mentions(self, text: str) -> tuple[list[str], str]:
+        if not text:
+            return [], ""
+        registered = self.get_registered_workers()
+        found: list[str] = []
+        for match in re.finditer(r"@([a-zA-Z0-9_-]+)", text):
+            name = match.group(1).lower()
+            if name in registered and name not in found:
+                found.append(name)
+        if not found:
+            return [], text
+        found_set = set(found)
+        cleaned = re.sub(
+            r"@([a-zA-Z0-9_-]+)",
+            lambda m: "" if m.group(1).lower() in found_set else m.group(0),
+            text,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return found, cleaned
+
+    def _send_alert(self, text: str) -> None:
+        tag = f"[{self.connector_name}]"
+        print(f"{tag} ALERT: {text}")
+        alert_fn = self.on_alert  # Capture ref outside lock
+        if alert_fn is None:
+            return
+        with self._lock:
+            if self._alert_sent:
+                return
+            self._alert_sent = True
+        try:
+            alert_fn(f"{tag} {text}")
+        except Exception as e:
+            print(f"{tag} Failed to send alert: {e}")
+            with self._lock:
+                self._alert_sent = False  # Rollback — allow retry
+
+    def _clear_alert(self) -> None:
+        with self._lock:
+            was_alerted = self._alert_sent
+            self._alert_sent = False
+        if was_alerted:
+            tag = f"[{self.connector_name}]"
+            if self.on_alert:
+                try:
+                    self.on_alert(f"{tag} Recovered — polling resumed")
+                except Exception as e:
+                    print(f"{tag} Failed to send recovery alert: {e}")
+
+    def track_failure(self) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            should_alert = self._consecutive_failures >= CONSECUTIVE_FAIL_WARN and not self._alert_sent
+        if should_alert:
+            self._send_alert(f"Polling failing ({self._consecutive_failures} consecutive errors)")
+
+    def track_success(self) -> None:
+        with self._lock:
+            was_failing = self._consecutive_failures > 0
+            self._consecutive_failures = 0
+        if was_failing:
+            self._clear_alert()
+
+    def _poll_loop(self, skip_preflight: bool = False) -> None:
+        tag = f"[{self.connector_name}]"
+        if not skip_preflight:
+            ok, msg = self.preflight_check()
+            if not ok:
+                print(f"{tag} Preflight FAILED: {msg}")
+                print(f"{tag} Retrying in 60s...")
+                if self._stop_event.wait(60):
+                    return
+                ok, msg = self.preflight_check()
+                if not ok:
+                    self._send_alert(f"{self.connector_name} disabled — {msg}")
+                    return
+            print(f"{tag} Preflight OK: {msg}")
+        else:
+            print(f"{tag} Preflight OK (restart)")
+        self._on_preflight_ok()
+        while not self._stop_event.is_set():
+            try:
+                self.poll_once()
+            except Exception as e:
+                print(f"{tag} Poll error: {e}")
+                self.track_failure()
+            self._stop_event.wait(self.poll_interval)
+
+
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _sanitize_filename(name: str) -> str:
+    name = os.path.basename(name)  # strip directory components
+    name = name.replace("..", "_").replace("/", "_").replace("\\", "_")
+    name = re.sub(r"[^\w.\-]", "_", name)  # keep only safe chars; name = name or "attachment"
+    if len(name) > _MAX_FILENAME_LEN:
+        root, ext = os.path.splitext(name)
+        if len(ext) >= _MAX_FILENAME_LEN:
+            ext = ext[:10]  # Truncate absurdly long extensions
+        name = root[: _MAX_FILENAME_LEN - len(ext)] + ext
+    return name
+
+
+def _truncate(text: str, limit: int = 1500) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nl = cut.rfind("\n")
+    if nl > limit // 2:
+        cut = cut[:nl]
+    return cut + "\n… (truncated)"
+
+
+def _get_header(headers: list[GmailHeader], name: str) -> str:
+    target = name.lower()
+    for h in headers:
+        if not isinstance(h, dict):
+            continue
+        h_name = h.get("name")
+        if not isinstance(h_name, str):
+            continue
+        if h_name.lower() == target:
+            h_value = h.get("value")
+            return str(h_value) if isinstance(h_value, str) else ""
+    return ""
+
+
+def _safe_json_loads_list(raw: str) -> list[GithubComment]:
+    raw = raw.strip()
+    if not raw:
+        return []
+    raw_items: list[object] = []
+    try:
+        result: object = json.loads(raw)
+        if isinstance(result, list):
+            raw_items = result
+        else:
+            return []  # unexpected type
+    except json.JSONDecodeError:
+        for chunk in re.split(r"\]\s*\[", raw):
+            chunk = chunk.strip()
+            if not chunk.startswith("["):
+                chunk = "[" + chunk
+            if not chunk.endswith("]"):
+                chunk = chunk + "]"
+            try:
+                parsed: object = json.loads(chunk)
+                if isinstance(parsed, list):
+                    raw_items.extend(parsed)
+            except json.JSONDecodeError:
+                continue
+    comments: list[GithubComment] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            comments.append(_validate_github_comment(cast(dict[str, object], item)))
+    return comments
+
+
+def _str_val(raw: dict[str, object], key: str) -> str:
+    val = raw.get(key)
+    return str(val) if isinstance(val, str) else ""
+
+
+def _int_val(raw: dict[str, object], key: str) -> int:
+    val = raw.get(key)
+    return int(val) if isinstance(val, int) and not isinstance(val, bool) else 0
+
+
+def _str_list_val(raw: dict[str, object], key: str) -> list[str]:
+    val = raw.get(key)
+    if not isinstance(val, list):
+        return []
+    return [str(item) for item in val if isinstance(item, str)]
+
+
+def _pick_strs(src: dict[str, object], dst: object, *keys: str) -> None:
+    for k in keys:
+        v = _str_val(src, k)
+        if v:
+            cast(dict[str, object], dst)[k] = v
+
+
+def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
+    body = GmailBody()
+    _pick_strs(raw, body, "data", "attachmentId")
+    size = _int_val(raw, "size")
+    if size:
+        body["size"] = size
+    return body
+
+
+def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
+    header = GmailHeader()
+    _pick_strs(raw, header, "name", "value")
+    return header
+
+
+def _validate_payload_part(
+    raw: dict[str, object],
+    depth: int = 0,
+    counter: Optional[list[int]] = None,
+) -> GmailPayloadPart:
+    if counter is None:
+        counter = [0]  # Root call: start fresh counter
+    counter[0] += 1
+    result = GmailPayloadPart()
+    if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
+        return result  # Truncate overly deep/wide MIME trees at validation boundary
+    mime = _str_val(raw, "mimeType")
+    if mime:
+        result["mimeType"] = mime
+    filename = _str_val(raw, "filename")
+    if filename:
+        result["filename"] = filename
+    body_raw = raw.get("body")
+    if isinstance(body_raw, dict):
+        result["body"] = _validate_gmail_body(cast(dict[str, object], body_raw))
+    headers_raw = raw.get("headers")
+    if isinstance(headers_raw, list):
+        headers: list[GmailHeader] = []
+        for h in headers_raw:
+            if isinstance(h, dict):
+                headers.append(_validate_gmail_header(cast(dict[str, object], h)))
+        result["headers"] = headers
+    parts_raw = raw.get("parts")
+    if isinstance(parts_raw, list):
+        parts: list[GmailPayloadPart] = []
+        for p in parts_raw:
+            if isinstance(p, dict):
+                parts.append(_validate_payload_part(cast(dict[str, object], p), depth + 1, counter))
+        result["parts"] = parts
+    return result
+
+
+def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
+    result = GmailMessage()
+    _pick_strs(raw, result, "id", "threadId", "historyId")
+    label_ids = _str_list_val(raw, "labelIds")
+    if label_ids:
+        result["labelIds"] = label_ids
+    payload_raw = raw.get("payload")
+    if isinstance(payload_raw, dict):
+        result["payload"] = _validate_payload_part(cast(dict[str, object], payload_raw))
+    return result
+
+
+def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResponse:
+    result = GmailHistoryResponse()
+    _pick_strs(raw, result, "historyId")
+    history_raw = raw.get("history")
+    if isinstance(history_raw, list):
+        entries: list[GmailHistoryEntry] = []
+        for entry_raw in history_raw:
+            if not isinstance(entry_raw, dict):
+                continue
+            entry = GmailHistoryEntry()
+            added_raw = cast(dict[str, object], entry_raw).get("messagesAdded")
+            if isinstance(added_raw, list):
+                entry["messagesAdded"] = [
+                    GmailMessageRef(
+                        message=_validate_gmail_message(
+                            cast(dict[str, object], cast(dict[str, object], a).get("message"))
+                        )
+                    )
+                    for a in added_raw
+                    if isinstance(a, dict) and isinstance(cast(dict[str, object], a).get("message"), dict)
+                ]
+            entries.append(entry)
+        result["history"] = entries
+    return result
+
+
+def _validate_gmail_attachment_data(raw: dict[str, object]) -> GmailAttachmentData:
+    result = GmailAttachmentData()
+    _pick_strs(raw, result, "data")
+    return result
+
+
+def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessageListResponse:
+    result = GmailMessageListResponse()
+    msgs_raw = raw.get("messages")
+    if isinstance(msgs_raw, list):
+        result["messages"] = [
+            _validate_gmail_message(cast(dict[str, object], m)) for m in msgs_raw if isinstance(m, dict)
+        ]
+    return result
+
+
+def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
+    return GmailProfile(
+        emailAddress=_str_val(raw, "emailAddress"),
+        historyId=_str_val(raw, "historyId"),
+    )
+
+
+def _validate_github_state(raw: dict[str, object]) -> GithubState:
+    lpt_raw = raw.get("last_poll_time")
+    lpt: Optional[str] = str(lpt_raw) if isinstance(lpt_raw, str) and lpt_raw else None
+    seen_raw = raw.get("seen_ids")
+    seen: list[int] = []
+    if isinstance(seen_raw, list):
+        seen = [int(sid) for sid in seen_raw if isinstance(sid, int) and not isinstance(sid, bool)]
+    return GithubState(last_poll_time=lpt, seen_ids=seen)
+
+
+def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
+    result = GithubComment()
+    cid = _int_val(raw, "id")
+    if cid:
+        result["id"] = cid
+    _pick_strs(raw, result, "body", "html_url", "issue_url", "pull_request_url", "issue_num", "kind")
+    user_raw = raw.get("user")
+    if isinstance(user_raw, dict):
+        user = GithubUser()
+        login = _str_val(cast(dict[str, object], user_raw), "login")
+        if login:
+            user["login"] = login
+        result["user"] = user
+    return result
+
+
+class GmailConnector(BaseConnector[GmailMessage]):
+    connector_name: str = "gmail"
+
+    def __init__(
+        self,
+        gws_bin: str,
+        from_filter: str,
+        poll_interval: int,
+        on_message: MessageCallback,
+        get_registered_workers: WorkerListCallback,
+        on_alert: Optional[AlertCallback] = None,
+        history_file: str = "",
+    ) -> None:
+        super().__init__(
+            sender_filter=from_filter,
+            poll_interval=poll_interval,
+            on_message=on_message,
+            get_registered_workers=get_registered_workers,
+            on_alert=on_alert,
+        )
+        self.gws_bin: str = gws_bin
+        self._history_id: Optional[str] = None
+        self._history_file_path: str = history_file or os.path.join(
+            os.path.expanduser("~"),
+            ".cache",
+            "beast",
+            "email",
+            "gmail_history_id",
+        )
+
+    def preflight_check(self) -> tuple[bool, str]:
+        if not os.path.isfile(self.gws_bin):
+            return False, f"gws binary not found at {self.gws_bin}"
+        if not os.access(self.gws_bin, os.X_OK):
+            return False, f"gws binary not executable: {self.gws_bin}"
+        profile = self._get_profile()
+        if profile is None:
+            return False, "gws auth failed — token may be expired (run: gws gmail users getProfile)"
+        email = profile.get("emailAddress")
+        email_str: str = str(email) if isinstance(email, str) else "?"
+        return True, f"OK (email={email_str})"
+
+    def status(self) -> GmailStatus:
+        with self._lock:
+            return GmailStatus(
+                name=self.connector_name,
+                running=self.running,
+                sender_filter=self.sender_filter,
+                poll_interval=self.poll_interval,
+                consecutive_failures=self._consecutive_failures,
+                alert_sent=self._alert_sent,
+                history_id=self._history_id,
+            )
+
+    def _run_gws(self, *args: str, json_body: Optional[str] = None) -> Optional[dict[str, object]]:
+        cmd: list[str] = [self.gws_bin, "gmail", "users"] + list(args)
+        if json_body:
+            cmd.extend(["--json", json_body])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                stderr = result.stderr[:200]
+                print(f"[gmail] gws error: {stderr}")
+                if "token" in stderr.lower() or "auth" in stderr.lower() or "expired" in stderr.lower():
+                    print(
+                        '[gmail] ⚠ TOKEN MAY BE EXPIRED — run: gws gmail users getProfile --params \'{"userId":"me"}\''
+                    )
+                return None
+            parsed: object = json.loads(result.stdout)
+            if not isinstance(parsed, dict):
+                print(f"[gmail] gws returned non-dict: {type(parsed).__name__}")
+                return None
+            return cast(dict[str, object], parsed)
+        except subprocess.TimeoutExpired:
+            print("[gmail] gws call timed out")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"[gmail] gws JSON parse failed: {e}")
+            return None
+        except OSError as e:
+            print(f"[gmail] gws call failed: {e}")
+            return None
+
+    def _get_profile(self) -> Optional[GmailProfile]:
+        raw = self._run_gws("getProfile", "--params", '{"userId":"me"}')
+        if raw is None:
+            return None
+        return _validate_gmail_profile(raw)
+
+    def get_message(self, msg_id: str) -> Optional[GmailMessage]:
+        params = json.dumps({"userId": "me", "id": msg_id, "format": "full"})
+        raw = self._run_gws("messages", "get", "--params", params)
+        if raw is None:
+            return None
+        return _validate_gmail_message(raw)
+
+    def _get_history(self, start_history_id: str) -> Optional[GmailHistoryResponse]:
+        params = json.dumps({"userId": "me", "startHistoryId": start_history_id})
+        raw = self._run_gws("history", "list", "--params", params)
+        if raw is None:
+            return None
+        return _validate_gmail_history_response(raw)
+
+    def _get_attachment_data(self, msg_id: str, att_id: str) -> Optional[GmailAttachmentData]:
+        params = json.dumps({"userId": "me", "messageId": msg_id, "id": att_id})
+        raw = self._run_gws("messages", "attachments", "get", "--params", params)
+        if raw is None:
+            return None
+        return _validate_gmail_attachment_data(raw)
+
+    def _list_messages(self, query: str, max_results: int = 5) -> Optional[GmailMessageListResponse]:
+        params = json.dumps({"userId": "me", "maxResults": max_results, "q": query})
+        raw = self._run_gws("messages", "list", "--params", params)
+        if raw is None:
+            return None
+        return _validate_gmail_message_list_response(raw)
+
+    def mark_as_read(self, msg_id: str) -> bool:
+        params = json.dumps({"userId": "me", "id": msg_id})
+        body = json.dumps({"removeLabelIds": ["UNREAD"]})
+        result = self._run_gws("messages", "modify", "--params", params, json_body=body)
+        return result is not None
+
+    def _save_history_id(self) -> None:
+        with self._lock:
+            hid = self._history_id
+        if not hid:
+            return
+        try:
+            _atomic_write_text(self._history_file_path, hid)
+        except OSError as e:
+            print(f"[gmail] Failed to save historyId: {e}")
+
+    def _load_history_id(self) -> Optional[str]:
+        try:
+            with open(self._history_file_path, "r") as f:
+                hid = f.read().strip()
+                if hid:
+                    return hid
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"[gmail] Failed to load historyId: {e}")
+        return None
+
+    def _bootstrap_history_id(self, skip_disk: bool = False) -> Optional[str]:
+        if not skip_disk:
+            saved = self._load_history_id()
+            if saved:
+                print(f"[gmail] Resumed historyId={saved} from disk")
+                return saved
+        profile = self._get_profile()
+        if profile and profile.get("historyId"):
+            hid = str(profile["historyId"])
+            with self._lock:
+                self._history_id = hid
+            self._save_history_id()
+            return hid
+        return None
+
+    def _hdrs(self, message: GmailMessage) -> list[GmailHeader]:
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return []
+        headers = payload.get("headers")
+        return headers if isinstance(headers, list) else []
+
+    def extract_sender(self, message: GmailMessage) -> str:
+        from_val = _get_header(self._hdrs(message), "from")
+        if not from_val:
+            return ""
+        match = re.search(r"<([^>]+)>", from_val)
+        return match.group(1).lower() if match else from_val.strip().lower()
+
+    def extract_sender_name(self, message: GmailMessage) -> str:
+        from_val = _get_header(self._hdrs(message), "from")
+        if not from_val:
+            return ""
+        match = re.match(r"^([^<]+)\s*<", from_val)
+        return match.group(1).strip().strip('"') if match else from_val.split("@")[0]
+
+    def extract_subject(self, message: GmailMessage) -> str:
+        return _get_header(self._hdrs(message), "subject")
+
+    def extract_message_id(self, message: GmailMessage) -> str:
+        return _get_header(self._hdrs(message), "message-id")
+
+    def is_sent_message(self, message: GmailMessage) -> bool:
+        label_ids = message.get("labelIds")
+        if not isinstance(label_ids, list):
+            return False
+        return "SENT" in label_ids
+
+    def extract_body_text(self, message: GmailMessage) -> str:
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            return ""
+        return self._find_text_part(payload)
+
+    def _find_text_part(
+        self,
+        part: GmailPayloadPart,
+        depth: int = 0,
+        counter: Optional[list[int]] = None,
+    ) -> str:
+        if counter is None:
+            counter = [0]
+        counter[0] += 1
+        if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
+            return ""
+        raw_mime = part.get("mimeType")
+        mime_type: str = str(raw_mime) if isinstance(raw_mime, str) else ""
+        if mime_type == "text/plain":
+            body = part.get("body")
+            if not isinstance(body, dict):
+                return ""
+            raw_data = body.get("data")
+            data: str = str(raw_data) if isinstance(raw_data, str) else ""
+            if data:
+                padded = data + "=" * (-len(data) % 4)
+                if not _B64_URLSAFE.match(padded):
+                    return ""
+                try:
+                    return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+                except (ValueError, binascii.Error):
+                    return ""
+            return ""
+        parts = part.get("parts")
+        if isinstance(parts, list):
+            for sub in parts:
+                if counter[0] > _MAX_MIME_PARTS:
+                    break
+                if isinstance(sub, dict):
+                    text = self._find_text_part(sub, depth + 1, counter)
+                    if text:
+                        return text
+        return ""
+
+    def extract_attachments(self, message: GmailMessage) -> list[GmailAttachmentInfo]:
+        attachments: list[GmailAttachmentInfo] = []
+        payload = message.get("payload")
+        if isinstance(payload, dict):
+            self._find_attachments(payload, attachments)
+        return attachments
+
+    def _find_attachments(
+        self,
+        part: GmailPayloadPart,
+        result: list[GmailAttachmentInfo],
+        depth: int = 0,
+        counter: Optional[list[int]] = None,
+    ) -> None:
+        if counter is None:
+            counter = [0]
+        counter[0] += 1
+        if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
+            return
+        raw_fn = part.get("filename")
+        filename: str = str(raw_fn) if isinstance(raw_fn, str) else ""
+        body = part.get("body")
+        if isinstance(body, dict):
+            raw_att_id = body.get("attachmentId")
+            att_id: str = str(raw_att_id) if isinstance(raw_att_id, str) else ""
+            raw_size = body.get("size")
+            size: int = int(raw_size) if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
+            if filename and att_id:
+                if size > _MAX_ATTACHMENT_BYTES:
+                    print(f"[gmail] Skipping oversized attachment: {filename} ({size} bytes)")
+                else:
+                    raw_mime = part.get("mimeType")
+                    mime: str = str(raw_mime) if isinstance(raw_mime, str) else ""
+                    result.append(
+                        GmailAttachmentInfo(
+                            filename=_sanitize_filename(filename),
+                            mimeType=mime,
+                            size=size,
+                            attachmentId=att_id,
+                        )
+                    )
+        parts = part.get("parts")
+        if isinstance(parts, list):
+            for sub in parts:
+                if counter[0] > _MAX_MIME_PARTS:
+                    break
+                if isinstance(sub, dict):
+                    self._find_attachments(sub, result, depth + 1, counter)
+
+    def is_inbox_unread(self, label_ids: list[str]) -> bool:
+        return "INBOX" in label_ids and "UNREAD" in label_ids
+
+    def _clean_body(self, text: str) -> str:
+        text = text.replace("\r\n", "\n")
+        text = re.sub(r"<https?://[^>]+>", "", text)
+        text = re.sub(r"\[image:[^\]]*\]", "", text)
+        text = re.sub(r"Get Outlook for iOS\s*", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _strip_reply_chain(self, text: str) -> str:
+        patterns = [
+            r"\s+On \w{3}, \w{3,9} \d{1,2}, \d{4}[ ,].{5,80} wrote:",
+            r"\s+On \d{1,2} \w{3,9} \d{4}[ ,].{5,80} wrote:",
+            r"\n>[ >].*(?:\n>[ >].*)*",
+            r"\n-{2,}\s*Reply above this line\s*-{2,}",
+            r"\n_{2,}\nFrom:.*?\nSent:",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.DOTALL)
+            if m:
+                text = text[: m.start()]
+        return text.strip()
+
+    def _detect_forward_split(self, body: str) -> tuple[Optional[str], Optional[str]]:
+        gmail_marker = "---------- Forwarded message ---------"
+        if gmail_marker in body:
+            parts = body.split(gmail_marker, 1)
+            return parts[0].strip(), parts[1].strip()
+        outlook_match = re.search(
+            r"\n_{3,}\n\s*From:.*?\nSent:.*?\nTo:.*?\nSubject:",
+            body,
+            re.DOTALL,
+        )
+        if outlook_match:
+            return body[: outlook_match.start()].strip(), body[outlook_match.start() :].strip()
+        generic_match = re.search(
+            r"\n-{2,}\s*(?:Original Message|Forwarded)\s*-{2,}",
+            body,
+            re.IGNORECASE,
+        )
+        if generic_match:
+            return body[: generic_match.start()].strip(), body[generic_match.start() :].strip()
+        return None, None
+
+    def format_email_message(self, body: str, subject: str, thread_id: str = "") -> tuple[str, str]:
+        body = self._clean_body(body)
+        manager_text, forwarded_content = self._detect_forward_split(body)
+        thread_tag = f" [thread:{thread_id}]" if thread_id else ""
+        if forwarded_content is not None:
+            if manager_text:
+                manager_text = self._strip_reply_chain(manager_text)
+            forwarded_content = self._clean_body(forwarded_content)
+            forwarded_content = _truncate(forwarded_content, 1200)
+            fwd_subject = subject if re.match(r"(?i)^(fwd?|forwarded):", subject) else f"Fwd: {subject}"
+            html_parts = [f"📧 <b>{_escape_html(fwd_subject)}</b>{thread_tag}"]
+            plain_parts = [f"manager (via email):{thread_tag}"]
+            if manager_text:
+                html_parts.append(f"\n{_escape_html(manager_text)}")
+                plain_parts.append(manager_text)
+            html_parts.append(f"<blockquote>{_escape_html(forwarded_content)}</blockquote>")
+            plain_parts.append(f"--- Forwarded: {subject} ---")
+            plain_parts.append(forwarded_content)
+            return "\n".join(html_parts), "\n".join(plain_parts)
+        body = self._strip_reply_chain(body)
+        body = _truncate(body)
+        html = f"📧 <b>{_escape_html(subject)}</b>{thread_tag}\n\n{_escape_html(body)}"
+        plain = f"manager (via email):{thread_tag} {body}"
+        return html, plain
+
+    def _format_sent_reply(self, body: str, subject: str, thread_id: str, message: GmailMessage) -> tuple[str, str]:
+        body = self._clean_body(body)
+        body = self._strip_reply_chain(body)
+        body = _truncate(body)
+        sender_name = self.extract_sender_name(message)
+        thread_tag = f" [thread:{thread_id}]" if thread_id else ""
+        html = f"✉️ <b>Sent:</b> {_escape_html(subject)}{thread_tag}\n\n{_escape_html(body)}"
+        plain = f"{sender_name} (sent via email):{thread_tag} {body}"
+        return html, plain
+
+    def _get_new_message_ids(self) -> tuple[Optional[list[str]], Optional[str]]:
+        with self._lock:
+            current_hid = self._history_id
+        if not current_hid:
+            return [], None
+        data = self._get_history(current_hid)
+        if data is None:
+            return None, None
+        msg_ids: list[str] = []
+        seen: set[str] = set()
+        history_entries = data.get("history")
+        if not isinstance(history_entries, list):
+            history_entries = []
+        for entry in history_entries:
+            if not isinstance(entry, dict):
+                continue
+            messages_added = entry.get("messagesAdded")
+            if not isinstance(messages_added, list):
+                continue
+            for added in messages_added:
+                if not isinstance(added, dict):
+                    continue
+                msg = added.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                raw_id = msg.get("id")
+                msg_id: str = str(raw_id) if isinstance(raw_id, str) else ""
+                label_ids = msg.get("labelIds")
+                if not isinstance(label_ids, list):
+                    label_ids = []
+                if msg_id and msg_id not in seen:
+                    if self.is_inbox_unread(label_ids) or "SENT" in label_ids:
+                        seen.add(msg_id)
+                        msg_ids.append(msg_id)
+        raw_hid = data.get("historyId")
+        new_hid: Optional[str] = str(raw_hid) if raw_hid is not None else None
+        return msg_ids, new_hid
+
+    def _format_attachment_line(self, attachments: list[GmailAttachmentInfo]) -> str:
+        return (
+            f"\n[{len(attachments)} attachment(s): {', '.join(str(a.get('filename') or '?') for a in attachments)}]"
+            if attachments
+            else ""
+        )
+
+    def _download_attachment(self, msg_id: str, att: GmailAttachmentInfo) -> Optional[str]:
+        raw_att_id = att.get("attachmentId")
+        att_id: str = str(raw_att_id) if isinstance(raw_att_id, str) else ""
+        if not att_id:
+            return None
+        data = self._get_attachment_data(msg_id, att_id)
+        if not data:
+            return None
+        raw_b64 = data.get("data")
+        if not isinstance(raw_b64, str) or not raw_b64:
+            return None
+        padded_b64 = raw_b64 + "=" * (-len(raw_b64) % 4)
+        if not _B64_URLSAFE.match(padded_b64):
+            print(f"[gmail] Invalid base64 characters in attachment data")
+            return None
+        try:
+            decoded = base64.urlsafe_b64decode(padded_b64)
+        except (ValueError, binascii.Error) as e:
+            print(f"[gmail] decode attachment failed: {e}")
+            return None
+        if len(decoded) > _MAX_ATTACHMENT_BYTES:
+            print(f"[gmail] Attachment too large: {len(decoded)} bytes")
+            return None
+        raw_fn = att.get("filename")
+        raw_name = _sanitize_filename(str(raw_fn) if isinstance(raw_fn, str) else "attachment")
+        safe_prefix = re.sub(r"[^\w]", "", msg_id[:8]) if msg_id else ""
+        filename = f"{safe_prefix}_{raw_name}" if safe_prefix else raw_name
+        if len(filename) > _MAX_FILENAME_LEN:
+            root, ext = os.path.splitext(filename)
+            if len(ext) > 10:
+                ext = ext[:10]
+            filename = root[: _MAX_FILENAME_LEN - len(ext)] + ext
+        att_dir = os.path.join(os.path.expanduser("~"), ".cache", "beast", "email", "attachments")
+        try:
+            _atomic_write_bytes(os.path.join(att_dir, filename), decoded)
+            return os.path.join(att_dir, filename)
+        except OSError as e:
+            print(f"[gmail] save attachment failed: {e}")
+            return None
+
+    def _process_message(self, msg_id: str) -> None:
+        message = self.get_message(msg_id)
+        if not message:
+            raise RuntimeError(f"get_message({msg_id}) returned None — transient API failure")
+        is_sent = self.is_sent_message(message)
+        if not is_sent and not self.is_allowed_sender(message):
+            return
+        body = self.extract_body_text(message)
+        subject = self.extract_subject(message)
+        raw_tid = message.get("threadId")
+        thread_id: str = str(raw_tid) if isinstance(raw_tid, str) else ""
+        message_id = self.extract_message_id(message)
+        attachments = self.extract_attachments(message)
+        if not body.strip():
+            return
+        if is_sent:
+            html_text, plain_text = self._format_sent_reply(body, subject, thread_id, message)
+            downloaded: list[Attachment] = []
+            for att in attachments:
+                path = self._download_attachment(msg_id, att)
+                if path:
+                    downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
+            self.on_message([], html_text, plain_text, downloaded)
+            return
+        body = self._strip_reply_chain(body)
+        targets, cleaned = self.parse_mentions(body)
+        if targets:
+            html_text, plain_text = self.format_email_message(cleaned, subject, thread_id)
+        else:
+            html_text, plain_text = self.format_email_message(body, subject, thread_id)
+        att_line = self._format_attachment_line(attachments)
+        html_text += att_line
+        plain_text += att_line
+        if targets and message_id:
+            safe_subject = subject.replace("'", "'\\''")
+            safe_thread = thread_id.replace("'", "'\\''")
+            safe_msgid = message_id.replace("'", "'\\''")
+            reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
+            reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
+            plain_text += reply_hint
+        downloaded_atts: list[Attachment] = []
+        for att in attachments:
+            path = self._download_attachment(msg_id, att)
+            if path:
+                downloaded_atts.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
+                print(f"[gmail] attachment: {att['filename']} -> {path}")
+        self.on_message(targets, html_text, plain_text, downloaded_atts)
+        if not self.mark_as_read(msg_id):
+            print(f"[gmail] Warning: failed to mark message {msg_id} as read")
+
+    def poll_once(self) -> None:
+        msg_ids, new_hid = self._get_new_message_ids()
+        if msg_ids is None:
+            self.track_failure()
+            with self._lock:
+                fail_count = self._consecutive_failures
+            if fail_count >= CONSECUTIVE_FAIL_REBOOTSTRAP:
+                print(f"[gmail] ⚠ {fail_count} failures — attempting re-bootstrap")
+                new_id = self._bootstrap_history_id(skip_disk=True)
+                if new_id:
+                    with self._lock:
+                        self._history_id = new_id
+                    self.track_success()
+                    print(f"[gmail] Re-bootstrap OK (historyId={new_id})")
+                else:
+                    self._send_alert(
+                        "Gmail re-bootstrap failed — token expired, needs manual renewal (ask geni to run gws renewal)"
+                    )
+            return
+        self.track_success()
+        had_errors: bool = False
+        for msg_id in msg_ids:
+            try:
+                self._process_message(msg_id)
+            except Exception as e:
+                print(f"[gmail] Error processing message {msg_id}: {e}")
+                had_errors = True
+        if new_hid and not had_errors:
+            with self._lock:
+                self._history_id = new_hid
+            self._save_history_id()
+        elif had_errors:
+            print("[gmail] historyId NOT advanced — some messages failed, will retry next poll")
+
+    def _on_preflight_ok(self) -> None:
+        hid = self._bootstrap_history_id()
+        with self._lock:
+            self._history_id = hid
+        if not hid:
+            print("[gmail] Bootstrap failed, retrying in 60s...")
+            if self._stop_event.wait(60):
+                return
+            hid = self._bootstrap_history_id()
+            with self._lock:
+                self._history_id = hid
+            if not hid:
+                self._send_alert("Gmail connector disabled — cannot get historyId")
+                self._stop_event.set()
+                return
+        print(f"[gmail] Started (interval={self.poll_interval}s, from={self.sender_filter}, historyId={hid})")
+        self._catchup_unread()
+
+    def _catchup_unread(self) -> None:
+        q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"
+        data = self._list_messages(q, max_results=5)
+        if not data:
+            return
+        messages_list = data.get("messages")
+        if not isinstance(messages_list, list):
+            return
+        msg_ids: list[str] = []
+        for m in messages_list:
+            if isinstance(m, dict):
+                raw_id = m.get("id")
+                if isinstance(raw_id, str):
+                    msg_ids.append(raw_id)
+        if not msg_ids:
+            return
+        print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
+        for msg_id in msg_ids:
+            try:
+                self._process_message(msg_id)
+            except Exception as e:
+                print(f"[gmail] Catch-up error {msg_id}: {e}")
+
+    def stop(self) -> None:
+        super().stop()  # Wait for poll thread to exit before saving
+        self._save_history_id()
+
+
+class GitHubConnector(BaseConnector[GithubComment]):
+    connector_name: str = "github"
+
+    def __init__(
+        self,
+        repo: str | list[str],
+        from_user: str,
+        poll_interval: int,
+        on_message: MessageCallback,
+        get_registered_workers: WorkerListCallback,
+        on_alert: Optional[AlertCallback] = None,
+        state_file: str = "",
+        gh_bin: str = "",
+    ) -> None:
+        super().__init__(
+            sender_filter=from_user,
+            poll_interval=poll_interval,
+            on_message=on_message,
+            get_registered_workers=get_registered_workers,
+            on_alert=on_alert,
+        )
+        self.gh_bin: str = gh_bin or "gh"
+        if isinstance(repo, str):
+            repos = [repo]
+        else:
+            repos = list(repo)
+        if not repos:
+            raise ValueError("github: at least one repo required")
+        for r in repos:
+            if not _REPO_PATTERN.match(r):
+                raise ValueError(f"github: repo must be 'owner/name' format, got: {r!r}")
+        self.repos: list[str] = repos
+        self._state_file: str = state_file
+        self._last_poll_time: Optional[str] = None
+        self._seen_ids: set[int] = set()
+
+    def preflight_check(self) -> tuple[bool, str]:
+        for repo in self.repos:
+            try:
+                result = subprocess.run(
+                    [self.gh_bin, "api", f"/repos/{repo}", "--jq", ".id"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode != 0:
+                    return False, f"gh api failed for {repo}: {result.stderr.strip()}"
+            except subprocess.TimeoutExpired:
+                return False, f"gh api timed out during preflight for {repo}"
+            except FileNotFoundError:
+                return False, f"gh binary not found: {self.gh_bin}"
+            except OSError as e:
+                return False, f"gh error: {e}"
+        return True, "OK"
+
+    def status(self) -> GithubStatus:
+        with self._lock:
+            return GithubStatus(
+                name=self.connector_name,
+                running=self.running,
+                sender_filter=self.sender_filter,
+                poll_interval=self.poll_interval,
+                consecutive_failures=self._consecutive_failures,
+                alert_sent=self._alert_sent,
+                repos=self.repos,
+                last_poll_time=self._last_poll_time,
+                seen_ids_count=len(self._seen_ids),
+            )
+
+    def _load_state(self) -> bool:
+        if not self._state_file:
+            return False
+        try:
+            with open(self._state_file) as f:
+                data: object = json.load(f)
+            if not isinstance(data, dict):
+                return False
+            state = _validate_github_state(cast(dict[str, object], data))
+            with self._lock:
+                if state["last_poll_time"]:
+                    self._last_poll_time = state["last_poll_time"]
+                for sid in state["seen_ids"]:
+                    self._seen_ids.add(sid)
+                return bool(self._last_poll_time)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return False
+
+    def _save_state(self) -> None:
+        if not self._state_file:
+            return
+        with self._lock:
+            state = GithubState(
+                last_poll_time=self._last_poll_time,
+                seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
+            )
+        try:
+            _atomic_write_text(self._state_file, json.dumps(state))
+        except OSError as e:
+            print(f"[github] Failed to save state: {e}")
+
+    def _on_preflight_ok(self) -> None:
+        restored = self._load_state()
+        if restored:
+            with self._lock:
+                seen_count = len(self._seen_ids)
+                poll_time = self._last_poll_time
+            print(f"[github] Restart — restored state: {seen_count} seen IDs, since={poll_time}")
+        else:
+            initial_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with self._lock:
+                self._last_poll_time = initial_time
+            seed, _ = self._get_all_comments(initial_time)
+            if seed:
+                with self._lock:
+                    for c in seed:
+                        cid = c.get("id")
+                        if isinstance(cid, int) and not isinstance(cid, bool):
+                            self._seen_ids.add(cid)
+                print(f"[github] First run — seeded {len(seed)} existing comments as seen")
+            else:
+                print(f"[github] First run — no comments to seed")
+            self._save_state()
+        with self._lock:
+            poll_time = self._last_poll_time
+        repos_str = ", ".join(self.repos)
+        print(
+            f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})"
+        )
+
+    def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                [self.gh_bin, "api", endpoint, "--paginate"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                print(f"[github] gh api error: {result.stderr.strip()}")
+                return None
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            print(f"[github] gh api timed out: {endpoint}")
+            return None
+        except OSError as e:
+            print(f"[github] gh api exception: {e}")
+            return None
+
+    def _get_all_comments(self, since: str) -> tuple[Optional[list[GithubComment]], bool]:
+        all_raws: list[Optional[str]] = []
+        any_success = False
+        is_complete = True
+        for repo in self.repos:
+            issue_raw = self._gh_api(
+                f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
+            )
+            pr_raw = self._gh_api(
+                f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
+            )
+            if issue_raw is not None or pr_raw is not None:
+                any_success = True
+            if issue_raw is None or pr_raw is None:
+                is_complete = False
+                failed = "issues" if issue_raw is None else "pulls"
+                print(f"[github] Partial fetch for {repo} — {failed} comments failed")
+            all_raws.extend([issue_raw, pr_raw])
+        if not any_success:
+            return None, False
+        seen: set[int] = set()
+        merged: list[GithubComment] = []
+        for raw in all_raws:
+            if not raw:
+                continue
+            comments = _safe_json_loads_list(raw)
+            for c in comments:
+                if not isinstance(c, dict):
+                    continue
+                cid = c.get("id", 0)
+                if isinstance(cid, int) and not isinstance(cid, bool) and cid not in seen:
+                    seen.add(cid)
+                    merged.append(c)
+        return merged, is_complete
+
+    def extract_sender(self, comment: GithubComment) -> str:
+        user = comment.get("user")
+        if not isinstance(user, dict):
+            return ""
+        login = user.get("login")
+        return str(login).lower() if isinstance(login, str) and login else ""
+
+    def extract_issue_context(self, comment: GithubComment) -> IssueContext:
+        if comment.get("issue_num") and comment.get("kind"):
+            return IssueContext(
+                number=str(comment["issue_num"]),
+                kind=str(comment["kind"]),
+                url=str(comment.get("html_url", "")),
+            )
+        raw_issue_url = comment.get("issue_url")
+        raw_pr_url = comment.get("pull_request_url")
+        issue_url: str = str(raw_issue_url) if isinstance(raw_issue_url, str) else ""
+        if not issue_url and isinstance(raw_pr_url, str):
+            issue_url = str(raw_pr_url)
+        raw_html_url = comment.get("html_url")
+        html_url: str = str(raw_html_url) if isinstance(raw_html_url, str) else ""
+        number: str = ""
+        kind: str = "comment"
+        if "/issues/" in issue_url:
+            candidate = issue_url.rsplit("/", 1)[-1]
+            if candidate.isdigit():
+                number = candidate
+            kind = "issue"
+        elif "/pulls/" in issue_url or "/pull/" in html_url:
+            if "/pulls/" in issue_url:
+                candidate = issue_url.rsplit("/", 1)[-1]
+                if candidate.isdigit():
+                    number = candidate
+            elif "/pull/" in html_url:
+                parts = html_url.split("/pull/")
+                if len(parts) > 1:
+                    candidate = parts[1].split("/")[0]
+                    if "#" in candidate:
+                        candidate = candidate.split("#")[0]
+                    if candidate.isdigit():
+                        number = candidate
+            kind = "PR"
+        return IssueContext(number=number, kind=kind, url=html_url)
+
+    def _md_to_telegram_html(self, md: str) -> str:
+        text = _escape_html(md)
+        text = re.sub(r"```[a-zA-Z]*\n(.*?)```", lambda m: f"<pre>{m.group(1).rstrip()}</pre>", text, flags=re.DOTALL)
+        text = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", text)
+        text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", lambda m: m.group(1) or "(image)", text)
+        text = re.sub(
+            r"\[([^\]]+)\]\(([^)]+)\)", lambda m: f'<a href="{_escape_html(m.group(2))}">{m.group(1)}</a>', text
+        )
+        text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+        text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+        text = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"<i>\1</i>", text)
+        text = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"<i>\1</i>", text)
+        lines = text.split("\n")
+        result: list[str] = []
+        in_quote = False
+        quote_lines: list[str] = []
+        for line in lines:
+            if re.match(r"&gt;\s?", line):
+                in_quote = True
+                quote_lines.append(re.sub(r"^&gt;\s?", "", line))
+            else:
+                if in_quote:
+                    result.append(f"<blockquote>{chr(10).join(quote_lines)}</blockquote>")
+                    quote_lines = []
+                    in_quote = False
+                result.append(line)
+        if in_quote:
+            result.append(f"<blockquote>{chr(10).join(quote_lines)}</blockquote>")
+        text = "\n".join(result)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def format_comment(self, body: str, context: IssueContext) -> tuple[str, str]:
+        body = _truncate(body)
+        kind = context["kind"]
+        number = context["number"]
+        url = context["url"]
+        tag = f"#{number}" if number else ""
+        link = f'<a href="{_escape_html(url)}">#{number}</a>' if url and number else tag
+        html = f"🔔 <b>GitHub {kind} {link}</b>\n\n{self._md_to_telegram_html(body)}"
+        plain = f"manager (via GitHub {kind} {tag}): {body}"
+        return html, plain
+
+    @staticmethod
+    def _extract_repo_from_comment(comment: GithubComment) -> str:
+        for key in ("issue_url", "pull_request_url", "html_url"):
+            url = comment.get(key)
+            if not isinstance(url, str):
+                continue
+            m = re.search(r"/repos/([^/]+/[^/]+)/", url)
+            if m:
+                return m.group(1)
+            m = re.search(r"github\.com/([^/]+/[^/]+)/", url)
+            if m:
+                return m.group(1)
+        return ""
+
+    def _process_comment(self, comment: GithubComment) -> None:
+        cid = comment.get("id", 0)
+        if not isinstance(cid, int) or isinstance(cid, bool) or cid == 0:
+            return
+        with self._lock:
+            if cid in self._seen_ids:
+                return
+        if not self.is_allowed_sender(comment):
+            with self._lock:
+                self._seen_ids.add(cid)  # Non-target sender: mark seen, no retry needed
+            return
+        raw_body = comment.get("body")
+        body: str = str(raw_body).strip() if isinstance(raw_body, str) else ""
+        if not body:
+            with self._lock:
+                self._seen_ids.add(cid)
+            return
+        context = self.extract_issue_context(comment)
+        targets, cleaned = self.parse_mentions(body)
+        if targets:
+            html_text, plain_text = self.format_comment(cleaned, context)
+        else:
+            html_text, plain_text = self.format_comment(body, context)
+        comment_repo = self._extract_repo_from_comment(comment) or (self.repos[0] if self.repos else "")
+        if targets and context["number"]:
+            num = context["number"]
+            safe_repo = comment_repo.replace("'", "'\\''")
+            reply_hint = f"\n\nView: beast github show {num} --repo '{safe_repo}'"
+            reply_hint += f"\nReply: beast github comment {num} --repo '{safe_repo}' --body 'your reply'"
+            plain_text += reply_hint
+        metadata = ConnectorMetadata(number=context["number"], repo=comment_repo, comment_id=cid)
+        self.on_message(targets, html_text, plain_text, [], metadata=metadata)
+        with self._lock:
+            self._seen_ids.add(cid)
+        print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
+
+    def poll_once(self) -> None:
+        with self._lock:
+            poll_time = self._last_poll_time
+        if not poll_time:
+            return
+        all_comments, fetch_complete = self._get_all_comments(poll_time)
+        if all_comments is None:
+            self.track_failure()
+            return
+        self.track_success()
+        had_errors: bool = False
+        for comment in all_comments:
+            try:
+                self._process_comment(comment)
+            except Exception as e:
+                print(f"[github] Error processing comment {comment.get('id')}: {e}")
+                had_errors = True
+        if not had_errors and fetch_complete:
+            with self._lock:
+                self._last_poll_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            print(
+                f"[github] poll_time NOT advanced — {', '.join(r for r in ['partial fetch' if not fetch_complete else '', 'processing errors' if had_errors else ''] if r)}, will retry"
+            )
+        self._prune_seen_ids()
+        self._save_state()
+
+    def _prune_seen_ids(self) -> None:
+        with self._lock:
+            if len(self._seen_ids) > _MAX_SEEN_IDS:
+                self._seen_ids = set(sorted(self._seen_ids)[-_PRUNE_KEEP:])
+
+    def stop(self) -> None:
+        super().stop()  # Wait for poll thread to exit before saving
+        self._save_state()
+
+
+# ============================================================
+# connector_glue
+# ============================================================
+
+
+import os
+import re
+import time
+from typing import TYPE_CHECKING, Callable, cast
+from urllib.parse import urlparse
+
+import core
+import telegram
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    BRIDGE_PUBLIC_URL,
+    NODE_DIR,
+    TIMEOUT_GIT_OP,
+)
+
+def connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
+    from bridge import connectors
+
+    connectors.log_message(tag, html_text, plain_text, targets)
+
+
+def connector_render_html(tag: str, current_html: str) -> str:
+    import html as html_mod
+    from bridge import connectors, _CONNECTOR_CSS
+
+    esc = html_mod.escape
+    msgs = connectors.get_log(tag)
+    icon = "🔔" if tag == "github" else "📧"
+    title = f"{tag.title()} Feed"
+    blocks = []
+    av_letter = tag[0].upper()
+    av_color = "#8b5cf6" if tag == "github" else "#f59e0b"
+    av_svg = f'<div class="u-av"><svg viewBox="0 0 28 28"><rect width="28" height="28" rx="14" fill="{av_color}"/><text x="14" y="18" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">{av_letter}</text></svg></div>'
+    tag_title = esc(tag.title())
+    for i, m in enumerate(msgs):
+        ts = time.strftime("%b %d, %H:%M", time.gmtime(m["ts"]))
+        who = ", ".join(m["targets"]) if m["targets"] else "all"
+        content = re.sub(r"(https?://\S+)", r'<a href="\1" target="_blank" rel="noopener">\1</a>', m["html"]).replace(
+            "\n", "<br>"
+        )
+        is_latest = i == len(msgs) - 1
+        cls = "chat-msg latest" if is_latest else "chat-msg"
+        badge = '<span class="badge">Latest</span>' if is_latest else ""
+        blocks.append(
+            f'<div class="{cls}">{av_svg}<div class="chat-body"><span class="u-name">{tag_title}</span><span class="ts">{ts}</span><span class="target">→ {esc(who)}</span>{badge}<div class="chat-text">{content}</div></div></div>'
+        )
+    blocks_html = "\n".join(blocks)
+    updated = time.strftime("%b %d, %H:%M UTC", time.gmtime(core._clock.time()))
+    count_text = f'{len(msgs)} recent message{"s" if len(msgs) != 1 else ""}'
+    return (
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{icon} {title}</title>'
+        '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">'
+        "<style>" + _CONNECTOR_CSS + f'</style></head><body><div class="wrap"><header><h1>{icon} {title}</h1>'
+        f'<div class="meta">{count_text} &middot; Updated {updated}</div></header>'
+        f'<div class="thread">{blocks_html}</div></div></body></html>'
+    )
+
+
+def connector_short_summary(
+    tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None
+) -> str:
+    import html as _html
+
+    icon = "🔔" if tag == "github" else "📧"
+    body = plain_text.strip()
+    body = re.sub(r"^manager\s*\(via\s+\w+[^)]*\):\s*", "", body)
+    body = re.sub(r"\[thread:[^\]]+\]\s*", "", body)
+    body = " ".join(body.split())
+    if len(body) > 200:
+        body = body[:197] + "…"
+    ref_match = re.search(r"#(\d+)", plain_text)
+    thread_match = re.search(r"\[thread:([^\]]+)\]", plain_text)
+    header = f"{icon} <b>{tag.title()}</b>"
+    if ref_match:
+        num = ref_match.group(1)
+        repo = (metadata or {}).get("repo", "BasedHardware/omi")
+        gh_url = f"https://github.com/{repo}/issues/{num}"
+        header += f' <a href="{gh_url}">#{num}</a>'
+    elif thread_match:
+        header += f" {_html.escape('thread:' + thread_match.group(1))}"
+    parts = [header, _html.escape(body)]
+    if serve_url:
+        parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
+    return "\n".join(parts)
+
+
+def connector_export_github(number: int, repo: str) -> str | None:
+    import subprocess
+
+    try:
+        r = core._subprocess_runner.run(
+            ["beast", "github", "export", str(number), "--format", "print", "--serve", "--repo", repo, "--fresh"],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_GIT_OP,
+        )
+        if r.returncode == 0:
+            for line in r.stderr.splitlines() + r.stdout.splitlines():
+                if "http" in line and ("localhost" in line or "serve" in line.lower()):
+                    url = line.strip().split()[-1].rstrip("/")
+                    if "localhost" in url:
+                        host = (urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else None) or "157.180.48.254"
+                        url = url.replace("localhost", host)
+                    return url
+    except subprocess.SubprocessError as e:
+        _log(_LOG_WARN, "github", f"export failed for #{number}: {e}")
+    return None
+
+
+def connector_on_message(tag: str) -> Callable:
+    def handler(targets, html_text, plain_text=None, attachments=None, metadata=None):
+        import urllib.error
+        from bridge import send_to_worker, _beast_serve_deploy
+
+        if plain_text is None:
+            plain_text = html_text
+        connector_log_message(tag, html_text, plain_text, targets)
+        if core.admin_chat_id:
+            serve_url = None
+            if tag == "github" and metadata and metadata.get("number"):
+                try:
+                    serve_url = connector_export_github(metadata["number"], metadata.get("repo", "BasedHardware/omi"))
+                except KeyError as e:
+                    _log(_LOG_WARN, tag, f"github export failed: {e}")
+            if not serve_url:
+                try:
+                    page_html = connector_render_html(tag, html_text)
+                    tmp_path = f"/tmp/connector-{tag}.html"
+                    with open(tmp_path, "w") as f:
+                        f.write(page_html)
+                    serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
+                except OSError as e:
+                    _log(_LOG_WARN, tag, f"beast serve failed: {e}")
+            summary = connector_short_summary(tag, plain_text, serve_url, metadata)
+            try:
+                telegram.send_telegram_message(core.admin_chat_id, summary, parse_mode="HTML")
+            except OSError:
+                try:
+                    telegram.send_telegram_message(core.admin_chat_id, plain_text[:300])
+                except (urllib.error.URLError, OSError, TimeoutError) as e:
+                    _log(_LOG_WARN, tag, f"Telegram send failed: {e}")
+            for att in attachments or []:
+                fpath = att.get("path", "")
+                fname = att.get("filename", "")
+                if not fpath or not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                caption = f"📧 {fname}"
+                if ext in ALLOWED_IMAGE_EXTENSIONS:
+                    telegram.send_photo(core.admin_chat_id, fpath, caption)
+                elif ext in VIDEO_EXTENSIONS:
+                    telegram.send_video(core.admin_chat_id, fpath, caption)
+                else:
+                    telegram.send_document(core.admin_chat_id, fpath, caption)
+                _log(_LOG_INFO, tag, f"attachment -> Telegram: {fname}")
+        if targets:
+            for name in targets:
+                send_to_worker(name, plain_text)
+                _log(_LOG_INFO, tag, f"-> {name}: {plain_text[:80]}...")
+        else:
+            _log(_LOG_INFO, tag, f"-> Telegram only (no mentions): {plain_text[:80]}...")
+
+    return handler
+
+
+def connector_get_workers() -> set[str]:
+    return set(get_registered_sessions().keys())
+
+
+def connector_on_alert(tag: str) -> Callable:
+    def handler(text: str) -> None:
+        import urllib.error
+
+        if core.admin_chat_id:
+            try:
+                telegram.send_telegram_message(core.admin_chat_id, text)
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                _log(_LOG_WARN, tag, f"Failed to send Telegram alert: {e}")
+
+    return handler
+
+
+def new_gmail() -> GmailConnector:
+    from bridge import GmailConnector as _GmailConnector, GMAIL_GWS_BIN, GMAIL_FROM_FILTER, GMAIL_POLL_INTERVAL
+
+    return _GmailConnector(
+        gws_bin=GMAIL_GWS_BIN,
+        from_filter=GMAIL_FROM_FILTER,
+        poll_interval=GMAIL_POLL_INTERVAL,
+        on_message=connector_on_message("gmail"),
+        get_registered_workers=connector_get_workers,
+        on_alert=connector_on_alert("gmail"),
+    )
+
+
+def new_github() -> GitHubConnector:
+    from bridge import GitHubConnector as _GitHubConnector, GITHUB_REPOS, GITHUB_FROM_USER, GITHUB_POLL_INTERVAL
+
+    return _GitHubConnector(
+        repo=GITHUB_REPOS,
+        from_user=GITHUB_FROM_USER,
+        poll_interval=GITHUB_POLL_INTERVAL,
+        on_message=connector_on_message("github"),
+        get_registered_workers=connector_get_workers,
+        on_alert=connector_on_alert("github"),
+        state_file=str(NODE_DIR / "github_state.json"),
+    )
+
+
+def start_connectors() -> tuple[object, object]:
+    from bridge import (
+        GMAIL_ENABLED,
+        GmailConnector as _GmailConnector,
+        GMAIL_IMPORT_ERROR,
+        GMAIL_POLL_INTERVAL,
+        GMAIL_FROM_FILTER,
+        GITHUB_ENABLED,
+        GitHubConnector as _GitHubConnector,
+        GITHUB_IMPORT_ERROR,
+        GITHUB_POLL_INTERVAL,
+        GITHUB_FROM_USER,
+        GITHUB_REPOS,
+    )
+
+    gmail_inst = None
+    if GMAIL_ENABLED and _GmailConnector is not None:
+        gmail_inst = new_gmail()
+        gmail_inst.start()
+        print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
+    elif GMAIL_ENABLED and _GmailConnector is None:
+        _log(_LOG_ERROR, "bridge", f"Gmail connector disabled: {GMAIL_IMPORT_ERROR}")
+    github_inst = None
+    if GITHUB_ENABLED and _GitHubConnector is not None:
+        github_inst = new_github()
+        github_inst.start()
+        print(
+            f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {', '.join(GITHUB_REPOS)}"
+        )
+    elif GITHUB_ENABLED and _GitHubConnector is None:
+        _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
+    return gmail_inst, github_inst
+
+
+def restart_connector(name: str) -> tuple[bool, str]:
+    from bridge import (
+        GMAIL_ENABLED,
+        GmailConnector as _GmailConnector,
+        GMAIL_IMPORT_ERROR,
+        GITHUB_ENABLED,
+        GitHubConnector as _GitHubConnector,
+        GITHUB_IMPORT_ERROR,
+        connectors,
+    )
+
+    _cfg = {
+        "gmail": (GMAIL_ENABLED, _GmailConnector, GMAIL_IMPORT_ERROR, "GMAIL_ENABLED=0", new_gmail),
+        "github": (GITHUB_ENABLED, _GitHubConnector, GITHUB_IMPORT_ERROR, "BRIDGE_GHPOLL_ENABLED=0", new_github),
+    }
+    entry = _cfg.get(name)
+    if not entry:
+        return False, f"Unknown connector: {name} (valid: gmail, github)"
+    enabled, cls, import_err, env_name, factory = entry
+    if not enabled:
+        return False, f"{name.title()} connector not enabled ({env_name})"
+    if cls is None:
+        return False, f"{name.title()} connector import failed: {import_err}"
+    old = getattr(connectors, name, None)
+    if old is not None:
+        old.stop()
+    inst = factory()
+    setattr(connectors, name, inst)
+    ok, msg = inst.restart()
+    print(f"{name.title()} connector {'restarted' if ok else 'restart failed'}: {msg}")
+    return ok, msg
+
+
+def get_connectors_status() -> dict[str, ConnectorStatusDict]:
+    from bridge import GMAIL_ENABLED, GITHUB_ENABLED, connectors
+
+    result: dict[str, ConnectorStatusDict] = {}
+    for cname, enabled in [("gmail", GMAIL_ENABLED), ("github", GITHUB_ENABLED)]:
+        if not enabled:
+            result[cname] = {"name": cname, "running": False, "enabled": False}
+        else:
+            inst = getattr(connectors, cname, None)
+            result[cname] = (
+                cast("ConnectorStatusDict", inst.status())
+                if inst
+                else {"name": cname, "running": False, "error": "not initialized"}
+            )
+    return result
+
+
+# ============================================================
+# _health_impl
+# ============================================================
+
+
+import json
+import os
+import re
+import subprocess
+import urllib.error
+from pathlib import Path
+from typing import Any, Callable, cast
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_DEBUG,
+    _clock,
+    _subprocess_runner,
+    _node_name,
+    admin_chat_id,
+    ALERT_COOLDOWN,
+    CPU_ACTIVE,
+    CPU_HOG_DURATION_MIN,
+    CPU_IDLE,
+    DEFAULT_BACKEND,
+    DELAY_BRIEF,
+    HOST_DOWN_THRESHOLD,
+    IDLE_STREAK_STUCK,
+    SESSIONS_DIR,
+    START_GRACE,
+    STALE_PENDING,
+    THINK_GRACE,
+    TIMEOUT_GIT_OP,
+    TIMEOUT_REMOTE_CMD,
+    TIMEOUT_TMUX_CHECK,
+    TIMEOUT_TMUX_SEND,
+    TMUX_PREFIX,
+    TOOL_GAP_GRACE,
+    WATCHDOG_INTERVAL,
+    _res_cfg,
+)
+from claudecode import (
+    CpuHogEntry,
+    DiskUsageDict,
+    IoUsageDict,
+    MemUsageDict,
+    ProcStatsEntry,
+    QuestionDetails,
+    TmuxActivityResult,
+    TmuxSessionDict,
+    WorkerStateEntry,
+    WorktreeItemDict,
+    _capture_pane_text,
+    _find_codex_transcript,
+    _INTERACTIVE_CONTENT,
+    _INTERACTIVE_FOOTERS,
+    _remote_run,
+    _remap_path,
+    _tmux_pane_pids,
+    get_backend,
+    get_session_dir,
+    get_worker_backend,
+    HOOK_FAILURE_THRESHOLD,
+    HOOK_FAILURE_WINDOW,
+    normalize_backend,
+    POISON_PATTERNS,
+    host_health,
+    processes,
+    watchdog,
+)
+import time
+
+
+def _read_noninteractive_activity(worker_name: str) -> str:
+    with processes.adapter_pids_lock:
+        entry = processes.adapter_pids.get(worker_name)
+    if entry:
+        proc, _ = entry
+        if proc.poll() is None:
+            return "adapter running"
+    host = get_worker_host(worker_name)
+    path = _find_codex_transcript(worker_name, host=host)
+    if path:
+        try:
+            if host:
+                r = _remote_run(
+                    ["stat", "-c", "%Y", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+                )
+                if r.returncode == 0:
+                    mtime = float(r.stdout.strip())
+                    age = int(_clock.time() - mtime)
+                else:
+                    age = -1
+            else:
+                mtime = os.path.getmtime(path)
+                age = int(_clock.time() - mtime)
+            if age >= 0:
+                if age < 60:
+                    return f"idle (last response {age}s ago)"
+                elif age < 3600:
+                    return f"idle (last response {age // 60}m ago)"
+                else:
+                    return f"idle (last response {age // 3600}h ago)"
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+    return "idle"
+
+
+def _check_hook_failure_signal(name: str) -> str | None:
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+    if host:
+        try:
+            r = _remote_run(["cat", signal_path], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0:
+                return None
+            raw = r.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            return None
+    else:
+        signal_file = Path(signal_path)
+        if not signal_file.exists():
+            return None
+        try:
+            raw = signal_file.read_text().strip()
+        except OSError:
+            return None
+    if not raw:
+        return None
+    lines = raw.splitlines()
+    cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW
+    recent = 0
+    for line in lines:
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            ts = int(parts[0])
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent += 1
+    if recent >= HOOK_FAILURE_THRESHOLD:
+        return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
+    return None
+
+
+def _clear_hook_failures(name: str) -> None:
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    host = get_worker_host(name)
+    if host:
+        try:
+            _remote_run(["rm", "-f", signal_path], host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+        except (subprocess.SubprocessError, OSError) as exc:
+            _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+    else:
+        try:
+            Path(signal_path).unlink(missing_ok=True)
+        except OSError as exc:
+            _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+
+
+def _detect_poisoned(name: str, tmux_name: str) -> str | None:
+    hook_reason = _check_hook_failure_signal(name)
+    if hook_reason:
+        return hook_reason
+    backend_name = get_worker_backend(name)
+    backend = get_backend(backend_name)
+    host = get_worker_host(name)
+    text_parts = []
+    if backend.is_interactive:
+        text_parts.append(_capture_pane_text(tmux_name, host=host))
+    else:
+        text_parts.append(_check_adapter_log(name))
+    combined = "\n".join([part for part in text_parts if part])
+    if not combined:
+        return None
+    for pattern in POISON_PATTERNS:
+        if len(pattern.findall(combined)) >= 3:
+            return pattern.pattern
+    return None
+
+
+def _activity_from_spinner(stripped: list[str]) -> str | None:
+    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
+    for raw in reversed(stripped):
+        first = raw[0] if raw else ""
+        if first == "✻" and "…" not in raw and "..." not in raw:
+            continue
+        if first not in _ACTIVE_SPINNER_CHARS:
+            continue
+        match = re.match(r"^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$", raw)
+        if match:
+            verb = match.group(1).strip()
+            dur = match.group(2).split("·")[0].strip()
+            return f"{verb} ({dur})"
+        verb_match = re.match(r"^.\s+(.+?)(?:…|\.{3})?\s*$", raw)
+        if verb_match:
+            verb = verb_match.group(1).strip()
+            dur_match = re.search(r"(\d+m?\s*\d*\.?\d*s)", raw)
+            return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
+    return None
+
+
+def _activity_from_tool(stripped: list[str]) -> str | None:
+    last_running_tool = None
+    for i, raw in enumerate(stripped):
+        tool_match = re.match(r"^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(", raw)
+        if not tool_match:
+            continue
+        tool = tool_match.group(1)
+        for j in range(i + 1, min(i + 6, len(stripped))):
+            line = stripped[j]
+            if not line:
+                continue
+            if line.startswith("⎿"):
+                if "Running" in line and "background" not in line:
+                    last_running_tool = tool
+                break
+    if last_running_tool:
+        if last_running_tool.startswith("mcp__"):
+            parts = last_running_tool.split("__")
+            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
+        return f"Running {last_running_tool}"
+    return None
+
+
+def _activity_from_rate_limit(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        lower = raw.lower()
+        if "rate limit" in lower:
+            return "Rate limited — waiting to retry"
+        if "connection error" in lower and "retrying" in lower:
+            return "Connection error — retrying"
+        if lower.startswith("retrying") or "retrying in" in lower:
+            return "Retrying API request"
+    return None
+
+
+def _activity_from_interactive(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                for question_line in stripped:
+                    if "☐" in question_line:
+                        question = question_line.replace("☐", "").strip()
+                        if question:
+                            return f"Waiting for input: {question}"
+                return "Waiting for user input"
+    for raw in stripped:
+        for pattern in _INTERACTIVE_CONTENT:
+            if pattern in raw:
+                if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
+                    return "Waiting for plan approval"
+                if "plan mode" in raw.lower():
+                    return "Waiting for plan mode decision"
+                if raw.startswith("Allow "):
+                    return "Waiting for tool permission"
+                return "Waiting for user input"
+    return None
+
+
+def _activity_from_prompt(stripped: list[str]) -> str | None:
+    last_prompt_idx = None
+    last_plan_bar_idx = None
+    for i, raw in enumerate(stripped):
+        if raw.startswith("❯"):
+            last_prompt_idx = i
+        if raw.startswith("⏸"):
+            last_plan_bar_idx = i
+    if last_plan_bar_idx is not None:
+        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
+            return "In plan mode"
+    if last_prompt_idx is not None:
+        return "Ready"
+    return None
+
+
+_REVERSE_SCAN_PATTERNS: list[tuple[str, str]] = [
+    ("Save and close editor to continue", "Waiting for external editor"),
+    ("Running SessionStart", "Running SessionStart hooks"),
+    ("Running PreCompact", "Running PreCompact hooks"),
+    ("Do you want to proceed?", "Waiting for plan approval"),
+    ("Would you like to proceed?", "Waiting for plan approval"),
+    ("Exit plan mode?", "In plan mode"),
+    ("Entering plan mode", "In plan mode"),
+    ("Waiting for team lead", "Waiting for team lead approval"),
+]
+
+
+def _activity_from_reverse_scan(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        for needle, result in _REVERSE_SCAN_PATTERNS:
+            if needle in raw:
+                return result
+    return None
+
+
+def _activity_from_tasks(stripped: list[str]) -> str | None:
+    done = 0
+    total = 0
+    for raw in stripped:
+        line = raw.lstrip()
+        if line.startswith("✔") or line.startswith("✅"):
+            done += 1
+            total += 1
+        elif line.startswith("◻"):
+            total += 1
+    if total >= 2:
+        return f"Tasks ({done}/{total} done)"
+    return None
+
+
+def _is_output_block_end(text: str) -> bool:
+    trimmed = text.lstrip()
+    if trimmed.startswith("Context left until auto-compact:"):
+        return True
+    return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
+
+
+def _activity_from_output_block(stripped: list[str]) -> str | None:
+    for i in range(len(stripped) - 1, -1, -1):
+        raw = stripped[i]
+        if not raw.startswith("●"):
+            continue
+        if re.match(r"^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(", raw):
+            continue
+        parts: list[str] = []
+        head = re.sub(r"^●\s*", "", raw).strip()
+        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
+            parts.append(head)
+        j = i + 1
+        while j < len(stripped):
+            nxt = stripped[j]
+            if _is_output_block_end(nxt):
+                break
+            text = nxt.strip()
+            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"):
+                parts.append(text)
+            j += 1
+        if parts:
+            msg = re.sub(r"\s+", " ", " ".join(parts)).strip()
+            if len(msg) > 120:
+                msg = msg[:117].rstrip() + "..."
+            return msg
+    return None
+
+
+def _activity_from_error(stripped: list[str]) -> str | None:
+    for raw in reversed(stripped):
+        if re.match(r"^(FAIL|ERROR|Error|Traceback|Fail)\b", raw, re.IGNORECASE):
+            lower = raw.lower()
+            if lower.startswith("error"):
+                tail = raw[len("Error") :].lstrip(": ").strip()
+                return f"Error: {tail}" if tail else "Error"
+            return f"Error: {raw[:60]}"
+    return None
+
+
+def _extract_activity(lines: list[str]) -> str:
+    if not lines:
+        return "Active"
+    stripped = [line.strip() for line in lines if line.strip()]
+    if not stripped:
+        return "Idle"
+    _CHECKS: list[Callable[[list[str]], str | None]] = [
+        _activity_from_spinner,
+        _activity_from_tool,
+        _activity_from_rate_limit,
+        _activity_from_interactive,
+        _activity_from_prompt,
+        _activity_from_reverse_scan,
+        _activity_from_tasks,
+        _activity_from_output_block,
+        _activity_from_error,
+    ]
+    for check in _CHECKS:
+        result: str | None = check(stripped)
+        if result is not None:
+            return result
+    return "Active"
+
+
+def _extract_context_pct(lines: list[str]) -> str | None:
+    for line in reversed(lines):
+        m = re.search(r"Context left.*?(\d+)%", line)
+        if m:
+            return f"{m.group(1)}%"
+    return None
+
+
+def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivityResult:
+    try:
+        if host:
+            proc = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+        else:
+            proc = _subprocess_runner.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_CHECK,
+            )
+        if proc.returncode != 0:
+            return TmuxActivityResult("Unknown", None, None)
+        lines = proc.stdout.split("\n")
+        tail = lines[-40:]
+        return TmuxActivityResult(_extract_activity(tail), _extract_context_pct(tail), tail)
+    except (subprocess.SubprocessError, OSError):
+        return TmuxActivityResult("Unknown", None, None)
+
+
+def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
+    if not lines:
+        return None
+    stripped = [l.strip() for l in lines if l.strip()]
+    if not stripped:
+        return None
+    tail = stripped[-5:]
+    if any(line == "❯" for line in tail):
+        return None
+    has_interactive = False
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                has_interactive = True
+                break
+        if has_interactive:
+            break
+    if not has_interactive:
+        for raw in stripped:
+            for pattern in _INTERACTIVE_CONTENT:
+                if pattern in raw:
+                    has_interactive = True
+                    break
+            if has_interactive:
+                break
+    if not has_interactive:
+        return None
+    header = ""
+    for raw in stripped:
+        if "☐" in raw:
+            header = raw.replace("☐", "").strip()
+            break
+    options = []
+    selected_num = 0
+    opt_re = re.compile(r"^(❯)?\s*(\d+)\.\s+(.+)")
+    for raw in stripped:
+        m = opt_re.match(raw)
+        if m:
+            is_selected = m.group(1) == "❯"
+            num = int(m.group(2))
+            label = m.group(3).strip()
+            options.append({"num": num, "label": label, "selected": is_selected})
+            if is_selected:
+                selected_num = num
+    if not options:
+        return None
+    return cast(
+        QuestionDetails,
+        {
+            "header": header,
+            "options": options,
+            "selected_num": selected_num,
+        },
+    )
+
+
+def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
+    reply = reply.strip().lower()
+    if reply in ("skip", "cancel", "esc"):
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "Escape"], host=host, timeout=TIMEOUT_TMUX_SEND)
+        return True
+    if reply.isdigit():
+        target_num = int(reply)
+        option_nums = [o["num"] for o in details["options"]]
+        if target_num not in option_nums:
+            return False
+        target_idx = option_nums.index(target_num)
+        current_idx = 0
+        for i, o in enumerate(details["options"]):
+            if o["selected"]:
+                current_idx = i
+                break
+        diff = target_idx - current_idx
+        keys = []
+        if diff > 0:
+            keys = ["Down"] * diff
+        elif diff < 0:
+            keys = ["Up"] * abs(diff)
+        keys.append("Enter")
+        for key in keys:
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=host, timeout=TIMEOUT_TMUX_SEND)
+            _clock.sleep(DELAY_BRIEF)
+        return True
+    return False
+
+
+def _get_claude_pid(pane_pid: str, host: str | None = None) -> str | None:
+    try:
+        result = _remote_run(
+            ["pgrep", "-P", str(pane_pid), "-f", "claude"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    output = result.stdout.strip().splitlines()
+    if not output:
+        return None
+    return output[0].strip()
+
+
+def _child_count(pid: str, host: str | None = None) -> int:
+    if not pid:
+        return 0
+    try:
+        result = _remote_run(
+            ["pgrep", "-P", str(pid)], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if result.returncode != 0:
+        return 0
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEntry]:
+    pid_list = [str(pid) for pid in pids if pid]
+    if not pid_list:
+        return {}
+    try:
+        result = _remote_run(
+            ["ps", "-o", "pid=,%cpu=,state=", "-p", ",".join(pid_list)],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    stats = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3:
+            continue
+        pid = parts[0]
+        try:
+            cpu = float(parts[1])
+        except ValueError:
+            cpu = 0.0
+        state = parts[2]
+        stats[pid] = cast(ProcStatsEntry, {"cpu": cpu, "state": state})
+    return stats
+
+
+def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
+    try:
+        cmd = ["df", "-g", "/"] if is_mac else ["df", "-BG", "--output=size,used,avail,pcent", "/"]
+        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split()
+        if is_mac:
+            if len(parts) < 6:
+                return None
+            return {"pct": int(parts[4].rstrip("%")), "free_gb": float(parts[3]), "total_gb": float(parts[1])}
+        if len(parts) < 4:
+            return None
+        return {
+            "pct": int(parts[3].rstrip("%")),
+            "free_gb": float(parts[2].rstrip("G")),
+            "total_gb": float(parts[0].rstrip("G")),
+        }
+    except (ValueError, KeyError):
+        return None
+
+
+def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
+    try:
+        if is_mac:
+            r = _remote_run(
+                ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+            if r.returncode != 0:
+                return None
+            lines = r.stdout.strip().splitlines()
+            if len(lines) < 2:
+                return None
+            total = int(lines[0])
+            page_size = 16384
+            free_p = inactive_p = spec_p = 0
+            for line in lines[1:]:
+                if "page size of" in line:
+                    try:
+                        page_size = int(line.split("page size of")[1].strip().rstrip("."))
+                    except (ValueError, IndexError):
+                        pass
+                elif "Pages free:" in line:
+                    free_p = int(line.split(":")[1].strip().rstrip("."))
+                elif "Pages inactive:" in line:
+                    inactive_p = int(line.split(":")[1].strip().rstrip("."))
+                elif "Pages speculative:" in line:
+                    spec_p = int(line.split(":")[1].strip().rstrip("."))
+            avail = (free_p + inactive_p + spec_p) * page_size
+            used = total - avail
+        else:
+            r = _remote_run(["free", "-b"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+            if r.returncode != 0:
+                return None
+            mem_line = next((l for l in r.stdout.strip().splitlines() if l.startswith("Mem:")), None)
+            if not mem_line:
+                return None
+            parts = mem_line.split()
+            total = int(parts[1])
+            used = int(parts[2])
+            avail = int(parts[6]) if len(parts) >= 7 else total - used
+        total_gb = total / (1024**3)
+        used_gb = used / (1024**3)
+        avail_gb = avail / (1024**3)
+        pct = int((used / total) * 100) if total > 0 else 0
+        top_procs = _get_top_mem_procs(host)
+        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
+    except (ValueError, KeyError):
+        return None
+
+
+def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
+    try:
+        r = _remote_run(
+            ["ps", "aux", "--sort=-rss"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+        )
+        if r.returncode != 0:
+            return []
+        procs = []
+        for line in r.stdout.strip().splitlines()[1:6]:
+            parts = line.split(None, 10)
+            if len(parts) >= 11:
+                procs.append(
+                    cast(
+                        dict[str, object],
+                        {
+                            "pid": parts[1],
+                            "rss_gb": round(int(parts[5]) / (1024 * 1024), 1),
+                            "pct": parts[3],
+                            "cmd": parts[10][:80],
+                        },
+                    )
+                )
+        return procs
+    except (ValueError, KeyError):
+        return []
+
+
+def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
+    is_mac = bool(host and "mac" in host.lower())
+    if is_mac:
+        try:
+            r = _remote_run(
+                ["iostat", "-c", "2", "-w", "1"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            )
+            if r.returncode != 0:
+                return None
+            lines = r.stdout.strip().splitlines()
+            if len(lines) < 3:
+                return None
+            parts = lines[-1].split()
+            return (
+                {"iowait_pct": 0, "read_iops": int(float(parts[0])), "write_iops": int(float(parts[1])), "util_pct": 0}
+                if len(parts) >= 6
+                else None
+            )
+        except (ValueError, KeyError):
+            return None
+    try:
+        r = _remote_run(
+            ["iostat", "-x", "-d", "1", "2", "-o", "JSON"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_REMOTE_CMD,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            data = cast(dict[str, object], json.loads(r.stdout))
+            _sysstat = data.get("sysstat", {})
+            _hosts = _sysstat.get("hosts", [{}]) if isinstance(_sysstat, dict) else [{}]
+            _host0 = _hosts[0] if isinstance(_hosts, list) and _hosts else {}
+            stats = _host0.get("statistics", []) if isinstance(_host0, dict) else []
+            if isinstance(stats, list) and len(stats) >= 2:
+                disks = stats[-1].get("disk", []) if isinstance(stats[-1], dict) else []
+                r_iops = sum(d.get("r/s", 0) for d in disks)
+                w_iops = sum(d.get("w/s", 0) for d in disks)
+                m_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0)
+                iowait = 0.0
+                r2 = _remote_run(
+                    ["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+                )
+                if r2.returncode == 0:
+                    vlines = r2.stdout.strip().splitlines()
+                    if len(vlines) >= 3:
+                        vp = vlines[-1].split()
+                        if len(vp) >= 16:
+                            iowait = float(vp[15])
+                return {
+                    "iowait_pct": round(iowait, 1),
+                    "read_iops": round(r_iops),
+                    "write_iops": round(w_iops),
+                    "util_pct": round(m_util, 1),
+                }
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        _log(_LOG_DEBUG, "parse:io", f"{type(exc).__name__}: {exc}")
+    try:
+        r = _remote_run(["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        if r.returncode != 0:
+            return None
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 3:
+            return None
+        parts = lines[-1].split()
+        if len(parts) < 16:
+            return None
+        return {
+            "iowait_pct": round(float(parts[15]), 1),
+            "read_iops": int(parts[8]),
+            "write_iops": int(parts[9]),
+            "util_pct": 0,
+        }
+    except (ValueError, KeyError):
+        return None
+
+
+def _probe_metric(
+    remote_hosts: set[str],
+    *,
+    check_fn: Callable[..., dict[str, Any] | None],  # type: ignore[explicit-any]
+    usage_store: dict[str, Any],
+    alerted_store: dict[str, Any],  # type: ignore[explicit-any]
+    alert_ts_store: dict[str, float],
+    cooldown: int | float,
+    is_critical_fn: Callable[[dict[str, Any]], bool],  # type: ignore[explicit-any]
+    alert_fmt: Callable[[str, dict[str, Any]], str],  # type: ignore[explicit-any]
+    recovery_fmt: Callable[[str, dict[str, Any]], str],
+    category: str,
+) -> None:  # type: ignore[explicit-any]
+    """Generic host metric probe: check -> threshold -> alert with cooldown."""
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
+        if host and _is_host_down(host):
+            continue
+        host_label = host or "VPS"
+        usage = check_fn(host)
+        if usage is None:
+            continue
+        is_crit = is_critical_fn(usage)
+        alert_text = None
+        with watchdog.lock:
+            usage_store[host_label] = {**usage, "ts": now}
+            was_alerted = alerted_store.get(host_label, False)
+            if is_crit and not was_alerted:
+                if now - alert_ts_store.get(host_label, 0) >= cooldown:
+                    alert_text = alert_fmt(host_label, usage)
+                    alert_ts_store[host_label] = now
+                    alerted_store[host_label] = True
+            elif not is_crit and was_alerted:
+                alerted_store[host_label] = False
+                alert_text = recovery_fmt(host_label, usage)
+        _watchdog_alert(category, alert_text)
+
+
+def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
+    _probe_metric(
+        remote_hosts,
+        check_fn=_check_disk_usage,  # type: ignore[arg-type]
+        usage_store=host_health.disk_usage,
+        alerted_store=host_health.disk_alerted,
+        alert_ts_store=host_health.disk_alert_ts,
+        cooldown=_res_cfg.disk_cooldown,
+        is_critical_fn=lambda u: u["pct"] >= _res_cfg.disk_alert_pct or u["free_gb"] < _res_cfg.disk_alert_gb,
+        alert_fmt=lambda h, u: f"🔴 Disk space critical: {h}\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
+        recovery_fmt=lambda h, u: f"✅ Disk space recovered: {h} — {u['pct']}% ({u['free_gb']:.1f}GB free)",
+        category="Disk",
+    )
+
+
+def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
+    def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
+        text = f"🧠 Memory critical: {h}\nUsage: {u['pct']}% ({u['avail_gb']:.1f}GB available of {u['total_gb']:.0f}GB)"
+        for p in u.get("top_procs", [])[:3]:
+            text += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+        return text
+
+    _probe_metric(
+        remote_hosts,
+        check_fn=_check_mem_usage,  # type: ignore[arg-type]
+        usage_store=host_health.mem_usage,
+        alerted_store=host_health.mem_alerted,
+        alert_ts_store=host_health.mem_alert_ts,
+        cooldown=_res_cfg.mem_cooldown,
+        is_critical_fn=lambda u: u["pct"] >= _res_cfg.mem_threshold_pct or u["avail_gb"] < _res_cfg.mem_threshold_gb,
+        alert_fmt=_fmt,
+        recovery_fmt=lambda h, u: f"✅ Memory recovered: {h} — {u['pct']}% ({u['avail_gb']:.1f}GB available)",
+        category="Memory",
+    )
+
+
+def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
+    _probe_metric(
+        remote_hosts,
+        check_fn=_check_io_usage,  # type: ignore[arg-type]
+        usage_store=host_health.io_usage,
+        alerted_store=host_health.io_alerted,
+        alert_ts_store=host_health.io_alert_ts,
+        cooldown=_res_cfg.io_cooldown,
+        is_critical_fn=lambda u: u["iowait_pct"] >= _res_cfg.io_iowait_pct,
+        alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w"
+        + (f" | disk util: {u['util_pct']}%" if u["util_pct"] else ""),
+        recovery_fmt=lambda h, u: f"✅ IO recovered: {h} — iowait {u['iowait_pct']}%, IOPS {u['read_iops']}r+{u['write_iops']}w",
+        category="IO",
+    )
+
+
+def _get_cpu_hogs(host: str | None = None) -> list[CpuHogEntry]:
+    is_mac = bool(host and "mac" in host.lower())
+    try:
+        cmd = (
+            ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
+            if is_mac
+            else ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
+        )
+        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
+        if r.returncode != 0:
+            return []
+        hogs: list[CpuHogEntry] = []
+        for line in r.stdout.strip().splitlines()[1:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                pid = int(parts[0])
+                cpu = float(parts[1])
+            except (ValueError, IndexError):
+                continue
+            if cpu < _res_cfg.cpu_hog_pct:
+                break
+            etime_str = parts[2]
+            days = 0
+            if "-" in etime_str:
+                day_part, etime_str = etime_str.split("-", 1)
+                days = int(day_part)
+            tp = etime_str.split(":")
+            try:
+                mins = (
+                    days * 1440 + (int(tp[0]) * 60 + int(tp[1]) if len(tp) == 3 else int(tp[0]))
+                    if len(tp) >= 2
+                    else None
+                )
+            except (ValueError, IndexError):
+                mins = None
+            if mins is None:
+                continue
+            hogs.append({"pid": pid, "cpu": cpu, "etime_min": mins, "cmd": parts[3][:80] if len(parts) > 3 else "?"})
+        return hogs
+    except (ValueError, KeyError):
+        return []
+
+
+def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
+        if host and _is_host_down(host):
+            continue
+        host_label = host or "VPS"
+        real_hogs = [h for h in _get_cpu_hogs(host) if h["etime_min"] >= CPU_HOG_DURATION_MIN]
+        with watchdog.lock:
+            host_health.cpu_hogs[host_label] = real_hogs
+        if real_hogs and now - host_health.cpu_hog_alert_ts.get(host_label, 0) >= _res_cfg.cpu_hog_cooldown:
+            lines = []
+            for h in real_hogs[:5]:
+                elapsed = (
+                    f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
+                )
+                lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
+            host_health.cpu_hog_alert_ts[host_label] = now
+            _watchdog_alert(
+                "CPU hog",
+                f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines),
+            )
+
+
+def _check_worktree_usage(host: str | None = None) -> dict[str, Any] | None:  # type: ignore[explicit-any]
+    is_mac = bool(host and "mac" in host.lower())
+    try:
+        du_flag = "-sk" if is_mac else "-sb"
+        cmd = [
+            "bash",
+            "-c",
+            f'find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | while read d; do du {du_flag} "$d" 2>/dev/null; done',
+        ]
+        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+        if r.returncode != 0:
+            return None
+        items: list[WorktreeItemDict] = []
+        total_bytes = 0
+        for line in r.stdout.strip().splitlines() if r.stdout.strip() else []:
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                size_val = int(parts[0])
+            except (ValueError, IndexError):
+                continue
+            size_bytes = size_val * 1024 if is_mac else size_val
+            total_bytes += size_bytes
+            items.append({"path": parts[1], "size_gb": round(size_bytes / (1024**3), 1)})
+        return {"total_gb": round(total_bytes / (1024**3), 1), "items": items}
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+
+
+def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
+    def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
+        top = sorted(u.get("items", []), key=lambda x: x["size_gb"], reverse=True)[:5]
+        return (
+            f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n"
+            + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
+        )
+
+    _probe_metric(
+        remote_hosts,
+        check_fn=_check_worktree_usage,
+        usage_store=host_health.worktree_usage,
+        alerted_store=host_health.worktree_alerted,
+        alert_ts_store=host_health.worktree_alert_ts,
+        cooldown=_res_cfg.worktree_cooldown,
+        is_critical_fn=lambda u: u["total_gb"] >= _res_cfg.worktree_threshold_gb,
+        alert_fmt=_fmt,
+        recovery_fmt=lambda h, u: f"✅ Worktree size recovered: {h} — {u['total_gb']:.1f}GB (below {_res_cfg.worktree_threshold_gb}GB)",
+        category="Worktree",
+    )
+
+
+def _probe_tailscale() -> None:
+    now = _clock.time()
+    try:
+        r = _subprocess_runner.run(
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+        )
+        is_up = r.returncode == 0 and json.loads(r.stdout).get("BackendState") == "Running"
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        is_up = False
+    alert_text = None
+    with watchdog.lock:
+        if not is_up and not host_health.tailscale_down:
+            if now - host_health.tailscale_alert_ts >= _res_cfg.infra_cooldown:
+                host_health.tailscale_down = True
+                host_health.tailscale_alert_ts = now
+                alert_text = "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\nRun: sudo tailscale up"
+        elif is_up and host_health.tailscale_down:
+            host_health.tailscale_down = False
+            alert_text = "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
+    _watchdog_alert("Tailscale", alert_text)
+
+
+# Bridge proxy helpers removed — real definitions later in this file
+
+
+# --- Pure display functions ---
+def _normalize_activity(raw: str) -> str:
+    if not raw:
+        return raw
+    m = re.match(r"^([A-Z][a-z]+ing)\s*(?:\((.+)\))?\s*$", raw)
+    if m:
+        verb = m.group(1)
+        dur = m.group(2)
+        if dur:
+            return f"Thinking ({dur})"
+        return "Thinking"
+    return raw
+
+
+def _team_attention_summary(watchdog_status: str, activity: str) -> tuple[str, str, int]:
+    status = (watchdog_status or "").lower()
+    act = (activity or "").lower()
+    if "rate limit" in act:
+        return "🔴", "rate limit", 0
+    if "error" in act or "traceback" in act or "not running" in act or "failed" in act:
+        return "🔴", "error", 0
+    if "needs input" in status or "needs reply" in status:
+        return "🟡", "needs reply", 1
+    if "stuck" in status or "no progress" in status:
+        return "🔴", "stuck", 0
+    if "poisoned" in status or "error loop" in status:
+        return "🔴", "error loop", 0
+    if "dead" in status or "not responding" in status:
+        return "🔴", "stopped", 0
+    if "offline" in status:
+        return "🔴", "offline", 0
+    if "exited" in status or "session ended" in status:
+        return "🔴", "session ended", 0
+    waiting_signals = (
+        "waiting for",
+        "awaiting",
+        "approval",
+        "accept edits",
+        "confirm",
+        "in plan mode",
+    )
+    if "working (waiting)" in status or any(sig in act for sig in waiting_signals):
+        return "🟡", "needs reply", 1
+    return "🟢", "ok", 2
+
+
+def _format_watchdog_status_pure(
+    name: str,
+    pending_lookup: Callable[[str], bool] | None = None,
+    state_snapshot: dict[str, WorkerStateEntry] | None = None,
+    clock_now: float | None = None,
+) -> str:
+    if pending_lookup is None:
+        pending_lookup = lambda _: False  # noqa: E731
+    if clock_now is None:
+        clock_now = time.time()
+    entry = state_snapshot.get(name) if state_snapshot else None
+    if not entry:
+        return "Working" if pending_lookup(name) else "Ready"
+    state, _reason, since = entry
+    now = clock_now
+    _SIMPLE = {
+        "READY": "Ready",
+        "BUSY_TOOL": "Working",
+        "BUSY_THINKING": "Thinking",
+        "WAITING": "Working",
+        "DEAD": "Not responding",
+        "HOST_OFFLINE": "Host offline",
+        "OFFLINE": "Offline",
+        "EXITED": "Session ended",
+        "UNTRACKED_BUSY": "Working",
+    }
+    if state in _SIMPLE:
+        return _SIMPLE[state]
+    minutes = max(0, int((now - since) / 60)) if since else 0
+    if state == "WAITING_INPUT":
+        return f"Needs reply ({minutes}m)"
+    if state == "STUCK":
+        age_match = re.search(r"age=(\d+)s", _reason) if _reason else None
+        if age_match:
+            minutes = int(age_match.group(1)) // 60
+        return f"No progress ({minutes}m)"
+    if state == "POISONED":
+        return f"Error loop ({minutes}m)"
+    return state.lower()
+
+
+def _format_team_lines_pure(
+    registered: dict[str, TmuxSessionDict],
+    active: str | None,
+    pending_lookup: Callable[[str], bool] | None = None,
+    worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None,
+    *,
+    state_snapshot: dict[str, WorkerStateEntry] | None = None,
+    clock_now: float | None = None,
+    normalize_backend_fn: Callable[[str | None], str] | None = None,
+) -> list[str]:
+    if pending_lookup is None:
+        pending_lookup = lambda _: False  # noqa: E731
+    if worker_live is None:
+        worker_live = {}
+    if state_snapshot is None:
+        state_snapshot = {}
+    if clock_now is None:
+        clock_now = time.time()
+    if normalize_backend_fn is None:
+        normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
+    backend_values = set()
+    for name, session in registered.items():
+        live = worker_live.get(name, {})
+        backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
+        backend_values.add(backend)
+    show_backend = len(backend_values) > 1
+    rows = []
+    counts = {"🔴": 0, "🟡": 0, "🟢": 0}
+    for name in sorted(registered.keys()):
+        session = registered[name]
+        watchdog_status = _format_watchdog_status_pure(
+            name, pending_lookup, state_snapshot=state_snapshot, clock_now=clock_now
+        )
+        live = worker_live.get(name, {})
+        backend = normalize_backend_fn(live.get("backend") or session.get("backend"))
+        raw_activity = str(live.get("activity") or "").strip()
+        if not raw_activity or raw_activity == "Unknown":
+            raw_activity = watchdog_status
+        activity = _normalize_activity(raw_activity)
+        if len(activity) > 42:
+            activity = activity[:39].rstrip() + "..."
+        context_pct = str(live.get("context_pct") or "").strip()
+        icon, blocker, severity_rank = _team_attention_summary(watchdog_status, raw_activity)
+        counts[icon] += 1
+        name_cell = f"{name} 🎯" if name == active else name
+        ctx_part = f" | ctx {context_pct}" if context_pct and context_pct != "--" else ""
+        row = f"{icon} {name_cell} — {activity}{ctx_part}"
+        if show_backend:
+            row += f" | backend={backend}"
+        focus_rank = 0 if name == active else 1
+        rows.append((severity_rank, focus_rank, name, blocker, row))
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
+    attention_rows = [f"{name} ({blocker})" for rank, _focus, name, blocker, _row in rows if rank < 2]
+    lines = []
+    focused = active or "(none)"
+    lines.append(
+        f"Team: {len(registered)} agents · focused: {focused} | "
+        f"🟢 {counts['🟢']} ok · 🟡 {counts['🟡']} need reply · 🔴 {counts['🔴']} blocked"
+    )
+    if attention_rows:
+        lines.append("Needs your reply: " + ", ".join(attention_rows))
+    lines.extend(row for _rank, _focus, _name, _blocker, row in rows)
+    return lines
+
+
+# --- State computation ---
+def compute_state(
+    tmux_exists: bool,
+    claude_pid: str | None,
+    pending: bool,
+    pending_ts: int | None,
+    pending_age: float,
+    children: int,
+    last_child_ts: float,
+    cpu: float,
+    last_hook_ts: float | None,
+    last_seen_claude: float | None,
+    now: float,
+    is_interactive: bool = True,
+    adapter_alive: bool = False,
+    poisoned_reason: str | None = None,
+) -> tuple[str, str]:
+    if not tmux_exists:
+        return "OFFLINE", "tmux missing"
+    if not is_interactive:
+        if adapter_alive:
+            return "BUSY_TOOL", "adapter running"
+        if pending:
+            if pending_age < STALE_PENDING:
+                return "WAITING", f"age={int(pending_age)}s"
+            hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+            if pending_age >= STALE_PENDING and not hook_since_pending:
+                if poisoned_reason is not None:
+                    return "POISONED", f"{poisoned_reason}"
+                return "STUCK", f"age={int(pending_age)}s"
+            return "WAITING", f"age={int(pending_age)}s"
+        return "READY", "idle"
+    if not claude_pid and last_seen_claude is not None:
+        if (now - last_seen_claude) > START_GRACE:
+            return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
+    if pending and children > 0:
+        return "BUSY_TOOL", f"children={children}"
+    if pending and children == 0:
+        if (pending_age <= THINK_GRACE) or ((now - last_child_ts) <= TOOL_GAP_GRACE) or (cpu >= CPU_ACTIVE):
+            return "BUSY_THINKING", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        if pending_age < STALE_PENDING:
+            return "WAITING", f"age={int(pending_age)}s"
+        hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+        if pending_age >= STALE_PENDING and cpu < CPU_IDLE and not hook_since_pending:
+            if poisoned_reason is not None:
+                return "POISONED", f"{poisoned_reason}"
+            return "STUCK", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        return "WAITING", f"age={int(pending_age)}s"
+    if not pending and children > 0:
+        return "UNTRACKED_BUSY", f"children={children}"
+    if claude_pid and not pending:
+        return "READY", "idle"
+    return "OFFLINE", "tmux alive, claude missing"
+
+
+def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
+    if tail_lines <= 0:
+        return ""
+    host = get_worker_host(name)
+    if host:
+        try:
+            remote_log = _remap_path(str(get_session_dir(name) / "adapter.log"), host)
+            r = _remote_run(
+                ["tail", "-n", str(tail_lines), remote_log],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+            return r.stdout if r.returncode == 0 else ""
+        except (subprocess.SubprocessError, OSError):
+            return ""
+    log_path = get_session_dir(name) / "adapter.log"
+    if not log_path.exists():
+        return ""
+    try:
+        with log_path.open("r", errors="ignore") as fh:
+            lines = fh.readlines()
+        return "".join(lines[-tail_lines:])
+    except OSError:
+        return ""
+
+
+# --- Watchdog alerting ---
+def _watchdog_alert(category: str, text: str | None) -> None:
+    if not text or not admin_chat_id:
+        return
+    try:
+        import telegram as _tg
+
+        _tg.transport.send_text(admin_chat_id, text)
+        _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        _log(_LOG_ERROR, "watchdog", f"{category} error: {e}")
+
+
+def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
+    if admin_chat_id is None:
+        return
+    now = _clock.time()
+    with watchdog.lock:
+        last = watchdog.last_alert_ts.get(name)
+    if last and (now - last) < ALERT_COOLDOWN:
+        _log(
+            _LOG_WARN,
+            "watchdog",
+            f"Alert suppressed for {name} ({state}): cooldown {now - last:.0f}s < {ALERT_COOLDOWN}s",
+        )
+        return
+    if state == "WAITING_INPUT":
+        with watchdog.lock:
+            details = watchdog.waiting_input_details.get(name)
+        header = details.get("header", "") if details else ""
+        title = f"🟡 {name} needs your reply"
+        if header:
+            title += f": {header}"
+        parts = [title]
+        if details and details.get("options"):
+            for o in details["options"]:
+                marker = "➔ " if o.get("selected") else "  "
+                parts.append(f"{marker}{o['num']}. {o['label']}")
+            max_num = max(o["num"] for o in details["options"])
+            parts.append(f'\nReply 1-{max_num} to choose, or "skip" to cancel.')
+        text = "\n".join(parts)
+    elif state == "STUCK":
+        age_match = re.search(r"age=(\d+)s", reason)
+        age_min = int(age_match.group(1)) // 60 if age_match else 0
+        age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
+        text = f"🔴 {name} has made no progress for {age_str}.\n/restart --clean {name} (starts fresh)"
+    elif state == "POISONED":
+        text = f"🔴 {name} is stuck in an error loop.\n/restart --clean {name} (starts fresh)"
+    elif state == "DEAD":
+        text = f"🔴 {name} stopped unexpectedly.\n/restart --clean {name} (starts fresh)"
+    elif state == "EXITED":
+        text = f"🟡 {name}'s session ended.\n/restart {name}"
+    elif state == "OFFLINE":
+        text = f"🔴 {name} is not running.\n/hire {name}"
+    else:
+        text = f"{name}: {state} ({reason}). Check /team"
+    try:
+        import telegram as _tg
+
+        result = _tg.transport.send_text(admin_chat_id, text)
+        if result and result.get("ok"):
+            _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
+            _res = result.get("result", {})
+            msg_id = _res.get("message_id") if isinstance(_res, dict) else None
+            with watchdog.lock:
+                watchdog.last_alert_ts[name] = now
+                if msg_id:
+                    watchdog.alert_msg_ids[name] = (msg_id, text)
+        else:
+            _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
+    except KeyError as e:
+        _log(_LOG_ERROR, "watchdog", f"Watchdog alert error: {e}")
+
+
+def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
+    now = _clock.time()
+    with watchdog.lock:
+        was_down = host_health.down.get(host, False)
+        if ok:
+            host_health.ssh_failures[host] = 0
+            host_health.last_error.pop(host, None)
+            if was_down:
+                host_health.down[host] = False
+                down_since = host_health.down_since.pop(host, now)
+                duration = int(now - down_since)
+                workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
+                _do_send = True
+                alert_text = f"✅ Host BACK UP: {host}\nWas down for {duration // 60}m {duration % 60}s\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
+            else:
+                _do_send = False
+                alert_text = None
+        else:
+            failures = host_health.ssh_failures.get(host, 0) + 1
+            host_health.ssh_failures[host] = failures
+            host_health.last_error[host] = error or "ssh probe failed"
+            if not was_down and failures >= HOST_DOWN_THRESHOLD:
+                host_health.down[host] = True
+                host_health.down_since[host] = now
+                workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
+                _do_send = True
+                alert_text = f"🔴 Host DOWN: {host}\nAfter {failures} consecutive SSH failures\nError: {error or 'unknown'}\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
+            else:
+                _do_send = False
+                alert_text = None
+    if _do_send:
+        _watchdog_alert("Host", alert_text)
+
+
+def _is_host_down(host: str) -> bool:
+    with watchdog.lock:
+        return host_health.down.get(host, False)
+
+
+def _send_resolved_alert(name: str, new_state: str) -> None:
+    if admin_chat_id is None:
+        return
+    good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
+    with watchdog.lock:
+        prev_state = watchdog.prev_worker_states.get(name)
+    if prev_state not in bad_states or new_state not in good_states:
+        return
+    restart_ts = watchdog.recent_restarts.get(name)
+    if restart_ts and _clock.time() - restart_ts < 30:
+        return
+    now = _clock.time()
+    last_resolved = watchdog.last_resolved_ts.get(name, 0)
+    if now - last_resolved < 180:
+        return
+    watchdog.last_resolved_ts[name] = now
+    with watchdog.lock:
+        alert_info = watchdog.alert_msg_ids.pop(name, None)
+    if alert_info:
+        old_msg_id, old_text = alert_info
+        resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
+        try:
+            import telegram as _tg
+
+            _tg.transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
+            _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
+            return
+        except (urllib.error.URLError, OSError, TimeoutError):
+            pass
+    text = f"✅ {name} is back to normal."
+    try:
+        import telegram as _tg
+
+        _tg.transport.send_text(admin_chat_id, text)
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        _log(_LOG_ERROR, "watchdog", f"Watchdog resolved alert error: {e}")
+
+
+def _handle_watchdog_transition(
+    name: str,
+    state: str,
+    reason: str,
+    since: float,
+    now: float | None = None,
+) -> None:
+    if now is None:
+        now = _clock.time()
+    bad_states = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT", "HOST_OFFLINE"}
+    good_states = {"READY", "BUSY_TOOL", "BUSY_THINKING"}
+    with watchdog.lock:
+        prev_state = watchdog.prev_worker_states.get(name)
+    state_changed = prev_state is None or prev_state != state
+    if state == "HOST_OFFLINE":
+        with watchdog.lock:
+            watchdog.prev_worker_states[name] = state
+        return
+    teleport_state_file = SESSIONS_DIR / name / "teleport_state"
+    if state in {"OFFLINE", "DEAD", "EXITED"} and teleport_state_file.exists():
+        with watchdog.lock:
+            watchdog.prev_worker_states[name] = state
+        return
+
+    def eligible_for_alert() -> bool:
+        if state in {"OFFLINE", "DEAD", "EXITED"}:
+            return since is not None and (now - since) >= START_GRACE
+        return True
+
+    GOOD_PROBE_THRESHOLD = 3
+    BAD_PROBE_THRESHOLD = 3
+    is_remote = bool(get_worker_host(name))
+    if state in bad_states:
+        with watchdog.lock:
+            watchdog.consecutive_good_probes[name] = 0
+        if is_remote and state in {"OFFLINE", "DEAD"}:
+            with watchdog.lock:
+                watchdog.consecutive_bad_probes[name] = watchdog.consecutive_bad_probes.get(name, 0) + 1
+                bad_count = watchdog.consecutive_bad_probes[name]
+            if bad_count < BAD_PROBE_THRESHOLD:
+                return
+        if state_changed or prev_state is None:
+            if eligible_for_alert():
+                _log(_LOG_WARN, "watchdog", f"State change {name}: {prev_state} -> {state} ({reason}), sending alert")
+                _send_watchdog_alert(name, state, reason)
+        elif state in {"OFFLINE", "DEAD", "EXITED"} and eligible_for_alert():
+            _send_watchdog_alert(name, state, reason)
+        with watchdog.lock:
+            watchdog.prev_worker_states[name] = state
+        return
+    if state in good_states and prev_state in bad_states:
+        with watchdog.lock:
+            watchdog.consecutive_good_probes[name] = watchdog.consecutive_good_probes.get(name, 0) + 1
+            watchdog.consecutive_bad_probes[name] = 0
+            good_count = watchdog.consecutive_good_probes[name]
+        if good_count >= GOOD_PROBE_THRESHOLD:
+            _send_resolved_alert(name, state)
+            with watchdog.lock:
+                watchdog.consecutive_good_probes[name] = 0
+                watchdog.prev_worker_states[name] = state
+        return
+    with watchdog.lock:
+        watchdog.consecutive_good_probes[name] = 0
+        watchdog.consecutive_bad_probes[name] = 0
+        watchdog.prev_worker_states[name] = state
+
+
+def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
+    with watchdog.lock:
+        prev = watchdog.worker_states.get(name)
+        if prev and prev[0] == state:
+            since = prev[2]
+        else:
+            since = now
+        watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
+    return since
+
+
+# --- Watchdog loop and helpers ---
+def watchdog_loop() -> None:
+    _disk_check_counter = 0
+    while not watchdog.stop_event.is_set():
+        try:
+            now = _clock.time()
+            registered = get_registered_sessions()
+            pane_pids = _tmux_pane_pids()
+            registered_names = set(registered.keys())
+            probe_failed = bool(registered_names) and not pane_pids
+            _watchdog_update_probe_failures(registered_names, probe_failed)
+            remote_workers, remote_pane_pids, failed_hosts = _watchdog_probe_remote_hosts(registered)
+            claude_pids, tmux_present, backend_info = _watchdog_collect_worker_pids(
+                registered, pane_pids, remote_pane_pids, now
+            )
+            stats = _watchdog_gather_cpu_stats(claude_pids)
+            _watchdog_evaluate_workers(
+                registered, tmux_present, claude_pids, backend_info, stats, probe_failed, failed_hosts, now
+            )
+            _watchdog_cleanup_stale(registered_names)
+            _disk_check_counter += 1
+            if _disk_check_counter >= 20:
+                _disk_check_counter = 0
+                _watchdog_resource_checks(set(remote_workers.keys()))
+        except (subprocess.SubprocessError, ValueError, KeyError) as e:
+            _log(_LOG_ERROR, "watchdog", f"Watchdog error: {e}")
+        watchdog.stop_event.wait(WATCHDOG_INTERVAL)
+
+
+def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bool) -> None:
+    if probe_failed:
+        for name in registered_names:
+            watchdog.consecutive_probe_failures[name] = watchdog.consecutive_probe_failures.get(name, 0) + 1
+    else:
+        for name in registered_names:
+            watchdog.consecutive_probe_failures[name] = 0
+
+
+def _watchdog_probe_remote_hosts(
+    registered: dict[str, TmuxSessionDict]
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
+    remote_workers: dict[str, list[tuple[str, str]]] = {}
+    for name, session in registered.items():
+        host = get_worker_host(name)
+        if host:
+            tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+            remote_workers.setdefault(host, []).append((name, tmux_name))
+    remote_pane_pids: dict[str, str] = {}
+    failed_hosts: set[str] = set()
+    for host, workers in remote_workers.items():
+        try:
+            r = _remote_run(
+                ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        remote_pane_pids[parts[0]] = parts[1]
+                _record_host_probe(host, ok=True)
+            else:
+                failed_hosts.add(host)
+                _record_host_probe(host, ok=False, error=f"tmux list-panes exit {r.returncode}")
+        except (subprocess.SubprocessError, KeyError) as e:
+            failed_hosts.add(host)
+            _record_host_probe(host, ok=False, error=str(e)[:200])
+    return remote_workers, remote_pane_pids, failed_hosts
+
+
+def _watchdog_collect_worker_pids(
+    registered: dict[str, TmuxSessionDict], pane_pids: dict[str, str], remote_pane_pids: dict[str, str], now: float
+) -> tuple[dict[str, str], dict[str, bool], dict[str, "Backend"]]:
+    from claudecode import Backend
+
+    claude_pids: dict[str, str] = {}
+    tmux_present: dict[str, bool] = {}
+    backend_info: dict[str, Backend] = {}
+    for name, session in registered.items():
+        backend_name = get_worker_backend(name, session)
+        backend = get_backend(backend_name)
+        backend_info[name] = backend
+        tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+        host = get_worker_host(name)
+        pane_pid = remote_pane_pids.get(tmux_name) if host else pane_pids.get(tmux_name)
+        tmux_exists = bool(pane_pid)
+        tmux_present[name] = tmux_exists
+        if not tmux_exists:
+            continue
+        if backend.is_interactive and pane_pid:
+            claude_pid = _get_claude_pid(pane_pid, host=host)
+            if claude_pid:
+                claude_pids[name] = claude_pid
+                with watchdog.lock:
+                    watchdog.last_seen_claude[name] = now
+            else:
+                with watchdog.lock:
+                    if name not in watchdog.last_seen_claude:
+                        watchdog.last_seen_claude[name] = now
+    return claude_pids, tmux_present, backend_info
+
+
+def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
+    pids_by_host: dict[str | None, list[str]] = {}
+    for name, pid in claude_pids.items():
+        host = get_worker_host(name)
+        pids_by_host.setdefault(host, []).append(pid)
+    stats: dict[str, ProcStatsEntry] = {}
+    for host, pids in pids_by_host.items():
+        stats.update(_ps_stats(pids, host=host))
+    return stats
+
+
+def _watchdog_evaluate_workers(
+    registered: dict[str, TmuxSessionDict],
+    tmux_present: dict[str, bool],
+    claude_pids: dict[str, str],
+    backend_info: dict[str, "Backend"],
+    stats: dict[str, ProcStatsEntry],
+    probe_failed: bool,
+    failed_hosts: set[str],
+    now: float,
+) -> None:
+    from claudecode import Backend
+
+    for name, session in registered.items():
+        tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+        tmux_exists = tmux_present.get(name, False)
+        if not tmux_exists and "tmux" not in session:
+            since = _record_worker_state(name, "EXITED", "session gone", now)
+            _handle_watchdog_transition(name, "EXITED", "session gone", since, now=now)
+            continue
+        if probe_failed and not tmux_exists and watchdog.consecutive_probe_failures.get(name, 0) < 3:
+            continue
+        host = get_worker_host(name)
+        if host and _is_host_down(host):
+            reason = f"host {host} offline"
+            since = _record_worker_state(name, "HOST_OFFLINE", reason, now)
+            _handle_watchdog_transition(name, "HOST_OFFLINE", reason, since, now=now)
+            continue
+        if host and host in failed_hosts and not tmux_exists:
+            continue
+        backend = backend_info.get(name)
+        if backend is None:
+            backend_name = get_worker_backend(name, session)
+            backend = get_backend(backend_name)
+        is_interactive = backend.is_interactive
+        adapter_alive = False
+        if not is_interactive:
+            with processes.adapter_pids_lock:
+                entry = processes.adapter_pids.get(name)
+            if entry:
+                proc, _stderr = entry
+                adapter_alive = proc.poll() is None
+        host = get_worker_host(name)
+        claude_pid = claude_pids.get(name) if is_interactive else None
+        cpu = 0.0
+        if claude_pid and claude_pid in stats:
+            cpu = stats[claude_pid].get("cpu", 0.0)
+        children_total = _child_count(claude_pid, host=host) if claude_pid else 0
+        children = _watchdog_compute_children(name, children_total, is_interactive, claude_pid, now)
+        if children > 0:
+            with watchdog.lock:
+                watchdog.last_child_ts[name] = now
+        _watchdog_track_activity(name, children, cpu, now)
+        pending_ts = _pending_timestamp(name)
+        pending = pending_ts is not None
+        with watchdog.lock:
+            last_activity = watchdog.last_activity_ts.get(name, 0.0)
+        if pending_ts:
+            effective_start = max(pending_ts, last_activity) if last_activity > pending_ts else pending_ts
+            pending_age = now - effective_start
+        else:
+            pending_age = 0.0
+        with watchdog.lock:
+            last_child_ts = watchdog.last_child_ts.get(name, 0.0)
+            last_hook_ts = watchdog.last_hook_ts.get(name)
+            last_seen_claude = watchdog.last_seen_claude.get(name)
+        if not is_interactive:
+            last_seen_claude = None
+        state_kw: dict[str, object] = dict(
+            tmux_exists=tmux_exists,
+            claude_pid=claude_pid,
+            pending=pending,
+            pending_ts=pending_ts,
+            pending_age=pending_age,
+            children=children,
+            last_child_ts=last_child_ts,
+            cpu=cpu,
+            last_hook_ts=last_hook_ts,
+            last_seen_claude=last_seen_claude,
+            now=now,
+            is_interactive=is_interactive,
+            adapter_alive=adapter_alive,
+        )
+        worker_state, reason = compute_state(**state_kw)  # type: ignore[arg-type]
+        worker_state, reason = _watchdog_refine_state(name, tmux_name, worker_state, reason, state_kw, host)
+        since = _record_worker_state(name, worker_state, reason, now)
+        _handle_watchdog_transition(name, worker_state, reason, since, now=now)
+
+
+def _watchdog_compute_children(
+    name: str, children_total: int, is_interactive: bool, claude_pid: str | None, now: float
+) -> int:
+    pending_ts = _pending_timestamp(name)
+    pending = pending_ts is not None
+    if is_interactive and claude_pid:
+        with watchdog.lock:
+            baseline = watchdog.idle_child_baseline.get(name)
+            if baseline is None:
+                watchdog.idle_child_baseline[name] = children_total
+                baseline = children_total
+            elif not pending:
+                baseline = min(baseline, children_total)
+                watchdog.idle_child_baseline[name] = baseline
+        return max(0, children_total - baseline)
+    return children_total
+
+
+def _watchdog_track_activity(name: str, children: int, cpu: float, now: float) -> None:
+    with watchdog.lock:
+        prev_children = watchdog.prev_children.get(name)
+        activity_increased = prev_children is not None and children > prev_children
+        if activity_increased or cpu >= CPU_ACTIVE:
+            watchdog.last_activity_ts[name] = now
+        watchdog.prev_children[name] = children
+
+
+def _watchdog_refine_state(
+    name: str,
+    tmux_name: str,
+    worker_state: str,
+    reason: str,
+    state_kw: dict[str, object],
+    host: str | None,
+) -> tuple[str, str]:
+    is_interactive = bool(state_kw.get("is_interactive", True))
+    pending = bool(state_kw.get("pending"))
+    pending_age = float(state_kw.get("pending_age", 0.0))
+    now = float(state_kw.get("now", 0.0))  # type: ignore[arg-type]
+    if worker_state == "STUCK":
+        watchdog.idle_streak[name] = watchdog.idle_streak.get(name, 0) + 1
+        streak = watchdog.idle_streak[name]
+        if streak < IDLE_STREAK_STUCK:
+            worker_state = "WAITING"
+        else:
+            if is_interactive and pending:
+                pane_text = _capture_pane_text(tmux_name, lines=15, host=host)
+                if pane_text:
+                    activity = _extract_activity(pane_text.splitlines())
+                    if activity == "Idle at prompt":
+                        _log(
+                            _LOG_WARN,
+                            "watchdog",
+                            f"Auto-clearing stale pending for {name} (idle at prompt, age={int(pending_age)}s)",
+                        )
+                        clear_pending(name)
+                        watchdog.idle_streak[name] = 0
+                        since = _record_worker_state(name, "READY", "idle (auto-cleared stale pending)", now)
+                        _handle_watchdog_transition(name, "READY", "idle (auto-cleared stale pending)", since, now=now)
+                        return "READY", "idle (auto-cleared stale pending)"
+            poisoned_reason = _detect_poisoned(name, tmux_name)
+            worker_state, reason = compute_state(**state_kw, poisoned_reason=poisoned_reason)  # type: ignore[arg-type]
+        reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+    elif worker_state == "POISONED":
+        streak = watchdog.idle_streak.get(name, 0)
+        if streak:
+            reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
+    else:
+        watchdog.idle_streak[name] = 0
+    if worker_state == "READY" and is_interactive:
+        pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
+        if pane_text:
+            pane_lines = pane_text.splitlines()
+            details = _extract_question_details(pane_lines)
+            if details:
+                with watchdog.lock:
+                    watchdog.waiting_input_details[name] = details
+                worker_state = "WAITING_INPUT"
+                header = details.get("header", "")
+                reason = f"question={header}" if header else "interactive prompt"
+    return worker_state, reason
+
+
+def _watchdog_cleanup_stale(registered_names: set[str]) -> None:
+    with watchdog.lock:
+        stale_dicts: list[dict[str, object]] = cast(
+            list[dict[str, object]],
+            [
+                watchdog.worker_states,
+                watchdog.last_child_ts,
+                watchdog.last_seen_claude,
+                watchdog.last_hook_ts,
+                watchdog.prev_worker_states,
+                watchdog.last_alert_ts,
+                watchdog.idle_streak,
+                watchdog.idle_child_baseline,
+                watchdog.prev_children,
+                watchdog.last_activity_ts,
+            ],
+        )
+        for d in stale_dicts:
+            for name in list(d.keys()):
+                if name not in registered_names:
+                    d.pop(name, None)
+    for name in list(watchdog.consecutive_probe_failures.keys()):
+        if name not in registered_names:
+            watchdog.consecutive_probe_failures.pop(name, None)
+
+
+def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
+    checks: list[tuple[str, Callable[[], None]]] = [
+        ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
+        ("Memory", lambda: _probe_mem_all_hosts(remote_hosts)),
+        ("IO", lambda: _probe_io_all_hosts(remote_hosts)),
+        ("CPU hog", lambda: _probe_cpu_hogs(remote_hosts)),
+        ("Worktree", lambda: _probe_worktree_sizes(remote_hosts)),
+        ("Tailscale", lambda: _probe_tailscale()),
+    ]
+    for label, check_fn in checks:
+        try:
+            check_fn()
+        except (subprocess.SubprocessError, OSError) as e:
+            _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
+
+
+# ============================================================
+# health
+# ============================================================
+
+import re
+from typing import Callable
+from core import _clock, DEFAULT_BACKEND
+from claudecode import (
+    TmuxSessionDict,
+    WorkerStateEntry,
+    normalize_backend,
+    watchdog,
+)
+
+
+def _format_watchdog_status(
+    name: str,
+    pending_lookup: Callable[[str], bool] | None = None,
+    state_snapshot: dict[str, WorkerStateEntry] | None = None,
+) -> str:
+    if pending_lookup is None:
+        pending_lookup = is_pending
+    if state_snapshot is None:
+        with watchdog.lock:
+            state_snapshot = dict(watchdog.worker_states)
+    return _format_watchdog_status_pure(
+        name,
+        pending_lookup=pending_lookup,
+        state_snapshot=state_snapshot,
+        clock_now=_clock.time(),
+    )
+
+
+def format_team_lines(  # type: ignore[no-redef]
+    registered: dict[str, TmuxSessionDict],
+    active: str | None,
+    pending_lookup: Callable[[str], bool] | None = None,
+    worker_live: dict[str, TmuxSessionDict] | dict[str, dict[str, str | None]] | None = None,
+) -> list[str]:
+    if pending_lookup is None:
+        pending_lookup = is_pending
+    with watchdog.lock:
+        state_snapshot = dict(watchdog.worker_states)
+    return _format_team_lines_pure(
+        registered,
+        active,
+        pending_lookup=pending_lookup,
+        worker_live=worker_live,
+        state_snapshot=state_snapshot,
+        clock_now=_clock.time(),
+        normalize_backend_fn=normalize_backend,
+    )
+
+
+# ============================================================
+# _transcript_render
+# ============================================================
+
+
+import json
+import os
+from pathlib import Path
+from typing import Callable, cast
+from core import _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG, _clock, _int_field
+from claudecode import (
+    _remote_run,
+    _remap_path,
+    _project_slug,
+    _get_remote_home,
+    normalize_cwd,
+    AuthorDetection,
+)
+from _types import TranscriptEntry, TranscriptStatsDict, ToolResultDict
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
+_TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
+_ICONS = (
+    json.loads((_TEMPLATE_DIR / "transcript_icons.json").read_text())
+    if (_TEMPLATE_DIR / "transcript_icons.json").exists()
+    else {}
+)
+
+_TRANSCRIPT_CHEVRON_SVG = _ICONS.get("chevron", "")
+_TRANSCRIPT_CLAUDE_AVATAR = _ICONS.get("claude_avatar", "")
+_TRANSCRIPT_DEFAULT_TOOL_SVG = _ICONS.get("default_tool", "")
+_TRANSCRIPT_TOOL_SVGS: dict[str, str] = _ICONS.get("tools", {})
+_TEAM_MEMBERS = {
+    "chen",
+    "geni",
+    "hiro",
+    "jin",
+    "kai",
+    "kelvin",
+    "kenji",
+    "lee",
+    "luck",
+    "mon",
+    "noa",
+    "ren",
+    "ryo",
+    "sora",
+    "taro",
+    "x",
+    "yuki",
+    "finn",
+}
+_MANAGER_AV = _ICONS.get("manager_avatar", "")
+_LOADING_CSS = (
+    (_TEMPLATE_DIR / "transcript_loading.css").read_text().strip()
+    if (_TEMPLATE_DIR / "transcript_loading.css").exists()
+    else ""
+)
+
+
+def _generate_member_avatar(name: str) -> str:
+    name_hash = hash(name) & 0xFFFFFFFF
+    hue = (name_hash % 36) * 10
+    sat = 55 + (name_hash >> 6 & 1) * 15
+    shape_idx = (name_hash >> 7) % 6
+    accent_idx = (name_hash >> 10) % 5
+    initials = name[:2].upper() if len(name) >= 2 else name.upper()
+    bg = f"hsl({hue},{sat}%,42%)"
+    fg = f"hsl({hue},{max(sat-20,30)}%,75%)"
+    shapes = [
+        '<circle cx="14" cy="14" r="14"/>',
+        '<rect x="1" y="1" width="26" height="26" rx="6"/>',
+        '<polygon points="14,0 28,7 28,21 14,28 0,21 0,7"/>',
+        '<polygon points="14,1 27,14 14,27 1,14"/>',
+        '<polygon points="14,0 28,10 22,28 6,28 0,10"/>',
+        '<rect x="0" y="0" width="28" height="28" rx="10"/>',
+    ]
+    accents = [
+        "",
+        f'<circle cx="14" cy="14" r="8" fill="none" stroke="{fg}" stroke-width="1.5" opacity=".3"/>',
+        f'<circle cx="7" cy="7" r="2" fill="{fg}" opacity=".2"/><circle cx="21" cy="7" r="2" fill="{fg}" opacity=".2"/>',
+        f'<line x1="4" y1="4" x2="24" y2="24" stroke="{fg}" stroke-width="1" opacity=".15"/><line x1="4" y1="24" x2="24" y2="4" stroke="{fg}" stroke-width="1" opacity=".15"/>',
+        f'<rect x="4" y="12" width="20" height="4" rx="2" fill="{fg}" opacity=".15"/>',
+    ]
+    return (
+        f'<div class="u-av"><svg viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">'
+        f'<g fill="{bg}">{shapes[shape_idx]}</g>'
+        f"{accents[accent_idx]}"
+        f'<text x="14" y="14" text-anchor="middle" dominant-baseline="central" '
+        f'fill="#fff" font-family="Inter,system-ui,sans-serif" font-size="11" font-weight="600" '
+        f'opacity=".9">{initials}</text></svg></div>'
+    )
+
+
+def _detect_message_author(text: str) -> AuthorDetection:
+    stripped = text.strip()
+    colon_pos = stripped.find(":")
+    if 0 < colon_pos <= 10:
+        prefix = stripped[:colon_pos].lower().strip()
+        rest = stripped[colon_pos + 1 :].strip()
+        if prefix == "manager":
+            return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
+        if prefix in _TEAM_MEMBERS:
+            return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
+    return AuthorDetection("manager", _MANAGER_AV, stripped)
+
+
+def _transcript_entry_to_html(
+    entry: TranscriptEntry, esc: Callable[[str], str], tool_results: dict[str, ToolResultDict] | None = None
+) -> str:
+    import base64 as _b64
+
+    if tool_results is None:
+        tool_results = {}
+    etype = entry.get("type", "")
+    msg = entry.get("message", {})
+    role = msg.get("role", "")
+    content = msg.get("content", "")
+    _chev = _TRANSCRIPT_CHEVRON_SVG
+    _claude_av = _TRANSCRIPT_CLAUDE_AVATAR
+    _tool_svgs = _TRANSCRIPT_TOOL_SVGS
+    _default_tool_svg = _TRANSCRIPT_DEFAULT_TOOL_SVG
+    parts: list[str] = []
+    ts_raw = entry.get("timestamp", "")
+    ts_html = ""
+    if ts_raw:
+        ts_html = f'<span class="ts" data-ts="{esc(ts_raw)}">{esc(ts_raw[:16].replace("T"," "))}</span>'
+    if etype == "user" and role == "user":
+        if isinstance(content, str) and content.strip():
+            raw = content.strip()
+            if raw.startswith("<task-notification>") or raw.startswith("<system-reminder>"):
+                return ""
+            _author, _avatar, _display = _detect_message_author(raw)
+            text = esc(_display)
+            if len(text) > 2000:
+                text = text[:2000] + "\n\n<em>… truncated</em>"
+            _name_html = f'<span class="u-name">{esc(_author)}</span>' if _author != "manager" else ""
+            parts.append(
+                f'<div class="user-msg">{_avatar}<div class="u-body">{_name_html}<div class="u-text">{text}{ts_html}</div></div></div>'
+            )
+        elif isinstance(content, list):
+            pass
+    elif etype == "assistant" and role == "assistant":
+        if isinstance(content, list):
+            for item in content:
+                ct = str(item.get("type", ""))
+                if ct == "thinking":
+                    raw_thinking = str(item.get("thinking", ""))
+                    if raw_thinking and raw_thinking.strip():
+                        tt = esc(raw_thinking[:3000])
+                        if len(raw_thinking) > 3000:
+                            tt += "\n… truncated"
+                        parts.append(
+                            f'<details class="think"><summary class="think-h">{_chev} Thinking</summary><div class="think-t">{tt}</div></details>'
+                        )
+                elif ct == "text":
+                    text = item.get("text", "")
+                    if text and text != "(no content)":
+                        b64 = _b64.b64encode(text.encode("utf-8")).decode("ascii")
+                        parts.append(f'<div class="a-text markdown" data-md="{b64}"></div>')
+                elif ct == "tool_use":
+                    tn = item.get("name", "?")
+                    ti = item.get("input", {})
+                    tool_svg = _tool_svgs.get(tn, _default_tool_svg)
+                    _INPUT_KEYS = {
+                        "Read": "file_path",
+                        "Write": "file_path",
+                        "Edit": "file_path",
+                        "Glob": "pattern",
+                        "Bash": "command",
+                        "Grep": "pattern",
+                        "Search": "pattern",
+                    }
+                    key = _INPUT_KEYS.get(tn)
+                    if key:
+                        inp = ti.get(key, "")
+                    elif tn == "Agent":
+                        inp = ti.get("description", "") or str(ti.get("prompt", ""))[:80]
+                    else:
+                        inp = json.dumps(ti, ensure_ascii=False)[:200]
+                    is_fp = tn in ("Read", "Write", "Edit") and inp and "/" in inp
+                    inp = str(inp)[:300]
+                    tool_id = item.get("id", "")
+                    tr = tool_results.get(tool_id, {})
+                    tr_text = tr.get("content", "")
+                    tr_err = tr.get("is_error", False)
+                    has_result = bool(tr_text and tr_text.strip() and tr_text != "Bash completed with no output")
+                    tr_esc = ""
+                    if has_result:
+                        tr_str = str(tr_text)[:5000]
+                        tr_esc = esc(tr_str)
+                        if len(str(tr_text)) > 5000:
+                            tr_esc += "\n… truncated"
+                    err_cls = " act-err" if tr_err else ""
+                    if tn == "Edit" and ti.get("old_string") is not None:
+                        fp = esc(ti.get("file_path", "?"))
+                        old = ti.get("old_string", "").splitlines(True)
+                        new = ti.get("new_string", "").splitlines(True)
+                        dl = [
+                            f'<div class="diff-del"><span class="diff-ln">{i+1}</span><span class="diff-sign">-</span>{esc(l.rstrip())}</div>'
+                            for i, l in enumerate(old[:60])
+                        ]
+                        dl += [
+                            f'<div class="diff-add"><span class="diff-ln">{i+1}</span><span class="diff-sign">+</span>{esc(l.rstrip())}</div>'
+                            for i, l in enumerate(new[:60])
+                        ]
+                        if len(old) > 60 or len(new) > 60:
+                            dl.append(
+                                '<div class="diff-ctx"><span class="diff-ln"></span><span class="diff-sign"> </span>… truncated</div>'
+                            )
+                        no, na, nm = len(old), len(new), min(len(old), len(new))
+                        stats = f'<span class="diff-stat"><span class="diff-plus">+{na-nm}</span> <span class="diff-minus">-{no-nm}</span> <span class="diff-mod">~{nm}</span></span>'
+                        pp = fp.rsplit("/", 1)
+                        fp_h = f'<span class="fp-dir">{esc(pp[0])}/</span>{esc(pp[1])}' if len(pp) > 1 else fp
+                        parts.append(
+                            f'<details class="act diff-act{err_cls}"><summary class="act-h">{tool_svg}<span class="fp">{fp_h}</span>{stats}{_chev}</summary><div class="diff-body">{chr(10).join(dl)}</div></details>'
+                        )
+                    elif tn == "Bash" and inp:
+                        body_html = f'<div class="act-cmd">{esc(inp)}</div>'
+                        if tr_esc:
+                            body_html += f'<div class="act-out{" act-out-err" if tr_err else ""}">{tr_esc}</div>'
+                        parts.append(
+                            f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}<span class="t-det">{esc(inp[:80])}</span>{_chev}</summary><div class="act-body">{body_html}</div></details>'
+                        )
+                    else:
+                        if is_fp:
+                            pp = inp.rsplit("/", 1)
+                            dp = esc(pp[0]) if len(pp) > 1 else ""
+                            bp = esc(pp[-1])
+                            inner = f'<span class="fp-dir">{dp}/</span>{bp}' if dp else bp
+                            label = f'<span class="fp">{inner}</span>'
+                        else:
+                            label = f'<span class="t-det">{esc(inp[:80])}</span>'
+                        if tr_esc and has_result:
+                            parts.append(
+                                f'<details class="act{err_cls}"><summary class="act-h">{tool_svg}{label}{_chev}</summary><div class="act-body"><pre class="t-out">{tr_esc}</pre></div></details>'
+                            )
+                        else:
+                            parts.append(f'<div class="chip">{tool_svg}{label}</div>')
+        elif isinstance(content, str) and content.strip():
+            b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
+            parts.append(f'<div class="a-text markdown" data-md="{b64}"></div>')
+    return "\n".join(parts)
+
+
+def _format_model_name(model_name: str) -> str:
+    import re as _re
+
+    s = model_name.replace("claude-", "")
+    s = _re.sub(r"-\d{8}$", "", s)
+    s = _re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", s)
+    s = _re.sub(r"-(\d+)\.(\d+)$", r" \1.\2", s)
+    s = s.replace("-", " ").title()
+    return s
+
+
+def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
+    n_user = sum(
+        1
+        for e in entries
+        if e.get("type") == "user"
+        and e.get("message", {}).get("role") == "user"
+        and isinstance(e.get("message", {}).get("content"), str)
+    )
+    n_tool = 0
+    n_edit = 0
+    lines_add = 0
+    lines_del = 0
+    lines_mod = 0
+    files_modified: set[str] = set()
+    for e in entries:
+        if e.get("type") != "assistant":
+            continue
+        for c in e.get("message", {}).get("content") or []:
+            if not isinstance(c, dict) or c.get("type") != "tool_use":
+                continue
+            n_tool += 1
+            ti = c.get("input", {})
+            cname = c.get("name")
+            fp = ti.get("file_path", "")
+            if cname == "Edit" and ti.get("old_string") is not None:
+                n_edit += 1
+                n_old = len(ti.get("old_string", "").splitlines(True))
+                n_new = len(ti.get("new_string", "").splitlines(True))
+                overlap = min(n_old, n_new)
+                lines_mod += overlap
+                lines_del += n_old - overlap
+                lines_add += n_new - overlap
+            if cname in ("Write", "Read", "Edit") and fp:
+                files_modified.add(fp)
+    model = version = git_branch = first_ts = last_ts = ""
+    input_tokens = output_tokens = 0
+    for e in entries:
+        if not model:
+            model = e.get("message", {}).get("model", "")
+        if not version:
+            version = e.get("version", "")
+        if not git_branch:
+            git_branch = e.get("gitBranch", "")
+        ts = e.get("timestamp", "")
+        if ts:
+            if not first_ts:
+                first_ts = ts
+            last_ts = ts
+        usage = e.get("message", {}).get("usage", {})
+        input_tokens += (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+        )
+        output_tokens += usage.get("output_tokens", 0)
+    duration_str = ""
+    if first_ts and last_ts:
+        try:
+            from datetime import datetime
+
+            total_s = max(
+                0,
+                int(
+                    (
+                        datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+                    ).total_seconds()
+                ),
+            )
+            d, rem = divmod(total_s, 86400)
+            h = rem // 3600
+            m = (rem % 3600) // 60
+            duration_str = f"{d}d {h}h" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
+        except (ValueError, TypeError, KeyError) as exc:
+            _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
+    return {
+        "n_user": n_user,
+        "n_tool": n_tool,
+        "n_edit": n_edit,
+        "lines_add": lines_add,
+        "lines_del": lines_del,
+        "lines_mod": lines_mod,
+        "n_files": len(files_modified),
+        "model": model,
+        "version": version,
+        "git_branch": git_branch,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration": duration_str,
+    }
+
+
+def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
+    import html as html_mod
+
+    esc = html_mod.escape
+    info = _transcript_sync.get(sync_key) or {}
+    status = info.get("status", "syncing")
+    progress = esc(info.get("progress", "Starting sync..."))
+    pct = info.get("pct", 0)
+    elapsed = int(_clock.time() - info.get("started", _clock.time()))
+    error = info.get("error")
+    if status == "error":
+        bar_html = '<div class="bar-fill err" style="width:100%"></div>'
+        msg = f'<p class="err-msg">Error: {esc(error or "Unknown error")}</p>'
+        meta_js = ""
+    else:
+        bar_html = f'<div class="bar-fill" style="width:{pct}%"></div>'
+        msg = ""
+        meta_js = '<meta http-equiv="refresh" content="2">'
+    spin = '<span class="spinner"></span>' if status == "syncing" else ""
+    return f'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loading {esc(name)}</title>{meta_js}<style>{_LOADING_CSS}</style></head><body><div class="card"><h1>Preparing Transcript</h1><p class="sub">{esc(name)}</p><div class="bar">{bar_html}</div><p class="progress">{spin}{progress}</p><p class="elapsed">{elapsed}s elapsed</p>{msg}</div></body></html>'
+
+
+def _transcript_html_head(name: str, esc: Callable[[str], str]) -> str:
+    return (
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(name)} — Transcript</title>'
+        '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">'
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">'
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">'
+        '<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>'
+        '<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>'
+        "<style>" + _TRANSCRIPT_CSS + '</style></head><body><div class="wrap"><div class="main"><div class="content">'
+    )
+
+
+def _transcript_html_nav(
+    name: str, stats: TranscriptStatsDict, prompts_filter_url: str, esc: Callable[[str], str]
+) -> str:
+    _nav = _ICONS.get("nav", {})
+    _info_svg = _nav.get("info", "")
+    _clock_svg = _nav.get("clock", "")
+    _model_svg = _nav.get("model", "")
+    _branch_svg = _nav.get("branch", "")
+    _chat_svg = _nav.get("chat", "")
+    _tool_svg = _nav.get("tool", "")
+    meta = []
+    if stats["first_ts"]:
+        meta.append(f"<span class='mi'>{_clock_svg}{esc(stats['first_ts'][:10])}</span>")
+    if stats["model"]:
+        meta.append(f"<span class='mi'>{_model_svg}{esc(stats['model'])}</span>")
+    if stats["git_branch"]:
+        meta.append(f"<span class='mi'>{_branch_svg}{esc(stats['git_branch'])}</span>")
+    meta.append(
+        f'<a class="mi" href="{prompts_filter_url}" style="cursor:pointer" title="Filter to prompts only">{_chat_svg}{stats["n_user"]} prompts</a>'
+    )
+    meta.append(f'<span class="mi">{_tool_svg}{stats["n_tool"]} tool call{"s" if stats["n_tool"] != 1 else ""}</span>')
+    return (
+        f'<header><div class="h-row"><h1>{esc(name)}</h1><button class="sb-toggle" onclick="document.querySelector(\'.sidebar\').classList.toggle(\'sb-open\')" title="Session info">{_info_svg}</button></div>'
+        f'<div class="meta">{"".join(meta)}</div></header>'
+    )
+
+
+def _transcript_html_entries(
+    page_entries: list[TranscriptEntry],
+    tool_results: dict[str, ToolResultDict],
+    search_val: str,
+    filter_banner: str,
+    search_result: str,
+    nav_html: str,
+    live_base_url: str,
+    name: str,
+    token: str,
+    search_query: str,
+    total: int,
+    per_page: int,
+    page: int,
+    total_pages: int,
+    esc: Callable[[str], str],
+    session_id: str | None,
+    filter_mode: str,
+) -> str:
+    _tool_results = tool_results
+    blocks = []
+    in_assistant_turn = False
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+
+    def _ctx_url(entry: TranscriptEntry) -> str:
+        if not search_query:
+            return ""
+        idx = entry.get("_idx", -1)
+        if idx < 0:
+            return ""
+        ctx_page = (idx // per_page) + 1
+        ctx_qs = []
+        if token:
+            ctx_qs.append(f"token={esc(token)}")
+        if session_id:
+            ctx_qs.append(f"sid={esc(session_id)}")
+        if per_page != 50:
+            ctx_qs.append(f"per_page={per_page}")
+        ctx_qs.append(f"page={ctx_page}")
+        return f'{_url_prefix}{"&".join(ctx_qs)}#e-{idx}'
+
+    for entry in page_entries:
+        etype = entry.get("type", "")
+        role = entry.get("message", {}).get("role", "")
+        is_tool_result = (
+            etype == "user"
+            and role == "user"
+            and isinstance(entry.get("message", {}).get("content"), list)
+            and any(
+                c.get("type") == "tool_result"
+                for c in entry.get("message", {}).get("content", [])
+                if isinstance(c, dict)
+            )
+        )
+        if is_tool_result:
+            continue
+        entry_html = _transcript_entry_to_html(entry, esc, tool_results=_tool_results)
+        if not entry_html:
+            continue
+        eidx = entry.get("_idx", -1)
+        anchor = f' id="e-{eidx}"' if eidx >= 0 else ""
+        curl = _ctx_url(entry)
+        is_assistant = etype == "assistant" and role == "assistant"
+        if is_assistant:
+            if curl:
+                if in_assistant_turn:
+                    blocks.append("</div>")
+                    in_assistant_turn = False
+                entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
+                blocks.append(entry_html)
+            else:
+                if not in_assistant_turn:
+                    blocks.append(f'<div class="turn-body"{anchor}>')
+                    in_assistant_turn = True
+                blocks.append(entry_html)
+        else:
+            if in_assistant_turn:
+                blocks.append("</div>")
+                in_assistant_turn = False
+            if curl:
+                entry_html = f'<a class="ctx-wrap" href="{curl}"{anchor}>{entry_html}</a>'
+            elif anchor:
+                entry_html = f"<div{anchor}>{entry_html}</div>"
+            blocks.append(entry_html)
+    if in_assistant_turn:
+        blocks.append("</div>")
+    hidden = "".join(
+        f"<input type='hidden' name='{k}' value='{esc(str(v))}'>"
+        for k, v in [
+            ("token", token),
+            ("sid", session_id),
+            ("per_page", per_page if per_page != 50 else ""),
+            ("filter", "prompts" if filter_mode == "prompts" else ""),
+        ]
+        if v
+    )
+    action = f' action="{esc(live_base_url)}"' if live_base_url else ""
+    upd_url = esc(live_base_url) + "/updates" if live_base_url else "/transcript/" + esc(name) + "/updates"
+    pg_url = esc(live_base_url) if live_base_url else "/transcript/" + esc(name)
+    search_attr = f' data-search="{esc(search_query)}"' if search_query else ""
+    return (
+        f'<form class="search-bar" method="get"{action}><input type="text" name="q" placeholder="Search transcript…" value="{search_val}"><button type="submit">Search</button>{hidden}</form>'
+        f"{filter_banner}{search_result}{nav_html}"
+        f'<div id="live-banner" class="live-banner" style="display:none"></div>'
+        f'<div class="thread" id="thread"{search_attr} data-total="{total}" data-name="{esc(name)}" data-token="{esc(token)}" data-updates-url="{upd_url}" data-page-url="{pg_url}" data-per-page="{per_page}" data-page="{page}" data-total-pages="{total_pages}">'
+        f'{"".join(blocks)}</div>{nav_html}'
+    )
+
+
+def _transcript_html_footer(
+    sid: str,
+    stats: TranscriptStatsDict,
+    file_size_str: str,
+    total: int,
+    page: int,
+    total_pages: int,
+    esc: Callable[[str], str],
+) -> str:
+    def _row(label: str, val: str) -> str:
+        return f"<div class='sb-row'><span class='sb-label'>{label}</span><span class='sb-val'>{val}</span></div>"
+
+    _d = '<div class="sb-divider"></div>'
+    rows = [_row("Session", esc(sid[:12]))]
+    if stats["model"]:
+        rows.append(_row("Model", esc(_format_model_name(stats["model"]))))
+    if stats["version"]:
+        rows.append(_row("Version", esc(stats["version"])))
+    if stats["git_branch"]:
+        rows.append(_row("Branch", esc(stats["git_branch"])))
+    rows.append(_d)
+    rows += [_row("Prompts", str(stats["n_user"])), _row("Tool calls", str(stats["n_tool"]))]
+    if stats["n_edit"]:
+        rows.append(_row("Edits", str(stats["n_edit"])))
+    if stats["n_files"]:
+        rows.append(_row("Files touched", str(stats["n_files"])))
+    if stats["lines_add"] or stats["lines_del"] or stats["lines_mod"]:
+        rows.append(
+            _d
+            + f'<div class="sb-lines"><span class="plus">+{stats["lines_add"]}</span><span class="minus">-{stats["lines_del"]}</span><span class="mod">~{stats["lines_mod"]}</span></div>'
+        )
+    if stats["duration"] or file_size_str or stats["input_tokens"]:
+        rows.append(_d)
+    if stats["duration"]:
+        rows.append(_row("Duration", esc(stats["duration"])))
+    if file_size_str:
+        rows.append(_row("File size", esc(file_size_str)))
+    if stats["input_tokens"]:
+        rows.append(_row("Input tokens", f'{stats["input_tokens"]:,}'))
+    if stats["output_tokens"]:
+        rows.append(_row("Output tokens", f'{stats["output_tokens"]:,}'))
+    rows += [_d, _row("Total entries", str(total)), _row("Page", f"{page}/{total_pages}")]
+    sb = "\n".join(rows)
+    return f'</div><aside class="sidebar"><div class="sidebar-inner"><div class="sb-title">Session Info</div>{sb}</div></aside></div></div><div class="jump"><a href="#" title="Top" onclick="window.scrollTo(0,0);return false">↑</a><a href="#" title="Bottom" onclick="window.scrollTo(0,document.body.scrollHeight);return false">↓</a></div>'
+
+
+def _transcript_html_search_js() -> str:
+    return "<script>\n" + _TRANSCRIPT_JS + "\n</script>\n</body>\n</html>\n"
+
+
+def _err_page(title: str, detail: str = "") -> str:
+    d = f"<p>{detail}</p>" if detail else ""
+    return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>{title}</h1>{d}</body></html>"
+
+
+def _render_transcript_html(
+    name: str,
+    session_id: str | None = None,
+    page: int | None = None,
+    per_page: int = 50,
+    search_query: str = "",
+    token: str = "",
+    filter_mode: str = "",
+    search_sort: str = "relevance",
+    live_base_url: str = "",
+) -> str:
+    import html as html_mod
+
+    esc = html_mod.escape
+    host = get_worker_host(name)
+    if host:
+        cwd = get_claude_session_cwd(name) or ""
+        sid: str | None = session_id or get_claude_session_id(name, authoritative=True)
+        if not sid:
+            return _err_page(f"No session found for {esc(name)}")
+        remote_home = _get_remote_home(host) or ""
+        if not remote_home:
+            return _err_page(f"Cannot resolve remote home for {esc(name)}")
+        remote_cwd = _remap_path(cwd, host)
+        remote_slug = _project_slug(remote_cwd)
+        jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+        transcript_path = None
+    else:
+        transcript_path, sid, cwd = _resolve_transcript_path(name, session_id)
+        if not sid:
+            return _err_page(f"No session found for {esc(name)}")
+        if not transcript_path or transcript_path == "syncing":
+            return _err_page("Transcript not found", f"Worker: {esc(name)}, Session: {esc(sid)}")
+        jsonl_path = str(transcript_path)
+    query_result = (
+        _run_transcript_query(
+            jsonl_path,
+            sid,
+            "search+stats",
+            host=host,
+            search=search_query,
+            page=page or 1,
+            per_page=per_page,
+            sort=search_sort,
+        )
+        if search_query
+        else _run_transcript_query(
+            jsonl_path, sid, "entries+stats", host=host, page=page, per_page=per_page, filter_mode=filter_mode
+        )
+    )
+    stats_result = query_result.pop("stats", None) if query_result else None
+    if not query_result:
+        if not transcript_path or not Path(str(transcript_path)).exists():
+            return _err_page("Transcript not available", f"Worker: {esc(name)}, Session: {esc(sid)}")
+        all_entries = _parse_transcript_entries(transcript_path)
+        total = len(all_entries)
+        for _i, _e in enumerate(all_entries):
+            _e["_idx"] = _i
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        if page is None:
+            page = total_pages
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * per_page
+        page_entries = all_entries[start : start + per_page]
+        stats = _transcript_stats(all_entries)
+        file_size_str = ""
+    else:
+        page_entries = []
+        _entries_raw = query_result.get("entries", [])
+        for e in _entries_raw if isinstance(_entries_raw, list) else []:
+            try:
+                entry = cast(TranscriptEntry, json.loads(e["raw_json"]))
+                entry["_idx"] = e.get("idx", -1)
+                page_entries.append(entry)
+            except (json.JSONDecodeError, KeyError):
+                continue
+        if search_query:
+            total = _int_field(query_result, "total_results")
+        else:
+            total = _int_field(query_result, "total")
+        total_pages = _int_field(query_result, "total_pages", 1)
+        page = _int_field(query_result, "page", 1)
+        _empty_stats: TranscriptStatsDict = {
+            "n_user": 0,
+            "n_tool": 0,
+            "n_edit": 0,
+            "lines_add": 0,
+            "lines_del": 0,
+            "lines_mod": 0,
+            "n_files": 0,
+            "model": "",
+            "version": "",
+            "git_branch": "",
+            "first_ts": "",
+            "last_ts": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "duration": "",
+        }
+        stats = cast(TranscriptStatsDict, stats_result) if stats_result else _empty_stats
+    file_size_str = ""
+    if not host:
+        try:
+            file_size_bytes = os.path.getsize(transcript_path) if transcript_path else 0
+            if file_size_bytes >= 1_048_576:
+                file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
+            elif file_size_bytes >= 1024:
+                file_size_str = f"{file_size_bytes / 1024:.0f} KB"
+            else:
+                file_size_str = f"{file_size_bytes} B"
+        except OSError as exc:
+            _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+    _tool_results: dict[str, ToolResultDict] = {}
+    for entry in page_entries:
+        ct = entry.get("message", {}).get("content", []) if entry.get("type") == "user" else []
+        if not isinstance(ct, list):
+            continue
+        for item in ct:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                rt = item.get("content", "")
+                rt = (
+                    "\n".join(str(r.get("text", "")) for r in rt if isinstance(r, dict) and r.get("type") == "text")
+                    if isinstance(rt, list)
+                    else str(rt)
+                )
+                _tool_results[str(item.get("tool_use_id", ""))] = cast(
+                    ToolResultDict, {"content": rt, "is_error": bool(item.get("is_error"))}
+                )
+    _url_prefix = live_base_url + "?" if live_base_url else "?"
+
+    def _qs(*extras: str) -> str:
+        return "&".join(
+            [
+                p
+                for p in [
+                    f"token={esc(token)}" if token else "",
+                    f"sid={esc(session_id)}" if session_id else "",
+                    f"per_page={per_page}" if per_page != 50 else "",
+                ]
+                if p
+            ]
+            + list(extras)
+        )
+
+    qs_base = _qs(
+        *(
+            ([f"q={esc(search_query)}"] if search_query else [])
+            + ([f"filter={esc(filter_mode)}"] if filter_mode else [])
+        )
+    )
+
+    def page_url(p: int | str) -> str:
+        return _url_prefix + (f"page={p}&{qs_base}" if qs_base else f"page={p}")
+
+    nav_html = ""
+    if total_pages > 1:
+
+        def _pg(label: str, p: int, dis: bool = False, cur: bool = False) -> str:
+            cls = " pg-dis" if dis else (" pg-cur" if cur else "")
+            return f'<a class="pg-btn{cls}" href="{page_url(p)}">{label}</a>'
+
+        start_p = max(1, min(page - 3, total_pages - 6))
+        end_p = min(total_pages, start_p + 6)
+        nav_items = [_pg("First", 1, page <= 1), _pg("Prev", page - 1, page <= 1)]
+        nav_items += [_pg(str(p), p, cur=(p == page)) for p in range(start_p, end_p + 1)]
+        nav_items += [_pg("Next", page + 1, page >= total_pages), _pg("Last", total_pages, page >= total_pages)]
+        nav_html = f'<nav class="pg">{"".join(nav_items)}<span class="pg-info">Page {page}/{total_pages} ({total} entries)</span></nav>'
+    search_val = esc(search_query) if search_query else ""
+    search_result = ""
+    if search_query:
+        sort_label = "by time" if search_sort == "time" else "by relevance"
+        alt_sort = "time" if search_sort == "relevance" else "relevance"
+        sort_url = _url_prefix + _qs(f"q={esc(search_query)}", f"sort={alt_sort}")
+        search_result = (
+            f'<div class="search-info">Found {total} matching entries for "<strong>{esc(search_query)}</strong>" '
+            f'(sorted {sort_label}) &middot; <a href="{sort_url}">sort by {alt_sort}</a></div>'
+        )
+    filt_qs = _qs("filter=prompts") if filter_mode != "prompts" else _qs()
+    prompts_filter_url = _url_prefix + filt_qs if filt_qs else _url_prefix.rstrip("?")
+    filter_banner = ""
+    if filter_mode == "prompts":
+        clear_url = _url_prefix + _qs() if _qs() else _url_prefix.rstrip("?")
+        filter_banner = f'<div class="search-info">Showing prompts only — <a href="{clear_url}">show all</a></div>'
+    return (
+        _transcript_html_head(name, esc)
+        + _transcript_html_nav(name, stats, prompts_filter_url, esc)
+        + _transcript_html_entries(
+            page_entries,
+            _tool_results,
+            search_val,
+            filter_banner,
+            search_result,
+            nav_html,
+            live_base_url,
+            name,
+            token,
+            search_query,
+            total,
+            per_page,
+            page,
+            total_pages,
+            esc,
+            session_id,
+            filter_mode,
+        )
+        + _transcript_html_footer(sid, stats, file_size_str, total, page, total_pages, esc)
+        + _transcript_html_search_js()
+    )
+
+
+# ============================================================
+# transcript
+# ============================================================
+
+import json
+import os
+import subprocess
+import threading
+from pathlib import Path
+from typing import Callable, TypedDict, cast
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_DEBUG,
+    _subprocess_runner,
+    _clock,
+    _int_field,
+)
+from claudecode import (
+    _remote_run,
+    _remap_path,
+    _project_slug,
+    _get_remote_home,
+    normalize_cwd,
+    AuthorDetection,
+)
+from _types import (
+    TranscriptSyncState,
+    TranscriptMessageUsage,
+    TranscriptMessageContent,
+    TranscriptMessage,
+    TranscriptEntry,
+    TranscriptStatsDict,
+    ToolResultDict,
+)
+
+
+# get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+
+
+class TranscriptSyncRegistry:
+    def __init__(self) -> None:
+        self._state: dict[str, TranscriptSyncState] = {}
+        self._lock: threading.Lock = threading.Lock()
+
+    def get(self, key: str) -> TranscriptSyncState | None:
+        with self._lock:
+            return self._state.get(key)
+
+    def set(self, key: str, value: TranscriptSyncState) -> None:
+        with self._lock:
+            self._state[key] = value
+
+    def update(self, key: str, **fields: object) -> None:
+        with self._lock:
+            if key in self._state:
+                self._state[key].update(fields)  # type: ignore[typeddict-item]
+
+    def get_started(self, key: str) -> float:
+        with self._lock:
+            entry = self._state.get(key, {})
+            return entry.get("started", 0)
+
+
+_transcript_sync = TranscriptSyncRegistry()
+INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indexer.py")
+
+
+def _run_transcript_query(
+    jsonl_path: str,
+    sid: str,
+    query: str,
+    host: str | None = None,
+    *,
+    page: int | None = None,
+    per_page: int | None = None,
+    search: str | None = None,
+    filter_mode: str | None = None,
+    sort: str | None = None,
+) -> dict[str, object] | None:
+    import bridge as _b  # late import to avoid circular dependency
+
+    db_path = f"/tmp/transcript-cache/{sid}.db"
+    script_path = INDEXER_SCRIPT
+    if host:
+        remote_home = _get_remote_home(host) or ""
+        if remote_home:
+            script_path = f"{remote_home}/claudecode-telegram/indexer.py"
+    cmd = ["python3", script_path, "transcript", "--jsonl", str(jsonl_path), "--db", db_path, "--query", query]
+    if page is not None:
+        cmd.extend(["--page", str(page)])
+    if per_page is not None:
+        cmd.extend(["--per-page", str(per_page)])
+    if search:
+        cmd.extend(["--search", search])
+    if filter_mode:
+        cmd.extend(["--filter", filter_mode])
+    if sort and sort != "relevance":
+        cmd.extend(["--sort", sort])
+    try:
+        if host:
+            r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=_b.TIMEOUT_LARGE_TRANSFER)
+        else:
+            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=_b.TIMEOUT_GIT_OP)
+        if r.returncode == 0 and r.stdout.strip():
+            return cast(dict[str, object], json.loads(r.stdout))
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
+    return None
+
+
+def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
+    import bridge as _b  # late import
+
+    try:
+        _transcript_sync.set(
+            key,
+            {
+                "status": "syncing",
+                "progress": "Connecting to remote host...",
+                "started": _clock.time(),
+                "path": None,
+                "error": None,
+            },
+        )
+        r = _subprocess_runner.run(
+            ["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
+            capture_output=True,
+            text=True,
+            timeout=_b.TIMEOUT_REMOTE_CMD,
+        )
+        remote_size = 0
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            remote_size = int(r.stdout.strip())
+        if remote_size > 0:
+            size_mb = remote_size / 1_048_576
+            _transcript_sync.update(key, progress=f"Syncing transcript ({size_mb:.1f} MB)...", remote_size=remote_size)
+        else:
+            _transcript_sync.update(key, progress="Syncing transcript...")
+        proc = _subprocess_runner.popen(
+            ["rsync", "-az", f"{host}:{remote_path}", str(local_tmp)], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:
+            while proc.poll() is None:
+                _clock.sleep(_b.DELAY_STARTUP)
+                try:
+                    if local_tmp.exists() and remote_size > 0:
+                        local_size = local_tmp.stat().st_size
+                        pct = min(99, int(local_size * 100 / remote_size))
+                        _transcript_sync.update(
+                            key,
+                            progress=f"Syncing... {pct}% ({local_size / 1_048_576:.1f} / {remote_size / 1_048_576:.1f} MB)",
+                            pct=pct,
+                        )
+                except (OSError, ValueError) as exc:
+                    _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
+            if proc.returncode == 0 and local_tmp.exists() and local_tmp.stat().st_size > 0:
+                _transcript_sync.set(
+                    key,
+                    {
+                        "status": "done",
+                        "progress": "Ready",
+                        "path": str(local_tmp),
+                        "started": _transcript_sync.get_started(key),
+                        "error": None,
+                    },
+                )
+            else:
+                stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                _transcript_sync.set(
+                    key,
+                    {
+                        "status": "error",
+                        "progress": "Sync failed",
+                        "started": _transcript_sync.get_started(key),
+                        "path": None,
+                        "error": stderr[:200] or "rsync failed",
+                    },
+                )
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
+        _transcript_sync.set(
+            key,
+            {
+                "status": "error",
+                "progress": "Sync failed",
+                "started": _transcript_sync.get_started(key),
+                "path": None,
+                "error": str(e)[:200],
+            },
+        )
+
+
+def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
+    import bridge as _b  # late import
+
+    cwd = get_claude_session_cwd(name)
+    if not cwd:
+        host = get_worker_host(name)
+        tmux_name = f"{_b.TMUX_PREFIX}{name}"
+        try:
+            assert _b.worker_manager is not None
+            cwd = normalize_cwd(_b.worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
+        except Exception:
+            pass
+    cwd = cwd or os.path.expanduser("~")
+    sid = session_id or get_claude_session_id(name, authoritative=True)
+    if not sid:
+        return None, "", cwd
+    slug = _project_slug(cwd)
+    transcript_path = Path.home() / ".claude" / "projects" / slug / f"{sid}.jsonl"
+    if not transcript_path.exists():
+        reg = _b._load_registry().get("workers", {})
+        entry = reg.get(name, {})
+        host = entry.get("host")
+        if host:
+            try:
+                remote_home = _get_remote_home(host)
+                if remote_home:
+                    remote_cwd = _remap_path(cwd, host)
+                    remote_slug = _project_slug(remote_cwd)
+                    remote_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+                    local_tmp = Path(f"/tmp/transcript-{name}-{sid}.jsonl")
+                    sync_key = f"{name}:{sid}"
+                    sync_info = _transcript_sync.get(sync_key)
+                    if sync_info and sync_info["status"] == "done" and local_tmp.exists():
+                        transcript_path = local_tmp
+                    elif sync_info and sync_info["status"] == "syncing":
+                        return "syncing", sid, cwd
+                    elif sync_info and sync_info["status"] == "error":
+                        err = sync_info.get("error", "unknown error")
+                        _log(_LOG_WARN, "transcript", f"sync failed for {name}:{sid}: {err}")
+                        return None, sid, cwd
+                    else:
+                        _b._task_pool.submit(_start_transcript_sync, name, host, remote_path, local_tmp, sync_key)
+                        return "syncing", sid, cwd
+            except (OSError, subprocess.SubprocessError) as exc:
+                _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+    if transcript_path.exists():
+        return str(transcript_path), sid, cwd
+    return None, sid, cwd
+
+
+def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
+    entries = []
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = cast(TranscriptEntry, json.loads(line))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            etype = entry.get("type", "")
+            if etype in ("progress", "queue-operation", "file-history-snapshot"):
+                continue
+            if etype == "system":
+                continue
+            entries.append(entry)
+    return entries
+
+
+def handle_transcript_endpoint(handler, parsed) -> None:
+    import bridge as _b
+
+    try:
+        from urllib.parse import parse_qs
+
+        query_params = parse_qs(parsed.query)
+        token = query_params.get("token", [None])[0]
+        if not _b.tokens.validate_rewind(token):
+            handler._send_html(
+                _err_page(
+                    "Session Expired",
+                    "This link has expired or is invalid. Send <code>/rewind &lt;name&gt;</code> in Telegram to get a fresh 5-minute link.",
+                ).encode("utf-8"),
+                403,
+            )
+            return
+        parts = parsed.path.rstrip("/").split("/")
+        if len(parts) < 3 or not parts[2]:
+            handler._send_json(400, {"error": "Usage: /transcript/<worker_name>"})
+            return
+        name = parts[2]
+        if len(parts) >= 4 and parts[3] == "updates":
+            query_params = parse_qs(parsed.query)
+            since = int(query_params.get("since", [0])[0])
+            session_id = query_params.get("sid", [None])[0]
+            host = _b.get_worker_host(name)
+            if host:
+                cwd = _b.get_claude_session_cwd(name) or ""
+                sid = session_id or _b.get_claude_session_id(name)
+                if not sid:
+                    handler._send_json(200, {"total": 0, "new": 0})
+                    return
+                remote_home = _b._get_remote_home(host) or ""
+                remote_cwd = _b._remap_path(cwd, host)
+                remote_slug = _b._project_slug(remote_cwd)
+                jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+            else:
+                _tp, sid, _cwd = _resolve_transcript_path(name, session_id)
+                if not _tp or not sid:
+                    handler._send_json(200, {"total": 0, "new": 0})
+                    return
+                jsonl_path = str(_tp)
+            result = _run_transcript_query(jsonl_path, sid, "stats", host=host)
+            total = 0
+            if result:
+                total = _b._int_field(result, "n_user") + _b._int_field(result, "n_tool")
+                count_result = _run_transcript_query(jsonl_path, sid, "entries", host=host, page=1, per_page=1)
+                if count_result:
+                    total = _b._int_field(count_result, "total", total)
+            new_count = max(0, total - since)
+            handler._send_json(200, {"total": total, "new": new_count})
+            return
+        query_params = parse_qs(parsed.query)
+        session_id = query_params.get("sid", [None])[0]
+        page_raw = query_params.get("page", [None])[0]
+        try:
+            page = max(1, int(page_raw)) if page_raw is not None else None
+        except (ValueError, TypeError):
+            page = None
+        try:
+            per_page = max(1, min(500, int(query_params.get("per_page", [50])[0])))
+        except (ValueError, TypeError):
+            per_page = 50
+        search_query = query_params.get("q", [""])[0].strip()
+        search_sort = query_params.get("sort", ["relevance"])[0].strip()
+        if search_sort not in ("relevance", "time"):
+            search_sort = "relevance"
+        filter_mode = query_params.get("filter", [""])[0].strip()
+        host = _b.get_worker_host(name)
+        if not host:
+            _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
+            if _tp == "syncing":
+                sync_key = f"{name}:{_sid}"
+                handler._send_html(_render_transcript_loading(name, _sid, token or "", sync_key).encode("utf-8"))
+                return
+        html_content = _render_transcript_html(
+            name,
+            session_id=session_id,
+            page=page,
+            per_page=per_page,
+            search_query=search_query,
+            token=token or "",
+            filter_mode=filter_mode,
+            search_sort=search_sort,
+        )
+        handler._send_html(html_content.encode("utf-8"))
+    except (OSError, ValueError, KeyError) as e:
+        _b._log(_b._LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
+        handler._send_text(500, str(e))
+
+
+# ============================================================
+# _review_cache
+# ============================================================
+
+import base64
+import json
+import html
+import sys
+import os
+import subprocess
+import re
+import sqlite3
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Iterable
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_REVIEW_SCHEMA = (
+    (_TEMPLATE_DIR / "review_schema.sql").read_text() if (_TEMPLATE_DIR / "review_schema.sql").exists() else ""
+)
+CACHE_DB = os.environ.get("PR_CACHE_DB", "/tmp/pr-review-cache.db")
+USER_PROFILE_TTL = 86400
+
+
+class PRCache:
+    def __init__(self, db_path: str | None = None) -> None:
+        self.db_path = db_path or CACHE_DB
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript(_REVIEW_SCHEMA)
+
+    def clear_pr(self, pr_key: str) -> None:
+        for table in ("pr_meta", "pr_files", "pr_commits", "pr_comments", "pr_reviews"):
+            self.conn.execute(f"DELETE FROM {table} WHERE pr_key=?", (pr_key,))
+        self.conn.commit()
+
+    def get_meta(self, pr_key: str) -> dict[str, object] | None:
+        row = self.conn.execute(
+            "SELECT data, head_sha, comment_count, review_count, commit_count " "FROM pr_meta WHERE pr_key=?", (pr_key,)
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "data": json.loads(row[0]),
+            "head_sha": row[1],
+            "comment_count": row[2],
+            "review_count": row[3],
+            "commit_count": row[4],
+        }
+
+    def set_meta(
+        self, pr_key: str, meta: dict[str, object], comment_count: int, review_count: int, commit_count: int
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pr_meta VALUES (?,?,?,?,?,?,?)",
+            (
+                pr_key,
+                json.dumps(meta),
+                meta.get("head_sha", ""),
+                comment_count,
+                review_count,
+                commit_count,
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_files(self, pr_key: str, head_sha: str) -> list[dict[str, object]] | None:
+        row = self.conn.execute(
+            "SELECT data FROM pr_files WHERE pr_key=? AND head_sha=?", (pr_key, head_sha)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_files(self, pr_key: str, head_sha: str, files: list[dict[str, object]]) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO pr_files VALUES (?,?,?)", (pr_key, head_sha, json.dumps(files)))
+        self.conn.commit()
+
+    def get_commits(self, pr_key: str) -> dict[str, dict[str, object]]:
+        rows = self.conn.execute("SELECT sha, data FROM pr_commits WHERE pr_key=?", (pr_key,)).fetchall()
+        return {r[0]: json.loads(r[1]) for r in rows}
+
+    def set_commit(self, pr_key: str, sha: str, commit_data: dict[str, object]) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO pr_commits VALUES (?,?,?)", (pr_key, sha, json.dumps(commit_data)))
+        self.conn.commit()
+
+    def _get_id_list(self, table: str, pr_key: str) -> list[dict[str, object]]:
+        rows = self.conn.execute(f"SELECT data FROM {table} WHERE pr_key=? ORDER BY id", (pr_key,)).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def _set_id_list(self, table: str, pr_key: str, items: list[dict[str, object]]) -> None:
+        self.conn.execute(f"DELETE FROM {table} WHERE pr_key=?", (pr_key,))
+        for item in items:
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO {table} VALUES (?,?,?)", (pr_key, item.get("id", 0), json.dumps(item))
+            )
+        self.conn.commit()
+
+    def get_comments(self, pr_key: str) -> list[dict[str, object]]:
+        return self._get_id_list("pr_comments", pr_key)
+
+    def set_comments(self, pr_key: str, comments: list[dict[str, object]]) -> None:
+        self._set_id_list("pr_comments", pr_key, comments)
+
+    def get_reviews(self, pr_key: str) -> list[dict[str, object]]:
+        return self._get_id_list("pr_reviews", pr_key)
+
+    def set_reviews(self, pr_key: str, reviews: list[dict[str, object]]) -> None:
+        self._set_id_list("pr_reviews", pr_key, reviews)
+
+    def get_user_profile(self, username: str) -> dict[str, object] | None:
+        row = self.conn.execute("SELECT data, fetched_at FROM user_profiles WHERE username=?", (username,)).fetchone()
+        if not row:
+            return None
+        if time.time() - row[1] > USER_PROFILE_TTL:
+            return None  # expired
+        return json.loads(row[0])
+
+    def set_user_profile(self, username: str, profile: dict[str, object]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO user_profiles VALUES (?,?,?)", (username, json.dumps(profile), time.time())
+        )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def fetch_pr_cached(
+    owner: str,
+    repo: str,
+    pr_num: int,
+    cache: PRCache | None = None,
+    fresh: bool = False,
+) -> tuple[
+    dict[str, object],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, dict[str, object]],
+]:
+    pr_key = f"{owner}/{repo}/{pr_num}"
+    if not cache:
+        cache = PRCache()
+    if fresh:
+        print(f"  --fresh: clearing cache for {pr_key}")
+        cache.clear_pr(pr_key)
+    cached = cache.get_meta(pr_key)
+    print("  Fetching metadata...")
+    meta = fetch_pr_meta(owner, repo, pr_num)
+    new_head_sha = meta.get("head_sha", "")
+    head_changed = not cached or cached["head_sha"] != new_head_sha
+    need_files = head_changed or cache.get_files(pr_key, new_head_sha) is None
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        if need_files:
+            print(
+                "  Fetching file patches (head SHA changed)..."
+                if cached and head_changed
+                else "  Fetching file patches..."
+            )
+            results["files"] = pool.submit(fetch_pr_files, owner, repo, pr_num)
+        results["comments"] = pool.submit(fetch_pr_comments, owner, repo, pr_num)
+        results["reviews"] = pool.submit(fetch_pr_reviews, owner, repo, pr_num)
+        results["commit_list"] = pool.submit(_fetch_commit_list, owner, repo, pr_num)
+    if need_files:
+        files = results["files"].result()
+        cache.set_files(pr_key, new_head_sha, files)
+    else:
+        files = cache.get_files(pr_key, new_head_sha)
+        print(f"  Files: cached ({len(files)} files)")
+    cached_comments = cache.get_comments(pr_key) if cached else []
+    cached_reviews = cache.get_reviews(pr_key) if cached else []
+    comments = results["comments"].result()
+    reviews = results["reviews"].result()
+    if len(comments) != len(cached_comments) or len(reviews) != len(cached_reviews):
+        if cached:
+            print(
+                f"  Comments/reviews updated ({len(cached_comments)}->{len(comments)}, "
+                f"{len(cached_reviews)}->{len(reviews)})"
+            )
+        else:
+            print(f"  Fetched {len(comments)} comments, {len(reviews)} reviews")
+        cache.set_comments(pr_key, comments)
+        cache.set_reviews(pr_key, reviews)
+    else:
+        print(f"  Comments: cached ({len(comments)}), Reviews: cached ({len(reviews)})")
+        comments = cached_comments
+        reviews = cached_reviews
+    commit_list = results["commit_list"].result()
+    cached_commits = cache.get_commits(pr_key)
+    to_fetch_commits = []
+    commit_map = {}
+    for c in commit_list:
+        sha = c["sha"]
+        if sha in cached_commits and not head_changed:
+            commit_map[sha] = cached_commits[sha]
+        else:
+            to_fetch_commits.append(c)
+    if to_fetch_commits:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            pool.map(lambda c: _fetch_commit_files_single(owner, repo, c), to_fetch_commits)
+        for c in to_fetch_commits:
+            cache.set_commit(pr_key, c["sha"], c)
+            commit_map[c["sha"]] = c
+    commits = [commit_map.get(c["sha"], c) for c in commit_list]
+    new_count = len(to_fetch_commits)
+    if new_count:
+        print(f"  Fetched {new_count} new commit(s), {len(commits) - new_count} cached")
+    else:
+        print(f"  Commits: all {len(commits)} cached")
+    usernames = {meta.get("user", "")}
+    for c in comments:
+        usernames.add(c.get("user", ""))
+    for r in reviews:
+        usernames.add(r.get("user", ""))
+    for cm in commits:
+        if cm.get("author_login"):
+            usernames.add(cm["author_login"])
+    usernames.discard("")
+    user_profiles = {}
+    to_fetch = []
+    for u in usernames:
+        cached_profile = cache.get_user_profile(u)
+        if cached_profile:
+            user_profiles[u] = cached_profile
+        else:
+            to_fetch.append(u)
+    if to_fetch:
+        print(f"  Fetching {len(to_fetch)} user profile(s)...")
+        fresh_profiles = fetch_user_info(to_fetch)
+        for u, p in fresh_profiles.items():
+            user_profiles[u] = p
+            cache.set_user_profile(u, p)
+    else:
+        print(f"  User profiles: all {len(user_profiles)} cached")
+    cache.set_meta(pr_key, meta, len(comments), len(reviews), len(commits))
+    return meta, files, comments, reviews, commits, user_profiles
+
+
+def fetch_user_info(usernames: Iterable[str]) -> dict[str, dict[str, object]]:
+    profiles = {}
+    for username in set(usernames):
+        if not username:
+            continue
+        try:
+            r = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"users/{username}",
+                    "--jq",
+                    "{login: .login, name: .name, followers: .followers, "
+                    "public_repos: .public_repos, created_at: .created_at, "
+                    "avatar_url: .avatar_url, bio: .bio}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                profiles[username] = json.loads(r.stdout)
+        except Exception:
+            pass
+    return profiles
+
+
+def fetch_pr_reviews(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
+    reviews = []
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
+                "--paginate",
+                "--jq",
+                ".[] | {id: .id, body: .body, user: .user.login, "
+                "state: .state, submitted_at: .submitted_at, "
+                "html_url: .html_url}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in r.stdout.strip().split("\n"):
+            if line.strip():
+                reviews.append(json.loads(line))
+    except Exception as e:
+        print(f"Warning: could not fetch reviews: {e}")
+    return reviews
+
+
+def fetch_pr_comments(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
+    comments = []
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{repo}/issues/{pr_num}/comments",
+                "--paginate",
+                "--jq",
+                ".[] | {id: .id, body: .body, user: .user.login, "
+                "created_at: .created_at, updated_at: .updated_at, "
+                'html_url: .html_url, type: "issue"}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in r.stdout.strip().split("\n"):
+            if line.strip():
+                comments.append(json.loads(line))
+    except Exception as e:
+        print(f"Warning: could not fetch issue comments: {e}")
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
+                "--paginate",
+                "--jq",
+                ".[] | {id: .id, body: .body, user: .user.login, "
+                "created_at: .created_at, path: .path, line: .line, "
+                "original_line: .original_line, side: .side, "
+                'diff_hunk: .diff_hunk, html_url: .html_url, type: "review"}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in r.stdout.strip().split("\n"):
+            if line.strip():
+                comments.append(json.loads(line))
+    except Exception as e:
+        print(f"Warning: could not fetch review comments: {e}")
+    comments.sort(key=lambda c: c.get("created_at", ""))
+    return comments
+
+
+def _fetch_commit_list(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
+    commits = []
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
+                "--paginate",
+                "--jq",
+                ".[] | {sha: .sha, message: .commit.message, "
+                "author: .commit.author.name, author_login: .author.login, "
+                "date: .commit.author.date}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            print(f"Warning: commit list API returned {r.returncode}: {r.stderr.strip()[:200]}")
+            return commits
+        for line in r.stdout.strip().split("\n"):
+            if line.strip():
+                obj = json.loads(line)
+                if "sha" in obj:
+                    commits.append(obj)
+    except Exception as e:
+        print(f"Warning: could not fetch commits: {e}")
+    return commits
+
+
+def _fetch_commit_files_single(owner: str, repo: str, c: dict[str, object]) -> None:
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{owner}/{repo}/commits/{c['sha']}",
+                "--jq",
+                "{files: [.files[] | {filename: .filename, status: .status, "
+                "additions: .additions, deletions: .deletions, patch: .patch}]}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            data = json.loads(r.stdout)
+            c["files"] = data.get("files", [])
+    except Exception:
+        c["files"] = []
+
+
+def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
+    meta_raw = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{owner}/{repo}/pulls/{pr_num}",
+            "--jq",
+            "{title: .title, body: .body, user: .user.login, "
+            "changed_files: .changed_files, additions: .additions, "
+            "deletions: .deletions, commits: .commits, "
+            "base: .base.ref, head: .head.ref, html_url: .html_url, "
+            "head_sha: .head.sha, base_sha: .base.sha, "
+            "mergeable: .mergeable, mergeable_state: .mergeable_state, "
+            "merged: .merged, state: .state, draft: .draft}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if meta_raw.returncode != 0:
+        raise RuntimeError(f"PR #{pr_num} not found or API error: {meta_raw.stderr.strip()[:200]}")
+    meta = json.loads(meta_raw.stdout)
+    head_sha = meta.get("head_sha", "")
+    if head_sha:
+        try:
+            checks_raw = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+                    "--jq",
+                    "[.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}]",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if checks_raw.returncode == 0 and checks_raw.stdout.strip():
+                meta["checks"] = json.loads(checks_raw.stdout)
+            else:
+                meta["checks"] = []
+        except Exception:
+            meta["checks"] = []
+    return meta
+
+
+def fetch_pr_files(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
+    files_raw = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{owner}/{repo}/pulls/{pr_num}/files",
+            "--paginate",
+            "--jq",
+            ".[] | {filename: .filename, status: .status, "
+            "additions: .additions, deletions: .deletions, patch: .patch}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    files = []
+    for line in files_raw.stdout.strip().split("\n"):
+        if line.strip():
+            files.append(json.loads(line))
+    missing = [f for f in files if not f.get("patch") and f.get("additions", 0) > 0]
+    if missing:
+        print(f"    Fetching full diff for {len(missing)} large files...")
+        full_diff = _fetch_full_diff(owner, repo, pr_num)
+        if full_diff:
+            diff_patches = _parse_full_diff(full_diff)
+            for f in files:
+                if not f.get("patch") and f["filename"] in diff_patches:
+                    f["patch"] = diff_patches[f["filename"]]
+    return files
+
+
+def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
+    try:
+        r = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}", "-H", "Accept: application/vnd.github.v3.diff"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if r.returncode == 0:
+            return r.stdout
+    except subprocess.TimeoutExpired:
+        print("Full diff fetch timed out")
+    return None
+
+
+def _parse_full_diff(diff_text: str) -> dict[str, str]:
+    patches = {}
+    current_file = None
+    current_lines = []
+    for line in diff_text.split("\n"):
+        if line.startswith("diff --git"):
+            if current_file and current_lines:
+                patches[current_file] = "\n".join(current_lines)
+            current_lines = []
+            parts = line.split(" b/", 1)
+            current_file = parts[1] if len(parts) > 1 else None
+        elif line.startswith("@@") or (current_lines and current_file):
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+            if line.startswith("@@") or current_lines:
+                current_lines.append(line)
+    if current_file and current_lines:
+        patches[current_file] = "\n".join(current_lines)
+    return patches
+
+
+def _fetch_file_context(
+    owner: str, repo: str, path: str, line: int, ref: str, context: int = 3
+) -> tuple[str | None, str]:
+    try:
+        r = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if r.returncode != 0:
+            return None, ref[:12]
+        content = base64.b64decode(r.stdout.strip()).decode("utf-8", errors="replace")
+        lines = content.split("\n")
+        start = max(0, line - context - 1)
+        end = min(len(lines), line + context)
+        snippet = []
+        for i in range(start, end):
+            ln = i + 1
+            marker = " \u2190" if ln == line else ""
+            snippet.append(f"\u2502 {ln:>4}: {lines[i]}{marker}")
+        return "\n".join(snippet), ref[:12]
+    except Exception as e:
+        print(f"[pr-comment] Failed to fetch file context: {e}")
+        return None, ref[:12]
+
+
+def _format_comment_with_context(
+    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None, short_sha: str
+) -> str:
+    parts = [f"PR #{pr_num} comment on {path}:{line} (ref {short_sha})"]
+    if context_snippet:
+        parts.append(context_snippet)
+    parts.append("")
+    parts.append(comment_body)
+    return "\n".join(parts)
+
+
+def _notify_telegram(
+    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = ""
+) -> None:
+    bridge_url = os.environ.get("BRIDGE_URL", "http://localhost:8271")
+    text = f"\U0001f4ac " + _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha)
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{bridge_url}/notifications",
+            data=json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        print(f"[pr-comment] Telegram notify failed: {e}")
+
+
+def _route_mentions_to_workers(
+    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = ""
+) -> None:
+    tmux_prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
+    mentions = re.findall(r"@(\w+)", comment_body)
+    if not mentions:
+        return
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True, timeout=5
+        )
+        active_sessions = set(r.stdout.strip().split("\n")) if r.returncode == 0 else set()
+    except Exception:
+        active_sessions = set()
+    msg = "manager: " + _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha)
+    for mention in mentions:
+        target_session = f"{tmux_prefix}{mention}"
+        if target_session not in active_sessions:
+            continue
+        try:
+            import tempfile as _tf, uuid as _uuid
+
+            buf_name = f"pr-{_uuid.uuid4().hex[:8]}"
+            fd, tmpfile = _tf.mkstemp(suffix=".msg", prefix="pr-send-")
+            try:
+                os.write(fd, msg.encode())
+                os.close(fd)
+                subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmpfile], capture_output=True, timeout=5)
+                subprocess.run(
+                    ["tmux", "paste-buffer", "-b", buf_name, "-t", target_session], capture_output=True, timeout=5
+                )
+                subprocess.run(["tmux", "send-keys", "-t", target_session, "Enter"], capture_output=True, timeout=5)
+                subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
+            finally:
+                try:
+                    os.unlink(tmpfile)
+                except OSError:
+                    pass
+            print(f"[pr-comment] Routed to @{mention} via tmux")
+        except Exception as e:
+            print(f"[pr-comment] Failed to route to @{mention}: {e}")
+
+
+def _pr_review_main() -> None:
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <pr_url_or_number> [--port PORT]", file=sys.stderr)
+        sys.exit(1)
+    pr_input = sys.argv[1]
+    port = 10171
+    for i, arg in enumerate(sys.argv):
+        if arg == "--port" and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+    highlight_comment_id = None
+    fragment_match = re.search(r"#issuecomment-(\d+)", pr_input)
+    if fragment_match:
+        highlight_comment_id = fragment_match.group(1)
+    clean_url = pr_input.split("#")[0]
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", clean_url)
+    if m:
+        owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
+    else:
+        owner, repo, pr_num = "BasedHardware", "omi", int(clean_url)
+    fresh = "--fresh" in sys.argv
+    cache = PRCache()
+    print(f"Fetching PR #{pr_num} from {owner}/{repo}..." + (" (fresh)" if fresh else ""))
+    meta, files, comments, reviews, commits, user_profiles = fetch_pr_cached(
+        owner, repo, pr_num, cache=cache, fresh=fresh
+    )
+    cache.close()
+    print(
+        f"Ready: {len(files)} files, {len(comments)} comments, {len(reviews)} reviews, "
+        f"{len(commits)} commits, {len(user_profiles)} profiles"
+    )
+    html_content = generate_html(
+        meta,
+        files,
+        pr_num,
+        owner,
+        repo,
+        comments=comments,
+        reviews=reviews,
+        user_profiles=user_profiles,
+        highlight_comment_id=highlight_comment_id,
+        commits=commits,
+    )
+    out_path = f"/tmp/pr-review-{pr_num}.html"
+    with open(out_path, "w") as f:
+        f.write(html_content)
+    print(f"Written to {out_path}")
+    if "--no-serve" not in sys.argv:
+        import http.server
+        import socketserver
+        from urllib.parse import urlparse, parse_qs
+
+        os.chdir("/tmp")
+        base_handler = http.server.SimpleHTTPRequestHandler
+
+        class PRHandler(base_handler):
+            def log_message(self, fmt: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                if self.path == "/tools/review/comments":
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(length)
+                    try:
+                        data = json.loads(body)
+                    except (json.JSONDecodeError, ValueError):
+                        self.send_response(400)
+                        self.end_headers()
+                        self.wfile.write(b"Invalid JSON")
+                        return
+                    o = data.get("owner", "")
+                    r = data.get("repo", "")
+                    pn = data.get("pr_num", 0)
+                    path = data.get("path", "")
+                    line = data.get("line", 0)
+                    side = data.get("side", "RIGHT")
+                    comment_body = data.get("body", "").strip()
+                    head_sha = data.get("head_sha", "")
+                    if not all([o, r, pn, path, line, comment_body, head_sha]):
+                        self.send_response(400)
+                        self.end_headers()
+                        self.wfile.write(b"Missing required fields")
+                        return
+                    gh_payload = json.dumps(
+                        {
+                            "body": comment_body,
+                            "commit_id": head_sha,
+                            "path": path,
+                            "line": line,
+                            "side": side,
+                        }
+                    )
+                    try:
+                        result = subprocess.run(
+                            ["gh", "api", f"repos/{o}/{r}/pulls/{pn}/comments", "--method", "POST", "--input", "-"],
+                            input=gh_payload,
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                        )
+                        if result.returncode != 0:
+                            err = result.stderr.strip() or result.stdout.strip()
+                            self.send_response(502)
+                            self.end_headers()
+                            self.wfile.write(f"GitHub API error: {err}".encode())
+                            return
+                    except subprocess.TimeoutExpired:
+                        self.send_response(504)
+                        self.end_headers()
+                        self.wfile.write(b"GitHub API timeout")
+                        return
+                    context_snippet, short_sha = _fetch_file_context(o, r, path, line, head_sha)
+                    _notify_telegram(comment_body, pn, path, line, context_snippet, short_sha)
+                    _route_mentions_to_workers(comment_body, pn, path, line, context_snippet, short_sha)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"ok": True}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_GET(self) -> None:
+                parsed = urlparse(self.path)
+                if parsed.path == "/tools/review/files":
+                    params = parse_qs(parsed.query)
+                    o = params.get("owner", [""])[0]
+                    r = params.get("repo", [""])[0]
+                    fp = params.get("path", [""])[0]
+                    ref = params.get("ref", [""])[0]
+                    if not all([o, r, fp, ref]):
+                        self.send_response(400)
+                        self.end_headers()
+                        return
+                    try:
+                        result = subprocess.run(
+                            ["gh", "api", f"repos/{o}/{r}/contents/{fp}?ref={ref}", "--jq", ".content"],
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                        )
+                        if result.returncode != 0:
+                            self.send_response(404)
+                            self.end_headers()
+                            return
+                        import base64 as b64
+
+                        content = b64.b64decode(result.stdout.strip()).decode("utf-8", errors="replace")
+                        lines = content.split("\n")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps(lines).encode())
+                    except Exception:
+                        self.send_response(500)
+                        self.end_headers()
+                    return
+                super().do_GET()
+
+        with socketserver.TCPServer(("0.0.0.0", port), PRHandler) as httpd:
+            url = f"http://100.125.36.102:{port}/pr-review-{pr_num}.html"
+            print(f"\nServing at {url}")
+            print("Press Ctrl+C to stop")
+            httpd.serve_forever()
+
+
+# ============================================================
+# _relay_impl
+# ============================================================
+
+
+import hashlib, json, os, secrets, time, threading
+from pathlib import Path
+from typing import TypedDict, cast
+from core import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
+from _types import _GuestSessionDictRequired, ChannelMemberDict, ChannelDict, RelayChannelDict
+
+
+class GuestSessionDict(_GuestSessionDictRequired, total=False):
+    token_hash: str
+    expires_at: str
+
+
+GuestInboxMessageDict = TypedDict(
+    "GuestInboxMessageDict",
+    {
+        "id": str,
+        "from": str,
+        "sender": str,
+        "text": str,
+        "ts": int,
+        "to": str,
+        "channel": str,
+    },
+    total=False,
+)
+ChannelMessageDict = TypedDict(
+    "ChannelMessageDict",
+    {
+        "id": str,
+        "seq": int,
+        "from": str,
+        "text": str,
+        "ts": int,
+    },
+)
+_RelayMessageDictRequired = TypedDict(
+    "_RelayMessageDictRequired",
+    {
+        "message_id": str,
+        "direction": str,
+        "from": str,
+        "to": str,
+        "text": str,
+        "ts": str,
+    },
+)
+
+
+class RelayMessageDict(_RelayMessageDictRequired, total=False):
+    sender_name: str
+
+
+def _save_state_json(path: Path, data: object, label: str) -> None:
+    try:
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        tmp.rename(path)
+        os.chmod(path, 0o600)
+    except OSError as e:
+        _log(_LOG_WARN, label, f"Failed to save state: {e}")
+
+
+def _load_state_json(path: Path, label: str) -> dict[str, object] | None:
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            result: object = json.load(f)
+            return cast(dict[str, object], result) if isinstance(result, dict) else None
+    except (json.JSONDecodeError, OSError, KeyError) as e:
+        _log(_LOG_WARN, label, f"Failed to load state: {e}")
+        return None
+
+
+class GuestStore:
+    def __init__(self) -> None:
+        self.guests: dict[str, GuestSessionDict] = {}
+        self.inboxes: dict[str, list[GuestInboxMessageDict]] = {}
+        self.lock: threading.Lock = threading.Lock()
+
+
+guest_store = GuestStore()
+GUEST_TTL = 86400
+GUEST_INBOX_CAP = 200
+
+
+def _guest_state_path() -> Path:
+    return NODE_DIR / "guest_state.json"
+
+
+def _guest_save() -> None:
+    now = _clock.time()
+    active_guests = {}
+    for k, v in guest_store.guests.items():
+        if now <= v.get("expires_at_unix", 0):
+            guest = dict(v)
+            if isinstance(guest.get("notified_workers"), set):
+                guest["notified_workers"] = list(cast("set[str] | list[str]", guest.get("notified_workers", [])))
+            active_guests[k] = guest
+    active_names = {guest["name"] for guest in active_guests.values()}
+    active_inboxes = {k: v for k, v in guest_store.inboxes.items() if k in active_names}
+    _save_state_json(_guest_state_path(), {"guests": active_guests, "inboxes": active_inboxes}, "guest")
+
+
+def _guest_load() -> None:
+    data = _load_state_json(_guest_state_path(), "guest")
+    if not data:
+        return
+    now = _clock.time()
+    restored = 0
+    raw_guests = data.get("guests", {})
+    if isinstance(raw_guests, dict):
+        for k, v in raw_guests.items():
+            if isinstance(v, dict) and now <= v.get("expires_at_unix", 0):
+                if isinstance(v.get("notified_workers"), list):
+                    v["notified_workers"] = set(v["notified_workers"])
+                guest_store.guests[k] = cast("GuestSessionDict", v)
+                restored += 1
+    raw_inboxes = data.get("inboxes", {})
+    if isinstance(raw_inboxes, dict):
+        guest_store.inboxes.update(cast("dict[str, list[GuestInboxMessageDict]]", raw_inboxes))
+    if restored:
+        _log(_LOG_INFO, "guest", f"Restored {restored} active guest(s) from disk")
+
+
+def guest_create_token() -> tuple[str, str]:
+    token = f"gt_{secrets.token_urlsafe(32)}"
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash
+
+
+def guest_generate_name(existing_names: set[str] | None = None) -> str:
+    if existing_names is None:
+        existing_names = set()
+    for _ in range(100):
+        name = secrets.token_urlsafe(3).rstrip("=").lower()[:5]
+        if len(name) >= 3 and name not in existing_names:
+            return name
+    return secrets.token_urlsafe(4).rstrip("=").lower()[:6]
+
+
+def guest_validate_name(name: str, team_workers: set[str], existing_guests: set[str]) -> tuple[bool, str]:
+    if not name or not name.strip():
+        return False, "name is required"
+    name = name.strip().lower()
+    if len(name) > 20:
+        return False, "name too long (max 20 chars)"
+    if name in team_workers:
+        return False, f"name '{name}' conflicts with a team worker"
+    if name in existing_guests:
+        return False, f"name '{name}' already taken by another guest"
+    return True, ""
+
+
+def guest_is_expired(expires_at_unix: float) -> bool:
+    return _clock.time() >= expires_at_unix
+
+
+def guest_inbox_filter(messages: list[GuestInboxMessageDict], after: str | None = None) -> list[GuestInboxMessageDict]:
+    if not after:
+        return list(messages)
+    found = False
+    result = []
+    for m in messages:
+        if found:
+            result.append(m)
+        elif m.get("id") == after:
+            found = True
+    if not found:
+        return list(messages)
+    return result
+
+
+def guest_inbox_append(inbox: list[GuestInboxMessageDict], msg: GuestInboxMessageDict) -> list[GuestInboxMessageDict]:
+    inbox.append(msg)
+    if len(inbox) > GUEST_INBOX_CAP:
+        inbox = inbox[-GUEST_INBOX_CAP:]
+    return inbox
+
+
+class ChannelStore:
+    def __init__(self) -> None:
+        self.channels: dict[str, ChannelDict] = {}
+        self.lock: threading.Lock = threading.Lock()
+
+
+channel_store = ChannelStore()
+CHANNEL_TTL = 86400
+CHANNEL_MSG_CAP = 200
+
+
+def _channel_state_path() -> Path:
+    return NODE_DIR / "channel_state.json"
+
+
+def _channel_save() -> None:
+    active = {cid: ch for cid, ch in channel_store.channels.items() if not channel_is_expired(ch)}
+    _save_state_json(_channel_state_path(), active, "channel")
+
+
+def _channel_load() -> None:
+    data = _load_state_json(_channel_state_path(), "channel")
+    if not data:
+        return
+    restored = 0
+    for cid, ch_raw in data.items():
+        ch = cast("ChannelDict", ch_raw)
+        if not channel_is_expired(ch):
+            channel_store.channels[cid] = ch
+            restored += 1
+    if restored:
+        _log(_LOG_INFO, "channel", f"Restored {restored} active channel(s) from disk")
+
+
+def channel_create_id(label: str = "") -> str:
+    short = secrets.token_urlsafe(4).rstrip("=").lower()[:6]
+    return f"ch_{short}"
+
+
+def _channel_member_entry(m: str) -> tuple[str, ChannelMemberDict] | None:
+    if m == "manager":
+        return "manager", cast("ChannelMemberDict", {"type": "manager"})
+    if ":" in m:
+        mtype, name = m.split(":", 1)
+        if mtype in ("worker", "guest"):
+            return m, cast("ChannelMemberDict", {"type": mtype, "name": name})
+    return None
+
+
+def channel_new(
+    channel_id: str, label: str, created_by: str, members: list[str], ttl: int = CHANNEL_TTL
+) -> ChannelDict:
+    now = _clock.time()
+    member_dict: dict[str, ChannelMemberDict] = {
+        k: v for m in members for pair in [_channel_member_entry(m)] if pair for k, v in [pair]
+    }
+    return {
+        "id": channel_id,
+        "label": label,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "expires_at_unix": now + ttl,
+        "seq": 0,
+        "created_by": created_by,
+        "members": member_dict,
+        "messages": [],
+    }
+
+
+def channel_add_members(channel: ChannelDict, members: list[str]) -> list[str]:
+    added = []
+    for m in members:
+        if m in channel["members"]:
+            continue
+        entry = _channel_member_entry(m)
+        if entry:
+            channel["members"][entry[0]] = entry[1]
+            added.append(m)
+    return added
+
+
+def channel_remove_members(channel: ChannelDict, members: list[str]) -> list[str]:
+    removed = []
+    for m in members:
+        if m in channel["members"]:
+            del channel["members"][m]
+            removed.append(m)
+    return removed
+
+
+def channel_append_message(channel: ChannelDict, from_member: str, text: str) -> ChannelMessageDict:
+    channel["seq"] += 1
+    msg = {
+        "id": f"cm_{channel['seq']:06d}",
+        "seq": channel["seq"],
+        "from": from_member,
+        "text": text,
+        "ts": int(_clock.time()),
+    }
+    channel["messages"].append(cast("ChannelMessageDict", msg))
+    if len(channel["messages"]) > CHANNEL_MSG_CAP:
+        channel["messages"] = channel["messages"][-CHANNEL_MSG_CAP:]
+    return cast("ChannelMessageDict", msg)
+
+
+def channel_get_messages(channel: ChannelDict, after: str | None = None) -> tuple[list[ChannelMessageDict], bool]:
+    if not after:
+        return list(channel["messages"]), False
+    found_idx = -1
+    for i, m in enumerate(channel["messages"]):
+        if m["id"] == after:
+            found_idx = i
+            break
+    if found_idx == -1:
+        return list(channel["messages"]), True
+    return channel["messages"][found_idx + 1 :], False
+
+
+def channel_is_expired(channel: ChannelDict) -> bool:
+    return _clock.time() > channel["expires_at_unix"]
+
+
+class RelayStore:
+    def __init__(self) -> None:
+        self.channels: dict[str, RelayChannelDict] = {}
+        self.lock: threading.Lock = threading.Lock()
+
+
+relay_store = RelayStore()
+RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
+
+
+def _bridge_public_url() -> str:
+    import bridge as _b
+
+    return _b.BRIDGE_PUBLIC_URL
+
+
+def _bridge_port() -> int:
+    import bridge as _b
+
+    return _b.PORT
+
+
+def _relay_state_path() -> Path:
+    return NODE_DIR / "relay_state.json"
+
+
+def _relay_save() -> None:
+    now = _clock.time()
+    active = {cid: ch for cid, ch in relay_store.channels.items() if now <= ch["expires_at_unix"]}
+    _save_state_json(_relay_state_path(), active, "relay")
+
+
+def _relay_load() -> None:
+    data = _load_state_json(_relay_state_path(), "relay")
+    if not data:
+        return
+    now = _clock.time()
+    restored = 0
+    for cid, ch_raw in data.items():
+        ch = cast("RelayChannelDict", ch_raw)
+        if now <= ch.get("expires_at_unix", 0):
+            relay_store.channels[cid] = ch
+            restored += 1
+    if restored:
+        _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
+
+
+def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
+    channel_id = channel_create_id(label)
+    guest_token = f"gt_{secrets.token_urlsafe(32)}"
+    reply_token = f"rt_{secrets.token_urlsafe(32)}"
+    now = _clock.time()
+    channel = {
+        "id": channel_id,
+        "label": label,
+        "worker": worker,
+        "workers": [worker],
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + ttl)),
+        "expires_at_unix": now + ttl,
+        "guest_token_hash": hashlib.sha256(guest_token.encode()).hexdigest(),
+        "reply_token_hash": hashlib.sha256(reply_token.encode()).hexdigest(),
+        "reply_token": reply_token,
+        "messages": [],
+    }
+    return cast("RelayChannelDict", channel), guest_token, reply_token
+
+
+def _relay_base_url() -> str:
+    pub = _bridge_public_url()
+    if pub:
+        return pub
+    return f"http://{RELAY_PUBLIC_HOST}:{_bridge_port()}"
+
+
+def relay_guide_url(channel_id: str, guest_token: str) -> str:
+    return f"{_relay_base_url()}/relay/{channel_id}?token={guest_token}"
+
+
+def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
+    base = f"{_relay_base_url()}/relay/{channel['id']}"
+    w = channel["worker"]
+    exp = channel["expires_at"]
+    return (
+        f"# Chat Channel to {w}\nDirect chat channel to **{w}** (a Claude Code agent).\n"
+        f'```bash\nexport RELAY_TOKEN="{guest_token}"\nexport RELAY="{base}"\n```\n'
+        f'```bash\ncurl -fsS $RELAY/send -H "Authorization: Bearer $RELAY_TOKEN" -H "Content-Type: application/json" -d \'{{"text":"your message here"}}\'\n```\n'
+        f'```bash\ncurl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"\n```\n'
+        f"1. Send a message using the curl command above\n2. Poll `/messages` to see replies (add `?after=<message_id>` for new messages only)\n3. The channel expires at `{exp}`\n"
+    )
+
+
+def _relay_auth(channel_id: str, token: str, hash_key: str) -> RelayChannelDict | None:
+    with relay_store.lock:
+        channel = relay_store.channels.get(channel_id)
+    if not channel or _clock.time() > channel.get("expires_at_unix", 0):
+        return None
+    if hashlib.sha256(token.encode()).hexdigest() != channel.get(hash_key):
+        return None
+    return channel
+
+
+def relay_auth_guest(channel_id: str, token: str) -> RelayChannelDict | None:
+    return _relay_auth(channel_id, token, "guest_token_hash")
+
+
+def relay_auth_reply(channel_id: str, token: str) -> RelayChannelDict | None:
+    return _relay_auth(channel_id, token, "reply_token_hash")
+
+
+def _relay_append_msg(channel: RelayChannelDict, direction: str, from_: str, to: str, text: str) -> RelayMessageDict:
+    msg_id = f"msg_{secrets.token_urlsafe(4)}"
+    relay_msg = cast(
+        "RelayMessageDict",
+        {
+            "message_id": msg_id,
+            "direction": direction,
+            "from": from_,
+            "to": to,
+            "text": text,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_clock.time())),
+        },
+    )
+    with relay_store.lock:
+        channel["messages"].append(relay_msg)
+        _relay_save()
+    return relay_msg
+
+
+def relay_guest_send(channel_id: str, text: str) -> tuple[str | None, RelayMessageDict | None]:
+    with relay_store.lock:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
+        return None, None
+    relay_msg = _relay_append_msg(channel, "guest_to_worker", channel["label"], channel["worker"], text)
+    base = f"{_relay_base_url()}/relay/{channel_id}"
+    rt = channel["reply_token"]
+    envelope = (
+        f"[RELAY from {channel['label']}]\nchannel: {channel_id}\nmessage_id: {relay_msg['message_id']}\n"
+        f"reply: curl -fsS {base}/reply -H 'Authorization: Bearer {rt}' "
+        f"-H 'Content-Type: application/json' -d '{{\"text\":\"YOUR_REPLY\"}}'\n\n{text}\n[/RELAY]"
+    )
+    return envelope, relay_msg
+
+
+def relay_worker_reply(channel_id: str, text: str) -> RelayMessageDict | None:
+    with relay_store.lock:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
+        return None
+    return _relay_append_msg(channel, "worker_to_guest", channel["worker"], channel["label"], text)
+
+
+def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayMessageDict]:
+    with relay_store.lock:
+        channel = relay_store.channels.get(channel_id)
+    if not channel:
+        return []
+    msgs = channel["messages"]
+    if not after:
+        return list(msgs)
+    for i, m in enumerate(msgs):
+        if m["message_id"] == after:
+            return list(msgs[i + 1 :])
+    return list(msgs)
+
+
+def _relay_get_token(handler) -> str | None:
+    from urllib.parse import urlparse
+
+    auth = handler.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    parsed = urlparse(handler.path)
+    params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+    return params.get("token", "")
+
+
+def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
+    import json
+    from typing import cast
+
+    token = _relay_get_token(handler)
+    if not token:
+        handler._send_json(401, {"error": "missing token"})
+        return None, "", None
+    channel = auth_fn(channel_id, token)
+    if not channel:
+        handler._send_json(403, {"error": "invalid or expired channel/token"})
+        return None, "", None
+    try:
+        data = cast(dict[str, object], json.loads(body)) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        handler._send_json(400, {"error": "invalid JSON"})
+        return None, "", None
+    import bridge as _b
+
+    text = _b._str_field(data, "text").strip()
+    if not text:
+        handler._send_json(400, {"error": "missing text"})
+        return None, "", None
+    return data, text, channel
+
+
+def handle_relay_get(handler, channel_id: str, action, parsed) -> None:
+    token = _relay_get_token(handler)
+    if not token:
+        handler._send_json(401, {"error": "missing token"})
+        return
+    channel = relay_auth_guest(channel_id, token)
+    if not channel:
+        handler._send_json(403, {"error": "invalid or expired channel/token"})
+        return
+    if action is None:
+        handler._send_text(200, relay_guide_text(channel, token))
+        return
+    if action == "messages":
+        params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p)
+        handler._send_json(200, {"messages": relay_get_messages(channel_id, after=params.get("after"))})
+        return
+    if action == "status":
+        handler._send_json(
+            200,
+            {
+                "channel_id": channel_id,
+                "worker": channel["worker"],
+                "label": channel["label"],
+                "expires_at": channel["expires_at"],
+                "message_count": len(channel["messages"]),
+            },
+        )
+        return
+    handler._send_json(404, {"error": f"unknown action: {action}"})
+
+
+def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
+    import bridge as _b
+
+    data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_guest, body)
+    if not data:
+        return
+    envelope, msg = relay_guest_send(channel_id, text)
+    if not envelope:
+        handler._send_json(500, {"error": "channel not found"})
+        return
+    workers = channel.get("workers", [channel["worker"]])
+    delivered = {w: _b.send_to_worker(w, envelope) for w in workers}
+    handler._send_json(
+        200, {"message_id": msg["message_id"], "delivered": all(delivered.values()), "workers": delivered}
+    )
+
+
+def handle_relay_reply(handler, channel_id: str, body: bytes = b"") -> None:
+    data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_reply, body)
+    if not data:
+        return
+    msg = relay_worker_reply(channel_id, text)
+    if not msg:
+        handler._send_json(500, {"error": "channel not found"})
+        return
+    handler._send_json(200, {"message_id": msg["message_id"], "delivered": True})
+
+
+def cmd_relay_list(router, chat_id) -> bool:
+    import bridge as _b
+
+    with relay_store.lock:
+        active = [(cid, ch) for cid, ch in relay_store.channels.items() if _b._clock.time() <= ch["expires_at_unix"]]
+    if active:
+        lines = []
+        for cid, ch in active:
+            msg_count = len(ch.get("messages", []))
+            workers = ch.get("workers", [ch["worker"]])
+            worker_str = ", ".join(workers)
+            lines.append(f"• {cid} → {worker_str} ({msg_count} msgs, expires {ch['expires_at']})")
+        router.reply(chat_id, "📡 Active relays:\n" + "\n".join(lines))
+    else:
+        router.reply(chat_id, "No active relays.")
+    return True
+
+
+def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+
+    if len(parts) < 3:
+        router.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
+        return True
+    channel_id = parts[1]
+    new_worker = parts[2].lower()
+    registered = _b.get_registered_sessions()
+    if new_worker not in registered:
+        router.reply(chat_id, f'Worker "{new_worker}" not found.')
+        return True
+    with relay_store.lock:
+        found = relay_store.channels.get(channel_id)
+        if not found or _b._clock.time() > found["expires_at_unix"]:
+            found = None
+    if not found:
+        router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
+        return True
+    workers = found.get("workers", [found["worker"]])
+    if new_worker in workers:
+        router.reply(chat_id, f"{new_worker} is already in {channel_id}.")
+        return True
+    with relay_store.lock:
+        found.setdefault("workers", [found["worker"]]).append(new_worker)
+        _relay_save()
+    router.reply(chat_id, f"📡 Added {new_worker} to {channel_id}. Workers: {', '.join(found['workers'])}")
+    return True
+
+
+def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+
+    if len(parts) < 3:
+        router.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
+        return True
+    channel_id = parts[1]
+    rm_worker = parts[2].lower()
+    with relay_store.lock:
+        found = relay_store.channels.get(channel_id)
+        if not found or _b._clock.time() > found["expires_at_unix"]:
+            found = None
+    if not found:
+        router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
+        return True
+    workers = found.get("workers", [found["worker"]])
+    if rm_worker not in workers:
+        router.reply(chat_id, f"{rm_worker} is not in {channel_id}.")
+        return True
+    if len(workers) <= 1:
+        router.reply(chat_id, f"Can't remove the last worker. Use /relay stop {channel_id} to close it.")
+        return True
+    with relay_store.lock:
+        found["workers"].remove(rm_worker)
+        _relay_save()
+    router.reply(chat_id, f"📡 Removed {rm_worker} from {channel_id}. Workers: {', '.join(found['workers'])}")
+    return True
+
+
+def cmd_relay_status(router, chat_id) -> bool:
+    import bridge as _b
+
+    now = _b._clock.time()
+    with relay_store.lock:
+        relay_active = [(cid, ch) for cid, ch in relay_store.channels.items() if now <= ch["expires_at_unix"]]
+    with _b.channel_store.lock:
+        ch_active = [(cid, ch) for cid, ch in _b.channel_store.channels.items() if not _b.channel_is_expired(ch)]
+    with _b.guest_store.lock:
+        guest_active = [g for g in _b.guest_store.guests.values() if now <= g.get("expires_at_unix", 0)]
+    lines = ["📡 System Status\n"]
+    lines.append(f"Relays: {len(relay_active)}")
+    for cid, ch in relay_active:
+        msg_count = len(ch.get("messages", []))
+        workers = ch.get("workers", [ch["worker"]])
+        lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
+    lines.append(f"\nChannels: {len(ch_active)}")
+    for cid, chan in ch_active:
+        members_str = ", ".join(chan["members"].keys())
+        msg_count = len(chan.get("messages", []))
+        lines.append(f"  • {cid} ({chan['label']}) — {members_str} ({msg_count} msgs)")
+    lines.append(f"\nGuests: {len(guest_active)}")
+    for g in guest_active:
+        inbox_count = len(_b.guest_store.inboxes.get(g["name"], []))
+        lines.append(f"  • {g['name']} (inbox: {inbox_count} msgs)")
+    router.reply(chat_id, "\n".join(lines))
+    return True
+
+
+def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
+    import bridge as _b
+
+    if len(parts) < 2:
+        router.reply(chat_id, "Usage: /relay stop <label>")
+        return True
+    target = parts[1]
+    removed = False
+    with relay_store.lock:
+        to_remove = None
+        if target in relay_store.channels:
+            to_remove = target
+        else:
+            target_lower = target.lower()
+            for cid, ch in relay_store.channels.items():
+                if ch["label"] == target_lower or ch["worker"] == target_lower:
+                    to_remove = cid
+                    break
+        if to_remove:
+            del relay_store.channels[to_remove]
+            _relay_save()
+            removed = True
+    if removed:
+        router.reply(chat_id, f'📡 Relay "{target}" closed.')
+    else:
+        router.reply(chat_id, f'Relay "{target}" not found.')
+    return True
+
+
+def cmd_relay(router, arg: str, chat_id) -> bool:
+    import bridge as _b
+
+    if not arg:
+        with relay_store.lock:
+            active = [ch for ch in relay_store.channels.values() if _b._clock.time() <= ch["expires_at_unix"]]
+        lines = ["📡 Relay — connect any agent to the team\n"]
+        lines.append("/relay <worker> — create relay, get a guideline link")
+        lines.append("/relay add <channel_id> <worker> — add worker to relay")
+        lines.append("/relay remove <channel_id> <worker> — remove worker")
+        lines.append("/relay list — active relays")
+        lines.append("/relay status — counts for relays, channels, guests")
+        lines.append("/relay stop <name> — close relay")
+        if active:
+            lines.append(f"\nActive: {', '.join(ch['label'] for ch in active)}")
+        router.reply(chat_id, "\n".join(lines))
+        return True
+    parts = arg.strip().split()
+    sub = parts[0].lower()
+    subcommands = {
+        "list": lambda: cmd_relay_list(router, chat_id),
+        "add": lambda: cmd_relay_add(router, parts, chat_id),
+        "remove": lambda: cmd_relay_remove(router, parts, chat_id),
+        "status": lambda: cmd_relay_status(router, chat_id),
+        "stop": lambda: cmd_relay_stop(router, parts, chat_id),
+    }
+    if sub in subcommands:
+        return subcommands[sub]()
+    worker = sub
+    registered = _b.get_registered_sessions()
+    if worker not in registered:
+        router.reply(chat_id, f'Worker "{worker}" not found.')
+        return True
+    label = f"relay-{worker}"
+    ch, guest_token, reply_token = relay_channel_create(worker, label)
+    with relay_store.lock:
+        relay_store.channels[ch["id"]] = ch
+        _relay_save()
+    url = relay_guide_url(ch["id"], guest_token)
+    lines = [f"📡 Relay to {worker} (24h) — {ch['id']}"]
+    lines.append(f"\nManage: /relay add {ch['id']} <worker> to add more workers")
+    lines.append(f"\nPaste this to the external agent:\n")
+    lines.append(f"---")
+    lines.append(f"You have a direct channel to {worker}. Open this link to see the API guide (setup + curl commands):")
+    lines.append(f"{url}")
+    lines.append(
+        f"Steps: (1) open the link, (2) copy the env vars and curl commands from the page, (3) send your message via the /send endpoint, (4) poll /messages for replies. Channel expires in 24h."
+    )
+    lines.append(f"---")
+    router.reply(chat_id, "\n".join(lines))
+    return True
+
+
+# ============================================================
+# _bridge_helpers
+# ============================================================
+
+
+import collections
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
+from urllib.parse import urlparse
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    _LOG_DEBUG,
+    _clock,
+    _subprocess_runner,
+    BRIDGE_URL,
+    BRIDGE_PUBLIC_URL,
+    BRIDGE_SSH_TARGET,
+    MACHINES_CONFIG_FILE,
+    TIMEOUT_FILE_TRANSFER,
+    TIMEOUT_GIT_OP,
+    TIMEOUT_RSYNC,
+    DELAY_BRIEF,
+    DELAY_RESPONSE_GAP,
+    DEFAULT_BACKEND,
+    RESTART_COOLDOWN,
+    _LEARNING_REMINDER_PATH,
+)
+from claudecode import (
+    _detect_os_family,
+    _find_codex_transcript,
+    _remote_run,
+    _LEARNING_REMINDER_TEXT,
+    is_claude_running,
+    remote_cache,
+    watchdog,
+    learning_reminders,
+    host_health,
+    LEARNING_REMINDER_RESPONSE_THRESHOLD,
+    LEARNING_REMINDER_IDLE_HOURS,
+    REWIND_TOKENS,
+    PR_REVIEW_TOKENS,
+    get_backend,
+    is_valid_backend,
+    list_backends,
+)
+from _types import (
+    MachinePublicDict,
+    MachineHealthDict,
+    MachinesCatalogResponse,
+    NodeConfigDict,
+    MentionRouteResult,
+    ParsedWorkerTarget,
+    ReminderState,
+    RewindTokenEntry,
+    PrReviewTokenEntry,
+    ConnectorMessageLogEntry,
+    CodexTranscriptEntry,
+    TmuxSessionDict,
+)
+
+
+class MachineConfigError(ValueError):
+    pass
+
+
+@dataclass
+class Machine:
+    id: str
+    ssh_target: str | None
+    bridge_base_url: str
+    home_root: str
+    os_family: str
+    display_name: str = ""
+    tailscale_ip: str = ""
+    role: str = ""
+    configured: bool = True
+
+    @property
+    def is_local(self) -> bool:
+        return self.ssh_target is None
+
+    def public_dict(self) -> MachinePublicDict:
+        return {
+            "id": self.id,
+            "display_name": self.display_name or self.id,
+            "ssh_target": self.ssh_target,
+            "bridge_base_url": self.bridge_base_url,
+            "home_root": self.home_root,
+            "os_family": self.os_family,
+            "tailscale_ip": self.tailscale_ip,
+            "role": self.role,
+            "configured": self.configured,
+        }
+
+
+def _validate_machine_id(machine_id: str) -> str:
+    if not isinstance(machine_id, str) or not machine_id:
+        raise MachineConfigError("machine id must be a non-empty string")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", machine_id):
+        raise MachineConfigError(f"invalid machine id: {machine_id!r}")
+    return machine_id
+
+
+def _coerce_optional_str(value: object, field: str, machine_id: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise MachineConfigError(f"machine {machine_id!r} field {field!r} must be a string")
+    return value
+
+
+def _implicit_local_machine() -> Machine:
+    _id = BRIDGE_SSH_TARGET or "vps"
+    return Machine(
+        id=_id,
+        ssh_target=None,
+        bridge_base_url=BRIDGE_URL,
+        home_root=str(Path.home()),
+        os_family=_detect_os_family(),
+        display_name=_id.upper(),
+        role="bridge",
+        configured=False,
+    )
+
+
+def load_machines_config(path: Path | None = None) -> dict[str, Machine]:
+    config_path = Path(path) if path is not None else MACHINES_CONFIG_FILE
+    if not config_path.exists():
+        return {_implicit_local_machine().id: _implicit_local_machine()}
+    try:
+        data = cast(NodeConfigDict, json.loads(config_path.read_text()))
+    except json.JSONDecodeError as e:
+        raise MachineConfigError(f"{config_path}: invalid JSON: {e}") from e
+    except OSError as e:
+        raise MachineConfigError(f"{config_path}: cannot read: {e}") from e
+    if not isinstance(data, dict):
+        raise MachineConfigError(f"{config_path}: root must be an object")
+    if data.get("version") != 1:
+        raise MachineConfigError(f"{config_path}: version must be 1")
+    raw_machines = data.get("machines")
+    if not isinstance(raw_machines, dict) or not raw_machines:
+        raise MachineConfigError(f"{config_path}: machines must be a non-empty object")
+    machines: dict[str, Machine] = {}
+    ssh_targets: dict[str, str] = {}
+    local_count = 0
+    for raw_id, raw in raw_machines.items():
+        machine_id = _validate_machine_id(raw_id)
+        if not isinstance(raw, dict):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} must be an object")
+        missing = [k for k in ("ssh_target", "bridge_base_url", "home_root", "os_family") if k not in raw]
+        if missing:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} missing {', '.join(missing)}")
+        ssh_target = raw.get("ssh_target")
+        if ssh_target is not None and not isinstance(ssh_target, str):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target must be string or null")
+        if ssh_target == "":
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} ssh_target cannot be empty")
+        if ssh_target is None:
+            local_count += 1
+        elif ssh_target in ssh_targets:
+            raise MachineConfigError(
+                f"{config_path}: ssh_target {ssh_target!r} used by both "
+                f"{ssh_targets[ssh_target]!r} and {machine_id!r}"
+            )
+        else:
+            ssh_targets[ssh_target] = machine_id
+        bridge_base_url = _coerce_optional_str(raw.get("bridge_base_url"), "bridge_base_url", machine_id).rstrip("/")
+        home_root = _coerce_optional_str(raw.get("home_root"), "home_root", machine_id).rstrip("/")
+        os_family = _coerce_optional_str(raw.get("os_family"), "os_family", machine_id)
+        if not bridge_base_url:
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} bridge_base_url cannot be empty")
+        if not home_root.startswith("/"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} home_root must be absolute")
+        if os_family not in ("linux", "darwin"):
+            raise MachineConfigError(f"{config_path}: machine {machine_id!r} os_family must be linux or darwin")
+        machines[machine_id] = Machine(
+            id=machine_id,
+            ssh_target=ssh_target,
+            bridge_base_url=bridge_base_url,
+            home_root=home_root,
+            os_family=os_family,
+            display_name=_coerce_optional_str(raw.get("display_name", machine_id), "display_name", machine_id),
+            tailscale_ip=_coerce_optional_str(raw.get("tailscale_ip", ""), "tailscale_ip", machine_id),
+            role=_coerce_optional_str(raw.get("role", ""), "role", machine_id),
+        )
+    if local_count != 1:
+        raise MachineConfigError(f"{config_path}: exactly one local machine with ssh_target=null is required")
+    return machines
+
+
+def get_machine_catalog(force_reload: bool = False) -> dict[str, Machine]:
+    with remote_cache.lock:
+        if force_reload or remote_cache.machines is None or remote_cache.machines_path != MACHINES_CONFIG_FILE:
+            remote_cache.machines = load_machines_config(MACHINES_CONFIG_FILE)
+            remote_cache.machines_path = MACHINES_CONFIG_FILE
+        return dict(remote_cache.machines)
+
+
+def _machine_for_worker_host(host: str | None, machines: dict[str, Machine]) -> Machine:
+    if host is None:
+        for machine in machines.values():
+            if machine.is_local:
+                return machine
+        return _implicit_local_machine()
+    for machine in machines.values():
+        if machine.ssh_target == host:
+            return machine
+    machine_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", host).strip("-") or "unknown"
+    return Machine(
+        id=machine_id,
+        ssh_target=host,
+        bridge_base_url=BRIDGE_PUBLIC_URL or "",
+        home_root="",
+        os_family="",
+        display_name=host,
+        role="worker-host",
+        configured=False,
+    )
+
+
+def _machine_health(machine: Machine) -> MachineHealthDict:
+    host_label = machine.ssh_target or "VPS"
+    with watchdog.lock:
+        health: MachineHealthDict = {
+            "status": "up" if machine.is_local else "unknown",
+            "down_since": None,
+            "last_error": None,
+            "disk": host_health.disk_usage.get(host_label),
+            "memory": host_health.mem_usage.get(host_label),
+            "io": host_health.io_usage.get(host_label),
+        }
+        if machine.ssh_target:
+            if host_health.down.get(machine.ssh_target, False):
+                health["status"] = "down"
+                health["down_since"] = host_health.down_since.get(machine.ssh_target)
+                health["last_error"] = host_health.last_error.get(machine.ssh_target)
+            elif (
+                machine.ssh_target in host_health.ssh_failures
+                or machine.ssh_target in host_health.disk_usage
+                or machine.ssh_target in host_health.mem_usage
+                or machine.ssh_target in host_health.io_usage
+            ):
+                health["status"] = "up"
+    return health
+
+
+def _machine_access(machine: Machine, caller_host: str | None) -> str:
+    target_host = machine.ssh_target
+    if caller_host == target_host:
+        return "local"
+    if target_host is None:
+        return f"ssh {BRIDGE_SSH_TARGET}"
+    return f"ssh {target_host}"
+
+
+def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
+    import bridge as _b
+
+    machines = get_machine_catalog()
+    registered = _b.get_registered_sessions()
+    caller_info = registered.get(caller_from, {}) if caller_from else {}
+    caller_host = caller_info.get("host") if caller_info else (_b.get_worker_host(caller_from) if caller_from else None)
+    rows: dict[str, MachinePublicDict] = {}
+    for machine in machines.values():
+        row = machine.public_dict()
+        row["access"] = _machine_access(machine, caller_host)
+        row["workers"] = []
+        row["worker_count"] = 0
+        row["health"] = _machine_health(machine)
+        rows[machine.id] = row
+    for name, info in registered.items():
+        host = info.get("host") if "host" in info else _b.get_worker_host(name)
+        machine = _machine_for_worker_host(host, machines)
+        if machine.id not in rows:
+            row = machine.public_dict()
+            row["access"] = _machine_access(machine, caller_host)
+            row["workers"] = []
+            row["worker_count"] = 0
+            row["health"] = _machine_health(machine)
+            rows[machine.id] = row
+        rows[machine.id]["workers"].append(
+            {
+                "name": name,
+                "backend": info.get("backend", DEFAULT_BACKEND),
+                "status": "online" if info.get("tmux") or info.get("callback_url") else "exited",
+            }
+        )
+        rows[machine.id]["worker_count"] += 1
+    return {
+        "version": 1,
+        "config_path": str(MACHINES_CONFIG_FILE),
+        "caller": caller_from or None,
+        "machines": list(rows.values()),
+    }
+
+
+def parse_hire_args(raw: str) -> tuple[str, str]:
+    parts = [p for p in (raw or "").split() if p]
+    backend = DEFAULT_BACKEND
+    name_parts = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part == "--backend" and i + 1 < len(parts):
+            backend = parts[i + 1]
+            i += 2
+            continue
+        elif part == "--codex":
+            backend = "codex"
+        elif part.startswith("--"):
+            pass
+        else:
+            name_parts.append(part)
+        i += 1
+    if len(name_parts) != 1:
+        return "", backend
+    name = name_parts[0]
+    for backend_name in list_backends():
+        prefix = f"{backend_name}-"
+        if name.startswith(prefix):
+            backend = backend_name
+            name = name[len(prefix) :]
+            break
+    if not is_valid_backend(backend):
+        return name, backend
+    return name, backend
+
+
+def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "push") -> None:
+    if not host:
+        shutil.copy2(src, dst)
+    elif direction == "push":
+        _subprocess_runner.run(["scp", "-q", src, f"{host}:{dst}"], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
+    else:
+        _subprocess_runner.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
+
+
+def parse_worker_target(target: str) -> ParsedWorkerTarget:
+    if "@" in target:
+        name, host = target.rsplit("@", 1)
+        return ParsedWorkerTarget(name, host)
+    return ParsedWorkerTarget(target, None)
+
+
+def _read_learning_reminder(name: str) -> str:
+    try:
+        if os.path.isfile(_LEARNING_REMINDER_PATH):
+            text = Path(_LEARNING_REMINDER_PATH).read_text().strip()
+            if text:
+                return text.replace("{name}", name)
+    except OSError as e:
+        _log(_LOG_WARN, "bridge", f"Failed to read learning reminder from {_LEARNING_REMINDER_PATH}: {e}")
+    return _LEARNING_REMINDER_TEXT.replace("{name}", name)
+
+
+def _new_reminder_state() -> ReminderState:
+    now = _clock.time()
+    return {
+        "response_count": 0,
+        "last_reminder_ts": now,
+        "last_response_ts": now,
+        "reminder_pending": False,
+    }
+
+
+def _reset_learning_reminder(name: str) -> None:
+    with learning_reminders.lock:
+        learning_reminders.state[name] = _new_reminder_state()
+
+
+def _fire_reminder(name: str, st: ReminderState) -> None:
+    import bridge as _b
+
+    st["response_count"] = 0
+    st["last_reminder_ts"] = _clock.time()
+    st["reminder_pending"] = True
+    _b._task_pool.submit(_send_learning_reminder, name, _read_learning_reminder(name))
+
+
+def _check_learning_reminder(name: str) -> None:
+    with learning_reminders.lock:
+        st = learning_reminders.state.get(name)
+        if st is None:
+            st = _new_reminder_state()
+            learning_reminders.state[name] = st
+        st["last_response_ts"] = _clock.time()
+        if st.get("reminder_pending"):
+            st["reminder_pending"] = False
+            st["response_count"] = 1
+            return
+        st["response_count"] = st.get("response_count", 0) + 1
+        if st["response_count"] >= LEARNING_REMINDER_RESPONSE_THRESHOLD:
+            _fire_reminder(name, st)
+
+
+def _scan_idle_workers() -> None:
+    try:
+        now = _clock.time()
+        idle_threshold = LEARNING_REMINDER_IDLE_HOURS * 3600
+        to_fire = []
+        with learning_reminders.lock:
+            for name, st in learning_reminders.state.items():
+                if st.get("reminder_pending"):
+                    continue
+                if st.get("response_count", 0) <= 1:
+                    continue
+                idle_seconds = now - st.get("last_response_ts", now)
+                since_reminder = now - st.get("last_reminder_ts", now)
+                if idle_seconds >= idle_threshold and since_reminder >= idle_threshold:
+                    to_fire.append(name)
+            for name in to_fire:
+                _fire_reminder(name, learning_reminders.state[name])
+    except KeyError as e:
+        _log(_LOG_ERROR, "bridge", f"Learning reminder idle scan error: {e}")
+    finally:
+        _schedule_idle_scan()
+
+
+def _seed_learning_reminder_state(worker_names: Iterable[str]) -> None:
+    with learning_reminders.lock:
+        for name in worker_names:
+            if name not in learning_reminders.state:
+                learning_reminders.state[name] = _new_reminder_state()
+
+
+def _schedule_idle_scan() -> None:
+    learning_reminders.idle_scan_timer = threading.Timer(1800, _scan_idle_workers)
+    learning_reminders.idle_scan_timer.name = "idle-scan"
+    learning_reminders.idle_scan_timer.daemon = True
+    learning_reminders.idle_scan_timer.start()
+
+
+def _send_learning_reminder(name: str, text: str) -> None:
+    import bridge as _b
+
+    try:
+        _clock.sleep(DELAY_RESPONSE_GAP)
+        if _b.send_to_worker(name, text):
+            _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
+        else:
+            _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
+    except (ConnectionError, OSError, TimeoutError) as e:
+        _log(_LOG_ERROR, "bridge", f"Learning reminder error for {name}: {e}")
+
+
+class ConnectorRegistry:
+    def __init__(self) -> None:
+        from typing import Any as _Any
+
+        self.gmail: _Any = None  # type: ignore[explicit-any]
+        self.github: _Any = None  # type: ignore[explicit-any]
+        self._log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
+        self._lock: threading.Lock = threading.Lock()
+
+    def stop_all(self) -> None:
+        for name, inst in [("gmail", self.gmail), ("github", self.github)]:
+            if inst is not None:
+                try:
+                    inst.stop()
+                    print(f"{name.title()} connector stopped")
+                except (RuntimeError, OSError) as exc:
+                    _log(_LOG_DEBUG, f"shutdown:{name}", f"{type(exc).__name__}: {exc}")
+
+    def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
+        with self._lock:
+            if tag not in self._log:
+                self._log[tag] = collections.deque(maxlen=20)
+            self._log[tag].append(
+                {
+                    "ts": _clock.time(),
+                    "html": html_text,
+                    "plain": plain_text,
+                    "targets": targets or [],
+                }
+            )
+
+    def get_log(self, tag: str) -> list[ConnectorMessageLogEntry]:
+        with self._lock:
+            return list(self._log.get(tag, []))
+
+
+def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
+    try:
+        if host:
+            r = _remote_run(["cat", path], host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
+            if r.returncode != 0:
+                return []
+            content = r.stdout
+        else:
+            content = Path(path).read_text()
+    except (subprocess.SubprocessError, OSError):
+        return []
+    messages = []
+    for line in content.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            ev = cast(dict[str, object], json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        ev_type = str(ev.get("type", ""))
+        raw_payload = ev.get("payload", {})
+        payload = cast(dict[str, object], raw_payload) if isinstance(raw_payload, dict) else {}
+        ts = str(ev.get("timestamp", ""))
+        if ev_type == "response_item":
+            item_type = str(payload.get("type", ""))
+            if item_type == "message":
+                role = str(payload.get("role", "assistant"))
+                text_parts: list[str] = []
+                raw_content = payload.get("content", [])
+                for c in cast(list[dict[str, object]], raw_content) if isinstance(raw_content, list) else []:
+                    if isinstance(c, dict) and c.get("type") in ("output_text", "input_text") and c.get("text"):
+                        text_parts.append(str(c["text"]))
+                text = "\n".join(text_parts).strip()
+                if text and role != "developer":
+                    messages.append({"role": role, "text": text, "timestamp": ts})
+            elif item_type == "function_call":
+                name = str(payload.get("name", ""))
+                messages.append({"role": "tool_use", "text": f"[{name}]", "timestamp": ts})
+            elif item_type == "function_call_output":
+                output = str(payload.get("output", ""))
+                if output:
+                    messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
+    return cast(list[CodexTranscriptEntry], messages)
+
+
+def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
+    import bridge as _b
+
+    host = _b.get_worker_host(worker_name)
+    path = _find_codex_transcript(worker_name, host=host)
+    if not path:
+        return []
+    return _parse_codex_transcript(path, host=host)
+
+
+REWIND_TIMEOUT: int = 24 * 60 * 60
+PR_REVIEW_EXTEND: int = 300
+
+
+class TokenStore:
+    def __init__(self) -> None:
+        self._lock: threading.Lock = threading.Lock()
+
+    def _validate(
+        self, store: dict[str, dict[str, object]], token: str | None, extend: bool, ttl: int
+    ) -> dict[str, object] | None:
+        if not token:
+            return None
+        now = _clock.time()
+        with self._lock:
+            for k in [k for k, v in store.items() if v["expires_at"] <= now]:
+                del store[k]
+            entry = store.get(token)
+            if entry and extend:
+                entry["expires_at"] = now + ttl
+            return entry
+
+    def add_rewind(self, token: str, name: str, timeout: int = REWIND_TIMEOUT) -> None:
+        with self._lock:
+            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
+
+    def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
+        return self._validate(REWIND_TOKENS, token, extend, REWIND_TIMEOUT)
+
+    def add_pr_review(self, token: str, pr_num: int, owner: str, repo: str) -> None:
+        with self._lock:
+            PR_REVIEW_TOKENS[token] = {
+                "pr_num": pr_num,
+                "owner": owner,
+                "repo": repo,
+                "expires_at": _clock.time() + PR_REVIEW_EXTEND,
+            }
+
+    def validate_pr_review(self, token: str | None, extend: bool = True) -> PrReviewTokenEntry | None:
+        return self._validate(PR_REVIEW_TOKENS, token, extend, PR_REVIEW_EXTEND)
+
+
+def _extract_file_id(msg: TelegramMessageDict) -> tuple[str | None, str]:
+    if msg.get("animation"):
+        return msg["animation"].get("file_id"), "GIF"
+    if msg.get("photo"):
+        return max(msg["photo"], key=lambda p: p.get("file_size", 0)).get("file_id"), "image"
+    doc = msg.get("document")
+    if doc:
+        if doc.get("mime_type", "").startswith("image/"):
+            return doc.get("file_id"), "image"
+        return doc.get("file_id"), "file"
+    for key, label in [
+        ("video", "video"),
+        ("audio", "audio"),
+        ("voice", "voice"),
+        ("video_note", "video note"),
+        ("sticker", "sticker"),
+    ]:
+        if msg.get(key):
+            return msg[key].get("file_id"), label
+    return None, "media"
+
+
+def _format_offline_warning(statuses: list[MentionRouteResult | None]) -> str | None:
+    sent_to = [s["name"] for s in statuses if s and s.get("status") == "sent"]
+    offline = [s["name"] for s in statuses if s and s.get("status") == "offline"]
+    if not offline:
+        return None
+    parts = [f"⚠️ {', '.join(offline)} {'is' if len(offline) == 1 else 'are'} offline."]
+    if sent_to:
+        parts.append(f"Delivered to {', '.join(sent_to)}.")
+    return " ".join(parts)
+
+
+def _gh_api_call(
+    args: list[str], *, input_data: str | None = None, timeout: int = TIMEOUT_FILE_TRANSFER
+) -> tuple[bool, str]:
+    try:
+        kw: dict[str, object] = {"capture_output": True, "text": True, "timeout": timeout}
+        if input_data is not None:
+            kw["input"] = input_data
+        r = _subprocess_runner.run(["gh", "api"] + args, **kw)
+        if r.returncode != 0:
+            return False, r.stderr.strip() or r.stdout.strip()
+        return True, r.stdout
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+
+
+def _fetch_remote_file(host: str, remote_path: str) -> str | None:
+    original_name = Path(remote_path).name
+    tmp_dir = tempfile.mkdtemp(prefix="remote-file-")
+    local_path = os.path.join(tmp_dir, original_name)
+    try:
+        r = _subprocess_runner.run(
+            ["rsync", "-az", f"{host}:{remote_path}", local_path], capture_output=True, text=True, timeout=TIMEOUT_RSYNC
+        )
+        if r.returncode == 0 and os.path.getsize(local_path) > 0:
+            return local_path
+        if r.returncode != 0:
+            _log(
+                _LOG_ERROR, "bridge", f"rsync failed (exit {r.returncode}): {host}:{remote_path} -> {r.stderr.strip()}"
+            )
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_WARN, "bridge", f"Remote file fetch failed: {host}:{remote_path} -> {e}")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None
+
+
+def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
+    import bridge as _b
+
+    host = _b.get_worker_host(name)
+    if not host:
+        return media_list
+    result: list[tuple[str | None, str]] = []
+    for file_path, caption in media_list:
+        if not file_path:
+            result.append((file_path, caption))
+            continue
+        local = _fetch_remote_file(host, file_path)
+        if local:
+            result.append((local, caption))
+        else:
+            _log(_LOG_WARN, "bridge", f"Cannot fetch remote file {host}:{file_path} for {name}")
+            result.append((None, f"[Fetch failed: {file_path}]"))
+    return result
+
+
+def _parse_response_media(
+    name: str, text: str
+) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
+    import bridge as _b
+
+    host = _b.get_worker_host(name)
+    if host:
+        _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
+        clean_text, images = _parse_media_tags(text, "image", _accept_all)
+        clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
+    else:
+        clean_text, images = parse_image_tags(text)
+        clean_text, files = parse_file_tags(clean_text)
+    images = _localize_media(name, images)
+    files = _localize_media(name, files)
+    return clean_text, images, files
+
+
+def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix: str) -> None:
+    rich_sent = False
+    rich_failed_at = -1
+    rich_chunks: list[str] = []
+    prev_msg_id: int | None = None
+    if hasattr(transport, "send_rich_text"):
+        rich_text = clean_text.lstrip()
+        prefix_lower = f"{name}:".lower()
+        if rich_text.lower().startswith(prefix_lower):
+            rich_text = rich_text[len(prefix_lower) :].lstrip()
+        rich_text = _pipe_tables_to_html(rich_text)
+        rich_md = f"**{name}:**\n{rich_text}"
+        prefix_reserve = len(name) + 30
+        rich_chunks = split_message(rich_md, TELEGRAM_RICH_MAX_LENGTH - prefix_reserve)
+        rich_sent = True
+        for i, chunk in enumerate(rich_chunks):
+            if i > 0:
+                chunk = f"**{name}:** _(continued)_\n{chunk}"
+            result = transport.send_rich_text(chat_id, chunk, reply_to=prev_msg_id if prev_msg_id else None)
+            if result and result.get("ok"):
+                _rr = result.get("result", {})
+                prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
+                if len(rich_chunks) > 1:
+                    _log(
+                        _LOG_INFO,
+                        "telegram",
+                        f"{log_prefix} sent (rich): {name} part {i+1}/{len(rich_chunks)} -> Telegram OK",
+                    )
+                else:
+                    _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
+            else:
+                error_code = (result or {}).get("error_code", 0)
+                desc = (result or {}).get("description", "")
+                _log(
+                    _LOG_ERROR,
+                    "bridge",
+                    f"{log_prefix} sendRichMessage failed ({error_code}: {desc}), falling back to HTML",
+                )
+                rich_sent = False
+                rich_failed_at = i
+                break
+            if i < len(rich_chunks) - 1:
+                _clock.sleep(DELAY_BRIEF)
+    if not rich_sent and rich_failed_at > 0:
+        _send_as_html(name, "\n".join(rich_chunks[rich_failed_at:]), chat_id, log_prefix, prev_msg_id)
+        rich_sent = True
+    if not rich_sent:
+        _send_as_html(name, clean_text, chat_id, log_prefix)
+
+
+def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str, prev_msg_id: int | None = None) -> int | None:
+    html_text = markdown_to_telegram_html(text)
+    prefix_reserve = len(name) + 30
+    chunks = split_message(html_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
+    formatted_parts = format_multipart_messages(name, chunks)
+    for i, part in enumerate(formatted_parts):
+        result = transport.send_text(chat_id, part, parse_mode="HTML", reply_to=prev_msg_id if prev_msg_id else None)
+        if result and result.get("ok"):
+            _rr = result.get("result", {})
+            prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
+            if len(formatted_parts) > 1:
+                _log(
+                    _LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK"
+                )
+            else:
+                _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
+        else:
+            desc = str((result or {}).get("description", ""))
+            _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed ({desc}), retrying as plain text")
+            plain_text = re.sub(r"<[^>]+>", "", part)
+            plain_text = plain_text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+            result = transport.send_text(chat_id, plain_text, reply_to=prev_msg_id if prev_msg_id else None)
+            if result and result.get("ok"):
+                _rr = result.get("result", {})
+                prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
+        if i < len(formatted_parts) - 1:
+            _clock.sleep(DELAY_BRIEF)
+    return prev_msg_id
+
+
+def _send_response_media(
+    name: str, images: list[tuple[str | None, str]], files: list[tuple[str | None, str]], chat_id: int
+) -> None:
+    for img_path, img_caption in images:
+        if img_path is None:
+            transport.send_text(chat_id, f"{name}: {img_caption}")
+            continue
+        full_caption = f"{name}: {img_caption}" if img_caption else f"{name}:"
+        if Path(img_path).suffix.lower() in (".gif", ".mp4"):
+            sent = send_animation(chat_id, img_path, full_caption)
+        else:
+            sent = send_photo(chat_id, img_path, full_caption)
+        if sent:
+            _log(_LOG_INFO, "telegram", f"Image sent: {name} -> {img_path}")
+        else:
+            transport.send_text(chat_id, f"{name}: [Image failed: {img_path}]")
+    for file_path, file_caption in files:
+        if file_path is None:
+            transport.send_text(chat_id, f"{name}: {file_caption}")
+            continue
+        full_caption = f"{name}: {file_caption}" if file_caption else f"{name}:"
+        ext = Path(file_path).suffix.lower()
+        if ext in VIDEO_EXTENSIONS:
+            sent = send_video(chat_id, file_path, full_caption)
+        elif ext in AUDIO_EXTENSIONS:
+            sent = send_audio(chat_id, file_path, full_caption)
+        elif ext in VOICE_EXTENSIONS:
+            sent = send_voice(chat_id, file_path, full_caption)
+        elif ext in STICKER_EXTENSIONS:
+            sent = send_sticker(chat_id, file_path)
+        else:
+            sent = send_document(chat_id, file_path, full_caption)
+        if sent:
+            _log(_LOG_INFO, "telegram", f"File sent: {name} -> {file_path}")
+        else:
+            transport.send_text(chat_id, f"{name}: [File failed: {file_path}]")
+
+
+def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: str = "Response") -> None:
+    clean_text, images, files = _parse_response_media(name, text)
+    if clean_text and len(clean_text.strip()) <= 5:
+        _log(
+            _LOG_DEBUG,
+            "telegram",
+            f"{log_prefix} short msg: {name}, text={repr(clean_text)}, " f"images={len(images)}, files={len(files)}",
+        )
+    if clean_text:
+        _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
+    _send_response_media(name, images, files, chat_id)
+
+
+def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
+    try:
+        r = _subprocess_runner.run(
+            ["beast", "serve", "deploy", html_path, "--slug", slug, "--output-json"],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_GIT_OP,
+        )
+        if r.returncode == 0:
+            data = cast(dict[str, object], json.loads(r.stdout))
+            url = str(data.get("url", ""))
+            if url and "localhost" in url:
+                host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "157.180.48.254"
+                url = url.replace("localhost", str(host))
+            return url or None
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        _log(_LOG_WARN, "bridge", f"beast serve deploy failed for {slug}: {e}")
+    return None
+
+
+class _LegacyTransportAdapter(MessageTransport):
+    def __init__(self, legacy: Any) -> None:
+        self._legacy = legacy
+
+    @property
+    def name(self) -> str:
+        return "legacy-adapter"
+
+    def send_text(
+        self, chat_id: ChatId, text: str, parse_mode: ParseMode = None, reply_to: MessageId | None = None
+    ) -> TelegramApiResponse:
+        result = self._legacy.send_message(chat_id, text)
+        return result if result else {"ok": True, "result": {"message_id": 1}}
+
+    def send_photo(self, chat_id: ChatId, photo_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_document(self, chat_id: ChatId, doc_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_animation(self, chat_id: ChatId, animation_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_video(self, chat_id: ChatId, video_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_audio(self, chat_id: ChatId, audio_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_voice(self, chat_id: ChatId, voice_path: str | Path, caption: str | None = None) -> bool:
+        return False
+
+    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
+        return False
+
+    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
+        pass
+
+    def set_reaction(self, chat_id: ChatId, message_id: MessageId, reaction: list[dict[str, str]]) -> None:
+        if hasattr(self._legacy, "set_reaction"):
+            self._legacy.set_reaction(chat_id, message_id, reaction)
+
+    def edit_message(
+        self, chat_id: ChatId, message_id: MessageId, text: str, parse_mode: ParseMode = None
+    ) -> TelegramApiResponse:
+        return {"ok": True, "result": {"message_id": message_id}}
+
+    def setup_commands(self, commands: list[dict[str, str]]) -> None:
+        pass
+
+    def download_file(self, file_id: str, session_name: str) -> str | None:
+        return None
+
+
+def _checkin_can_restart(
+    name: str, tmux_name: str, host: str | None, pane_cwd: str, requested_cwd: str
+) -> tuple[bool, str]:
+    last_restart = watchdog.recent_restarts.get(name, 0)
+    elapsed = _clock.time() - last_restart
+    if elapsed < RESTART_COOLDOWN:
+        if watchdog.force_restart_pending_cwd.pop(name, False):
+            _log(_LOG_WARN, "checkin", f"{name}: cooldown bypassed (post-force CWD repair)")
+        else:
+            _log(_LOG_WARN, "checkin", f"{name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
+            return False, (
+                f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
+                f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
+            )
+    if is_claude_running(tmux_name, host=host):
+        _log(_LOG_INFO, "checkin", f"{name}: BLOCKED restart (Claude already running in tmux)")
+        return False, (
+            f"Checkin restart skipped: {name} has Claude running. "
+            f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
+        )
+    with watchdog.restart_lock:
+        inflight_ts = watchdog.restart_in_progress.get(name)
+        if inflight_ts and _clock.time() - inflight_ts < 120:
+            _log(
+                _LOG_INFO,
+                "checkin",
+                f"{name}: BLOCKED restart (in-flight since {_clock.time() - inflight_ts:.0f}s ago)",
+            )
+            return (
+                False,
+                f"Checkin restart blocked: {name} restart already in progress ({_clock.time() - inflight_ts:.0f}s).",
+            )
+        watchdog.restart_in_progress[name] = _clock.time()
+    return True, ""
+
+
+def _checkin_do_restart(
+    name: str, backend_name: str, tmux_name: str, host: str | None, requested_cwd: str
+) -> tuple[bool, str]:
+    import bridge as _b
+
+    notify_chat_id = get_manager_chat_id(name)
+    try:
+        if notify_chat_id is not None:
+            send_telegram_message(
+                notify_chat_id,
+                f"{name} is restarting in a new directory. " "Messages during restart may be lost.",
+            )
+        if host:
+            restart_backend = get_backend(backend_name)
+            ok, err = _b.command_router._restart_remote_worker(
+                name, backend_name, restart_backend, tmux_name, host, "relaunch"
+            )
+        else:
+            ok, err = _b.worker_manager.restart(name, mode="relaunch")
+        watchdog.recent_restarts[name] = _clock.time()
+        _log(_LOG_INFO, "checkin", f"{name}: restart result ok={ok}, err={err}")
+        if not ok:
+            if notify_chat_id is not None:
+                send_telegram_message(
+                    notify_chat_id,
+                    f"{name} could not restart. " f"Run /restart {name} before sending new messages.",
+                )
+            return False, err or "restart failed"
+        if notify_chat_id is not None:
+            if _b._wait_for_restart_ready(tmux_name, backend_name, host=host):
+                send_telegram_message(notify_chat_id, f"{name} is ready. Safe to send messages now.")
+            else:
+                send_telegram_message(
+                    notify_chat_id,
+                    f"{name} restarted but is not ready yet. "
+                    f"Hold messages for now. If this continues, run /restart {name}.",
+                )
+        return True, ""
+    finally:
+        with watchdog.restart_lock:
+            watchdog.restart_in_progress.pop(name, None)
+
+
+# ============================================================
+# _worker_impl
+# ============================================================
+
+import json
+import os
+import shlex
+import subprocess
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+import core
+import claudecode
+from core import (
+    Clock,
+    SubprocessRunner,
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    BRIDGE_URL,
+    BRIDGE_SSH_TARGET,
+    DEFAULT_BACKEND,
+    TIMEOUT_TMUX_CHECK,
+    TIMEOUT_TMUX_SEND,
+    TIMEOUT_REMOTE_CMD,
+    DELAY_SHORT,
+    DELAY_TMUX_SEND,
+    DELAY_STARTUP,
+    DELAY_STARTUP_LONG,
+    DELAY_RETRY,
+    DELAY_RESPONSE_GAP,
+)
+from claudecode import (
+    normalize_backend,
+    is_valid_backend,
+    list_backends,
+    _which_binary,
+    normalize_cwd,
+    get_tmux_env_value,
+    cleanup_worker_pipe,
+    clear_claude_session_id,
+)
+
+if TYPE_CHECKING:
+    from bridge import WorkerEndpointInfo
+    from claudecode import Backend, TmuxSessionDict
+    from telegram import ChatId
+
+
+class WorkerManager:
+    def __init__(
+        self,
+        sessions_dir: Path,
+        tmux_prefix: str,
+        runner: "SubprocessRunner | None" = None,
+        clock: "Clock | None" = None,
+    ) -> None:
+        self.sessions_dir = sessions_dir
+        self.tmux_prefix = tmux_prefix
+        self._runner: SubprocessRunner = runner or core._subprocess_runner
+        self._clock: Clock = clock or core._clock
+
+    def _sync_paths(self) -> None:
+        if self.sessions_dir != core.SESSIONS_DIR:
+            self.sessions_dir = core.SESSIONS_DIR
+        if self.tmux_prefix != core.TMUX_PREFIX:
+            self.tmux_prefix = core.TMUX_PREFIX
+
+    def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
+        from bridge import _get_worker_cwd
+
+        candidate = normalize_cwd(requested_cwd)
+        if not candidate:
+            candidate = normalize_cwd(_get_worker_cwd(name))
+        if candidate:
+            if os.path.isdir(candidate):
+                return candidate
+            _log(_LOG_WARN, "bridge", f"Ignoring invalid startup cwd for {name}: {candidate}")
+        fallback = normalize_cwd(fallback_cwd)
+        if fallback and os.path.isdir(fallback):
+            return fallback
+        return ""
+
+    def _get_tmux_pane_cwd(self, tmux_name: str, host: str | None = None) -> str:
+        result = claudecode._remote_run(
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_current_path}"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_TMUX_CHECK,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+
+    def _cd_tmux_to_cwd(self, tmux_name: str, cwd: str) -> None:
+        if not cwd:
+            return
+        self._runner.run(
+            ["tmux", "send-keys", "-t", tmux_name, f"cd {shlex.quote(cwd)}", "Enter"], timeout=TIMEOUT_TMUX_SEND
+        )
+        self._clock.sleep(DELAY_SHORT)
+
+    def scan_tmux_sessions(self) -> dict[str, TmuxSessionDict]:
+        from bridge import _registry_add, get_machine_catalog
+
+        self._sync_paths()
+        registered: dict[str, TmuxSessionDict] = {}
+        try:
+            result = self._runner.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_CHECK,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    session_name = line.strip()
+                    if session_name.startswith(self.tmux_prefix):
+                        name = session_name[len(self.tmux_prefix) :]
+                        backend = normalize_backend(get_tmux_env_value(session_name, "WORKER_BACKEND"))
+                        registered[name] = {"tmux": session_name, "backend": backend}
+        except (subprocess.SubprocessError, KeyError) as e:
+            _log(_LOG_ERROR, "bridge", f"Error scanning local tmux: {e}")
+        try:
+            machines = get_machine_catalog()
+        except (subprocess.SubprocessError, OSError):
+            machines = {}
+        for machine in machines.values():
+            if machine.is_local or not machine.ssh_target:
+                continue
+            if machine.role not in ("worker-host", ""):
+                continue
+            try:
+                r = claudecode._remote_run(
+                    ["tmux", "list-sessions", "-F", "#{session_name}"],
+                    host=machine.ssh_target,
+                    capture_output=True,
+                    text=True,
+                    timeout=TIMEOUT_REMOTE_CMD,
+                )
+                if r.returncode != 0:
+                    continue
+                for line in r.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    session_name = line.strip()
+                    if session_name.startswith(self.tmux_prefix):
+                        name = session_name[len(self.tmux_prefix) :]
+                        if name not in registered:
+                            registered[name] = {
+                                "tmux": session_name,
+                                "backend": DEFAULT_BACKEND,
+                                "host": machine.ssh_target,
+                            }
+                            _registry_add(name, DEFAULT_BACKEND, host=machine.ssh_target)
+            except (subprocess.SubprocessError, KeyError) as e:
+                _log(_LOG_ERROR, "bridge", f"Error scanning tmux on {machine.ssh_target}: {e}")
+        return registered
+
+    _sessions_cache = None
+    _sessions_cache_ts: float = 0
+    _sessions_cache_lock = threading.Lock()
+    _SESSIONS_CACHE_TTL = 15
+
+    def invalidate_sessions_cache(self) -> None:
+        with self._sessions_cache_lock:
+            self._sessions_cache = None
+            self._sessions_cache_ts = 0
+
+    def get_registered_sessions(
+        self, registered: dict[str, TmuxSessionDict] | None = None
+    ) -> dict[str, TmuxSessionDict]:
+        from bridge import _load_registry, _registry_bootstrap, state
+
+        self._sync_paths()
+        if registered is None:
+            now = self._clock.time()
+            with self._sessions_cache_lock:
+                if self._sessions_cache is not None and (now - self._sessions_cache_ts) < self._SESSIONS_CACHE_TTL:
+                    return dict(self._sessions_cache)
+            registered = self.scan_tmux_sessions()
+        registry = _load_registry()
+        for rname, rentry in registry.get("workers", {}).items():
+            if rname not in registered and rentry.get("backend") != "claude":
+                registered[rname] = {"backend": rentry.get("backend", "codex")}
+        _registry_bootstrap(registered)
+        registry = _load_registry()
+        for name, info in registry.get("workers", {}).items():
+            if name not in registered:
+                entry: TmuxSessionDict = {"backend": str(info.get("backend", DEFAULT_BACKEND))}
+                for key in ("protocol", "callback_url", "host", "version"):
+                    val = info.get(key)
+                    if val:
+                        entry[key] = str(val)
+                if info.get("host") and not info.get("callback_url"):
+                    entry["tmux"] = f"{self.tmux_prefix}{name}"
+                registered[name] = entry
+            else:
+                for key in ("protocol", "callback_url", "host", "version"):
+                    if info.get(key):
+                        registered[name][key] = info.get(key)  # type: ignore[literal-required]
+        if state.active and state.active not in registered:
+            state.active = None
+        if registered and not state.active:
+            state.active = list(registered.keys())[0]
+        with self._sessions_cache_lock:
+            self._sessions_cache = dict(registered)
+            self._sessions_cache_ts = self._clock.time()
+        return registered
+
+    def is_online(self, name: str, session: TmuxSessionDict | None = None) -> bool:
+        self._sync_paths()
+        if not session:
+            sessions = self.get_registered_sessions()
+            session = sessions.get(name)
+        if not session:
+            return False
+        if session.get("callback_url"):
+            return True
+        backend_name = normalize_backend(session.get("backend"))
+        backend = claudecode.get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+        host = get_worker_host(name)
+        if host:
+            try:
+                if not claudecode.tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK):
+                    return False
+                if backend.is_interactive:
+                    try:
+                        return claudecode.is_claude_running(tmux_name, host=host)
+                    except (subprocess.SubprocessError, OSError):
+                        return True
+                return True
+            except (subprocess.SubprocessError, OSError):
+                return True
+        return backend.is_online(tmux_name)
+
+    def send(
+        self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None
+    ) -> bool:
+        from bridge import _send_to_callback_worker
+
+        self._sync_paths()
+        if not session:
+            sessions = self.get_registered_sessions()
+            session = sessions.get(name)
+        if not session:
+            return False
+        if session.get("callback_url"):
+            return _send_to_callback_worker(name, message, "manager", session)
+        backend_name = normalize_backend(session.get("backend"))
+        backend = claudecode.get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+        return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+
+    def _pipe_worker_entry(self, name: str, peer_host: str | None, caller_host: str | None) -> WorkerEndpointInfo:
+        pipe_path = claudecode.ensure_worker_pipe(name)
+        pipe_cmd = f"echo 'YOUR_NAME: your message here' > {pipe_path} &"
+        return cast(
+            "WorkerEndpointInfo",
+            {
+                "name": name,
+                "machine": peer_host or BRIDGE_SSH_TARGET,
+                "protocol": "pipe",
+                "address": str(pipe_path),
+                "send_example": self._wrap_for_caller(pipe_cmd, peer_host, caller_host),
+                "note": "Non-interactive. IMPORTANT: Always prefix your name (e.g., 'kenji: hello'). Always use & (background) when writing to pipe — it BLOCKS until read. Never use cat/echo without & or your session will freeze.",
+            },
+        )
+
+    def get_workers(self, caller_from: str | None = None) -> list[WorkerEndpointInfo]:
+        from bridge import get_machine_catalog
+
+        self._sync_paths()
+        workers: list[WorkerEndpointInfo] = []
+        registered = self.get_registered_sessions()
+        caller_host = get_worker_host(caller_from) if caller_from else None
+        for name, info in registered.items():
+            callback_url = info.get("callback_url", "")
+            if callback_url:
+                msg_url = callback_url.rstrip("/")
+                if not msg_url.endswith("/msg"):
+                    msg_url = f"{msg_url}/msg"
+                payload = json.dumps({"from": "YOUR_NAME", "text": "your message here"})
+                workers.append(
+                    cast(
+                        "WorkerEndpointInfo",
+                        {
+                            "name": name,
+                            "machine": info.get("host", "") or BRIDGE_SSH_TARGET,
+                            "protocol": "http",
+                            "address": msg_url,
+                            "send_example": f"curl -sS -X POST {shlex.quote(msg_url)} -H 'Content-Type: application/json' --data-raw {shlex.quote(payload)}",
+                            "note": "HTTP callback worker. POST JSON with from/text. Always set from to your worker name.",
+                        },
+                    )
+                )
+                continue
+            backend_name = claudecode.get_worker_backend(name, info)
+            backend = claudecode.get_backend(backend_name)
+            peer_host = get_worker_host(name)
+            if "tmux" not in info:
+                if not backend.is_interactive:
+                    workers.append(self._pipe_worker_entry(name, peer_host, caller_host))
+                else:
+                    workers.append(
+                        cast(
+                            "WorkerEndpointInfo",
+                            {
+                                "name": name,
+                                "machine": peer_host or BRIDGE_SSH_TARGET,
+                                "protocol": "none",
+                                "address": "",
+                                "status": "exited",
+                                "note": f"Worker exited. Use /restart {name} to bring back.",
+                            },
+                        )
+                    )
+                continue
+            if not backend.is_interactive:
+                if peer_host:
+                    workers.append(
+                        cast(
+                            "WorkerEndpointInfo",
+                            {
+                                "name": name,
+                                "machine": peer_host,
+                                "protocol": "adapter",
+                                "address": f"{peer_host}:{info.get('tmux', '')}",
+                                "note": f"Non-interactive ({backend_name}) on {peer_host}. Use @{name} from Telegram or bridge API.",
+                            },
+                        )
+                    )
+                else:
+                    workers.append(self._pipe_worker_entry(name, peer_host, caller_host))
+            else:
+                tmux_name = info.get("tmux")
+                tmux_cmd = (
+                    f"echo 'YOUR_NAME: your message here' | "
+                    f"tmux load-buffer - && "
+                    f"tmux paste-buffer -p -r -t {tmux_name} && "
+                    f"sleep 1 && tmux send-keys -t {tmux_name} Enter"
+                )
+                send_example = self._wrap_for_caller(tmux_cmd, peer_host, caller_host)
+                if peer_host and caller_host == peer_host:
+                    note = f"On {peer_host} (same machine as caller). Uses paste-buffer -p. Always prefix your name."
+                elif peer_host:
+                    note = f"On {peer_host}. Uses SSH + paste-buffer -p (bracketed paste). Always prefix your name."
+                elif caller_host:
+                    note = f"On bridge host (cross-machine from caller). Uses SSH + paste-buffer -p. Always prefix your name."
+                else:
+                    note = "Uses paste-buffer -p (bracketed paste) for reliable delivery. Sleep 1s before Enter — TUI needs time to render. Always prefix your name."
+                workers.append(
+                    cast(
+                        "WorkerEndpointInfo",
+                        {
+                            "name": name,
+                            "machine": peer_host or BRIDGE_SSH_TARGET,
+                            "protocol": "tmux",
+                            "address": f"{peer_host}:{tmux_name}" if peer_host else tmux_name,
+                            "send_example": send_example,
+                            "note": note,
+                        },
+                    )
+                )
+        return workers
+
+    def _wrap_for_caller(self, cmd: str, peer_host: str | None, caller_host: str | None) -> str:
+        if caller_host == peer_host:
+            return cmd
+        ssh_target = peer_host if peer_host is not None else BRIDGE_SSH_TARGET
+        escaped = cmd.replace('"', '\\"')
+        return f'ssh {ssh_target} "{escaped}"'
+
+    def _build_welcome(self, name: str, backend_obj: Backend) -> str:
+        from bridge import read_checkin_note
+
+        welcome = (
+            "You are connected to Telegram via claudecode-telegram bridge. "
+            "RECEIVING FILES: Manager sends files (images, PDFs, documents) — they appear as local paths you can read directly. "
+            "SENDING FILES: Use [[image:/path/to/photo.png|caption]] for images (jpg/png/webp/bmp) and animations (gif/mp4), or [[file:/path/to/file|caption]] for documents, video (mp4/mov/avi — shows player), audio (mp3/m4a/flac — shows player), and voice (ogg/opus — voice bubble). "
+            f'MESSAGING WORKERS: Run `curl -s "$BRIDGE_URL/workers?from={name}"` to discover other workers — returns JSON with a `send_example` field containing ready-to-use send commands wrapped correctly for your machine (auto-adds ssh when a peer lives elsewhere). Always call /workers?from={name} before messaging, never guess addresses. Never use POST /outputs to message another worker; /outputs only publishes your own worker output to Telegram. '
+            f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
+            f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
+            f'WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s "$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project"`. '
+            "BRIDGE API: Available endpoints: GET /workers, GET /checkin. Messages from manager arrive as prompts — there is NO polling endpoint. "
+            "WARNING: Do NOT output worker messages normally — they go to Telegram. Use the send commands from /workers instead."
+        )
+        if not backend_obj.is_interactive:
+            welcome += (
+                " NON-INTERACTIVE MODE: Your bridge URL is in $BRIDGE_URL env var. "
+                "Each message triggers a blocking CLI call, responses arrive async in Telegram. "
+                "Use nohup/& if calling CLI directly."
+            )
+        note = read_checkin_note()
+        if note:
+            rendered = note.replace("{name}", name)
+            host = get_worker_host(name)
+            if host:
+                machine = f"Mac Mini ({host})"
+            else:
+                machine = "VPS (100.125.36.102)"
+            rendered = rendered.replace("{machine}", machine)
+            welcome += f"\n\nMANAGER NOTE:\n{rendered}"
+            _log(_LOG_INFO, "checkin", f"Checkin note included for {name}")
+        return welcome
+
+    def hire(self, name: str, backend: str = "", chat_id: ChatId | None = None) -> tuple[bool, str | None]:
+        from bridge import set_pending, state, _registry_add, _reset_learning_reminder
+
+        if not backend:
+            backend = DEFAULT_BACKEND
+        self._sync_paths()
+        if not is_valid_backend(backend):
+            return False, f"Unknown backend '{backend}'. Available: {', '.join(list_backends())}"
+        backend_obj = claudecode.get_backend(backend)
+        if not _which_binary(backend_obj.binary):
+            return False, f"'{backend_obj.binary}' not found in PATH. Install it first."
+        tmux_name = f"{self.tmux_prefix}{name}"
+        if claudecode.tmux_exists(tmux_name):
+            return False, f"Worker '{name}' already exists"
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        result = self._runner.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+            capture_output=True,
+            env=clean_env,
+            timeout=TIMEOUT_REMOTE_CMD,
+        )
+        if result.returncode != 0:
+            return False, "Could not start the worker workspace"
+        self._runner.run(
+            ["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
+            capture_output=True,
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+        self._clock.sleep(DELAY_RETRY)
+        startup_cwd = self._get_startup_cwd(name)
+        if startup_cwd:
+            self._cd_tmux_to_cwd(tmux_name, startup_cwd)
+        claudecode.export_hook_env(tmux_name, backend)
+        self._clock.sleep(DELAY_TMUX_SEND)
+        self._runner.run(
+            ["tmux", "send-keys", "-t", tmux_name, 'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+        self._clock.sleep(DELAY_TMUX_SEND)
+        claudecode.ensure_session_dir(name)
+        if chat_id:
+            chat_id_file = claudecode.get_chat_id_file(name)
+            _tmp = chat_id_file.with_suffix(".tmp")
+            _tmp.write_text(str(chat_id))
+            _tmp.chmod(0o600)
+            os.replace(str(_tmp), str(chat_id_file))
+        if not backend_obj.is_interactive:
+            claudecode.ensure_worker_pipe(name)
+        start_cmd = f"unset CLAUDECODE && {backend_obj.start_cmd()}"
+        if startup_cwd:
+            start_cmd = f"cd {shlex.quote(startup_cwd)} && {start_cmd}"
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        if backend_obj.is_interactive:
+            self._clock.sleep(DELAY_STARTUP_LONG)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        if backend_obj.is_interactive:
+            self._clock.sleep(DELAY_RESPONSE_GAP)
+        welcome = self._build_welcome(name, backend_obj)
+        if not backend_obj.is_interactive:
+            if chat_id:
+                set_pending(name, chat_id)
+            self._runner.run(
+                ["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND
+            )
+        else:
+            self.send(name, welcome)
+        state.active = name
+        import telegram as _tg
+
+        _tg.save_last_active(name)
+        _registry_add(name, backend, chat_id)
+        _reset_learning_reminder(name)
+        if not backend_obj.is_interactive:
+            _log(_LOG_INFO, "worker", f"Created {backend} worker '{name}' (non-interactive mode)")
+        self.invalidate_sessions_cache()
+        return True, None
+
+    def end(self, name: str) -> tuple[bool, str | None]:
+        from bridge import kill_adapter, clear_pending, _set_worker_cwd, cleanup_inbox, _registry_remove, state
+
+        self._sync_paths()
+        registered = self.get_registered_sessions()
+        if name not in registered:
+            return False, f"Worker '{name}' not found"
+        session = registered[name]
+        backend_name = claudecode.get_worker_backend(name, session)
+        backend = claudecode.get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+        if not backend.is_interactive:
+            kill_adapter(name)
+            session_dir = self.sessions_dir / name
+            try:
+                for session_id_file in session_dir.glob("*_session_id"):
+                    session_id_file.unlink()
+            except OSError as e:
+                return False, f"Failed to clean non-interactive metadata: {e}"
+        clear_pending(name)
+        _set_worker_cwd(name, "")
+        host = get_worker_host(name)
+        claudecode._remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
+        cleanup_inbox(name)
+        cleanup_worker_pipe(name)
+        _registry_remove(name)
+        self.invalidate_sessions_cache()
+        if state.active == name:
+            state.active = None
+            self.get_registered_sessions()
+        return True, None
+
+    def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
+        from bridge import clear_pending, _reset_learning_reminder
+
+        self._sync_paths()
+        registered = self.get_registered_sessions()
+        if name not in registered:
+            return False, f"Worker '{name}' not found"
+        host = get_worker_host(name)
+        if host:
+            return False, "use_remote_restart"
+        session = registered[name]
+        backend_name = claudecode.get_worker_backend(name, session)
+        backend = claudecode.get_backend(backend_name)
+        tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
+        if not claudecode.tmux_exists(tmux_name):
+            return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
+        if not _which_binary(backend.binary):
+            return False, f"'{backend.binary}' not found in PATH. Install it first."
+        resume_id, startup_cwd = self._prepare_restart_state(name, mode)
+        if mode != "resume":
+            _clear_hook_failures(name)
+        session_dir = self.sessions_dir / name
+        if not backend.is_interactive:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            claudecode.ensure_worker_pipe(name)
+            clear_pending(name)
+        elif claudecode.is_claude_running(tmux_name):
+            self._stop_running_claude(name, tmux_name)
+        if backend.is_interactive and not claudecode.is_claude_running(tmux_name):
+            self._kill_stray_children(name, tmux_name)
+        claudecode.export_hook_env(tmux_name, backend_name)
+        self._clock.sleep(DELAY_TMUX_SEND)
+        self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
+        welcome = self._build_welcome(name, backend)
+        if backend.is_interactive:
+            started = self._wait_for_startup(name, tmux_name, backend, resume_id, startup_cwd)
+            if started:
+                self.send(name, welcome)
+            else:
+                _log(_LOG_WARN, "restart", f"{name}: Claude did not start within 10s, skipping welcome")
+        else:
+            self._runner.run(
+                ["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND
+            )
+        _reset_learning_reminder(name)
+        self.invalidate_sessions_cache()
+        return True, None
+
+    def _prepare_restart_state(self, name: str, mode: str) -> tuple[str, str]:
+        resume_id = ""
+        resume_cwd = ""
+        session_dir = self.sessions_dir / name
+        if mode == "resume":
+            resume_id = (
+                claudecode.get_claude_session_id(name, authoritative=False)
+                or claudecode.get_claude_session_id(name, authoritative=True)
+                or ""
+            )
+            resume_cwd = ""
+        else:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            for session_id_file in session_dir.glob("*_session_id"):
+                session_id_file.unlink()
+        startup_cwd = self._get_startup_cwd(name, fallback_cwd=resume_cwd)
+        if startup_cwd:
+            claudecode._ensure_workspace_trusted(startup_cwd)
+        return resume_id, startup_cwd
+
+    def _stop_running_claude(self, name: str, tmux_name: str) -> None:
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], timeout=TIMEOUT_TMUX_SEND)
+        self._clock.sleep(DELAY_RETRY)
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        self._clock.sleep(DELAY_STARTUP)
+        if claudecode.is_claude_running(tmux_name):
+            pane_pid = claudecode._tmux_pane_pids().get(tmux_name)
+            if pane_pid:
+                claude_pid = _get_claude_pid(pane_pid)
+                if claude_pid:
+                    self._runner.run(["kill", claude_pid], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+        for _ in range(20):
+            if not claudecode.is_claude_running(tmux_name):
+                break
+            self._clock.sleep(DELAY_SHORT)
+        else:
+            _log(_LOG_WARN, "restart", f"{name}: Claude still running after 5s kill wait")
+
+    def _kill_stray_children(self, name: str, tmux_name: str) -> None:
+        pane_pids = claudecode._tmux_pane_pids()
+        pane_pid = pane_pids.get(tmux_name)
+        if pane_pid:
+            stray = self._runner.run(
+                ["pgrep", "-P", str(pane_pid)], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            )
+            if stray.returncode == 0:
+                for child_pid in stray.stdout.strip().splitlines():
+                    child_pid = child_pid.strip()
+                    if child_pid and child_pid.isdigit():
+                        _log(_LOG_INFO, "restart", f"{name}: killing stray child pid {child_pid}")
+                        self._runner.run(["kill", child_pid], capture_output=True, timeout=TIMEOUT_TMUX_SEND)
+                self._clock.sleep(DELAY_RETRY)
+
+    def _send_start_command(
+        self, name: str, tmux_name: str, backend: Backend, resume_id: str, startup_cwd: str
+    ) -> None:
+        self._runner.run(
+            ["tmux", "send-keys", "-t", tmux_name, 'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+        self._clock.sleep(DELAY_TMUX_SEND)
+        start_cmd = backend.start_cmd(resume_id)
+        start_cmd = f"unset CLAUDECODE && {start_cmd}"
+        if startup_cwd:
+            start_cmd = f"cd {shlex.quote(startup_cwd)} && {start_cmd}"
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+
+    def _wait_for_startup(self, name: str, tmux_name: str, backend: Backend, resume_id: str, startup_cwd: str) -> bool:
+        started = False
+        for _ in range(10):
+            self._clock.sleep(DELAY_STARTUP)
+            if claudecode.is_claude_running(tmux_name):
+                started = True
+                break
+        if not started and resume_id:
+            started = self._retry_after_stale_resume(name, tmux_name, backend, resume_id, startup_cwd)
+        return started
+
+    def _retry_after_stale_resume(
+        self, name: str, tmux_name: str, backend: Backend, resume_id: str, startup_cwd: str
+    ) -> bool:
+        from bridge import _notify_admin
+
+        _log(_LOG_WARN, "restart", f"{name}: resume failed (stale session {resume_id[:8]}), auto-retrying fresh")
+        clear_claude_session_id(name)
+        _clear_hook_failures(name)
+        start_cmd = backend.start_cmd("")
+        start_cmd = f"unset CLAUDECODE && {start_cmd}"
+        if startup_cwd:
+            start_cmd = f"cd {shlex.quote(startup_cwd)} && {start_cmd}"
+        self._runner.run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        started = False
+        for _ in range(10):
+            self._clock.sleep(DELAY_STARTUP)
+            if claudecode.is_claude_running(tmux_name):
+                started = True
+                break
+        if started:
+            _log(_LOG_INFO, "restart", f"{name}: fresh start succeeded after stale resume")
+            _notify_admin(f"⚠️ {name}: stale session ID {resume_id[:8]}… — auto-restarted fresh ✓")
+        else:
+            _log(_LOG_WARN, "restart", f"{name}: fresh start also failed after stale resume")
+            _notify_admin(
+                f"🔴 {name}: resume failed (stale {resume_id[:8]}…) AND fresh start failed.\n/restart --clean {name} to try manually."
+            )
+        return started
+
+    def _restart_dead_worker(
+        self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str
+    ) -> tuple[bool, str | None]:
+        from bridge import _reset_learning_reminder
+
+        if not _which_binary(backend.binary):
+            return False, f"'{backend.binary}' not found in PATH. Install it first."
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        result = self._runner.run(
+            ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+            capture_output=True,
+            env=clean_env,
+            timeout=TIMEOUT_REMOTE_CMD,
+        )
+        if result.returncode != 0:
+            return False, "Could not create worker workspace"
+        self._runner.run(
+            ["tmux", "set-option", "-t", tmux_name, "window-size", "manual"],
+            capture_output=True,
+            timeout=TIMEOUT_TMUX_SEND,
+        )
+        self._clock.sleep(DELAY_RETRY)
+        claudecode.ensure_session_dir(name)
+        if not backend.is_interactive:
+            claudecode.ensure_worker_pipe(name)
+        resume_id, startup_cwd = self._prepare_restart_state(name, mode)
+        claudecode.export_hook_env(tmux_name, backend_name)
+        self._clock.sleep(DELAY_TMUX_SEND)
+        self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
+        if backend.is_interactive:
+            self._clock.sleep(DELAY_STARTUP_LONG)
+            self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
+        welcome = self._build_welcome(name, backend)
+        if backend.is_interactive:
+            started = self._wait_for_startup(name, tmux_name, backend, resume_id, startup_cwd)
+            if started:
+                self.send(name, welcome)
+            else:
+                _log(_LOG_WARN, "restart", f"{name}: dead worker did not start within 10s, skipping welcome")
+        else:
+            self._runner.run(
+                ["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND
+            )
+        _log(_LOG_INFO, "worker", f"Dead worker '{name}' recovered from registry (mode={mode})")
+        self.invalidate_sessions_cache()
+        return True, None
+
+
+# ============================================================
+# _command_impl
+# ============================================================
+
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+from pathlib import Path
+from typing import cast
+import core
+import claudecode
+import telegram
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    _LOG_DEBUG,
+    BRIDGE_PUBLIC_URL,
+    PORT,
+    DEFAULT_BACKEND,
+    TIMEOUT_TMUX_SEND,
+    PENDING_TIMEOUT,
+    VERSION,
+)
+
+
+def cmd_pilot(router, name: str, chat_id) -> bool:
+    if not name:
+        router.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
+        return True
+    names = name.lower().strip().split()
+    prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
+    pilot_port = os.environ.get("PILOT_PORT", "10170")
+    import urllib.request, json as _json
+    from urllib.parse import urlparse, quote as _urlquote
+
+    if "all" in names:
+        from bridge import worker_manager, _load_registry
+
+        assert worker_manager is not None
+        registered = worker_manager.scan_tmux_sessions()
+        registry = _load_registry()
+        for rname, rinfo in registry.get("workers", {}).items():
+            if rinfo.get("host") and rname not in registered:
+                registered[rname] = {"tmux": f"{prefix}{rname}", "host": rinfo["host"]}
+        if not registered:
+            router.reply(chat_id, "No active workers found", outcome="Needs decision")
+            return True
+        names = sorted(registered.keys())
+    enabled = []
+    session_names = []
+    errors = []
+    for n in names:
+        session_name = f"{prefix}{n}" if not n.startswith("claude-") else n
+        try:
+            worker_host = get_worker_host(n)
+            url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
+            if worker_host:
+                url += f"&host={_urlquote(worker_host)}"
+            req = urllib.request.Request(url, method="POST")
+            with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
+                cast(dict[str, object], _json.loads(resp.read()))
+            enabled.append(n)
+            session_names.append(session_name)
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            errors.append(f"{n}: {e}")
+    if not enabled:
+        router.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
+        return True
+    ts = time.strftime("%m%d-%H%M", time.gmtime(core._clock.time()))
+    if len(enabled) <= 3:
+        slug = "-".join(enabled) + "-" + ts
+    else:
+        slug = f"team{len(enabled)}-{ts}"
+    try:
+        payload = _json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
+        req = urllib.request.Request(
+            f"http://localhost:{pilot_port}/api/grid-session",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
+            cast(dict[str, object], _json.loads(resp.read()))
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+    from urllib.parse import urlparse, quote as _urlquote
+
+    host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
+    pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
+    names_str = ", ".join(enabled)
+    msg = f"✈️ Pilot: {names_str} (30min)\n{pilot_url}"
+    if errors:
+        msg += f"\n⚠️ Failed: {'; '.join(errors)}"
+    router.reply(chat_id, msg)
+    return True
+
+
+def cmd_rewind(router, name: str, chat_id) -> bool:
+    if not name:
+        router.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
+        return True
+    name = name.lower().strip()
+    import secrets
+    from bridge import tokens, _render_transcript_html, _beast_serve_deploy
+
+    base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+    token = secrets.token_urlsafe(32)
+    tokens.add_rewind(token, name)
+    url = f"{base_url}/transcript/{name}?token={token}"
+    try:
+        html_content = _render_transcript_html(
+            name, per_page=200, token=token, live_base_url=f"{base_url}/transcript/{name}"
+        )
+        snap_path = f"/tmp/rewind-{name}.html"
+        with open(snap_path, "w") as f:
+            f.write(html_content)
+        serve_url = _beast_serve_deploy(snap_path, f"rewind-{name}")
+        if serve_url:
+            router.reply(chat_id, f"⏪ Rewind for {name}\n{serve_url}")
+            return True
+    except OSError as e:
+        _log(_LOG_WARN, "bridge", f"Rewind snapshot deploy failed for {name}: {e}")
+    router.reply(chat_id, f"⏪ Rewind for {name}\n{url}")
+    return True
+
+
+def cmd_pr_review(router, arg: str, chat_id) -> bool:
+    if not arg:
+        router.reply(
+            chat_id,
+            "Usage: /pr <github_pr_url>\nExample: /pr https://github.com/BasedHardware/omi/pull/6426",
+            outcome="Needs decision",
+        )
+        return True
+    arg = arg.strip()
+    clean_url = arg.split("#")[0]
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", clean_url)
+    if not m:
+        try:
+            pr_num = int(clean_url)
+            owner, repo = "BasedHardware", "omi"
+        except ValueError:
+            router.reply(
+                chat_id,
+                "Invalid PR URL. Example: /pr https://github.com/BasedHardware/omi/pull/6426",
+                outcome="Needs decision",
+            )
+            return True
+    else:
+        owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
+    router.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
+    script_path = Path(__file__).parent / "review.py"
+    out_path = f"/tmp/pr-review-{pr_num}.html"
+    try:
+        r = core._subprocess_runner.run(
+            [sys.executable, str(script_path), arg, "--no-serve"],
+            capture_output=True,
+            text=True,
+            timeout=PENDING_TIMEOUT,
+        )
+        if r.returncode != 0 or not os.path.exists(out_path):
+            router.reply(chat_id, f"Failed to generate PR review:\n{r.stderr[:500]}", outcome="Needs decision")
+            return True
+    except subprocess.TimeoutExpired:
+        router.reply(chat_id, "PR review generation timed out (>300s).", outcome="Needs decision")
+        return True
+    from bridge import _beast_serve_deploy
+
+    slug = f"pr-{pr_num}"
+    serve_url = _beast_serve_deploy(out_path, slug)
+    if serve_url:
+        router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
+    else:
+        import secrets
+        from bridge import tokens
+
+        token = secrets.token_urlsafe(32)
+        tokens.add_pr_review(token, pr_num, owner, repo)
+        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+        url = f"{base_url}/tools/review/{pr_num}?token={token}"
+        router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
+    return True
+
+
+def cmd_team(router, chat_id) -> bool:
+    from bridge import state
+
+    registered = router.workers.scan_tmux_sessions()
+    registered = router.workers.get_registered_sessions(registered)
+    if not registered:
+        router.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+        return True
+    worker_live = {}
+    for name, session in registered.items():
+        backend_name = claudecode.get_worker_backend(name, session)
+        activity = None
+        context_pct = None
+        tmux_name = session.get("tmux", f"{router.workers.tmux_prefix}{name}")
+        host = get_worker_host(name)
+        tmux_alive = "tmux" in session and claudecode.tmux_exists(tmux_name, host=host)
+        if tmux_alive:
+            backend = claudecode.get_backend(backend_name)
+            if backend.is_interactive:
+                if claudecode.is_claude_running(tmux_name, host=host):
+                    activity, context_pct, _ = _read_tmux_activity(tmux_name, host=host)
+                else:
+                    activity = "worker app not running"
+            else:
+                activity = _read_noninteractive_activity(name)
+        worker_live[name] = {"backend": backend_name, "activity": activity, "context_pct": context_pct}
+    lines = format_team_lines(registered, state.active, worker_live=worker_live)
+    router.reply(chat_id, "\n".join(lines))
+    return True
+
+
+def cmd_status(router, chat_id) -> bool:
+    import time as _time
+    from bridge import state, watchdog, tunnel_manager, get_machine_catalog, _get_connectors_status
+
+    registered = router.workers.get_registered_sessions()
+    try:
+        uptime_sec = int(_time.time() - os.stat(f"/proc/{os.getpid()}").st_mtime)
+        d, rem = divmod(uptime_sec, 86400)
+        h, rem = divmod(rem, 3600)
+        m, _ = divmod(rem, 60)
+        uptime_str = f"{d}d {h}h {m}m" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
+    except (OSError, ValueError):
+        uptime_str = "unknown"
+    tm_status = tunnel_manager.status() if tunnel_manager else {}
+    tunnel_url = tm_status.get("tunnel_url", "")
+    inbound = f"webhook ({tunnel_url})" if tunnel_url else "poll" if tm_status.get("polling_active", False) else "DOWN"
+    busy = 0
+    idle = 0
+    offline = 0
+    busy_names = []
+    for name, session in registered.items():
+        if router.workers.is_online(name, session):
+            wd = watchdog.worker_states.get(name)
+            if wd and wd.status == "BUSY":
+                busy += 1
+                busy_names.append(name)
+            else:
+                idle += 1
+        else:
+            offline += 1
+    total = busy + idle + offline
+    machine_workers = {}
+    ssh_to_display = {None: "local"}
+    for mach in get_machine_catalog().values():
+        if mach.ssh_target:
+            ssh_to_display[mach.ssh_target] = mach.display_name or mach.id
+    for name in registered:
+        host = get_worker_host(name)
+        machine_workers.setdefault(ssh_to_display.get(host, host or "local"), []).append(name)
+    conn_parts = [
+        f"{cn} ({info.get('consecutive_failures', 0)} err)" if info.get("consecutive_failures", 0) else cn
+        for cn, info in _get_connectors_status().items()
+        if info.get("running", False)
+    ]
+    lines = [
+        f"<b>v{VERSION}</b> | up {uptime_str} | {inbound}",
+        "",
+        f"<b>{total}</b> workers: {busy} busy, {idle} idle, {offline} off",
+        f"focus: <b>{state.active or 'none'}</b>",
+    ]
+    if busy_names:
+        lines.append(f"busy: {', '.join(sorted(busy_names))}")
+    if len(machine_workers) > 1:
+        lines.append(" / ".join(f"{label} {len(ws)}" for label, ws in sorted(machine_workers.items())))
+    if conn_parts:
+        lines.append(", ".join(conn_parts))
+    if router.transport is not None and chat_id is not None:
+        router.transport.send_text(chat_id, "\n".join(lines), parse_mode="HTML")
+    return True
+
+
+def cmd_focus(router, name: str, chat_id) -> bool:
+    if not name:
+        router.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
+        return True
+    name = name.lower().strip()
+    from bridge import switch_session
+
+    ok, err = switch_session(name)
+    if ok:
+        router.reply(chat_id, f"Now talking to {name.capitalize()}.")
+    else:
+        router.reply(chat_id, f'Could not focus "{name}". {err}', outcome="Needs decision")
+    return True
+
+
+def cmd_hire(router, name: str, chat_id) -> bool:
+    if not name:
+        router.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
+        return True
+    from bridge import parse_hire_args, RESERVED_NAMES, create_session, PERSISTENCE_NOTE
+
+    parsed_name, backend = parse_hire_args(name)
+    if not parsed_name:
+        router.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
+        return True
+    name = parsed_name.lower().strip()
+    name = re.sub(r"[^a-z0-9-]", "", name)
+    if not name:
+        router.reply(chat_id, "Name must use letters, numbers, and hyphens only.", outcome="Needs decision")
+        return True
+    if name in RESERVED_NAMES:
+        router.reply(chat_id, f'Cannot use "{name}" - reserved command. Choose another name.', outcome="Needs decision")
+        return True
+    ok, err = create_session(name, backend, chat_id=chat_id)
+    if ok:
+        router.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
+        telegram.update_bot_commands()
+    else:
+        router.reply(chat_id, f'Could not hire "{name}". {err}', outcome="Needs decision")
+    return True
+
+
+def cmd_end(router, name: str, chat_id) -> bool:
+    if not name:
+        router.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
+        return True
+    name = name.lower().strip()
+    from bridge import kill_session
+
+    ok, err = kill_session(name)
+    if ok:
+        router.reply(chat_id, f"{name.capitalize()} removed from your team.")
+        telegram.update_bot_commands()
+    else:
+        router.reply(chat_id, f'Could not remove "{name}". {err}', outcome="Needs decision")
+    return True
+
+
+def cmd_restart(router, chat_id, args: str = "") -> bool:
+    from bridge import state, watchdog
+
+    args = (args or "").strip()
+    clean = False
+    force = False
+    tokens = args.split()
+    remaining = []
+    for t in tokens:
+        if t == "--clean":
+            clean = True
+        elif t == "--force":
+            force = True
+        else:
+            remaining.append(t)
+    name_arg = remaining[0].lower() if remaining else ""
+    if name_arg == "cancel":
+        return _cmd_restart_cancel(router, chat_id)
+    if name_arg == "all":
+        return _cmd_restart_all(router, chat_id, clean)
+    if len(remaining) > 1:
+        names = [n.lower() for n in remaining]
+        router.reply(chat_id, f"Restarting {len(names)} workers: {', '.join(names)}...")
+        for n in names:
+            cmd_restart(router, chat_id, f"{'--clean ' if clean else ''}{'--force ' if force else ''}{n}")
+        return True
+    if name_arg:
+        name = name_arg
+    else:
+        if not state.active:
+            registered = router.workers.get_registered_sessions()
+            if len(registered) == 1:
+                name = next(iter(registered))
+                state.active = name
+                telegram.save_last_active(name)
+            else:
+                router.reply(chat_id, "No one assigned.")
+                return True
+        else:
+            name = state.active
+    registered = router.workers.get_registered_sessions()
+    session = registered.get(name)
+    if name not in registered:
+        if registered:
+            names_str = ", ".join(registered.keys())
+            router.reply(chat_id, f'Can\'t find "{name}". Available workers: {names_str}')
+        else:
+            router.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+        return True
+    if name_arg:
+        state.active = name
+        telegram.save_last_active(name)
+    host = get_worker_host(name)
+    tmux_name = (
+        session.get("tmux", f"{router.workers.tmux_prefix}{name}") if session else f"{router.workers.tmux_prefix}{name}"
+    )
+    _log(_LOG_INFO, "cmd_restart", f"{name}: force={force}, clean={clean}, host={host}, tmux={tmux_name}")
+    tmux_alive = claudecode.tmux_exists(tmux_name, host=host)
+    claude_running = claudecode.is_claude_running(tmux_name, host=host) if tmux_alive else False
+    _log(_LOG_INFO, "cmd_restart", f"{name}: tmux_alive={tmux_alive}, claude_running={claude_running}")
+    if not force and tmux_alive and claude_running:
+        _log(_LOG_INFO, "cmd_restart", f"{name}: BLOCKED (already running)")
+        router.reply(chat_id, f"{name.capitalize()} is already running. Use /restart --force {name} to force.")
+        return True
+    with watchdog.restart_lock:
+        inflight_ts = watchdog.restart_in_progress.get(name)
+        if inflight_ts and core._clock.time() - inflight_ts < 120:
+            _log(
+                _LOG_INFO,
+                "cmd_restart",
+                f"{name}: BLOCKED (restart in progress since {core._clock.time() - inflight_ts:.0f}s ago)",
+            )
+            router.reply(chat_id, f"{name.capitalize()} restart already in progress. Wait for it to finish.")
+            return True
+        watchdog.restart_in_progress[name] = core._clock.time()
+    try:
+        result = _do_restart(router, name, session, chat_id, host, tmux_name, force, clean)
+        if force:
+            watchdog.force_restart_pending_cwd[name] = True
+        return result
+    finally:
+        with watchdog.restart_lock:
+            watchdog.restart_in_progress.pop(name, None)
+
+
+def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -> bool:
+    from bridge import restart_claude
+
+    if host:
+        mode = "relaunch" if clean else "resume"
+        backend_name = claudecode.get_worker_backend(name, session) if session else DEFAULT_BACKEND
+        backend_obj = claudecode.get_backend(backend_name)
+        _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, host={host}")
+        router.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
+        from bridge import watchdog
+
+        ok, err = router._restart_remote_worker(name, backend_name, backend_obj, tmux_name, host, mode)
+        watchdog.recent_restarts[name] = core._clock.time()
+        _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart result ok={ok}, err={err}")
+        return _restart_reply(router, chat_id, name, ok, err, host)
+    backend_name = claudecode.get_worker_backend(name, session) if session else DEFAULT_BACKEND
+    backend = claudecode.get_backend(backend_name)
+    tmux_name = (
+        session.get("tmux", f"{router.workers.tmux_prefix}{name}") if session else f"{router.workers.tmux_prefix}{name}"
+    )
+    if not clean and not backend.is_interactive and session and "tmux" in session and claudecode.tmux_exists(tmux_name):
+        session_id, source = claudecode.get_any_session_id(name)
+        if session_id:
+            router.reply(chat_id, f"{name.capitalize()} is still active. Next message continues where you left off.")
+        else:
+            router.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
+        return True
+    mode = "relaunch" if clean else "resume"
+    if mode == "resume":
+        session_dir = claudecode.get_session_dir(name)
+        if not session_dir.exists() or not any(session_dir.glob("*_session_id")):
+            mode = "relaunch"
+    label = "Resuming" if mode == "resume" else ("Bringing" if clean else "Restarting")
+    router.reply(chat_id, f"{label} {name.capitalize()}...")
+    ok, err = restart_claude(name, mode=mode)
+    if ok:
+        from bridge import watchdog
+
+        watchdog.recent_restarts[name] = core._clock.time()
+    return _restart_reply(router, chat_id, name, ok, err)
+
+
+def _restart_reply(router, chat_id, name, ok, err, host=None) -> bool:
+    if ok:
+        router.reply(chat_id, f"{name.capitalize()} is back and ready.")
+    else:
+        loc = f" on {host}" if host else ""
+        router.reply(chat_id, f'Could not restart "{name}"{loc}. {err}', outcome="Needs decision")
+    return True
+
+
+def _cmd_restart_all(router, chat_id, clean) -> bool:
+    import threading
+    from bridge import state
+
+    registered = router.workers.get_registered_sessions()
+    if not registered:
+        router.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
+        return True
+    with router._restart_all_lock:
+        if router._restart_all_running:
+            router.reply(chat_id, "A /restart all is already running. Use /restart cancel to stop it.")
+            return True
+        router._restart_all_running = True
+        router._restart_all_abort.clear()
+    names = sorted(registered.keys())
+    active = state.active
+    if active and active in names:
+        names.remove(active)
+        names.append(active)
+    mode = "relaunch" if clean else "resume"
+    router.reply(chat_id, f"Restarting {len(names)} workers sequentially ({mode})...")
+    router._restart_all_thread = threading.Thread(
+        target=_run_restart_all_sequence, args=(router, chat_id, names, mode), name="restart-all", daemon=True
+    )
+    router._restart_all_thread.start()
+    return True
+
+
+def _run_restart_all_sequence(router, chat_id, names, mode) -> None:
+    from bridge import restart_claude, watchdog, worker_manager, _sync_worker_manager
+
+    delay_s = 7
+    failed = []
+    try:
+        total = len(names)
+        for i, name in enumerate(names, 1):
+            if router._restart_all_abort.is_set():
+                router.reply(chat_id, f"Restart sequence aborted at {i-1}/{total}.")
+                return
+            host = get_worker_host(name)
+            if host:
+                _sync_worker_manager()
+                assert worker_manager is not None
+                reg = worker_manager.get_registered_sessions()
+                session = reg.get(name, {})
+                backend_name = claudecode.get_worker_backend(name, session)
+                backend_obj = claudecode.get_backend(backend_name)
+                tmux_name = session.get("tmux", f"{router.workers.tmux_prefix}{name}")
+
+                ok, err = restart_remote_worker(name, backend_name, backend_obj, tmux_name, host, mode, router.workers)
+            else:
+                ok, err = restart_claude(name, mode=mode)
+            if ok:
+                router.reply(chat_id, f"[{i}/{total}] {name.capitalize()} restarted.")
+            else:
+                failed.append((name, err))
+                router.reply(chat_id, f"[{i}/{total}] {name.capitalize()} failed: {err}")
+            if i < total:
+                for _ in range(5):
+                    if router._restart_all_abort.is_set():
+                        break
+                    core._clock.sleep(delay_s / 5)
+        if failed:
+            summary = ", ".join(n for n, _ in failed)
+            router.reply(chat_id, f"Restart all done. {len(failed)} failed: {summary}")
+        else:
+            router.reply(chat_id, f"Restart all done. All {total} workers restarted.")
+    finally:
+        with router._restart_all_lock:
+            router._restart_all_running = False
+            router._restart_all_abort.clear()
+            router._restart_all_thread = None
+
+
+def _cmd_restart_cancel(router, chat_id) -> bool:
+    with router._restart_all_lock:
+        if not router._restart_all_running:
+            router.reply(chat_id, "No restart-all sequence is running.")
+            return True
+        router._restart_all_abort.set()
+    router.reply(chat_id, "Stopping restart-all sequence...")
+    return True
+
+
+# ============================================================
+# _teleport_ops
+# ============================================================
+
+
+import json
+import os
+import shlex
+import subprocess
+import tempfile
+import threading
+import urllib.error
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    _LOG_DEBUG,
+    _subprocess_runner,
+    _clock,
+)
+from claudecode import (
+    GIT_SERVER_DIR,
+    GitPushStateResult,
+    _get_remote_home,
+    _is_git_repo,
+    _project_slug,
+    _remap_path,
+    _remote_run,
+    _resolve_remote_tool,
+    ensure_session_dir,
+    get_claude_session_cwd,
+    get_claude_session_id,
+    get_session_dir,
+    get_worker_backend,
+    is_claude_running,
+    normalize_backend,
+    save_claude_session_cwd,
+    clear_claude_session_id,
+    get_any_session_id,
+    get_backend,
+    tmux_exists,
+    watchdog,
+)
+
+
+# _get_claude_pid and get_worker_host — defined earlier (from _health_impl)
+
+
+if TYPE_CHECKING:
+    from claudecode import Backend, TmuxSessionDict
+
+
+def _ensure_bare_repo(project_name: str) -> str:
+    bare_path = os.path.join(GIT_SERVER_DIR, f"{project_name}.git")
+    if not os.path.isdir(bare_path):
+        os.makedirs(GIT_SERVER_DIR, exist_ok=True)
+        _subprocess_runner.run(
+            ["git", "init", "--bare", bare_path], capture_output=True, text=True, check=True, timeout=10
+        )
+    return bare_path
+
+
+def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
+    if target_host:
+        return f"claude@100.125.36.102:{bare_repo_path}"
+    return bare_repo_path
+
+
+def _git_push_state(
+    source_cwd: str, worker_name: str, bare_repo: str, host: str | None = None
+) -> GitPushStateResult | None:
+    import bridge
+
+    try:
+        r = _remote_run(
+            ["git", "-C", source_cwd, "rev-parse", "HEAD"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_FILE_TRANSFER,
+        )
+        if r.returncode != 0:
+            _log(_LOG_WARN, "git-sync", f"rev-parse HEAD failed: {r.stderr[:200]}")
+            return None
+        orig_sha = r.stdout.strip()
+        r = _remote_run(
+            ["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_REMOTE_CMD,
+        )
+        orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
+        r = _remote_run(
+            ["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_FILE_TRANSFER,
+        )
+        staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
+        _remote_run(
+            ["git", "-C", source_cwd, "add", "-A"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_GIT_OP,
+        )
+        try:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "stash", "create"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_GIT_OP,
+            )
+            stash_sha = r.stdout.strip() if r.returncode == 0 else ""
+        finally:
+            _remote_run(
+                ["git", "-C", source_cwd, "reset", "HEAD"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_FILE_TRANSFER,
+            )
+            if staged_files:
+                _remote_run(
+                    ["git", "-C", source_cwd, "add", "--"] + staged_files,
+                    host=host,
+                    capture_output=True,
+                    text=True,
+                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                )
+        push_sha = stash_sha if stash_sha else orig_sha
+        ref = f"refs/heads/teleport/{worker_name}"
+        if host:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+            )
+        else:
+            r = _remote_run(
+                ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+            )
+        if r.returncode != 0:
+            _log(_LOG_WARN, "git-sync", f"push failed: {r.stderr[:200]}")
+            return None
+        return {
+            "orig_sha": orig_sha,
+            "orig_branch": orig_branch,
+            "staged_files": staged_files,
+            "stash_sha": stash_sha or None,
+        }
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_ERROR, "git-sync", f"push state error: {e}")
+        return None
+
+
+def _git_pull_state(
+    target_cwd: str, worker_name: str, bare_repo_url: str, metadata: GitPushStateResult, host: str | None = None
+) -> bool:
+    import bridge
+
+    try:
+        orig_sha = metadata["orig_sha"]
+        orig_branch = metadata["orig_branch"]
+        staged_files = metadata.get("staged_files", [])
+        stash_sha = metadata.get("stash_sha")
+        ref = f"teleport/{worker_name}"
+        is_existing = False
+        try:
+            r = _remote_run(
+                ["git", "-C", target_cwd, "rev-parse", "--git-dir"],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_REMOTE_CMD,
+            )
+            is_existing = r.returncode == 0
+        except (subprocess.SubprocessError, OSError) as exc:
+            _log(_LOG_DEBUG, "probe:_git_pull_state", f"{type(exc).__name__}: {exc}")
+        if not is_existing:
+            r = _remote_run(
+                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_RSYNC,
+            )
+            if r.returncode != 0:
+                _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
+                return False
+            _remote_run(
+                ["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"], host=host, capture_output=True
+            )
+            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host, capture_output=True)
+        else:
+            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host, capture_output=True)
+            _remote_run(
+                ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_REMOTE_CMD,
+            )
+            r = _remote_run(
+                ["git", "-C", target_cwd, "fetch", "vps", ref],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_RSYNC,
+            )
+            if r.returncode != 0:
+                _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
+                return False
+        if orig_branch and orig_branch != "HEAD":
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_GIT_OP,
+            )
+        else:
+            _remote_run(
+                ["git", "-C", target_cwd, "checkout", orig_sha],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_GIT_OP,
+            )
+        if stash_sha:
+            fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
+            r = _remote_run(
+                ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
+                host=host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_GIT_OP,
+            )
+            if r.returncode != 0:
+                _remote_run(
+                    ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
+                    host=host,
+                    capture_output=True,
+                    text=True,
+                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                )
+                r = _remote_run(
+                    ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
+                    host=host,
+                    capture_output=True,
+                    text=True,
+                    timeout=bridge.TIMEOUT_GIT_OP,
+                )
+            if staged_files:
+                _remote_run(
+                    ["git", "-C", target_cwd, "reset", "HEAD"],
+                    host=host,
+                    capture_output=True,
+                    text=True,
+                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                )
+                _remote_run(
+                    ["git", "-C", target_cwd, "add", "--"] + staged_files,
+                    host=host,
+                    capture_output=True,
+                    text=True,
+                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                )
+        return True
+    except (subprocess.SubprocessError, OSError) as e:
+        _log(_LOG_ERROR, "git-sync", f"pull state error: {e}")
+        return False
+
+
+def _get_project_name(cwd: str, host: str | None = None) -> str | None:
+    import bridge
+
+    try:
+        r = _remote_run(
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            host=host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_REMOTE_CMD,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        url = r.stdout.strip()
+        if url.endswith(".git"):
+            url = url[:-4]
+        if ":" in url and not url.startswith("http"):
+            name = url.rsplit("/", 1)[-1] if "/" in url.split(":")[-1] else url.split(":")[-1]
+        else:
+            name = url.rsplit("/", 1)[-1]
+        return name if name else None
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def _ensure_workspace_trusted_remote(
+    cwd: str | None,
+    host: str | None,
+) -> None:
+    import bridge
+
+    if not cwd:
+        return
+    if not host:
+        bridge._ensure_workspace_trusted(cwd)
+        return
+    script = (
+        "import json, pathlib, os, fcntl; "
+        "p = pathlib.Path(os.path.expanduser('~/.claude.json')); "
+        "lk = open(str(p) + '.lock', 'w'); "
+        "fcntl.flock(lk, fcntl.LOCK_EX); "
+        "d = json.loads(p.read_text()) if p.exists() else {}; "
+        "proj = d.setdefault('projects', {}); "
+        f"e = proj.get({cwd!r}, {{}}); "
+        "changed = e.get('hasTrustDialogAccepted') is not True; "
+        f"proj[{cwd!r}] = {{**e, 'hasTrustDialogAccepted': True}} if changed else e; "
+        "p.write_text(json.dumps(d, indent=2)) if changed else None; "
+        "fcntl.flock(lk, fcntl.LOCK_UN); lk.close(); "
+        "print('trusted' if changed else 'already')"
+    )
+    try:
+        r = _remote_run(
+            ["python3", "-c", script], host=host, capture_output=True, text=True, timeout=bridge.TIMEOUT_TMUX_SEND
+        )
+        if r.returncode == 0:
+            _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
+        else:
+            _log(_LOG_WARN, "trust", f"remote pre-trust failed on {host}: {r.stderr[:200]}")
+    except (OSError, TimeoutError) as exc:
+        _log(_LOG_WARN, "trust", f"remote pre-trust {cwd} on {host}: {exc}")
+
+
+def _build_teleport_context(
+    name: str,
+    source_host: str | None,
+    target_host: str,
+    source_cwd: str | None,
+    session_id: str | None,
+) -> str:
+    src_label = source_host or "VPS (local)"
+    lines = [
+        f"📦 You were teleported from {src_label} to {target_host}.",
+        f"Previous workspace: {source_cwd}",
+    ]
+    if session_id:
+        lines.append(f"Previous session: {session_id}")
+        lines.append("")
+        lines.append(
+            "To retrieve your previous work context, run:\n"
+            f"  beast transcript search --session {session_id} --last 20 --full"
+        )
+    else:
+        lines.append("No previous session was active.")
+    return "\n".join(lines)
+
+
+def teleport_notify(chat_id: "ChatId | None", text: str) -> None:
+    if chat_id is None:
+        return
+    try:
+        import bridge
+
+        bridge.transport.send_text(chat_id, text)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        _log(_LOG_DEBUG, "notify:_teleport_notify", f"{type(exc).__name__}: {exc}")
+
+
+def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
+    import bridge
+
+    conflicts: list[str] = []
+    if not local_cwd or not remote_host:
+        return conflicts
+    local_is_git = os.path.isdir(os.path.join(local_cwd, ".git"))
+    if not local_is_git:
+        return conflicts
+    local_status = _subprocess_runner.run(
+        ["git", "-C", local_cwd, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=bridge.TIMEOUT_REMOTE_CMD,
+    )
+    local_changed = bool(local_status.stdout.strip()) if local_status.returncode == 0 else False
+    local_head = _subprocess_runner.run(
+        ["git", "-C", local_cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=bridge.TIMEOUT_TMUX_SEND
+    )
+    local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
+    remote_cwd = _remap_path(local_cwd, remote_host)
+    r_status = _remote_run(
+        ["git", "-C", remote_cwd, "status", "--porcelain"],
+        host=remote_host,
+        capture_output=True,
+        text=True,
+        timeout=bridge.TIMEOUT_REMOTE_CMD,
+    )
+    remote_changed = bool(r_status.stdout.strip()) if r_status.returncode == 0 else False
+    r_head = _remote_run(
+        ["git", "-C", remote_cwd, "rev-parse", "HEAD"],
+        host=remote_host,
+        capture_output=True,
+        text=True,
+        timeout=bridge.TIMEOUT_TMUX_SEND,
+    )
+    remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
+    if local_changed and remote_changed:
+        local_files = [l.strip().split(None, 1)[-1] for l in local_status.stdout.strip().splitlines()[:5]]
+        remote_files = [l.strip().split(None, 1)[-1] for l in r_status.stdout.strip().splitlines()[:5]]
+        conflicts.append(f"VPS has uncommitted changes: {', '.join(local_files)}")
+        conflicts.append(f"Remote has uncommitted changes: {', '.join(remote_files)}")
+    elif local_commit and remote_commit and local_commit != remote_commit:
+        if local_changed:
+            conflicts.append(f"VPS has uncommitted changes AND different commit than remote")
+        elif remote_changed:
+            conflicts.append(f"VPS has new commits since teleport (HEAD: {local_commit[:8]})")
+            conflicts.append(f"Remote has uncommitted changes (HEAD: {remote_commit[:8]})")
+    return conflicts
+
+
+def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str) -> list[str]:
+    import bridge
+
+    fails = []
+    preflight_dirs = [
+        os.path.expanduser("~/agent-config/teleport-preflight.d"),
+        os.path.expanduser("~/.config/claudecode-telegram/teleport-preflight.d"),
+    ]
+    env = os.environ.copy()
+    env["TARGET_HOST"] = target_host or ""
+    env["WORKER_NAME"] = worker_name
+    env["BACKEND"] = backend_name
+    env["BRIDGE_URL"] = bridge.BRIDGE_PUBLIC_URL or bridge.BRIDGE_URL
+    seen_scripts: set[str] = set()
+    for pdir in preflight_dirs:
+        if not os.path.isdir(pdir):
+            continue
+        scripts = sorted(f for f in os.listdir(pdir) if f.endswith(".sh") and os.access(os.path.join(pdir, f), os.X_OK))
+        for script in scripts:
+            script_path = os.path.join(pdir, script)
+            real_path = os.path.realpath(script_path)
+            if real_path in seen_scripts:
+                continue
+            seen_scripts.add(real_path)
+            try:
+                r = _subprocess_runner.run(
+                    [script_path], env=env, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD
+                )
+                if r.returncode != 0:
+                    reason = r.stdout.strip().split("\n")[0] if r.stdout.strip() else f"{script} failed"
+                    fails.append(reason)
+            except subprocess.TimeoutExpired:
+                fails.append(f"{script} timed out")
+            except (subprocess.SubprocessError, OSError) as e:
+                fails.append(f"{script} error: {e}")
+    return fails
+
+
+def sync_working_directory(
+    source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None, full: bool = False
+) -> bool:
+    import bridge
+
+    if not full and _is_git_repo(source_cwd, host=source_host):
+        project = _get_project_name(source_cwd, host=source_host)
+        if project:
+            try:
+                bare_repo = _ensure_bare_repo(project)
+                meta = _git_push_state(source_cwd, project, bare_repo, host=source_host)
+                if meta:
+                    bare_url = _bare_repo_url(bare_repo, target_host=target_host)
+                    if _git_pull_state(target_cwd, project, bare_url, meta, host=target_host):
+                        _log(_LOG_INFO, "teleport", f"git sync succeeded for {project}")
+                        return True
+                    _log(_LOG_WARN, "teleport", f"git pull failed, falling back to rsync")
+                else:
+                    _log(_LOG_WARN, "teleport", f"git push failed, falling back to rsync")
+            except (subprocess.SubprocessError, OSError, KeyError) as e:
+                _log(_LOG_ERROR, "teleport", f"git sync error, falling back to rsync: {e}")
+    return rsync_working_directory(source_cwd, target_cwd, source_host, target_host, full)
+
+
+def rsync_working_directory(
+    source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None, full: bool = False
+) -> bool:
+    import bridge
+
+    _remote_run(["mkdir", "-p", target_cwd], host=target_host, capture_output=True)
+    cmd = ["rsync", "-az", "--delete"]
+    gitignore_tmpfile = None
+    if not full:
+        try:
+            gi_result = _remote_run(
+                ["git", "-C", source_cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+                host=source_host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_FILE_TRANSFER,
+            )
+            if gi_result.returncode == 0 and gi_result.stdout.strip():
+                fd, gitignore_tmpfile = tempfile.mkstemp(prefix="rsync-gitignore-", suffix=".txt")
+                try:
+                    os.write(fd, gi_result.stdout.encode())
+                finally:
+                    os.close(fd)
+                cmd.extend(["--exclude-from", gitignore_tmpfile])
+        except (ConnectionError, TimeoutError, OSError) as e:
+            _log(_LOG_WARN, "teleport", f"git ls-files failed, skipping gitignore excludes: {e}")
+        for excl in bridge.TELEPORT_RSYNC_EXCLUDES:
+            cmd.extend(["--exclude", excl])
+    src = source_cwd.rstrip("/") + "/"
+    dst = target_cwd.rstrip("/") + "/"
+    if source_host:
+        cmd.extend([f"{source_host}:{src}", dst])
+    elif target_host:
+        cmd.extend([src, f"{target_host}:{dst}"])
+    else:
+        cmd.extend([src, dst])
+    try:
+        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=bridge.TIMEOUT_FULL_SYNC)
+        if r.returncode != 0:
+            _log(_LOG_WARN, "teleport", f"rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
+        return r.returncode == 0
+    finally:
+        if gitignore_tmpfile and os.path.exists(gitignore_tmpfile):
+            os.unlink(gitignore_tmpfile)
+
+
+def sync_session_transcript(
+    session_id: str, source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None
+) -> None:
+    import bridge
+
+    if not session_id:
+        return
+    source_slug = _project_slug(source_cwd)
+    target_slug = _project_slug(target_cwd)
+    source_dir = f".claude/projects/{source_slug}"
+    target_dir = f".claude/projects/{target_slug}"
+    if target_host:
+        _remote_run(["bash", "-c", f"mkdir -p $HOME/{target_dir}"], host=target_host, capture_output=True)
+    else:
+        os.makedirs(os.path.expanduser(f"~/{target_dir}"), exist_ok=True)
+    jsonl = f"{session_id}.jsonl"
+    for item in [jsonl, f"{session_id}/"]:
+        if source_host:
+            src_path = f"~/{source_dir}/{item}"
+            local_dst = os.path.expanduser(f"~/{target_dir}/")
+            cmd = ["rsync", "-az", f"{source_host}:{src_path}", local_dst]
+        elif target_host:
+            local_src = os.path.expanduser(f"~/{source_dir}/{item}")
+            dst_path = f"~/{target_dir}/"
+            cmd = ["rsync", "-az", local_src, f"{target_host}:{dst_path}"]
+        else:
+            local_src = os.path.expanduser(f"~/{source_dir}/{item}")
+            local_dst = os.path.expanduser(f"~/{target_dir}/")
+            cmd = ["rsync", "-az", local_src, local_dst]
+        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=bridge.TIMEOUT_RSYNC)
+        if r.returncode != 0:
+            _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
+
+
+def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> list[str]:
+    import bridge
+
+    if not target_host:
+        return []
+    warnings: list[str] = []
+
+    def _warn(msg: str) -> None:
+        warnings.append(msg)
+        _log(_LOG_INFO, "teleport", msg)
+
+    try:
+        home = os.path.expanduser("~")
+        git_repos = {"team": os.path.join(home, "team"), "agent-config": os.path.join(home, "agent-config")}
+        for rn, rp in git_repos.items():
+            if os.path.isdir(os.path.join(rp, ".git")):
+                try:
+                    for cmd in [
+                        ["git", "-C", rp, "add", "-A"],
+                        ["git", "-C", rp, "commit", "-m", f"teleport sync: {rn}"],
+                    ]:
+                        _subprocess_runner.run(cmd, capture_output=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+                    _subprocess_runner.run(
+                        ["git", "-C", rp, "push", "origin", "master"],
+                        capture_output=True,
+                        timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                    )
+                except (subprocess.SubprocessError, OSError) as e:
+                    _warn(f"git push {rn}: {e}")
+        for rn in git_repos:
+            try:
+                _remote_run(
+                    ["bash", "-c", f"cd ~/{rn} 2>/dev/null && git pull origin master 2>/dev/null || true"],
+                    host=target_host,
+                    capture_output=True,
+                    timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                _warn(f"git pull {rn} on {target_host}: {e}")
+        for subdir in ("skills", "hooks", "scripts"):
+            try:
+                _remote_run(
+                    [
+                        "bash",
+                        "-c",
+                        f"[ -d ~/agent-config/.claude/{subdir} ] && rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/",
+                    ],
+                    host=target_host,
+                    capture_output=True,
+                    timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                _warn(f"agent-config deploy {subdir}: {e}")
+        remote_home = _get_remote_home(target_host)
+        if remote_home and remote_home != home:
+            settings_src = os.path.expanduser("~/.claude/settings.json")
+            if os.path.exists(settings_src):
+                with open(settings_src) as f:
+                    settings_text = f.read().replace(home, remote_home)
+                fd, tmp = tempfile.mkstemp(suffix=".json")
+                try:
+                    os.write(fd, settings_text.encode())
+                finally:
+                    os.close(fd)
+                try:
+                    _subprocess_runner.run(
+                        ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
+                        capture_output=True,
+                        timeout=bridge.TIMEOUT_REMOTE_CMD,
+                    )
+                finally:
+                    os.unlink(tmp)
+    except (subprocess.SubprocessError, OSError) as e:
+        _warn(f"shared repo sync: {e}")
+    return warnings
+
+
+def sync_worker_data_back(name: str, source_host: str | None) -> None:
+    import bridge
+
+    if not source_host:
+        return
+    home = os.path.expanduser("~")
+    worker_team_dir = os.path.join(home, "team", name)
+    if os.path.isdir(worker_team_dir):
+        _subprocess_runner.run(
+            ["rsync", "-az", f"{source_host}:team/{name}/", f"{worker_team_dir}/"],
+            capture_output=True,
+            timeout=bridge.TIMEOUT_GIT_OP,
+        )
+    r = _remote_run(
+        ["bash", "-c", "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
+        host=source_host,
+        capture_output=True,
+        text=True,
+        timeout=bridge.TIMEOUT_REMOTE_CMD,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        for remote_file in r.stdout.strip().splitlines():
+            remote_home = _get_remote_home(source_host)
+            if remote_home and remote_file.startswith(remote_home):
+                local_file = home + remote_file[len(remote_home) :]
+                local_dir = os.path.dirname(local_file)
+                os.makedirs(local_dir, exist_ok=True)
+                _subprocess_runner.run(
+                    ["rsync", "-az", f"{source_host}:{remote_file}", local_file],
+                    capture_output=True,
+                    timeout=bridge.TIMEOUT_REMOTE_CMD,
+                )
+
+
+def install_hooks_on_target(target_host: str) -> list[str]:
+    import bridge
+
+    if not target_host:
+        return []
+    warnings = []
+    try:
+        _remote_run(["chmod", "-R", "700", ".claude/hooks"], host=target_host, capture_output=True)
+        claude_json = os.path.expanduser("~/.claude.json")
+        if os.path.exists(claude_json):
+            _subprocess_runner.run(
+                ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
+                capture_output=True,
+                timeout=bridge.TIMEOUT_REMOTE_CMD,
+            )
+        else:
+            _remote_run(
+                [
+                    "python3",
+                    "-c",
+                    "import json,os,pathlib;"
+                    'p=pathlib.Path(os.path.expanduser("~/.claude.json"));'
+                    "d=json.loads(p.read_text()) if p.exists() else {};"
+                    'd["hasCompletedOnboarding"]=True;'
+                    'd.setdefault("numStartups",1);'
+                    "p.write_text(json.dumps(d))",
+                ],
+                host=target_host,
+                capture_output=True,
+                timeout=bridge.TIMEOUT_REMOTE_CMD,
+            )
+    except (subprocess.SubprocessError, OSError) as e:
+        w = f"hook install: {e}"
+        warnings.append(w)
+        _log(_LOG_INFO, "teleport", f"{w}")
+    return warnings
+
+
+def sync_session_files_to_target(name: str, target_sessions_dir: str, target_host: str) -> None:
+    import bridge
+
+    local_session_dir = bridge.SESSIONS_DIR / name
+    if not local_session_dir.is_dir():
+        return
+    remote_session_dir = f"{target_sessions_dir}/{name}"
+    _remote_run(["mkdir", "-p", remote_session_dir], host=target_host, capture_output=True)
+    for fname in ["chat_id", "claude_session_id"]:
+        local_file = local_session_dir / fname
+        if local_file.exists():
+            _subprocess_runner.run(
+                ["rsync", "-az", str(local_file), f"{target_host}:{remote_session_dir}/{fname}"],
+                capture_output=True,
+                timeout=bridge.TIMEOUT_REMOTE_CMD,
+            )
+
+
+def sync_credentials_to_target(target_host: str) -> None:
+    import bridge
+
+    local_creds = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.exists(local_creds):
+        return
+    try:
+        r = _remote_run(
+            ["cat", ".claude/.credentials.json"],
+            host=target_host,
+            capture_output=True,
+            text=True,
+            timeout=bridge.TIMEOUT_TMUX_SEND,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            remote_data = cast(dict[str, object], json.loads(r.stdout))
+            local_data = cast(dict[str, object], json.loads(Path(local_creds).read_text()))
+            _ro = remote_data.get("claudeAiOauth", {})
+            remote_oauth = _ro if isinstance(_ro, dict) else {}
+            _lo = local_data.get("claudeAiOauth", {})
+            local_oauth = _lo if isinstance(_lo, dict) else {}
+            remote_refresh = str(remote_oauth.get("refreshToken", ""))
+            local_refresh = str(local_oauth.get("refreshToken", ""))
+            remote_exp = int(remote_oauth.get("expiresAt", 0))
+            now_ms = int(_clock.time() * 1000)
+            if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
+                _log(_LOG_INFO, "creds", f"Target {target_host} has independent valid credentials, skipping sync")
+                return
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
+        pass
+    _remote_run(["mkdir", "-p", ".claude"], host=target_host, capture_output=True)
+    _subprocess_runner.run(
+        ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json.tmp"],
+        capture_output=True,
+        timeout=bridge.TIMEOUT_REMOTE_CMD,
+    )
+    _remote_run(
+        ["mv", ".claude/.credentials.json.tmp", ".claude/.credentials.json"], host=target_host, capture_output=True
+    )
+    _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host, capture_output=True)
+    _log(_LOG_INFO, "creds", f"Synced credentials to {target_host}")
+
+
+def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None) -> str | None:
+    import bridge
+
+    session_id = get_claude_session_id(name, authoritative=True)
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host, capture_output=True)
+    for _ in range(20):
+        _clock.sleep(bridge.DELAY_RETRY)
+        r = _remote_run(
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host, capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            break
+        pane_pid = r.stdout.strip()
+        if pane_pid:
+            claude_pid = _get_claude_pid(pane_pid, host=host)
+            if not claude_pid:
+                break
+    else:
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], host=host, capture_output=True)
+        _clock.sleep(bridge.DELAY_STARTUP)
+    return get_claude_session_id(name, authoritative=True) or session_id
+
+
+def start_worker_on_target(
+    name: str,
+    target_host: str,
+    target_cwd: str | None,
+    session_id: str | None,
+    backend_name: str,
+    skip_session_sync: bool = False,
+) -> bool:
+    import bridge
+
+    tmux_name = f"{bridge.TMUX_PREFIX}{name}"
+    _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host, capture_output=True)
+    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    r = _remote_run(
+        ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+        host=target_host,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        _log(
+            _LOG_WARN,
+            "teleport",
+            f"tmux new-session failed: rc={r.returncode} stderr={r.stderr[:200] if r.stderr else ''}",
+        )
+        return False
+    _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=target_host, capture_output=True)
+    _clock.sleep(bridge.DELAY_RETRY)
+    target_sessions_dir = _remap_path(str(bridge.SESSIONS_DIR), target_host)
+    if target_host and not skip_session_sync:
+        sync_session_files_to_target(name, target_sessions_dir, target_host)
+    if target_host:
+        sync_credentials_to_target(target_host)
+    for key, value in {
+        "PORT": str(bridge.PORT),
+        "TMUX_PREFIX": bridge.TMUX_PREFIX,
+        "SESSIONS_DIR": target_sessions_dir,
+        "WORKER_BACKEND": normalize_backend(backend_name),
+        "BRIDGE_URL": bridge.BRIDGE_PUBLIC_URL or bridge.BRIDGE_URL,
+    }.items():
+        _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value], host=target_host, capture_output=True)
+    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    _remote_run(
+        ["tmux", "send-keys", "-t", tmux_name, 'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
+        host=target_host,
+        capture_output=True,
+    )
+    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    backend = get_backend(backend_name)
+    cli_cmd = backend.start_cmd(session_id or "")
+    if target_host:
+        id_result = _remote_run(["id", "-u"], host=target_host, capture_output=True, text=True)
+        if id_result.returncode == 0 and id_result.stdout.strip() == "0":
+            cli_cmd = cli_cmd.replace(" --dangerously-skip-permissions", "")
+    start_cmd = f"unset CLAUDECODE && {cli_cmd}"
+    if target_cwd:
+        start_cmd = f"cd {shlex.quote(target_cwd)} && {start_cmd}"
+    _log(_LOG_INFO, "teleport", f"start_cmd={start_cmd}")
+    _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=target_host, capture_output=True)
+    if backend.is_interactive:
+        for delay, key in [(3.0, "Enter"), (2.0, "Enter"), (1.0, "Enter"), (1.0, "Enter")]:
+            _clock.sleep(delay)
+            _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=target_host, capture_output=True)
+    for attempt in range(30):
+        _clock.sleep(bridge.DELAY_STARTUP)
+        r = _remote_run(
+            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
+            host=target_host,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            if attempt % 10 == 0:
+                _log(_LOG_WARN, "teleport", f"verify attempt {attempt}: tmux display-message failed rc={r.returncode}")
+            continue
+        pane_pid = r.stdout.strip()
+        claude_pid = _get_claude_pid(pane_pid, host=target_host) if pane_pid else None
+        if claude_pid:
+            _log(_LOG_INFO, "teleport", f"verified: claude running as pid {claude_pid} (pane {pane_pid})")
+            return True
+        if attempt % 10 == 0:
+            _log(_LOG_INFO, "teleport", f"verify attempt {attempt}: pane_pid={pane_pid}, no claude yet")
+            cap = _remote_run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p"],
+                host=target_host,
+                capture_output=True,
+                text=True,
+                timeout=bridge.TIMEOUT_TMUX_SEND,
+            )
+            if cap.returncode == 0:
+                _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
+    _log(_LOG_WARN, "teleport", f"verify FAILED after 30 attempts")
+    return False
+
+
+def teleport_rollback(
+    name: str,
+    tmux_name: str,
+    source_host: str | None,
+    source_cwd: str | None,
+    session_id: str | None,
+    backend_name: str,
+    chat_id: "ChatId | None",
+    reason: str,
+) -> None:
+    import bridge
+
+    teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
+    try:
+        if source_cwd:
+            save_claude_session_cwd(name, source_cwd)
+        if not tmux_exists(tmux_name, host=source_host):
+            _remote_run(
+                ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
+                host=source_host,
+                capture_output=True,
+            )
+            _remote_run(
+                ["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=source_host, capture_output=True
+            )
+        backend = get_backend(backend_name)
+        start_cmd = f'unset CLAUDECODE && {backend.start_cmd(session_id or "")}'
+        if source_cwd:
+            start_cmd = f"cd {shlex.quote(source_cwd)} && {start_cmd}"
+        _remote_run(["tmux", "send-keys", "-t", tmux_name, start_cmd, "Enter"], host=source_host, capture_output=True)
+        teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
+    except (subprocess.SubprocessError, OSError) as e:
+        teleport_notify(chat_id, f"Rollback also failed: {e}")
+    try:
+        state_file = bridge.SESSIONS_DIR / name / "teleport_state"
+        state_file.unlink(missing_ok=True)
+    except OSError as exc:
+        _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+
+
+# ============================================================
+# api_handlers
+# ============================================================
+
+import json
+import os
+import subprocess
+import urllib.error
+from typing import TYPE_CHECKING, cast
+from urllib.parse import parse_qs
+import core
+import claudecode
+import telegram
+from core import (
+    _log,
+    _LOG_ERROR,
+    _LOG_WARN,
+    _LOG_INFO,
+    _LOG_DEBUG,
+    _str_field,
+    _int_field,
+    DEFAULT_BACKEND,
+    TMUX_PREFIX,
+    NODE_NAME,
+    TIMEOUT_TMUX_SEND,
+)
+from claudecode import (
+    get_backend,
+    get_worker_backend,
+    normalize_cwd,
+    validate_cwd,
+    get_claude_session_id,
+    get_claude_session_cwd,
+    save_claude_session_cwd,
+    _ensure_workspace_trusted,
+    _log_session_event,
+)
+
+if TYPE_CHECKING:
+    from urllib.parse import ParseResult
+
+
+def handle_notify(handler, body: bytes = b"") -> None:
+    from bridge import _parse_response_media, _send_response_media, get_all_chat_ids
+
+    try:
+        data = cast(dict[str, object], json.loads(body))
+        text = _str_field(data, "text")
+        name = _str_field(data, "name")
+        if not text:
+            handler._send_text(400, "Missing text")
+            return
+        clean_text, images, files = _parse_response_media(name or "", text)
+        chat_ids = get_all_chat_ids()
+        sent = 0
+        label = name or "notify"
+        for chat_id in chat_ids:
+            if clean_text:
+                result = telegram.transport.send_text(chat_id, clean_text)
+                if result and result.get("ok"):
+                    sent += 1
+            _send_response_media(label, images, files, chat_id)
+        has_media = len(images) + len(files)
+        _log(
+            _LOG_INFO,
+            "notify",
+            f"sent to {sent}/{len(chat_ids)} chats: {text[:50]}..." f"{f' ({has_media} media)' if has_media else ''}",
+        )
+        handler._send_text(200, f"Sent to {sent} chats")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        _log(_LOG_ERROR, "bridge", f"Notify error: {e}")
+        handler._send_text(500, str(e))
+
+
+def handle_health_alert(handler, body: bytes = b"") -> None:
+    from bridge import get_all_chat_ids
+
+    try:
+        data = json.loads(body) if body else {}
+        worker = _str_field(data, "worker", "unknown")
+        issue = _str_field(data, "issue", "unknown")
+        age = _int_field(data, "transcript_age")
+        age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
+        alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
+        _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
+        chat_ids = get_all_chat_ids()
+        for chat_id in chat_ids:
+            telegram.transport.send_text(chat_id, alert_text)
+        handler._send_json(200, {"ok": True})
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")
+        handler._send_json(500, {"ok": False, "error": str(e)})
+
+
+def handle_forge_register(handler, body: bytes = b"") -> None:
+    from bridge import _registry_add, _registry_add_callback, worker_manager
+
+    try:
+        data = json.loads(body) if body else {}
+        name = _str_field(data, "Name") or _str_field(data, "name")
+        host = _str_field(data, "Host") or _str_field(data, "host")
+        version = _str_field(data, "Version") or _str_field(data, "version")
+        callback_url = (
+            _str_field(data, "CallbackURL") or _str_field(data, "callback_url") or _str_field(data, "callbackUrl")
+        )
+        tools = data.get("Tools", data.get("tools", {}))
+        if name:
+            if callback_url:
+                _registry_add_callback(name, callback_url, host=host, version=version, tools=tools)
+                _log(
+                    _LOG_INFO,
+                    "worker",
+                    f"Callback worker registered: {name} (host={host}, url={callback_url}, version={version})",
+                )
+            else:
+                _registry_add(name, DEFAULT_BACKEND, host=host)
+                _log(_LOG_INFO, "worker", f"Forge worker registered: {name} (host={host}, version={version})")
+            backend_name = get_worker_backend(name, {"host": host})
+            tmux_name = f"{TMUX_PREFIX}{name}"
+            reg_host = host or None
+            if claudecode.tmux_exists(tmux_name, host=reg_host):
+                claudecode.export_hook_env(tmux_name, backend_name, host=reg_host)
+            claudecode.ensure_session_dir(name)
+            if core.admin_chat_id is not None:
+                cid_file = claudecode.get_chat_id_file(name)
+                if not cid_file.exists():
+                    _tmp_cid = cid_file.with_suffix(".tmp")
+                    _tmp_cid.write_text(str(core.admin_chat_id))
+                    _tmp_cid.chmod(0o600)
+                    os.replace(str(_tmp_cid), str(cid_file))
+        tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
+        conflict = False
+        active_workers = []
+        try:
+            r = core._subprocess_runner.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+            if r.returncode == 0:
+                active_workers = [
+                    s.removeprefix(TMUX_PREFIX) for s in r.stdout.strip().split("\n") if s.startswith(TMUX_PREFIX)
+                ]
+                conflict = name in active_workers if name else False
+        except (subprocess.SubprocessError, OSError) as exc:
+            _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
+        worker_manager.invalidate_sessions_cache()
+        handler._send_json(
+            200,
+            {
+                "ok": True,
+                "settings": {"tmux_prefix": TMUX_PREFIX, "node_name": NODE_NAME or "", "tmux_session": tmux_session},
+                "conflict": conflict,
+                "active_workers": active_workers,
+            },
+        )
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError, KeyError) as e:
+        _log(_LOG_ERROR, "bridge", f"Register error: {e}")
+        handler._send_json(500, {"ok": False, "error": str(e)})
+
+
+def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
+    from bridge import _sync_worker_manager, worker_manager, _set_worker_cwd, _checkin_can_restart, _checkin_do_restart
+
+    try:
+        params = parse_qs(parsed.query)
+        name = params.get("name", ["worker"])[0]
+        raw_cwd = params.get("cwd", [None])[0]
+        requested_cwd = ""
+        if raw_cwd is not None:
+            worker_host = get_worker_host(name)
+            requested_cwd, cwd_err = validate_cwd(raw_cwd, host=worker_host)
+            if cwd_err:
+                handler._send_text(400, f"Invalid cwd: {cwd_err}")
+                return
+        _sync_worker_manager()
+        registered = worker_manager.get_registered_sessions()
+        tmux_name = ""
+        host = None
+        if name in registered:
+            backend_name = get_worker_backend(name, registered[name])
+            tmux_name = registered[name].get("tmux", f"{TMUX_PREFIX}{name}")
+            host = get_worker_host(name)
+            if claudecode.tmux_exists(tmux_name, host=host):
+                claudecode.export_hook_env(tmux_name, backend_name, host=host)
+        else:
+            backend_name = DEFAULT_BACKEND
+        backend_obj = get_backend(backend_name)
+        if requested_cwd:
+            _set_worker_cwd(name, requested_cwd)
+            old_cwd = get_claude_session_cwd(name)
+            save_claude_session_cwd(name, requested_cwd)
+            _ensure_workspace_trusted(requested_cwd)
+            if old_cwd and old_cwd.rstrip("/") != requested_cwd.rstrip("/"):
+                old_sid = get_claude_session_id(name)
+                _log_session_event(name, old_sid or "(none)", requested_cwd, "cwd_change")
+                _log(
+                    _LOG_WARN,
+                    "checkin",
+                    f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate",
+                )
+                notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
+                notify_chat_id = telegram.get_manager_chat_id(name)
+                if notify_chat_id is not None:
+                    telegram.send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
+            _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
+            if tmux_name and claudecode.tmux_exists(tmux_name, host=host):
+                pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
+                same_cwd = pane_cwd and pane_cwd.rstrip("/") == requested_cwd.rstrip("/")
+                _log(_LOG_INFO, "checkin", f"{name}: pane_cwd={pane_cwd}, same_cwd={same_cwd}")
+                if not same_cwd:
+                    allowed, block_msg = _checkin_can_restart(name, tmux_name, host, pane_cwd or "", requested_cwd)
+                    if not allowed:
+                        notify_chat_id = telegram.get_manager_chat_id(name)
+                        if notify_chat_id is not None:
+                            telegram.send_telegram_message(notify_chat_id, block_msg)
+                        handler._send_text(200, block_msg)
+                        return
+                    _log(
+                        _LOG_INFO,
+                        "checkin",
+                        f"{name}: triggering restart (cwd mismatch: pane={pane_cwd} vs requested={requested_cwd})",
+                    )
+                    ok, err = _checkin_do_restart(name, backend_name, tmux_name, host, requested_cwd)
+                    if not ok:
+                        handler._send_text(500, f"Failed to restart in {requested_cwd}: {err}")
+                    else:
+                        handler._send_text(200, f"Restarting in {requested_cwd}...")
+                    return
+        handler._send_text(200, worker_manager._build_welcome(name, backend_obj))
+    except (subprocess.SubprocessError, OSError, KeyError) as exc:
+        _log(_LOG_ERROR, "bridge", f"Checkin endpoint error: {exc}")
+        handler._send_text(500, str(exc))
+
+
+def handle_health_workers_endpoint(handler) -> None:
+    from bridge import watchdog
+
+    try:
+        now = core._clock.time()
+        registered = get_registered_sessions()
+        with watchdog.lock:
+            state_snapshot = dict(watchdog.worker_states)
+        workers = {}
+        for name in sorted(registered.keys()):
+            entry = state_snapshot.get(name)
+            if entry:
+                workers[name] = {
+                    "state": entry.status,
+                    "reason": entry.reason,
+                    "since": entry.since,
+                    "age_sec": int(now - entry.since) if entry.since else None,
+                }
+            else:
+                workers[name] = {"state": "unknown"}
+        handler._send_json(200, {"workers": workers})
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        _log(_LOG_ERROR, "worker", f"Health workers endpoint error: {e}")
+        handler._send_text(500, str(e))
+
+
+# ============================================================
+# pr_handlers
+# ============================================================
+
+
+import base64 as _b64
+import json
+import os
+import urllib.error
+from typing import TYPE_CHECKING, cast
+from urllib.parse import parse_qs, urlparse
+
+if TYPE_CHECKING:
+    from urllib.parse import ParseResult
+
+
+def _b():
+    import bridge as _b
+
+    return _b
+
+
+def handle_pr_file_content(handler, parsed: ParseResult) -> None:
+    b = _b()
+    params = dict(parse_qs(parsed.query))
+    token = params.get("token", [None])[0]
+    if not b.tokens.validate_pr_review(token):
+        handler._send_status(403)
+        return
+    owner = params.get("owner", [None])[0]
+    repo = params.get("repo", [None])[0]
+    path = params.get("path", [None])[0]
+    ref = params.get("ref", [None])[0]
+    if not all([owner, repo, path, ref]):
+        handler._send_status(400)
+        return
+    ok, out = b._gh_api_call([f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
+    if not ok:
+        handler._send_status(504 if out == "timeout" else 404)
+        return
+    try:
+        raw = _b64.b64decode(out.strip()).decode("utf-8", errors="replace")
+        handler._send_json(200, raw.splitlines())
+    except (ValueError, TypeError):
+        handler._send_status(500)
+
+
+def handle_pr_keepalive(handler, parsed: ParseResult) -> None:
+    b = _b()
+    params = dict(parse_qs(parsed.query))
+    token = params.get("token", [None])[0]
+    if not b.tokens.validate_pr_review(token):
+        handler._send_status(403)
+        return
+    handler._send_status(204)
+
+
+def handle_pr_review_comments(handler, body: bytes) -> None:
+    b = _b()
+    try:
+        data = cast(dict[str, object], json.loads(body))
+    except (json.JSONDecodeError, ValueError):
+        handler._send_text(400, "Invalid JSON")
+        return
+    if b._str_field(data, "path") and b._int_field(data, "line"):
+        handle_pr_comment(handler, body)
+    else:
+        handle_pr_general_comment(handler, body)
+
+
+def _pr_guard(handler, body: bytes):
+    b = _b()
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        handler._send_text(400, "Invalid JSON")
+        return None
+    if not b.tokens.validate_pr_review(b._str_field(data, "token")):
+        handler._send_text(403, "Token expired")
+        return None
+    return data
+
+
+def _pr_notify(text: str) -> None:
+    b = _b()
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{b.BRIDGE_PUBLIC_URL or f'http://localhost:{b.PORT}'}/notifications",
+            data=json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        b._urlopen(req, timeout=b.TIMEOUT_TMUX_SEND)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        b._log(b._LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+
+
+def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
+    b = _b()
+    targets, _ = b.command_router.parse_at_mentions(comment_body)
+    if targets:
+        msg = f"manager: PR #{pr_num} review comment{prefix}\n\n{comment_body}"
+        for t in targets:
+            b.send_to_worker(t, msg)
+
+
+def handle_pr_general_comment(handler, body: bytes) -> None:
+    b = _b()
+    data = _pr_guard(handler, body)
+    if not data:
+        return
+    owner = b._str_field(data, "owner")
+    repo = b._str_field(data, "repo")
+    pr_num = b._int_field(data, "pr_num")
+    comment_body = b._str_field(data, "body").strip()
+    if not all([owner, repo, pr_num, comment_body]):
+        handler._send_text(400, "Missing required fields")
+        return
+    ok, err = b._gh_api_call(
+        [f"repos/{owner}/{repo}/issues/{pr_num}/comments", "--method", "POST", "-f", f"body={comment_body}"]
+    )
+    if not ok:
+        handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err[:200]}")
+        return
+    _pr_notify(f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}")
+    _pr_fan_out(pr_num, comment_body)
+    handler._send_json(200, {"ok": True})
+
+
+def handle_pr_merge(handler, body: bytes) -> None:
+    b = _b()
+    data = _pr_guard(handler, body)
+    if not data:
+        return
+    owner = b._str_field(data, "owner")
+    repo = b._str_field(data, "repo")
+    pr_num = b._int_field(data, "pr_num")
+    merge_method = b._str_field(data, "merge_method", "merge")
+    if merge_method not in ("merge", "squash", "rebase"):
+        merge_method = "merge"
+    if not all([owner, repo, pr_num]):
+        handler._send_text(400, "Missing required fields")
+        return
+    ok, err = b._gh_api_call(
+        [f"repos/{owner}/{repo}/pulls/{pr_num}/merge", "--method", "PUT", "-f", f"merge_method={merge_method}"],
+        timeout=b.TIMEOUT_GIT_OP,
+    )
+    if not ok:
+        handler._send_text(504 if err == "timeout" else 502, f"Merge failed: {err[:300]}")
+        return
+    _pr_notify(f"✅ PR #{pr_num} merged ({merge_method}) via review page")
+    handler._send_json(200, {"ok": True})
+
+
+def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
+    b = _b()
+    params = dict(parse_qs(parsed.query))
+    token = params.get("token", [None])[0]
+    info = b.tokens.validate_pr_review(token)
+    if not info:
+        handler._send_html(
+            b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>",
+            403,
+        )
+        return
+    pr_num = info["pr_num"]
+    html_path = f"/tmp/pr-review-{pr_num}.html"
+    if not os.path.exists(html_path):
+        handler._send_html(
+            f"<h2>PR review not found</h2><p>File {html_path} missing. Re-run /pr command.</p>".encode(), 404
+        )
+        return
+    with open(html_path, "rb") as f:
+        handler._send_html(f.read())
+
+
+def handle_pr_comment(handler, body: bytes) -> None:
+    b = _b()
+    data = _pr_guard(handler, body)
+    if not data:
+        return
+    owner = b._str_field(data, "owner")
+    repo = b._str_field(data, "repo")
+    pr_num = b._int_field(data, "pr_num")
+    path = b._str_field(data, "path")
+    line = b._int_field(data, "line")
+    side = b._str_field(data, "side", "RIGHT")
+    comment_body = b._str_field(data, "body").strip()
+    head_sha = b._str_field(data, "head_sha")
+    if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
+        handler._send_text(400, "Missing required fields")
+        return
+    gh_payload = json.dumps({"body": comment_body, "commit_id": head_sha, "path": path, "line": line, "side": side})
+    ok, err = b._gh_api_call(
+        [f"repos/{owner}/{repo}/pulls/{pr_num}/comments", "--method", "POST", "--input", "-"], input_data=gh_payload
+    )
+    if not ok:
+        b._log(b._LOG_ERROR, "pr-comment", f"GitHub API error: {err}")
+        handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err}")
+        return
+    if b.admin_chat_id:
+        b.transport.send_text(b.admin_chat_id, f"\U0001f4ac PR #{pr_num} comment\n{path}:{line}\n\n{comment_body}")
+    _pr_fan_out(pr_num, comment_body, f" on {path}:{line}")
+    handler._send_json(200, {"ok": True})
+
+
+# ============================================================
+# guest_handlers
+# ============================================================
+
+import hashlib
+import json
+import secrets
+import time
+from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse, parse_qs, ParseResult
+import claudecode
+from core import (
+    _str_field,
+    _int_field,
+    _bool_field,
+    _clock,
+    _log,
+    _LOG_INFO,
+    _LOG_WARN,
+    BRIDGE_URL,
+    SESSIONS_DIR,
+    TMUX_PREFIX,
+)
+
+if TYPE_CHECKING:
+    from http.server import BaseHTTPRequestHandler
+
+
+def _fanout_channel_message(
+    channel_id: str, from_member: str, text: str, msg: dict, members_snapshot: dict, registered: dict
+) -> None:
+    tagged = f"[{channel_id} from {from_member}] {text}"
+    for member_key, minfo in members_snapshot.items():
+        if member_key == from_member:
+            continue
+        if minfo["type"] == "worker":
+            wname = minfo.get("name", "")
+            if wname and wname in registered:
+                winfo = registered[wname]
+                backend_name = claudecode.get_worker_backend(wname, winfo)
+                backend = claudecode.get_backend(backend_name)
+                try:
+                    backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged, BRIDGE_URL, SESSIONS_DIR)
+                except (ConnectionError, TimeoutError) as e:
+                    _log(_LOG_WARN, "bridge", f"Channel fan-out to {wname} failed: {e}")
+        elif minfo["type"] == "guest":
+            gname = minfo.get("name", "")
+            if gname:
+                with guest_store.lock:
+                    ginbox = guest_store.inboxes.get(gname, [])
+                    guest_store.inboxes[gname] = guest_inbox_append(
+                        ginbox,
+                        {
+                            "id": msg["id"],
+                            "from": from_member,
+                            "channel": channel_id,
+                            "text": text,
+                            "ts": msg["ts"],
+                        },
+                    )
+        elif minfo["type"] == "manager":
+            from bridge import _notify_admin
+
+            _notify_admin(f"[{channel_id}] {from_member}: {text}")
+
+
+def _guest_auth(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> dict | None:
+    query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
+    token = query_params.get("token", [""])[0]
+    if not token:
+        handler._send_error_json(403, "token required")
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with guest_store.lock:
+        guest = guest_store.guests.get(token_hash)
+    if not guest or guest_is_expired(guest["expires_at_unix"]):
+        if guest:
+            with guest_store.lock:
+                guest_store.guests.pop(token_hash, None)
+                _guest_save()
+        handler._send_error_json(403, "invalid or expired guest session")
+        return None
+    return guest
+
+
+def _channel_guest_auth(handler: "BaseHTTPRequestHandler", query_params: dict) -> str | None:
+    token = query_params.get("token", [None])[0]
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with guest_store.lock:
+        guest = guest_store.guests.get(token_hash)
+    if not guest or guest_is_expired(guest["expires_at_unix"]):
+        handler._send_error_json(403, "invalid or expired token")
+        return ""
+    return f"guest:{guest['name']}"
+
+
+def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+    from bridge import _notify_admin, _relay_base_url
+
+    try:
+        data = cast(dict, json.loads(body)) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    requested_name = _str_field(data, "name").strip().lower()
+    team_workers = set(get_registered_sessions().keys())
+    with guest_store.lock:
+        existing_guests = {g["name"] for g in guest_store.guests.values()}
+    if requested_name:
+        ok, err = guest_validate_name(requested_name, team_workers, existing_guests)
+        if not ok:
+            status = 409 if "conflicts" in err or "already taken" in err else 400
+            handler._send_json(status, {"ok": False, "error": err})
+            return
+        name = requested_name
+    else:
+        name = guest_generate_name(existing_names=team_workers | existing_guests)
+    token, token_hash = guest_create_token()
+    now = _clock.time()
+    expires_at_unix = now + GUEST_TTL
+    expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_unix))
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    guest = cast(
+        GuestSessionDict,
+        {
+            "name": name,
+            "token_hash": token_hash,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "expires_at_unix": expires_at_unix,
+            "notified_workers": set(),
+        },
+    )
+    with guest_store.lock:
+        guest_store.guests[token_hash] = guest
+        guest_store.inboxes[name] = []
+        _guest_save()
+    base_url = _relay_base_url()
+    listen_script = (
+        f"python3 -c \"import json,time,urllib.request as u;TOKEN,URL='{token}','{base_url}';last='';"
+        f"print('[listener] connected',flush=True)\nwhile True:\n try:\n  q=URL+'/guests/inbox?token='+TOKEN+("
+        f"'&after='+last if last else '');d=json.loads(u.urlopen(u.Request(q),timeout=10).read())\n  for m in d.get('messages',[]):"
+        f"\n   print(m.get('from','?')+': '+m['text'],flush=True);last=m['id']\n except Exception as e:\n  "
+        f"if '403' in str(e) or '404' in str(e):print('[listener] expired',flush=True);break\n time.sleep(3)\""
+    )
+    _notify_admin(f'\U0001f514 Guest "{name}" connected')
+    _log(_LOG_INFO, "guest", f"Guest registered: {name} (expires {expires_at})")
+    handler._send_json(
+        200,
+        {
+            "ok": True,
+            "name": name,
+            "token": token,
+            "expires": expires_at,
+            "inbox_url": f"/guests/inbox?token={token}",
+            "send_url": f"/guests/send?token={token}",
+            "channels_url": f"/channels?token={token}",
+            "channel_create_url": f"/channels?token={token}",
+            "listen_script": listen_script,
+        },
+    )
+
+
+def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+    from bridge import _notify_admin
+
+    parsed = urlparse(handler.path)
+    guest = _guest_auth(handler, parsed)
+    if not guest:
+        return
+    data = handler._parse_body(body)
+    if data is None:
+        return
+    text = _str_field(data, "text").strip()
+    if not text:
+        handler._send_error_json(400, "text required")
+        return
+    raw_to = data.get("to", _str_field(data, "worker"))
+    if isinstance(raw_to, str):
+        targets = [raw_to.strip()] if raw_to.strip() else []
+    elif isinstance(raw_to, list):
+        targets = [t.strip() for t in raw_to if isinstance(t, str) and t.strip()]
+    else:
+        targets = []
+    if not targets:
+        handler._send_error_json(400, "to (or worker) required")
+        return
+    guest_name = guest["name"]
+    from_member = f"guest:{guest_name}"
+    tagged_text = f"[guest:{guest_name}] {text}"
+    registered = get_registered_sessions()
+    results = []
+    for target in targets:
+        if target.startswith("#") or target.startswith("ch_"):
+            with channel_store.lock:
+                if target.startswith("#"):
+                    ch_id = next(
+                        (
+                            cid
+                            for cid, ch in channel_store.channels.items()
+                            if ch["label"] == target[1:] and not channel_is_expired(ch)
+                        ),
+                        None,
+                    )
+                else:
+                    ch_id = target
+                channel = channel_store.channels.get(ch_id) if ch_id else None
+                if not channel or channel_is_expired(channel):
+                    results.append({"target": target, "ok": False, "error": "channel not found"})
+                    continue
+                if from_member not in channel["members"]:
+                    results.append({"target": target, "ok": False, "error": "not a member"})
+                    continue
+                msg = channel_append_message(channel, from_member, text)
+                members_snapshot = dict(channel["members"])
+            _fanout_channel_message(ch_id, from_member, text, msg, members_snapshot, registered)
+            results.append({"target": target, "ok": True, "channel": ch_id, "message_id": msg["id"]})
+        elif target.startswith("guest:"):
+            target_guest = target.split(":", 1)[1]
+            msg_id = f"gm_{secrets.token_hex(4)}"
+            with guest_store.lock:
+                ginbox = guest_store.inboxes.get(target_guest, [])
+                guest_store.inboxes[target_guest] = guest_inbox_append(
+                    ginbox,
+                    {
+                        "id": msg_id,
+                        "from": from_member,
+                        "text": text,
+                        "ts": int(_clock.time()),
+                    },
+                )
+            results.append({"target": target, "ok": True, "message_id": msg_id})
+        else:
+            worker = target
+            if worker not in registered:
+                results.append({"target": worker, "ok": False, "error": f"worker '{worker}' not found"})
+                continue
+            info = registered[worker]
+            backend_name = claudecode.get_worker_backend(worker, info)
+            backend = claudecode.get_backend(backend_name)
+            tmux_name = f"{TMUX_PREFIX}{worker}"
+            delivered = backend.send(worker, tmux_name, tagged_text, BRIDGE_URL, SESSIONS_DIR)
+            msg_id = f"gm_{secrets.token_hex(4)}"
+            with guest_store.lock:
+                inbox = guest_store.inboxes.get(guest_name, [])
+                guest_store.inboxes[guest_name] = guest_inbox_append(
+                    inbox,
+                    {
+                        "id": msg_id,
+                        "from": guest_name,
+                        "to": worker,
+                        "text": text,
+                        "ts": int(_clock.time()),
+                    },
+                )
+                notified = guest.get("notified_workers", set())
+                if worker not in notified:
+                    if isinstance(notified, set):
+                        notified.add(worker)
+                    guest["notified_workers"] = notified
+                    _notify_admin(f'\U0001f514 Guest "{guest_name}" → {worker}')
+            results.append({"target": worker, "ok": True, "delivered": delivered, "message_id": msg_id})
+    if len(results) == 1:
+        handler._send_json(200, {**results[0], "ok": results[0].get("ok", True)})
+    else:
+        handler._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
+
+
+def handle_guest_reply(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+    data = handler._parse_body(body)
+    if data is None:
+        return
+    guest_name = _str_field(data, "guest").strip()
+    from_worker = _str_field(data, "from").strip()
+    text = _str_field(data, "text").strip()
+    if not guest_name or not text:
+        handler._send_error_json(400, "guest and text required")
+        return
+    msg_id = f"gm_{secrets.token_hex(4)}"
+    with guest_store.lock:
+        if guest_name not in guest_store.inboxes:
+            guest_store.inboxes[guest_name] = []
+        guest_store.inboxes[guest_name] = guest_inbox_append(
+            guest_store.inboxes[guest_name],
+            {"id": msg_id, "from": from_worker or "worker", "text": text, "ts": int(_clock.time())},
+        )
+    handler._send_json(200, {"ok": True, "message_id": msg_id})
+
+
+def handle_guest_inbox(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+    guest = _guest_auth(handler, parsed)
+    if not guest:
+        return
+    query_params = parse_qs(parsed.query)
+    after = query_params.get("after", [None])[0]
+    guest_name = guest["name"]
+    with guest_store.lock:
+        msgs = list(guest_store.inboxes.get(guest_name, []))
+    filtered = guest_inbox_filter(msgs, after=after)
+    handler._send_json(
+        200,
+        {
+            "ok": True,
+            "name": guest_name,
+            "messages": filtered,
+        },
+    )
+
+
+def handle_guest_status(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+    guest = _guest_auth(handler, parsed)
+    if not guest:
+        return
+    with guest_store.lock:
+        workers = list(guest.get("notified_workers", set()))
+    handler._send_json(
+        200, {"ok": True, "name": guest["name"], "expires": guest["expires_at"], "connected_workers": workers}
+    )
+
+
+def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
+    with guest_store.lock:
+        guests_list = []
+        expired = []
+        for th, g in guest_store.guests.items():
+            if guest_is_expired(g["expires_at_unix"]):
+                expired.append(th)
+            else:
+                guests_list.append(
+                    {
+                        "name": g["name"],
+                        "expires": g["expires_at"],
+                        "connected_workers": list(g.get("notified_workers", set())),
+                    }
+                )
+        for th in expired:
+            guest_store.inboxes.pop(guest_store.guests.pop(th, {}).get("name", ""), None)
+        if expired:
+            _guest_save()
+    handler._send_json(200, {"ok": True, "guests": guests_list})
+
+
+def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+    from bridge import _notify_admin
+
+    query_params = parse_qs(parsed.query)
+    token = query_params.get("token", [""])[0]
+    if not token:
+        handler._send_error_json(403, "token required")
+        return
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with guest_store.lock:
+        guest = guest_store.guests.pop(token_hash, None)
+        if guest:
+            guest_store.inboxes.pop(guest["name"], None)
+            _guest_save()
+    if not guest:
+        handler._send_error_json(403, "invalid token")
+        return
+    _notify_admin(f"\U0001f514 Guest \"{guest['name']}\" disconnected")
+    _log(_LOG_INFO, "guest", f"Guest disconnected: {guest['name']}")
+    handler._send_json(200, {"ok": True, "name": guest["name"]})
+
+
+def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+    from bridge import _notify_admin
+
+    data = handler._parse_body(body)
+    if data is None:
+        return
+    label = _str_field(data, "label").strip()
+    members = data.get("members", [])
+    include_manager = _bool_field(data, "include_manager", True)
+    ttl = min(_int_field(data, "ttl_seconds", CHANNEL_TTL), CHANNEL_TTL)
+    if not isinstance(members, list):
+        handler._send_error_json(400, "members must be a list")
+        return
+    valid_members = []
+    for m in members:
+        if isinstance(m, str) and (m == "manager" or ":" in m):
+            valid_members.append(m)
+    if include_manager and "manager" not in valid_members:
+        valid_members.append("manager")
+    parsed = urlparse(handler.path)
+    query_params = parse_qs(parsed.query)
+    guest_member = _channel_guest_auth(handler, query_params)
+    if guest_member == "":
+        return
+    created_by = guest_member or "manager"
+    if guest_member and guest_member not in valid_members:
+        valid_members.append(guest_member)
+    channel_id = channel_create_id(label)
+    channel = channel_new(channel_id, label, created_by, valid_members, ttl)
+    with channel_store.lock:
+        channel_store.channels[channel_id] = channel
+        _channel_save()
+    member_str = ", ".join(valid_members)
+    _notify_admin(f"\U0001f4e2 Channel {channel_id} created by {created_by}\nMembers: {member_str}")
+    _log(_LOG_INFO, "channel", f"Channel created: {channel_id} by {created_by} members=[{member_str}]")
+    handler._send_json(
+        200,
+        {
+            "ok": True,
+            "channel": channel_id,
+            "label": label,
+            "members": valid_members,
+            "send_url": f"/channels/{channel_id}/send",
+            "messages_url": f"/channels/{channel_id}/messages",
+        },
+    )
+
+
+def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
+    from bridge import _notify_admin
+
+    data = handler._parse_body(body)
+    if data is None:
+        return
+    with channel_store.lock:
+        channel = channel_store.channels.get(channel_id)
+        if not channel or channel_is_expired(channel):
+            handler._send_error_json(404, "channel not found")
+            return
+        added = channel_add_members(channel, data.get("add", []) if isinstance(data.get("add", []), list) else [])
+        removed = channel_remove_members(
+            channel, data.get("remove", []) if isinstance(data.get("remove", []), list) else []
+        )
+        current = list(channel["members"].keys())
+    if added or removed:
+        _notify_admin(
+            f"\U0001f4e2 Channel {channel_id}: {'; '.join((['added ' + ', '.join(added)] if added else []) + (['removed ' + ', '.join(removed)] if removed else []))}"
+        )
+    handler._send_json(200, {"ok": True, "channel": channel_id, "added": added, "removed": removed, "members": current})
+
+
+def handle_channel_send(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
+    data = handler._parse_body(body)
+    if data is None:
+        return
+    text = _str_field(data, "text").strip()
+    if not text:
+        handler._send_error_json(400, "text required")
+        return
+    parsed = urlparse(handler.path)
+    query_params = parse_qs(parsed.query)
+    guest_member = _channel_guest_auth(handler, query_params)
+    if guest_member == "":
+        return
+    from_member = guest_member or _str_field(data, "from") or "manager"
+    with channel_store.lock:
+        channel = channel_store.channels.get(channel_id)
+        if not channel or channel_is_expired(channel):
+            handler._send_error_json(404, "channel not found")
+            return
+        if from_member not in channel["members"] and from_member != "manager":
+            handler._send_error_json(403, f"{from_member} not a member")
+            return
+        msg = channel_append_message(channel, from_member, text)
+        members_snapshot = dict(channel["members"])
+    _fanout_channel_message(channel_id, from_member, text, msg, members_snapshot, get_registered_sessions())
+    handler._send_json(200, {"ok": True, "channel": channel_id, "message_id": msg["id"], "seq": msg["seq"]})
+
+
+def handle_channel_messages(handler: "BaseHTTPRequestHandler", channel_id: str, parsed: ParseResult) -> None:
+    query_params = parse_qs(parsed.query)
+    after = query_params.get("after", [None])[0]
+    from_member = _channel_guest_auth(handler, query_params)
+    if from_member == "":
+        return
+    with channel_store.lock:
+        channel = channel_store.channels.get(channel_id)
+        if not channel or channel_is_expired(channel):
+            handler._send_error_json(404, "channel not found")
+            return
+        if from_member and from_member not in channel["members"]:
+            handler._send_error_json(403, "not a member of this channel")
+            return
+        msgs, truncated = channel_get_messages(channel, after)
+    resp: dict = {"ok": True, "channel": channel_id, "messages": msgs}
+    if truncated:
+        resp["truncated"] = True
+    handler._send_json(200, resp)
+
+
+def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> None:
+    query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
+    filter_member = _channel_guest_auth(handler, query_params)
+    if filter_member == "":
+        return
+    with channel_store.lock:
+        active = []
+        expired_ids = []
+        for cid, ch in channel_store.channels.items():
+            if channel_is_expired(ch):
+                expired_ids.append(cid)
+            else:
+                if filter_member and filter_member not in ch["members"]:
+                    continue
+                active.append(
+                    {
+                        "id": ch["id"],
+                        "label": ch["label"],
+                        "members": list(ch["members"].keys()),
+                        "message_count": len(ch["messages"]),
+                        "created_by": ch["created_by"],
+                        "send_url": f"/channels/{ch['id']}/send",
+                        "messages_url": f"/channels/{ch['id']}/messages",
+                    }
+                )
+        for cid in expired_ids:
+            del channel_store.channels[cid]
+        if expired_ids:
+            _channel_save()
+    handler._send_json(200, {"ok": True, "channels": active})
+
+
+def handle_channel_delete(handler: "BaseHTTPRequestHandler", channel_id: str) -> None:
+    from bridge import _notify_admin
+
+    with channel_store.lock:
+        channel = channel_store.channels.pop(channel_id, None)
+        if channel:
+            _channel_save()
+    if not channel:
+        handler._send_error_json(404, "channel not found")
+        return
+    _notify_admin(f"\U0001f4e2 Channel {channel_id} closed")
+    _log(_LOG_INFO, "channel", f"Channel deleted: {channel_id}")
+    handler._send_json(200, {"ok": True, "channel": channel_id})
+
+
+# Aliases (originally from connector_glue import ... as ...)
+_connector_on_message = connector_on_message
+_connector_get_workers = connector_get_workers
+_connector_on_alert = connector_on_alert
+_start_connectors = start_connectors
+_restart_connector = restart_connector
+_get_connectors_status = get_connectors_status
+
+
+# ============================================================
+# bridge (main module body)
+# ============================================================
 
 class WorkerRegistryEntry:
     backend: str = "claude"
@@ -560,41 +12514,496 @@ class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+
+# ============================================================
+# teleport (merged from teleport.py)
+# ============================================================
+
+def do_teleport(
+    name: str,
+    target_host: str,
+    target_cwd: str,
+    full_sync: bool,
+    chat_id: "int | str",
+    workers: object,
+    is_teleback: bool = False,
+) -> None:
+
+    try:
+        registered = workers.get_registered_sessions()
+        session = registered.get(name, {})  # type: ignore[attr-defined]
+        tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
+        backend_name = get_worker_backend(name, session)
+        source_host = get_worker_host(name)
+        source_cwd = get_claude_session_cwd(name) or ""
+        _log(
+            _LOG_INFO,
+            "teleport",
+            f"{name}: source_host={source_host}, source_cwd={source_cwd}, target_host={target_host}, target_cwd={target_cwd}",
+        )
+        if not target_cwd:
+            target_cwd = _remap_path(source_cwd, target_host) if target_host else source_cwd
+        if target_cwd and target_cwd.startswith("~"):
+            if target_host:
+                rh = _get_remote_home(target_host)
+                if rh:
+                    target_cwd = rh + target_cwd[1:]
+            else:
+                target_cwd = os.path.expanduser(target_cwd)
+        ensure_session_dir(name)
+        state_file = SESSIONS_DIR / name / "teleport_state"
+        _tmp_ts = state_file.with_suffix(".tmp")
+        _tmp_ts.write_text(
+            json.dumps(
+                {
+                    "phase": 1,
+                    "source_host": source_host,
+                    "target_host": target_host,
+                    "target_cwd": target_cwd,
+                    "started_at": int(_clock.time()),
+                }
+            )
+        )
+        os.replace(str(_tmp_ts), str(state_file))
+        teleport_notify(chat_id, f"Stopping {name}...")
+        session_id = stop_worker_for_teleport(name, tmux_name, source_host)
+        _log(_LOG_INFO, "teleport", f"{name}: stopped, session_id={session_id}")
+        if source_cwd and target_cwd:
+            teleport_notify(chat_id, f"Syncing working directory...")
+            _log(_LOG_INFO, "teleport", f"{name}: syncing {source_cwd} → {target_cwd}")
+            ok = sync_working_directory(source_cwd, target_cwd, source_host, target_host, full_sync)
+            _log(_LOG_INFO, "teleport", f"{name}: working dir sync ok={ok}")
+            if not ok:
+                teleport_rollback(
+                    name,
+                    tmux_name,
+                    source_host,
+                    source_cwd,
+                    session_id,
+                    backend_name,
+                    chat_id,
+                    "working directory sync failed",
+                )
+                return
+        if session_id:
+            teleport_notify(chat_id, "Syncing session transcript...")
+            sync_session_transcript(session_id, source_cwd, target_cwd, source_host, target_host)
+            _log(_LOG_INFO, "teleport", f"{name}: transcript sync done")
+        if not is_teleback:
+            teleport_notify(chat_id, "Syncing team config and hooks...")
+            sw = sync_shared_repos(target_host, chat_id)
+            hook_warnings = install_hooks_on_target(target_host)
+            all_warnings = sw + hook_warnings
+            if all_warnings:
+                teleport_notify(
+                    chat_id, f"Config sync completed with warnings:\n" + "\n".join(f"- {w}" for w in all_warnings)
+                )
+            _log(_LOG_WARN, "teleport", f"{name}: team config + hooks synced ({len(all_warnings)} warnings)")
+        _tmp_ts2 = state_file.with_suffix(".tmp")
+        _tmp_ts2.write_text(
+            json.dumps(
+                {
+                    "phase": 2,
+                    "source_host": source_host,
+                    "target_host": target_host,
+                    "target_cwd": target_cwd,
+                    "started_at": int(_clock.time()),
+                }
+            )
+        )
+        os.replace(str(_tmp_ts2), str(state_file))
+        save_claude_session_cwd(name, target_cwd)
+        clear_claude_session_id(name)
+        _ensure_workspace_trusted_remote(target_cwd, target_host)
+        teleport_notify(chat_id, f"Starting {name} on {target_host or 'local'}...")
+        resume_id = session_id
+        _log(
+            _LOG_INFO,
+            "teleport",
+            f"{name}: calling _start_worker_on_target(target_cwd={target_cwd}, session_id={resume_id}, backend={backend_name})",
+        )
+        ok = start_worker_on_target(name, target_host, target_cwd, resume_id, backend_name)
+        _log(_LOG_INFO, "teleport", f"{name}: _start_worker_on_target returned {ok}")
+        if not ok:
+            _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host, capture_output=True)
+            teleport_rollback(
+                name, tmux_name, source_host, source_cwd, session_id, backend_name, chat_id, "failed to start on target"
+            )
+            return
+        if is_teleback:
+            _registry_clear_teleport(name)
+        else:
+            _registry_update_teleport(name, host=target_host, home_host=source_host, home_cwd=source_cwd)
+        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=source_host, capture_output=True)
+        if is_teleback:
+            sync_worker_data_back(name, source_host)
+        if not is_teleback:
+            try:
+                backend_obj = get_backend(backend_name)
+                welcome = workers._build_welcome(name, backend_obj)  # type: ignore[attr-defined]
+                _clock.sleep(DELAY_PROCESS_SETTLE)
+                workers.send(name, welcome)  # type: ignore[attr-defined]
+                if source_host != target_host:
+                    ctx = _build_teleport_context(
+                        name=name,
+                        source_host=source_host,
+                        target_host=target_host,
+                        source_cwd=source_cwd,
+                        session_id=session_id,
+                    )
+                    _clock.sleep(0.5)
+                    workers.send(name, ctx)  # type: ignore[attr-defined]
+            except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
+                _log(_LOG_WARN, "teleport", f"Warning: failed to send welcome to {name}: {e}")
+        state_file.unlink(missing_ok=True)
+        dest_label = target_host or "local"
+        action = "teleported back" if is_teleback else "teleported"
+        msg = f"{name} {action} to {dest_label}:{target_cwd}"
+        if session_id:
+            msg += f"\nSession resumed ({session_id[:8]}...)."
+        if not is_teleback:
+            msg += f"\nUse /teleback {name} to bring it back."
+        teleport_notify(chat_id, msg)
+    except (
+        subprocess.SubprocessError,
+        ConnectionError,
+        TimeoutError,
+        TypeError,
+        AttributeError,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as e:
+        _log(_LOG_ERROR, "teleport", f"Teleport failed: {e}", exc=e)
+        teleport_notify(chat_id, f"Teleport failed: {e}")
+        try:
+            state_file = SESSIONS_DIR / name / "teleport_state"
+            state_file.unlink(missing_ok=True)
+        except OSError as exc:
+            _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
+
+
+def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool = False) -> bool:
+
+    if not arg:
+        cmd_name = "/teleport-check" if check_only else "/teleport"
+        router.reply(chat_id, f"Usage: {cmd_name} <worker> <host>[:/path]")  # type: ignore[attr-defined]
+        return True
+    parts = arg.split()
+    worker_name = parts[0].lower()
+    target_spec = " ".join(parts[1:]) if len(parts) > 1 else ""
+    if not target_spec:
+        router.reply(chat_id, "Usage: /teleport <worker> <host>[:/path] [--full]")  # type: ignore[attr-defined]
+        return True
+    full_sync = "--full" in target_spec
+    target_spec = target_spec.replace("--full", "").strip()
+    if ":" in target_spec and not target_spec.startswith("/"):
+        target_host, target_cwd = target_spec.split(":", 1)
+    else:
+        target_host = target_spec
+        target_cwd = ""
+    machines = get_machine_catalog()
+    if target_host in machines:
+        machine = machines[target_host]
+        if machine.ssh_target:
+            target_host = machine.ssh_target
+    registry = _load_registry()
+    worker_entry = registry.get("workers", {}).get(worker_name)
+    if not worker_entry:
+        router.reply(chat_id, f"Worker '{worker_name}' not found in registry.")  # type: ignore[attr-defined]
+        return True
+    backend_name = worker_entry.get("backend", "claude")
+    with watchdog.lock:
+        worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+    current_state = worker_state[0]
+    if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
+        router.reply(
+            chat_id,  # type: ignore[attr-defined]
+            f"{worker_name} is busy. Must be idle to teleport.\n"
+            f"Wait for it to finish or /pause {worker_name} first.",
+        )
+        return True
+    teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+    if teleport_file.exists():
+        router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
+        return True
+    r = _remote_run(["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD)
+    if r.returncode != 0:
+        router.reply(chat_id, f"Cannot reach {target_host} via SSH.")  # type: ignore[attr-defined]
+        return True
+    required_tools = ["claude", "tmux", "rsync"] + ([backend_name] if backend_name != "claude" else [])
+    for tool in required_tools:
+        if _resolve_remote_tool(tool, target_host) == tool:
+            router.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")  # type: ignore[attr-defined]
+            return True
+    tmux_name = f"{router.workers.tmux_prefix}{worker_name}"  # type: ignore[attr-defined]
+    r = _remote_run(
+        ["bash", "-c", f"tmux has-session -t {tmux_name} 2>/dev/null && echo exists || echo none"],
+        host=target_host,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_TMUX_SEND,
+    )
+    if r.returncode == 0 and "exists" in r.stdout:
+        teleport_notify(chat_id, f"⚠️ tmux session '{tmux_name}' already exists on {target_host} — will be replaced.")
+    target_bridge_url = BRIDGE_PUBLIC_URL or BRIDGE_URL
+    if "localhost" in target_bridge_url or "127.0.0.1" in target_bridge_url:
+        router.reply(
+            chat_id,  # type: ignore[attr-defined]
+            "Cannot teleport: no reachable bridge URL. "
+            "Set BRIDGE_PUBLIC_URL to this machine's network IP "
+            "(e.g., BRIDGE_PUBLIC_URL=http://100.125.36.102:8271).",
+        )
+        return True
+    r = _remote_run(
+        ["curl", "-sf", "--connect-timeout", "5", f"{target_bridge_url}/"],
+        host=target_host,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_REMOTE_CMD,
+    )
+    if r.returncode != 0:
+        router.reply(
+            chat_id,  # type: ignore[attr-defined]
+            f"Target {target_host} cannot reach {target_bridge_url}. "
+            f"Ensure BRIDGE_BIND=0.0.0.0 and network connectivity.",
+        )
+        return True
+    r = _remote_run(
+        ["test", "-f", ".claude/.credentials.json"],
+        host=target_host,
+        capture_output=True,
+        timeout=TIMEOUT_TMUX_SEND,
+    )
+    if r.returncode != 0:
+        local_creds = os.path.expanduser("~/.claude/.credentials.json")
+        if os.path.exists(local_creds):
+            _remote_run(["mkdir", "-p", ".claude"], host=target_host, capture_output=True)
+            _subprocess_runner.run(
+                ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json"],
+                capture_output=True,
+                timeout=TIMEOUT_REMOTE_CMD,
+            )
+            _remote_run(["chmod", "600", ".claude/.credentials.json"], host=target_host, capture_output=True)
+            teleport_notify(chat_id, "Synced credentials to target.")
+        else:
+            router.reply(
+                chat_id,  # type: ignore[attr-defined]
+                f"No Claude credentials on {target_host} or locally. " f"Run: ssh {target_host} claude login",
+            )
+            return True
+    r = _remote_run(
+        ["test", "-f", ".claude/hooks/claudecode.sh"],
+        host=target_host,
+        capture_output=True,
+        timeout=TIMEOUT_TMUX_SEND,
+    )
+    if r.returncode != 0:
+        teleport_notify(chat_id, "Hooks missing on target — will install during teleport.")
+    preflight_fails = run_teleport_preflight(target_host, worker_name, backend_name)
+    if preflight_fails:
+        router.reply(chat_id, f"Preflight failed:\n" + "\n".join(f" - {f}" for f in preflight_fails))  # type: ignore[attr-defined]
+        return True
+    if check_only:
+        router.reply(chat_id, f"Preflight OK — {worker_name} is clear to teleport to {target_host}.")  # type: ignore[attr-defined]
+        return True
+    router.reply(chat_id, f"Teleporting {worker_name} to {target_host}...")  # type: ignore[attr-defined]
+    threading.Thread(
+        target=do_teleport,
+        args=(worker_name, target_host, target_cwd, full_sync, chat_id, router.workers),  # type: ignore[attr-defined]
+        name=f"teleport-{worker_name}",
+        daemon=True,
+    ).start()
+    return True
+
+
+def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
+
+    parts = arg.split()
+    worker_name = parts[0].lower() if parts else ""
+    full_sync = "--full" in parts
+    if not worker_name:
+        router.reply(chat_id, "Usage: /teleback <worker> [--full]")  # type: ignore[attr-defined]
+        return True
+    registry = _load_registry()
+    worker = registry.get("workers", {}).get(worker_name)
+    if not worker:
+        router.reply(chat_id, f"Worker '{worker_name}' not in registry.")  # type: ignore[attr-defined]
+        return True
+    current_host = worker.get("host")
+    home_host = worker.get("home_host")
+    home_cwd = worker.get("home_cwd")
+    if current_host is None and home_cwd is None:
+        router.reply(chat_id, f"{worker_name} hasn't been teleported.")  # type: ignore[attr-defined]
+        return True
+    with watchdog.lock:
+        worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+    if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
+        router.reply(
+            chat_id,  # type: ignore[attr-defined]
+            f"{worker_name} is busy. Must be idle to teleback. " f"Wait or /pause {worker_name} first.",
+        )
+        return True
+    teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+    if teleport_file.exists():
+        router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
+        return True
+    target_host = home_host
+    target_cwd = home_cwd or get_claude_session_cwd(worker_name)
+    if target_host:
+        r = _remote_run(
+            ["echo", "ok"], host=target_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
+        )
+        if r.returncode != 0:
+            router.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")  # type: ignore[attr-defined]
+            return True
+        for tool in ("claude", "tmux", "rsync"):
+            tool_path = _resolve_remote_tool(tool, target_host)
+            if tool_path == tool:
+                router.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")  # type: ignore[attr-defined]
+                return True
+    if current_host:
+        r = _remote_run(
+            ["echo", "ok"], host=current_host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
+        )
+        if r.returncode != 0:
+            router.reply(chat_id, f"Cannot reach {current_host} where {worker_name} currently is.")  # type: ignore[attr-defined]
+            return True
+    if not full_sync:
+        conflicts = check_teleback_conflicts(worker_name, current_host, target_cwd)
+        if conflicts:
+            router.reply(
+                chat_id,  # type: ignore[attr-defined]
+                f"Teleback conflict detected for {worker_name}:\n"
+                + "\n".join(f"  {c}" for c in conflicts)
+                + "\n\nUse /teleback "
+                + worker_name
+                + " --full to force sync "
+                "(remote overwrites local).",
+            )
+            return True
+    dest_label = home_host or "local"
+    router.reply(chat_id, f"Bringing {worker_name} back to {dest_label}...")  # type: ignore[attr-defined]
+    threading.Thread(
+        target=do_teleport,
+        args=(worker_name, target_host, target_cwd, full_sync, chat_id, router.workers, True),  # type: ignore[attr-defined]
+        name=f"teleback-{worker_name}",
+        daemon=True,
+    ).start()
+    return True
+
+
+def restart_remote_worker(
+    name: str, backend_name: str, backend: "Backend", tmux_name: str, host: str, mode: str, workers: object
+) -> tuple[bool, str | None]:
+
+    resume_id = ""
+    target_cwd = get_claude_session_cwd(name)
+    if target_cwd and host:
+        target_cwd = _remap_path(target_cwd, host)
+    _log(_LOG_INFO, "_restart_remote", f"{name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
+    if mode == "resume":
+        resume_id = get_claude_session_id(name, authoritative=False)
+        if not resume_id:
+            resume_id = get_claude_session_id(name, authoritative=True)
+        _log(_LOG_INFO, "_restart_remote", f"{name}: resume_id={resume_id}")
+    else:
+        session_dir = SESSIONS_DIR / name
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cleared = list(session_dir.glob("*_session_id"))
+        for f in cleared:
+            f.unlink()
+        _clear_hook_failures(name)
+        _log(_LOG_INFO, "_restart_remote", f"{name}: cleared {len(cleared)} session files for relaunch")
+    if tmux_exists(tmux_name, host=host):
+        _log(_LOG_INFO, "_restart_remote", f"{name}: stopping remote tmux {tmux_name}")
+        stop_worker_for_teleport(name, tmux_name, host=host)
+        _remote_run(["tmux", "kill-session", "-t", tmux_name], host=host, capture_output=True)
+        _clock.sleep(DELAY_RETRY)
+    else:
+        _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
+    if mode == "resume":
+        cached = get_claude_session_id(name, authoritative=False)
+        if cached:
+            resume_id = cached
+        else:
+            resume_id = get_claude_session_id(name, authoritative=True) or resume_id
+        _log(_LOG_INFO, "_restart_remote", f"{name}: post-stop resume_id={resume_id}")
+    if resume_id and target_cwd and host:
+        remote_home = _get_remote_home(host)
+        if remote_home:
+            cwd_slug = target_cwd.replace("/", "-")
+            session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
+            check = _remote_run(
+                ["test", "-f", session_file], host=host, capture_output=True, timeout=TIMEOUT_TMUX_SEND
+            )
+            if check.returncode != 0:
+                _log(
+                    _LOG_INFO,
+                    "_restart_remote",
+                    f"{name}: session {resume_id} NOT found at {session_file}, starting fresh",
+                )
+                resume_id = ""
+                session_dir = SESSIONS_DIR / name
+                session_dir.mkdir(parents=True, exist_ok=True)
+                for f in session_dir.glob("*_session_id"):
+                    f.unlink()
+            else:
+                _log(_LOG_INFO, "_restart_remote", f"{name}: session {resume_id} validated at {session_file}")
+    _ensure_workspace_trusted_remote(target_cwd, host)
+    _log(
+        _LOG_INFO,
+        "_restart_remote",
+        f"{name}: calling _start_worker_on_target(cwd={target_cwd}, resume={resume_id}, backend={backend_name})",
+    )
+    ok = start_worker_on_target(name, host, target_cwd, resume_id, backend_name, skip_session_sync=True)
+    if not ok:
+        _log(_LOG_WARN, "_restart_remote", f"{name}: _start_worker_on_target FAILED")
+        return False, f"Failed to restart {name} on {host}"
+    welcome = workers._build_welcome(name, backend)  # type: ignore[attr-defined]
+    if backend.is_interactive:
+        started = False
+        for _ in range(10):
+            _clock.sleep(DELAY_STARTUP)
+            if is_claude_running(tmux_name, host=host):
+                started = True
+                break
+        if started:
+            workers.send(name, welcome)  # type: ignore[attr-defined]
+        else:
+            _log(_LOG_WARN, "_restart_remote", f"{name}: Claude did not start within 10s, skipping welcome")
+    _log(_LOG_INFO, "_restart_remote", f"{name}: restarted successfully (mode={mode})")
+    return True, None
+
+
 class CommandRouter:
     def cmd_teleport(self, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
-        from teleport import cmd_teleport
 
         return cmd_teleport(self, arg, chat_id, check_only)
 
     def cmd_teleback(self, arg: str, chat_id: ChatId) -> bool:
-        from teleport import cmd_teleback
 
         return cmd_teleback(self, arg, chat_id)
 
     def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_hire
 
         return cmd_hire(self, name, chat_id)
 
     def cmd_end(self, name: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_end
 
         return cmd_end(self, name, chat_id)
 
     def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
-        from command_handlers import cmd_restart
 
         return cmd_restart(self, chat_id, args)
 
     def _restart_remote_worker(
         self, name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str
     ) -> tuple[bool, str | None]:
-        from teleport import restart_remote_worker
 
         return restart_remote_worker(name, backend_name, backend, tmux_name, host, mode, self.workers)
 
     def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
-        from relay import cmd_relay
 
         return cmd_relay(self, arg, chat_id)
 
@@ -1095,32 +13504,26 @@ class CommandRouter:
         return False
 
     def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_pilot
 
         return cmd_pilot(self, name, chat_id)
 
     def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_rewind
 
         return cmd_rewind(self, name, chat_id)
 
     def cmd_pr_review(self, arg: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_pr_review
 
         return cmd_pr_review(self, arg, chat_id)
 
     def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_focus
 
         return cmd_focus(self, name, chat_id)
 
     def cmd_team(self, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_team
 
         return cmd_team(self, chat_id)
 
     def cmd_status(self, chat_id: ChatId) -> bool:
-        from command_handlers import cmd_status
 
         return cmd_status(self, chat_id)
 
@@ -1269,144 +13672,116 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _guest_auth(self, parsed: ParseResult | None = None) -> "GuestSessionDict | None":
-        from guest_handlers import _guest_auth
 
         return _guest_auth(self, parsed)
 
     def _channel_guest_auth(self, query_params: dict[str, list[str]]) -> str | None:
-        from guest_handlers import _channel_guest_auth
 
         return _channel_guest_auth(self, query_params)
 
     def handle_guest_register(self, body: bytes = b"") -> None:
-        from guest_handlers import handle_guest_register
 
         handle_guest_register(self, body)
 
     def handle_guest_send(self, body: bytes = b"") -> None:
-        from guest_handlers import handle_guest_send
 
         handle_guest_send(self, body)
 
     def handle_guest_reply(self, body: bytes = b"") -> None:
-        from guest_handlers import handle_guest_reply
 
         handle_guest_reply(self, body)
 
     def handle_guest_inbox(self, parsed: ParseResult) -> None:
-        from guest_handlers import handle_guest_inbox
 
         handle_guest_inbox(self, parsed)
 
     def handle_guest_status(self, parsed: ParseResult) -> None:
-        from guest_handlers import handle_guest_status
 
         handle_guest_status(self, parsed)
 
     def handle_guests_list(self) -> None:
-        from guest_handlers import handle_guests_list
 
         handle_guests_list(self)
 
     def handle_guest_disconnect(self, parsed: ParseResult) -> None:
-        from guest_handlers import handle_guest_disconnect
 
         handle_guest_disconnect(self, parsed)
 
     def handle_channel_create(self, body: bytes = b"") -> None:
-        from guest_handlers import handle_channel_create
 
         handle_channel_create(self, body)
 
     def handle_channel_members(self, channel_id: str, body: bytes = b"") -> None:
-        from guest_handlers import handle_channel_members
 
         handle_channel_members(self, channel_id, body)
 
     def handle_channel_send(self, channel_id: str, body: bytes = b"") -> None:
-        from guest_handlers import handle_channel_send
 
         handle_channel_send(self, channel_id, body)
 
     def handle_channel_messages(self, channel_id: str, parsed: ParseResult) -> None:
-        from guest_handlers import handle_channel_messages
 
         handle_channel_messages(self, channel_id, parsed)
 
     def handle_channels_list(self, parsed: ParseResult | None = None) -> None:
-        from guest_handlers import handle_channels_list
 
         handle_channels_list(self, parsed)
 
     def handle_channel_delete(self, channel_id: str) -> None:
-        from guest_handlers import handle_channel_delete
 
         handle_channel_delete(self, channel_id)
 
     def _relay_get_token(self) -> str | None:
-        from relay import _relay_get_token
 
         return _relay_get_token(self)
 
     def handle_relay_get(self, channel_id: str, action: str | None, parsed: ParseResult) -> None:
-        from relay import handle_relay_get
 
         handle_relay_get(self, channel_id, action, parsed)
 
     def _relay_auth_and_parse(
         self, channel_id: str, auth_fn: Callable[..., object], body: bytes
     ) -> tuple[dict[str, object] | None, str, object]:
-        from relay import _relay_auth_and_parse
 
         return _relay_auth_and_parse(self, channel_id, auth_fn, body)
 
     def handle_relay_send(self, channel_id: str, body: bytes = b"") -> None:
-        from relay import handle_relay_send
 
         handle_relay_send(self, channel_id, body)
 
     def handle_relay_reply(self, channel_id: str, body: bytes = b"") -> None:
-        from relay import handle_relay_reply
 
         handle_relay_reply(self, channel_id, body)
 
     def handle_pr_file_content(self, parsed: ParseResult) -> None:
-        from pr_handlers import handle_pr_file_content
 
         handle_pr_file_content(self, parsed)
 
     def handle_pr_keepalive(self, parsed: ParseResult) -> None:
-        from pr_handlers import handle_pr_keepalive
 
         handle_pr_keepalive(self, parsed)
 
     def handle_pr_review_comments(self, body: bytes) -> None:
-        from pr_handlers import handle_pr_review_comments
 
         handle_pr_review_comments(self, body)
 
     def handle_pr_general_comment(self, body: bytes) -> None:
-        from pr_handlers import handle_pr_general_comment
 
         handle_pr_general_comment(self, body)
 
     def handle_pr_merge(self, body: bytes) -> None:
-        from pr_handlers import handle_pr_merge
 
         handle_pr_merge(self, body)
 
     def handle_pr_review_endpoint(self, parsed: ParseResult) -> None:
-        from pr_handlers import handle_pr_review_endpoint
 
         handle_pr_review_endpoint(self, parsed)
 
     def handle_pr_comment(self, body: bytes) -> None:
-        from pr_handlers import handle_pr_comment
 
         handle_pr_comment(self, body)
 
     def handle_transcript_endpoint(self, parsed: ParseResult) -> None:
-        from transcript import handle_transcript_endpoint
 
         handle_transcript_endpoint(self, parsed)
 
@@ -1496,17 +13871,14 @@ class Handler(BaseHTTPRequestHandler):
             _log(_LOG_ERROR, "webhook", f"parse error: {e}", exc=e)
 
     def handle_notify(self, body: bytes = b"") -> None:
-        from api_handlers import handle_notify
 
         handle_notify(self, body)
 
     def handle_health_alert(self, body: bytes = b"") -> None:
-        from api_handlers import handle_health_alert
 
         handle_health_alert(self, body)
 
     def handle_forge_register(self, body: bytes = b"") -> None:
-        from api_handlers import handle_forge_register
 
         handle_forge_register(self, body)
 
@@ -1672,12 +14044,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(e)})
 
     def handle_checkin_endpoint(self, parsed: ParseResult) -> None:
-        from api_handlers import handle_checkin_endpoint
 
         handle_checkin_endpoint(self, parsed)
 
     def handle_health_workers_endpoint(self) -> None:
-        from api_handlers import handle_health_workers_endpoint
 
         handle_health_workers_endpoint(self)
 
@@ -1879,9 +14249,6 @@ def get_worker_host(name: str) -> str | None:
     return worker.get("host")
 
 
-from worker_manager import WorkerManager
-
-
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
     _sync_worker_manager()
     assert worker_manager is not None
@@ -1896,7 +14263,6 @@ def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
 
 worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)  # type: ignore[assignment]
 try:
-    from _connector_impl import GmailConnector, GitHubConnector
 
     GMAIL_IMPORT_ERROR: ImportError | None = None
     GITHUB_IMPORT_ERROR: ImportError | None = None
@@ -1908,7 +14274,7 @@ except ImportError as e:
 _message_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="msg")
 _task_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 connectors = ConnectorRegistry()
-tunnel_manager: _tunnel_mod.TunnelManager | None = None
+tunnel_manager: TunnelManager | None = None
 if not BRIDGE_PUBLIC_URL:
     try:
         _ts_ip = subprocess.run(
@@ -2027,32 +14393,6 @@ def send_shutdown_message() -> None:
 CommandFn = Callable[[str, ChatId, MessageId], bool]
 assert worker_manager is not None
 command_router = CommandRouter(transport, worker_manager)
-from transcript import (  # noqa: E402
-    TranscriptSyncState,
-    TranscriptEntry,
-    TranscriptStatsDict,
-    ToolResultDict,
-    TranscriptSyncRegistry,
-    _TEAM_MEMBERS,
-    _MANAGER_AV,
-    _run_transcript_query,
-    _start_transcript_sync,
-    _resolve_transcript_path,
-    _parse_transcript_entries,
-    _generate_member_avatar,
-    _detect_message_author,
-    _transcript_entry_to_html,
-    _format_model_name,
-    _transcript_stats,
-    _render_transcript_loading,
-    _transcript_html_head,
-    _transcript_html_nav,
-    _transcript_html_entries,
-    _transcript_html_footer,
-    _transcript_html_search_js,
-    _err_page,
-    _render_transcript_html,
-)
 
 _endpoint_router = EndpointRouter()
 _setup_endpoint_routes()
@@ -2189,16 +14529,6 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
         _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
 
 
-from connector_glue import (  # noqa: E402
-    connector_on_message as _connector_on_message,
-    connector_get_workers as _connector_get_workers,
-    connector_on_alert as _connector_on_alert,
-    start_connectors as _start_connectors,
-    restart_connector as _restart_connector,
-    get_connectors_status as _get_connectors_status,
-)
-
-
 def main() -> None:
     global admin_chat_id, tunnel_manager
     if TRANSPORT_MODE == "telegram" and not BOT_TOKEN:
@@ -2247,7 +14577,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-        tunnel_manager = _tunnel_mod.TunnelManager(
+        tunnel_manager = TunnelManager(
             config=tunnel_config,
             bot_token=BOT_TOKEN,
             port=PORT,
@@ -2268,13 +14598,17 @@ def main() -> None:
 import types as _types_mod
 
 
+# Propagate attribute writes to foundation modules (test monkeypatching support)
+import types as _types_mod
+import core as _core_mod
+import claudecode as _cc_mod
+import telegram as _tg_mod
+
+
 class _BridgeModule(_types_mod.ModuleType):
-    _sources: tuple[_types_mod.ModuleType, ...] = ()
+    _sources = ()
 
     def __setattr__(self, name: str, value: object) -> None:
-        if name == "_sources":
-            super().__setattr__(name, value)
-            return
         for mod in self._sources:
             if hasattr(mod, name):
                 setattr(mod, name, value)
@@ -2289,115 +14623,10 @@ class _BridgeModule(_types_mod.ModuleType):
         raise AttributeError(f"module 'bridge' has no attribute {name}")
 
 
-import core as _core_mod
-import telegram as _tg_mod
-import claudecode as _cc_mod
-import health as _health_mod
-import relay as _relay_mod
-import _bridge_helpers as _bh_mod
-import _health_impl as _hi_mod
-_ci_mod = _cc_mod  # _claudecode_impl merged into claudecode
-_ti_mod = _tg_mod  # _telegram_impl merged into telegram
-import teleport as _tp_mod
-import _teleport_ops as _tpo_mod
-import _worker_impl as _wi_mod
-import _command_impl as _cdi_mod
-import _connector_impl as _coi_mod
-import _transcript_render as _tr_mod
-from health import (  # noqa: E402
-    _clear_hook_failures,
-    _extract_question_details,
-    _get_claude_pid,
-    _read_noninteractive_activity,
-    _read_tmux_activity,
-    _send_interactive_reply,
-    compute_state,
-    format_team_lines,
-    _format_watchdog_status,
-    _normalize_activity,
-    _team_attention_summary,
-    _format_watchdog_status_pure,
-    _format_team_lines_pure,
-    _check_adapter_log,
-    _detect_poisoned,
-    _extract_activity,
-    watchdog_loop,
-)
-from relay import (  # noqa: E402
-    GuestSessionDict,
-    GuestInboxMessageDict,
-    ChannelMemberDict,
-    ChannelMessageDict,
-    ChannelDict,
-    RelayMessageDict,
-    RelayChannelDict,
-    _save_state_json,
-    _load_state_json,
-    GuestStore,
-    guest_store,
-    GUEST_TTL,
-    GUEST_INBOX_CAP,
-    _guest_state_path,
-    _guest_save,
-    _guest_load,
-    guest_create_token,
-    guest_generate_name,
-    guest_validate_name,
-    guest_is_expired,
-    guest_inbox_filter,
-    guest_inbox_append,
-    ChannelStore,
-    channel_store,
-    CHANNEL_TTL,
-    CHANNEL_MSG_CAP,
-    _channel_state_path,
-    _channel_save,
-    _channel_load,
-    channel_create_id,
-    _channel_member_entry,
-    channel_new,
-    channel_add_members,
-    channel_remove_members,
-    channel_append_message,
-    channel_get_messages,
-    channel_is_expired,
-    RelayStore,
-    relay_store,
-    RELAY_PUBLIC_HOST,
-    _relay_state_path,
-    _relay_save,
-    _relay_load,
-    relay_channel_create,
-    _relay_base_url,
-    relay_guide_url,
-    relay_guide_text,
-    _relay_auth,
-    relay_auth_guest,
-    relay_auth_reply,
-    _relay_append_msg,
-    relay_guest_send,
-    relay_worker_reply,
-    relay_get_messages,
-)
-
 _this_module = sys.modules[__name__]
 _this_module.__class__ = _BridgeModule
-_this_module._sources = (
-    _core_mod,
-    _tg_mod,
-    _cc_mod,
-    _health_mod,
-    _relay_mod,
-    _bh_mod,
-    _hi_mod,
-    _ci_mod,
-    _ti_mod,
-    _tp_mod,
-    _tpo_mod,
-    _wi_mod,
-    _cdi_mod,
-    _coi_mod,
-    _tr_mod,
-)
-if __name__ == "__main__":
+_this_module._sources = (_core_mod, _tg_mod, _cc_mod)
+
+
+if __name__ == '__main__':
     main()
