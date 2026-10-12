@@ -8,25 +8,34 @@ import shutil
 import signal
 import subprocess
 import sys
+from shared import *  # noqa: F401,F403
 from shared import (
-    WorkerEndpointInfo,
-    MachinePublicDict,
-    MachinesCatalogResponse,
-    ConnectorMessageLogEntry,
-    ConnectorMetadataDict,
-    ConnectorAttachmentDict,
-    ConnectorStatusDict,
-    MentionRouteResult,
-    HookResponseBody,
-    HealthAlertBody,
-    ForgeRegisterBody,
-    PrActionBody,
-    TelegramWebhookBody,
-    NodeConfigDict,
+    _CHECKIN_NOTE_PATH,
+    _DEFAULT_PORTS,
+    _GuestSessionDictRequired,
+    _LEARNING_REMINDER_PATH,
+    _LOG_DEBUG,
+    _LOG_ERROR,
+    _LOG_INFO,
+    _LOG_WARN,
     _MentionSnapshot,
+    _RealClock,
+    _RealSubprocessRunner,
     _StateSnapshot,
-    PostRouteResolution,
-    GetRouteResolution,
+    _app_context,
+    _bool_field,
+    _bridge_url_env,
+    _build_app_context,
+    _build_tunnel_config,
+    _clock,
+    _int_field,
+    _log,
+    _node_name,
+    _res_cfg,
+    _str_field,
+    _subprocess_runner,
+    _urlopen,
+    _wd_cfg,
 )
 
 if __name__ == "__main__":
@@ -44,29 +53,6 @@ from urllib.parse import urlparse, parse_qs, ParseResult
 from pathlib import Path
 from collections.abc import Mapping
 from typing import IO, Any, Callable, NamedTuple, TypedDict, cast
-from shared import *  # noqa: F401,F403
-from shared import (
-    _str_field,
-    _bool_field,
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    _subprocess_runner,
-    _clock,
-    _urlopen,
-    _RealClock,
-    _build_app_context,
-    _wd_cfg,
-    _res_cfg,
-    _DEFAULT_PORTS,
-    _bridge_url_env,
-    _node_name,
-    _CHECKIN_NOTE_PATH,
-    _LEARNING_REMINDER_PATH,
-    _app_context,
-)
 from telegram import *  # noqa: F401,F403
 from telegram import (
     _TelegramHTMLSanitizer,
@@ -85,7 +71,6 @@ from telegram import (
     _extract_msg_text,
     _build_cwd_change_notice,
 )
-from shared import _build_tunnel_config
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
     _acquire_flock,
@@ -648,18 +633,6 @@ import enum
 import http.client
 import socket
 from typing import Callable, Protocol, cast
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_INFO,
-    _LOG_WARN,
-    SubprocessRunner,
-    Clock,
-    TunnelConfig,
-    _RealSubprocessRunner,
-    _RealClock,
-    _urlopen,
-)
 
 
 class UrlOpenFn(Protocol):
@@ -1121,28 +1094,6 @@ import base64
 import binascii
 from datetime import datetime, timezone, timedelta
 from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
-from shared import (
-    GmailHeader,
-    GmailBody,
-    GmailPayloadPart,
-    GmailMessage,
-    GmailMessageRef,
-    GmailHistoryEntry,
-    GmailHistoryResponse,
-    GmailProfile,
-    GmailAttachmentData,
-    GmailMessageListResponse,
-    GmailAttachmentInfo,
-    GithubUser,
-    GithubComment,
-    GithubState,
-    Attachment,
-    ConnectorMetadata,
-    IssueContext,
-    ConnectorStatus,
-    GmailStatus,
-    GithubStatus,
-)
 
 
 class MessageCallback(Protocol):
@@ -2402,15 +2353,6 @@ from urllib.parse import urlparse
 
 import shared as core
 import telegram
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    BRIDGE_PUBLIC_URL,
-    NODE_DIR,
-    TIMEOUT_GIT_OP,
-)
 
 def connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     from bridge import connectors
@@ -2697,36 +2639,6 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
 
 
 from typing import Any, Callable, cast
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_DEBUG,
-    _clock,
-    _subprocess_runner,
-    _node_name,
-    admin_chat_id,
-    ALERT_COOLDOWN,
-    CPU_ACTIVE,
-    CPU_HOG_DURATION_MIN,
-    CPU_IDLE,
-    DEFAULT_BACKEND,
-    DELAY_BRIEF,
-    HOST_DOWN_THRESHOLD,
-    IDLE_STREAK_STUCK,
-    SESSIONS_DIR,
-    START_GRACE,
-    STALE_PENDING,
-    THINK_GRACE,
-    TIMEOUT_GIT_OP,
-    TIMEOUT_REMOTE_CMD,
-    TIMEOUT_TMUX_CHECK,
-    TIMEOUT_TMUX_SEND,
-    TMUX_PREFIX,
-    TOOL_GAP_GRACE,
-    WATCHDOG_INTERVAL,
-    _res_cfg,
-)
 from claudecode import (
     CpuHogEntry,
     DiskUsageDict,
@@ -4126,7 +4038,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # ============================================================
 
 from typing import Callable
-from shared import _clock, DEFAULT_BACKEND
 from claudecode import (
     TmuxSessionDict,
     WorkerStateEntry,
@@ -4162,7 +4073,6 @@ def format_team_lines(  # type: ignore[no-redef]
 
 
 from typing import Callable, cast
-from shared import _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG, _clock, _int_field
 from claudecode import (
     _remote_run,
     _remap_path,
@@ -4170,7 +4080,6 @@ from claudecode import (
     _get_remote_home,
     normalize_cwd,
 )
-from shared import TranscriptEntry, TranscriptStatsDict, ToolResultDict
 
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
 _TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
@@ -4463,24 +4372,6 @@ def _render_transcript_html(
 # ============================================================
 
 from typing import Callable, TypedDict, cast
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_DEBUG,
-    _subprocess_runner,
-    _clock,
-    _int_field,
-)
-from shared import (
-    TranscriptSyncState,
-    TranscriptMessageUsage,
-    TranscriptMessageContent,
-    TranscriptMessage,
-    TranscriptEntry,
-    TranscriptStatsDict,
-    ToolResultDict,
-)
 
 
 # get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
@@ -5464,8 +5355,6 @@ def _pr_review_main() -> None:
 
 import hashlib, json, os, secrets, time, threading
 from typing import TypedDict, cast
-from shared import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
-from shared import _GuestSessionDictRequired, ChannelMemberDict, ChannelDict, RelayChannelDict
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -6220,27 +6109,6 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
 
 
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    _clock,
-    _subprocess_runner,
-    BRIDGE_URL,
-    BRIDGE_PUBLIC_URL,
-    BRIDGE_SSH_TARGET,
-    MACHINES_CONFIG_FILE,
-    TIMEOUT_FILE_TRANSFER,
-    TIMEOUT_GIT_OP,
-    TIMEOUT_RSYNC,
-    DELAY_BRIEF,
-    DELAY_RESPONSE_GAP,
-    DEFAULT_BACKEND,
-    RESTART_COOLDOWN,
-    _LEARNING_REMINDER_PATH,
-)
 from claudecode import (
     _detect_os_family,
     _find_codex_transcript,
@@ -6258,19 +6126,6 @@ from claudecode import (
     get_backend,
     is_valid_backend,
     list_backends,
-)
-from shared import (
-    MachinePublicDict,
-    MachineHealthDict,
-    MachinesCatalogResponse,
-    NodeConfigDict,
-    MentionRouteResult,
-    ReminderState,
-    RewindTokenEntry,
-    PrReviewTokenEntry,
-    ConnectorMessageLogEntry,
-    CodexTranscriptEntry,
-    TmuxSessionDict,
 )
 
 
@@ -7171,26 +7026,6 @@ def _checkin_do_restart(
 import shlex
 from typing import TYPE_CHECKING, cast
 import claudecode
-from shared import (
-    Clock,
-    SubprocessRunner,
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    BRIDGE_URL,
-    BRIDGE_SSH_TARGET,
-    DEFAULT_BACKEND,
-    TIMEOUT_TMUX_CHECK,
-    TIMEOUT_TMUX_SEND,
-    TIMEOUT_REMOTE_CMD,
-    DELAY_SHORT,
-    DELAY_TMUX_SEND,
-    DELAY_STARTUP,
-    DELAY_STARTUP_LONG,
-    DELAY_RETRY,
-    DELAY_RESPONSE_GAP,
-)
 from claudecode import (
     normalize_backend,
     is_valid_backend,
@@ -7882,19 +7717,6 @@ class WorkerManager:
 # ============================================================
 
 from typing import cast
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    BRIDGE_PUBLIC_URL,
-    PORT,
-    DEFAULT_BACKEND,
-    TIMEOUT_TMUX_SEND,
-    PENDING_TIMEOUT,
-    VERSION,
-)
 
 
 def cmd_pilot(router, name: str, chat_id) -> bool:
@@ -8431,15 +8253,6 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
 # ============================================================
 
 
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    _subprocess_runner,
-    _clock,
-)
 from claudecode import (
     GIT_SERVER_DIR,
     GitPushStateResult,
@@ -9303,19 +9116,6 @@ def teleport_rollback(
 # ============================================================
 
 from urllib.parse import parse_qs
-from shared import (
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    _str_field,
-    _int_field,
-    DEFAULT_BACKEND,
-    TMUX_PREFIX,
-    NODE_NAME,
-    TIMEOUT_TMUX_SEND,
-)
 from claudecode import (
     get_backend,
     get_worker_backend,
@@ -9760,18 +9560,6 @@ def handle_pr_comment(handler, body: bytes) -> None:
 # ============================================================
 
 import hashlib
-from shared import (
-    _str_field,
-    _int_field,
-    _bool_field,
-    _clock,
-    _log,
-    _LOG_INFO,
-    _LOG_WARN,
-    BRIDGE_URL,
-    SESSIONS_DIR,
-    TMUX_PREFIX,
-)
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
