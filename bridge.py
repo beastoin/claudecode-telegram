@@ -219,6 +219,13 @@ class TranscriptStats:
     duration: str = ""
 
 
+_EMPTY_TRANSCRIPT_STATS: TranscriptStatsDict = {
+    "n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0, "lines_del": 0, "lines_mod": 0,
+    "n_files": 0, "model": "", "version": "", "git_branch": "", "first_ts": "", "last_ts": "",
+    "input_tokens": 0, "output_tokens": 0, "duration": "",
+}
+
+
 def _sanitize_fts5_query(term: str) -> str:
     if re.search(r"\b(AND|OR|NOT|NEAR)\b", term):
         return term
@@ -2502,40 +2509,38 @@ def _read_noninteractive_activity(worker_name: str) -> str:
     return "idle"
 
 
-def _check_hook_failure_signal(name: str) -> str | None:
-    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
-    host = get_worker_host(name)
+def _read_host_file(path: str, host: str | None) -> str | None:
+    """Read file content from local or remote host. Returns None if missing/unreadable."""
     if host:
         try:
-            r = _remote_run(["cat", signal_path], host=host, timeout=TIMEOUT_TMUX_SEND)
-            if r.returncode != 0:
-                return None
-            raw = r.stdout.strip()
+            r = _remote_run(["cat", path], host=host, timeout=TIMEOUT_TMUX_SEND)
+            return r.stdout if r.returncode == 0 else None
         except (subprocess.SubprocessError, OSError):
             return None
-    else:
-        signal_file = Path(signal_path)
-        if not signal_file.exists():
-            return None
-        try:
-            raw = signal_file.read_text().strip()
-        except OSError:
-            return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return p.read_text()
+    except OSError:
+        return None
+
+
+def _check_hook_failure_signal(name: str) -> str | None:
+    signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
+    raw = (_read_host_file(signal_path, get_worker_host(name)) or "").strip()
     if not raw:
         return None
-    lines = raw.splitlines()
     cutoff = int(_clock.time()) - HOOK_FAILURE_WINDOW
     recent = 0
-    for line in lines:
+    for line in raw.splitlines():
         parts = line.split(None, 1)
-        if not parts:
-            continue
-        try:
-            ts = int(parts[0])
-        except ValueError:
-            continue
-        if ts >= cutoff:
-            recent += 1
+        if parts:
+            try:
+                if int(parts[0]) >= cutoff:
+                    recent += 1
+            except ValueError:
+                pass
     if recent >= HOOK_FAILURE_THRESHOLD:
         return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
     return None
@@ -2547,13 +2552,13 @@ def _clear_hook_failures(name: str) -> None:
     if host:
         try:
             _remote_run(["rm", "-f", signal_path], host=host, timeout=TIMEOUT_TMUX_SEND)
-        except (subprocess.SubprocessError, OSError) as exc:
-            _log(_LOG_DEBUG, "probe:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+        except (subprocess.SubprocessError, OSError):
+            pass
     else:
         try:
             Path(signal_path).unlink(missing_ok=True)
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:_clear_hook_failures", f"{type(exc).__name__}: {exc}")
+        except OSError:
+            pass
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
@@ -2747,59 +2752,28 @@ def _read_tmux_activity(tmux_name: str, host: str | None = None) -> TmuxActivity
 
 
 def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
-    if not lines:
-        return None
     stripped = [l.strip() for l in lines if l.strip()]
-    if not stripped:
+    if not stripped or any(line == "❯" for line in stripped[-5:]):
         return None
-    tail = stripped[-5:]
-    if any(line == "❯" for line in tail):
-        return None
-    has_interactive = False
-    for raw in reversed(stripped):
-        for footer in _INTERACTIVE_FOOTERS:
-            if footer in raw:
-                has_interactive = True
-                break
-        if has_interactive:
-            break
-    if not has_interactive:
-        for raw in stripped:
-            for pattern in _INTERACTIVE_CONTENT:
-                if pattern in raw:
-                    has_interactive = True
-                    break
-            if has_interactive:
-                break
+    has_interactive = any(f in raw for raw in reversed(stripped) for f in _INTERACTIVE_FOOTERS) or \
+                      any(p in raw for raw in stripped for p in _INTERACTIVE_CONTENT)
     if not has_interactive:
         return None
-    header = ""
-    for raw in stripped:
-        if "☐" in raw:
-            header = raw.replace("☐", "").strip()
-            break
+    header = next((raw.replace("☐", "").strip() for raw in stripped if "☐" in raw), "")
     options = []
     selected_num = 0
     opt_re = re.compile(r"^(❯)?\s*(\d+)\.\s+(.+)")
     for raw in stripped:
         m = opt_re.match(raw)
         if m:
-            is_selected = m.group(1) == "❯"
             num = int(m.group(2))
-            label = m.group(3).strip()
-            options.append({"num": num, "label": label, "selected": is_selected})
+            is_selected = m.group(1) == "❯"
+            options.append({"num": num, "label": m.group(3).strip(), "selected": is_selected})
             if is_selected:
                 selected_num = num
     if not options:
         return None
-    return cast(
-        QuestionDetails,
-        {
-            "header": header,
-            "options": options,
-            "selected_num": selected_num,
-        },
-    )
+    return cast(QuestionDetails, {"header": header, "options": options, "selected_num": selected_num})
 
 
 def _send_interactive_reply(tmux_name: str, reply: str, details: QuestionDetails, host: str | None = None) -> bool:
@@ -3137,16 +3111,11 @@ def _format_team_lines_pure(
     clock_now: float | None = None,
     normalize_backend_fn: Callable[[str | None], str] | None = None,
 ) -> list[str]:
-    if pending_lookup is None:
-        pending_lookup = lambda _: False  # noqa: E731
-    if worker_live is None:
-        worker_live = {}
-    if state_snapshot is None:
-        state_snapshot = {}
-    if clock_now is None:
-        clock_now = time.time()
-    if normalize_backend_fn is None:
-        normalize_backend_fn = lambda b: b or DEFAULT_BACKEND  # noqa: E731
+    pending_lookup = pending_lookup or (lambda _: False)
+    worker_live = worker_live or {}
+    state_snapshot = state_snapshot or {}
+    clock_now = clock_now or time.time()
+    normalize_backend_fn = normalize_backend_fn or (lambda b: b or DEFAULT_BACKEND)
     backend_values = set()
     for name, session in registered.items():
         live = worker_live.get(name, {})
@@ -3193,6 +3162,20 @@ def _format_team_lines_pure(
 
 
 # --- State computation ---
+def _check_stuck_or_poisoned(
+    pending_age: float, last_hook_ts: float | None, pending_ts: int | None,
+    poisoned_reason: str | None, reason_suffix: str,
+) -> tuple[str, str] | None:
+    if pending_age < STALE_PENDING:
+        return None
+    hook_since = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
+    if not hook_since:
+        if poisoned_reason is not None:
+            return "POISONED", f"{poisoned_reason}"
+        return "STUCK", f"age={int(pending_age)}s{reason_suffix}"
+    return None
+
+
 def compute_state(
     tmux_exists: bool,
     claude_pid: str | None,
@@ -3215,14 +3198,8 @@ def compute_state(
         if adapter_alive:
             return "BUSY_TOOL", "adapter running"
         if pending:
-            if pending_age < STALE_PENDING:
-                return "WAITING", f"age={int(pending_age)}s"
-            hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
-            if pending_age >= STALE_PENDING and not hook_since_pending:
-                if poisoned_reason is not None:
-                    return "POISONED", f"{poisoned_reason}"
-                return "STUCK", f"age={int(pending_age)}s"
-            return "WAITING", f"age={int(pending_age)}s"
+            stuck = _check_stuck_or_poisoned(pending_age, last_hook_ts, pending_ts, poisoned_reason, "")
+            return stuck if stuck else ("WAITING", f"age={int(pending_age)}s")
         return "READY", "idle"
     if not claude_pid and last_seen_claude is not None:
         if (now - last_seen_claude) > START_GRACE:
@@ -3232,13 +3209,9 @@ def compute_state(
     if pending and children == 0:
         if (pending_age <= THINK_GRACE) or ((now - last_child_ts) <= TOOL_GAP_GRACE) or (cpu >= CPU_ACTIVE):
             return "BUSY_THINKING", f"age={int(pending_age)}s cpu={cpu:.1f}"
-        if pending_age < STALE_PENDING:
-            return "WAITING", f"age={int(pending_age)}s"
-        hook_since_pending = last_hook_ts is not None and pending_ts is not None and last_hook_ts > pending_ts
-        if pending_age >= STALE_PENDING and cpu < CPU_IDLE and not hook_since_pending:
-            if poisoned_reason is not None:
-                return "POISONED", f"{poisoned_reason}"
-            return "STUCK", f"age={int(pending_age)}s cpu={cpu:.1f}"
+        stuck = _check_stuck_or_poisoned(pending_age, last_hook_ts, pending_ts, poisoned_reason, f" cpu={cpu:.1f}")
+        if stuck and cpu < CPU_IDLE:
+            return stuck
         return "WAITING", f"age={int(pending_age)}s"
     if not pending and children > 0:
         return "UNTRACKED_BUSY", f"children={children}"
@@ -3298,6 +3271,12 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
             f"Alert suppressed for {name} ({state}): cooldown {now - last:.0f}s < {ALERT_COOLDOWN}s",
         )
         return
+    _ALERT_TEMPLATES = {
+        "POISONED": ("🔴", "is stuck in an error loop", "/restart --clean"),
+        "DEAD": ("🔴", "stopped unexpectedly", "/restart --clean"),
+        "EXITED": ("🟡", "'s session ended", "/restart"),
+        "OFFLINE": ("🔴", "is not running", "/hire"),
+    }
     if state == "WAITING_INPUT":
         with watchdog.lock:
             details = watchdog.waiting_input_details.get(name)
@@ -3308,24 +3287,17 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         parts = [title]
         if details and details.get("options"):
             for o in details["options"]:
-                marker = "➔ " if o.get("selected") else "  "
-                parts.append(f"{marker}{o['num']}. {o['label']}")
-            max_num = max(o["num"] for o in details["options"])
-            parts.append(f'\nReply 1-{max_num} to choose, or "skip" to cancel.')
+                parts.append(f"{'➔ ' if o.get('selected') else '  '}{o['num']}. {o['label']}")
+            parts.append(f'\nReply 1-{max(o["num"] for o in details["options"])} to choose, or "skip" to cancel.')
         text = "\n".join(parts)
     elif state == "STUCK":
         age_match = re.search(r"age=(\d+)s", reason)
         age_min = int(age_match.group(1)) // 60 if age_match else 0
         age_str = f"{age_min}min" if age_min > 0 else reason.split()[0]
         text = f"🔴 {name} has made no progress for {age_str}.\n/restart --clean {name} (starts fresh)"
-    elif state == "POISONED":
-        text = f"🔴 {name} is stuck in an error loop.\n/restart --clean {name} (starts fresh)"
-    elif state == "DEAD":
-        text = f"🔴 {name} stopped unexpectedly.\n/restart --clean {name} (starts fresh)"
-    elif state == "EXITED":
-        text = f"🟡 {name}'s session ended.\n/restart {name}"
-    elif state == "OFFLINE":
-        text = f"🔴 {name} is not running.\n/hire {name}"
+    elif state in _ALERT_TEMPLATES:
+        icon, msg, cmd = _ALERT_TEMPLATES[state]
+        text = f"{icon} {name} {msg}.\n{cmd} {name}"
     else:
         text = f"{name}: {state} ({reason}). Check /team"
     try:
@@ -3877,73 +3849,46 @@ _LOADING_CSS = (
 
 
 def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
-    n_user = sum(
-        1
-        for e in entries
-        if e.get("type") == "user"
-        and e.get("message", {}).get("role") == "user"
-        and isinstance(e.get("message", {}).get("content"), str)
-    )
-    n_tool = 0
-    n_edit = 0
-    lines_add = 0
-    lines_del = 0
-    lines_mod = 0
+    n_user = n_tool = n_edit = lines_add = lines_del = lines_mod = input_tokens = output_tokens = 0
     files_modified: set[str] = set()
-    for e in entries:
-        if e.get("type") != "assistant":
-            continue
-        for c in e.get("message", {}).get("content") or []:
-            if not isinstance(c, dict) or c.get("type") != "tool_use":
-                continue
-            n_tool += 1
-            ti = c.get("input", {})
-            cname = c.get("name")
-            fp = ti.get("file_path", "")
-            if cname == "Edit" and ti.get("old_string") is not None:
-                n_edit += 1
-                n_old = len(ti.get("old_string", "").splitlines(True))
-                n_new = len(ti.get("new_string", "").splitlines(True))
-                overlap = min(n_old, n_new)
-                lines_mod += overlap
-                lines_del += n_old - overlap
-                lines_add += n_new - overlap
-            if cname in ("Write", "Read", "Edit") and fp:
-                files_modified.add(fp)
     model = version = git_branch = first_ts = last_ts = ""
-    input_tokens = output_tokens = 0
     for e in entries:
-        if not model:
-            model = e.get("message", {}).get("model", "")
-        if not version:
-            version = e.get("version", "")
-        if not git_branch:
-            git_branch = e.get("gitBranch", "")
+        msg = e.get("message", {})
+        etype = e.get("type", "")
+        if etype == "user" and msg.get("role") == "user" and isinstance(msg.get("content"), str):
+            n_user += 1
+        if etype == "assistant":
+            for c in msg.get("content") or []:
+                if not isinstance(c, dict) or c.get("type") != "tool_use":
+                    continue
+                n_tool += 1
+                ti = c.get("input", {})
+                cname = c.get("name")
+                fp = ti.get("file_path", "")
+                if cname == "Edit" and ti.get("old_string") is not None:
+                    n_edit += 1
+                    n_old = len(ti.get("old_string", "").splitlines(True))
+                    n_new = len(ti.get("new_string", "").splitlines(True))
+                    overlap = min(n_old, n_new)
+                    lines_mod += overlap
+                    lines_del += n_old - overlap
+                    lines_add += n_new - overlap
+                if cname in ("Write", "Read", "Edit") and fp:
+                    files_modified.add(fp)
+        model = model or msg.get("model", "")
+        version = version or e.get("version", "")
+        git_branch = git_branch or e.get("gitBranch", "")
         ts = e.get("timestamp", "")
         if ts:
-            if not first_ts:
-                first_ts = ts
+            first_ts = first_ts or ts
             last_ts = ts
-        usage = e.get("message", {}).get("usage", {})
-        input_tokens += (
-            usage.get("input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0)
-        )
+        usage = msg.get("usage", {})
+        input_tokens += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
         output_tokens += usage.get("output_tokens", 0)
     duration_str = ""
     if first_ts and last_ts:
         try:
-
-            total_s = max(
-                0,
-                int(
-                    (
-                        datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-                        - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
-                    ).total_seconds()
-                ),
-            )
+            total_s = max(0, int((datetime.fromisoformat(last_ts.replace("Z", "+00:00")) - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))).total_seconds()))
             d, rem = divmod(total_s, 86400)
             h = rem // 3600
             m = (rem % 3600) // 60
@@ -3951,21 +3896,11 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
         except (ValueError, TypeError, KeyError) as exc:
             _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
     return {
-        "n_user": n_user,
-        "n_tool": n_tool,
-        "n_edit": n_edit,
-        "lines_add": lines_add,
-        "lines_del": lines_del,
-        "lines_mod": lines_mod,
-        "n_files": len(files_modified),
-        "model": model,
-        "version": version,
-        "git_branch": git_branch,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "duration": duration_str,
+        "n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
+        "lines_add": lines_add, "lines_del": lines_del, "lines_mod": lines_mod,
+        "n_files": len(files_modified), "model": model, "version": version,
+        "git_branch": git_branch, "first_ts": first_ts, "last_ts": last_ts,
+        "input_tokens": input_tokens, "output_tokens": output_tokens, "duration": duration_str,
     }
 
 
@@ -4075,24 +4010,7 @@ def _render_transcript_html(
             total = _int_field(query_result, "total")
         total_pages = _int_field(query_result, "total_pages", 1)
         page = _int_field(query_result, "page", 1)
-        _empty_stats: TranscriptStatsDict = {
-            "n_user": 0,
-            "n_tool": 0,
-            "n_edit": 0,
-            "lines_add": 0,
-            "lines_del": 0,
-            "lines_mod": 0,
-            "n_files": 0,
-            "model": "",
-            "version": "",
-            "git_branch": "",
-            "first_ts": "",
-            "last_ts": "",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "duration": "",
-        }
-        stats = cast(TranscriptStatsDict, stats_result) if stats_result else _empty_stats
+        stats = cast(TranscriptStatsDict, stats_result) if stats_result else dict(_EMPTY_TRANSCRIPT_STATS)
     file_size_str = ""
     if not host:
         try:
@@ -5153,10 +5071,6 @@ GUEST_TTL = 86400
 GUEST_INBOX_CAP = 200
 
 
-def _guest_state_path() -> Path:
-    return NODE_DIR / "guest_state.json"
-
-
 def _guest_save() -> None:
     now = _clock.time()
     active_guests = {}
@@ -5168,11 +5082,11 @@ def _guest_save() -> None:
             active_guests[k] = guest
     active_names = {guest["name"] for guest in active_guests.values()}
     active_inboxes = {k: v for k, v in guest_store.inboxes.items() if k in active_names}
-    _save_state_json(_guest_state_path(), {"guests": active_guests, "inboxes": active_inboxes}, "guest")
+    _save_state_json(NODE_DIR / "guest_state.json", {"guests": active_guests, "inboxes": active_inboxes}, "guest")
 
 
 def _guest_load() -> None:
-    data = _load_state_json(_guest_state_path(), "guest")
+    data = _load_state_json(NODE_DIR / "guest_state.json", "guest")
     if not data:
         return
     now = _clock.time()
@@ -5258,27 +5172,31 @@ CHANNEL_TTL = 86400
 CHANNEL_MSG_CAP = 200
 
 
-def _channel_state_path() -> Path:
-    return NODE_DIR / "channel_state.json"
-
-
 def _channel_save() -> None:
     active = {cid: ch for cid, ch in channel_store.channels.items() if not channel_is_expired(ch)}
-    _save_state_json(_channel_state_path(), active, "channel")
+    _save_state_json(NODE_DIR / "channel_state.json", active, "channel")
 
 
-def _channel_load() -> None:
-    data = _load_state_json(_channel_state_path(), "channel")
+def _load_store_entries(
+    target: dict, path: Path, label: str, is_active: Callable[[dict], bool], cast_type: str = "",
+) -> None:
+    data = _load_state_json(path, label)
     if not data:
         return
     restored = 0
-    for cid, ch_raw in data.items():
-        ch = cast("ChannelDict", ch_raw)
-        if not channel_is_expired(ch):
-            channel_store.channels[cid] = ch
+    for k, v in data.items():
+        if isinstance(v, dict) and is_active(v):
+            target[k] = v
             restored += 1
     if restored:
-        _log(_LOG_INFO, "channel", f"Restored {restored} active channel(s) from disk")
+        _log(_LOG_INFO, label, f"Restored {restored} active {label}(s) from disk")
+
+
+def _channel_load() -> None:
+    _load_store_entries(
+        channel_store.channels, NODE_DIR / "channel_state.json", "channel",
+        lambda ch: not channel_is_expired(ch),
+    )
 
 
 def channel_create_id(label: str = "") -> str:
@@ -5378,37 +5296,18 @@ relay_store = RelayStore()
 RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
 
 
-def _bridge_public_url() -> str:
-    return BRIDGE_PUBLIC_URL
-
-
-def _bridge_port() -> int:
-    return PORT
-
-
-def _relay_state_path() -> Path:
-    return NODE_DIR / "relay_state.json"
-
-
 def _relay_save() -> None:
     now = _clock.time()
     active = {cid: ch for cid, ch in relay_store.channels.items() if now <= ch["expires_at_unix"]}
-    _save_state_json(_relay_state_path(), active, "relay")
+    _save_state_json(NODE_DIR / "relay_state.json", active, "relay")
 
 
 def _relay_load() -> None:
-    data = _load_state_json(_relay_state_path(), "relay")
-    if not data:
-        return
     now = _clock.time()
-    restored = 0
-    for cid, ch_raw in data.items():
-        ch = cast("RelayChannelDict", ch_raw)
-        if now <= ch.get("expires_at_unix", 0):
-            relay_store.channels[cid] = ch
-            restored += 1
-    if restored:
-        _log(_LOG_INFO, "relay", f"Restored {restored} active relay(s) from disk")
+    _load_store_entries(
+        relay_store.channels, NODE_DIR / "relay_state.json", "relay",
+        lambda ch: now <= ch.get("expires_at_unix", 0),
+    )
 
 
 def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[RelayChannelDict, str, str]:
@@ -5433,10 +5332,7 @@ def relay_channel_create(worker: str, label: str, ttl: int = 86400) -> tuple[Rel
 
 
 def _relay_base_url() -> str:
-    pub = _bridge_public_url()
-    if pub:
-        return pub
-    return f"http://{RELAY_PUBLIC_HOST}:{_bridge_port()}"
+    return BRIDGE_PUBLIC_URL or f"http://{RELAY_PUBLIC_HOST}:{PORT}"
 
 
 def relay_guide_url(channel_id: str, guest_token: str) -> str:
@@ -6553,30 +6449,6 @@ class _LegacyTransportAdapter(MessageTransport):
         result = self._legacy.send_message(chat_id, text)
         return result if result else {"ok": True, "result": {"message_id": 1}}
 
-    def send_photo(self, chat_id: ChatId, photo_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_document(self, chat_id: ChatId, doc_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_animation(self, chat_id: ChatId, animation_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_video(self, chat_id: ChatId, video_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_audio(self, chat_id: ChatId, audio_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_voice(self, chat_id: ChatId, voice_path: str | Path, caption: str | None = None) -> bool:
-        return False
-
-    def send_sticker(self, chat_id: ChatId, sticker_path: str | Path) -> bool:
-        return False
-
-    def send_chat_action(self, chat_id: ChatId, action: str) -> None:
-        pass
-
     def set_reaction(self, chat_id: ChatId, message_id: MessageId, reaction: list[dict[str, str]]) -> None:
         if hasattr(self._legacy, "set_reaction"):
             self._legacy.set_reaction(chat_id, message_id, reaction)
@@ -6586,11 +6458,12 @@ class _LegacyTransportAdapter(MessageTransport):
     ) -> TelegramApiResponse:
         return {"ok": True, "result": {"message_id": message_id}}
 
-    def setup_commands(self, commands: list[dict[str, str]]) -> None:
-        pass
 
-    def download_file(self, file_id: str, session_name: str) -> str | None:
-        return None
+for _m in ("send_photo", "send_document", "send_animation", "send_video", "send_audio", "send_voice", "send_sticker"):
+    setattr(_LegacyTransportAdapter, _m, lambda self, *a, **kw: False)
+for _m in ("send_chat_action", "setup_commands"):
+    setattr(_LegacyTransportAdapter, _m, lambda self, *a, **kw: None)
+setattr(_LegacyTransportAdapter, "download_file", lambda self, *a, **kw: None)
 
 
 def _checkin_can_restart(
@@ -9808,16 +9681,12 @@ def set_pending(name: str, chat_id: ChatId) -> None:
     _sync_chat_id_to_remote(name, str(chat_id_file))
 
 
-def _remap_sessions_dir(host: str | None) -> str:
-    return _remap_path(str(SESSIONS_DIR), host)
-
-
 def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     host = get_worker_host(name)
     if not host:
         return
     try:
-        remote_sessions_dir = _remap_sessions_dir(host)
+        remote_sessions_dir = _remap_path(str(SESSIONS_DIR), host)
         _remote_run(
             ["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, timeout=TIMEOUT_TMUX_CHECK
         )
@@ -9911,10 +9780,6 @@ def _sync_worker_manager() -> None:
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
-
-
-def worker_set_pending(name: str, chat_id: ChatId) -> None:
-    set_pending(name, chat_id)
 
 
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
@@ -10944,7 +10809,7 @@ class CommandRouter:
             text = f"manager: {text}"
         _log(_LOG_INFO, "dispatch", f"chat_id={chat_id} -> {session_name}: {text[:50]}...")
         if backend.is_interactive and chat_id is not None:
-            worker_set_pending(session_name, chat_id)
+            set_pending(session_name, chat_id)
         if chat_id is not None:
             _task_pool.submit(send_typing_loop, chat_id, session_name)
         send_ok = self.workers.send(session_name, text, chat_id, session)
