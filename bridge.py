@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import collections
+from contextlib import suppress
 from dataclasses import dataclass, field
 import os
 import json
@@ -866,11 +867,9 @@ class TunnelManager:
     def _kill_cloudflared(self) -> None:
         proc = self._tunnel_proc
         if proc is not None:
-            try:
+            with suppress(OSError, subprocess.TimeoutExpired):
                 proc.kill()
                 proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
             self._tunnel_proc = None
 
     def _is_tunnel_alive(self) -> bool:
@@ -1032,10 +1031,8 @@ class TunnelManager:
         return False
 
     def _save_tunnel_url(self, url: str) -> None:
-        try:
+        with suppress(OSError):
             (self._node_dir / "tunnel_url").write_text(url)
-        except OSError:
-            pass
 
     def _kill_stale_tunnel(self) -> None:
         pid_file = self._node_dir / "tunnel.pid"
@@ -1043,21 +1040,15 @@ class TunnelManager:
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
             return
-        try:
+        with suppress(OSError, ProcessLookupError):
             os.kill(pid, 9)
             _log(_LOG_WARN, "tunnel", f"Killed stale cloudflared (pid={pid})")
-        except (OSError, ProcessLookupError):
-            pass
-        try:
+        with suppress(OSError):
             pid_file.unlink()
-        except OSError:
-            pass
 
     def _save_pid(self, pid: int) -> None:
-        try:
+        with suppress(OSError):
             (self._node_dir / "tunnel.pid").write_text(str(pid))
-        except OSError:
-            pass
 
     def _save_bot_info(self) -> None:
         try:
@@ -1123,29 +1114,19 @@ def _atomic_write(path: str, payload: str | bytes) -> None:
             os.fsync(f.fileno())
         os.replace(tmp, path)
         renamed = True
-        try:
+        with suppress(OSError):
             dir_fd = os.open(dirname, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-        except OSError:
-            pass
     except BaseException:
         if not renamed:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
         raise
 
 
-def _atomic_write_text(path: str, content: str) -> None:
-    _atomic_write(path, content)
-
-
-def _atomic_write_bytes(path: str, data: bytes) -> None:
-    _atomic_write(path, data)
 
 
 class BaseConnector(abc.ABC, Generic[M]):
@@ -1515,7 +1496,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if not hid:
             return
         try:
-            _atomic_write_text(self._history_file_path, hid)
+            _atomic_write(self._history_file_path, hid)
         except OSError as e:
             print(f"[gmail] Failed to save historyId: {e}")
 
@@ -1619,10 +1600,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
             padded = data + "=" * (-len(data) % 4)
             if not _B64_URLSAFE.match(padded):
                 return
-            try:
+            with suppress(ValueError, binascii.Error):
                 found.append(base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace"))
-            except (ValueError, binascii.Error):
-                pass
         self._walk_mime(part, _visit)
         return found[0] if found else ""
 
@@ -1788,7 +1767,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         filename = _sanitize_filename(f"{prefix}_{att.get('filename', 'attachment')}" if prefix else str(att.get("filename", "attachment")))
         att_dir = os.path.join(os.path.expanduser("~"), ".cache", "beast", "email", "attachments")
         try:
-            _atomic_write_bytes(os.path.join(att_dir, filename), decoded)
+            _atomic_write(os.path.join(att_dir, filename), decoded)
             return os.path.join(att_dir, filename)
         except OSError:
             return None
@@ -2022,7 +2001,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
             )
         try:
-            _atomic_write_text(self._state_file, json.dumps(state))
+            _atomic_write(self._state_file, json.dumps(state))
         except OSError as e:
             print(f"[github] Failed to save state: {e}")
 
@@ -2536,11 +2515,9 @@ def _check_hook_failure_signal(name: str) -> str | None:
     for line in raw.splitlines():
         parts = line.split(None, 1)
         if parts:
-            try:
+            with suppress(ValueError):
                 if int(parts[0]) >= cutoff:
                     recent += 1
-            except ValueError:
-                pass
     if recent >= HOOK_FAILURE_THRESHOLD:
         return f"hook failure signal: {recent} tool failures in {HOOK_FAILURE_WINDOW}s"
     return None
@@ -2550,15 +2527,11 @@ def _clear_hook_failures(name: str) -> None:
     signal_path = f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks/failures"
     host = get_worker_host(name)
     if host:
-        try:
+        with suppress(subprocess.SubprocessError, OSError):
             _remote_run(["rm", "-f", signal_path], host=host, timeout=TIMEOUT_TMUX_SEND)
-        except (subprocess.SubprocessError, OSError):
-            pass
     else:
-        try:
+        with suppress(OSError):
             Path(signal_path).unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _detect_poisoned(name: str, tmux_name: str) -> str | None:
@@ -3378,13 +3351,10 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if alert_info:
         old_msg_id, old_text = alert_info
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
-        try:
-
+        with suppress(urllib.error.URLError, OSError, TimeoutError):
             transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
             _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
             return
-        except (urllib.error.URLError, OSError, TimeoutError):
-            pass
     text = f"✅ {name} is back to normal."
     try:
 
@@ -4206,11 +4176,9 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     if not cwd:
         host = get_worker_host(name)
         tmux_name = f"{TMUX_PREFIX}{name}"
-        try:
+        with suppress(Exception):
             assert worker_manager is not None
             cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
-        except Exception:
-            pass
     cwd = cwd or os.path.expanduser("~")
     sid = session_id or get_claude_session_id(name, authoritative=True)
     if not sid:
@@ -4815,10 +4783,8 @@ def _route_mentions_to_workers(
                 subprocess.run(["tmux", "send-keys", "-t", target_session, "Enter"], capture_output=True, timeout=5)
                 subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
             finally:
-                try:
+                with suppress(OSError):
                     os.unlink(tmpfile)
-                except OSError:
-                    pass
             print(f"[pr-comment] Routed to @{mention} via tmux")
         except Exception as e:
             print(f"[pr-comment] Failed to route to @{mention}: {e}")
@@ -7658,9 +7624,7 @@ def _run_restart_all_sequence(router, chat_id, names, mode) -> None:
                 return
             host = get_worker_host(name)
             if host:
-                _sync_worker_manager()
-                assert worker_manager is not None
-                reg = worker_manager.get_registered_sessions()
+                reg = _wm().get_registered_sessions()
                 session = reg.get(name, {})
                 backend_name = claudecode.get_worker_backend(name, session)
                 backend_obj = claudecode.get_backend(backend_name)
@@ -8629,8 +8593,7 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
             if cwd_err:
                 handler._send_text(400, f"Invalid cwd: {cwd_err}")
                 return
-        _sync_worker_manager()
-        registered = worker_manager.get_registered_sessions()
+        registered = _wm().get_registered_sessions()
         tmux_name = ""
         host = None
         if name in registered:
@@ -9650,9 +9613,7 @@ def cleanup_inbox(session_name: str) -> None:
 
 
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.get_workers(caller_from=caller_from)
+    return _wm().get_workers(caller_from=caller_from)
 
 
 def get_pending_file(name: str) -> Path:
@@ -9776,16 +9737,19 @@ def _send_to_callback_worker(
         return False
 
 
-def _sync_worker_manager() -> None:
+def _wm() -> "WorkerManager":
+    """Return worker_manager after syncing its config."""
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
     worker_manager.tmux_prefix = TMUX_PREFIX
+    return worker_manager
+
+
+_sync_worker_manager = _wm  # backward compat for tests
 
 
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.scan_tmux_sessions()
+    return _wm().scan_tmux_sessions()
 
 
 class ReuseAddrServer(ThreadingHTTPServer):
@@ -10835,31 +10799,13 @@ class EndpointRouter:
         self._exact: dict[str, dict[str, object]] = {"POST": {}, "GET": {}, "DELETE": {}}
         self._pats: dict[str, list[tuple[re.Pattern[str], object]]] = {"POST": [], "GET": [], "DELETE": []}
 
-    def _add(self, method: str, path: str, handler: object) -> None:
+    def add(self, method: str, path: str, handler: object) -> None:
         self._exact[method][path] = handler
 
-    def _add_pat(self, method: str, pattern: str, handler: object) -> None:
+    def add_pattern(self, method: str, pattern: str, handler: object) -> None:
         self._pats[method].append((re.compile(pattern), handler))
 
-    def post(self, path: str, handler: PostRouteHandler) -> None:
-        self._add("POST", path, handler)
-
-    def post_pattern(self, pattern: str, handler: PostRouteHandler) -> None:
-        self._add_pat("POST", pattern, handler)
-
-    def get(self, path: str, handler: GetRouteHandler) -> None:
-        self._add("GET", path, handler)
-
-    def get_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
-        self._add_pat("GET", pattern, handler)
-
-    def delete(self, path: str, handler: GetRouteHandler) -> None:
-        self._add("DELETE", path, handler)
-
-    def delete_pattern(self, pattern: str, handler: GetRouteHandler) -> None:
-        self._add_pat("DELETE", pattern, handler)
-
-    def _resolve(self, method: str, path: str) -> tuple[object | None, re.Match[str] | None]:
+    def resolve(self, method: str, path: str) -> tuple[object | None, re.Match[str] | None]:
         h = self._exact[method].get(path)
         if h:
             return h, None
@@ -10868,15 +10814,6 @@ class EndpointRouter:
             if m:
                 return ph, m
         return None, None
-
-    def resolve_post(self, path: str) -> PostRouteResolution:
-        return cast(PostRouteResolution, self._resolve("POST", path))
-
-    def resolve_get(self, path: str) -> GetRouteResolution:
-        return cast(GetRouteResolution, self._resolve("GET", path))
-
-    def resolve_delete(self, path: str) -> GetRouteResolution:
-        return cast(GetRouteResolution, self._resolve("DELETE", path))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -10938,7 +10875,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        handler, match = _endpoint_router.resolve_post(parsed.path)
+        handler, match = _endpoint_router.resolve("POST", parsed.path)
         if handler:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             handler(self, body, match)
@@ -11088,7 +11025,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        handler, match = _endpoint_router.resolve_get(parsed.path)
+        handler, match = _endpoint_router.resolve("GET", parsed.path)
         if handler:
             handler(self, parsed, match)
             return
@@ -11112,7 +11049,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
-        handler, match = _endpoint_router.resolve_delete(parsed.path)
+        handler, match = _endpoint_router.resolve("DELETE", parsed.path)
         if handler:
             handler(self, parsed, match)
             return
@@ -11186,40 +11123,41 @@ def _mg2(m: re.Match[str] | None) -> str:
 
 def _setup_endpoint_routes() -> None:
     r = _endpoint_router
-    r.post("/outputs", lambda h, b, _m: h.handle_hook_response(b))
-    r.post("/notifications", lambda h, b, _m: h.handle_notify(b))
-    r.post("/messages", lambda h, b, _m: h.handle_send_endpoint(b))
-    r.post("/tools/review/comments", lambda h, b, _m: h.handle_pr_review_comments(b))
-    r.post("/tools/review/merges", lambda h, b, _m: h.handle_pr_merge(b))
-    r.post("/workers", lambda h, b, _m: h.handle_forge_register(b))
-    r.post("/guests", lambda h, b, _m: h.handle_guest_register(b))
-    r.post("/channels", lambda h, b, _m: h.handle_channel_create(b))
-    r.post("/alerts", lambda h, b, _m: h.handle_health_alert(b))
-    r.post("/connectors/restarts", lambda h, b, _m: h.handle_connectors_restart(b))
-    r.post_pattern(r"^/guests/send", lambda h, b, m: h.handle_guest_send(b))
-    r.post_pattern(r"^/guests/reply", lambda h, b, m: h.handle_guest_reply(b))
-    r.post_pattern(r"^/channels/([^/]+)/members$", lambda h, b, m: h.handle_channel_members(_mg(m), b))
-    r.post_pattern(r"^/channels/([^/]+)/send$", lambda h, b, m: h.handle_channel_send(_mg(m), b))
-    r.post_pattern(r"^/relay/([^/]+)/send$", lambda h, b, m: h.handle_relay_send(_mg(m), b))
-    r.post_pattern(r"^/relay/([^/]+)/reply$", lambda h, b, m: h.handle_relay_reply(_mg(m), b))
-    r.get("/guests", lambda h, p, _m: h.handle_guests_list())
-    r.get("/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
-    r.get("/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
-    r.get("/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
-    r.get("/health/workers", lambda h, p, _m: h.handle_health_workers_endpoint())
-    r.get("/health/tunnel", lambda h, p, _m: h.handle_health_tunnel_endpoint())
-    r.get("/connectors", lambda h, p, _m: h.handle_connectors_status())
-    r.get("/channels", lambda h, p, _m: h.handle_channels_list(p))
-    r.get("/tools/review/files", lambda h, p, _m: h.handle_pr_file_content(p))
-    r.get("/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
-    r.get_pattern(r"^/guests/inbox", lambda h, p, m: h.handle_guest_inbox(p))
-    r.get_pattern(r"^/guests/status", lambda h, p, m: h.handle_guest_status(p))
-    r.get_pattern(r"^/relay/([^/]+)(?:/(.+))?$", lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p))
-    r.get_pattern(r"^/channels/([^/]+)/messages$", lambda h, p, m: h.handle_channel_messages(_mg(m), p))
-    r.get_pattern(r"^/transcript/", lambda h, p, m: h.handle_transcript_endpoint(p))
-    r.get_pattern(r"^/tools/review/", lambda h, p, m: h.handle_pr_review_endpoint(p))
-    r.delete("/guests", lambda h, p, _m: h.handle_guest_disconnect(p))
-    r.delete_pattern(r"^/channels/([^/]+)$", lambda h, p, m: h.handle_channel_delete(_mg(m)))
+    P, G, D = "POST", "GET", "DELETE"
+    r.add(P, "/outputs", lambda h, b, _m: h.handle_hook_response(b))
+    r.add(P, "/notifications", lambda h, b, _m: h.handle_notify(b))
+    r.add(P, "/messages", lambda h, b, _m: h.handle_send_endpoint(b))
+    r.add(P, "/tools/review/comments", lambda h, b, _m: h.handle_pr_review_comments(b))
+    r.add(P, "/tools/review/merges", lambda h, b, _m: h.handle_pr_merge(b))
+    r.add(P, "/workers", lambda h, b, _m: h.handle_forge_register(b))
+    r.add(P, "/guests", lambda h, b, _m: h.handle_guest_register(b))
+    r.add(P, "/channels", lambda h, b, _m: h.handle_channel_create(b))
+    r.add(P, "/alerts", lambda h, b, _m: h.handle_health_alert(b))
+    r.add(P, "/connectors/restarts", lambda h, b, _m: h.handle_connectors_restart(b))
+    r.add_pattern(P, r"^/guests/send", lambda h, b, m: h.handle_guest_send(b))
+    r.add_pattern(P, r"^/guests/reply", lambda h, b, m: h.handle_guest_reply(b))
+    r.add_pattern(P, r"^/channels/([^/]+)/members$", lambda h, b, m: h.handle_channel_members(_mg(m), b))
+    r.add_pattern(P, r"^/channels/([^/]+)/send$", lambda h, b, m: h.handle_channel_send(_mg(m), b))
+    r.add_pattern(P, r"^/relay/([^/]+)/send$", lambda h, b, m: h.handle_relay_send(_mg(m), b))
+    r.add_pattern(P, r"^/relay/([^/]+)/reply$", lambda h, b, m: h.handle_relay_reply(_mg(m), b))
+    r.add(G, "/guests", lambda h, p, _m: h.handle_guests_list())
+    r.add(G, "/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
+    r.add(G, "/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
+    r.add(G, "/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
+    r.add(G, "/health/workers", lambda h, p, _m: h.handle_health_workers_endpoint())
+    r.add(G, "/health/tunnel", lambda h, p, _m: h.handle_health_tunnel_endpoint())
+    r.add(G, "/connectors", lambda h, p, _m: h.handle_connectors_status())
+    r.add(G, "/channels", lambda h, p, _m: h.handle_channels_list(p))
+    r.add(G, "/tools/review/files", lambda h, p, _m: h.handle_pr_file_content(p))
+    r.add(G, "/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
+    r.add_pattern(G, r"^/guests/inbox", lambda h, p, m: h.handle_guest_inbox(p))
+    r.add_pattern(G, r"^/guests/status", lambda h, p, m: h.handle_guest_status(p))
+    r.add_pattern(G, r"^/relay/([^/]+)(?:/(.+))?$", lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p))
+    r.add_pattern(G, r"^/channels/([^/]+)/messages$", lambda h, p, m: h.handle_channel_messages(_mg(m), p))
+    r.add_pattern(G, r"^/transcript/", lambda h, p, m: h.handle_transcript_endpoint(p))
+    r.add_pattern(G, r"^/tools/review/", lambda h, p, m: h.handle_pr_review_endpoint(p))
+    r.add(D, "/guests", lambda h, p, _m: h.handle_guest_disconnect(p))
+    r.add_pattern(D, r"^/channels/([^/]+)$", lambda h, p, m: h.handle_channel_delete(_mg(m)))
 
 
 _CONNECTOR_CSS = (_TEMPLATE_DIR / "connector.css").read_text() if (_TEMPLATE_DIR / "connector.css").exists() else ""
@@ -11364,15 +11302,11 @@ def get_worker_host(name: str) -> str | None:
 
 
 def get_registered_sessions(registered: dict[str, TmuxSessionDict] | None = None) -> dict[str, TmuxSessionDict]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.get_registered_sessions(registered)
+    return _wm().get_registered_sessions(registered)
 
 
 def send_to_worker(name: str, message: str, chat_id: int | None = None) -> bool:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.send(name, message, chat_id)
+    return _wm().send(name, message, chat_id)
 
 
 worker_manager = WorkerManager(SESSIONS_DIR, TMUX_PREFIX)  # type: ignore[assignment]
@@ -11390,14 +11324,12 @@ _task_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 connectors = ConnectorRegistry()
 tunnel_manager: TunnelManager | None = None
 if not BRIDGE_PUBLIC_URL:
-    try:
+    with suppress(subprocess.SubprocessError, OSError):
         _ts_ip = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3
         ).stdout.strip()  # noqa: direct call — runs before constants init
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
-    except (subprocess.SubprocessError, OSError):
-        pass
 GMAIL_ENABLED = os.environ.get("GMAIL_ENABLED", "0") == "1"
 GMAIL_POLL_INTERVAL = int(os.environ.get("GMAIL_POLL_INTERVAL", "45"))
 GMAIL_FROM_FILTER = os.environ.get("GMAIL_FROM_FILTER", "ngocthinhdp@gmail.com")
@@ -11435,21 +11367,15 @@ tokens = TokenStore()
 
 
 def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.hire(name, backend, chat_id=chat_id)
+    return _wm().hire(name, backend, chat_id=chat_id)
 
 
 def kill_session(name: str) -> tuple[bool, str | None]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.end(name)
+    return _wm().end(name)
 
 
 def restart_claude(name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.restart(name, mode=mode)
+    return _wm().restart(name, mode=mode)
 
 
 def switch_session(name: str) -> tuple[bool, str | None]:
@@ -11462,11 +11388,9 @@ def switch_session(name: str) -> tuple[bool, str | None]:
 
 
 def _notify_admin(msg: str) -> None:
-    try:
+    with suppress(urllib.error.URLError, OSError, TimeoutError):
         if admin_chat_id:
             send_telegram_message(admin_chat_id, msg)
-    except (urllib.error.URLError, OSError, TimeoutError):
-        pass
 
 
 def send_typing_loop(chat_id: int | str, session_name: str) -> None:
@@ -11542,25 +11466,19 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
         for _mg_entry in media_groups.buffer.values():
             t = _mg_entry.get("timer")
             if t is not None:
-                try:
+                with suppress(RuntimeError, OSError):
                     t.cancel()
-                except (RuntimeError, OSError):
-                    pass
         media_groups.buffer.clear()
     with processes.adapter_pids_lock:
         adapter_names = list(processes.adapter_pids.keys())
     for name in adapter_names:
-        try:
+        with suppress(OSError, ProcessLookupError):
             kill_adapter(name)
-        except (OSError, ProcessLookupError):
-            pass
     with processes.pipe_readers_lock:
         pipe_names = list(processes.pipe_readers.keys())
     for name in pipe_names:
-        try:
+        with suppress(OSError):
             stop_pipe_reader(name)
-        except OSError:
-            pass
     _message_pool.shutdown(wait=False, cancel_futures=True)
     _task_pool.shutdown(wait=False, cancel_futures=True)
     send_shutdown_message()
@@ -11684,10 +11602,8 @@ def main() -> None:
 
         def _tunnel_on_notify(msg: str) -> None:
             if admin_chat_id:
-                try:
+                with suppress(Exception):
                     transport.send_text(admin_chat_id, msg)
-                except Exception:
-                    pass
 
         tunnel_manager = TunnelManager(
             config=tunnel_config,
@@ -11727,10 +11643,8 @@ class _BridgeModule(_types_mod.ModuleType):
 
     def __getattr__(self, name: str) -> object:
         for mod in self._sources:
-            try:
+            with suppress(AttributeError):
                 return getattr(mod, name)
-            except AttributeError:
-                pass
         raise AttributeError(f"module 'bridge' has no attribute {name}")
 
 
