@@ -3379,210 +3379,38 @@ def _ps_stats(pids: list[str], host: str | None = None) -> dict[str, ProcStatsEn
     return stats
 
 
-def _check_disk_usage(host: str | None = None) -> DiskUsageDict | None:
-    is_mac = bool(host and "mac" in host.lower())
-    try:
-        cmd = ["df", "-g", "/"] if is_mac else ["df", "-BG", "--output=size,used,avail,pcent", "/"]
-        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
-        lines = r.stdout.strip().splitlines()
-        if len(lines) < 2:
-            return None
-        parts = lines[1].split()
-        if is_mac:
-            if len(parts) < 6:
-                return None
-            return {"pct": int(parts[4].rstrip("%")), "free_gb": float(parts[3]), "total_gb": float(parts[1])}
-        if len(parts) < 4:
-            return None
-        return {
-            "pct": int(parts[3].rstrip("%")),
-            "free_gb": float(parts[2].rstrip("G")),
-            "total_gb": float(parts[0].rstrip("G")),
-        }
-    except (ValueError, KeyError):
-        return None
+_METRICS_SCRIPT = str(Path(__file__).parent / "scripts" / "host_metrics.sh")
 
 
-def _check_mem_usage(host: str | None = None) -> MemUsageDict | None:
-    is_mac = bool(host and "mac" in host.lower())
-    try:
-        if is_mac:
-            r = _remote_run(
-                ["bash", "-c", "sysctl -n hw.memsize && vm_stat"],
-                host=host,
-                capture_output=True,
-                text=True,
-                timeout=TIMEOUT_TMUX_SEND,
-            )
-            if r.returncode != 0:
-                return None
-            lines = r.stdout.strip().splitlines()
-            if len(lines) < 2:
-                return None
-            total = int(lines[0])
-            page_size = 16384
-            free_p = inactive_p = spec_p = 0
-            for line in lines[1:]:
-                if "page size of" in line:
-                    try:
-                        page_size = int(line.split("page size of")[1].strip().rstrip("."))
-                    except (ValueError, IndexError):
-                        pass
-                elif "Pages free:" in line:
-                    free_p = int(line.split(":")[1].strip().rstrip("."))
-                elif "Pages inactive:" in line:
-                    inactive_p = int(line.split(":")[1].strip().rstrip("."))
-                elif "Pages speculative:" in line:
-                    spec_p = int(line.split(":")[1].strip().rstrip("."))
-            avail = (free_p + inactive_p + spec_p) * page_size
-            used = total - avail
-        else:
-            r = _remote_run(["free", "-b"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-            if r.returncode != 0:
-                return None
-            mem_line = next((l for l in r.stdout.strip().splitlines() if l.startswith("Mem:")), None)
-            if not mem_line:
-                return None
-            parts = mem_line.split()
-            total = int(parts[1])
-            used = int(parts[2])
-            avail = int(parts[6]) if len(parts) >= 7 else total - used
-        total_gb = total / (1024**3)
-        used_gb = used / (1024**3)
-        avail_gb = avail / (1024**3)
-        pct = int((used / total) * 100) if total > 0 else 0
-        top_procs = _get_top_mem_procs(host)
-        return {"pct": pct, "used_gb": used_gb, "total_gb": total_gb, "avail_gb": avail_gb, "top_procs": top_procs}
-    except (ValueError, KeyError):
-        return None
-
-
-def _get_top_mem_procs(host: str | None = None) -> list[dict[str, object]]:
+def _run_metric(metric: str, host: str | None = None) -> dict[str, Any] | None:  # type: ignore[explicit-any]
+    """Run host_metrics.sh for a single metric, return parsed JSON or None."""
     try:
         r = _remote_run(
-            ["ps", "aux", "--sort=-rss"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
+            ["bash", _METRICS_SCRIPT, metric],
+            host=host, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD,
         )
-        if r.returncode != 0:
-            return []
-        procs = []
-        for line in r.stdout.strip().splitlines()[1:6]:
-            parts = line.split(None, 10)
-            if len(parts) >= 11:
-                procs.append(
-                    cast(
-                        dict[str, object],
-                        {
-                            "pid": parts[1],
-                            "rss_gb": round(int(parts[5]) / (1024 * 1024), 1),
-                            "pct": parts[3],
-                            "cmd": parts[10][:80],
-                        },
-                    )
-                )
-        return procs
-    except (ValueError, KeyError):
-        return []
-
-
-def _check_io_usage(host: str | None = None) -> IoUsageDict | None:
-    is_mac = bool(host and "mac" in host.lower())
-    if is_mac:
-        try:
-            r = _remote_run(
-                ["iostat", "-c", "2", "-w", "1"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-            )
-            if r.returncode != 0:
-                return None
-            lines = r.stdout.strip().splitlines()
-            if len(lines) < 3:
-                return None
-            parts = lines[-1].split()
-            return (
-                {"iowait_pct": 0, "read_iops": int(float(parts[0])), "write_iops": int(float(parts[1])), "util_pct": 0}
-                if len(parts) >= 6
-                else None
-            )
-        except (ValueError, KeyError):
+        if r.returncode != 0 or not r.stdout.strip():
             return None
-    try:
-        r = _remote_run(
-            ["iostat", "-x", "-d", "1", "2", "-o", "JSON"],
-            host=host,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_REMOTE_CMD,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            data = cast(dict[str, object], json.loads(r.stdout))
-            _sysstat = data.get("sysstat", {})
-            _hosts = _sysstat.get("hosts", [{}]) if isinstance(_sysstat, dict) else [{}]
-            _host0 = _hosts[0] if isinstance(_hosts, list) and _hosts else {}
-            stats = _host0.get("statistics", []) if isinstance(_host0, dict) else []
-            if isinstance(stats, list) and len(stats) >= 2:
-                disks = stats[-1].get("disk", []) if isinstance(stats[-1], dict) else []
-                r_iops = sum(d.get("r/s", 0) for d in disks)
-                w_iops = sum(d.get("w/s", 0) for d in disks)
-                m_util = max((d.get("util", d.get("%util", 0)) for d in disks), default=0)
-                iowait = 0.0
-                r2 = _remote_run(
-                    ["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-                )
-                if r2.returncode == 0:
-                    vlines = r2.stdout.strip().splitlines()
-                    if len(vlines) >= 3:
-                        vp = vlines[-1].split()
-                        if len(vp) >= 16:
-                            iowait = float(vp[15])
-                return {
-                    "iowait_pct": round(iowait, 1),
-                    "read_iops": round(r_iops),
-                    "write_iops": round(w_iops),
-                    "util_pct": round(m_util, 1),
-                }
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
-        _log(_LOG_DEBUG, "parse:io", f"{type(exc).__name__}: {exc}")
-    try:
-        r = _remote_run(["vmstat", "1", "2"], host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return None
-        lines = r.stdout.strip().splitlines()
-        if len(lines) < 3:
-            return None
-        parts = lines[-1].split()
-        if len(parts) < 16:
-            return None
-        return {
-            "iowait_pct": round(float(parts[15]), 1),
-            "read_iops": int(parts[8]),
-            "write_iops": int(parts[9]),
-            "util_pct": 0,
-        }
-    except (ValueError, KeyError):
+        result = json.loads(r.stdout)
+        return None if result is None else result
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, ValueError):
         return None
 
 
 def _probe_metric(
-    remote_hosts: set[str],
-    *,
-    check_fn: Callable[..., dict[str, Any] | None],  # type: ignore[explicit-any]
-    usage_store: dict[str, Any],
-    alerted_store: dict[str, Any],  # type: ignore[explicit-any]
-    alert_ts_store: dict[str, float],
-    cooldown: int | float,
+    remote_hosts: set[str], *, metric: str,
+    usage_store: dict[str, Any], alerted_store: dict[str, Any],  # type: ignore[explicit-any]
+    alert_ts_store: dict[str, float], cooldown: int | float,
     is_critical_fn: Callable[[dict[str, Any]], bool],  # type: ignore[explicit-any]
     alert_fmt: Callable[[str, dict[str, Any]], str],  # type: ignore[explicit-any]
-    recovery_fmt: Callable[[str, dict[str, Any]], str],
-    category: str,
+    recovery_fmt: Callable[[str, dict[str, Any]], str], category: str,
 ) -> None:  # type: ignore[explicit-any]
-    """Generic host metric probe: check -> threshold -> alert with cooldown."""
     now = _clock.time()
     for host in [None, *remote_hosts]:
         if host and _is_host_down(host):
             continue
         host_label = host or "VPS"
-        usage = check_fn(host)
+        usage = _run_metric(metric, host)
         if usage is None:
             continue
         is_crit = is_critical_fn(usage)
@@ -3603,11 +3431,8 @@ def _probe_metric(
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
     _probe_metric(
-        remote_hosts,
-        check_fn=_check_disk_usage,  # type: ignore[arg-type]
-        usage_store=host_health.disk_usage,
-        alerted_store=host_health.disk_alerted,
-        alert_ts_store=host_health.disk_alert_ts,
+        remote_hosts, metric="disk", usage_store=host_health.disk_usage,
+        alerted_store=host_health.disk_alerted, alert_ts_store=host_health.disk_alert_ts,
         cooldown=_res_cfg.disk_cooldown,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.disk_alert_pct or u["free_gb"] < _res_cfg.disk_alert_gb,
         alert_fmt=lambda h, u: f"🔴 Disk space critical: {h}\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
@@ -3624,11 +3449,8 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
         return text
 
     _probe_metric(
-        remote_hosts,
-        check_fn=_check_mem_usage,  # type: ignore[arg-type]
-        usage_store=host_health.mem_usage,
-        alerted_store=host_health.mem_alerted,
-        alert_ts_store=host_health.mem_alert_ts,
+        remote_hosts, metric="mem", usage_store=host_health.mem_usage,
+        alerted_store=host_health.mem_alerted, alert_ts_store=host_health.mem_alert_ts,
         cooldown=_res_cfg.mem_cooldown,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.mem_threshold_pct or u["avail_gb"] < _res_cfg.mem_threshold_gb,
         alert_fmt=_fmt,
@@ -3639,11 +3461,8 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     _probe_metric(
-        remote_hosts,
-        check_fn=_check_io_usage,  # type: ignore[arg-type]
-        usage_store=host_health.io_usage,
-        alerted_store=host_health.io_alerted,
-        alert_ts_store=host_health.io_alert_ts,
+        remote_hosts, metric="io", usage_store=host_health.io_usage,
+        alerted_store=host_health.io_alerted, alert_ts_store=host_health.io_alert_ts,
         cooldown=_res_cfg.io_cooldown,
         is_critical_fn=lambda u: u["iowait_pct"] >= _res_cfg.io_iowait_pct,
         alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w"
@@ -3653,118 +3472,33 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     )
 
 
-def _get_cpu_hogs(host: str | None = None) -> list[CpuHogEntry]:
-    is_mac = bool(host and "mac" in host.lower())
-    try:
-        cmd = (
-            ["ps", "-eo", "pid,pcpu,etime,comm", "-r"]
-            if is_mac
-            else ["ps", "-eo", "pid,pcpu,etime,comm", "--sort=-pcpu"]
-        )
-        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND)
-        if r.returncode != 0:
-            return []
-        hogs: list[CpuHogEntry] = []
-        for line in r.stdout.strip().splitlines()[1:]:
-            parts = line.split(None, 3)
-            if len(parts) < 4:
-                continue
-            try:
-                pid = int(parts[0])
-                cpu = float(parts[1])
-            except (ValueError, IndexError):
-                continue
-            if cpu < _res_cfg.cpu_hog_pct:
-                break
-            etime_str = parts[2]
-            days = 0
-            if "-" in etime_str:
-                day_part, etime_str = etime_str.split("-", 1)
-                days = int(day_part)
-            tp = etime_str.split(":")
-            try:
-                mins = (
-                    days * 1440 + (int(tp[0]) * 60 + int(tp[1]) if len(tp) == 3 else int(tp[0]))
-                    if len(tp) >= 2
-                    else None
-                )
-            except (ValueError, IndexError):
-                mins = None
-            if mins is None:
-                continue
-            hogs.append({"pid": pid, "cpu": cpu, "etime_min": mins, "cmd": parts[3][:80] if len(parts) > 3 else "?"})
-        return hogs
-    except (ValueError, KeyError):
-        return []
-
-
 def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
     now = _clock.time()
     for host in [None, *remote_hosts]:
         if host and _is_host_down(host):
             continue
         host_label = host or "VPS"
-        real_hogs = [h for h in _get_cpu_hogs(host) if h["etime_min"] >= CPU_HOG_DURATION_MIN]
+        all_hogs = _run_metric("cpu_hogs", host) or []
+        real_hogs = [h for h in all_hogs if isinstance(h, dict) and h.get("etime_min", 0) >= CPU_HOG_DURATION_MIN]
         with watchdog.lock:
             host_health.cpu_hogs[host_label] = real_hogs
         if real_hogs and now - host_health.cpu_hog_alert_ts.get(host_label, 0) >= _res_cfg.cpu_hog_cooldown:
             lines = []
             for h in real_hogs[:5]:
-                elapsed = (
-                    f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
-                )
+                elapsed = f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
                 lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
             host_health.cpu_hog_alert_ts[host_label] = now
-            _watchdog_alert(
-                "CPU hog",
-                f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines),
-            )
-
-
-def _check_worktree_usage(host: str | None = None) -> dict[str, Any] | None:  # type: ignore[explicit-any]
-    is_mac = bool(host and "mac" in host.lower())
-    try:
-        du_flag = "-sk" if is_mac else "-sb"
-        cmd = [
-            "bash",
-            "-c",
-            f'find $HOME -maxdepth 4 -type d -name worktrees 2>/dev/null | while read d; do du {du_flag} "$d" 2>/dev/null; done',
-        ]
-        r = _remote_run(cmd, host=host, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        if r.returncode != 0:
-            return None
-        items: list[WorktreeItemDict] = []
-        total_bytes = 0
-        for line in r.stdout.strip().splitlines() if r.stdout.strip() else []:
-            parts = line.split(None, 1)
-            if len(parts) < 2:
-                continue
-            try:
-                size_val = int(parts[0])
-            except (ValueError, IndexError):
-                continue
-            size_bytes = size_val * 1024 if is_mac else size_val
-            total_bytes += size_bytes
-            items.append({"path": parts[1], "size_gb": round(size_bytes / (1024**3), 1)})
-        return {"total_gb": round(total_bytes / (1024**3), 1), "items": items}
-    except (urllib.error.URLError, OSError, TimeoutError):
-        return None
+            _watchdog_alert("CPU hog", f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines))
 
 
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
         top = sorted(u.get("items", []), key=lambda x: x["size_gb"], reverse=True)[:5]
-        return (
-            f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n"
-            + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
-        )
+        return f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n" + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
 
     _probe_metric(
-        remote_hosts,
-        check_fn=_check_worktree_usage,
-        usage_store=host_health.worktree_usage,
-        alerted_store=host_health.worktree_alerted,
-        alert_ts_store=host_health.worktree_alert_ts,
+        remote_hosts, metric="worktree", usage_store=host_health.worktree_usage,
+        alerted_store=host_health.worktree_alerted, alert_ts_store=host_health.worktree_alert_ts,
         cooldown=_res_cfg.worktree_cooldown,
         is_critical_fn=lambda u: u["total_gb"] >= _res_cfg.worktree_threshold_gb,
         alert_fmt=_fmt,
@@ -3775,13 +3509,8 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
 
 def _probe_tailscale() -> None:
     now = _clock.time()
-    try:
-        r = _subprocess_runner.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-        )
-        is_up = r.returncode == 0 and json.loads(r.stdout).get("BackendState") == "Running"
-    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
-        is_up = False
+    result = _run_metric("tailscale")
+    is_up = isinstance(result, dict) and result.get("up", False)
     alert_text = None
     with watchdog.lock:
         if not is_up and not host_health.tailscale_down:
