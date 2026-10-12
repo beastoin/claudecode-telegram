@@ -4418,7 +4418,6 @@ def _run_transcript_query(
     filter_mode: str | None = None,
     sort: str | None = None,
 ) -> dict[str, object] | None:
-    import bridge as _b  # late import to avoid circular dependency
 
     db_path = f"/tmp/transcript-cache/{sid}.db"
     script_path = INDEXER_SCRIPT
@@ -4439,9 +4438,9 @@ def _run_transcript_query(
         cmd.extend(["--sort", sort])
     try:
         if host:
-            r = _remote_run(cmd, host=host, timeout=_b.TIMEOUT_LARGE_TRANSFER)
+            r = _remote_run(cmd, host=host, timeout=TIMEOUT_LARGE_TRANSFER)
         else:
-            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=_b.TIMEOUT_GIT_OP)
+            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
         if r.returncode == 0 and r.stdout.strip():
             return cast(dict[str, object], json.loads(r.stdout))
     except (subprocess.SubprocessError, OSError) as e:
@@ -4450,7 +4449,6 @@ def _run_transcript_query(
 
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
-    import bridge as _b  # late import
 
     try:
         _transcript_sync.set(
@@ -4467,7 +4465,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
             ["ssh", host, f"stat -f%z '{remote_path}' 2>/dev/null || stat -c%s '{remote_path}' 2>/dev/null"],
             capture_output=True,
             text=True,
-            timeout=_b.TIMEOUT_REMOTE_CMD,
+            timeout=TIMEOUT_REMOTE_CMD,
         )
         remote_size = 0
         if r.returncode == 0 and r.stdout.strip().isdigit():
@@ -4482,7 +4480,7 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
         )
         try:
             while proc.poll() is None:
-                _clock.sleep(_b.DELAY_STARTUP)
+                _clock.sleep(DELAY_STARTUP)
                 try:
                     if local_tmp.exists() and remote_size > 0:
                         local_size = local_tmp.stat().st_size
@@ -4536,15 +4534,14 @@ def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Pa
 
 
 def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[str | None, str | None, str]:
-    import bridge as _b  # late import
 
     cwd = get_claude_session_cwd(name)
     if not cwd:
         host = get_worker_host(name)
-        tmux_name = f"{_b.TMUX_PREFIX}{name}"
+        tmux_name = f"{TMUX_PREFIX}{name}"
         try:
-            assert _b.worker_manager is not None
-            cwd = normalize_cwd(_b.worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
+            assert worker_manager is not None
+            cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
         except Exception:
             pass
     cwd = cwd or os.path.expanduser("~")
@@ -4554,7 +4551,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     slug = _project_slug(cwd)
     transcript_path = Path.home() / ".claude" / "projects" / slug / f"{sid}.jsonl"
     if not transcript_path.exists():
-        reg = _b._load_registry().get("workers", {})
+        reg = _load_registry().get("workers", {})
         entry = reg.get(name, {})
         host = entry.get("host")
         if host:
@@ -4576,7 +4573,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
                         _log(_LOG_WARN, "transcript", f"sync failed for {name}:{sid}: {err}")
                         return None, sid, cwd
                     else:
-                        _b._task_pool.submit(_start_transcript_sync, name, host, remote_path, local_tmp, sync_key)
+                        _task_pool.submit(_start_transcript_sync, name, host, remote_path, local_tmp, sync_key)
                         return "syncing", sid, cwd
             except (OSError, subprocess.SubprocessError) as exc:
                 _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
@@ -4606,14 +4603,12 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
 
 
 def handle_transcript_endpoint(handler, parsed) -> None:
-    import bridge as _b
-
     try:
         from urllib.parse import parse_qs
 
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
-        if not _b.tokens.validate_rewind(token):
+        if not tokens.validate_rewind(token):
             handler._send_html(
                 _err_page(
                     "Session Expired",
@@ -4631,16 +4626,16 @@ def handle_transcript_endpoint(handler, parsed) -> None:
             query_params = parse_qs(parsed.query)
             since = int(query_params.get("since", [0])[0])
             session_id = query_params.get("sid", [None])[0]
-            host = _b.get_worker_host(name)
+            host = get_worker_host(name)
             if host:
-                cwd = _b.get_claude_session_cwd(name) or ""
-                sid = session_id or _b.get_claude_session_id(name)
+                cwd = get_claude_session_cwd(name) or ""
+                sid = session_id or get_claude_session_id(name)
                 if not sid:
                     handler._send_json(200, {"total": 0, "new": 0})
                     return
-                remote_home = _b._get_remote_home(host) or ""
-                remote_cwd = _b._remap_path(cwd, host)
-                remote_slug = _b._project_slug(remote_cwd)
+                remote_home = _get_remote_home(host) or ""
+                remote_cwd = _remap_path(cwd, host)
+                remote_slug = _project_slug(remote_cwd)
                 jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
             else:
                 _tp, sid, _cwd = _resolve_transcript_path(name, session_id)
@@ -4651,10 +4646,10 @@ def handle_transcript_endpoint(handler, parsed) -> None:
             result = _run_transcript_query(jsonl_path, sid, "stats", host=host)
             total = 0
             if result:
-                total = _b._int_field(result, "n_user") + _b._int_field(result, "n_tool")
+                total = _int_field(result, "n_user") + _int_field(result, "n_tool")
                 count_result = _run_transcript_query(jsonl_path, sid, "entries", host=host, page=1, per_page=1)
                 if count_result:
-                    total = _b._int_field(count_result, "total", total)
+                    total = _int_field(count_result, "total", total)
             new_count = max(0, total - since)
             handler._send_json(200, {"total": total, "new": new_count})
             return
@@ -4674,7 +4669,7 @@ def handle_transcript_endpoint(handler, parsed) -> None:
         if search_sort not in ("relevance", "time"):
             search_sort = "relevance"
         filter_mode = query_params.get("filter", [""])[0].strip()
-        host = _b.get_worker_host(name)
+        host = get_worker_host(name)
         if not host:
             _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
             if _tp == "syncing":
@@ -4693,7 +4688,7 @@ def handle_transcript_endpoint(handler, parsed) -> None:
         )
         handler._send_html(html_content.encode("utf-8"))
     except (OSError, ValueError, KeyError) as e:
-        _b._log(_b._LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
+        _log(_LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
         handler._send_text(500, str(e))
 
 
@@ -5663,15 +5658,11 @@ RELAY_PUBLIC_HOST = os.environ.get("RELAY_PUBLIC_HOST", "157.180.48.254")
 
 
 def _bridge_public_url() -> str:
-    import bridge as _b
-
-    return _b.BRIDGE_PUBLIC_URL
+    return BRIDGE_PUBLIC_URL
 
 
 def _bridge_port() -> int:
-    import bridge as _b
-
-    return _b.PORT
+    return PORT
 
 
 def _relay_state_path() -> Path:
@@ -5847,9 +5838,7 @@ def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
     except (json.JSONDecodeError, ValueError):
         handler._send_json(400, {"error": "invalid JSON"})
         return None, "", None
-    import bridge as _b
-
-    text = _b._str_field(data, "text").strip()
+    text = _str_field(data, "text").strip()
     if not text:
         handler._send_json(400, {"error": "missing text"})
         return None, "", None
@@ -5888,8 +5877,6 @@ def handle_relay_get(handler, channel_id: str, action, parsed) -> None:
 
 
 def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
-    import bridge as _b
-
     data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_guest, body)
     if not data:
         return
@@ -5898,7 +5885,7 @@ def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
         handler._send_json(500, {"error": "channel not found"})
         return
     workers = channel.get("workers", [channel["worker"]])
-    delivered = {w: _b.send_to_worker(w, envelope) for w in workers}
+    delivered = {w: send_to_worker(w, envelope) for w in workers}
     handler._send_json(
         200, {"message_id": msg["message_id"], "delivered": all(delivered.values()), "workers": delivered}
     )
@@ -5916,10 +5903,8 @@ def handle_relay_reply(handler, channel_id: str, body: bytes = b"") -> None:
 
 
 def cmd_relay_list(router, chat_id) -> bool:
-    import bridge as _b
-
     with relay_store.lock:
-        active = [(cid, ch) for cid, ch in relay_store.channels.items() if _b._clock.time() <= ch["expires_at_unix"]]
+        active = [(cid, ch) for cid, ch in relay_store.channels.items() if _clock.time() <= ch["expires_at_unix"]]
     if active:
         lines = []
         for cid, ch in active:
@@ -5934,20 +5919,18 @@ def cmd_relay_list(router, chat_id) -> bool:
 
 
 def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
-    import bridge as _b
-
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
         return True
     channel_id = parts[1]
     new_worker = parts[2].lower()
-    registered = _b.get_registered_sessions()
+    registered = get_registered_sessions()
     if new_worker not in registered:
         router.reply(chat_id, f'Worker "{new_worker}" not found.')
         return True
     with relay_store.lock:
         found = relay_store.channels.get(channel_id)
-        if not found or _b._clock.time() > found["expires_at_unix"]:
+        if not found or _clock.time() > found["expires_at_unix"]:
             found = None
     if not found:
         router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
@@ -5964,8 +5947,6 @@ def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
 
 
 def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
-    import bridge as _b
-
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
         return True
@@ -5973,7 +5954,7 @@ def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
     rm_worker = parts[2].lower()
     with relay_store.lock:
         found = relay_store.channels.get(channel_id)
-        if not found or _b._clock.time() > found["expires_at_unix"]:
+        if not found or _clock.time() > found["expires_at_unix"]:
             found = None
     if not found:
         router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
@@ -5993,15 +5974,13 @@ def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
 
 
 def cmd_relay_status(router, chat_id) -> bool:
-    import bridge as _b
-
-    now = _b._clock.time()
+    now = _clock.time()
     with relay_store.lock:
         relay_active = [(cid, ch) for cid, ch in relay_store.channels.items() if now <= ch["expires_at_unix"]]
-    with _b.channel_store.lock:
-        ch_active = [(cid, ch) for cid, ch in _b.channel_store.channels.items() if not _b.channel_is_expired(ch)]
-    with _b.guest_store.lock:
-        guest_active = [g for g in _b.guest_store.guests.values() if now <= g.get("expires_at_unix", 0)]
+    with channel_store.lock:
+        ch_active = [(cid, ch) for cid, ch in channel_store.channels.items() if not channel_is_expired(ch)]
+    with guest_store.lock:
+        guest_active = [g for g in guest_store.guests.values() if now <= g.get("expires_at_unix", 0)]
     lines = ["📡 System Status\n"]
     lines.append(f"Relays: {len(relay_active)}")
     for cid, ch in relay_active:
@@ -6015,15 +5994,13 @@ def cmd_relay_status(router, chat_id) -> bool:
         lines.append(f"  • {cid} ({chan['label']}) — {members_str} ({msg_count} msgs)")
     lines.append(f"\nGuests: {len(guest_active)}")
     for g in guest_active:
-        inbox_count = len(_b.guest_store.inboxes.get(g["name"], []))
+        inbox_count = len(guest_store.inboxes.get(g["name"], []))
         lines.append(f"  • {g['name']} (inbox: {inbox_count} msgs)")
     router.reply(chat_id, "\n".join(lines))
     return True
 
 
 def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
-    import bridge as _b
-
     if len(parts) < 2:
         router.reply(chat_id, "Usage: /relay stop <label>")
         return True
@@ -6051,11 +6028,9 @@ def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
 
 
 def cmd_relay(router, arg: str, chat_id) -> bool:
-    import bridge as _b
-
     if not arg:
         with relay_store.lock:
-            active = [ch for ch in relay_store.channels.values() if _b._clock.time() <= ch["expires_at_unix"]]
+            active = [ch for ch in relay_store.channels.values() if _clock.time() <= ch["expires_at_unix"]]
         lines = ["📡 Relay — connect any agent to the team\n"]
         lines.append("/relay <worker> — create relay, get a guideline link")
         lines.append("/relay add <channel_id> <worker> — add worker to relay")
@@ -6079,7 +6054,7 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
     if sub in subcommands:
         return subcommands[sub]()
     worker = sub
-    registered = _b.get_registered_sessions()
+    registered = get_registered_sessions()
     if worker not in registered:
         router.reply(chat_id, f'Worker "{worker}" not found.')
         return True
@@ -6324,12 +6299,10 @@ def _machine_access(machine: Machine, caller_host: str | None) -> str:
 
 
 def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
-    import bridge as _b
-
     machines = get_machine_catalog()
-    registered = _b.get_registered_sessions()
+    registered = get_registered_sessions()
     caller_info = registered.get(caller_from, {}) if caller_from else {}
-    caller_host = caller_info.get("host") if caller_info else (_b.get_worker_host(caller_from) if caller_from else None)
+    caller_host = caller_info.get("host") if caller_info else (get_worker_host(caller_from) if caller_from else None)
     rows: dict[str, MachinePublicDict] = {}
     for machine in machines.values():
         row = machine.public_dict()
@@ -6339,7 +6312,7 @@ def get_machines(caller_from: str | None = None) -> MachinesCatalogResponse:
         row["health"] = _machine_health(machine)
         rows[machine.id] = row
     for name, info in registered.items():
-        host = info.get("host") if "host" in info else _b.get_worker_host(name)
+        host = info.get("host") if "host" in info else get_worker_host(name)
         machine = _machine_for_worker_host(host, machines)
         if machine.id not in rows:
             row = machine.public_dict()
@@ -6432,12 +6405,10 @@ def _reset_learning_reminder(name: str) -> None:
 
 
 def _fire_reminder(name: str, st: ReminderState) -> None:
-    import bridge as _b
-
     st["response_count"] = 0
     st["last_reminder_ts"] = _clock.time()
     st["reminder_pending"] = True
-    _b._task_pool.submit(_send_learning_reminder, name, _read_learning_reminder(name))
+    _task_pool.submit(_send_learning_reminder, name, _read_learning_reminder(name))
 
 
 def _check_learning_reminder(name: str) -> None:
@@ -6494,11 +6465,9 @@ def _schedule_idle_scan() -> None:
 
 
 def _send_learning_reminder(name: str, text: str) -> None:
-    import bridge as _b
-
     try:
         _clock.sleep(DELAY_RESPONSE_GAP)
-        if _b.send_to_worker(name, text):
+        if send_to_worker(name, text):
             _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
         else:
             _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
@@ -6698,9 +6667,7 @@ def _fetch_remote_file(host: str, remote_path: str) -> str | None:
 
 
 def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
-    import bridge as _b
-
-    host = _b.get_worker_host(name)
+    host = get_worker_host(name)
     if not host:
         return media_list
     result: list[tuple[str | None, str]] = []
@@ -6720,9 +6687,7 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
 def _parse_response_media(
     name: str, text: str
 ) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
-    import bridge as _b
-
-    host = _b.get_worker_host(name)
+    host = get_worker_host(name)
     if host:
         _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
         clean_text, images = _parse_media_tags(text, "image", _accept_all)
@@ -6979,8 +6944,6 @@ def _checkin_can_restart(
 def _checkin_do_restart(
     name: str, backend_name: str, tmux_name: str, host: str | None, requested_cwd: str
 ) -> tuple[bool, str]:
-    import bridge as _b
-
     notify_chat_id = get_manager_chat_id(name)
     try:
         if notify_chat_id is not None:
@@ -6990,11 +6953,11 @@ def _checkin_do_restart(
             )
         if host:
             restart_backend = get_backend(backend_name)
-            ok, err = _b.command_router._restart_remote_worker(
+            ok, err = command_router._restart_remote_worker(
                 name, backend_name, restart_backend, tmux_name, host, "relaunch"
             )
         else:
-            ok, err = _b.worker_manager.restart(name, mode="relaunch")
+            ok, err = worker_manager.restart(name, mode="relaunch")
         watchdog.recent_restarts[name] = _clock.time()
         _log(_LOG_INFO, "checkin", f"{name}: restart result ok={ok}, err={err}")
         if not ok:
@@ -7005,7 +6968,7 @@ def _checkin_do_restart(
                 )
             return False, err or "restart failed"
         if notify_chat_id is not None:
-            if _b._wait_for_restart_ready(tmux_name, backend_name, host=host):
+            if _wait_for_restart_ready(tmux_name, backend_name, host=host):
                 send_telegram_message(notify_chat_id, f"{name} is ready. Safe to send messages now.")
             else:
                 send_telegram_message(
@@ -9365,8 +9328,6 @@ if TYPE_CHECKING:
 
 
 def _b():
-    import bridge as _b
-
     return _b
 
 
