@@ -2345,13 +2345,11 @@ import shared as core
 
 
 def connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
-    from bridge import connectors
 
     connectors.log_message(tag, html_text, plain_text, targets)
 
 
 def connector_render_html(tag: str, current_html: str) -> str:
-    from bridge import connectors, _CONNECTOR_CSS
 
     esc = html.escape
     msgs = connectors.get_log(tag)
@@ -2440,7 +2438,6 @@ def connector_export_github(number: int, repo: str) -> str | None:
 def connector_on_message(tag: str) -> Callable:
     def handler(targets, html_text, plain_text=None, attachments=None, metadata=None):
         import urllib.error
-        from bridge import send_to_worker, _beast_serve_deploy
 
         if plain_text is None:
             plain_text = html_text
@@ -2511,9 +2508,8 @@ def connector_on_alert(tag: str) -> Callable:
 
 
 def new_gmail() -> GmailConnector:
-    from bridge import GmailConnector as _GmailConnector, GMAIL_GWS_BIN, GMAIL_FROM_FILTER, GMAIL_POLL_INTERVAL
 
-    return _GmailConnector(
+    return GmailConnector(
         gws_bin=GMAIL_GWS_BIN,
         from_filter=GMAIL_FROM_FILTER,
         poll_interval=GMAIL_POLL_INTERVAL,
@@ -2524,9 +2520,8 @@ def new_gmail() -> GmailConnector:
 
 
 def new_github() -> GitHubConnector:
-    from bridge import GitHubConnector as _GitHubConnector, GITHUB_REPOS, GITHUB_FROM_USER, GITHUB_POLL_INTERVAL
 
-    return _GitHubConnector(
+    return GitHubConnector(
         repo=GITHUB_REPOS,
         from_user=GITHUB_FROM_USER,
         poll_interval=GITHUB_POLL_INTERVAL,
@@ -2538,53 +2533,31 @@ def new_github() -> GitHubConnector:
 
 
 def start_connectors() -> tuple[object, object]:
-    from bridge import (
-        GMAIL_ENABLED,
-        GmailConnector as _GmailConnector,
-        GMAIL_IMPORT_ERROR,
-        GMAIL_POLL_INTERVAL,
-        GMAIL_FROM_FILTER,
-        GITHUB_ENABLED,
-        GitHubConnector as _GitHubConnector,
-        GITHUB_IMPORT_ERROR,
-        GITHUB_POLL_INTERVAL,
-        GITHUB_FROM_USER,
-        GITHUB_REPOS,
-    )
 
     gmail_inst = None
-    if GMAIL_ENABLED and _GmailConnector is not None:
+    if GMAIL_ENABLED and GmailConnector is not None:
         gmail_inst = new_gmail()
         gmail_inst.start()
         print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
-    elif GMAIL_ENABLED and _GmailConnector is None:
+    elif GMAIL_ENABLED and GmailConnector is None:
         _log(_LOG_ERROR, "bridge", f"Gmail connector disabled: {GMAIL_IMPORT_ERROR}")
     github_inst = None
-    if GITHUB_ENABLED and _GitHubConnector is not None:
+    if GITHUB_ENABLED and GitHubConnector is not None:
         github_inst = new_github()
         github_inst.start()
         print(
             f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {', '.join(GITHUB_REPOS)}"
         )
-    elif GITHUB_ENABLED and _GitHubConnector is None:
+    elif GITHUB_ENABLED and GitHubConnector is None:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
     return gmail_inst, github_inst
 
 
 def restart_connector(name: str) -> tuple[bool, str]:
-    from bridge import (
-        GMAIL_ENABLED,
-        GmailConnector as _GmailConnector,
-        GMAIL_IMPORT_ERROR,
-        GITHUB_ENABLED,
-        GitHubConnector as _GitHubConnector,
-        GITHUB_IMPORT_ERROR,
-        connectors,
-    )
 
     _cfg = {
-        "gmail": (GMAIL_ENABLED, _GmailConnector, GMAIL_IMPORT_ERROR, "GMAIL_ENABLED=0", new_gmail),
-        "github": (GITHUB_ENABLED, _GitHubConnector, GITHUB_IMPORT_ERROR, "BRIDGE_GHPOLL_ENABLED=0", new_github),
+        "gmail": (GMAIL_ENABLED, GmailConnector, GMAIL_IMPORT_ERROR, "GMAIL_ENABLED=0", new_gmail),
+        "github": (GITHUB_ENABLED, GitHubConnector, GITHUB_IMPORT_ERROR, "BRIDGE_GHPOLL_ENABLED=0", new_github),
     }
     entry = _cfg.get(name)
     if not entry:
@@ -2605,7 +2578,6 @@ def restart_connector(name: str) -> tuple[bool, str]:
 
 
 def get_connectors_status() -> dict[str, ConnectorStatusDict]:
-    from bridge import GMAIL_ENABLED, GITHUB_ENABLED, connectors
 
     result: dict[str, ConnectorStatusDict] = {}
     for cname, enabled in [("gmail", GMAIL_ENABLED), ("github", GITHUB_ENABLED)]:
@@ -6908,7 +6880,6 @@ class WorkerManager:
             self.tmux_prefix = core.TMUX_PREFIX
 
     def _get_startup_cwd(self, name: str, requested_cwd: str = "", fallback_cwd: str = "") -> str:
-        from bridge import _get_worker_cwd
 
         candidate = normalize_cwd(requested_cwd)
         if not candidate:
@@ -6941,7 +6912,6 @@ class WorkerManager:
         self._clock.sleep(DELAY_SHORT)
 
     def scan_tmux_sessions(self) -> dict[str, TmuxSessionDict]:
-        from bridge import _registry_add, get_machine_catalog
 
         self._sync_paths()
         registered: dict[str, TmuxSessionDict] = {}
@@ -7010,7 +6980,6 @@ class WorkerManager:
     def get_registered_sessions(
         self, registered: dict[str, TmuxSessionDict] | None = None
     ) -> dict[str, TmuxSessionDict]:
-        from bridge import _load_registry, _registry_bootstrap, state
 
         self._sync_paths()
         if registered is None:
@@ -7078,7 +7047,6 @@ class WorkerManager:
     def send(
         self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None
     ) -> bool:
-        from bridge import _send_to_callback_worker
 
         self._sync_paths()
         if not session:
@@ -7109,7 +7077,6 @@ class WorkerManager:
         )
 
     def get_workers(self, caller_from: str | None = None) -> list[WorkerEndpointInfo]:
-        from bridge import get_machine_catalog
 
         self._sync_paths()
         workers: list[WorkerEndpointInfo] = []
@@ -7213,7 +7180,6 @@ class WorkerManager:
         return f'ssh {ssh_target} "{escaped}"'
 
     def _build_welcome(self, name: str, backend_obj: Backend) -> str:
-        from bridge import read_checkin_note
 
         welcome = (
             "You are connected to Telegram via claudecode-telegram bridge. "
@@ -7246,7 +7212,6 @@ class WorkerManager:
         return welcome
 
     def hire(self, name: str, backend: str = "", chat_id: ChatId | None = None) -> tuple[bool, str | None]:
-        from bridge import set_pending, state, _registry_add, _reset_learning_reminder
 
         if not backend:
             backend = DEFAULT_BACKEND
@@ -7322,7 +7287,6 @@ class WorkerManager:
         return True, None
 
     def end(self, name: str) -> tuple[bool, str | None]:
-        from bridge import kill_adapter, clear_pending, _set_worker_cwd, cleanup_inbox, _registry_remove, state
 
         self._sync_paths()
         registered = self.get_registered_sessions()
@@ -7354,7 +7318,6 @@ class WorkerManager:
         return True, None
 
     def restart(self, name: str, mode: str = "relaunch") -> tuple[bool, str | None]:
-        from bridge import clear_pending, _reset_learning_reminder
 
         self._sync_paths()
         registered = self.get_registered_sessions()
@@ -7482,7 +7445,6 @@ class WorkerManager:
     def _retry_after_stale_resume(
         self, name: str, tmux_name: str, backend: Backend, resume_id: str, startup_cwd: str
     ) -> bool:
-        from bridge import _notify_admin
 
         _log(_LOG_WARN, "restart", f"{name}: resume failed (stale session {resume_id[:8]}), auto-retrying fresh")
         clear_claude_session_id(name)
@@ -7511,7 +7473,6 @@ class WorkerManager:
     def _restart_dead_worker(
         self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str
     ) -> tuple[bool, str | None]:
-        from bridge import _reset_learning_reminder
 
         if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
@@ -7571,7 +7532,6 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
     import urllib.request, json as _json
 
     if "all" in names:
-        from bridge import worker_manager, _load_registry
 
         assert worker_manager is not None
         registered = worker_manager.scan_tmux_sessions()
@@ -7636,7 +7596,6 @@ def cmd_rewind(router, name: str, chat_id) -> bool:
         router.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
         return True
     name = name.lower().strip()
-    from bridge import tokens, _render_transcript_html, _beast_serve_deploy
 
     base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
     token = secrets.token_urlsafe(32)
@@ -7699,14 +7658,12 @@ def cmd_pr_review(router, arg: str, chat_id) -> bool:
     except subprocess.TimeoutExpired:
         router.reply(chat_id, "PR review generation timed out (>300s).", outcome="Needs decision")
         return True
-    from bridge import _beast_serve_deploy
 
     slug = f"pr-{pr_num}"
     serve_url = _beast_serve_deploy(out_path, slug)
     if serve_url:
         router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
     else:
-        from bridge import tokens
 
         token = secrets.token_urlsafe(32)
         tokens.add_pr_review(token, pr_num, owner, repo)
@@ -7717,7 +7674,6 @@ def cmd_pr_review(router, arg: str, chat_id) -> bool:
 
 
 def cmd_team(router, chat_id) -> bool:
-    from bridge import state
 
     registered = router.workers.scan_tmux_sessions()
     registered = router.workers.get_registered_sessions(registered)
@@ -7748,7 +7704,6 @@ def cmd_team(router, chat_id) -> bool:
 
 
 def cmd_status(router, chat_id) -> bool:
-    from bridge import state, watchdog, tunnel_manager, get_machine_catalog, _get_connectors_status
 
     registered = router.workers.get_registered_sessions()
     try:
@@ -7812,7 +7767,6 @@ def cmd_focus(router, name: str, chat_id) -> bool:
         router.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
         return True
     name = name.lower().strip()
-    from bridge import switch_session
 
     ok, err = switch_session(name)
     if ok:
@@ -7826,7 +7780,6 @@ def cmd_hire(router, name: str, chat_id) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
         return True
-    from bridge import parse_hire_args, RESERVED_NAMES, create_session, PERSISTENCE_NOTE
 
     parsed_name, backend = parse_hire_args(name)
     if not parsed_name:
@@ -7854,7 +7807,6 @@ def cmd_end(router, name: str, chat_id) -> bool:
         router.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
         return True
     name = name.lower().strip()
-    from bridge import kill_session
 
     ok, err = kill_session(name)
     if ok:
@@ -7866,7 +7818,6 @@ def cmd_end(router, name: str, chat_id) -> bool:
 
 
 def cmd_restart(router, chat_id, args: str = "") -> bool:
-    from bridge import state, watchdog
 
     args = (args or "").strip()
     clean = False
@@ -7951,7 +7902,6 @@ def cmd_restart(router, chat_id, args: str = "") -> bool:
 
 
 def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -> bool:
-    from bridge import restart_claude
 
     if host:
         mode = "relaunch" if clean else "resume"
@@ -7959,7 +7909,6 @@ def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -
         backend_obj = claudecode.get_backend(backend_name)
         _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, host={host}")
         router.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
-        from bridge import watchdog
 
         ok, err = router._restart_remote_worker(name, backend_name, backend_obj, tmux_name, host, mode)
         watchdog.recent_restarts[name] = core._clock.time()
@@ -7986,7 +7935,6 @@ def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -
     router.reply(chat_id, f"{label} {name.capitalize()}...")
     ok, err = restart_claude(name, mode=mode)
     if ok:
-        from bridge import watchdog
 
         watchdog.recent_restarts[name] = core._clock.time()
     return _restart_reply(router, chat_id, name, ok, err)
@@ -8002,7 +7950,6 @@ def _restart_reply(router, chat_id, name, ok, err, host=None) -> bool:
 
 
 def _cmd_restart_all(router, chat_id, clean) -> bool:
-    from bridge import state
 
     registered = router.workers.get_registered_sessions()
     if not registered:
@@ -8029,7 +7976,6 @@ def _cmd_restart_all(router, chat_id, clean) -> bool:
 
 
 def _run_restart_all_sequence(router, chat_id, names, mode) -> None:
-    from bridge import restart_claude, watchdog, worker_manager, _sync_worker_manager
 
     delay_s = 7
     failed = []
@@ -8906,7 +8852,6 @@ def teleport_rollback(
 
 
 def handle_notify(handler, body: bytes = b"") -> None:
-    from bridge import _parse_response_media, _send_response_media, get_all_chat_ids
 
     try:
         data = cast(dict[str, object], json.loads(body))
@@ -8938,7 +8883,6 @@ def handle_notify(handler, body: bytes = b"") -> None:
 
 
 def handle_health_alert(handler, body: bytes = b"") -> None:
-    from bridge import get_all_chat_ids
 
     try:
         data = json.loads(body) if body else {}
@@ -8958,7 +8902,6 @@ def handle_health_alert(handler, body: bytes = b"") -> None:
 
 
 def handle_forge_register(handler, body: bytes = b"") -> None:
-    from bridge import _registry_add, _registry_add_callback, worker_manager
 
     try:
         data = json.loads(body) if body else {}
@@ -9026,7 +8969,6 @@ def handle_forge_register(handler, body: bytes = b"") -> None:
 
 
 def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
-    from bridge import _sync_worker_manager, worker_manager, _set_worker_cwd, _checkin_can_restart, _checkin_do_restart
 
     try:
         params = parse_qs(parsed.query)
@@ -9100,7 +9042,6 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
 
 
 def handle_health_workers_endpoint(handler) -> None:
-    from bridge import watchdog
 
     try:
         now = core._clock.time()
@@ -9364,7 +9305,6 @@ def _fanout_channel_message(
                         },
                     )
         elif minfo["type"] == "manager":
-            from bridge import _notify_admin
 
             _notify_admin(f"[{channel_id}] {from_member}: {text}")
 
@@ -9402,7 +9342,6 @@ def _channel_guest_auth(handler: "BaseHTTPRequestHandler", query_params: dict) -
 
 
 def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
-    from bridge import _notify_admin, _relay_base_url
 
     try:
         data = cast(dict, json.loads(body)) if body else {}
@@ -9468,7 +9407,6 @@ def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
 
 
 def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
-    from bridge import _notify_admin
 
     parsed = urlparse(handler.path)
     guest = _guest_auth(handler, parsed)
@@ -9647,7 +9585,6 @@ def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
 
 
 def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
-    from bridge import _notify_admin
 
     query_params = parse_qs(parsed.query)
     token = query_params.get("token", [""])[0]
@@ -9669,7 +9606,6 @@ def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResu
 
 
 def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
-    from bridge import _notify_admin
 
     data = handler._parse_body(body)
     if data is None:
@@ -9717,7 +9653,6 @@ def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
 
 
 def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
-    from bridge import _notify_admin
 
     data = handler._parse_body(body)
     if data is None:
@@ -9821,7 +9756,6 @@ def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult 
 
 
 def handle_channel_delete(handler: "BaseHTTPRequestHandler", channel_id: str) -> None:
-    from bridge import _notify_admin
 
     with channel_store.lock:
         channel = channel_store.channels.pop(channel_id, None)
