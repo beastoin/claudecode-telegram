@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import collections
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 import os
 import json
@@ -103,6 +103,15 @@ from claudecode import (
 
 
 import html
+
+
+@contextmanager
+def _log_suppress(*exc_types, level=_LOG_WARN, tag="bridge", msg="", exc_info=False):
+    try:
+        yield
+    except exc_types as e:
+        _log(level, tag, f"{msg}{e}" if msg else f"{type(e).__name__}: {e}", exc=e if exc_info else None)
+
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _REVIEW_CSS = (_TEMPLATE_DIR / "review.css").read_text() if (_TEMPLATE_DIR / "review.css").exists() else ""
@@ -989,10 +998,8 @@ class TunnelManager:
                 for update in data.get("result", []):
                     uid = update.get("update_id", 0)
                     if self._on_update:
-                        try:
+                        with _log_suppress(Exception, level=_LOG_ERROR, tag="tunnel:poll", msg=f"Forward failed update_id={uid}: "):
                             self._on_update(update)
-                        except Exception as exc:
-                            _log(_LOG_ERROR, "tunnel:poll", f"Forward failed update_id={uid}: {exc}")
                     else:
                         self._forward_to_localhost(update)
                     offset = uid + 1
@@ -1003,7 +1010,7 @@ class TunnelManager:
 
     def _forward_to_localhost(self, update: dict[str, object]) -> None:
         _bridge_host = self._bind_host or "127.0.0.1"
-        try:
+        with _log_suppress(Exception, tag="tunnel:poll", msg=f"Forward to {_bridge_host} failed: "):
             req = urllib.request.Request(
                 f"http://{_bridge_host}:{self._port}/",
                 data=json.dumps(update).encode(),
@@ -1011,8 +1018,6 @@ class TunnelManager:
                 method="POST",
             )
             self._urlopen(req, timeout=5)
-        except Exception as exc:
-            _log(_LOG_WARN, "tunnel:poll", f"Forward to {_bridge_host} failed: {exc}")
 
     def _wait_for_port(self) -> bool:
         elapsed = 0
@@ -2302,27 +2307,21 @@ def connector_on_message(tag: str) -> Callable:
         if core.admin_chat_id:
             serve_url = None
             if tag == "github" and metadata and metadata.get("number"):
-                try:
+                with _log_suppress(KeyError, tag=tag, msg="github export failed: "):
                     serve_url = connector_export_github(metadata["number"], metadata.get("repo", "BasedHardware/omi"))
-                except KeyError as e:
-                    _log(_LOG_WARN, tag, f"github export failed: {e}")
             if not serve_url:
-                try:
+                with _log_suppress(OSError, tag=tag, msg="beast serve failed: "):
                     page_html = connector_render_html(tag, html_text)
                     tmp_path = f"/tmp/connector-{tag}.html"
                     with open(tmp_path, "w") as f:
                         f.write(page_html)
                     serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
-                except OSError as e:
-                    _log(_LOG_WARN, tag, f"beast serve failed: {e}")
             summary = connector_short_summary(tag, plain_text, serve_url, metadata)
             try:
                 telegram.send_telegram_message(core.admin_chat_id, summary, parse_mode="HTML")
             except OSError:
-                try:
+                with _log_suppress(urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Telegram send failed: "):
                     telegram.send_telegram_message(core.admin_chat_id, plain_text[:300])
-                except (urllib.error.URLError, OSError, TimeoutError) as e:
-                    _log(_LOG_WARN, tag, f"Telegram send failed: {e}")
             for att in attachments or []:
                 fpath = att.get("path", "")
                 fname = att.get("filename", "")
@@ -2356,10 +2355,8 @@ def connector_on_alert(tag: str) -> Callable:
         import urllib.error
 
         if core.admin_chat_id:
-            try:
+            with _log_suppress(urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Failed to send Telegram alert: "):
                 telegram.send_telegram_message(core.admin_chat_id, text)
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
-                _log(_LOG_WARN, tag, f"Failed to send Telegram alert: {e}")
 
     return handler
 
@@ -3215,12 +3212,9 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 def _watchdog_alert(category: str, text: str | None) -> None:
     if not text or not admin_chat_id:
         return
-    try:
-
+    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg=f"{category} error: "):
         transport.send_text(admin_chat_id, text)
         _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        _log(_LOG_ERROR, "watchdog", f"{category} error: {e}")
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
@@ -3265,8 +3259,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         text = f"{icon} {name} {msg}.\n{cmd} {name}"
     else:
         text = f"{name}: {state} ({reason}). Check /team"
-    try:
-
+    with _log_suppress(KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog alert error: "):
         result = transport.send_text(admin_chat_id, text)
         if result and result.get("ok"):
             _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
@@ -3278,8 +3271,6 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
                     watchdog.alert_msg_ids[name] = (msg_id, text)
         else:
             _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
-    except KeyError as e:
-        _log(_LOG_ERROR, "watchdog", f"Watchdog alert error: {e}")
 
 
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
@@ -3348,11 +3339,8 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
             _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
             return
     text = f"✅ {name} is back to normal."
-    try:
-
+    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog resolved alert error: "):
         transport.send_text(admin_chat_id, text)
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        _log(_LOG_ERROR, "watchdog", f"Watchdog resolved alert error: {e}")
 
 
 def _handle_watchdog_transition(
@@ -3437,7 +3425,7 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 def watchdog_loop() -> None:
     _disk_check_counter = 0
     while not watchdog.stop_event.is_set():
-        try:
+        with _log_suppress(subprocess.SubprocessError, ValueError, KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog error: "):
             now = _clock.time()
             registered = get_registered_sessions()
             pane_pids = _tmux_pane_pids()
@@ -3457,8 +3445,6 @@ def watchdog_loop() -> None:
             if _disk_check_counter >= 20:
                 _disk_check_counter = 0
                 _watchdog_resource_checks(set(remote_workers.keys()))
-        except (subprocess.SubprocessError, ValueError, KeyError) as e:
-            _log(_LOG_ERROR, "watchdog", f"Watchdog error: {e}")
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)
 
 
@@ -3752,10 +3738,8 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
         ("Tailscale", lambda: _probe_tailscale()),
     ]
     for label, check_fn in checks:
-        try:
+        with _log_suppress(subprocess.SubprocessError, OSError, level=_LOG_ERROR, tag="watchdog", msg=f"{label} check error: "):
             check_fn()
-        except (subprocess.SubprocessError, OSError) as e:
-            _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
 
 
 def format_team_lines(  # type: ignore[no-redef]
@@ -3849,14 +3833,12 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
         output_tokens += usage.get("output_tokens", 0)
     duration_str = ""
     if first_ts and last_ts:
-        try:
+        with _log_suppress(ValueError, TypeError, KeyError, level=_LOG_DEBUG, tag="parse:unknown"):
             total_s = max(0, int((datetime.fromisoformat(last_ts.replace("Z", "+00:00")) - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))).total_seconds()))
             d, rem = divmod(total_s, 86400)
             h = rem // 3600
             m = (rem % 3600) // 60
             duration_str = f"{d}d {h}h" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
-        except (ValueError, TypeError, KeyError) as exc:
-            _log(_LOG_DEBUG, "parse:unknown", f"{type(exc).__name__}: {exc}")
     return {
         "n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
         "lines_add": lines_add, "lines_del": lines_del, "lines_mod": lines_mod,
@@ -3975,7 +3957,7 @@ def _render_transcript_html(
         stats = cast(TranscriptStatsDict, stats_result) if stats_result else dict(_EMPTY_TRANSCRIPT_STATS)
     file_size_str = ""
     if not host:
-        try:
+        with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:unknown"):
             file_size_bytes = os.path.getsize(transcript_path) if transcript_path else 0
             if file_size_bytes >= 1_048_576:
                 file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
@@ -3983,8 +3965,6 @@ def _render_transcript_html(
                 file_size_str = f"{file_size_bytes / 1024:.0f} KB"
             else:
                 file_size_str = f"{file_size_bytes} B"
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
     data = json.dumps(
         {
             "name": name,
@@ -4995,14 +4975,12 @@ class RelayMessageDict(_RelayMessageDictRequired, total=False):
 
 
 def _save_state_json(path: Path, data: object, label: str) -> None:
-    try:
+    with _log_suppress(OSError, tag=label, msg="Failed to save state: "):
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
         tmp.rename(path)
         os.chmod(path, 0o600)
-    except OSError as e:
-        _log(_LOG_WARN, label, f"Failed to save state: {e}")
 
 
 def _load_state_json(path: Path, label: str) -> dict[str, object] | None:
@@ -6009,14 +5987,12 @@ def _schedule_idle_scan() -> None:
 
 
 def _send_learning_reminder(name: str, text: str) -> None:
-    try:
+    with _log_suppress(ConnectionError, OSError, TimeoutError, level=_LOG_ERROR, msg=f"Learning reminder error for {name}: "):
         _clock.sleep(DELAY_RESPONSE_GAP)
         if send_to_worker(name, text):
             _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
         else:
             _log(_LOG_WARN, "bridge", f"Learning reminder: failed to send to {name}")
-    except (ConnectionError, OSError, TimeoutError) as e:
-        _log(_LOG_ERROR, "bridge", f"Learning reminder error for {name}: {e}")
 
 
 class ConnectorRegistry:
@@ -6029,11 +6005,9 @@ class ConnectorRegistry:
     def stop_all(self) -> None:
         for name, inst in [("gmail", self.gmail), ("github", self.github)]:
             if inst is not None:
-                try:
+                with _log_suppress(RuntimeError, OSError, level=_LOG_DEBUG, tag=f"shutdown:{name}"):
                     inst.stop()
                     print(f"{name.title()} connector stopped")
-                except (RuntimeError, OSError) as exc:
-                    _log(_LOG_DEBUG, f"shutdown:{name}", f"{type(exc).__name__}: {exc}")
 
     def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
         with self._lock:
@@ -7203,7 +7177,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
         slug = "-".join(enabled) + "-" + ts
     else:
         slug = f"team{len(enabled)}-{ts}"
-    try:
+    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
         payload = _json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
         req = urllib.request.Request(
             f"http://localhost:{pilot_port}/api/grid-session",
@@ -7213,8 +7187,6 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
         )
         with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
             cast(dict[str, object], _json.loads(resp.read()))
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
     host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
     pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
@@ -7765,15 +7737,13 @@ def _git_pull_state(
         stash_sha = metadata.get("stash_sha")
         ref = f"teleport/{worker_name}"
         is_existing = False
-        try:
+        with _log_suppress(subprocess.SubprocessError, OSError, level=_LOG_DEBUG, tag="probe:_git_pull_state"):
             r = _remote_run(
                 ["git", "-C", target_cwd, "rev-parse", "--git-dir"],
                 host=host,
                 timeout=TIMEOUT_REMOTE_CMD,
             )
             is_existing = r.returncode == 0
-        except (subprocess.SubprocessError, OSError) as exc:
-            _log(_LOG_DEBUG, "probe:_git_pull_state", f"{type(exc).__name__}: {exc}")
         if not is_existing:
             r = _remote_run(
                 ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
@@ -7894,16 +7864,12 @@ def _ensure_workspace_trusted_remote(
         "fcntl.flock(lk, fcntl.LOCK_UN); lk.close(); "
         "print('trusted' if changed else 'already')"
     )
-    try:
-        r = _remote_run(
-            ["python3", "-c", script], host=host, timeout=TIMEOUT_TMUX_SEND
-        )
+    with _log_suppress(OSError, TimeoutError, tag="trust", msg=f"remote pre-trust {cwd} on {host}: "):
+        r = _remote_run(["python3", "-c", script], host=host, timeout=TIMEOUT_TMUX_SEND)
         if r.returncode == 0:
             _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
         else:
             _log(_LOG_WARN, "trust", f"remote pre-trust failed on {host}: {r.stderr[:200]}")
-    except (OSError, TimeoutError) as exc:
-        _log(_LOG_WARN, "trust", f"remote pre-trust {cwd} on {host}: {exc}")
 
 
 def _build_teleport_context(
@@ -7933,11 +7899,8 @@ def _build_teleport_context(
 def teleport_notify(chat_id: "ChatId | None", text: str) -> None:
     if chat_id is None:
         return
-    try:
-
+    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:_teleport_notify"):
         transport.send_text(chat_id, text)
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        _log(_LOG_DEBUG, "notify:_teleport_notify", f"{type(exc).__name__}: {exc}")
 
 
 def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
@@ -8052,7 +8015,7 @@ def rsync_working_directory(
     cmd = ["rsync", "-az", "--delete"]
     gitignore_tmpfile = None
     if not full:
-        try:
+        with _log_suppress(ConnectionError, TimeoutError, OSError, tag="teleport", msg="git ls-files failed, skipping gitignore excludes: "):
             gi_result = _remote_run(
                 ["git", "-C", source_cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
                 host=source_host,
@@ -8065,8 +8028,6 @@ def rsync_working_directory(
                 finally:
                     os.close(fd)
                 cmd.extend(["--exclude-from", gitignore_tmpfile])
-        except (ConnectionError, TimeoutError, OSError) as e:
-            _log(_LOG_WARN, "teleport", f"git ls-files failed, skipping gitignore excludes: {e}")
         for excl in TELEPORT_RSYNC_EXCLUDES:
             cmd.extend(["--exclude", excl])
     src = source_cwd.rstrip("/") + "/"
@@ -8450,11 +8411,9 @@ def teleport_rollback(
         teleport_notify(chat_id, f"{name} restarted on source. Teleport cancelled.")
     except (subprocess.SubprocessError, OSError) as e:
         teleport_notify(chat_id, f"Rollback also failed: {e}")
-    try:
+    with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:unknown"):
         state_file = SESSIONS_DIR / name / "teleport_state"
         state_file.unlink(missing_ok=True)
-    except OSError as exc:
-        _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
 
 def handle_notify(handler, body: bytes = b"") -> None:
@@ -8542,7 +8501,7 @@ def handle_forge_register(handler, body: bytes = b"") -> None:
         tmux_session = f"{TMUX_PREFIX}{name}" if name else ""
         conflict = False
         active_workers = []
-        try:
+        with _log_suppress(subprocess.SubprocessError, OSError, level=_LOG_DEBUG, tag="probe:unknown"):
             r = core._subprocess_runner.run(
                 ["tmux", "list-sessions", "-F", "#{session_name}"],
                 capture_output=True,
@@ -8554,8 +8513,6 @@ def handle_forge_register(handler, body: bytes = b"") -> None:
                     s.removeprefix(TMUX_PREFIX) for s in r.stdout.strip().split("\n") if s.startswith(TMUX_PREFIX)
                 ]
                 conflict = name in active_workers if name else False
-        except (subprocess.SubprocessError, OSError) as exc:
-            _log(_LOG_DEBUG, "probe:unknown", f"{type(exc).__name__}: {exc}")
         worker_manager.invalidate_sessions_cache()
         handler._send_json(
             200,
@@ -8747,15 +8704,13 @@ def handle_pr_review_comments(handler, body: bytes) -> None:
 
 
 def _pr_notify(text: str) -> None:
-    try:
+    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
         req = urllib.request.Request(
             f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notifications",
             data=json.dumps({"text": text}).encode(),
             headers={"Content-Type": "application/json"},
         )
         _urlopen(req, timeout=TIMEOUT_TMUX_SEND)
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
 
 
 def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
@@ -8841,10 +8796,8 @@ def _fanout_channel_message(
                 winfo = registered[wname]
                 backend_name = claudecode.get_worker_backend(wname, winfo)
                 backend = claudecode.get_backend(backend_name)
-                try:
+                with _log_suppress(ConnectionError, TimeoutError, msg=f"Channel fan-out to {wname} failed: "):
                     backend.send(wname, f"{TMUX_PREFIX}{wname}", tagged, BRIDGE_URL, SESSIONS_DIR)
-                except (ConnectionError, TimeoutError) as e:
-                    _log(_LOG_WARN, "bridge", f"Channel fan-out to {wname} failed: {e}")
         elif minfo["type"] == "guest":
             gname = minfo.get("name", "")
             if gname:
@@ -9399,10 +9352,8 @@ def kill_adapter(name: str) -> None:
             proc.kill()
             proc.wait(timeout=TIMEOUT_THREAD_JOIN)
     if stderr_fh:
-        try:
+        with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:kill_adapter"):
             stderr_fh.close()
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:kill_adapter", f"{type(exc).__name__}: {exc}")
 
 
 def _load_registry() -> RegistryFileDict:
@@ -9418,15 +9369,13 @@ def _load_registry() -> RegistryFileDict:
         if WORKER_REGISTRY_FILE.exists():
             corrupt_path = WORKER_REGISTRY_FILE.with_suffix(f".corrupt.{int(_clock.time())}")
             _log(_LOG_INFO, "worker", f"Corrupt worker registry, renaming to {corrupt_path}: {e}")
-            try:
+            with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:_load_registry"):
                 WORKER_REGISTRY_FILE.rename(corrupt_path)
-            except OSError as exc:
-                _log(_LOG_DEBUG, "io:_load_registry", f"{type(exc).__name__}: {exc}")
         return {}
 
 
 def _save_registry(data: RegistryFileDict) -> None:
-    try:
+    with _log_suppress(OSError, msg="Failed to save worker registry: "):
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(NODE_DIR), suffix=".tmp")
         try:
@@ -9435,13 +9384,9 @@ def _save_registry(data: RegistryFileDict) -> None:
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, str(WORKER_REGISTRY_FILE))
         except OSError:
-            try:
+            with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:_save_registry"):
                 os.unlink(tmp_path)
-            except OSError as exc:
-                _log(_LOG_DEBUG, "io:_save_registry", f"{type(exc).__name__}: {exc}")
             raise
-    except OSError as e:
-        _log(_LOG_WARN, "worker", f"Failed to save worker registry: {e}")
 
 
 def _registry_add(name: str, backend: str, chat_id: ChatId | None = None, host: str | None = None) -> None:
@@ -9557,10 +9502,8 @@ def cleanup_inbox(session_name: str) -> None:
     inbox = get_inbox_dir(session_name)
     if inbox.exists():
         for f in inbox.iterdir():
-            try:
+            with _log_suppress(OSError, msg=f"Failed to delete {f}: "):
                 f.unlink()
-            except OSError as e:
-                _log(_LOG_WARN, "bridge", f"Failed to delete {f}: {e}")
 
 
 def get_workers(caller_from: str | None = None) -> list[WorkerEndpointInfo]:
@@ -9597,23 +9540,17 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     host = get_worker_host(name)
     if not host:
         return
-    try:
+    with _log_suppress(subprocess.SubprocessError, OSError, tag="set_pending", msg=f"Failed to sync chat_id to {host} for {name}: "):
         remote_sessions_dir = _remap_path(str(SESSIONS_DIR), host)
-        _remote_run(
-            ["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, timeout=TIMEOUT_TMUX_CHECK
-        )
+        _remote_run(["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, timeout=TIMEOUT_TMUX_CHECK)
         _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id", host=host, direction="push")
-    except (subprocess.SubprocessError, OSError) as e:
-        _log(_LOG_WARN, "set_pending", f"Failed to sync chat_id to {host} for {name}: {e}")
 
 
 def clear_pending(name: str) -> None:
     session_dir = get_session_dir(name)
     pending = session_dir / "pending"
-    try:
+    with _log_suppress(OSError, level=_LOG_DEBUG, tag="cleanup:clear_pending"):
         pending.unlink()
-    except OSError as exc:
-        _log(_LOG_DEBUG, "cleanup:clear_pending", f"{type(exc).__name__}: {exc}")
 
 
 def is_pending(name: str) -> bool:
@@ -9863,11 +9800,9 @@ def do_teleport(
     ) as e:
         _log(_LOG_ERROR, "teleport", f"Teleport failed: {e}", exc=e)
         teleport_notify(chat_id, f"Teleport failed: {e}")
-        try:
+        with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:unknown"):
             state_file = SESSIONS_DIR / name / "teleport_state"
             state_file.unlink(missing_ok=True)
-        except OSError as exc:
-            _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
 
 def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool = False) -> bool:
@@ -10855,10 +10790,8 @@ class Handler(BaseHTTPRequestHandler):
             if "message" in update:
 
                 def _safe_handle(upd: TelegramUpdate) -> None:
-                    try:
+                    with _log_suppress(json.JSONDecodeError, KeyError, ValueError, TypeError, level=_LOG_ERROR, tag="webhook", msg="handle_message CRASH: ", exc_info=True):
                         command_router.handle_message(upd)
-                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-                        _log(_LOG_ERROR, "webhook", f"handle_message CRASH: {exc}", exc=exc)
 
                 _message_pool.submit(_safe_handle, update)
         except (json.JSONDecodeError, KeyError) as e:
@@ -11225,25 +11158,7 @@ GITHUB_REPOS: list[str] = [r.strip() for r in _GITHUB_REPO_RAW.split(",") if r.s
 GITHUB_FROM_USER = os.environ.get("BRIDGE_GHPOLL_USER", "beastoin")
 if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
     raise RuntimeError("BRIDGE_GHPOLL_USER must be set when BRIDGE_GHPOLL_ENABLED=1 (security: sender filter required)")
-TELEPORT_RSYNC_EXCLUDES = [
-    "node_modules",
-    ".git",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".next",
-    "build",
-    "dist",
-    "target",
-    ".gradle",
-    ".cache",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    "*.pyc",
-    ".build",
-    ".claude/worktrees",
-]
+TELEPORT_RSYNC_EXCLUDES = "node_modules .git __pycache__ .venv venv .next build dist target .gradle .cache .tox .mypy_cache .pytest_cache *.pyc .build .claude/worktrees".split()
 media_groups = MediaGroupState()
 tokens = TokenStore()
 
@@ -11284,12 +11199,10 @@ def get_all_chat_ids() -> list[ChatId]:
             if session_dir.is_dir():
                 chat_id_file = session_dir / "chat_id"
                 if chat_id_file.exists():
-                    try:
+                    with _log_suppress(OSError, ValueError, level=_LOG_DEBUG, tag="parse:get_all_chat_ids"):
                         raw = chat_id_file.read_text().strip()
                         if raw:
                             chat_ids.add(int(raw))
-                    except (OSError, ValueError) as exc:
-                        _log(_LOG_DEBUG, "parse:get_all_chat_ids", f"{type(exc).__name__}: {exc}")
     if admin_chat_id:
         chat_ids.add(admin_chat_id)
     return list(chat_ids)
@@ -11319,27 +11232,21 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ppid = os.getppid()
     parent_info = f"ppid={ppid}"
-    try:
+    with _log_suppress(OSError, UnicodeDecodeError, level=_LOG_DEBUG, tag="io:graceful_shutdown"):
         with open(f"/proc/{ppid}/cmdline", "rb") as f:
             cmdline = f.read().decode().replace("\x00", " ").strip()
             parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
-    except (OSError, UnicodeDecodeError) as exc:
-        _log(_LOG_DEBUG, "io:graceful_shutdown", f"{type(exc).__name__}: {exc}")
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
     connectors.stop_all()
     if tunnel_manager is not None:
-        try:
+        with _log_suppress(RuntimeError, OSError, level=_LOG_DEBUG, tag="shutdown:tunnel"):
             tunnel_manager.stop()
             print("Tunnel manager stopped")
-        except (RuntimeError, OSError) as exc:
-            _log(_LOG_DEBUG, "shutdown:tunnel", f"{type(exc).__name__}: {exc}")
     watchdog.stop_event.set()
     for cancelable in [learning_reminders.idle_scan_timer]:
         if cancelable is not None:
-            try:
+            with _log_suppress(RuntimeError, OSError, level=_LOG_DEBUG, tag="shutdown:timer"):
                 cancelable.cancel()
-            except (RuntimeError, OSError) as exc:
-                _log(_LOG_DEBUG, "shutdown:timer", f"{type(exc).__name__}: {exc}")
     with media_groups.lock:
         for _mg_entry in media_groups.buffer.values():
             t = _mg_entry.get("timer")
@@ -11471,10 +11378,8 @@ def main() -> None:
             if "message" in update:
 
                 def _safe_handle(upd: dict[str, object]) -> None:
-                    try:
+                    with _log_suppress(json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, OSError, level=_LOG_ERROR, tag="tunnel:poll", msg="handle_message CRASH: ", exc_info=True):
                         command_router.handle_message(upd)
-                    except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, OSError) as exc:
-                        _log(_LOG_ERROR, "tunnel:poll", f"handle_message CRASH: {exc}", exc=exc)
 
                 _message_pool.submit(_safe_handle, update)
 
