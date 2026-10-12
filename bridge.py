@@ -10630,35 +10630,11 @@ def restart_remote_worker(
 
 
 class CommandRouter:
-    def cmd_teleport(self, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
-
-        return cmd_teleport(self, arg, chat_id, check_only)
-
-    def cmd_teleback(self, arg: str, chat_id: ChatId) -> bool:
-
-        return cmd_teleback(self, arg, chat_id)
-
-    def cmd_hire(self, name: str, chat_id: ChatId) -> bool:
-
-        return cmd_hire(self, name, chat_id)
-
-    def cmd_end(self, name: str, chat_id: ChatId) -> bool:
-
-        return cmd_end(self, name, chat_id)
-
-    def cmd_restart(self, chat_id: ChatId, args: str = "") -> bool:
-
-        return cmd_restart(self, chat_id, args)
 
     def _restart_remote_worker(
         self, name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str
     ) -> tuple[bool, str | None]:
-
         return restart_remote_worker(name, backend_name, backend, tmux_name, host, mode, self.workers)
-
-    def cmd_relay(self, arg: str, chat_id: ChatId) -> bool:
-
-        return cmd_relay(self, arg, chat_id)
 
     def _extract_reply_media(self, reply_to: TelegramMessageDict, target_worker: str) -> str | None:
         file_id, media_label = _extract_file_id(reply_to)
@@ -11156,30 +11132,6 @@ class CommandRouter:
             return True
         return False
 
-    def cmd_pilot(self, name: str, chat_id: ChatId) -> bool:
-
-        return cmd_pilot(self, name, chat_id)
-
-    def cmd_rewind(self, name: str, chat_id: ChatId) -> bool:
-
-        return cmd_rewind(self, name, chat_id)
-
-    def cmd_pr_review(self, arg: str, chat_id: ChatId) -> bool:
-
-        return cmd_pr_review(self, arg, chat_id)
-
-    def cmd_focus(self, name: str, chat_id: ChatId) -> bool:
-
-        return cmd_focus(self, name, chat_id)
-
-    def cmd_team(self, chat_id: ChatId) -> bool:
-
-        return cmd_team(self, chat_id)
-
-    def cmd_status(self, chat_id: ChatId) -> bool:
-
-        return cmd_status(self, chat_id)
-
     def route_to_active(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
         registered = self.workers.get_registered_sessions()
         if not state.active:
@@ -11582,7 +11534,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, data)
 
 
-_HANDLER_DELEGATES = [
+def _install_delegates(cls: type, names: list[str]) -> None:
+    for name in names:
+        fn = globals()[name]
+        def _make(f=fn, n=name):
+            def _d(self, *a, **kw):
+                return f(self, *a, **kw)
+            _d.__name__ = n
+            _d.__qualname__ = f"{cls.__name__}.{n}"
+            return _d
+        setattr(cls, name, _make())
+
+_install_delegates(Handler, [
     "_guest_auth", "_channel_guest_auth", "_relay_get_token", "_relay_auth_and_parse",
     "handle_guest_register", "handle_guest_send", "handle_guest_reply", "handle_guest_inbox",
     "handle_guest_status", "handle_guests_list", "handle_guest_disconnect",
@@ -11594,16 +11557,12 @@ _HANDLER_DELEGATES = [
     "handle_pr_comment", "handle_transcript_endpoint",
     "handle_notify", "handle_health_alert", "handle_forge_register",
     "handle_checkin_endpoint", "handle_health_workers_endpoint",
-]
-for _name in _HANDLER_DELEGATES:
-    _fn = globals()[_name]
-    def _make_delegate(_f):
-        def _delegate(self, *a, **kw):
-            return _f(self, *a, **kw)
-        _delegate.__name__ = _f.__name__
-        _delegate.__qualname__ = f"Handler.{_f.__name__}"
-        return _delegate
-    setattr(Handler, _name, _make_delegate(_fn))
+])
+_install_delegates(CommandRouter, [
+    "cmd_teleport", "cmd_teleback", "cmd_hire", "cmd_end", "cmd_restart",
+    "cmd_relay", "cmd_pilot", "cmd_rewind", "cmd_pr_review", "cmd_focus",
+    "cmd_team", "cmd_status",
+])
 
 
 def _mg(m: re.Match[str] | None, n: int = 1) -> str:
