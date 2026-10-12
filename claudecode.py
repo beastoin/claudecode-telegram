@@ -106,6 +106,7 @@ from shared import (
     STT_TIMEOUT,
     ADMIN_CHAT_ID_ENV,
     admin_chat_id,
+    CLAUDE_PROJECTS_DIR,
 )
 import collections
 from dataclasses import dataclass, field
@@ -1299,7 +1300,6 @@ _LEARNING_REMINDER_TEXT = (
     'because the error message says connection refused which misleads you into checking network config."\n'
     'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
 )
-CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
 REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
 PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"

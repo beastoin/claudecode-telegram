@@ -394,16 +394,6 @@ PostRouteHandler = Callable[..., None]  # (handler, body, match) -> None
 GetRouteHandler = Callable[..., None]  # (handler, parsed, match) -> None
 
 
-class PostRouteResolution(NamedTuple):
-    handler: PostRouteHandler | None
-    match: re.Match[str] | None
-
-
-class GetRouteResolution(NamedTuple):
-    handler: GetRouteHandler | None
-    match: re.Match[str] | None
-
-
 class GmailHeader(TypedDict, total=False):
     name: str
     value: str

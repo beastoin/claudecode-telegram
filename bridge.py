@@ -2207,10 +2207,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
 import shared as core
 
 
-def connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
-    connectors.log_message(tag, html_text, plain_text, targets)
-
-
 def connector_render_html(tag: str, current_html: str) -> str:
     esc = html.escape
     msgs = connectors.get_log(tag)
@@ -2302,7 +2298,7 @@ def connector_on_message(tag: str) -> Callable:
 
         if plain_text is None:
             plain_text = html_text
-        connector_log_message(tag, html_text, plain_text, targets)
+        connectors.log_message(tag, html_text, plain_text, targets)
         if core.admin_chat_id:
             serve_url = None
             if tag == "github" and metadata and metadata.get("number"):
@@ -7430,7 +7426,7 @@ def cmd_hire(router, name: str, chat_id) -> bool:
     if name in RESERVED_NAMES:
         router.reply(chat_id, f'Cannot use "{name}" - reserved command. Choose another name.', outcome="Needs decision")
         return True
-    ok, err = create_session(name, backend, chat_id=chat_id)
+    ok, err = _wm().hire(name, backend, chat_id=chat_id)
     if ok:
         router.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
         update_bot_commands()
@@ -8282,7 +8278,7 @@ def sync_credentials_to_target(target_host: str) -> None:
     local_creds = os.path.expanduser("~/.claude/.credentials.json")
     if not os.path.exists(local_creds):
         return
-    try:
+    with suppress(json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
         r = _remote_run(
             ["cat", ".claude/.credentials.json"],
             host=target_host,
@@ -8302,8 +8298,6 @@ def sync_credentials_to_target(target_host: str) -> None:
             if remote_refresh and remote_refresh != local_refresh and remote_exp > now_ms:
                 _log(_LOG_INFO, "creds", f"Target {target_host} has independent valid credentials, skipping sync")
                 return
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
-        pass
     _remote_run(["mkdir", "-p", ".claude"], host=target_host)
     _subprocess_runner.run(
         ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json.tmp"],
@@ -11154,43 +11148,6 @@ class BridgeRuntimeState:
 
 state = BridgeRuntimeState()
 _last_mention = state.mention
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-NODE_NAME = os.environ.get("NODE_NAME", "")
-_DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
-if NODE_NAME and not os.environ.get("PORT"):
-    PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
-else:
-    PORT = int(os.environ.get("PORT", "8270"))
-BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
-WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
-if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
-    SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
-else:
-    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
-if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
-    TMUX_PREFIX = f"claude-{NODE_NAME}-"
-else:
-    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
-CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
-CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
-_bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
-if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
-    BRIDGE_URL = _bridge_url_env
-else:
-    BRIDGE_URL = f"http://localhost:{PORT}"
-BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
-if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
-    _pub_host = urlparse(BRIDGE_PUBLIC_URL).hostname or ""
-    BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    if BRIDGE_BIND != "0.0.0.0":
-        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
-BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
-MACHINES_CONFIG_FILE = Path(
-    os.environ.get("MACHINES_CONFIG_FILE", Path.home() / ".config" / "claudecode-telegram" / "machines.json")
-)
-PERSISTENCE_NOTE = "They'll stay on your team."
-STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/transcribe")
-STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 API_ENDPOINTS = {
     "GET /": "API index — lists all endpoints",
     "GET /machines": "List configured machines, access hints, workers, and health",
@@ -11218,38 +11175,6 @@ API_ENDPOINTS = {
     "POST /relay/<channel_id>/send": "Guest sends message via relay channel",
     "POST /relay/<channel_id>/reply": "Worker replies via relay channel",
 }
-_node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
-FILE_INBOX_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
-WORKER_PIPE_ROOT = Path(f"/tmp/claudecode-telegram/{_node_name}")
-DEFAULT_BACKEND = "claude"
-DEFAULT_WORKER_BACKEND = DEFAULT_BACKEND
-PENDING_TIMEOUT = 600
-TIMEOUT_TMUX_CHECK = 3
-TIMEOUT_TMUX_SEND = 5
-TIMEOUT_REMOTE_CMD = 10
-TIMEOUT_FILE_TRANSFER = 15
-TIMEOUT_GIT_OP = 30
-TIMEOUT_LARGE_TRANSFER = 60
-TIMEOUT_RSYNC = 120
-TIMEOUT_FULL_SYNC = 600
-TIMEOUT_HTTP_API = 10
-TIMEOUT_HTTP_DOWNLOAD = 30
-TIMEOUT_HTTP_UPLOAD = 60
-TIMEOUT_PROCESS_WAIT = 3
-TIMEOUT_THREAD_JOIN = 1.0
-DELAY_TMUX_SEND = 0.3
-DELAY_PIPE_POLL = 0.5
-DELAY_STARTUP = 1.0
-DELAY_STARTUP_LONG = 1.5
-DELAY_RETRY = 0.5
-DELAY_BRIEF = 0.05
-DELAY_SHORT = 0.2
-DELAY_RESPONSE_GAP = 2
-DELAY_PROCESS_SETTLE = 3
-DELAY_CLAUDE_LOAD = 4
-TEAM_DIR = os.path.expanduser(os.environ.get("TEAM_DIR", "~/team"))
-_CHECKIN_NOTE_PATH = os.path.join(TEAM_DIR, "checkin-note.txt")
-_LEARNING_REMINDER_PATH = os.path.join(TEAM_DIR, "learning-reminder.txt")
 
 
 def get_worker_host(name: str) -> str | None:
@@ -11321,10 +11246,6 @@ TELEPORT_RSYNC_EXCLUDES = [
 ]
 media_groups = MediaGroupState()
 tokens = TokenStore()
-
-
-def create_session(name: str, backend: str = DEFAULT_BACKEND, chat_id: ChatId | None = None) -> tuple[bool, str | None]:
-    return _wm().hire(name, backend, chat_id=chat_id)
 
 
 def kill_session(name: str) -> tuple[bool, str | None]:
