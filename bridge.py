@@ -1471,174 +1471,8 @@ def _safe_json_loads_list(raw: str) -> list[GithubComment]:
                     raw_items.extend(parsed)
             except json.JSONDecodeError:
                 continue
-    comments: list[GithubComment] = []
-    for item in raw_items:
-        if isinstance(item, dict):
-            comments.append(_validate_github_comment(cast(dict[str, object], item)))
-    return comments
+    return [cast(GithubComment, item) for item in raw_items if isinstance(item, dict)]
 
-
-def _str_val(raw: dict[str, object], key: str) -> str:
-    val = raw.get(key)
-    return str(val) if isinstance(val, str) else ""
-
-
-def _int_val(raw: dict[str, object], key: str) -> int:
-    val = raw.get(key)
-    return int(val) if isinstance(val, int) and not isinstance(val, bool) else 0
-
-
-def _str_list_val(raw: dict[str, object], key: str) -> list[str]:
-    val = raw.get(key)
-    if not isinstance(val, list):
-        return []
-    return [str(item) for item in val if isinstance(item, str)]
-
-
-def _pick_strs(src: dict[str, object], dst: object, *keys: str) -> None:
-    for k in keys:
-        v = _str_val(src, k)
-        if v:
-            cast(dict[str, object], dst)[k] = v
-
-
-def _validate_gmail_body(raw: dict[str, object]) -> GmailBody:
-    body = GmailBody()
-    _pick_strs(raw, body, "data", "attachmentId")
-    size = _int_val(raw, "size")
-    if size:
-        body["size"] = size
-    return body
-
-
-def _validate_gmail_header(raw: dict[str, object]) -> GmailHeader:
-    header = GmailHeader()
-    _pick_strs(raw, header, "name", "value")
-    return header
-
-
-def _validate_payload_part(
-    raw: dict[str, object],
-    depth: int = 0,
-    counter: Optional[list[int]] = None,
-) -> GmailPayloadPart:
-    if counter is None:
-        counter = [0]  # Root call: start fresh counter
-    counter[0] += 1
-    result = GmailPayloadPart()
-    if depth > _MAX_MIME_DEPTH or counter[0] > _MAX_MIME_PARTS:
-        return result  # Truncate overly deep/wide MIME trees at validation boundary
-    mime = _str_val(raw, "mimeType")
-    if mime:
-        result["mimeType"] = mime
-    filename = _str_val(raw, "filename")
-    if filename:
-        result["filename"] = filename
-    body_raw = raw.get("body")
-    if isinstance(body_raw, dict):
-        result["body"] = _validate_gmail_body(cast(dict[str, object], body_raw))
-    headers_raw = raw.get("headers")
-    if isinstance(headers_raw, list):
-        headers: list[GmailHeader] = []
-        for h in headers_raw:
-            if isinstance(h, dict):
-                headers.append(_validate_gmail_header(cast(dict[str, object], h)))
-        result["headers"] = headers
-    parts_raw = raw.get("parts")
-    if isinstance(parts_raw, list):
-        parts: list[GmailPayloadPart] = []
-        for p in parts_raw:
-            if isinstance(p, dict):
-                parts.append(_validate_payload_part(cast(dict[str, object], p), depth + 1, counter))
-        result["parts"] = parts
-    return result
-
-
-def _validate_gmail_message(raw: dict[str, object]) -> GmailMessage:
-    result = GmailMessage()
-    _pick_strs(raw, result, "id", "threadId", "historyId")
-    label_ids = _str_list_val(raw, "labelIds")
-    if label_ids:
-        result["labelIds"] = label_ids
-    payload_raw = raw.get("payload")
-    if isinstance(payload_raw, dict):
-        result["payload"] = _validate_payload_part(cast(dict[str, object], payload_raw))
-    return result
-
-
-def _validate_gmail_history_response(raw: dict[str, object]) -> GmailHistoryResponse:
-    result = GmailHistoryResponse()
-    _pick_strs(raw, result, "historyId")
-    history_raw = raw.get("history")
-    if isinstance(history_raw, list):
-        entries: list[GmailHistoryEntry] = []
-        for entry_raw in history_raw:
-            if not isinstance(entry_raw, dict):
-                continue
-            entry = GmailHistoryEntry()
-            added_raw = cast(dict[str, object], entry_raw).get("messagesAdded")
-            if isinstance(added_raw, list):
-                entry["messagesAdded"] = [
-                    GmailMessageRef(
-                        message=_validate_gmail_message(
-                            cast(dict[str, object], cast(dict[str, object], a).get("message"))
-                        )
-                    )
-                    for a in added_raw
-                    if isinstance(a, dict) and isinstance(cast(dict[str, object], a).get("message"), dict)
-                ]
-            entries.append(entry)
-        result["history"] = entries
-    return result
-
-
-def _validate_gmail_attachment_data(raw: dict[str, object]) -> GmailAttachmentData:
-    result = GmailAttachmentData()
-    _pick_strs(raw, result, "data")
-    return result
-
-
-def _validate_gmail_message_list_response(raw: dict[str, object]) -> GmailMessageListResponse:
-    result = GmailMessageListResponse()
-    msgs_raw = raw.get("messages")
-    if isinstance(msgs_raw, list):
-        result["messages"] = [
-            _validate_gmail_message(cast(dict[str, object], m)) for m in msgs_raw if isinstance(m, dict)
-        ]
-    return result
-
-
-def _validate_gmail_profile(raw: dict[str, object]) -> GmailProfile:
-    return GmailProfile(
-        emailAddress=_str_val(raw, "emailAddress"),
-        historyId=_str_val(raw, "historyId"),
-    )
-
-
-def _validate_github_state(raw: dict[str, object]) -> GithubState:
-    lpt_raw = raw.get("last_poll_time")
-    lpt: Optional[str] = str(lpt_raw) if isinstance(lpt_raw, str) and lpt_raw else None
-    seen_raw = raw.get("seen_ids")
-    seen: list[int] = []
-    if isinstance(seen_raw, list):
-        seen = [int(sid) for sid in seen_raw if isinstance(sid, int) and not isinstance(sid, bool)]
-    return GithubState(last_poll_time=lpt, seen_ids=seen)
-
-
-def _validate_github_comment(raw: dict[str, object]) -> GithubComment:
-    result = GithubComment()
-    cid = _int_val(raw, "id")
-    if cid:
-        result["id"] = cid
-    _pick_strs(raw, result, "body", "html_url", "issue_url", "pull_request_url", "issue_num", "kind")
-    user_raw = raw.get("user")
-    if isinstance(user_raw, dict):
-        user = GithubUser()
-        login = _str_val(cast(dict[str, object], user_raw), "login")
-        if login:
-            user["login"] = login
-        result["user"] = user
-    return result
 
 
 class GmailConnector(BaseConnector[GmailMessage]):
@@ -1725,38 +1559,23 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return None
 
     def _get_profile(self) -> Optional[GmailProfile]:
-        raw = self._run_gws("getProfile", "--params", '{"userId":"me"}')
-        if raw is None:
-            return None
-        return _validate_gmail_profile(raw)
+        return cast(Optional[GmailProfile], self._run_gws("getProfile", "--params", '{"userId":"me"}'))
 
     def get_message(self, msg_id: str) -> Optional[GmailMessage]:
         params = json.dumps({"userId": "me", "id": msg_id, "format": "full"})
-        raw = self._run_gws("messages", "get", "--params", params)
-        if raw is None:
-            return None
-        return _validate_gmail_message(raw)
+        return cast(Optional[GmailMessage], self._run_gws("messages", "get", "--params", params))
 
     def _get_history(self, start_history_id: str) -> Optional[GmailHistoryResponse]:
         params = json.dumps({"userId": "me", "startHistoryId": start_history_id})
-        raw = self._run_gws("history", "list", "--params", params)
-        if raw is None:
-            return None
-        return _validate_gmail_history_response(raw)
+        return cast(Optional[GmailHistoryResponse], self._run_gws("history", "list", "--params", params))
 
     def _get_attachment_data(self, msg_id: str, att_id: str) -> Optional[GmailAttachmentData]:
         params = json.dumps({"userId": "me", "messageId": msg_id, "id": att_id})
-        raw = self._run_gws("messages", "attachments", "get", "--params", params)
-        if raw is None:
-            return None
-        return _validate_gmail_attachment_data(raw)
+        return cast(Optional[GmailAttachmentData], self._run_gws("messages", "attachments", "get", "--params", params))
 
     def _list_messages(self, query: str, max_results: int = 5) -> Optional[GmailMessageListResponse]:
         params = json.dumps({"userId": "me", "maxResults": max_results, "q": query})
-        raw = self._run_gws("messages", "list", "--params", params)
-        if raw is None:
-            return None
-        return _validate_gmail_message_list_response(raw)
+        return cast(Optional[GmailMessageListResponse], self._run_gws("messages", "list", "--params", params))
 
     def mark_as_read(self, msg_id: str) -> bool:
         params = json.dumps({"userId": "me", "id": msg_id})
@@ -2301,12 +2120,15 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 data: object = json.load(f)
             if not isinstance(data, dict):
                 return False
-            state = _validate_github_state(cast(dict[str, object], data))
             with self._lock:
-                if state["last_poll_time"]:
-                    self._last_poll_time = state["last_poll_time"]
-                for sid in state["seen_ids"]:
-                    self._seen_ids.add(sid)
+                lpt = data.get("last_poll_time")
+                if isinstance(lpt, str) and lpt:
+                    self._last_poll_time = lpt
+                seen_raw = data.get("seen_ids")
+                if isinstance(seen_raw, list):
+                    for sid in seen_raw:
+                        if isinstance(sid, int) and not isinstance(sid, bool):
+                            self._seen_ids.add(sid)
                 return bool(self._last_poll_time)
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return False
