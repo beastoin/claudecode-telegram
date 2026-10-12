@@ -9,69 +9,96 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Protocol, runtime_checkable
+
 VERSION = "0.51.0"
+
+
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
     val = d.get(key, default)
     return str(val) if val is not None else default
+
+
 def _int_field(d: Mapping[str, object], key: str, default: int = 0) -> int:
     val = d.get(key, default)
-    if isinstance(val, int): return val
+    if isinstance(val, int):
+        return val
     if isinstance(val, str):
-        try: return int(val)
-        except ValueError: return default
+        try:
+            return int(val)
+        except ValueError:
+            return default
     return default
+
+
 def _dict_field(d: Mapping[str, object], key: str) -> Mapping[str, object]:
     val = d.get(key)
     return val if isinstance(val, dict) else {}
+
+
 def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> bool:
     val = d.get(key, default)
     return bool(val)
+
+
 _LOG_ERROR: str = "ERROR"
 _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
 _LOG_DEBUG: str = "DEBUG"
-def _log(level: str, component: str, msg: str | Path, *,
-         exc: BaseException | None = None) -> None:
+
+
+def _log(level: str, component: str, msg: str | Path, *, exc: BaseException | None = None) -> None:
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         import traceback as _tb
+
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+
+
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
-    try: return func(*args, **kwargs)
+    try:
+        return func(*args, **kwargs)
     except Exception as exc:
         _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
         return None
+
+
 class MarkdownToken(Protocol):
     type: str
     content: str
-    children: list['MarkdownToken'] | None
+    children: list["MarkdownToken"] | None
     attrs: dict[str, str] | None
+
+
 class SubprocessRunner(Protocol):
-    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        ...
-    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
-        ...
+    def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]: ...
+    def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]: ...
 class Clock(Protocol):
-    def time(self) -> float:
-        ...
-    def sleep(self, seconds: float) -> None:
-        ...
+    def time(self) -> float: ...
+    def sleep(self, seconds: float) -> None: ...
 class _RealSubprocessRunner:
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
+
     def popen(self, args: list[str], **kwargs: object) -> subprocess.Popen[str]:
         return subprocess.Popen(args, **kwargs)  # type: ignore[call-overload,no-any-return]
+
+
 class _RealClock:
     def time(self) -> float:
         return time.time()
+
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
+
+
 _subprocess_runner: SubprocessRunner = _RealSubprocessRunner()
 _clock: Clock = _RealClock()
 _urlopen: Callable[..., http.client.HTTPResponse] = urllib.request.urlopen  # type: ignore[explicit-any]
 import http.cookiejar
 import threading
 import urllib.error
+
+
 @dataclass(frozen=True)
 class RetryConfig:
     max_retries: int = 3
@@ -79,26 +106,40 @@ class RetryConfig:
     max_delay: float = 60.0
     backoff_factor: float = 2.0
     retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
 @dataclass(frozen=True)
 class RateLimitConfig:
     requests_per_second: float = 30.0
     burst: int = 30
+
+
 class _TokenBucket:
     def __init__(self, rate: float, burst: int, clock: Clock | None = None) -> None:
-        self._rate = rate; self._burst = burst; self._clock = clock or _RealClock(); self._tokens = float(burst)
-        self._last_refill = self._clock.time(); self._lock = threading.Lock()
+        self._rate = rate
+        self._burst = burst
+        self._clock = clock or _RealClock()
+        self._tokens = float(burst)
+        self._last_refill = self._clock.time()
+        self._lock = threading.Lock()
+
     def acquire(self, timeout: float = 30.0) -> bool:
         deadline = self._clock.time() + timeout
         while True:
             with self._lock:
-                now = self._clock.time(); elapsed = now - self._last_refill
-                self._tokens = min(self._burst, self._tokens + elapsed * self._rate); self._last_refill = now
+                now = self._clock.time()
+                elapsed = now - self._last_refill
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+                self._last_refill = now
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return True
             wait = min(1.0 / self._rate, deadline - self._clock.time())
-            if wait <= 0: return False
+            if wait <= 0:
+                return False
             self._clock.sleep(wait)
+
+
 class HttpClient:
     def __init__(  # type: ignore[explicit-any]
         self,
@@ -107,22 +148,28 @@ class HttpClient:
         clock: Clock | None = None,
         urlopen: Callable[..., http.client.HTTPResponse] | None = None,
     ) -> None:
-        self._retry = retry or RetryConfig(); self._rate_config = rate_limit or RateLimitConfig()
-        self._clock = clock or _RealClock(); self._urlopen_fn = urlopen or urllib.request.urlopen
+        self._retry = retry or RetryConfig()
+        self._rate_config = rate_limit or RateLimitConfig()
+        self._clock = clock or _RealClock()
+        self._urlopen_fn = urlopen or urllib.request.urlopen
         self._opener = urllib.request.build_opener(
             urllib.request.HTTPHandler(),
             urllib.request.HTTPSHandler(),
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), )
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+        )
         self._limiters: dict[str, _TokenBucket] = {}
         self._limiters_lock = threading.Lock()
+
     def _get_limiter(self, host: str) -> _TokenBucket:
         with self._limiters_lock:
             if host not in self._limiters:
                 self._limiters[host] = _TokenBucket(
                     rate=self._rate_config.requests_per_second,
                     burst=self._rate_config.burst,
-                    clock=self._clock, )
+                    clock=self._clock,
+                )
             return self._limiters[host]
+
     def request(
         self,
         url: str,
@@ -134,66 +181,93 @@ class HttpClient:
         retry: RetryConfig | None = None,
     ) -> http.client.HTTPResponse:
         from urllib.parse import urlparse
-        host = urlparse(url).hostname or "localhost"; cfg = retry or self._retry; limiter = self._get_limiter(host)
-        if not limiter.acquire(timeout=timeout): raise TimeoutError(f"Rate limit timeout for {host}")
+
+        host = urlparse(url).hostname or "localhost"
+        cfg = retry or self._retry
+        limiter = self._get_limiter(host)
+        if not limiter.acquire(timeout=timeout):
+            raise TimeoutError(f"Rate limit timeout for {host}")
         req = urllib.request.Request(url, data=data, method=method)
         if headers:
-            for k, v in headers.items(): req.add_header(k, v)
+            for k, v in headers.items():
+                req.add_header(k, v)
         last_exc: BaseException | None = None
         delay = cfg.initial_delay
         for attempt in range(cfg.max_retries + 1):
-            try: return self._urlopen_fn(req, timeout=timeout)
+            try:
+                return self._urlopen_fn(req, timeout=timeout)
             except urllib.error.HTTPError as e:
-                if e.code not in cfg.retryable_status: raise
+                if e.code not in cfg.retryable_status:
+                    raise
                 last_exc = e
                 _log(_LOG_WARN, "http", f"{method} {url} -> {e.code} (attempt {attempt+1}/{cfg.max_retries+1})")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 last_exc = e
-                _log(_LOG_WARN, "http", f"{method} {url} -> {type(e).__name__} (attempt {attempt+1}/{cfg.max_retries+1})")
+                _log(
+                    _LOG_WARN, "http", f"{method} {url} -> {type(e).__name__} (attempt {attempt+1}/{cfg.max_retries+1})"
+                )
             if attempt < cfg.max_retries:
                 self._clock.sleep(min(delay, cfg.max_delay))
                 delay *= cfg.backoff_factor
         raise last_exc  # type: ignore[misc]
-    def get(self, url: str, *, timeout: float = 30.0,
-            retry: RetryConfig | None = None) -> http.client.HTTPResponse:
+
+    def get(self, url: str, *, timeout: float = 30.0, retry: RetryConfig | None = None) -> http.client.HTTPResponse:
         return self.request(url, method="GET", timeout=timeout, retry=retry)
-    def post(self, url: str, data: bytes, *, headers: dict[str, str] | None = None,
-             timeout: float = 30.0,
-             retry: RetryConfig | None = None) -> http.client.HTTPResponse:
-        return self.request(url, method="POST", data=data, headers=headers,
-                            timeout=timeout, retry=retry)
+
+    def post(
+        self,
+        url: str,
+        data: bytes,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        retry: RetryConfig | None = None,
+    ) -> http.client.HTTPResponse:
+        return self.request(url, method="POST", data=data, headers=headers, timeout=timeout, retry=retry)
+
+
 _tg_http_client: HttpClient = HttpClient(
     rate_limit=RateLimitConfig(requests_per_second=25.0, burst=30),
-    retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})), )
+    retry=RetryConfig(max_retries=3, initial_delay=0.5, retryable_status=frozenset({429, 500, 502, 503})),
+)
 NODE_NAME = os.environ.get("NODE_NAME", "")
 _DEFAULT_PORTS = {"prod": 8271, "dev": 8272, "test": 8295}
-if NODE_NAME and not os.environ.get("PORT"): PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
-else: PORT = int(os.environ.get("PORT", "8270"))
+if NODE_NAME and not os.environ.get("PORT"):
+    PORT = _DEFAULT_PORTS.get(NODE_NAME, 8270)
+else:
+    PORT = int(os.environ.get("PORT", "8270"))
 BRIDGE_BIND = os.environ.get("BRIDGE_BIND", "127.0.0.1")
-if NODE_NAME and not os.environ.get("SESSIONS_DIR"): SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
-else: SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
-if NODE_NAME and not os.environ.get("TMUX_PREFIX"): TMUX_PREFIX = f"claude-{NODE_NAME}-"
-else: TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
+if NODE_NAME and not os.environ.get("SESSIONS_DIR"):
+    SESSIONS_DIR = Path.home() / ".claude" / "telegram" / "nodes" / NODE_NAME / "sessions"
+else:
+    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", Path.home() / ".claude" / "telegram" / "sessions"))
+if NODE_NAME and not os.environ.get("TMUX_PREFIX"):
+    TMUX_PREFIX = f"claude-{NODE_NAME}-"
+else:
+    TMUX_PREFIX = os.environ.get("TMUX_PREFIX", "claude-")
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_DIR", Path.home() / ".claude"))
 CLAUDE_SETTINGS_FILE = Path(os.environ.get("CLAUDE_SETTINGS_FILE", CLAUDE_DIR / "settings.json"))
 _bridge_url_env = os.environ.get("BRIDGE_URL", "").rstrip("/")
-if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")): BRIDGE_URL = _bridge_url_env
-else: BRIDGE_URL = f"http://localhost:{PORT}"
+if _bridge_url_env and not _bridge_url_env.startswith(("http://localhost", "http://127.0.0.1")):
+    BRIDGE_URL = _bridge_url_env
+else:
+    BRIDGE_URL = f"http://localhost:{PORT}"
 BRIDGE_PUBLIC_URL = os.environ.get("BRIDGE_PUBLIC_URL", "").rstrip("/")
 if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     from urllib.parse import urlparse as _urlparse_pub
+
     _pub_host = _urlparse_pub(BRIDGE_PUBLIC_URL).hostname or ""
     BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    if BRIDGE_BIND != "0.0.0.0": BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
+    if BRIDGE_BIND != "0.0.0.0":
+        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 NODE_DIR = SESSIONS_DIR.parent if NODE_NAME else SESSIONS_DIR.parent
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
-MACHINES_CONFIG_FILE = Path(os.environ.get(
-    "MACHINES_CONFIG_FILE",
-    Path.home() / ".config" / "claudecode-telegram" / "machines.json"
-))
+MACHINES_CONFIG_FILE = Path(
+    os.environ.get("MACHINES_CONFIG_FILE", Path.home() / ".config" / "claudecode-telegram" / "machines.json")
+)
 TIMEOUT_TMUX_CHECK = 3
 TIMEOUT_TMUX_SEND = 5
 TIMEOUT_REMOTE_CMD = 10
@@ -230,6 +304,8 @@ STT_ENDPOINT = os.environ.get("STT_ENDPOINT", "http://100.126.187.125:10110/tran
 STT_TIMEOUT = int(os.environ.get("STT_TIMEOUT", "10"))
 ADMIN_CHAT_ID_ENV = os.environ.get("ADMIN_CHAT_ID", "")
 admin_chat_id: int | None = int(ADMIN_CHAT_ID_ENV) if ADMIN_CHAT_ID_ENV else None
+
+
 @dataclass(frozen=True)
 class WatchdogConfig:
     interval: int = 4
@@ -243,6 +319,8 @@ class WatchdogConfig:
     alert_cooldown: int = 180
     restart_cooldown: int = 60
     host_down_threshold: int = 3
+
+
 @dataclass(frozen=True)
 class ResourceAlertConfig:
     disk_warn_pct: int = 85
@@ -260,6 +338,8 @@ class ResourceAlertConfig:
     io_iowait_pct: int = 30
     io_cooldown: int = 3600
     infra_cooldown: int = 300
+
+
 @dataclass(frozen=True)
 class TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"] = "poll"
@@ -275,18 +355,31 @@ class TunnelConfig:
     poll_timeout: int = 30
     poll_error_delay: int = 2
     port_wait_timeout: int = 30
+
+
 TUNNEL_MODE: str = os.environ.get("TUNNEL_MODE", "poll")
 TUNNEL_URL: str = os.environ.get("TUNNEL_URL", "")
+
+
 def _build_tunnel_config() -> TunnelConfig:
     mode: Literal["auto", "poll", "provided", "none"]
-    tunnel_url = TUNNEL_URL; raw = TUNNEL_MODE.lower()
-    if raw == "none": mode = "none"
-    elif raw == "poll": mode = "poll"
-    elif tunnel_url: mode = "provided"
-    elif raw == "provided": mode = "provided"
-    elif raw == "auto": mode = "auto"
-    else: mode = "poll"
+    tunnel_url = TUNNEL_URL
+    raw = TUNNEL_MODE.lower()
+    if raw == "none":
+        mode = "none"
+    elif raw == "poll":
+        mode = "poll"
+    elif tunnel_url:
+        mode = "provided"
+    elif raw == "provided":
+        mode = "provided"
+    elif raw == "auto":
+        mode = "auto"
+    else:
+        mode = "poll"
     return TunnelConfig(mode=mode, provided_url=tunnel_url)
+
+
 _wd_cfg = WatchdogConfig()
 _res_cfg = ResourceAlertConfig()
 WATCHDOG_INTERVAL = _wd_cfg.interval
@@ -316,6 +409,8 @@ IO_COOLDOWN = _res_cfg.io_cooldown
 INFRA_COOLDOWN = _res_cfg.infra_cooldown
 HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
 TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
+
+
 @dataclass
 class AppContext:
     bot_token: str = ""
@@ -333,10 +428,16 @@ class AppContext:
     watchdog_interval: int = 4
     webhook_secret: str = ""
     transport_mode: str = "telegram"
+
     def __post_init__(self) -> None:
-        if self.sessions_dir is None: self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
-        if self.claude_dir is None: self.claude_dir = Path.home() / ".claude"
-        if not self.bridge_url: self.bridge_url = f"http://localhost:{self.port}"
+        if self.sessions_dir is None:
+            self.sessions_dir = Path.home() / ".claude" / "telegram" / "sessions"
+        if self.claude_dir is None:
+            self.claude_dir = Path.home() / ".claude"
+        if not self.bridge_url:
+            self.bridge_url = f"http://localhost:{self.port}"
+
+
 def _build_app_context() -> AppContext:
     return AppContext(
         bot_token=BOT_TOKEN,
@@ -353,11 +454,17 @@ def _build_app_context() -> AppContext:
         team_dir=TEAM_DIR,
         watchdog_interval=WATCHDOG_INTERVAL,
         webhook_secret=WEBHOOK_SECRET,
-        transport_mode=TRANSPORT_MODE, )
+        transport_mode=TRANSPORT_MODE,
+    )
+
+
 _CLAUDE_JSON_PATH = Path.home() / ".claude.json"
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~/.claude/projects"))
 _app_context: AppContext | None = None
+
+
 def get_app_context() -> AppContext:
     global _app_context
-    if _app_context is None: _app_context = _build_app_context()
+    if _app_context is None:
+        _app_context = _build_app_context()
     return _app_context

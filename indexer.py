@@ -9,22 +9,32 @@ import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, Optional, Sequence
+
+
 @dataclass
 class PaginatedResult:
     total: int = 0
     total_pages: int = 0
     page: int = 1
     per_page: int = 50
+
+
 @dataclass
 class EntriesResult(PaginatedResult):
     entries: list[dict[str, Any]] = field(default_factory=list)
+
+
 @dataclass
 class SearchResult(PaginatedResult):
     query: str = ""
     total_results: int = 0
+
+
 @dataclass
 class TranscriptSearchResult(SearchResult):
     entries: list[dict[str, Any]] = field(default_factory=list)
+
+
 @dataclass
 class TranscriptStats:
     n_user: int = 0
@@ -42,23 +52,32 @@ class TranscriptStats:
     input_tokens: int = 0
     output_tokens: int = 0
     duration: str = ""
+
+
 def _sanitize_fts5_query(term: str) -> str:
-    if re.search(r'\b(AND|OR|NOT|NEAR)\b', term): return term
+    if re.search(r"\b(AND|OR|NOT|NEAR)\b", term):
+        return term
     if re.search(r'[.*:^(){}"\-]', term):
         tokens = term.split()
         quoted = []
         for t in tokens:
             t = t.strip('"')
-            if t: quoted.append(f'"{t}"')
+            if t:
+                quoted.append(f'"{t}"')
         return " ".join(quoted)
     return term
+
+
 def _setup_db(db_path: str) -> sqlite3.Connection:
     db_dir = os.path.dirname(db_path)
-    if db_dir: os.makedirs(db_dir, exist_ok=True)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     db = sqlite3.connect(db_path)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=5000")
     return db
+
+
 def _check_incremental(
     db: sqlite3.Connection,
     jsonl_path: str,
@@ -66,7 +85,8 @@ def _check_incremental(
     meta_table: str = "meta",
 ) -> tuple[int, bool]:
     file_size = os.path.getsize(jsonl_path)
-    if file_size == 0: return 0, False
+    if file_size == 0:
+        return 0, False
     row = db.execute(f"SELECT value FROM {meta_table} WHERE key='file_size'").fetchone()
     old_size = int(row[0]) if row else 0
     path_row = db.execute(f"SELECT value FROM {meta_table} WHERE key='jsonl_path'").fetchone()
@@ -78,13 +98,16 @@ def _check_incremental(
         db.execute(f"DELETE FROM {fts_table}")
         db.execute(f"DELETE FROM {meta_table}")
         return 0, True
-    if old_size == file_size: return old_size, False  # No changes
+    if old_size == file_size:
+        return old_size, False  # No changes
     if old_size > file_size:
         db.execute(f"DELETE FROM {table}")
         db.execute(f"DELETE FROM {fts_table}")
         db.execute(f"DELETE FROM {meta_table}")
         return 0, True
     return old_size, True
+
+
 def _update_meta(
     db: sqlite3.Connection,
     jsonl_path: str,
@@ -97,15 +120,23 @@ def _update_meta(
     db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('entry_count', ?)", (str(next_idx),))
     db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('jsonl_path', ?)", (abs_path,))
     db.commit()
+
+
 def _paginate(total: int, page: Optional[int], per_page: int) -> tuple[int, int, int]:
     total_pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 0
-    if page is None: page = total_pages  # Default to last page
+    if page is None:
+        page = total_pages  # Default to last page
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
     return page, total_pages, offset
+
+
 _SKIP_TYPES = frozenset(("progress", "queue-operation", "file-history-snapshot", "system"))
+
+
 def _transcript_create_tables(db: sqlite3.Connection) -> None:
-    db.execute("""CREATE TABLE IF NOT EXISTS entries (
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS entries (
         idx INTEGER PRIMARY KEY,
         byte_offset INTEGER,
         type TEXT,
@@ -118,44 +149,61 @@ def _transcript_create_tables(db: sqlite3.Connection) -> None:
         plain_text TEXT,
         input_tokens INTEGER DEFAULT 0,
         output_tokens INTEGER DEFAULT 0
-    )""")
-    has_fts = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='entries_fts'"
-    ).fetchone()
+    )"""
+    )
+    has_fts = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries_fts'").fetchone()
     if not has_fts:
-        db.execute("""CREATE VIRTUAL TABLE entries_fts USING fts5(
+        db.execute(
+            """CREATE VIRTUAL TABLE entries_fts USING fts5(
             plain_text, content=entries, content_rowid=idx,
             tokenize='unicode61'
-        )""")
+        )"""
+        )
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+
 def _extract_plain_text(entry: dict[str, Any]) -> str:
     msg = entry.get("message", {})
     content = msg.get("content", "")
-    if isinstance(content, str): return content
+    if isinstance(content, str):
+        return content
     parts: list[str] = []
     if isinstance(content, list):
         for c in content:
-            if not isinstance(c, dict): continue
-            if c.get("text"): parts.append(c["text"])
-            if c.get("thinking"): parts.append(c["thinking"])
-            if isinstance(c.get("content"), str): parts.append(c["content"])
-            if c.get("type") == "tool_use": parts.append(json.dumps(c.get("input", {}), ensure_ascii=False))
+            if not isinstance(c, dict):
+                continue
+            if c.get("text"):
+                parts.append(c["text"])
+            if c.get("thinking"):
+                parts.append(c["thinking"])
+            if isinstance(c.get("content"), str):
+                parts.append(c["content"])
+            if c.get("type") == "tool_use":
+                parts.append(json.dumps(c.get("input", {}), ensure_ascii=False))
     return " ".join(parts)
+
+
 def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
     old_size, needs_work = _check_incremental(db, jsonl_path, "entries")
-    if not needs_work and old_size == os.path.getsize(jsonl_path): return 0
+    if not needs_work and old_size == os.path.getsize(jsonl_path):
+        return 0
     row = db.execute("SELECT MAX(idx) FROM entries").fetchone()
     next_idx: int = (row[0] + 1) if row[0] is not None else 0
     new_count = 0
     with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-        if old_size > 0: f.seek(old_size)
+        if old_size > 0:
+            f.seek(old_size)
         for line in f:
             line = line.strip()
-            if not line: continue
-            try: entry: dict[str, Any] = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError): continue
+            if not line:
+                continue
+            try:
+                entry: dict[str, Any] = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
             etype: str = entry.get("type", "")
-            if etype in _SKIP_TYPES: continue
+            if etype in _SKIP_TYPES:
+                continue
             msg = entry.get("message", {})
             plain_text = _extract_plain_text(entry)
             usage = msg.get("usage", {})
@@ -168,12 +216,18 @@ def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
             db.execute(
                 "INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    next_idx, old_size, etype,
-                    msg.get("role", ""), entry.get("timestamp", ""),
-                    msg.get("model", ""), entry.get("version", ""),
+                    next_idx,
+                    old_size,
+                    etype,
+                    msg.get("role", ""),
+                    entry.get("timestamp", ""),
+                    msg.get("model", ""),
+                    entry.get("version", ""),
                     entry.get("gitBranch", ""),
                     json.dumps(entry, ensure_ascii=False),
-                    plain_text, input_tokens, output_tokens,
+                    plain_text,
+                    input_tokens,
+                    output_tokens,
                 ),
             )
             db.execute(
@@ -184,6 +238,8 @@ def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
             new_count += 1
     _update_meta(db, jsonl_path, next_idx)
     return new_count
+
+
 def _transcript_query_entries(
     db: sqlite3.Connection,
     page: Optional[int] = None,
@@ -198,21 +254,25 @@ def _transcript_query_entries(
             "AND json_type(raw_json, '$.message.content') = 'text'"
         )
     total: int = db.execute(f"SELECT COUNT(*) FROM entries {where}").fetchone()[0]
-    if total == 0: return asdict(EntriesResult(per_page=per_page))
+    if total == 0:
+        return asdict(EntriesResult(per_page=per_page))
     page_num, total_pages, offset = _paginate(total, page, per_page)
     rows = db.execute(
-        f"SELECT idx, type, role, timestamp, raw_json FROM entries {where} "
-        "ORDER BY idx LIMIT ? OFFSET ?",
+        f"SELECT idx, type, role, timestamp, raw_json FROM entries {where} " "ORDER BY idx LIMIT ? OFFSET ?",
         (per_page, offset),
     ).fetchall()
-    entries = [
-        {"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4]}
-        for r in rows
-    ]
-    return asdict(EntriesResult(
-        entries=entries, total=total, total_pages=total_pages,
-        page=page_num, per_page=per_page,
-    ))
+    entries = [{"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4]} for r in rows]
+    return asdict(
+        EntriesResult(
+            entries=entries,
+            total=total,
+            total_pages=total_pages,
+            page=page_num,
+            per_page=per_page,
+        )
+    )
+
+
 def _transcript_query_search(
     db: sqlite3.Connection,
     search_term: str,
@@ -220,7 +280,8 @@ def _transcript_query_search(
     per_page: int = 50,
     sort: str = "relevance",
 ) -> dict[str, Any]:
-    if not search_term: return asdict(TranscriptSearchResult(per_page=per_page))
+    if not search_term:
+        return asdict(TranscriptSearchResult(per_page=per_page))
     safe_term = _sanitize_fts5_query(search_term)
     try:
         total_results: int = db.execute(
@@ -233,7 +294,8 @@ def _transcript_query_search(
             "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
             (safe_term,),
         ).fetchone()[0]
-    if total_results == 0: return asdict(TranscriptSearchResult(query=search_term, per_page=per_page))
+    if total_results == 0:
+        return asdict(TranscriptSearchResult(query=search_term, per_page=per_page))
     page_num, total_pages, offset = _paginate(total_results, page, per_page)
     order = "ORDER BY e.idx" if sort == "time" else "ORDER BY f.rank"
     rows = db.execute(
@@ -243,27 +305,40 @@ def _transcript_query_search(
         (safe_term, per_page, offset),
     ).fetchall()
     entries = [
-        {"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3],
-         "raw_json": r[4], "rank": r[5]}
-        for r in rows
+        {"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4], "rank": r[5]} for r in rows
     ]
-    return asdict(TranscriptSearchResult(
-        entries=entries, total_results=total_results, total_pages=total_pages,
-        page=page_num, per_page=per_page, query=search_term,
-    ))
+    return asdict(
+        TranscriptSearchResult(
+            entries=entries,
+            total_results=total_results,
+            total_pages=total_pages,
+            page=page_num,
+            per_page=per_page,
+            query=search_term,
+        )
+    )
+
+
 def _transcript_query_stats(db: sqlite3.Connection) -> dict[str, Any]:
-    agg = db.execute("""SELECT
+    agg = db.execute(
+        """SELECT
         SUM(input_tokens), SUM(output_tokens),
         MIN(timestamp), MAX(timestamp),
         (SELECT model FROM entries WHERE type='assistant' AND model != '' LIMIT 1),
         (SELECT version FROM entries WHERE version != '' LIMIT 1),
         (SELECT git_branch FROM entries WHERE git_branch != '' LIMIT 1)
-    FROM entries""").fetchone()
-    if not agg or agg[0] is None: return asdict(TranscriptStats())
+    FROM entries"""
+    ).fetchone()
+    if not agg or agg[0] is None:
+        return asdict(TranscriptStats())
     stats = TranscriptStats(
-        input_tokens=agg[0] or 0, output_tokens=agg[1] or 0,
-        first_ts=agg[2] or "", last_ts=agg[3] or "",
-        model=agg[4] or "", version=agg[5] or "", git_branch=agg[6] or "",
+        input_tokens=agg[0] or 0,
+        output_tokens=agg[1] or 0,
+        first_ts=agg[2] or "",
+        last_ts=agg[3] or "",
+        model=agg[4] or "",
+        version=agg[5] or "",
+        git_branch=agg[6] or "",
     )
     stats.n_user = db.execute(
         "SELECT COUNT(*) FROM entries WHERE type='user' AND role='user' "
@@ -271,17 +346,21 @@ def _transcript_query_stats(db: sqlite3.Connection) -> dict[str, Any]:
     ).fetchone()[0]
     files_modified: set[str] = set()
     for (raw,) in db.execute("SELECT raw_json FROM entries WHERE type='assistant'").fetchall():
-        try: entry = json.loads(raw)
-        except (json.JSONDecodeError, ValueError): continue
+        try:
+            entry = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
         content = entry.get("message", {}).get("content", [])
         if isinstance(content, list):
             for item in content:
-                if not isinstance(item, dict) or item.get("type") != "tool_use": continue
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
                 stats.n_tool += 1
                 name = item.get("name", "")
                 ti = item.get("input", {})
                 fp = ti.get("file_path", "") or ti.get("path", "")
-                if fp: files_modified.add(fp)
+                if fp:
+                    files_modified.add(fp)
                 if name == "Edit":
                     stats.n_edit += 1
                     n_old = len(ti.get("old_string", "").splitlines(True))
@@ -301,43 +380,55 @@ def _transcript_query_stats(db: sqlite3.Connection) -> dict[str, Any]:
                 days, rem = divmod(delta, 86400)
                 hours, rem = divmod(rem, 3600)
                 mins = rem // 60
-                if days > 0: stats.duration = f"{days}d {hours}h"
-                elif hours > 0: stats.duration = f"{hours}h {mins}m"
-                else: stats.duration = f"{mins}m"
-        except (ValueError, TypeError): pass
+                if days > 0:
+                    stats.duration = f"{days}d {hours}h"
+                elif hours > 0:
+                    stats.duration = f"{hours}h {mins}m"
+                else:
+                    stats.duration = f"{mins}m"
+        except (ValueError, TypeError):
+            pass
     return asdict(stats)
+
+
 def _run_transcript(args: argparse.Namespace) -> None:
     if not os.path.exists(args.jsonl):
         empty: dict[str, Any]
-        if args.query == "entries": empty = asdict(EntriesResult(per_page=args.per_page))
-        elif args.query == "search": empty = asdict(TranscriptSearchResult(query=args.search, per_page=args.per_page))
-        elif args.query == "stats": empty = asdict(TranscriptStats())
-        elif args.query in ("entries+stats", "search+stats"): empty = asdict(TranscriptStats())
-        else: empty = {}
+        if args.query == "entries":
+            empty = asdict(EntriesResult(per_page=args.per_page))
+        elif args.query == "search":
+            empty = asdict(TranscriptSearchResult(query=args.search, per_page=args.per_page))
+        elif args.query == "stats":
+            empty = asdict(TranscriptStats())
+        elif args.query in ("entries+stats", "search+stats"):
+            empty = asdict(TranscriptStats())
+        else:
+            empty = {}
         json.dump(empty, sys.stdout)
         return
     db = _setup_db(args.db)
     _transcript_create_tables(db)
-    if os.path.getsize(args.jsonl) > 0: _transcript_index(db, args.jsonl)
+    if os.path.getsize(args.jsonl) > 0:
+        _transcript_index(db, args.jsonl)
     result: dict[str, Any]
     if args.query == "entries":
-        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page,
-                                           filter_mode=args.filter_mode)
+        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
     elif args.query == "search":
-        result = _transcript_query_search(db, args.search, page=args.page or 1,
-                                          per_page=args.per_page, sort=args.sort)
-    elif args.query == "stats": result = _transcript_query_stats(db)
+        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
+    elif args.query == "stats":
+        result = _transcript_query_stats(db)
     elif args.query == "entries+stats":
-        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page,
-                                           filter_mode=args.filter_mode)
+        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
         result["stats"] = _transcript_query_stats(db)
     elif args.query == "search+stats":
-        result = _transcript_query_search(db, args.search, page=args.page or 1,
-                                          per_page=args.per_page, sort=args.sort)
+        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
         result["stats"] = _transcript_query_stats(db)
-    else: result = {}
+    else:
+        result = {}
     json.dump(result, sys.stdout, ensure_ascii=False)
     db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="JSONL transcript indexer with SQLite FTS5",
@@ -350,11 +441,13 @@ def main() -> None:
     shared.add_argument("--per-page", type=int, default=50, help="Items per page")
     shared.add_argument("--search", type=str, default="", help="Search term")
     t = sub.add_parser("transcript", parents=[shared], help="Index Claude transcripts")
-    t.add_argument("--query", required=True,
-                   choices=["entries", "search", "stats", "entries+stats", "search+stats"])
-    t.add_argument("--filter", type=str, default="", dest="filter_mode",
-                   help="Filter mode (e.g., 'prompts')")
+    t.add_argument("--query", required=True, choices=["entries", "search", "stats", "entries+stats", "search+stats"])
+    t.add_argument("--filter", type=str, default="", dest="filter_mode", help="Filter mode (e.g., 'prompts')")
     t.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"])
     args = parser.parse_args()
-    if args.mode == "transcript": _run_transcript(args)
-if __name__ == "__main__": main()
+    if args.mode == "transcript":
+        _run_transcript(args)
+
+
+if __name__ == "__main__":
+    main()
