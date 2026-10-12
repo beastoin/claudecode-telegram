@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import suppress
 from shared import (
     _subprocess_runner,
     _clock,
@@ -426,10 +427,8 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                         ["tmux", "load-buffer", "-b", buf_name, tmpfile], capture_output=True, timeout=TIMEOUT_TMUX_SEND
                     )
                 finally:
-                    try:
+                    with suppress(OSError):
                         os.unlink(tmpfile)
-                    except OSError:
-                        pass
             if r.returncode != 0:
                 return False
             r = _remote_run(
@@ -669,7 +668,7 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
         remote_sessions = bridge._remap_sessions_dir(host)
         sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"
         session_id = ""
-        try:
+        with suppress(OSError, subprocess.TimeoutExpired):
             r = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=5", host, "cat", sid_file],
                 capture_output=True,
@@ -678,8 +677,6 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
             )
             if r.returncode == 0:
                 session_id = r.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
         cmd_parts = ["codex", "exec", "--json", "--yolo"]
         if session_id and not session_id.startswith("-"):
             cmd_parts.extend(["resume", session_id, "-"])
@@ -691,7 +688,7 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
         if result.returncode != 0 and not response:
             response = (result.stderr or "").strip() or "Codex exec failed."
         if new_session_id:
-            try:
+            with suppress(OSError, subprocess.TimeoutExpired):
                 subprocess.run(
                     [
                         "ssh",
@@ -710,8 +707,6 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
                     timeout=10,
                     capture_output=True,
                 )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
         if response:
             target_url = BRIDGE_PUBLIC_URL or bridge_url
             _codex_send_to_bridge(worker_name, response, target_url)
@@ -805,10 +800,8 @@ def cleanup_worker_pipe(name: str) -> None:
             _log(_LOG_WARN, "worker", f"Failed to remove worker pipe {pipe_path}: {e}")
     pipe_dir = pipe_path.parent
     if pipe_dir.exists():
-        try:
+        with suppress(OSError):
             pipe_dir.rmdir()
-        except OSError:
-            pass
 
 
 def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
@@ -883,14 +876,12 @@ def stop_pipe_reader(name: str) -> None:
     stop_event.set()
     pipe_path = get_worker_pipe_path(name)
     if pipe_path.exists():
-        try:
+        with suppress(OSError):
             fd = os.open(str(pipe_path), os.O_WRONLY | os.O_NONBLOCK)
             try:
                 os.write(fd, b"\n")
             finally:
                 os.close(fd)
-        except OSError:
-            pass
     thread.join(timeout=TIMEOUT_THREAD_JOIN)
     if thread.is_alive():
         _log(_LOG_WARN, "bridge", f"Warning: pipe reader thread for '{name}' did not stop gracefully")
@@ -1221,7 +1212,7 @@ def tmux_prompt_empty(tmux_name: str, timeout: float = 0.5, host: str | None = N
 
 def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host: str | None = None) -> None:
     our_url = (BRIDGE_PUBLIC_URL or BRIDGE_URL) if host else BRIDGE_URL
-    try:
+    with suppress(urllib.error.URLError, OSError, TimeoutError):
         r = _remote_run(
             ["tmux", "show-environment", "-t", tmux_name, "BRIDGE_URL"],
             host=host,
@@ -1232,8 +1223,6 @@ def export_hook_env(tmux_name: str, backend: str = DEFAULT_WORKER_BACKEND, host:
             _urlopen(existing, timeout=TIMEOUT_THREAD_JOIN).read()
             _log(_LOG_DEBUG, "worker", f"  SKIP export_hook_env({tmux_name}): owned by live bridge at {existing}")
             return
-    except (urllib.error.URLError, OSError, TimeoutError):
-        pass
     _remote_run(["tmux", "set-environment", "-t", tmux_name, "PORT", str(PORT)], host=host, timeout=TIMEOUT_TMUX_CHECK)
     _remote_run(
         ["tmux", "set-environment", "-t", tmux_name, "TMUX_PREFIX", TMUX_PREFIX], host=host, timeout=TIMEOUT_TMUX_CHECK

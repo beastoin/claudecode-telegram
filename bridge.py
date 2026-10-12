@@ -1018,14 +1018,12 @@ class TunnelManager:
         elapsed = 0
         bind_host = self._bind_host or "127.0.0.1"
         while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
-            try:
+            with suppress(ConnectionRefusedError, OSError):
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(1)
                     s.connect((bind_host, self._port))
                     _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
                     return True
-            except (ConnectionRefusedError, OSError):
-                pass
             self._clock.sleep(1)
             elapsed += 1
         return False
@@ -1051,7 +1049,7 @@ class TunnelManager:
             (self._node_dir / "tunnel.pid").write_text(str(pid))
 
     def _save_bot_info(self) -> None:
-        try:
+        with suppress(Exception):
             info = self._tg_get_me()
             if info.get("ok"):
                 result = info.get("result", {})
@@ -1062,8 +1060,6 @@ class TunnelManager:
                         (self._node_dir / "bot_id").write_text(str(bot_id))
                     if username:
                         (self._node_dir / "bot_username").write_text(username)
-        except Exception:
-            pass
 
 import abc
 import base64
@@ -8678,15 +8674,11 @@ def handle_health_workers_endpoint(handler) -> None:
 
 import base64 as _b64
 
-def _b():
-    return _b
-
 
 def handle_pr_file_content(handler, parsed: ParseResult) -> None:
-    b = _b()
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
-    if not b.tokens.validate_pr_review(token):
+    if not tokens.validate_pr_review(token):
         handler._send_status(403)
         return
     owner = params.get("owner", [None])[0]
@@ -8696,7 +8688,7 @@ def handle_pr_file_content(handler, parsed: ParseResult) -> None:
     if not all([owner, repo, path, ref]):
         handler._send_status(400)
         return
-    ok, out = b._gh_api_call([f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
+    ok, out = _gh_api_call([f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
     if not ok:
         handler._send_status(504 if out == "timeout" else 404)
         return
@@ -8708,105 +8700,99 @@ def handle_pr_file_content(handler, parsed: ParseResult) -> None:
 
 
 def handle_pr_keepalive(handler, parsed: ParseResult) -> None:
-    b = _b()
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
-    if not b.tokens.validate_pr_review(token):
+    if not tokens.validate_pr_review(token):
         handler._send_status(403)
         return
     handler._send_status(204)
 
 
 def handle_pr_review_comments(handler, body: bytes) -> None:
-    b = _b()
-    try:
-        data = cast(dict[str, object], json.loads(body))
-    except (json.JSONDecodeError, ValueError):
-        handler._send_text(400, "Invalid JSON")
-        return
-    if b._str_field(data, "path") and b._int_field(data, "line"):
-        handle_pr_comment(handler, body)
-    else:
-        handle_pr_general_comment(handler, body)
-
-
-def _pr_guard(handler, body: bytes):
-    b = _b()
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
         handler._send_text(400, "Invalid JSON")
-        return None
-    if not b.tokens.validate_pr_review(b._str_field(data, "token")):
+        return
+    if not tokens.validate_pr_review(_str_field(data, "token")):
         handler._send_text(403, "Token expired")
-        return None
-    return data
-
-
-def _pr_notify(text: str) -> None:
-    b = _b()
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"{b.BRIDGE_PUBLIC_URL or f'http://localhost:{b.PORT}'}/notifications",
-            data=json.dumps({"text": text}).encode(),
-            headers={"Content-Type": "application/json"},
+        return
+    owner, repo = _str_field(data, "owner"), _str_field(data, "repo")
+    pr_num, comment_body = _int_field(data, "pr_num"), _str_field(data, "body").strip()
+    path, line = _str_field(data, "path"), _int_field(data, "line")
+    if path and line:
+        side = _str_field(data, "side", "RIGHT")
+        head_sha = _str_field(data, "head_sha")
+        if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
+            handler._send_text(400, "Missing required fields")
+            return
+        gh_payload = json.dumps({"body": comment_body, "commit_id": head_sha, "path": path, "line": line, "side": side})
+        ok, err = _gh_api_call(
+            [f"repos/{owner}/{repo}/pulls/{pr_num}/comments", "--method", "POST", "--input", "-"], input_data=gh_payload
         )
-        b._urlopen(req, timeout=b.TIMEOUT_TMUX_SEND)
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        b._log(b._LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
-
-
-def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
-    b = _b()
-    targets, _ = b.command_router.parse_at_mentions(comment_body)
-    if targets:
-        msg = f"manager: PR #{pr_num} review comment{prefix}\n\n{comment_body}"
-        for t in targets:
-            b.send_to_worker(t, msg)
-
-
-def handle_pr_general_comment(handler, body: bytes) -> None:
-    b = _b()
-    data = _pr_guard(handler, body)
-    if not data:
-        return
-    owner = b._str_field(data, "owner")
-    repo = b._str_field(data, "repo")
-    pr_num = b._int_field(data, "pr_num")
-    comment_body = b._str_field(data, "body").strip()
-    if not all([owner, repo, pr_num, comment_body]):
-        handler._send_text(400, "Missing required fields")
-        return
-    ok, err = b._gh_api_call(
-        [f"repos/{owner}/{repo}/issues/{pr_num}/comments", "--method", "POST", "-f", f"body={comment_body}"]
-    )
-    if not ok:
-        handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err[:200]}")
-        return
-    _pr_notify(f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}")
-    _pr_fan_out(pr_num, comment_body)
+        if not ok:
+            _log(_LOG_ERROR, "pr-comment", f"GitHub API error: {err}")
+            handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err}")
+            return
+        if admin_chat_id:
+            transport.send_text(admin_chat_id, f"\U0001f4ac PR #{pr_num} comment\n{path}:{line}\n\n{comment_body}")
+        _pr_fan_out(pr_num, comment_body, f" on {path}:{line}")
+    else:
+        if not all([owner, repo, pr_num, comment_body]):
+            handler._send_text(400, "Missing required fields")
+            return
+        ok, err = _gh_api_call(
+            [f"repos/{owner}/{repo}/issues/{pr_num}/comments", "--method", "POST", "-f", f"body={comment_body}"]
+        )
+        if not ok:
+            handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err[:200]}")
+            return
+        _pr_notify(f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}")
+        _pr_fan_out(pr_num, comment_body)
     handler._send_json(200, {"ok": True})
 
 
+def _pr_notify(text: str) -> None:
+    try:
+        req = urllib.request.Request(
+            f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notifications",
+            data=json.dumps({"text": text}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        _urlopen(req, timeout=TIMEOUT_TMUX_SEND)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
+
+
+def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
+    targets, _ = command_router.parse_at_mentions(comment_body)
+    if targets:
+        msg = f"manager: PR #{pr_num} review comment{prefix}\n\n{comment_body}"
+        for t in targets:
+            send_to_worker(t, msg)
+
+
 def handle_pr_merge(handler, body: bytes) -> None:
-    b = _b()
-    data = _pr_guard(handler, body)
-    if not data:
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        handler._send_text(400, "Invalid JSON")
         return
-    owner = b._str_field(data, "owner")
-    repo = b._str_field(data, "repo")
-    pr_num = b._int_field(data, "pr_num")
-    merge_method = b._str_field(data, "merge_method", "merge")
+    if not tokens.validate_pr_review(_str_field(data, "token")):
+        handler._send_text(403, "Token expired")
+        return
+    owner = _str_field(data, "owner")
+    repo = _str_field(data, "repo")
+    pr_num = _int_field(data, "pr_num")
+    merge_method = _str_field(data, "merge_method", "merge")
     if merge_method not in ("merge", "squash", "rebase"):
         merge_method = "merge"
     if not all([owner, repo, pr_num]):
         handler._send_text(400, "Missing required fields")
         return
-    ok, err = b._gh_api_call(
+    ok, err = _gh_api_call(
         [f"repos/{owner}/{repo}/pulls/{pr_num}/merge", "--method", "PUT", "-f", f"merge_method={merge_method}"],
-        timeout=b.TIMEOUT_GIT_OP,
+        timeout=TIMEOUT_GIT_OP,
     )
     if not ok:
         handler._send_text(504 if err == "timeout" else 502, f"Merge failed: {err[:300]}")
@@ -8816,10 +8802,9 @@ def handle_pr_merge(handler, body: bytes) -> None:
 
 
 def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
-    b = _b()
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
-    info = b.tokens.validate_pr_review(token)
+    info = tokens.validate_pr_review(token)
     if not info:
         handler._send_html(
             b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>",
@@ -8838,33 +8823,10 @@ def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
 
 
 def handle_pr_comment(handler, body: bytes) -> None:
-    b = _b()
-    data = _pr_guard(handler, body)
-    if not data:
-        return
-    owner = b._str_field(data, "owner")
-    repo = b._str_field(data, "repo")
-    pr_num = b._int_field(data, "pr_num")
-    path = b._str_field(data, "path")
-    line = b._int_field(data, "line")
-    side = b._str_field(data, "side", "RIGHT")
-    comment_body = b._str_field(data, "body").strip()
-    head_sha = b._str_field(data, "head_sha")
-    if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
-        handler._send_text(400, "Missing required fields")
-        return
-    gh_payload = json.dumps({"body": comment_body, "commit_id": head_sha, "path": path, "line": line, "side": side})
-    ok, err = b._gh_api_call(
-        [f"repos/{owner}/{repo}/pulls/{pr_num}/comments", "--method", "POST", "--input", "-"], input_data=gh_payload
-    )
-    if not ok:
-        b._log(b._LOG_ERROR, "pr-comment", f"GitHub API error: {err}")
-        handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err}")
-        return
-    if b.admin_chat_id:
-        b.transport.send_text(b.admin_chat_id, f"\U0001f4ac PR #{pr_num} comment\n{path}:{line}\n\n{comment_body}")
-    _pr_fan_out(pr_num, comment_body, f" on {path}:{line}")
-    handler._send_json(200, {"ok": True})
+    """Backward compat — delegates to unified handler."""
+    handle_pr_review_comments(handler, body)
+
+handle_pr_general_comment = handle_pr_comment  # same unified handler
 
 import hashlib
 
@@ -9407,26 +9369,21 @@ class WorkerRecord:
         return self.backend == "claude"
 
 
-def _registry_update_teleport(name: str, host: str, home_host: str | None, home_cwd: str | None) -> None:
+def _registry_update_teleport(name: str, host: str | None, home_host: str | None, home_cwd: str | None) -> None:
     with watchdog.lock:
         data = _load_registry()
         worker = data.get("workers", {}).get(name, {})
-        worker["host"] = host
-        worker["home_host"] = home_host
-        worker["home_cwd"] = home_cwd
+        for key, val in [("host", host), ("home_host", home_host), ("home_cwd", home_cwd)]:
+            if val is not None:
+                worker[key] = val
+            else:
+                worker.pop(key, None)
         data.setdefault("workers", {})[name] = worker
         _save_registry(data)
 
 
 def _registry_clear_teleport(name: str) -> None:
-    with watchdog.lock:
-        data = _load_registry()
-        worker = data.get("workers", {}).get(name, {})
-        worker.pop("host", None)
-        worker.pop("home_host", None)
-        worker.pop("home_cwd", None)
-        data.setdefault("workers", {})[name] = worker
-        _save_registry(data)
+    _registry_update_teleport(name, host=None, home_host=None, home_cwd=None)
 
 
 def mark_hook_event(session_name: str) -> None:

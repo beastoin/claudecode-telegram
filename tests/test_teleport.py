@@ -125,7 +125,7 @@ def test_registry_teleport_fields():
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data['workers']['lee']
     assert w['host'] == 'mac', f'host should be mac, got {w.get("host")}'
-    assert w['home_host'] is None, f'home_host should be None'
+    assert 'home_host' not in w, f'home_host should be removed when None'
     assert w['home_cwd'] == '/home/claude/proj', f'home_cwd wrong'
 
     # Clear teleport info (teleback)
