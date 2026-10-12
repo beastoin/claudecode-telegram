@@ -2296,7 +2296,7 @@ import health as _health_mod
 import relay as _relay_mod
 import _bridge_helpers as _bh_mod
 import _health_impl as _hi_mod
-import _claudecode_impl as _ci_mod
+_ci_mod = _cc_mod  # _claudecode_impl merged into claudecode
 _ti_mod = _tg_mod  # _telegram_impl merged into telegram
 import teleport as _tp_mod
 import _teleport_ops as _tpo_mod
