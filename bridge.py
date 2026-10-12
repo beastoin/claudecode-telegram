@@ -49,10 +49,10 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, ParseResult
+from urllib.parse import ParseResult, parse_qs, urlparse, quote as _urlquote
 from pathlib import Path
 from collections.abc import Mapping
-from typing import IO, Any, Callable, NamedTuple, TypedDict, cast
+from typing import Any, Callable, Generic, IO, Iterable, NamedTuple, Optional, Protocol, Sequence, TYPE_CHECKING, TypeVar, TypedDict, cast
 from telegram import *  # noqa: F401,F403
 from telegram import (
     _TelegramHTMLSanitizer,
@@ -183,8 +183,7 @@ def generate_html(
 import argparse
 import sqlite3
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
-from typing import Any, Optional, Sequence
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass
@@ -632,7 +631,6 @@ def _indexer_main() -> None:
 import enum
 import http.client
 import socket
-from typing import Callable, Protocol, cast
 
 
 class UrlOpenFn(Protocol):
@@ -1092,8 +1090,6 @@ class TunnelManager:
 import abc
 import base64
 import binascii
-from datetime import datetime, timezone, timedelta
-from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
 
 
 class MessageCallback(Protocol):
@@ -1129,8 +1125,6 @@ M = TypeVar("M")
 # ============================================================
 # _connector_impl
 # ============================================================
-
-
 
 
 def _atomic_write(path: str, payload: str | bytes) -> None:
@@ -1423,7 +1417,6 @@ def _safe_json_loads_list(raw: str) -> list[GithubComment]:
             except json.JSONDecodeError:
                 continue
     return [cast(GithubComment, item) for item in raw_items if isinstance(item, dict)]
-
 
 
 class GmailConnector(BaseConnector[GmailMessage]):
@@ -2348,11 +2341,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
 # ============================================================
 
 
-from typing import TYPE_CHECKING, Callable, cast
-from urllib.parse import urlparse
-
 import shared as core
-import telegram
+
 
 def connector_log_message(tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
     from bridge import connectors
@@ -2361,10 +2351,9 @@ def connector_log_message(tag: str, html_text: str, plain_text: str, targets: li
 
 
 def connector_render_html(tag: str, current_html: str) -> str:
-    import html as html_mod
     from bridge import connectors, _CONNECTOR_CSS
 
-    esc = html_mod.escape
+    esc = html.escape
     msgs = connectors.get_log(tag)
     icon = "🔔" if tag == "github" else "📧"
     title = f"{tag.title()} Feed"
@@ -2401,7 +2390,6 @@ def connector_render_html(tag: str, current_html: str) -> str:
 def connector_short_summary(
     tag: str, plain_text: str, serve_url: str | None = None, metadata: ConnectorMetadataDict | None = None
 ) -> str:
-    import html as _html
 
     icon = "🔔" if tag == "github" else "📧"
     body = plain_text.strip()
@@ -2419,15 +2407,15 @@ def connector_short_summary(
         gh_url = f"https://github.com/{repo}/issues/{num}"
         header += f' <a href="{gh_url}">#{num}</a>'
     elif thread_match:
-        header += f" {_html.escape('thread:' + thread_match.group(1))}"
-    parts = [header, _html.escape(body)]
+        header += f" {html.escape('thread:' + thread_match.group(1))}"
+    parts = [header, html.escape(body)]
     if serve_url:
-        parts.append(f'<a href="{_html.escape(serve_url)}">View full →</a>')
+        parts.append(f'<a href="{html.escape(serve_url)}">View full →</a>')
     return "\n".join(parts)
 
 
 def connector_export_github(number: int, repo: str) -> str | None:
-    import subprocess
+
 
     try:
         r = core._subprocess_runner.run(
@@ -2489,11 +2477,11 @@ def connector_on_message(tag: str) -> Callable:
                 ext = os.path.splitext(fname)[1].lower()
                 caption = f"📧 {fname}"
                 if ext in ALLOWED_IMAGE_EXTENSIONS:
-                    telegram.send_photo(core.admin_chat_id, fpath, caption)
+                    send_photo(core.admin_chat_id, fpath, caption)
                 elif ext in VIDEO_EXTENSIONS:
-                    telegram.send_video(core.admin_chat_id, fpath, caption)
+                    send_video(core.admin_chat_id, fpath, caption)
                 else:
-                    telegram.send_document(core.admin_chat_id, fpath, caption)
+                    send_document(core.admin_chat_id, fpath, caption)
                 _log(_LOG_INFO, tag, f"attachment -> Telegram: {fname}")
         if targets:
             for name in targets:
@@ -2636,9 +2624,6 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
 # ============================================================
 # _health_impl
 # ============================================================
-
-
-from typing import Any, Callable, cast
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
@@ -3452,9 +3437,8 @@ def _watchdog_alert(category: str, text: str | None) -> None:
     if not text or not admin_chat_id:
         return
     try:
-        import telegram as _tg
 
-        _tg.transport.send_text(admin_chat_id, text)
+        transport.send_text(admin_chat_id, text)
         _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "watchdog", f"{category} error: {e}")
@@ -3504,9 +3488,8 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     else:
         text = f"{name}: {state} ({reason}). Check /team"
     try:
-        import telegram as _tg
 
-        result = _tg.transport.send_text(admin_chat_id, text)
+        result = transport.send_text(admin_chat_id, text)
         if result and result.get("ok"):
             _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
             _res = result.get("result", {})
@@ -3583,18 +3566,16 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         old_msg_id, old_text = alert_info
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
         try:
-            import telegram as _tg
 
-            _tg.transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
+            transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
             _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
             return
         except (urllib.error.URLError, OSError, TimeoutError):
             pass
     text = f"✅ {name} is back to normal."
     try:
-        import telegram as _tg
 
-        _tg.transport.send_text(admin_chat_id, text)
+        transport.send_text(admin_chat_id, text)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "watchdog", f"Watchdog resolved alert error: {e}")
 
@@ -4006,8 +3987,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # health
 # ============================================================
 
-from typing import Callable
-
 
 def format_team_lines(  # type: ignore[no-redef]
     registered: dict[str, TmuxSessionDict],
@@ -4034,8 +4013,6 @@ def format_team_lines(  # type: ignore[no-redef]
 # _transcript_render
 # ============================================================
 
-
-from typing import Callable, cast
 
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
 _TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
@@ -4126,7 +4103,6 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
     duration_str = ""
     if first_ts and last_ts:
         try:
-            from datetime import datetime
 
             total_s = max(
                 0,
@@ -4163,9 +4139,8 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
 
 
 def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
-    import html as html_mod
 
-    esc = html_mod.escape
+    esc = html.escape
     info = _transcript_sync.get(sync_key) or {}
     status = info.get("status", "syncing")
     progress = esc(info.get("progress", "Starting sync..."))
@@ -4184,7 +4159,6 @@ def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key:
     return f'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loading {esc(name)}</title>{meta_js}<style>{_LOADING_CSS}</style></head><body><div class="card"><h1>Preparing Transcript</h1><p class="sub">{esc(name)}</p><div class="bar">{bar_html}</div><p class="progress">{spin}{progress}</p><p class="elapsed">{elapsed}s elapsed</p>{msg}</div></body></html>'
 
 
-
 def _err_page(title: str, detail: str = "") -> str:
     d = f"<p>{detail}</p>" if detail else ""
     return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>{title}</h1>{d}</body></html>"
@@ -4201,9 +4175,8 @@ def _render_transcript_html(
     search_sort: str = "relevance",
     live_base_url: str = "",
 ) -> str:
-    import html as html_mod
 
-    esc = html_mod.escape
+    esc = html.escape
     host = get_worker_host(name)
     if host:
         cwd = get_claude_session_cwd(name) or ""
@@ -4319,7 +4292,7 @@ def _render_transcript_html(
         },
         default=str,
     ).replace("</", "<\\/")
-    title = f"{html_mod.escape(name)} — Transcript"
+    title = f"{html.escape(name)} — Transcript"
     return _TRANSCRIPT_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
 
 
@@ -4327,11 +4300,8 @@ def _render_transcript_html(
 # transcript
 # ============================================================
 
-from typing import Callable, TypedDict, cast
-
 
 # get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
-
 
 
 class TranscriptSyncRegistry:
@@ -4560,7 +4530,6 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
 
 def handle_transcript_endpoint(handler, parsed) -> None:
     try:
-        from urllib.parse import parse_qs
 
         query_params = parse_qs(parsed.query)
         token = query_params.get("token", [None])[0]
@@ -4653,7 +4622,6 @@ def handle_transcript_endpoint(handler, parsed) -> None:
 # ============================================================
 
 import uuid
-from typing import Iterable
 
 _REVIEW_SCHEMA = (
     (_TEMPLATE_DIR / "review_schema.sql").read_text() if (_TEMPLATE_DIR / "review_schema.sql").exists() else ""
@@ -5111,10 +5079,8 @@ def _route_mentions_to_workers(
         if target_session not in active_sessions:
             continue
         try:
-            import tempfile as _tf, uuid as _uuid
-
-            buf_name = f"pr-{_uuid.uuid4().hex[:8]}"
-            fd, tmpfile = _tf.mkstemp(suffix=".msg", prefix="pr-send-")
+            buf_name = f"pr-{uuid.uuid4().hex[:8]}"
+            fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="pr-send-")
             try:
                 os.write(fd, msg.encode())
                 os.close(fd)
@@ -5183,7 +5149,6 @@ def _pr_review_main() -> None:
     if "--no-serve" not in sys.argv:
         import http.server
         import socketserver
-        from urllib.parse import urlparse, parse_qs
 
         os.chdir("/tmp")
         base_handler = http.server.SimpleHTTPRequestHandler
@@ -5305,7 +5270,6 @@ def _pr_review_main() -> None:
 
 
 import hashlib, json, os, secrets, time, threading
-from typing import TypedDict, cast
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -5767,7 +5731,6 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayM
 
 
 def _relay_get_token(handler) -> str | None:
-    from urllib.parse import urlparse
 
     auth = handler.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -5778,8 +5741,6 @@ def _relay_get_token(handler) -> str | None:
 
 
 def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
-    import json
-    from typing import cast
 
     token = _relay_get_token(handler)
     if not token:
@@ -6037,9 +5998,6 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
 # ============================================================
 # _bridge_helpers
 # ============================================================
-
-
-from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
 
 class MachineConfigError(ValueError):
@@ -6415,10 +6373,9 @@ def _send_learning_reminder(name: str, text: str) -> None:
 
 class ConnectorRegistry:
     def __init__(self) -> None:
-        from typing import Any as _Any
 
-        self.gmail: _Any = None  # type: ignore[explicit-any]
-        self.github: _Any = None  # type: ignore[explicit-any]
+        self.gmail: Any = None  # type: ignore[explicit-any]
+        self.github: Any = None  # type: ignore[explicit-any]
         self._log: dict[str, collections.deque[ConnectorMessageLogEntry]] = {}
         self._lock: threading.Lock = threading.Lock()
 
@@ -6925,7 +6882,6 @@ def _checkin_do_restart(
 # ============================================================
 
 import shlex
-from typing import TYPE_CHECKING, cast
 import claudecode
 
 if TYPE_CHECKING:
@@ -7356,9 +7312,8 @@ class WorkerManager:
         else:
             self.send(name, welcome)
         state.active = name
-        import telegram as _tg
 
-        _tg.save_last_active(name)
+        save_last_active(name)
         _registry_add(name, backend, chat_id)
         _reset_learning_reminder(name)
         if not backend_obj.is_interactive:
@@ -7605,8 +7560,6 @@ class WorkerManager:
 # _command_impl
 # ============================================================
 
-from typing import cast
-
 
 def cmd_pilot(router, name: str, chat_id) -> bool:
     if not name:
@@ -7616,7 +7569,6 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
     prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
     pilot_port = os.environ.get("PILOT_PORT", "10170")
     import urllib.request, json as _json
-    from urllib.parse import urlparse, quote as _urlquote
 
     if "all" in names:
         from bridge import worker_manager, _load_registry
@@ -7668,7 +7620,6 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
             cast(dict[str, object], _json.loads(resp.read()))
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         _log(_LOG_DEBUG, "notify:unknown", f"{type(exc).__name__}: {exc}")
-    from urllib.parse import urlparse, quote as _urlquote
 
     host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
     pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
@@ -7685,7 +7636,6 @@ def cmd_rewind(router, name: str, chat_id) -> bool:
         router.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
         return True
     name = name.lower().strip()
-    import secrets
     from bridge import tokens, _render_transcript_html, _beast_serve_deploy
 
     base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
@@ -7756,7 +7706,6 @@ def cmd_pr_review(router, arg: str, chat_id) -> bool:
     if serve_url:
         router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
     else:
-        import secrets
         from bridge import tokens
 
         token = secrets.token_urlsafe(32)
@@ -7799,12 +7748,11 @@ def cmd_team(router, chat_id) -> bool:
 
 
 def cmd_status(router, chat_id) -> bool:
-    import time as _time
     from bridge import state, watchdog, tunnel_manager, get_machine_catalog, _get_connectors_status
 
     registered = router.workers.get_registered_sessions()
     try:
-        uptime_sec = int(_time.time() - os.stat(f"/proc/{os.getpid()}").st_mtime)
+        uptime_sec = int(time.time() - os.stat(f"/proc/{os.getpid()}").st_mtime)
         d, rem = divmod(uptime_sec, 86400)
         h, rem = divmod(rem, 3600)
         m, _ = divmod(rem, 60)
@@ -7895,7 +7843,7 @@ def cmd_hire(router, name: str, chat_id) -> bool:
     ok, err = create_session(name, backend, chat_id=chat_id)
     if ok:
         router.reply(chat_id, f"{name.capitalize()} is added and assigned. {PERSISTENCE_NOTE}")
-        telegram.update_bot_commands()
+        update_bot_commands()
     else:
         router.reply(chat_id, f'Could not hire "{name}". {err}', outcome="Needs decision")
     return True
@@ -7911,7 +7859,7 @@ def cmd_end(router, name: str, chat_id) -> bool:
     ok, err = kill_session(name)
     if ok:
         router.reply(chat_id, f"{name.capitalize()} removed from your team.")
-        telegram.update_bot_commands()
+        update_bot_commands()
     else:
         router.reply(chat_id, f'Could not remove "{name}". {err}', outcome="Needs decision")
     return True
@@ -7951,7 +7899,7 @@ def cmd_restart(router, chat_id, args: str = "") -> bool:
             if len(registered) == 1:
                 name = next(iter(registered))
                 state.active = name
-                telegram.save_last_active(name)
+                save_last_active(name)
             else:
                 router.reply(chat_id, "No one assigned.")
                 return True
@@ -7968,7 +7916,7 @@ def cmd_restart(router, chat_id, args: str = "") -> bool:
         return True
     if name_arg:
         state.active = name
-        telegram.save_last_active(name)
+        save_last_active(name)
     host = get_worker_host(name)
     tmux_name = (
         session.get("tmux", f"{router.workers.tmux_prefix}{name}") if session else f"{router.workers.tmux_prefix}{name}"
@@ -8054,7 +8002,6 @@ def _restart_reply(router, chat_id, name, ok, err, host=None) -> bool:
 
 
 def _cmd_restart_all(router, chat_id, clean) -> bool:
-    import threading
     from bridge import state
 
     registered = router.workers.get_registered_sessions()
@@ -8142,8 +8089,6 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
 # ============================================================
 
 
-
-
 # _get_claude_pid and get_worker_host — defined earlier (from _health_impl)
 
 
@@ -8166,13 +8111,12 @@ def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
 def _git_push_state(
     source_cwd: str, worker_name: str, bare_repo: str, host: str | None = None
 ) -> GitPushStateResult | None:
-    import bridge
 
     try:
         r = _remote_run(
             ["git", "-C", source_cwd, "rev-parse", "HEAD"],
             host=host,
-            timeout=bridge.TIMEOUT_FILE_TRANSFER,
+            timeout=TIMEOUT_FILE_TRANSFER,
         )
         if r.returncode != 0:
             _log(_LOG_WARN, "git-sync", f"rev-parse HEAD failed: {r.stderr[:200]}")
@@ -8181,38 +8125,38 @@ def _git_push_state(
         r = _remote_run(
             ["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
             host=host,
-            timeout=bridge.TIMEOUT_REMOTE_CMD,
+            timeout=TIMEOUT_REMOTE_CMD,
         )
         orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
         r = _remote_run(
             ["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
             host=host,
-            timeout=bridge.TIMEOUT_FILE_TRANSFER,
+            timeout=TIMEOUT_FILE_TRANSFER,
         )
         staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
         _remote_run(
             ["git", "-C", source_cwd, "add", "-A"],
             host=host,
-            timeout=bridge.TIMEOUT_GIT_OP,
+            timeout=TIMEOUT_GIT_OP,
         )
         try:
             r = _remote_run(
                 ["git", "-C", source_cwd, "stash", "create"],
                 host=host,
-                timeout=bridge.TIMEOUT_GIT_OP,
+                timeout=TIMEOUT_GIT_OP,
             )
             stash_sha = r.stdout.strip() if r.returncode == 0 else ""
         finally:
             _remote_run(
                 ["git", "-C", source_cwd, "reset", "HEAD"],
                 host=host,
-                timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                timeout=TIMEOUT_FILE_TRANSFER,
             )
             if staged_files:
                 _remote_run(
                     ["git", "-C", source_cwd, "add", "--"] + staged_files,
                     host=host,
-                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                    timeout=TIMEOUT_FILE_TRANSFER,
                 )
         push_sha = stash_sha if stash_sha else orig_sha
         ref = f"refs/heads/teleport/{worker_name}"
@@ -8220,13 +8164,13 @@ def _git_push_state(
             r = _remote_run(
                 ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
                 host=host,
-                timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                timeout=TIMEOUT_LARGE_TRANSFER,
             )
         else:
             r = _remote_run(
                 ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
                 host=host,
-                timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                timeout=TIMEOUT_LARGE_TRANSFER,
             )
         if r.returncode != 0:
             _log(_LOG_WARN, "git-sync", f"push failed: {r.stderr[:200]}")
@@ -8245,7 +8189,6 @@ def _git_push_state(
 def _git_pull_state(
     target_cwd: str, worker_name: str, bare_repo_url: str, metadata: GitPushStateResult, host: str | None = None
 ) -> bool:
-    import bridge
 
     try:
         orig_sha = metadata["orig_sha"]
@@ -8258,7 +8201,7 @@ def _git_pull_state(
             r = _remote_run(
                 ["git", "-C", target_cwd, "rev-parse", "--git-dir"],
                 host=host,
-                timeout=bridge.TIMEOUT_REMOTE_CMD,
+                timeout=TIMEOUT_REMOTE_CMD,
             )
             is_existing = r.returncode == 0
         except (subprocess.SubprocessError, OSError) as exc:
@@ -8267,7 +8210,7 @@ def _git_pull_state(
             r = _remote_run(
                 ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
                 host=host,
-                timeout=bridge.TIMEOUT_RSYNC,
+                timeout=TIMEOUT_RSYNC,
             )
             if r.returncode != 0:
                 _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
@@ -8281,12 +8224,12 @@ def _git_pull_state(
             _remote_run(
                 ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
                 host=host,
-                timeout=bridge.TIMEOUT_REMOTE_CMD,
+                timeout=TIMEOUT_REMOTE_CMD,
             )
             r = _remote_run(
                 ["git", "-C", target_cwd, "fetch", "vps", ref],
                 host=host,
-                timeout=bridge.TIMEOUT_RSYNC,
+                timeout=TIMEOUT_RSYNC,
             )
             if r.returncode != 0:
                 _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
@@ -8295,42 +8238,42 @@ def _git_pull_state(
             _remote_run(
                 ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
                 host=host,
-                timeout=bridge.TIMEOUT_GIT_OP,
+                timeout=TIMEOUT_GIT_OP,
             )
         else:
             _remote_run(
                 ["git", "-C", target_cwd, "checkout", orig_sha],
                 host=host,
-                timeout=bridge.TIMEOUT_GIT_OP,
+                timeout=TIMEOUT_GIT_OP,
             )
         if stash_sha:
             fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
             r = _remote_run(
                 ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
                 host=host,
-                timeout=bridge.TIMEOUT_GIT_OP,
+                timeout=TIMEOUT_GIT_OP,
             )
             if r.returncode != 0:
                 _remote_run(
                     ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
                     host=host,
-                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                    timeout=TIMEOUT_FILE_TRANSFER,
                 )
                 r = _remote_run(
                     ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
                     host=host,
-                    timeout=bridge.TIMEOUT_GIT_OP,
+                    timeout=TIMEOUT_GIT_OP,
                 )
             if staged_files:
                 _remote_run(
                     ["git", "-C", target_cwd, "reset", "HEAD"],
                     host=host,
-                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                    timeout=TIMEOUT_FILE_TRANSFER,
                 )
                 _remote_run(
                     ["git", "-C", target_cwd, "add", "--"] + staged_files,
                     host=host,
-                    timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                    timeout=TIMEOUT_FILE_TRANSFER,
                 )
         return True
     except (subprocess.SubprocessError, OSError) as e:
@@ -8339,13 +8282,12 @@ def _git_pull_state(
 
 
 def _get_project_name(cwd: str, host: str | None = None) -> str | None:
-    import bridge
 
     try:
         r = _remote_run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
             host=host,
-            timeout=bridge.TIMEOUT_REMOTE_CMD,
+            timeout=TIMEOUT_REMOTE_CMD,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -8365,12 +8307,11 @@ def _ensure_workspace_trusted_remote(
     cwd: str | None,
     host: str | None,
 ) -> None:
-    import bridge
 
     if not cwd:
         return
     if not host:
-        bridge._ensure_workspace_trusted(cwd)
+        _ensure_workspace_trusted(cwd)
         return
     script = (
         "import json, pathlib, os, fcntl; "
@@ -8388,7 +8329,7 @@ def _ensure_workspace_trusted_remote(
     )
     try:
         r = _remote_run(
-            ["python3", "-c", script], host=host, timeout=bridge.TIMEOUT_TMUX_SEND
+            ["python3", "-c", script], host=host, timeout=TIMEOUT_TMUX_SEND
         )
         if r.returncode == 0:
             _log(_LOG_INFO, "trust", f"remote pre-trust {cwd} on {host}: {r.stdout.strip()}")
@@ -8426,15 +8367,13 @@ def teleport_notify(chat_id: "ChatId | None", text: str) -> None:
     if chat_id is None:
         return
     try:
-        import bridge
 
-        bridge.transport.send_text(chat_id, text)
+        transport.send_text(chat_id, text)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         _log(_LOG_DEBUG, "notify:_teleport_notify", f"{type(exc).__name__}: {exc}")
 
 
 def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:
-    import bridge
 
     conflicts: list[str] = []
     if not local_cwd or not remote_host:
@@ -8446,24 +8385,24 @@ def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str 
         ["git", "-C", local_cwd, "status", "--porcelain"],
         capture_output=True,
         text=True,
-        timeout=bridge.TIMEOUT_REMOTE_CMD,
+        timeout=TIMEOUT_REMOTE_CMD,
     )
     local_changed = bool(local_status.stdout.strip()) if local_status.returncode == 0 else False
     local_head = _subprocess_runner.run(
-        ["git", "-C", local_cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=bridge.TIMEOUT_TMUX_SEND
+        ["git", "-C", local_cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
     )
     local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
     remote_cwd = _remap_path(local_cwd, remote_host)
     r_status = _remote_run(
         ["git", "-C", remote_cwd, "status", "--porcelain"],
         host=remote_host,
-        timeout=bridge.TIMEOUT_REMOTE_CMD,
+        timeout=TIMEOUT_REMOTE_CMD,
     )
     remote_changed = bool(r_status.stdout.strip()) if r_status.returncode == 0 else False
     r_head = _remote_run(
         ["git", "-C", remote_cwd, "rev-parse", "HEAD"],
         host=remote_host,
-        timeout=bridge.TIMEOUT_TMUX_SEND,
+        timeout=TIMEOUT_TMUX_SEND,
     )
     remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
     if local_changed and remote_changed:
@@ -8481,7 +8420,6 @@ def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str 
 
 
 def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str) -> list[str]:
-    import bridge
 
     fails = []
     preflight_dirs = [
@@ -8492,7 +8430,7 @@ def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str
     env["TARGET_HOST"] = target_host or ""
     env["WORKER_NAME"] = worker_name
     env["BACKEND"] = backend_name
-    env["BRIDGE_URL"] = bridge.BRIDGE_PUBLIC_URL or bridge.BRIDGE_URL
+    env["BRIDGE_URL"] = BRIDGE_PUBLIC_URL or BRIDGE_URL
     seen_scripts: set[str] = set()
     for pdir in preflight_dirs:
         if not os.path.isdir(pdir):
@@ -8506,7 +8444,7 @@ def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str
             seen_scripts.add(real_path)
             try:
                 r = _subprocess_runner.run(
-                    [script_path], env=env, capture_output=True, text=True, timeout=bridge.TIMEOUT_REMOTE_CMD
+                    [script_path], env=env, capture_output=True, text=True, timeout=TIMEOUT_REMOTE_CMD
                 )
                 if r.returncode != 0:
                     reason = r.stdout.strip().split("\n")[0] if r.stdout.strip() else f"{script} failed"
@@ -8521,7 +8459,6 @@ def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str
 def sync_working_directory(
     source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None, full: bool = False
 ) -> bool:
-    import bridge
 
     if not full and _is_git_repo(source_cwd, host=source_host):
         project = _get_project_name(source_cwd, host=source_host)
@@ -8545,7 +8482,6 @@ def sync_working_directory(
 def rsync_working_directory(
     source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None, full: bool = False
 ) -> bool:
-    import bridge
 
     _remote_run(["mkdir", "-p", target_cwd], host=target_host)
     cmd = ["rsync", "-az", "--delete"]
@@ -8555,7 +8491,7 @@ def rsync_working_directory(
             gi_result = _remote_run(
                 ["git", "-C", source_cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
                 host=source_host,
-                timeout=bridge.TIMEOUT_FILE_TRANSFER,
+                timeout=TIMEOUT_FILE_TRANSFER,
             )
             if gi_result.returncode == 0 and gi_result.stdout.strip():
                 fd, gitignore_tmpfile = tempfile.mkstemp(prefix="rsync-gitignore-", suffix=".txt")
@@ -8566,7 +8502,7 @@ def rsync_working_directory(
                 cmd.extend(["--exclude-from", gitignore_tmpfile])
         except (ConnectionError, TimeoutError, OSError) as e:
             _log(_LOG_WARN, "teleport", f"git ls-files failed, skipping gitignore excludes: {e}")
-        for excl in bridge.TELEPORT_RSYNC_EXCLUDES:
+        for excl in TELEPORT_RSYNC_EXCLUDES:
             cmd.extend(["--exclude", excl])
     src = source_cwd.rstrip("/") + "/"
     dst = target_cwd.rstrip("/") + "/"
@@ -8577,7 +8513,7 @@ def rsync_working_directory(
     else:
         cmd.extend([src, dst])
     try:
-        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=bridge.TIMEOUT_FULL_SYNC)
+        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_FULL_SYNC)
         if r.returncode != 0:
             _log(_LOG_WARN, "teleport", f"rsync failed: cmd={cmd} rc={r.returncode} stderr={r.stderr[:500]}")
         return r.returncode == 0
@@ -8589,7 +8525,6 @@ def rsync_working_directory(
 def sync_session_transcript(
     session_id: str, source_cwd: str, target_cwd: str, source_host: str | None = None, target_host: str | None = None
 ) -> None:
-    import bridge
 
     if not session_id:
         return
@@ -8615,13 +8550,12 @@ def sync_session_transcript(
             local_src = os.path.expanduser(f"~/{source_dir}/{item}")
             local_dst = os.path.expanduser(f"~/{target_dir}/")
             cmd = ["rsync", "-az", local_src, local_dst]
-        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=bridge.TIMEOUT_RSYNC)
+        r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
         if r.returncode != 0:
             _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
 
 
 def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> list[str]:
-    import bridge
 
     if not target_host:
         return []
@@ -8641,11 +8575,11 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                         ["git", "-C", rp, "add", "-A"],
                         ["git", "-C", rp, "commit", "-m", f"teleport sync: {rn}"],
                     ]:
-                        _subprocess_runner.run(cmd, capture_output=True, timeout=bridge.TIMEOUT_REMOTE_CMD)
+                        _subprocess_runner.run(cmd, capture_output=True, timeout=TIMEOUT_REMOTE_CMD)
                     _subprocess_runner.run(
                         ["git", "-C", rp, "push", "origin", "master"],
                         capture_output=True,
-                        timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                        timeout=TIMEOUT_LARGE_TRANSFER,
                     )
                 except (subprocess.SubprocessError, OSError) as e:
                     _warn(f"git push {rn}: {e}")
@@ -8654,7 +8588,7 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                 _remote_run(
                     ["bash", "-c", f"cd ~/{rn} 2>/dev/null && git pull origin master 2>/dev/null || true"],
                     host=target_host,
-                    timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                    timeout=TIMEOUT_LARGE_TRANSFER,
                 )
             except (subprocess.SubprocessError, OSError) as e:
                 _warn(f"git pull {rn} on {target_host}: {e}")
@@ -8667,7 +8601,7 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                         f"[ -d ~/agent-config/.claude/{subdir} ] && rsync -az --checksum ~/agent-config/.claude/{subdir}/ ~/.claude/{subdir}/",
                     ],
                     host=target_host,
-                    timeout=bridge.TIMEOUT_LARGE_TRANSFER,
+                    timeout=TIMEOUT_LARGE_TRANSFER,
                 )
             except (subprocess.SubprocessError, OSError) as e:
                 _warn(f"agent-config deploy {subdir}: {e}")
@@ -8686,7 +8620,7 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
                     _subprocess_runner.run(
                         ["rsync", "-az", tmp, f"{target_host}:.claude/settings.json"],
                         capture_output=True,
-                        timeout=bridge.TIMEOUT_REMOTE_CMD,
+                        timeout=TIMEOUT_REMOTE_CMD,
                     )
                 finally:
                     os.unlink(tmp)
@@ -8696,7 +8630,6 @@ def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> l
 
 
 def sync_worker_data_back(name: str, source_host: str | None) -> None:
-    import bridge
 
     if not source_host:
         return
@@ -8706,12 +8639,12 @@ def sync_worker_data_back(name: str, source_host: str | None) -> None:
         _subprocess_runner.run(
             ["rsync", "-az", f"{source_host}:team/{name}/", f"{worker_team_dir}/"],
             capture_output=True,
-            timeout=bridge.TIMEOUT_GIT_OP,
+            timeout=TIMEOUT_GIT_OP,
         )
     r = _remote_run(
         ["bash", "-c", "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
         host=source_host,
-        timeout=bridge.TIMEOUT_REMOTE_CMD,
+        timeout=TIMEOUT_REMOTE_CMD,
     )
     if r.returncode == 0 and r.stdout.strip():
         for remote_file in r.stdout.strip().splitlines():
@@ -8723,12 +8656,11 @@ def sync_worker_data_back(name: str, source_host: str | None) -> None:
                 _subprocess_runner.run(
                     ["rsync", "-az", f"{source_host}:{remote_file}", local_file],
                     capture_output=True,
-                    timeout=bridge.TIMEOUT_REMOTE_CMD,
+                    timeout=TIMEOUT_REMOTE_CMD,
                 )
 
 
 def install_hooks_on_target(target_host: str) -> list[str]:
-    import bridge
 
     if not target_host:
         return []
@@ -8740,7 +8672,7 @@ def install_hooks_on_target(target_host: str) -> list[str]:
             _subprocess_runner.run(
                 ["rsync", "-az", claude_json, f"{target_host}:.claude.json"],
                 capture_output=True,
-                timeout=bridge.TIMEOUT_REMOTE_CMD,
+                timeout=TIMEOUT_REMOTE_CMD,
             )
         else:
             _remote_run(
@@ -8755,7 +8687,7 @@ def install_hooks_on_target(target_host: str) -> list[str]:
                     "p.write_text(json.dumps(d))",
                 ],
                 host=target_host,
-                timeout=bridge.TIMEOUT_REMOTE_CMD,
+                timeout=TIMEOUT_REMOTE_CMD,
             )
     except (subprocess.SubprocessError, OSError) as e:
         w = f"hook install: {e}"
@@ -8765,9 +8697,8 @@ def install_hooks_on_target(target_host: str) -> list[str]:
 
 
 def sync_session_files_to_target(name: str, target_sessions_dir: str, target_host: str) -> None:
-    import bridge
 
-    local_session_dir = bridge.SESSIONS_DIR / name
+    local_session_dir = SESSIONS_DIR / name
     if not local_session_dir.is_dir():
         return
     remote_session_dir = f"{target_sessions_dir}/{name}"
@@ -8778,12 +8709,11 @@ def sync_session_files_to_target(name: str, target_sessions_dir: str, target_hos
             _subprocess_runner.run(
                 ["rsync", "-az", str(local_file), f"{target_host}:{remote_session_dir}/{fname}"],
                 capture_output=True,
-                timeout=bridge.TIMEOUT_REMOTE_CMD,
+                timeout=TIMEOUT_REMOTE_CMD,
             )
 
 
 def sync_credentials_to_target(target_host: str) -> None:
-    import bridge
 
     local_creds = os.path.expanduser("~/.claude/.credentials.json")
     if not os.path.exists(local_creds):
@@ -8792,7 +8722,7 @@ def sync_credentials_to_target(target_host: str) -> None:
         r = _remote_run(
             ["cat", ".claude/.credentials.json"],
             host=target_host,
-            timeout=bridge.TIMEOUT_TMUX_SEND,
+            timeout=TIMEOUT_TMUX_SEND,
         )
         if r.returncode == 0 and r.stdout.strip():
             remote_data = cast(dict[str, object], json.loads(r.stdout))
@@ -8814,7 +8744,7 @@ def sync_credentials_to_target(target_host: str) -> None:
     _subprocess_runner.run(
         ["rsync", "-az", local_creds, f"{target_host}:.claude/.credentials.json.tmp"],
         capture_output=True,
-        timeout=bridge.TIMEOUT_REMOTE_CMD,
+        timeout=TIMEOUT_REMOTE_CMD,
     )
     _remote_run(
         ["mv", ".claude/.credentials.json.tmp", ".claude/.credentials.json"], host=target_host, capture_output=True
@@ -8824,12 +8754,11 @@ def sync_credentials_to_target(target_host: str) -> None:
 
 
 def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None) -> str | None:
-    import bridge
 
     session_id = get_claude_session_id(name, authoritative=True)
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host)
     for _ in range(20):
-        _clock.sleep(bridge.DELAY_RETRY)
+        _clock.sleep(DELAY_RETRY)
         r = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host
         )
@@ -8842,7 +8771,7 @@ def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None)
                 break
     else:
         _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], host=host)
-        _clock.sleep(bridge.DELAY_STARTUP)
+        _clock.sleep(DELAY_STARTUP)
     return get_claude_session_id(name, authoritative=True) or session_id
 
 
@@ -8854,11 +8783,10 @@ def start_worker_on_target(
     backend_name: str,
     skip_session_sync: bool = False,
 ) -> bool:
-    import bridge
 
-    tmux_name = f"{bridge.TMUX_PREFIX}{name}"
+    tmux_name = f"{TMUX_PREFIX}{name}"
     _remote_run(["tmux", "kill-session", "-t", tmux_name], host=target_host)
-    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    _clock.sleep(DELAY_TMUX_SEND)
     r = _remote_run(
         ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
         host=target_host,
@@ -8871,26 +8799,26 @@ def start_worker_on_target(
         )
         return False
     _remote_run(["tmux", "set-option", "-t", tmux_name, "window-size", "manual"], host=target_host)
-    _clock.sleep(bridge.DELAY_RETRY)
-    target_sessions_dir = _remap_path(str(bridge.SESSIONS_DIR), target_host)
+    _clock.sleep(DELAY_RETRY)
+    target_sessions_dir = _remap_path(str(SESSIONS_DIR), target_host)
     if target_host and not skip_session_sync:
         sync_session_files_to_target(name, target_sessions_dir, target_host)
     if target_host:
         sync_credentials_to_target(target_host)
     for key, value in {
-        "PORT": str(bridge.PORT),
-        "TMUX_PREFIX": bridge.TMUX_PREFIX,
+        "PORT": str(PORT),
+        "TMUX_PREFIX": TMUX_PREFIX,
         "SESSIONS_DIR": target_sessions_dir,
         "WORKER_BACKEND": normalize_backend(backend_name),
-        "BRIDGE_URL": bridge.BRIDGE_PUBLIC_URL or bridge.BRIDGE_URL,
+        "BRIDGE_URL": BRIDGE_PUBLIC_URL or BRIDGE_URL,
     }.items():
         _remote_run(["tmux", "set-environment", "-t", tmux_name, key, value], host=target_host)
-    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    _clock.sleep(DELAY_TMUX_SEND)
     _remote_run(
         ["tmux", "send-keys", "-t", tmux_name, 'eval "$(tmux show-environment -s)" && unset CLAUDECODE', "Enter"],
         host=target_host,
     )
-    _clock.sleep(bridge.DELAY_TMUX_SEND)
+    _clock.sleep(DELAY_TMUX_SEND)
     backend = get_backend(backend_name)
     cli_cmd = backend.start_cmd(session_id or "")
     if target_host:
@@ -8907,7 +8835,7 @@ def start_worker_on_target(
             _clock.sleep(delay)
             _remote_run(["tmux", "send-keys", "-t", tmux_name, key], host=target_host)
     for attempt in range(30):
-        _clock.sleep(bridge.DELAY_STARTUP)
+        _clock.sleep(DELAY_STARTUP)
         r = _remote_run(
             ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"],
             host=target_host,
@@ -8926,7 +8854,7 @@ def start_worker_on_target(
             cap = _remote_run(
                 ["tmux", "capture-pane", "-t", tmux_name, "-p"],
                 host=target_host,
-                timeout=bridge.TIMEOUT_TMUX_SEND,
+                timeout=TIMEOUT_TMUX_SEND,
             )
             if cap.returncode == 0:
                 _log(_LOG_INFO, "teleport", f"pane content: {cap.stdout[:300]}")
@@ -8944,7 +8872,6 @@ def teleport_rollback(
     chat_id: "ChatId | None",
     reason: str,
 ) -> None:
-    import bridge
 
     teleport_notify(chat_id, f"Teleport failed: {reason}. Rolling back...")
     try:
@@ -8967,7 +8894,7 @@ def teleport_rollback(
     except (subprocess.SubprocessError, OSError) as e:
         teleport_notify(chat_id, f"Rollback also failed: {e}")
     try:
-        state_file = bridge.SESSIONS_DIR / name / "teleport_state"
+        state_file = SESSIONS_DIR / name / "teleport_state"
         state_file.unlink(missing_ok=True)
     except OSError as exc:
         _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
@@ -8976,11 +8903,6 @@ def teleport_rollback(
 # ============================================================
 # api_handlers
 # ============================================================
-
-from urllib.parse import parse_qs
-
-if TYPE_CHECKING:
-    from urllib.parse import ParseResult
 
 
 def handle_notify(handler, body: bytes = b"") -> None:
@@ -8999,7 +8921,7 @@ def handle_notify(handler, body: bytes = b"") -> None:
         label = name or "notify"
         for chat_id in chat_ids:
             if clean_text:
-                result = telegram.transport.send_text(chat_id, clean_text)
+                result = transport.send_text(chat_id, clean_text)
                 if result and result.get("ok"):
                     sent += 1
             _send_response_media(label, images, files, chat_id)
@@ -9028,7 +8950,7 @@ def handle_health_alert(handler, body: bytes = b"") -> None:
         _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
         chat_ids = get_all_chat_ids()
         for chat_id in chat_ids:
-            telegram.transport.send_text(chat_id, alert_text)
+            transport.send_text(chat_id, alert_text)
         handler._send_json(200, {"ok": True})
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")
@@ -9144,7 +9066,7 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
                     f"{name}: CWD changed ({old_cwd} -> {requested_cwd}), stale sessions will self-invalidate",
                 )
                 notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
-                notify_chat_id = telegram.get_manager_chat_id(name)
+                notify_chat_id = get_manager_chat_id(name)
                 if notify_chat_id is not None:
                     telegram.send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
             _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
@@ -9155,7 +9077,7 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
                 if not same_cwd:
                     allowed, block_msg = _checkin_can_restart(name, tmux_name, host, pane_cwd or "", requested_cwd)
                     if not allowed:
-                        notify_chat_id = telegram.get_manager_chat_id(name)
+                        notify_chat_id = get_manager_chat_id(name)
                         if notify_chat_id is not None:
                             telegram.send_telegram_message(notify_chat_id, block_msg)
                         handler._send_text(200, block_msg)
@@ -9209,11 +9131,6 @@ def handle_health_workers_endpoint(handler) -> None:
 
 
 import base64 as _b64
-from urllib.parse import parse_qs, urlparse
-
-if TYPE_CHECKING:
-    from urllib.parse import ParseResult
-
 
 def _b():
     return _b
@@ -10321,7 +10238,6 @@ def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
 
 class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
-
 
 
 # ============================================================
@@ -12093,7 +12009,6 @@ _setup_endpoint_routes()
 
 
 def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
-    from datetime import datetime
 
     sig_name = signal.Signals(signum).name if signum else "unknown"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
