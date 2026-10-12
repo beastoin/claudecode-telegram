@@ -86,7 +86,7 @@ from telegram import (
     STICKER_EXTENSIONS,
     get_manager_chat_id,
 )
-from markdown_fmt import _pipe_tables_to_html
+from telegram import _pipe_tables_to_html
 from _types import (
     MachinePublicDict,
     MachineHealthDict,
