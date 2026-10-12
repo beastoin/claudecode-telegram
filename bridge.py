@@ -8,7 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
-from _types import (
+from shared import (
     WorkerEndpointInfo,
     MachinePublicDict,
     MachinesCatalogResponse,
@@ -44,8 +44,8 @@ from urllib.parse import urlparse, parse_qs, ParseResult
 from pathlib import Path
 from collections.abc import Mapping
 from typing import IO, Any, Callable, NamedTuple, TypedDict, cast
-from core import *  # noqa: F401,F403
-from core import (
+from shared import *  # noqa: F401,F403
+from shared import (
     _str_field,
     _bool_field,
     _log,
@@ -85,7 +85,7 @@ from telegram import (
     _extract_msg_text,
     _build_cwd_change_notice,
 )
-from core import _build_tunnel_config
+from shared import _build_tunnel_config
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
     _acquire_flock,
@@ -648,7 +648,7 @@ import enum
 import http.client
 import socket
 from typing import Callable, Protocol, cast
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_INFO,
@@ -1121,7 +1121,7 @@ import base64
 import binascii
 from datetime import datetime, timezone, timedelta
 from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
-from _types import (
+from shared import (
     GmailHeader,
     GmailBody,
     GmailPayloadPart,
@@ -2590,9 +2590,9 @@ class GitHubConnector(BaseConnector[GithubComment]):
 from typing import TYPE_CHECKING, Callable, cast
 from urllib.parse import urlparse
 
-import core
+import shared as core
 import telegram
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -2887,7 +2887,7 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
 
 
 from typing import Any, Callable, cast
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -4326,7 +4326,7 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # ============================================================
 
 from typing import Callable
-from core import _clock, DEFAULT_BACKEND
+from shared import _clock, DEFAULT_BACKEND
 from claudecode import (
     TmuxSessionDict,
     WorkerStateEntry,
@@ -4380,7 +4380,7 @@ def format_team_lines(  # type: ignore[no-redef]
 
 
 from typing import Callable, cast
-from core import _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG, _clock, _int_field
+from shared import _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG, _clock, _int_field
 from claudecode import (
     _remote_run,
     _remap_path,
@@ -4389,7 +4389,7 @@ from claudecode import (
     normalize_cwd,
     AuthorDetection,
 )
-from _types import TranscriptEntry, TranscriptStatsDict, ToolResultDict
+from shared import TranscriptEntry, TranscriptStatsDict, ToolResultDict
 
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
 _TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
@@ -4750,7 +4750,7 @@ def _render_transcript_html(
 # ============================================================
 
 from typing import Callable, TypedDict, cast
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -4759,7 +4759,7 @@ from core import (
     _clock,
     _int_field,
 )
-from _types import (
+from shared import (
     TranscriptSyncState,
     TranscriptMessageUsage,
     TranscriptMessageContent,
@@ -5751,8 +5751,8 @@ def _pr_review_main() -> None:
 
 import hashlib, json, os, secrets, time, threading
 from typing import TypedDict, cast
-from core import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
-from _types import _GuestSessionDictRequired, ChannelMemberDict, ChannelDict, RelayChannelDict
+from shared import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
+from shared import _GuestSessionDictRequired, ChannelMemberDict, ChannelDict, RelayChannelDict
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -6507,7 +6507,7 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
 
 
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -6546,7 +6546,7 @@ from claudecode import (
     is_valid_backend,
     list_backends,
 )
-from _types import (
+from shared import (
     MachinePublicDict,
     MachineHealthDict,
     MachinesCatalogResponse,
@@ -7476,7 +7476,7 @@ def _checkin_do_restart(
 import shlex
 from typing import TYPE_CHECKING, cast
 import claudecode
-from core import (
+from shared import (
     Clock,
     SubprocessRunner,
     _log,
@@ -8191,7 +8191,7 @@ class WorkerManager:
 # ============================================================
 
 from typing import cast
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -8740,7 +8740,7 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
 # ============================================================
 
 
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -9675,7 +9675,7 @@ def teleport_rollback(
 # ============================================================
 
 from urllib.parse import parse_qs
-from core import (
+from shared import (
     _log,
     _LOG_ERROR,
     _LOG_WARN,
@@ -10132,7 +10132,7 @@ def handle_pr_comment(handler, body: bytes) -> None:
 # ============================================================
 
 import hashlib
-from core import (
+from shared import (
     _str_field,
     _int_field,
     _bool_field,
@@ -13040,7 +13040,7 @@ import types as _types_mod
 
 
 # Propagate attribute writes to foundation modules (test monkeypatching support)
-import core as _core_mod
+import shared as _core_mod
 import claudecode as _cc_mod
 import telegram as _tg_mod
 

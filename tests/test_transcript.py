@@ -470,7 +470,7 @@ def test_transcript_prompts_filter():
 
     try:
         with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
-             patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+             patch('bridge._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             # Without filter: shows all entries
             html_all = bridge._render_transcript_html('test')
             data_all = _extract_data(html_all)
@@ -558,7 +558,7 @@ def test_transcript_sidebar_stats():
 
     try:
         with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
-             patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
+             patch('bridge._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             html = bridge._render_transcript_html('test')
             data = _extract_data(html)
             assert data is not None, 'Missing JSON data block'
@@ -933,7 +933,7 @@ def test_tindex_stats(tmp_path):
 
 
 def test_sync_session_transcript_targets_single_session():
-    import teleport
+    import bridge as teleport
     import types
     from unittest.mock import patch
 

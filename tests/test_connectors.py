@@ -9,7 +9,7 @@ import time
 import threading
 import pytest
 from unittest.mock import patch, MagicMock
-from connectors import GmailConnector, GitHubConnector, CONSECUTIVE_FAIL_WARN
+from bridge import GmailConnector, GitHubConnector, CONSECUTIVE_FAIL_WARN
 
 
 # ── Gmail Connector ─────────────────────────────────────────────────
@@ -792,7 +792,7 @@ class TestGmailBootstrapRetry:
 
 # ── GitHub Connector ────────────────────────────────────────────────
 
-from connectors import GitHubConnector, CONSECUTIVE_FAIL_WARN
+from bridge import GitHubConnector, CONSECUTIVE_FAIL_WARN
 
 
 def make_github_connector(**overrides):

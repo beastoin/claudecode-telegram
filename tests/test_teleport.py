@@ -168,7 +168,7 @@ def test_git_push_state_remote_host():
     import subprocess
     from unittest.mock import patch
     import bridge
-    import teleport
+    import bridge as teleport
 
     calls = []
 
@@ -210,7 +210,7 @@ def test_git_push_state_remote_host():
 def test_git_pull_state_remote_host():
     import subprocess
     from unittest.mock import patch
-    import teleport
+    import bridge as teleport
 
     calls = []
 
@@ -393,7 +393,7 @@ def test_workers_from_caller_local_to_remote_peer():
 
 def test_teleport_preflight_checks_rsync_and_backend():
     import inspect
-    import teleport
+    import bridge as teleport
 
     src = inspect.getsource(teleport.cmd_teleport)
 
@@ -412,7 +412,7 @@ def test_teleport_preflight_checks_rsync_and_backend():
 
 def test_teleport_cross_machine_passes_session_for_resume():
     import bridge
-    import teleport
+    import bridge as teleport
     import inspect
 
     # v0.44.5+: do_teleport no longer blanket-skips --resume for cross-machine.
@@ -450,7 +450,7 @@ def test_teleport_cross_machine_passes_session_for_resume():
 
 
 def test_teleport_context_message_has_session_and_search_cmd():
-    import teleport
+    import bridge as teleport
 
     # Build teleport context for a cross-machine move with a known session
     msg = teleport._build_teleport_context(
@@ -476,7 +476,7 @@ def test_teleport_context_message_has_session_and_search_cmd():
 
 def test_teleport_context_wired_into_do_teleport():
     import inspect
-    import teleport
+    import bridge as teleport
 
     # Verify the wiring: do_teleport code calls _build_teleport_context
     # when source_host != target_host
@@ -500,7 +500,7 @@ def test_teleport_context_wired_into_do_teleport():
 
 
 def test_ensure_workspace_trusted_remote_runs_on_target():
-    import teleport
+    import bridge as teleport
     import types
 
     # Capture remote commands
@@ -534,7 +534,7 @@ def test_ensure_workspace_trusted_remote_runs_on_target():
 
 def test_restart_remote_trusts_cwd_before_start():
     import inspect
-    import teleport
+    import bridge as teleport
 
     src = inspect.getsource(teleport.restart_remote_worker)
 
@@ -551,7 +551,7 @@ def test_restart_remote_trusts_cwd_before_start():
 
 def test_teleport_trusts_target_cwd_before_start():
     import inspect
-    import teleport
+    import bridge as teleport
 
     src = inspect.getsource(teleport.do_teleport)
 
@@ -569,7 +569,7 @@ def test_teleport_trusts_target_cwd_before_start():
 
 def test_ensure_workspace_trusted_remote_delegates_local():
     import bridge
-    import teleport
+    import bridge as teleport
     import json
     import tempfile
     import pathlib
@@ -593,7 +593,7 @@ def test_ensure_workspace_trusted_remote_delegates_local():
 
 
 def test_teleport_context_message_no_session():
-    import teleport
+    import bridge as teleport
 
     # No previous session
     msg = teleport._build_teleport_context(
@@ -695,10 +695,10 @@ def test_restart_teleported_worker():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('bridge._remote_run', side_effect=mock_remote_run), \
          patch('claudecode._remote_run', side_effect=mock_remote_run), \
-         patch('teleport.start_worker_on_target', side_effect=mock_start_worker), \
-         patch('teleport.stop_worker_for_teleport', side_effect=mock_stop), \
+         patch('bridge.start_worker_on_target', side_effect=mock_start_worker), \
+         patch('bridge.stop_worker_for_teleport', side_effect=mock_stop), \
          patch('time.sleep'):
 
         # Call _restart_remote_worker directly on CommandRouter
@@ -787,9 +787,9 @@ def test_restart_remote_validates_session_exists():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('bridge._remote_run', side_effect=mock_remote_run), \
          patch('claudecode._remote_run', side_effect=mock_remote_run), \
-         patch('teleport.start_worker_on_target', side_effect=mock_start), \
+         patch('bridge.start_worker_on_target', side_effect=mock_start), \
          patch('time.sleep'):
         ok, err = router._restart_remote_worker(
             'ren', 'claude', bridge.get_backend('claude'),
@@ -869,9 +869,9 @@ def test_restart_remote_remaps_cwd_home():
     router.workers = MockWorkers()
 
     with patch('bridge._remote_run', side_effect=mock_remote_run), \
-         patch('teleport._remote_run', side_effect=mock_remote_run), \
+         patch('bridge._remote_run', side_effect=mock_remote_run), \
          patch('claudecode._remote_run', side_effect=mock_remote_run), \
-         patch('teleport.start_worker_on_target', side_effect=mock_start), \
+         patch('bridge.start_worker_on_target', side_effect=mock_start), \
          patch('time.sleep'):
         ok, err = router._restart_remote_worker(
             'x', 'claude', bridge.get_backend('claude'),

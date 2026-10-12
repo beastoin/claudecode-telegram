@@ -6,7 +6,7 @@ All tests use injected clock/urlopen — no real network calls.
 import urllib.error
 from unittest.mock import MagicMock
 
-from core import (
+from shared import (
     HttpClient, RetryConfig, RateLimitConfig, _TokenBucket,
     _RealClock,
 )

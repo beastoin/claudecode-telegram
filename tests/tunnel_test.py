@@ -3,7 +3,7 @@
 Behavior tests: each test verifies something the bridge actually depends on.
 All tests use DI seams — no real subprocesses, network, or cloudflared.
 """
-import tunnel
+import bridge as tunnel
 
 import json
 import subprocess
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-from core import TunnelConfig
+from shared import TunnelConfig
 
 
 # ── Test doubles ──────────────────────────────────────────────────────

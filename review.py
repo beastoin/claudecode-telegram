@@ -1,21 +1,5 @@
-"""Shim: all content merged into bridge.py."""
-
-from bridge import *  # noqa: F401,F403
-from bridge import (  # noqa: F401 — underscore names excluded by * import
-    _fetch_commit_files_single,
-    _fetch_commit_list,
-    _fetch_file_context,
-    _fetch_full_diff,
-    _format_comment_with_context,
-    _notify_telegram,
-    _parse_full_diff,
-    _pr_review_main,
-    _REVIEW_CSS,
-    _REVIEW_JS,
-    _REVIEW_SCHEMA,
-    _route_mentions_to_workers,
-    _TEMPLATE_DIR,
-)
-
+#!/usr/bin/env python3
+"""PR review CLI — thin entry point for bridge._pr_review_main()."""
 if __name__ == "__main__":
+    from bridge import _pr_review_main
     _pr_review_main()

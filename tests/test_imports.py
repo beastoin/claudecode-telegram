@@ -15,7 +15,7 @@ import pytest
 
 
 # Each module that must be independently importable.
-INDEPENDENT_MODULES = ["core", "telegram", "claudecode", "tunnel"]
+INDEPENDENT_MODULES = ["shared", "telegram", "claudecode"]
 
 
 @pytest.mark.parametrize("module", INDEPENDENT_MODULES)
@@ -95,7 +95,7 @@ def test_single_connectors_instance():
     exact same object as bridge.connectors (not a second ConnectorRegistry).
     """
     import bridge
-    from connector_glue import get_connectors_status
+    from bridge import get_connectors_status
     # Stamp a marker on bridge.connectors
     bridge.connectors._test_marker = "single-instance"
     try:

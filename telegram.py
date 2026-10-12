@@ -37,7 +37,7 @@ from typing import (
     runtime_checkable,
 )
 
-from core import (
+from shared import (
     _str_field,
     _int_field,
     _dict_field,
@@ -81,7 +81,7 @@ from core import (
     admin_chat_id,
     DEFAULT_BACKEND,
 )
-from _types import (
+from shared import (
     TelegramApiResponseDict,
     TelegramUser,
     TelegramChat,
@@ -132,12 +132,31 @@ TELEGRAM_PHOTO_MAX_SUM = 10000
 TELEGRAM_PHOTO_MAX_DIM = 5000
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".mp4"}
 BLOCKED_DOC_EXTENSIONS = {
-    ".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der",
-    ".jks", ".keystore", ".kdb", ".pgp", ".gpg", ".asc",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".crt",
+    ".cer",
+    ".der",
+    ".jks",
+    ".keystore",
+    ".kdb",
+    ".pgp",
+    ".gpg",
+    ".asc",
 }
 BLOCKED_FILENAMES = {
-    ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
-    "id_rsa", "id_ed25519", "id_dsa", "credentials", "kubeconfig",
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    "id_rsa",
+    "id_ed25519",
+    "id_dsa",
+    "credentials",
+    "kubeconfig",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".flac", ".aac", ".wav"}
@@ -163,9 +182,23 @@ BOT_COMMANDS = [
     {"command": "end", "description": "Offboard a worker: /end <name>"},
 ]
 BLOCKED_COMMANDS = [
-    "/mcp", "/help", "/config", "/model", "/compact", "/cost", "/doctor",
-    "/init", "/login", "/logout", "/permissions", "/pr", "/review",
-    "/terminal", "/vim", "/approved-tools", "/listen",
+    "/mcp",
+    "/help",
+    "/config",
+    "/model",
+    "/compact",
+    "/cost",
+    "/doctor",
+    "/init",
+    "/login",
+    "/logout",
+    "/permissions",
+    "/pr",
+    "/review",
+    "/terminal",
+    "/vim",
+    "/approved-tools",
+    "/listen",
 ]
 
 # ---------------------------------------------------------------------------
@@ -335,7 +368,24 @@ def escape_html(text: str) -> str:
 
 class _TelegramHTMLSanitizer(HTMLParser):
     SAFE_TAGS: frozenset[str] = frozenset(
-        {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a", "blockquote", "span", "tg-emoji", "tg-spoiler"}
+        {
+            "b",
+            "strong",
+            "i",
+            "em",
+            "u",
+            "ins",
+            "s",
+            "strike",
+            "del",
+            "code",
+            "pre",
+            "a",
+            "blockquote",
+            "span",
+            "tg-emoji",
+            "tg-spoiler",
+        }
     )
     SAFE_ATTRS: dict[str, frozenset[str]] = {
         "a": frozenset({"href"}),
@@ -456,8 +506,15 @@ def _render_md_inline_plain(children: list[MarkdownToken]) -> str:
         elif tok.type == "image":
             out.append(tok.content or "image")
         elif tok.type in (
-            "strong_open", "strong_close", "em_open", "em_close",
-            "s_open", "s_close", "link_open", "link_close", "html_inline",
+            "strong_open",
+            "strong_close",
+            "em_open",
+            "em_close",
+            "s_open",
+            "s_close",
+            "link_open",
+            "link_close",
+            "html_inline",
         ):
             pass
         else:
