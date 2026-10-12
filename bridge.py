@@ -3498,101 +3498,6 @@ def _detect_poisoned(name: str, tmux_name: str) -> str | None:
     return None
 
 
-def _activity_from_spinner(stripped: list[str]) -> str | None:
-    _ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
-    for raw in reversed(stripped):
-        first = raw[0] if raw else ""
-        if first == "✻" and "…" not in raw and "..." not in raw:
-            continue
-        if first not in _ACTIVE_SPINNER_CHARS:
-            continue
-        match = re.match(r"^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$", raw)
-        if match:
-            verb = match.group(1).strip()
-            dur = match.group(2).split("·")[0].strip()
-            return f"{verb} ({dur})"
-        verb_match = re.match(r"^.\s+(.+?)(?:…|\.{3})?\s*$", raw)
-        if verb_match:
-            verb = verb_match.group(1).strip()
-            dur_match = re.search(r"(\d+m?\s*\d*\.?\d*s)", raw)
-            return f"{verb} ({dur_match.group(1).strip()})" if dur_match else verb
-    return None
-
-
-def _activity_from_tool(stripped: list[str]) -> str | None:
-    last_running_tool = None
-    for i, raw in enumerate(stripped):
-        tool_match = re.match(r"^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(", raw)
-        if not tool_match:
-            continue
-        tool = tool_match.group(1)
-        for j in range(i + 1, min(i + 6, len(stripped))):
-            line = stripped[j]
-            if not line:
-                continue
-            if line.startswith("⎿"):
-                if "Running" in line and "background" not in line:
-                    last_running_tool = tool
-                break
-    if last_running_tool:
-        if last_running_tool.startswith("mcp__"):
-            parts = last_running_tool.split("__")
-            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
-        return f"Running {last_running_tool}"
-    return None
-
-
-def _activity_from_rate_limit(stripped: list[str]) -> str | None:
-    for raw in reversed(stripped):
-        lower = raw.lower()
-        if "rate limit" in lower:
-            return "Rate limited — waiting to retry"
-        if "connection error" in lower and "retrying" in lower:
-            return "Connection error — retrying"
-        if lower.startswith("retrying") or "retrying in" in lower:
-            return "Retrying API request"
-    return None
-
-
-def _activity_from_interactive(stripped: list[str]) -> str | None:
-    for raw in reversed(stripped):
-        for footer in _INTERACTIVE_FOOTERS:
-            if footer in raw:
-                for question_line in stripped:
-                    if "☐" in question_line:
-                        question = question_line.replace("☐", "").strip()
-                        if question:
-                            return f"Waiting for input: {question}"
-                return "Waiting for user input"
-    for raw in stripped:
-        for pattern in _INTERACTIVE_CONTENT:
-            if pattern in raw:
-                if "plan" in raw.lower() and ("proceed" in raw.lower() or "execute" in raw.lower()):
-                    return "Waiting for plan approval"
-                if "plan mode" in raw.lower():
-                    return "Waiting for plan mode decision"
-                if raw.startswith("Allow "):
-                    return "Waiting for tool permission"
-                return "Waiting for user input"
-    return None
-
-
-def _activity_from_prompt(stripped: list[str]) -> str | None:
-    last_prompt_idx = None
-    last_plan_bar_idx = None
-    for i, raw in enumerate(stripped):
-        if raw.startswith("❯"):
-            last_prompt_idx = i
-        if raw.startswith("⏸"):
-            last_plan_bar_idx = i
-    if last_plan_bar_idx is not None:
-        if last_prompt_idx is None or last_prompt_idx < last_plan_bar_idx:
-            return "In plan mode"
-    if last_prompt_idx is not None:
-        return "Ready"
-    return None
-
-
 _REVERSE_SCAN_PATTERNS: list[tuple[str, str]] = [
     ("Save and close editor to continue", "Waiting for external editor"),
     ("Running SessionStart", "Running SessionStart hooks"),
@@ -3603,75 +3508,7 @@ _REVERSE_SCAN_PATTERNS: list[tuple[str, str]] = [
     ("Entering plan mode", "In plan mode"),
     ("Waiting for team lead", "Waiting for team lead approval"),
 ]
-
-
-def _activity_from_reverse_scan(stripped: list[str]) -> str | None:
-    for raw in reversed(stripped):
-        for needle, result in _REVERSE_SCAN_PATTERNS:
-            if needle in raw:
-                return result
-    return None
-
-
-def _activity_from_tasks(stripped: list[str]) -> str | None:
-    done = 0
-    total = 0
-    for raw in stripped:
-        line = raw.lstrip()
-        if line.startswith("✔") or line.startswith("✅"):
-            done += 1
-            total += 1
-        elif line.startswith("◻"):
-            total += 1
-    if total >= 2:
-        return f"Tasks ({done}/{total} done)"
-    return None
-
-
-def _is_output_block_end(text: str) -> bool:
-    trimmed = text.lstrip()
-    if trimmed.startswith("Context left until auto-compact:"):
-        return True
-    return trimmed.startswith(("●", "·", "*", "✻", "─", "❯", "⏵", "⏸"))
-
-
-def _activity_from_output_block(stripped: list[str]) -> str | None:
-    for i in range(len(stripped) - 1, -1, -1):
-        raw = stripped[i]
-        if not raw.startswith("●"):
-            continue
-        if re.match(r"^●\s*[A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*\(", raw):
-            continue
-        parts: list[str] = []
-        head = re.sub(r"^●\s*", "", raw).strip()
-        if head and not head.startswith("⎿") and not head.startswith("(ctrl+"):
-            parts.append(head)
-        j = i + 1
-        while j < len(stripped):
-            nxt = stripped[j]
-            if _is_output_block_end(nxt):
-                break
-            text = nxt.strip()
-            if text and not text.startswith("⎿") and not text.startswith("(ctrl+"):
-                parts.append(text)
-            j += 1
-        if parts:
-            msg = re.sub(r"\s+", " ", " ".join(parts)).strip()
-            if len(msg) > 120:
-                msg = msg[:117].rstrip() + "..."
-            return msg
-    return None
-
-
-def _activity_from_error(stripped: list[str]) -> str | None:
-    for raw in reversed(stripped):
-        if re.match(r"^(FAIL|ERROR|Error|Traceback|Fail)\b", raw, re.IGNORECASE):
-            lower = raw.lower()
-            if lower.startswith("error"):
-                tail = raw[len("Error") :].lstrip(": ").strip()
-                return f"Error: {tail}" if tail else "Error"
-            return f"Error: {raw[:60]}"
-    return None
+_ACTIVE_SPINNER_CHARS = {"·", "*", "✢", "✦", "✧", "✹", "✵", "∙", "•", "✻"}
 
 
 def _extract_activity(lines: list[str]) -> str:
@@ -3680,21 +3517,121 @@ def _extract_activity(lines: list[str]) -> str:
     stripped = [line.strip() for line in lines if line.strip()]
     if not stripped:
         return "Idle"
-    _CHECKS: list[Callable[[list[str]], str | None]] = [
-        _activity_from_spinner,
-        _activity_from_tool,
-        _activity_from_rate_limit,
-        _activity_from_interactive,
-        _activity_from_prompt,
-        _activity_from_reverse_scan,
-        _activity_from_tasks,
-        _activity_from_output_block,
-        _activity_from_error,
-    ]
-    for check in _CHECKS:
-        result: str | None = check(stripped)
-        if result is not None:
-            return result
+    # Spinner check
+    for raw in reversed(stripped):
+        first = raw[0] if raw else ""
+        if first == "✻" and "…" not in raw and "..." not in raw:
+            continue
+        if first in _ACTIVE_SPINNER_CHARS:
+            match = re.match(r"^.\s+(.+?)(?:…|\.{3})\s*\(([^()]+)\)\s*$", raw)
+            if match:
+                return f"{match.group(1).strip()} ({match.group(2).split('·')[0].strip()})"
+            verb_match = re.match(r"^.\s+(.+?)(?:…|\.{3})?\s*$", raw)
+            if verb_match:
+                verb = verb_match.group(1).strip()
+                dur = re.search(r"(\d+m?\s*\d*\.?\d*s)", raw)
+                return f"{verb} ({dur.group(1).strip()})" if dur else verb
+    # Running tool check
+    last_running_tool = None
+    for i, raw in enumerate(stripped):
+        tool_match = re.match(r"^●\s*([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\(", raw)
+        if not tool_match:
+            continue
+        for j in range(i + 1, min(i + 6, len(stripped))):
+            if not stripped[j]:
+                continue
+            if stripped[j].startswith("⎿"):
+                if "Running" in stripped[j] and "background" not in stripped[j]:
+                    last_running_tool = tool_match.group(1)
+                break
+    if last_running_tool:
+        if last_running_tool.startswith("mcp__"):
+            parts = last_running_tool.split("__")
+            last_running_tool = ".".join(parts[1:]) if len(parts) > 1 else last_running_tool
+        return f"Running {last_running_tool}"
+    # Rate limit / connection error
+    for raw in reversed(stripped):
+        lower = raw.lower()
+        if "rate limit" in lower:
+            return "Rate limited — waiting to retry"
+        if "connection error" in lower and "retrying" in lower:
+            return "Connection error — retrying"
+        if lower.startswith("retrying") or "retrying in" in lower:
+            return "Retrying API request"
+    # Interactive input waiting
+    for raw in reversed(stripped):
+        for footer in _INTERACTIVE_FOOTERS:
+            if footer in raw:
+                for q in stripped:
+                    if "☐" in q:
+                        question = q.replace("☐", "").strip()
+                        if question:
+                            return f"Waiting for input: {question}"
+                return "Waiting for user input"
+    for raw in stripped:
+        for pattern in _INTERACTIVE_CONTENT:
+            if pattern in raw:
+                lower = raw.lower()
+                if "plan" in lower and ("proceed" in lower or "execute" in lower):
+                    return "Waiting for plan approval"
+                if "plan mode" in lower:
+                    return "Waiting for plan mode decision"
+                if raw.startswith("Allow "):
+                    return "Waiting for tool permission"
+                return "Waiting for user input"
+    # Prompt / plan mode
+    last_prompt_idx = last_plan_idx = None
+    for i, raw in enumerate(stripped):
+        if raw.startswith("❯"):
+            last_prompt_idx = i
+        if raw.startswith("⏸"):
+            last_plan_idx = i
+    if last_plan_idx is not None and (last_prompt_idx is None or last_prompt_idx < last_plan_idx):
+        return "In plan mode"
+    if last_prompt_idx is not None:
+        return "Ready"
+    # Reverse scan patterns
+    for raw in reversed(stripped):
+        for needle, result in _REVERSE_SCAN_PATTERNS:
+            if needle in raw:
+                return result
+    # Task progress
+    done = total = 0
+    for raw in stripped:
+        line = raw.lstrip()
+        if line.startswith(("✔", "✅")):
+            done += 1
+            total += 1
+        elif line.startswith("◻"):
+            total += 1
+    if total >= 2:
+        return f"Tasks ({done}/{total} done)"
+    # Output block
+    for i in range(len(stripped) - 1, -1, -1):
+        raw = stripped[i]
+        if not raw.startswith("●") or re.match(r"^●\s*[A-Za-z]\w*(?:__\w+)*\(", raw):
+            continue
+        parts: list[str] = []
+        head = re.sub(r"^●\s*", "", raw).strip()
+        if head and not head.startswith(("⎿", "(ctrl+")):
+            parts.append(head)
+        for j in range(i + 1, len(stripped)):
+            nxt = stripped[j].lstrip()
+            if nxt.startswith(("Context left until auto-compact:", "●", "·", "*", "✻", "─", "❯", "⏵", "⏸")):
+                break
+            text = stripped[j].strip()
+            if text and not text.startswith(("⎿", "(ctrl+")):
+                parts.append(text)
+        if parts:
+            msg = re.sub(r"\s+", " ", " ".join(parts)).strip()
+            return msg[:117].rstrip() + "..." if len(msg) > 120 else msg
+    # Error
+    for raw in reversed(stripped):
+        if re.match(r"^(FAIL|ERROR|Error|Traceback|Fail)\b", raw, re.IGNORECASE):
+            if raw.lower().startswith("error"):
+                tail = raw[len("Error"):].lstrip(": ").strip()
+                return f"Error: {tail}" if tail else "Error"
+            return f"Error: {raw[:60]}"
     return "Active"
 
 
@@ -6509,226 +6446,117 @@ def fetch_pr_cached(
     return meta, files, comments, reviews, commits, user_profiles
 
 
+def _gh_api(endpoint: str, jq: str, *, paginate: bool = True, timeout: int = 30) -> list[dict[str, object]]:
+    """Run gh api and parse JSON line output. Returns [] on error."""
+    cmd = ["gh", "api", endpoint]
+    if paginate:
+        cmd.append("--paginate")
+    cmd.extend(["--jq", jq])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            print(f"Warning: gh api {endpoint} returned {r.returncode}: {r.stderr.strip()[:200]}")
+            return []
+        return [json.loads(line) for line in r.stdout.strip().split("\n") if line.strip()]
+    except Exception as e:
+        print(f"Warning: gh api {endpoint} failed: {e}")
+        return []
+
+
 def fetch_user_info(usernames: Iterable[str]) -> dict[str, dict[str, object]]:
     profiles = {}
     for username in set(usernames):
         if not username:
             continue
-        try:
-            r = subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    f"users/{username}",
-                    "--jq",
-                    "{login: .login, name: .name, followers: .followers, "
-                    "public_repos: .public_repos, created_at: .created_at, "
-                    "avatar_url: .avatar_url, bio: .bio}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                profiles[username] = json.loads(r.stdout)
-        except Exception:
-            pass
+        items = _gh_api(
+            f"users/{username}",
+            "{login: .login, name: .name, followers: .followers, "
+            "public_repos: .public_repos, created_at: .created_at, "
+            "avatar_url: .avatar_url, bio: .bio}",
+            paginate=False, timeout=10,
+        )
+        if items:
+            profiles[username] = items[0]
     return profiles
 
 
 def fetch_pr_reviews(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    reviews = []
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
-                "--paginate",
-                "--jq",
-                ".[] | {id: .id, body: .body, user: .user.login, "
-                "state: .state, submitted_at: .submitted_at, "
-                "html_url: .html_url}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        for line in r.stdout.strip().split("\n"):
-            if line.strip():
-                reviews.append(json.loads(line))
-    except Exception as e:
-        print(f"Warning: could not fetch reviews: {e}")
-    return reviews
+    return _gh_api(
+        f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
+        ".[] | {id: .id, body: .body, user: .user.login, "
+        "state: .state, submitted_at: .submitted_at, html_url: .html_url}",
+    )
 
 
 def fetch_pr_comments(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    comments = []
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{owner}/{repo}/issues/{pr_num}/comments",
-                "--paginate",
-                "--jq",
-                ".[] | {id: .id, body: .body, user: .user.login, "
-                "created_at: .created_at, updated_at: .updated_at, "
-                'html_url: .html_url, type: "issue"}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        for line in r.stdout.strip().split("\n"):
-            if line.strip():
-                comments.append(json.loads(line))
-    except Exception as e:
-        print(f"Warning: could not fetch issue comments: {e}")
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
-                "--paginate",
-                "--jq",
-                ".[] | {id: .id, body: .body, user: .user.login, "
-                "created_at: .created_at, path: .path, line: .line, "
-                "original_line: .original_line, side: .side, "
-                'diff_hunk: .diff_hunk, html_url: .html_url, type: "review"}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        for line in r.stdout.strip().split("\n"):
-            if line.strip():
-                comments.append(json.loads(line))
-    except Exception as e:
-        print(f"Warning: could not fetch review comments: {e}")
-    comments.sort(key=lambda c: c.get("created_at", ""))
-    return comments
+    issue = _gh_api(
+        f"repos/{owner}/{repo}/issues/{pr_num}/comments",
+        '.[] | {id: .id, body: .body, user: .user.login, '
+        'created_at: .created_at, updated_at: .updated_at, '
+        'html_url: .html_url, type: "issue"}',
+    )
+    review = _gh_api(
+        f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
+        '.[] | {id: .id, body: .body, user: .user.login, '
+        'created_at: .created_at, path: .path, line: .line, '
+        'original_line: .original_line, side: .side, '
+        'diff_hunk: .diff_hunk, html_url: .html_url, type: "review"}',
+    )
+    return sorted(issue + review, key=lambda c: c.get("created_at", ""))
 
 
 def _fetch_commit_list(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    commits = []
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
-                "--paginate",
-                "--jq",
-                ".[] | {sha: .sha, message: .commit.message, "
-                "author: .commit.author.name, author_login: .author.login, "
-                "date: .commit.author.date}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if r.returncode != 0:
-            print(f"Warning: commit list API returned {r.returncode}: {r.stderr.strip()[:200]}")
-            return commits
-        for line in r.stdout.strip().split("\n"):
-            if line.strip():
-                obj = json.loads(line)
-                if "sha" in obj:
-                    commits.append(obj)
-    except Exception as e:
-        print(f"Warning: could not fetch commits: {e}")
-    return commits
+    return [c for c in _gh_api(
+        f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
+        ".[] | {sha: .sha, message: .commit.message, "
+        "author: .commit.author.name, author_login: .author.login, "
+        "date: .commit.author.date}",
+    ) if "sha" in c]
 
 
 def _fetch_commit_files_single(owner: str, repo: str, c: dict[str, object]) -> None:
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{owner}/{repo}/commits/{c['sha']}",
-                "--jq",
-                "{files: [.files[] | {filename: .filename, status: .status, "
-                "additions: .additions, deletions: .deletions, patch: .patch}]}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            data = json.loads(r.stdout)
-            c["files"] = data.get("files", [])
-    except Exception:
-        c["files"] = []
+    items = _gh_api(
+        f"repos/{owner}/{repo}/commits/{c['sha']}",
+        "{files: [.files[] | {filename: .filename, status: .status, "
+        "additions: .additions, deletions: .deletions, patch: .patch}]}",
+        paginate=False,
+    )
+    c["files"] = items[0].get("files", []) if items else []
 
 
 def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
-    meta_raw = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{owner}/{repo}/pulls/{pr_num}",
-            "--jq",
-            "{title: .title, body: .body, user: .user.login, "
-            "changed_files: .changed_files, additions: .additions, "
-            "deletions: .deletions, commits: .commits, "
-            "base: .base.ref, head: .head.ref, html_url: .html_url, "
-            "head_sha: .head.sha, base_sha: .base.sha, "
-            "mergeable: .mergeable, mergeable_state: .mergeable_state, "
-            "merged: .merged, state: .state, draft: .draft}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
+    items = _gh_api(
+        f"repos/{owner}/{repo}/pulls/{pr_num}",
+        "{title: .title, body: .body, user: .user.login, "
+        "changed_files: .changed_files, additions: .additions, "
+        "deletions: .deletions, commits: .commits, "
+        "base: .base.ref, head: .head.ref, html_url: .html_url, "
+        "head_sha: .head.sha, base_sha: .base.sha, "
+        "mergeable: .mergeable, mergeable_state: .mergeable_state, "
+        "merged: .merged, state: .state, draft: .draft}",
+        paginate=False,
     )
-    if meta_raw.returncode != 0:
-        raise RuntimeError(f"PR #{pr_num} not found or API error: {meta_raw.stderr.strip()[:200]}")
-    meta = json.loads(meta_raw.stdout)
+    if not items:
+        raise RuntimeError(f"PR #{pr_num} not found or API error")
+    meta = items[0]
     head_sha = meta.get("head_sha", "")
     if head_sha:
-        try:
-            checks_raw = subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-                    "--jq",
-                    "[.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}]",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if checks_raw.returncode == 0 and checks_raw.stdout.strip():
-                meta["checks"] = json.loads(checks_raw.stdout)
-            else:
-                meta["checks"] = []
-        except Exception:
-            meta["checks"] = []
+        checks = _gh_api(
+            f"repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+            "[.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}]",
+            paginate=False, timeout=15,
+        )
+        meta["checks"] = checks[0] if checks and isinstance(checks[0], list) else checks or []
     return meta
 
 
 def fetch_pr_files(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    files_raw = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{owner}/{repo}/pulls/{pr_num}/files",
-            "--paginate",
-            "--jq",
-            ".[] | {filename: .filename, status: .status, "
-            "additions: .additions, deletions: .deletions, patch: .patch}",
-        ],
-        capture_output=True,
-        text=True,
+    files = _gh_api(
+        f"repos/{owner}/{repo}/pulls/{pr_num}/files",
+        ".[] | {filename: .filename, status: .status, "
+        "additions: .additions, deletions: .deletions, patch: .patch}",
         timeout=60,
     )
-    files = []
-    for line in files_raw.stdout.strip().split("\n"):
-        if line.strip():
-            files.append(json.loads(line))
     missing = [f for f in files if not f.get("patch") and f.get("additions", 0) > 0]
     if missing:
         print(f"    Fetching full diff for {len(missing)} large files...")
@@ -6745,15 +6573,12 @@ def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
     try:
         r = subprocess.run(
             ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}", "-H", "Accept: application/vnd.github.v3.diff"],
-            capture_output=True,
-            text=True,
-            timeout=120,
+            capture_output=True, text=True, timeout=120,
         )
-        if r.returncode == 0:
-            return r.stdout
+        return r.stdout if r.returncode == 0 else None
     except subprocess.TimeoutExpired:
         print("Full diff fetch timed out")
-    return None
+        return None
 
 
 def _parse_full_diff(diff_text: str) -> dict[str, str]:
