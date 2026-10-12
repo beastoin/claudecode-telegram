@@ -122,9 +122,6 @@ from claudecode import (
 
 
 import html
-import json
-import re
-from pathlib import Path
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _REVIEW_CSS = (_TEMPLATE_DIR / "review.css").read_text() if (_TEMPLATE_DIR / "review.css").exists() else ""
@@ -639,11 +636,7 @@ def generate_html(
 # ============================================================
 
 import argparse
-import json
-import os
-import re
 import sqlite3
-import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, Optional, Sequence
@@ -1093,14 +1086,7 @@ def _indexer_main() -> None:
 
 import enum
 import http.client
-import json
-import os
 import socket
-import subprocess
-import threading
-import urllib.error
-import urllib.request
-from pathlib import Path
 from typing import Callable, Protocol, cast
 from core import (
     _log,
@@ -1573,12 +1559,6 @@ class TunnelManager:
 import abc
 import base64
 import binascii
-import json
-import os
-import re
-import subprocess
-import tempfile
-import threading
 from datetime import datetime, timezone, timedelta
 from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
 from _types import (
@@ -1640,39 +1620,6 @@ M = TypeVar("M")
 # ============================================================
 
 
-import abc
-import base64
-import binascii
-import json
-import os
-import re
-import subprocess
-import tempfile
-import threading
-from datetime import datetime, timezone, timedelta
-from typing import Generic, Optional, Protocol, TypedDict, TypeVar, cast
-from _types import (
-    GmailHeader,
-    GmailBody,
-    GmailPayloadPart,
-    GmailMessage,
-    GmailMessageRef,
-    GmailHistoryEntry,
-    GmailHistoryResponse,
-    GmailProfile,
-    GmailAttachmentData,
-    GmailMessageListResponse,
-    GmailAttachmentInfo,
-    GithubUser,
-    GithubComment,
-    GithubState,
-    Attachment,
-    ConnectorMetadata,
-    IssueContext,
-    ConnectorStatus,
-    GmailStatus,
-    GithubStatus,
-)
 
 
 def _atomic_write(path: str, payload: str | bytes) -> None:
@@ -3080,9 +3027,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
 # ============================================================
 
 
-import os
-import re
-import time
 from typing import TYPE_CHECKING, Callable, cast
 from urllib.parse import urlparse
 
@@ -3382,12 +3326,6 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
 # ============================================================
 
 
-import json
-import os
-import re
-import subprocess
-import urllib.error
-from pathlib import Path
 from typing import Any, Callable, cast
 from core import (
     _log,
@@ -3448,7 +3386,6 @@ from claudecode import (
     processes,
     watchdog,
 )
-import time
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
@@ -5162,7 +5099,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # health
 # ============================================================
 
-import re
 from typing import Callable
 from core import _clock, DEFAULT_BACKEND
 from claudecode import (
@@ -5217,9 +5153,6 @@ def format_team_lines(  # type: ignore[no-redef]
 # ============================================================
 
 
-import json
-import os
-from pathlib import Path
 from typing import Callable, cast
 from core import _log, _LOG_ERROR, _LOG_WARN, _LOG_DEBUG, _clock, _int_field
 from claudecode import (
@@ -5232,7 +5165,6 @@ from claudecode import (
 )
 from _types import TranscriptEntry, TranscriptStatsDict, ToolResultDict
 
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
 _TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
 _ICONS = (
@@ -6003,11 +5935,6 @@ def _render_transcript_html(
 # transcript
 # ============================================================
 
-import json
-import os
-import subprocess
-import threading
-from pathlib import Path
 from typing import Callable, TypedDict, cast
 from core import (
     _log,
@@ -6017,14 +5944,6 @@ from core import (
     _subprocess_runner,
     _clock,
     _int_field,
-)
-from claudecode import (
-    _remote_run,
-    _remap_path,
-    _project_slug,
-    _get_remote_home,
-    normalize_cwd,
-    AuthorDetection,
 )
 from _types import (
     TranscriptSyncState,
@@ -6039,7 +5958,6 @@ from _types import (
 
 # get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
 
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 
 class TranscriptSyncRegistry:
@@ -6365,21 +6283,9 @@ def handle_transcript_endpoint(handler, parsed) -> None:
 # _review_cache
 # ============================================================
 
-import base64
-import json
-import html
-import sys
-import os
-import subprocess
-import re
-import sqlite3
-import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Iterable
 
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
 _REVIEW_SCHEMA = (
     (_TEMPLATE_DIR / "review_schema.sql").read_text() if (_TEMPLATE_DIR / "review_schema.sql").exists() else ""
 )
@@ -7142,7 +7048,6 @@ def _pr_review_main() -> None:
 
 
 import hashlib, json, os, secrets, time, threading
-from pathlib import Path
 from typing import TypedDict, cast
 from core import _log, _LOG_INFO, _LOG_WARN, _clock, NODE_DIR
 from _types import _GuestSessionDictRequired, ChannelMemberDict, ChannelDict, RelayChannelDict
@@ -7899,21 +7804,7 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
 # ============================================================
 
 
-import collections
-import json
-import os
-import re
-import shutil
-import subprocess
-import tempfile
-import threading
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
-from urllib.parse import urlparse
 from core import (
     _log,
     _LOG_ERROR,
@@ -8880,14 +8771,8 @@ def _checkin_do_restart(
 # _worker_impl
 # ============================================================
 
-import json
-import os
 import shlex
-import subprocess
-import threading
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
-import core
 import claudecode
 from core import (
     Clock,
@@ -9603,17 +9488,7 @@ class WorkerManager:
 # _command_impl
 # ============================================================
 
-import os
-import re
-import subprocess
-import sys
-import time
-import urllib.error
-from pathlib import Path
 from typing import cast
-import core
-import claudecode
-import telegram
 from core import (
     _log,
     _LOG_ERROR,
@@ -10163,15 +10038,6 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
 # ============================================================
 
 
-import json
-import os
-import shlex
-import subprocess
-import tempfile
-import threading
-import urllib.error
-from pathlib import Path
-from typing import TYPE_CHECKING, cast
 from core import (
     _log,
     _LOG_ERROR,
@@ -11106,15 +10972,7 @@ def teleport_rollback(
 # api_handlers
 # ============================================================
 
-import json
-import os
-import subprocess
-import urllib.error
-from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qs
-import core
-import claudecode
-import telegram
 from core import (
     _log,
     _LOG_ERROR,
@@ -11370,10 +11228,6 @@ def handle_health_workers_endpoint(handler) -> None:
 
 
 import base64 as _b64
-import json
-import os
-import urllib.error
-from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
@@ -11576,12 +11430,6 @@ def handle_pr_comment(handler, body: bytes) -> None:
 # ============================================================
 
 import hashlib
-import json
-import secrets
-import time
-from typing import TYPE_CHECKING, cast
-from urllib.parse import urlparse, parse_qs, ParseResult
-import claudecode
 from core import (
     _str_field,
     _int_field,
@@ -14105,9 +13953,6 @@ def _setup_endpoint_routes() -> None:
     r.delete_pattern(r"^/channels/([^/]+)$", lambda h, p, m: h.handle_channel_delete(_mg(m)))
 
 
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
-_TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
-_TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
 _CONNECTOR_CSS = (_TEMPLATE_DIR / "connector.css").read_text() if (_TEMPLATE_DIR / "connector.css").exists() else ""
 
 
@@ -14599,7 +14444,6 @@ import types as _types_mod
 
 
 # Propagate attribute writes to foundation modules (test monkeypatching support)
-import types as _types_mod
 import core as _core_mod
 import claudecode as _cc_mod
 import telegram as _tg_mod
