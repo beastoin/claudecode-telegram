@@ -101,11 +101,6 @@ from claudecode import (
 )
 
 
-# ============================================================
-# _review_render
-# ============================================================
-
-
 import html
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -174,11 +169,6 @@ def generate_html(
     ).replace("</", "<\\/")
     title = f"PR #{pr_num}: {html.escape(meta.get('title', ''))}"
     return _REVIEW_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
-
-
-# ============================================================
-# indexer
-# ============================================================
 
 import argparse
 import sqlite3
@@ -622,11 +612,6 @@ def _indexer_main() -> None:
     args = parser.parse_args()
     if args.mode == "transcript":
         _run_transcript(args)
-
-
-# ============================================================
-# tunnel
-# ============================================================
 
 import enum
 import http.client
@@ -1082,11 +1067,6 @@ class TunnelManager:
         except Exception:
             pass
 
-
-# ============================================================
-# connectors
-# ============================================================
-
 import abc
 import base64
 import binascii
@@ -1120,11 +1100,6 @@ _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
 _MAX_SEEN_IDS = 500
 _PRUNE_KEEP = 200
 M = TypeVar("M")
-
-
-# ============================================================
-# _connector_impl
-# ============================================================
 
 
 def _atomic_write(path: str, payload: str | bytes) -> None:
@@ -2336,11 +2311,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
         self._save_state()
 
 
-# ============================================================
-# connector_glue
-# ============================================================
-
-
 import shared as core
 
 
@@ -2591,11 +2561,6 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
                 else {"name": cname, "running": False, "error": "not initialized"}
             )
     return result
-
-
-# ============================================================
-# _health_impl
-# ============================================================
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
@@ -3955,11 +3920,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
             _log(_LOG_ERROR, "watchdog", f"{label} check error: {e}")
 
 
-# ============================================================
-# health
-# ============================================================
-
-
 def format_team_lines(  # type: ignore[no-redef]
     registered: dict[str, TmuxSessionDict],
     active: str | None,
@@ -3979,11 +3939,6 @@ def format_team_lines(  # type: ignore[no-redef]
         clock_now=_clock.time(),
         normalize_backend_fn=normalize_backend,
     )
-
-
-# ============================================================
-# _transcript_render
-# ============================================================
 
 
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
@@ -4266,11 +4221,6 @@ def _render_transcript_html(
     ).replace("</", "<\\/")
     title = f"{html.escape(name)} — Transcript"
     return _TRANSCRIPT_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
-
-
-# ============================================================
-# transcript
-# ============================================================
 
 
 # get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
@@ -4587,11 +4537,6 @@ def handle_transcript_endpoint(handler, parsed) -> None:
     except (OSError, ValueError, KeyError) as e:
         _log(_LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
         handler._send_text(500, str(e))
-
-
-# ============================================================
-# _review_cache
-# ============================================================
 
 import uuid
 
@@ -5234,11 +5179,6 @@ def _pr_review_main() -> None:
             print(f"\nServing at {url}")
             print("Press Ctrl+C to stop")
             httpd.serve_forever()
-
-
-# ============================================================
-# _relay_impl
-# ============================================================
 
 
 import hashlib, json, os, secrets, time, threading
@@ -5965,11 +5905,6 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
     lines.append(f"---")
     router.reply(chat_id, "\n".join(lines))
     return True
-
-
-# ============================================================
-# _bridge_helpers
-# ============================================================
 
 
 class MachineConfigError(ValueError):
@@ -6848,11 +6783,6 @@ def _checkin_do_restart(
         with watchdog.restart_lock:
             watchdog.restart_in_progress.pop(name, None)
 
-
-# ============================================================
-# _worker_impl
-# ============================================================
-
 import shlex
 import claudecode
 
@@ -7517,11 +7447,6 @@ class WorkerManager:
         return True, None
 
 
-# ============================================================
-# _command_impl
-# ============================================================
-
-
 def cmd_pilot(router, name: str, chat_id) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
@@ -8028,11 +7953,6 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
         router._restart_all_abort.set()
     router.reply(chat_id, "Stopping restart-all sequence...")
     return True
-
-
-# ============================================================
-# _teleport_ops
-# ============================================================
 
 
 # _get_claude_pid and get_worker_host — defined earlier (from _health_impl)
@@ -8846,11 +8766,6 @@ def teleport_rollback(
         _log(_LOG_DEBUG, "io:unknown", f"{type(exc).__name__}: {exc}")
 
 
-# ============================================================
-# api_handlers
-# ============================================================
-
-
 def handle_notify(handler, body: bytes = b"") -> None:
 
     try:
@@ -9066,11 +8981,6 @@ def handle_health_workers_endpoint(handler) -> None:
         handler._send_text(500, str(e))
 
 
-# ============================================================
-# pr_handlers
-# ============================================================
-
-
 import base64 as _b64
 
 def _b():
@@ -9260,11 +9170,6 @@ def handle_pr_comment(handler, body: bytes) -> None:
         b.transport.send_text(b.admin_chat_id, f"\U0001f4ac PR #{pr_num} comment\n{path}:{line}\n\n{comment_body}")
     _pr_fan_out(pr_num, comment_body, f" on {path}:{line}")
     handler._send_json(200, {"ok": True})
-
-
-# ============================================================
-# guest_handlers
-# ============================================================
 
 import hashlib
 
@@ -9777,11 +9682,6 @@ _start_connectors = start_connectors
 _restart_connector = restart_connector
 _get_connectors_status = get_connectors_status
 
-
-# ============================================================
-# bridge (main module body)
-# ============================================================
-
 class WorkerRegistryEntry:
     backend: str = "claude"
     protocol: str = ""
@@ -10172,11 +10072,6 @@ def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
 
 class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
-
-
-# ============================================================
-# teleport (merged from teleport.py)
-# ============================================================
 
 def do_teleport(
     name: str,
