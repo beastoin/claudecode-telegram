@@ -149,9 +149,9 @@ def test_worker_send_uses_backend():
         bridge.worker_manager.get_registered_sessions = fake_get_registered_sessions
 
         session = fake_scan()["alice"]
-        ok = bridge.worker_send("alice", "hello", session=session)
+        ok = bridge.worker_manager.send("alice", "hello", session=session)
 
-        assert ok is True, "expected worker_send to succeed"
+        assert ok is True, "expected worker_manager.send to succeed"
         assert calls["codex"] == 1, f"expected codex send, got {calls}"
         assert calls["claude"] == 0, f"expected no claude send, got {calls}"
     finally:

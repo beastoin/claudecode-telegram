@@ -146,9 +146,7 @@ from urllib.parse import urlparse
 from shared import (
     ReminderState,
     WorkerStateEntry,
-    ParsedWorkerTarget,
     TmuxActivityResult,
-    AuthorDetection,
     TmuxSessionDict,
     RegistryWorkerDict,
     RegistryFileDict,

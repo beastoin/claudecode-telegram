@@ -401,25 +401,6 @@ def test_worker_host_field():
         shutil.rmtree(tmpdir)
 
 
-def test_hire_parses_host():
-    import bridge
-
-    # Parse name@host
-    name, host = bridge.parse_worker_target('kenji@mac')
-    assert name == 'kenji', f'Expected kenji, got {name}'
-    assert host == 'mac', f'Expected mac, got {host}'
-
-    # Parse plain name (no host)
-    name, host = bridge.parse_worker_target('lee')
-    assert name == 'lee', f'Expected lee, got {name}'
-    assert host is None, f'Expected None, got {host}'
-
-    # Parse name@host with dashes
-    name, host = bridge.parse_worker_target('my-worker@mac-mini')
-    assert name == 'my-worker', f'Expected my-worker, got {name}'
-    assert host == 'mac-mini', f'Expected mac-mini, got {host}'
-
-
 @pytest.mark.skip(reason="truncated source: bash test body cut off mid python3 -c block, no assertions to convert")
 def test_workers_no_from_backward_compat():
     pass

@@ -69,9 +69,11 @@ def test_watchdog_waiting_input_state():
     import bridge
     import time
 
-    # Test _format_watchdog_status with WAITING_INPUT
-    bridge.watchdog.worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
-    result = bridge._format_watchdog_status('testbot')
+    # Test _format_watchdog_status_pure with WAITING_INPUT
+    now = time.time()
+    bridge.watchdog.worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', now - 120)
+    snapshot = dict(bridge.watchdog.worker_states)
+    result = bridge._format_watchdog_status_pure('testbot', pending_lookup=bridge.is_pending, state_snapshot=snapshot, clock_now=now)
     assert 'Needs reply' in result, f'Expected Needs reply, got: {result}'
     assert '2m' in result, f'Expected 2m duration, got: {result}'
 
@@ -156,42 +158,42 @@ def test_format_watchdog_status():
     snapshot = dict(states)
 
     # READY -> 'Ready'
-    result = bridge._format_watchdog_status('ready_worker', lambda n: False, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('ready_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
     assert result == 'Ready', f'READY: expected Ready, got {result}'
 
     # BUSY_TOOL -> 'Working'
-    result = bridge._format_watchdog_status('busy_tool_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('busy_tool_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result == 'Working', f'BUSY_TOOL: expected Working, got {result}'
 
     # BUSY_THINKING -> 'Thinking'
-    result = bridge._format_watchdog_status('busy_thinking_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('busy_thinking_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result == 'Thinking', f'BUSY_THINKING: expected Thinking, got {result}'
 
     # WAITING -> 'Working'
-    result = bridge._format_watchdog_status('waiting_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('waiting_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result == 'Working', f'WAITING: expected Working, got {result}'
 
     # STUCK -> 'No progress (Xm)'
-    result = bridge._format_watchdog_status('stuck_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('stuck_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result.startswith('No progress'), f'STUCK: expected No progress (Xm), got {result}'
     assert 'm)' in result, f'STUCK: expected minutes in parens, got {result}'
 
     # DEAD -> 'Not responding'
-    result = bridge._format_watchdog_status('dead_worker', lambda n: False, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('dead_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
     assert result == 'Not responding', f'DEAD: expected Not responding, got {result}'
 
     # OFFLINE -> 'Offline'
-    result = bridge._format_watchdog_status('offline_worker', lambda n: False, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('offline_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
     assert result == 'Offline', f'OFFLINE: expected Offline, got {result}'
 
     # POISONED -> 'Error loop (Xm)'
-    result = bridge._format_watchdog_status('poisoned_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('poisoned_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result.startswith('Error loop'), f'POISONED: expected Error loop (Xm), got {result}'
 
     # Unknown worker -> fallback based on pending
-    result = bridge._format_watchdog_status('nonexistent_worker', lambda n: True, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('nonexistent_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
     assert result == 'Working', f'Unknown+pending: expected Working, got {result}'
-    result = bridge._format_watchdog_status('nonexistent_worker', lambda n: False, state_snapshot=snapshot)
+    result = bridge._format_watchdog_status_pure('nonexistent_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
     assert result == 'Ready', f'Unknown+idle: expected Ready, got {result}'
 
     # Clean up
@@ -663,8 +665,11 @@ def test_watchdog_exited_state():
     assert entry is not None, 'EXITED state should be recorded'
     assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
 
-    # Verify _format_watchdog_status returns 'exited'
-    status = bridge._format_watchdog_status('deadworker')
+    # Verify _format_watchdog_status_pure returns 'exited'
+    import time as _time
+    _now = _time.time()
+    _snap = dict(bridge.watchdog.worker_states)
+    status = bridge._format_watchdog_status_pure('deadworker', pending_lookup=bridge.is_pending, state_snapshot=_snap, clock_now=_now)
     assert status == 'Session ended', f'expected "Session ended", got "{status}"'
 
     # Verify EXITED is in the alert actions

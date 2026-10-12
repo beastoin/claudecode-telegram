@@ -490,53 +490,8 @@ def test_transcript_prompts_filter():
         os.unlink(tpath)
 
 
-def test_transcript_dynamic_avatars():
-    import bridge
-
-    sys.path.insert(0, os.getcwd())
-
-    # Test _detect_message_author
-    author, av, display = bridge._detect_message_author('ryo: fix the bug')
-    assert author == 'ryo', f'Expected ryo, got {author}'
-    assert 'viewBox' in av, 'Team member should get SVG avatar'
-    assert display == 'fix the bug', f'Display should strip prefix, got: {display}'
-
-    # Manager prefix
-    author2, av2, display2 = bridge._detect_message_author('manager: check this')
-    assert author2 == 'manager', f'Expected manager, got {author2}'
-    assert 'github' in av2.lower() or 'img' in av2, 'Manager should get GitHub avatar'
-    assert display2 == 'check this'
-
-    # No prefix → default manager
-    author3, av3, display3 = bridge._detect_message_author('just a plain message')
-    assert author3 == 'manager'
-    assert 'img' in av3
-
-    # Test avatar uniqueness
-    av_ryo = bridge._generate_member_avatar('ryo')
-    av_mon = bridge._generate_member_avatar('mon')
-    av_lee = bridge._generate_member_avatar('lee')
-    assert av_ryo != av_mon, 'Different members should have different avatars'
-    assert av_ryo != av_lee
-    assert av_mon != av_lee
-
-    # Verify determinism
-    assert bridge._generate_member_avatar('ryo') == av_ryo, 'Same name should give same avatar'
-
-    # Verify 100+ unique variants
-    avatars = set()
-    for name in list(bridge._TEAM_MEMBERS) + ['alice', 'bob', 'carol', 'dave', 'eve', 'frank', 'grace',
-        'heidi', 'ivan', 'judy', 'karl', 'larry', 'mallory', 'nancy', 'oscar', 'peggy',
-        'quinn', 'romeo', 'steve', 'trudy', 'ursula', 'victor', 'wendy', 'xavier', 'yvonne', 'zach',
-        'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa',
-        'lambda', 'mu', 'nu', 'xi', 'omicron', 'pi', 'rho', 'sigma', 'tau', 'upsilon', 'phi',
-        'chi', 'psi', 'omega', 'ant', 'bee', 'cat', 'dog', 'elk', 'fox', 'gnu', 'hen', 'ibis',
-        'jay', 'koi', 'lynx', 'moth', 'newt', 'owl', 'pig', 'quail', 'ram', 'seal', 'toad',
-        'urchin', 'vole', 'wolf', 'yak', 'zebu', 'atom', 'bolt', 'cog', 'dart', 'edge',
-        'flux', 'grit', 'haze', 'icon', 'jest', 'knot', 'lens', 'mist', 'node', 'opus',
-        'pulse', 'rift', 'shard', 'tide', 'unit', 'vex', 'warp', 'xray', 'yield', 'zinc']:
-        avatars.add(bridge._generate_member_avatar(name))
-    assert len(avatars) >= 100, f'Expected 100+ unique avatars, got {len(avatars)}'
+# test_transcript_dynamic_avatars removed — _detect_message_author and
+# _generate_member_avatar moved to client-side JS (templates/transcript.js)
 
 
 def test_transcript_sidebar_stats():
@@ -1043,9 +998,8 @@ def test_codex_rewind_reads_native_transcript():
             for ev in events:
                 f.write(json.dumps(ev) + '\n')
 
-        # Mock _find_codex_transcript to return our test file
-        with patch.object(bridge, '_find_codex_transcript', return_value=str(transcript_file)):
-            messages = bridge._read_codex_transcript('alice')
+        # Call _parse_codex_transcript directly with the test file
+        messages = bridge._parse_codex_transcript(str(transcript_file))
 
         assert len(messages) == 2, f"expected 2 messages, got {len(messages)}"
         assert messages[0]['role'] == 'user', f"expected user: {messages[0]}"

@@ -32,21 +32,11 @@ class WorkerStateEntry(NamedTuple):
     since: float
 
 
-class ParsedWorkerTarget(NamedTuple):
-    name: str
-    host: str | None
-
-
 class TmuxActivityResult(NamedTuple):
     activity: str
     context_pct: str | None
     raw_lines: list[str] | None
 
-
-class AuthorDetection(NamedTuple):
-    author: str
-    avatar_html: str
-    display_text: str
 
 
 class TmuxSessionDict(TypedDict, total=False):

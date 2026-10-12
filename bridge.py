@@ -1838,33 +1838,21 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return None, None
         msg_ids: list[str] = []
         seen: set[str] = set()
-        history_entries = data.get("history")
-        if not isinstance(history_entries, list):
-            history_entries = []
-        for entry in history_entries:
+        for entry in data.get("history") or []:
             if not isinstance(entry, dict):
                 continue
-            messages_added = entry.get("messagesAdded")
-            if not isinstance(messages_added, list):
-                continue
-            for added in messages_added:
-                if not isinstance(added, dict):
-                    continue
-                msg = added.get("message")
+            for added in entry.get("messagesAdded") or []:
+                msg = added.get("message") if isinstance(added, dict) else None
                 if not isinstance(msg, dict):
                     continue
-                raw_id = msg.get("id")
-                msg_id: str = str(raw_id) if isinstance(raw_id, str) else ""
-                label_ids = msg.get("labelIds")
-                if not isinstance(label_ids, list):
-                    label_ids = []
-                if msg_id and msg_id not in seen:
+                msg_id = msg.get("id", "")
+                label_ids = msg.get("labelIds") or []
+                if msg_id and isinstance(msg_id, str) and msg_id not in seen:
                     if self.is_inbox_unread(label_ids) or "SENT" in label_ids:
                         seen.add(msg_id)
                         msg_ids.append(msg_id)
         raw_hid = data.get("historyId")
-        new_hid: Optional[str] = str(raw_hid) if raw_hid is not None else None
-        return msg_ids, new_hid
+        return msg_ids, str(raw_hid) if raw_hid is not None else None
 
     def _format_attachment_line(self, attachments: list[GmailAttachmentInfo]) -> str:
         return (
@@ -4157,24 +4145,6 @@ from claudecode import (
 )
 
 
-def _format_watchdog_status(
-    name: str,
-    pending_lookup: Callable[[str], bool] | None = None,
-    state_snapshot: dict[str, WorkerStateEntry] | None = None,
-) -> str:
-    if pending_lookup is None:
-        pending_lookup = is_pending
-    if state_snapshot is None:
-        with watchdog.lock:
-            state_snapshot = dict(watchdog.worker_states)
-    return _format_watchdog_status_pure(
-        name,
-        pending_lookup=pending_lookup,
-        state_snapshot=state_snapshot,
-        clock_now=_clock.time(),
-    )
-
-
 def format_team_lines(  # type: ignore[no-redef]
     registered: dict[str, TmuxSessionDict],
     active: str | None,
@@ -4209,7 +4179,6 @@ from claudecode import (
     _project_slug,
     _get_remote_home,
     normalize_cwd,
-    AuthorDetection,
 )
 from shared import TranscriptEntry, TranscriptStatsDict, ToolResultDict
 
@@ -4233,27 +4202,6 @@ _TRANSCRIPT_CHEVRON_SVG = _ICONS.get("chevron", "")
 _TRANSCRIPT_CLAUDE_AVATAR = _ICONS.get("claude_avatar", "")
 _TRANSCRIPT_DEFAULT_TOOL_SVG = _ICONS.get("default_tool", "")
 _TRANSCRIPT_TOOL_SVGS: dict[str, str] = _ICONS.get("tools", {})
-_TEAM_MEMBERS = {
-    "chen",
-    "geni",
-    "hiro",
-    "jin",
-    "kai",
-    "kelvin",
-    "kenji",
-    "lee",
-    "luck",
-    "mon",
-    "noa",
-    "ren",
-    "ryo",
-    "sora",
-    "taro",
-    "x",
-    "yuki",
-    "finn",
-}
-_MANAGER_AV = _ICONS.get("manager_avatar", "")
 _LOADING_CSS = (
     (_TEMPLATE_DIR / "transcript_loading.css").read_text().strip()
     if (_TEMPLATE_DIR / "transcript_loading.css").exists()
@@ -4261,55 +4209,8 @@ _LOADING_CSS = (
 )
 
 
-def _generate_member_avatar(name: str) -> str:
-    name_hash = hash(name) & 0xFFFFFFFF
-    hue = (name_hash % 36) * 10
-    sat = 55 + (name_hash >> 6 & 1) * 15
-    shape_idx = (name_hash >> 7) % 6
-    accent_idx = (name_hash >> 10) % 5
-    initials = name[:2].upper() if len(name) >= 2 else name.upper()
-    bg = f"hsl({hue},{sat}%,42%)"
-    fg = f"hsl({hue},{max(sat-20,30)}%,75%)"
-    shapes = [
-        '<circle cx="14" cy="14" r="14"/>',
-        '<rect x="1" y="1" width="26" height="26" rx="6"/>',
-        '<polygon points="14,0 28,7 28,21 14,28 0,21 0,7"/>',
-        '<polygon points="14,1 27,14 14,27 1,14"/>',
-        '<polygon points="14,0 28,10 22,28 6,28 0,10"/>',
-        '<rect x="0" y="0" width="28" height="28" rx="10"/>',
-    ]
-    accents = [
-        "",
-        f'<circle cx="14" cy="14" r="8" fill="none" stroke="{fg}" stroke-width="1.5" opacity=".3"/>',
-        f'<circle cx="7" cy="7" r="2" fill="{fg}" opacity=".2"/><circle cx="21" cy="7" r="2" fill="{fg}" opacity=".2"/>',
-        f'<line x1="4" y1="4" x2="24" y2="24" stroke="{fg}" stroke-width="1" opacity=".15"/><line x1="4" y1="24" x2="24" y2="4" stroke="{fg}" stroke-width="1" opacity=".15"/>',
-        f'<rect x="4" y="12" width="20" height="4" rx="2" fill="{fg}" opacity=".15"/>',
-    ]
-    return (
-        f'<div class="u-av"><svg viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">'
-        f'<g fill="{bg}">{shapes[shape_idx]}</g>'
-        f"{accents[accent_idx]}"
-        f'<text x="14" y="14" text-anchor="middle" dominant-baseline="central" '
-        f'fill="#fff" font-family="Inter,system-ui,sans-serif" font-size="11" font-weight="600" '
-        f'opacity=".9">{initials}</text></svg></div>'
-    )
-
-
-def _detect_message_author(text: str) -> AuthorDetection:
-    stripped = text.strip()
-    colon_pos = stripped.find(":")
-    if 0 < colon_pos <= 10:
-        prefix = stripped[:colon_pos].lower().strip()
-        rest = stripped[colon_pos + 1 :].strip()
-        if prefix == "manager":
-            return AuthorDetection("manager", _MANAGER_AV, rest or stripped)
-        if prefix in _TEAM_MEMBERS:
-            return AuthorDetection(prefix, _generate_member_avatar(prefix), rest or stripped)
-    return AuthorDetection("manager", _MANAGER_AV, stripped)
-
-
-
-# _transcript_entry_to_html and _format_model_name moved to client-side JS (templates/transcript.js)
+# _transcript_entry_to_html, _format_model_name, _detect_message_author,
+# and _generate_member_avatar moved to client-side JS (templates/transcript.js)
 
 
 def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
@@ -6374,7 +6275,6 @@ from shared import (
     MachinesCatalogResponse,
     NodeConfigDict,
     MentionRouteResult,
-    ParsedWorkerTarget,
     ReminderState,
     RewindTokenEntry,
     PrReviewTokenEntry,
@@ -6660,13 +6560,6 @@ def _remote_copy(src: str, dst: str, host: str | None = None, direction: str = "
         _subprocess_runner.run(["scp", "-q", f"{host}:{src}", dst], capture_output=True, timeout=TIMEOUT_FILE_TRANSFER)
 
 
-def parse_worker_target(target: str) -> ParsedWorkerTarget:
-    if "@" in target:
-        name, host = target.rsplit("@", 1)
-        return ParsedWorkerTarget(name, host)
-    return ParsedWorkerTarget(target, None)
-
-
 def _read_learning_reminder(name: str) -> str:
     try:
         if os.path.isfile(_LEARNING_REMINDER_PATH):
@@ -6847,16 +6740,6 @@ def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTra
                 if output:
                     messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
     return cast(list[CodexTranscriptEntry], messages)
-
-
-def _read_codex_transcript(worker_name: str) -> list[CodexTranscriptEntry]:
-    import bridge as _b
-
-    host = _b.get_worker_host(worker_name)
-    path = _find_codex_transcript(worker_name, host=host)
-    if not path:
-        return []
-    return _parse_codex_transcript(path, host=host)
 
 
 REWIND_TIMEOUT: int = 24 * 60 * 60
@@ -10868,12 +10751,6 @@ def _sync_worker_manager() -> None:
 
 def worker_set_pending(name: str, chat_id: ChatId) -> None:
     set_pending(name, chat_id)
-
-
-def worker_send(name: str, message: str, chat_id: int | None = None, session: TmuxSessionDict | None = None) -> bool:
-    _sync_worker_manager()
-    assert worker_manager is not None
-    return worker_manager.send(name, message, chat_id, session)
 
 
 def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
