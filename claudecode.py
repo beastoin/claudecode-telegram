@@ -1114,7 +1114,6 @@ def _remap_path(local_path: str, host: str | None) -> str:
 
 
 def _get_remote_home(host: str | None) -> str:
-
     with remote_cache.lock:
         cached = remote_cache.home_dirs.get(host or "")
     if cached is not None:
