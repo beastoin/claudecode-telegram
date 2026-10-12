@@ -743,9 +743,7 @@ class CodexBackend:
         return True
 
     def is_online(self, tmux_name: str) -> bool:
-        import claudecode as _cc
-
-        return _cc.tmux_exists(tmux_name)
+        return tmux_exists(tmux_name)
 
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:
@@ -1116,10 +1114,9 @@ def _remap_path(local_path: str, host: str | None) -> str:
 
 
 def _get_remote_home(host: str | None) -> str:
-    import claudecode as _cc  # late import — avoid circular
 
-    with _cc.remote_cache.lock:
-        cached = _cc.remote_cache.home_dirs.get(host or "")
+    with remote_cache.lock:
+        cached = remote_cache.home_dirs.get(host or "")
     if cached is not None:
         return cached
     try:
@@ -1129,8 +1126,8 @@ def _get_remote_home(host: str | None) -> str:
         home = r.stdout.strip() if r.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
         home = ""
-    with _cc.remote_cache.lock:
-        _cc.remote_cache.home_dirs[host or ""] = home
+    with remote_cache.lock:
+        remote_cache.home_dirs[host or ""] = home
     return home
 
 

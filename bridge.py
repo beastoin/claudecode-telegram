@@ -73,6 +73,9 @@ from telegram import (
 )
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
+    _INTERACTIVE_CONTENT,
+    _INTERACTIVE_FOOTERS,
+    _LEARNING_REMINDER_TEXT,
     _acquire_flock,
     _cache_session_id,
     _capture_pane_text,
@@ -85,14 +88,11 @@ from claudecode import (
     _forward_pipe_message,
     _get_remote_home,
     _get_tmux_send_lock,
-    _remap_path,
-    _INTERACTIVE_CONTENT,
-    _INTERACTIVE_FOOTERS,
     _is_git_repo,
-    _LEARNING_REMINDER_TEXT,
     _log_session_event,
     _project_slug,
     _release_flock,
+    _remap_path,
     _remote_run,
     _resolve_remote_tool,
     _scan_latest_session_id,
@@ -2639,35 +2639,6 @@ def get_connectors_status() -> dict[str, ConnectorStatusDict]:
 
 
 from typing import Any, Callable, cast
-from claudecode import (
-    CpuHogEntry,
-    DiskUsageDict,
-    IoUsageDict,
-    MemUsageDict,
-    ProcStatsEntry,
-    QuestionDetails,
-    TmuxActivityResult,
-    TmuxSessionDict,
-    WorkerStateEntry,
-    WorktreeItemDict,
-    _capture_pane_text,
-    _find_codex_transcript,
-    _INTERACTIVE_CONTENT,
-    _INTERACTIVE_FOOTERS,
-    _remote_run,
-    _remap_path,
-    _tmux_pane_pids,
-    get_backend,
-    get_session_dir,
-    get_worker_backend,
-    HOOK_FAILURE_THRESHOLD,
-    HOOK_FAILURE_WINDOW,
-    normalize_backend,
-    POISON_PATTERNS,
-    host_health,
-    processes,
-    watchdog,
-)
 
 
 def _read_noninteractive_activity(worker_name: str) -> str:
@@ -3780,7 +3751,6 @@ def _watchdog_probe_remote_hosts(
 def _watchdog_collect_worker_pids(
     registered: dict[str, TmuxSessionDict], pane_pids: dict[str, str], remote_pane_pids: dict[str, str], now: float
 ) -> tuple[dict[str, str], dict[str, bool], dict[str, "Backend"]]:
-    from claudecode import Backend
 
     claude_pids: dict[str, str] = {}
     tmux_present: dict[str, bool] = {}
@@ -3830,7 +3800,6 @@ def _watchdog_evaluate_workers(
     failed_hosts: set[str],
     now: float,
 ) -> None:
-    from claudecode import Backend
 
     for name, session in registered.items():
         tmux_name = session.get("tmux", f"{TMUX_PREFIX}{name}")
@@ -4038,12 +4007,6 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
 # ============================================================
 
 from typing import Callable
-from claudecode import (
-    TmuxSessionDict,
-    WorkerStateEntry,
-    normalize_backend,
-    watchdog,
-)
 
 
 def format_team_lines(  # type: ignore[no-redef]
@@ -4073,13 +4036,6 @@ def format_team_lines(  # type: ignore[no-redef]
 
 
 from typing import Callable, cast
-from claudecode import (
-    _remote_run,
-    _remap_path,
-    _project_slug,
-    _get_remote_home,
-    normalize_cwd,
-)
 
 _TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
 _TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
@@ -6084,24 +6040,6 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
 
 
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
-from claudecode import (
-    _detect_os_family,
-    _find_codex_transcript,
-    _remote_run,
-    _LEARNING_REMINDER_TEXT,
-    is_claude_running,
-    remote_cache,
-    watchdog,
-    learning_reminders,
-    host_health,
-    LEARNING_REMINDER_RESPONSE_THRESHOLD,
-    LEARNING_REMINDER_IDLE_HOURS,
-    REWIND_TOKENS,
-    PR_REVIEW_TOKENS,
-    get_backend,
-    is_valid_backend,
-    list_backends,
-)
 
 
 class MachineConfigError(ValueError):
@@ -6989,20 +6927,8 @@ def _checkin_do_restart(
 import shlex
 from typing import TYPE_CHECKING, cast
 import claudecode
-from claudecode import (
-    normalize_backend,
-    is_valid_backend,
-    list_backends,
-    _which_binary,
-    normalize_cwd,
-    get_tmux_env_value,
-    cleanup_worker_pipe,
-    clear_claude_session_id,
-)
 
 if TYPE_CHECKING:
-    from bridge import WorkerEndpointInfo
-    from claudecode import Backend, TmuxSessionDict
     from telegram import ChatId
 
 
@@ -8216,36 +8142,9 @@ def _cmd_restart_cancel(router, chat_id) -> bool:
 # ============================================================
 
 
-from claudecode import (
-    GIT_SERVER_DIR,
-    GitPushStateResult,
-    _get_remote_home,
-    _is_git_repo,
-    _project_slug,
-    _remap_path,
-    _remote_run,
-    _resolve_remote_tool,
-    ensure_session_dir,
-    get_claude_session_cwd,
-    get_claude_session_id,
-    get_session_dir,
-    get_worker_backend,
-    is_claude_running,
-    normalize_backend,
-    save_claude_session_cwd,
-    clear_claude_session_id,
-    get_any_session_id,
-    get_backend,
-    tmux_exists,
-    watchdog,
-)
 
 
 # _get_claude_pid and get_worker_host — defined earlier (from _health_impl)
-
-
-if TYPE_CHECKING:
-    from claudecode import Backend, TmuxSessionDict
 
 
 def _ensure_bare_repo(project_name: str) -> str:
@@ -9079,17 +8978,6 @@ def teleport_rollback(
 # ============================================================
 
 from urllib.parse import parse_qs
-from claudecode import (
-    get_backend,
-    get_worker_backend,
-    normalize_cwd,
-    validate_cwd,
-    get_claude_session_id,
-    get_claude_session_cwd,
-    save_claude_session_cwd,
-    _ensure_workspace_trusted,
-    _log_session_event,
-)
 
 if TYPE_CHECKING:
     from urllib.parse import ParseResult
