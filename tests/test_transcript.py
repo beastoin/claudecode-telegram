@@ -12,6 +12,15 @@ from unittest.mock import patch
 import pytest
 
 
+def _extract_data(html):
+    """Extract JSON data from transcript page HTML."""
+    m = re.search(r'id="transcript-data">(.*?)</script>', html, re.DOTALL)
+    if not m:
+        return None
+    # Unescape the <\/ → </ that Python applies for XSS safety
+    return json.loads(m.group(1).replace("<\\/", "</"))
+
+
 @pytest.fixture(autouse=True)
 def _bridge_env(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake:token")
@@ -48,14 +57,17 @@ def test_transcript_renders_html():
             html = bridge._render_transcript_html('testworker')
 
         assert '<!DOCTYPE html>' in html, 'Missing DOCTYPE'
-        assert 'testworker' in html, 'Missing worker name'
-        assert 'Hello world' in html, 'Missing user message'
-        # Assistant text is base64-encoded in data-md attr (rendered client-side by marked.js)
-        md_vals = [base64.b64decode(m).decode() for m in re.findall(r'data-md="([^"]+)"', html)]
-        assert any('Hi there!' in v for v in md_vals), f'Missing assistant reply in data-md: {md_vals}'
-        assert 'claude-opus-4-6' in html, 'Missing model name'
-        assert 'user-msg' in html, 'Missing user CSS class'
-        assert 'a-text' in html, 'Missing assistant CSS class'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data'
+        assert data['name'] == 'testworker', 'Missing worker name'
+        # User message in entries
+        user_entries = [e for e in data['entries'] if e.get('type') == 'user' and isinstance(e.get('message', {}).get('content'), str)]
+        assert any('Hello world' in e['message']['content'] for e in user_entries), 'Missing user message'
+        # Assistant text in entries
+        asst_entries = [e for e in data['entries'] if e.get('type') == 'assistant']
+        asst_texts = [item.get('text', '') for e in asst_entries for item in (e.get('message', {}).get('content') or []) if isinstance(item, dict) and item.get('type') == 'text']
+        assert any('Hi there!' in t for t in asst_texts), f'Missing assistant reply: {asst_texts}'
+        assert data['stats']['model'] == 'claude-opus-4-6', 'Missing model name'
 
 
 def test_transcript_missing_session():
@@ -96,16 +108,21 @@ def test_transcript_with_tool_calls():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('toolworker')
 
-        assert 'hello.txt' in html, 'Missing file path'
-        # Result merged into tool block (no separate t-result)
-        assert 't-result' not in html, 'Separate t-result should not exist (merged into tool block)'
-        assert 'file contents here' in html, 'Missing tool output merged into tool block'
-        assert 'act' in html, 'Read with result should become expandable act block'
-        assert 't-name' not in html, 'Tool name text should not appear (icon-only per AmpCode)'
-        assert 'Thinking' in html, 'Missing thinking block'
-        md_vals = [base64.b64decode(m).decode() for m in re.findall(r'data-md="([^"]+)"', html)]
-        assert any('The file contains hello.' in v for v in md_vals), f'Missing final text in data-md: {md_vals}'
-        assert '1 tool call' in html, 'Missing tool call count'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data'
+        # Tool use entry with file path
+        tool_uses = [item for e in data['entries'] if e.get('type') == 'assistant' for item in (e.get('message', {}).get('content') or []) if isinstance(item, dict) and item.get('type') == 'tool_use']
+        assert any('hello.txt' in str(t.get('input', {}).get('file_path', '')) for t in tool_uses), 'Missing file path'
+        # Tool result entry
+        tool_results = [item for e in data['entries'] if e.get('type') == 'user' for item in (e.get('message', {}).get('content') or []) if isinstance(item, dict) and item.get('type') == 'tool_result']
+        assert any('file contents here' in str(t.get('content', '')) for t in tool_results), 'Missing tool result'
+        # Thinking entry
+        thinking = [item for e in data['entries'] if e.get('type') == 'assistant' for item in (e.get('message', {}).get('content') or []) if isinstance(item, dict) and item.get('type') == 'thinking']
+        assert any('analyze this file' in t.get('thinking', '') for t in thinking), 'Missing thinking block'
+        # Final text
+        texts = [item for e in data['entries'] if e.get('type') == 'assistant' for item in (e.get('message', {}).get('content') or []) if isinstance(item, dict) and item.get('type') == 'text']
+        assert any('The file contains hello.' in t.get('text', '') for t in texts), 'Missing final text'
+        assert data['stats']['n_tool'] == 1, 'Expected 1 tool call'
 
 
 def test_transcript_default_last_page():
@@ -134,9 +151,13 @@ def test_transcript_default_last_page():
             html = bridge._render_transcript_html('testworker', per_page=50)
 
         # 120 entries / 50 = 3 pages. Default should show page 3
-        assert 'Message 119' in html, 'Last message not on default page'
-        assert 'Message 0' not in html, 'First message should NOT be on last page'
-        assert 'pg-cur' in html, 'Missing pagination current marker'
+        data = _extract_data(html)
+        assert data is not None
+        assert data['pagination']['page'] == 3, 'Default page should be last page (3)'
+        assert data['pagination']['total_pages'] == 3
+        contents = [e['message']['content'] for e in data['entries'] if isinstance(e.get('message', {}).get('content'), str)]
+        assert 'Message 119' in contents, 'Last message not on default page'
+        assert 'Message 0' not in contents, 'First message should NOT be on last page'
 
 
 def test_transcript_bm25_search():
@@ -164,12 +185,15 @@ def test_transcript_bm25_search():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker', page=1, search_query='teleport')
 
-        assert 'sorted by relevance' in html, 'Missing relevance info'
-        assert 'Found 2 matching' in html, 'Expected 2 results'
-        # The entry with 3x teleport should rank higher (appear first)
-        pos_3x = html.find('teleport teleport teleport')
-        pos_1x = html.find('one mention of teleport')
-        assert pos_3x < pos_1x, f'Higher TF entry should rank first: {pos_3x} vs {pos_1x}'
+        data = _extract_data(html)
+        assert data is not None
+        assert data['search_sort'] == 'relevance'
+        assert data['pagination']['total'] == 2, 'Expected 2 results'
+        # The entry with 3x teleport should rank higher (appear first in entries)
+        contents = [e['message']['content'] for e in data['entries'] if isinstance(e.get('message', {}).get('content'), str)]
+        idx_3x = next(i for i, c in enumerate(contents) if 'teleport teleport teleport' in c)
+        idx_1x = next(i for i, c in enumerate(contents) if 'one mention of teleport' in c)
+        assert idx_3x < idx_1x, f'Higher TF entry should rank first: idx {idx_3x} vs {idx_1x}'
 
 
 def test_transcript_search_assistant_ctx_link():
@@ -198,12 +222,14 @@ def test_transcript_search_assistant_ctx_link():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker', page=1, search_query='deployment')
 
-        # Both assistant entries mention deployment — they should have ctx-wrap links
-        assert 'ctx-wrap' in html, 'Missing ctx-wrap links in search results'
-        # Assistant entries have class 'a-text' — verify they are inside ctx-wrap anchors
-        # ctx-wrap links that contain assistant content (a-text divs)
-        assistant_ctx = re.findall(r'<a class="ctx-wrap"[^>]*>.*?class="a-text', html, re.DOTALL)
-        assert len(assistant_ctx) >= 1, f'Expected assistant entries wrapped in ctx-wrap, got {len(assistant_ctx)}: search should make assistant results clickable'
+        # With client-side rendering, verify search data is passed to JS
+        data = _extract_data(html)
+        assert data is not None
+        assert data['search_query'] == 'deployment'
+        # Both assistant entries should have _idx set for context linking
+        asst_entries = [e for e in data['entries'] if e.get('type') == 'assistant']
+        assert len(asst_entries) >= 1, 'Expected assistant entries in search results'
+        assert all('_idx' in e for e in asst_entries), 'Assistant entries should have _idx for context links'
 
 
 def test_transcript_search_sort_toggle():
@@ -235,19 +261,25 @@ def test_transcript_search_sort_toggle():
             # Time sort: entries in chronological order
             html_time = bridge._render_transcript_html('testworker', page=1, search_query='deploy', search_sort='time')
 
-        # Relevance: 'deploy deploy deploy' (idx 3, more TF) before 'first deploy' (idx 0)
-        pos_many_rel = html_rel.find('deploy deploy deploy')
-        pos_first_rel = html_rel.find('first deploy')
-        assert pos_many_rel < pos_first_rel, f'Relevance sort should put high-TF first: {pos_many_rel} vs {pos_first_rel}'
+        data_rel = _extract_data(html_rel)
+        data_time = _extract_data(html_time)
+        assert data_rel is not None and data_time is not None
 
-        # Time: 'first deploy' (idx 0) before 'deploy deploy deploy' (idx 3)
-        pos_first_time = html_time.find('first deploy')
-        pos_many_time = html_time.find('deploy deploy deploy')
-        assert pos_first_time < pos_many_time, f'Time sort should put earlier entry first: {pos_first_time} vs {pos_many_time}'
+        # Relevance: 'deploy deploy deploy' (more TF) before 'first deploy'
+        contents_rel = [e['message']['content'] for e in data_rel['entries'] if isinstance(e.get('message', {}).get('content'), str)]
+        idx_many = next(i for i, c in enumerate(contents_rel) if 'deploy deploy deploy' in c)
+        idx_first = next(i for i, c in enumerate(contents_rel) if 'first deploy' in c)
+        assert idx_many < idx_first, f'Relevance sort should put high-TF first: {idx_many} vs {idx_first}'
 
-        # Both HTML pages should have sort toggle links
-        assert 'sort=time' in html_rel, 'Relevance page should have link to switch to time sort'
-        assert 'sort=relevance' in html_time, 'Time page should have link to switch to relevance sort'
+        # Time: 'first deploy' before 'deploy deploy deploy'
+        contents_time = [e['message']['content'] for e in data_time['entries'] if isinstance(e.get('message', {}).get('content'), str)]
+        idx_first_t = next(i for i, c in enumerate(contents_time) if 'first deploy' in c)
+        idx_many_t = next(i for i, c in enumerate(contents_time) if 'deploy deploy deploy' in c)
+        assert idx_first_t < idx_many_t, f'Time sort should put earlier first: {idx_first_t} vs {idx_many_t}'
+
+        # Sort mode is recorded in JSON for JS to render toggle links
+        assert data_rel['search_sort'] == 'relevance'
+        assert data_time['search_sort'] == 'time'
 
 
 def test_transcript_unicode():
@@ -274,17 +306,25 @@ def test_transcript_unicode():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker')
 
-        # User message should have unicode rendered directly (HTML-escaped)
-        assert 'こんにちは世界' in html, 'Missing Japanese text in user message'
-        assert '🌍' in html, 'Missing emoji in user message'
-        assert 'café' in html, 'Missing accented text'
-        # Assistant text is base64 — verify the data-md roundtrips UTF-8
-        md_vals = [base64.b64decode(m).decode('utf-8') for m in re.findall(r'data-md="([^"]+)"', html)]
-        assert any('你好' in v for v in md_vals), f'Missing Chinese text in data-md: {md_vals}'
-        assert any('🎉' in v for v in md_vals), f'Missing emoji in data-md: {md_vals}'
-        assert any('Straße' in v for v in md_vals), f'Missing German text in data-md: {md_vals}'
-        # Verify decodeB64Utf8 function is in the JS
-        assert 'decodeB64Utf8' in html, 'Missing UTF-8 base64 decoder function'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data block'
+        entries = data['entries']
+        # User messages with unicode should be in JSON entries
+        user_contents = [e['message']['content'] for e in entries if e.get('message', {}).get('role') == 'user' and isinstance(e.get('message', {}).get('content'), str)]
+        assert any('こんにちは世界' in c for c in user_contents), 'Missing Japanese text in user entry'
+        assert any('🌍' in c for c in user_contents), 'Missing emoji in user entry'
+        assert any('café' in c for c in user_contents), 'Missing accented text in user entry'
+        # Assistant text should be in JSON entries
+        asst_texts = []
+        for e in entries:
+            msg = e.get('message', {})
+            if msg.get('role') == 'assistant':
+                for block in (msg.get('content') or []):
+                    if isinstance(block, dict) and block.get('type') == 'text':
+                        asst_texts.append(block['text'])
+        assert any('你好' in t for t in asst_texts), f'Missing Chinese text in assistant entries'
+        assert any('🎉' in t for t in asst_texts), f'Missing emoji in assistant entries'
+        assert any('Straße' in t for t in asst_texts), f'Missing German text in assistant entries'
 
 
 def test_transcript_edit_diff_rendering():
@@ -311,13 +351,21 @@ def test_transcript_edit_diff_rendering():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker')
 
-        assert 'diff-add' in html, 'Missing diff-add class'
-        assert 'diff-del' in html, 'Missing diff-del class'
-        assert 'diff-stat' in html, 'Missing diff stats'
-        # Per-edit: old=2, new=3 → overlap=2, pure_add=1, pure_del=0
-        assert '+1' in html, 'Missing add count (+1 pure additions)'
-        assert '~2' in html, 'Missing mod count (~2 modified lines)'
-        assert 'app.py' in html, 'Missing filename in diff header'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data block'
+        # Find the Edit tool_use entry in JSON data
+        edit_entry = None
+        for e in data['entries']:
+            msg = e.get('message', {})
+            if msg.get('role') == 'assistant':
+                for block in (msg.get('content') or []):
+                    if isinstance(block, dict) and block.get('name') == 'Edit':
+                        edit_entry = block
+                        break
+        assert edit_entry is not None, 'Missing Edit tool_use in entries'
+        assert edit_entry['input']['file_path'] == '/home/user/src/app.py'
+        assert 'x = 1' in edit_entry['input']['old_string']
+        assert 'z = 30' in edit_entry['input']['new_string']
 
 
 def test_transcript_turn_grouping():
@@ -346,20 +394,22 @@ def test_transcript_turn_grouping():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker')
 
-        thread_html = html[html.find('id="thread"'):]
-        # Assistant content grouped in turn-body (no avatar — AmpCode style)
-        assert 'turn-body' in thread_html, 'Missing turn-body grouping'
-        # No Claude avatar (removed per AmpCode match)
-        assert 'cl-av' not in thread_html, 'Should not have Claude avatar'
-        # User message should have image avatar
-        assert 'class="u-av"' in thread_html, 'Missing user avatar'
-        assert 'u-label' not in html, 'Should not have Human label (AmpCode: no labels)'
-        # Tool result merged into tool block inside turn-body
-        assert 't-result' not in thread_html, 'No separate t-result (merged into tool block)'
-        tb_start = thread_html.find('turn-body')
-        act_pos = thread_html.find('class="act"', tb_start)
-        assert tb_start < act_pos, 'Tool block (with merged result) should be inside turn-body'
-        assert 'file content' in thread_html, 'Merged result content should appear in tool block'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data block'
+        entries = data['entries']
+        # Should have 4 entries: user, assistant text, assistant tool_use, user tool_result
+        assert len(entries) == 4, f'Expected 4 entries, got {len(entries)}'
+        assert entries[0]['message']['role'] == 'user'
+        assert entries[0]['message']['content'] == 'Hello'
+        assert entries[1]['message']['role'] == 'assistant'
+        # Tool use entry
+        assert entries[2]['message']['role'] == 'assistant'
+        tool_blocks = entries[2]['message']['content']
+        assert any(b.get('name') == 'Read' for b in tool_blocks), 'Missing Read tool_use'
+        # Tool result entry
+        assert entries[3]['message']['role'] == 'user'
+        content = entries[3]['message']['content']
+        assert any(b.get('type') == 'tool_result' for b in content), 'Missing tool_result'
 
 
 def test_transcript_hides_system_messages():
@@ -388,14 +438,17 @@ def test_transcript_hides_system_messages():
              patch('pathlib.Path.home', return_value=Path(tmpdir)):
             html = bridge._render_transcript_html('testworker')
 
-        assert 'Hello world' in html, 'Real user message should appear'
-        assert 'Real user message' in html, 'Second real user message should appear'
-        assert 'task-notification' not in html, 'task-notification should be hidden'
-        assert 'system-reminder' not in html, 'system-reminder should be hidden'
-        assert 'Background command done' not in html, 'Task summary should be hidden'
-        # Count user-msg divs - should be exactly 2 (the real messages)
-        count = html.count('class="user-msg"')
-        assert count == 2, f'Expected 2 user messages, got {count}'
+        data = _extract_data(html)
+        assert data is not None, 'Missing JSON data block'
+        entries = data['entries']
+        # All 4 entries are in the JSON (JS filters system messages client-side)
+        assert len(entries) == 4, f'Expected 4 entries in data, got {len(entries)}'
+        # Verify real user messages are present
+        user_texts = [e['message']['content'] for e in entries if isinstance(e.get('message', {}).get('content'), str)]
+        assert 'Hello world' in user_texts
+        assert 'Real user message' in user_texts
+        # System entries are also present (JS will hide them during rendering)
+        assert any('task-notification' in str(e['message']['content']) for e in entries)
 
 
 def test_transcript_prompts_filter():
@@ -420,16 +473,19 @@ def test_transcript_prompts_filter():
              patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             # Without filter: shows all entries
             html_all = bridge._render_transcript_html('test')
-            assert 'hello world' in html_all
-            assert 'a-text markdown' in html_all  # assistant blocks visible
+            data_all = _extract_data(html_all)
+            assert data_all is not None
+            assert len(data_all['entries']) == 4
+            assert data_all['filter_mode'] is None or data_all['filter_mode'] == ''
 
-            # With filter=prompts: only user messages
+            # With filter=prompts: filter_mode set for JS to handle
             html_filt = bridge._render_transcript_html('test', filter_mode='prompts')
-            assert 'hello world' in html_filt
-            assert 'second prompt' in html_filt
-            assert 'Showing prompts only' in html_filt
-            # No assistant text blocks in the content area (before script tag)
-            assert 'a-text markdown' not in html_filt.split('<script>')[0]
+            data_filt = _extract_data(html_filt)
+            assert data_filt is not None
+            assert data_filt['filter_mode'] == 'prompts'
+            # All entries still in JSON (JS filters client-side)
+            assert any('hello world' in str(e['message']['content']) for e in data_filt['entries'])
+            assert any('second prompt' in str(e['message']['content']) for e in data_filt['entries'])
     finally:
         os.unlink(tpath)
 
@@ -504,13 +560,16 @@ def test_transcript_sidebar_stats():
         with patch.object(bridge, '_resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')), \
              patch('transcript._resolve_transcript_path', return_value=(tpath, 'test-sid', '/tmp')):
             html = bridge._render_transcript_html('test')
-            # Duration should show 2h 30m
-            assert '2h 30m' in html, 'Expected 2h 30m duration in sidebar'
+            data = _extract_data(html)
+            assert data is not None, 'Missing JSON data block'
+            stats = data['stats']
+            # Duration should be 2h 30m (150 min)
+            assert stats['duration'] == '2h 30m', f"Expected '2h 30m', got {stats['duration']}"
             # Token counts
-            assert '8,000' in html, 'Expected 8,000 input tokens (5000+3000)'
-            assert '1,200' in html, 'Expected 1,200 output tokens'
-            # File size should be present (small file)
-            assert 'KB' in html or ' B' in html, 'Expected file size in sidebar'
+            assert stats['input_tokens'] == 8000, f'Expected 8000 input tokens, got {stats["input_tokens"]}'
+            assert stats['output_tokens'] == 1200, f'Expected 1200 output tokens, got {stats["output_tokens"]}'
+            # File size should be present
+            assert data['file_size'], 'Expected file_size in data'
     finally:
         os.unlink(tpath)
 
