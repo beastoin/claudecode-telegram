@@ -337,12 +337,6 @@ class ConnectorMetadataDict(TypedDict, total=False):
     repo: str
 
 
-class ConnectorAttachmentDict(TypedDict, total=False):
-    path: str
-    filename: str
-    mimeType: str
-
-
 class ConnectorStatusDict(TypedDict, total=False):
     name: str
     running: bool
@@ -367,42 +361,6 @@ class HookResponseBody(TypedDict, total=False):
     to: str
     target: str
     message: str
-
-
-class HealthAlertBody(TypedDict, total=False):
-    worker: str
-    issue: str
-    transcript_age: int
-    node: str
-
-
-class ForgeRegisterBody(TypedDict, total=False):
-    Name: str
-    name: str
-    Host: str
-    host: str
-    Version: str
-    version: str
-    CallbackURL: str
-    callback_url: str
-    callbackUrl: str
-    Tools: dict[str, object]
-    tools: dict[str, object]
-    note: str
-    address: str
-    machine: str
-
-
-class PrActionBody(TypedDict, total=False):
-    token: str
-    owner: str
-    repo: str
-    pr_num: int
-    body: str
-    path: str
-    line: int
-    commit_id: str
-    merge_method: str
 
 
 class TelegramWebhookBody(TypedDict, total=False):
@@ -634,11 +592,6 @@ class TranscriptStatsDict(TypedDict):
     input_tokens: int
     output_tokens: int
     duration: str
-
-
-class ToolResultDict(TypedDict, total=False):
-    content: str
-    is_error: bool
 
 
 class _GuestSessionDictRequired(TypedDict):
