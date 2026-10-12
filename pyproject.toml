@@ -10,6 +10,19 @@ dependencies = [
 [project.scripts]
 claudecode-telegram = "bridge:main"
 
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["tests/", "experiments/"]
+
+[tool.ruff.lint]
+select = ["E", "W", "UP"]
+ignore = ["E402", "E501", "E741"]
+
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
