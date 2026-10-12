@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Optional, Protocol, TypedDict, runtime_checkable
 from urllib.parse import ParseResult
@@ -678,6 +679,14 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
     except Exception as exc:
         _log(_LOG_DEBUG, label, f"{type(exc).__name__}: {exc}")
         return None
+
+
+@contextmanager
+def _log_suppress(*exc_types, level=_LOG_WARN, tag="bridge", msg="", exc_info=False):
+    try:
+        yield
+    except exc_types as e:
+        _log(level, tag, f"{msg}{e}" if msg else f"{type(e).__name__}: {e}", exc=e if exc_info else None)
 
 
 class MarkdownToken(Protocol):

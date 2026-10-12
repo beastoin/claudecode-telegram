@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import collections
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field
 import os
 import json
@@ -31,6 +31,7 @@ from shared import (
     _clock,
     _int_field,
     _log,
+    _log_suppress,
     _node_name,
     _res_cfg,
     _str_field,
@@ -103,14 +104,6 @@ from claudecode import (
 
 
 import html
-
-
-@contextmanager
-def _log_suppress(*exc_types, level=_LOG_WARN, tag="bridge", msg="", exc_info=False):
-    try:
-        yield
-    except exc_types as e:
-        _log(level, tag, f"{msg}{e}" if msg else f"{type(e).__name__}: {e}", exc=e if exc_info else None)
 
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -629,6 +622,7 @@ def _indexer_main() -> None:
     args = parser.parse_args()
     if args.mode == "transcript":
         _run_transcript(args)
+
 
 import enum
 import http.client
@@ -4685,8 +4679,8 @@ def _fetch_file_context(
         snippet = []
         for i in range(start, end):
             ln = i + 1
-            marker = " \u2190" if ln == line else ""
-            snippet.append(f"\u2502 {ln:>4}: {lines[i]}{marker}")
+            marker = " ←" if ln == line else ""
+            snippet.append(f"│ {ln:>4}: {lines[i]}{marker}")
         return "\n".join(snippet), ref[:12]
     except Exception as e:
         print(f"[pr-comment] Failed to fetch file context: {e}")
@@ -8771,11 +8765,8 @@ def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
         handler._send_html(f.read())
 
 
-def handle_pr_comment(handler, body: bytes) -> None:
-    """Backward compat — delegates to unified handler."""
-    handle_pr_review_comments(handler, body)
-
-handle_pr_general_comment = handle_pr_comment  # same unified handler
+handle_pr_comment = handle_pr_review_comments
+handle_pr_general_comment = handle_pr_review_comments
 
 import hashlib
 

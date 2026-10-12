@@ -48,6 +48,7 @@ from shared import (
     _LOG_INFO,
     _LOG_DEBUG,
     _log_best_effort,
+    _log_suppress,
     SubprocessRunner,
     Clock,
     MarkdownToken,
@@ -314,14 +315,12 @@ class MediaGroupState:
 def save_last_chat_id(chat_id: ChatId | None) -> None:
     if chat_id is None:
         return
-    try:
+    with _log_suppress(OSError, tag="bridge", msg="Failed to save last_chat_id: "):
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         _tmp = LAST_CHAT_ID_FILE.with_suffix(".tmp")
         _tmp.write_text(str(chat_id))
         _tmp.chmod(0o600)
         os.replace(str(_tmp), str(LAST_CHAT_ID_FILE))
-    except OSError as e:
-        _log(_LOG_WARN, "bridge", f"Failed to save last_chat_id: {e}")
 
 
 def load_last_chat_id() -> int | None:
@@ -336,14 +335,12 @@ def load_last_chat_id() -> int | None:
 
 
 def save_last_active(name: str) -> None:
-    try:
+    with _log_suppress(OSError, tag="bridge", msg="Failed to save last_active: "):
         NODE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         _tmp = LAST_ACTIVE_FILE.with_suffix(".tmp")
         _tmp.write_text(name)
         _tmp.chmod(0o600)
         os.replace(str(_tmp), str(LAST_ACTIVE_FILE))
-    except OSError as e:
-        _log(_LOG_WARN, "bridge", f"Failed to save last_active: {e}")
 
 
 def load_last_active() -> str | None:

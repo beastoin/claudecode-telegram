@@ -5,6 +5,7 @@ from shared import (
     _clock,
     _log,
     _log_best_effort,
+    _log_suppress,
     _str_field,
     _int_field,
     _dict_field,
@@ -651,19 +652,17 @@ def _codex_send_to_bridge(session_name: str, text: str, bridge_url: str) -> bool
 
 
 def _codex_adapter_thread(worker_name: str, text: str, bridge_url: str, sessions_dir: Path) -> None:
-    try:
+    with _log_suppress(Exception, level=_LOG_ERROR, tag="codex", msg=f"Adapter thread for '{worker_name}' failed: "):
         session_id = _codex_load_session_id(worker_name, sessions_dir)
         response, new_session_id, _rc = _codex_run(text, session_id)
         if new_session_id:
             _codex_save_session_id(worker_name, sessions_dir, new_session_id)
         if response:
             _codex_send_to_bridge(worker_name, response, bridge_url)
-    except Exception as e:
-        _log(_LOG_ERROR, "codex", f"Adapter thread for '{worker_name}' failed: {e}")
 
 
 def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions_dir: Path, host: str) -> None:
-    try:
+    with _log_suppress(Exception, level=_LOG_ERROR, tag="codex", msg=f"Remote adapter for '{worker_name}' on {host} failed: "):
         import bridge
 
         remote_sessions = bridge._remap_sessions_dir(host)
@@ -711,8 +710,6 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
         if response:
             target_url = BRIDGE_PUBLIC_URL or bridge_url
             _codex_send_to_bridge(worker_name, response, target_url)
-    except Exception as e:
-        _log(_LOG_ERROR, "codex", f"Remote adapter for '{worker_name}' on {host} failed: {e}")
 
 
 class CodexBackend:
@@ -824,10 +821,8 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
                             "pipe",
                             f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}",
                         )
-                        try:
+                        with _log_suppress(OSError, ValueError, level=_LOG_ERROR, tag="bridge", msg=f"Error forwarding pipe message to '{name}': "):
                             _forward_pipe_message(name, message)
-                        except (OSError, ValueError) as e:
-                            _log(_LOG_ERROR, "bridge", f"Error forwarding pipe message to '{name}': {e}")
         except FileNotFoundError:
             _log(_LOG_WARN, "pipe", f"Pipe for '{name}' no longer exists, stopping reader")
             break
