@@ -353,8 +353,7 @@ def test_generate_html_diff_lines():
 
 
 def test_generate_html_highlight_comment():
-    """When highlight_comment_id is set, HTML includes scroll-to-comment JS."""
-    # In real data, fetch_pr_comments extracts user.login via jq, so 'user' is a string
+    """When highlight_comment_id is set, JSON data includes it for client-side scroll."""
     comments = [
         {"id": 7777, "user": "bob", "body": "Looks good!",
          "created_at": "2026-01-01T00:00:00Z", "html_url": ""},
@@ -364,9 +363,10 @@ def test_generate_html_highlight_comment():
         _MINI_META, _MINI_FILES, 42, "owner", "repo",
         comments=comments, highlight_comment_id="7777")
 
-    assert "disc-comment-7777" in output
-    assert "disc-highlight" in output
-    # Scroll-to JS
+    # Comment id and highlight are in JSON data (rendered client-side)
+    assert '"highlight_comment_id": "7777"' in output
+    assert '"id": 7777' in output
+    # JS code for scroll-to is in the bundled review.js
     assert "switchTab" in output
     assert "scrollIntoView" in output
 
@@ -472,7 +472,8 @@ def test_xss_escaping_in_filename():
 
 
 def test_xss_escaping_in_comment_body():
-    """Malicious comment body with script tag is HTML-escaped."""
+    """Malicious comment body with closing script tag cannot break out of JSON."""
+    import re
     xss_comments = [
         {"id": 99, "user": "attacker",
          "body": '<script>document.cookie</script>',
@@ -480,9 +481,16 @@ def test_xss_escaping_in_comment_body():
     ]
     output = generate_html(_MINI_META, _MINI_FILES, 42, "owner", "repo",
                            comments=xss_comments)
-    assert "<script>document.cookie</script>" not in output, \
-        "Raw <script> in comment body must be escaped"
-    assert "&lt;script&gt;" in output
+    # Extract the JSON data block between the pr-data script tags
+    m = re.search(r'id="pr-data">(.*?)</script>', output, re.DOTALL)
+    assert m, "Should have pr-data JSON block"
+    json_block = m.group(1)
+    # </  must be escaped to <\/ inside JSON to prevent breaking out of <script>
+    assert "</" not in json_block, \
+        "Raw </ in JSON data would break page structure"
+    assert "<\\/" in json_block, "Should use <\\/ escaping"
+    # The body text is safely inside JSON (parsed by JSON.parse, not rendered as HTML)
+    assert "document.cookie" in json_block
 
 
 # ── parse_patch edge case tests ─────────────────────────────────────────────
