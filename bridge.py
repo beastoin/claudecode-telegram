@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import sys
 
 if __name__ == "__main__":
@@ -55,7 +57,7 @@ from urllib.parse import ParseResult, parse_qs, urlparse
 from urllib.parse import quote as _urlquote
 
 import shared as core
-from claudecode import *  # noqa: F401,F403
+from claudecode import *
 from claudecode import (
     _INTERACTIVE_CONTENT,
     _INTERACTIVE_FOOTERS,
@@ -83,7 +85,7 @@ from claudecode import (
     _tmux_pane_pids,
     _which_binary,
 )
-from shared import *  # noqa: F401,F403
+from shared import *
 from shared import (
     _CHECKIN_NOTE_PATH,
     _DEFAULT_PORTS,
@@ -113,7 +115,7 @@ from shared import (
     _urlopen,
     _wd_cfg,
 )
-from telegram import *  # noqa: F401,F403
+from telegram import *
 from telegram import (
     _MEDIA_GROUP_WAIT,
     _build_cwd_change_notice,
@@ -624,9 +626,7 @@ def _run_transcript(args: argparse.Namespace) -> None:
             empty = asdict(EntriesResult(per_page=args.per_page))
         elif args.query == "search":
             empty = asdict(TranscriptSearchResult(query=args.search, per_page=args.per_page))
-        elif args.query == "stats":
-            empty = asdict(TranscriptStats())
-        elif args.query in ("entries+stats", "search+stats"):
+        elif args.query == "stats" or args.query in ("entries+stats", "search+stats"):
             empty = asdict(TranscriptStats())
         else:
             empty = {}
@@ -697,7 +697,7 @@ class TunnelManager:
         bind_host: str = "",
         subprocess_runner: SubprocessRunner | None = None,
         clock: Clock | None = None,
-        urlopen: "UrlOpenFn | None" = None,
+        urlopen: UrlOpenFn | None = None,
         on_notify: Callable[[str], None] | None = None,
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
@@ -881,7 +881,7 @@ class TunnelManager:
         try:
             proc = self._runner.popen(
                 [self._config.cloudflared_binary, "tunnel", "--url", f"http://localhost:{self._port}"],
-                stdout=open(log_file, "w"),
+                stdout=open(log_file, "w"),  # noqa: SIM115
                 stderr=subprocess.STDOUT,
             )
         except (OSError, FileNotFoundError) as exc:
@@ -1065,12 +1065,11 @@ class TunnelManager:
         elapsed = 0
         bind_host = self._bind_host or "127.0.0.1"
         while elapsed < self._config.port_wait_timeout and not self._stop_event.is_set():
-            with suppress(ConnectionRefusedError, OSError):
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(1)
-                    s.connect((bind_host, self._port))
-                    _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
-                    return True
+            with suppress(ConnectionRefusedError, OSError), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect((bind_host, self._port))
+                _log(_LOG_INFO, "tunnel", f"Bridge ready on {bind_host}:{self._port} ({elapsed}s)")
+                return True
             self._clock.sleep(1)
             elapsed += 1
         return False
@@ -1199,7 +1198,7 @@ class BaseConnector[M](abc.ABC):
     def poll_once(self) -> None: ...
     @abc.abstractmethod
     def extract_sender(self, message: M) -> str: ...
-    def _on_preflight_ok(self) -> None:
+    def _on_preflight_ok(self) -> None:  # noqa: B027
         pass
 
     def start(self) -> threading.Thread:
@@ -1473,7 +1472,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             )
 
     def _run_gws(self, *args: str, json_body: str | None = None) -> dict[str, object] | None:
-        cmd: list[str] = [self.gws_bin, "gmail", "users"] + list(args)
+        cmd: list[str] = [self.gws_bin, "gmail", "users", *list(args)]
         if json_body:
             cmd.extend(["--json", json_body])
         try:
@@ -1782,10 +1781,14 @@ class GmailConnector(BaseConnector[GmailMessage]):
                     continue
                 msg_id = msg.get("id", "")
                 label_ids = msg.get("labelIds") or []
-                if msg_id and isinstance(msg_id, str) and msg_id not in seen:
-                    if self.is_inbox_unread(label_ids) or "SENT" in label_ids:
-                        seen.add(msg_id)
-                        msg_ids.append(msg_id)
+                if (
+                    msg_id
+                    and isinstance(msg_id, str)
+                    and msg_id not in seen
+                    and (self.is_inbox_unread(label_ids) or "SENT" in label_ids)
+                ):
+                    seen.add(msg_id)
+                    msg_ids.append(msg_id)
         raw_hid = data.get("historyId")
         return msg_ids, str(raw_hid) if raw_hid is not None else None
 
@@ -1978,10 +1981,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             on_alert=on_alert,
         )
         self.gh_bin: str = gh_bin or "gh"
-        if isinstance(repo, str):
-            repos = [repo]
-        else:
-            repos = list(repo)
+        repos = [repo] if isinstance(repo, str) else list(repo)
         if not repos:
             raise ValueError("github: at least one repo required")
         for r in repos:
@@ -2355,7 +2355,13 @@ def connector_export_github(number: int, repo: str) -> str | None:
 
 
 def connector_on_message(tag: str) -> Callable:
-    def handler(targets, html_text, plain_text=None, attachments=None, metadata=None):
+    def handler(
+        targets: list[str],
+        html_text: str,
+        plain_text: str | None = None,
+        attachments: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         if plain_text is None:
             plain_text = html_text
         connectors.log_message(tag, html_text, plain_text, targets)
@@ -3107,7 +3113,10 @@ def _format_watchdog_status_pure(
     clock_now: float | None = None,
 ) -> str:
     if pending_lookup is None:
-        pending_lookup = lambda _: False  # noqa: E731
+
+        def pending_lookup(_: str) -> bool:
+            return False
+
     if clock_now is None:
         clock_now = time.time()
     entry = state_snapshot.get(name) if state_snapshot else None
@@ -3244,9 +3253,8 @@ def compute_state(
             stuck = _check_stuck_or_poisoned(pending_age, last_hook_ts, pending_ts, poisoned_reason, "")
             return stuck if stuck else ("WAITING", f"age={int(pending_age)}s")
         return "READY", "idle"
-    if not claude_pid and last_seen_claude is not None:
-        if (now - last_seen_claude) > START_GRACE:
-            return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
+    if not claude_pid and last_seen_claude is not None and (now - last_seen_claude) > START_GRACE:
+        return "DEAD", f"claude missing {int(now - last_seen_claude)}s"
     if pending and children > 0:
         return "BUSY_TOOL", f"children={children}"
     if pending and children == 0:
@@ -3503,10 +3511,7 @@ def _handle_watchdog_transition(
 def _record_worker_state(name: str, state: str, reason: str, now: float) -> float:
     with watchdog.lock:
         prev = watchdog.worker_states.get(name)
-        if prev and prev[0] == state:
-            since = prev[2]
-        else:
-            since = now
+        since = prev[2] if prev and prev[0] == state else now
         watchdog.worker_states[name] = WorkerStateEntry(state, reason, since)
     return since
 
@@ -3560,7 +3565,7 @@ def _watchdog_probe_remote_hosts(
             remote_workers.setdefault(host, []).append((name, tmux_name))
     remote_pane_pids: dict[str, str] = {}
     failed_hosts: set[str] = set()
-    for host, workers in remote_workers.items():
+    for host, _workers in remote_workers.items():
         try:
             r = _remote_run(
                 ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
@@ -3584,7 +3589,7 @@ def _watchdog_probe_remote_hosts(
 
 def _watchdog_collect_worker_pids(
     registered: dict[str, TmuxSessionDict], pane_pids: dict[str, str], remote_pane_pids: dict[str, str], now: float
-) -> tuple[dict[str, str], dict[str, bool], dict[str, "Backend"]]:
+) -> tuple[dict[str, str], dict[str, bool], dict[str, Backend]]:
 
     claude_pids: dict[str, str] = {}
     tmux_present: dict[str, bool] = {}
@@ -3628,7 +3633,7 @@ def _watchdog_evaluate_workers(
     registered: dict[str, TmuxSessionDict],
     tmux_present: dict[str, bool],
     claude_pids: dict[str, str],
-    backend_info: dict[str, "Backend"],
+    backend_info: dict[str, Backend],
     stats: dict[str, ProcStatsEntry],
     probe_failed: bool,
     failed_hosts: set[str],
@@ -3690,21 +3695,21 @@ def _watchdog_evaluate_workers(
             last_seen_claude = watchdog.last_seen_claude.get(name)
         if not is_interactive:
             last_seen_claude = None
-        state_kw: dict[str, object] = dict(
-            tmux_exists=tmux_exists,
-            claude_pid=claude_pid,
-            pending=pending,
-            pending_ts=pending_ts,
-            pending_age=pending_age,
-            children=children,
-            last_child_ts=last_child_ts,
-            cpu=cpu,
-            last_hook_ts=last_hook_ts,
-            last_seen_claude=last_seen_claude,
-            now=now,
-            is_interactive=is_interactive,
-            adapter_alive=adapter_alive,
-        )
+        state_kw: dict[str, object] = {
+            "tmux_exists": tmux_exists,
+            "claude_pid": claude_pid,
+            "pending": pending,
+            "pending_ts": pending_ts,
+            "pending_age": pending_age,
+            "children": children,
+            "last_child_ts": last_child_ts,
+            "cpu": cpu,
+            "last_hook_ts": last_hook_ts,
+            "last_seen_claude": last_seen_claude,
+            "now": now,
+            "is_interactive": is_interactive,
+            "adapter_alive": adapter_alive,
+        }
         worker_state, reason = compute_state(**state_kw)  # type: ignore[arg-type]
         worker_state, reason = _watchdog_refine_state(name, tmux_name, worker_state, reason, state_kw, host)
         since = _record_worker_state(name, worker_state, reason, now)
@@ -4064,10 +4069,7 @@ def _render_transcript_html(
                 page_entries.append(entry)
             except (json.JSONDecodeError, KeyError):
                 continue
-        if search_query:
-            total = _int_field(query_result, "total_results")
-        else:
-            total = _int_field(query_result, "total")
+        total = _int_field(query_result, "total_results") if search_query else _int_field(query_result, "total")
         total_pages = _int_field(query_result, "total_pages", 1)
         page = _int_field(query_result, "page", 1)
         stats = cast(TranscriptStatsDict, stats_result) if stats_result else dict(_EMPTY_TRANSCRIPT_STATS)
@@ -4336,7 +4338,7 @@ def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
     return entries
 
 
-def handle_transcript_endpoint(handler, parsed) -> None:
+def handle_transcript_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     try:
 
         query_params = parse_qs(parsed.query)
@@ -4790,7 +4792,7 @@ def _parse_full_diff(diff_text: str) -> dict[str, str]:
             parts = line.split(" b/", 1)
             current_file = parts[1] if len(parts) > 1 else None
         elif line.startswith("@@") or (current_lines and current_file):
-            if line.startswith("---") or line.startswith("+++"):
+            if line.startswith(("---", "+++")):
                 continue
             if line.startswith("@@") or current_lines:
                 current_lines.append(line)
@@ -5495,7 +5497,7 @@ def relay_get_messages(channel_id: str, after: str | None = None) -> list[RelayM
     return list(msgs)
 
 
-def _relay_get_token(handler) -> str | None:
+def _relay_get_token(handler: BaseHTTPRequestHandler) -> str | None:
     auth = handler.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:].strip()
@@ -5504,7 +5506,9 @@ def _relay_get_token(handler) -> str | None:
     return params.get("token", "")
 
 
-def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
+def _relay_auth_and_parse(
+    handler: BaseHTTPRequestHandler, channel_id: str, auth_fn: Callable[[str], bool], body: bytes
+) -> dict[str, object] | None:
     token = _relay_get_token(handler)
     if not token:
         handler._send_json(401, {"error": "missing token"})
@@ -5525,7 +5529,7 @@ def _relay_auth_and_parse(handler, channel_id: str, auth_fn, body: bytes):
     return data, text, channel
 
 
-def handle_relay_get(handler, channel_id: str, action, parsed) -> None:
+def handle_relay_get(handler: BaseHTTPRequestHandler, channel_id: str, action: str, parsed: ParseResult) -> None:
     token = _relay_get_token(handler)
     if not token:
         handler._send_json(401, {"error": "missing token"})
@@ -5556,7 +5560,7 @@ def handle_relay_get(handler, channel_id: str, action, parsed) -> None:
     handler._send_json(404, {"error": f"unknown action: {action}"})
 
 
-def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
+def handle_relay_send(handler: BaseHTTPRequestHandler, channel_id: str, body: bytes = b"") -> None:
     data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_guest, body)
     if not data:
         return
@@ -5571,8 +5575,8 @@ def handle_relay_send(handler, channel_id: str, body: bytes = b"") -> None:
     )
 
 
-def handle_relay_reply(handler, channel_id: str, body: bytes = b"") -> None:
-    data, text, channel = _relay_auth_and_parse(handler, channel_id, relay_auth_reply, body)
+def handle_relay_reply(handler: BaseHTTPRequestHandler, channel_id: str, body: bytes = b"") -> None:
+    data, text, _channel = _relay_auth_and_parse(handler, channel_id, relay_auth_reply, body)
     if not data:
         return
     msg = relay_worker_reply(channel_id, text)
@@ -5582,7 +5586,7 @@ def handle_relay_reply(handler, channel_id: str, body: bytes = b"") -> None:
     handler._send_json(200, {"message_id": msg["message_id"], "delivered": True})
 
 
-def cmd_relay_list(router, chat_id) -> bool:
+def cmd_relay_list(router: CommandRouter, chat_id: int) -> bool:
     with relay_store.lock:
         active = [(cid, ch) for cid, ch in relay_store.channels.items() if _clock.time() <= ch["expires_at_unix"]]
     if active:
@@ -5598,7 +5602,7 @@ def cmd_relay_list(router, chat_id) -> bool:
     return True
 
 
-def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
+def cmd_relay_add(router: CommandRouter, parts: list[str], chat_id: int) -> bool:
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
         return True
@@ -5626,7 +5630,7 @@ def cmd_relay_add(router, parts: list[str], chat_id) -> bool:
     return True
 
 
-def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
+def cmd_relay_remove(router: CommandRouter, parts: list[str], chat_id: int) -> bool:
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
         return True
@@ -5653,7 +5657,7 @@ def cmd_relay_remove(router, parts: list[str], chat_id) -> bool:
     return True
 
 
-def cmd_relay_status(router, chat_id) -> bool:
+def cmd_relay_status(router: CommandRouter, chat_id: int) -> bool:
     now = _clock.time()
     with relay_store.lock:
         relay_active = [(cid, ch) for cid, ch in relay_store.channels.items() if now <= ch["expires_at_unix"]]
@@ -5663,7 +5667,7 @@ def cmd_relay_status(router, chat_id) -> bool:
         guest_active = [g for g in guest_store.guests.values() if now <= g.get("expires_at_unix", 0)]
     lines = ["📡 System Status\n"]
     lines.append(f"Relays: {len(relay_active)}")
-    for cid, ch in relay_active:
+    for _cid, ch in relay_active:
         msg_count = len(ch.get("messages", []))
         workers = ch.get("workers", [ch["worker"]])
         lines.append(f"  • {ch['label']} → {', '.join(workers)} ({msg_count} msgs)")
@@ -5680,7 +5684,7 @@ def cmd_relay_status(router, chat_id) -> bool:
     return True
 
 
-def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
+def cmd_relay_stop(router: CommandRouter, parts: list[str], chat_id: int) -> bool:
     if len(parts) < 2:
         router.reply(chat_id, "Usage: /relay stop <label>")
         return True
@@ -5707,7 +5711,7 @@ def cmd_relay_stop(router, parts: list[str], chat_id) -> bool:
     return True
 
 
-def cmd_relay(router, arg: str, chat_id) -> bool:
+def cmd_relay(router: CommandRouter, arg: str, chat_id: int) -> bool:
     if not arg:
         with relay_store.lock:
             active = [ch for ch in relay_store.channels.values() if _clock.time() <= ch["expires_at_unix"]]
@@ -5739,7 +5743,7 @@ def cmd_relay(router, arg: str, chat_id) -> bool:
         router.reply(chat_id, f'Worker "{worker}" not found.')
         return True
     label = f"relay-{worker}"
-    ch, guest_token, reply_token = relay_channel_create(worker, label)
+    ch, guest_token, _reply_token = relay_channel_create(worker, label)
     with relay_store.lock:
         relay_store.channels[ch["id"]] = ch
         _relay_save()
@@ -6288,7 +6292,7 @@ def _gh_api_call(
         kw: dict[str, object] = {"capture_output": True, "text": True, "timeout": timeout}
         if input_data is not None:
             kw["input"] = input_data
-        r = _subprocess_runner.run(["gh", "api"] + args, **kw)
+        r = _subprocess_runner.run(["gh", "api", *args], **kw)
         if r.returncode != 0:
             return False, r.stderr.strip() or r.stdout.strip()
         return True, r.stdout
@@ -6477,7 +6481,7 @@ def send_response_to_telegram(name: str, text: str, chat_id: int, log_prefix: st
         _log(
             _LOG_DEBUG,
             "telegram",
-            f"{log_prefix} short msg: {name}, text={repr(clean_text)}, " f"images={len(images)}, files={len(files)}",
+            f"{log_prefix} short msg: {name}, text={clean_text!r}, " f"images={len(images)}, files={len(files)}",
         )
     if clean_text:
         _send_text_via_telegram(name, clean_text, chat_id, log_prefix)
@@ -6505,7 +6509,7 @@ def _beast_serve_deploy(html_path: str, slug: str) -> str | None:
 
 
 class _LegacyTransportAdapter(MessageTransport):
-    def __init__(self, legacy: Any) -> None:
+    def __init__(self, legacy: MessageTransport) -> None:
         self._legacy = legacy
 
     @property
@@ -6612,7 +6616,7 @@ def _checkin_do_restart(
             watchdog.restart_in_progress.pop(name, None)
 
 
-import claudecode  # noqa: E402
+import claudecode  # noqa: E402  # circular
 
 if TYPE_CHECKING:
     from telegram import ChatId
@@ -6623,8 +6627,8 @@ class WorkerManager:
         self,
         sessions_dir: Path,
         tmux_prefix: str,
-        runner: "SubprocessRunner | None" = None,
-        clock: "Clock | None" = None,
+        runner: SubprocessRunner | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self.sessions_dir = sessions_dir
         self.tmux_prefix = tmux_prefix
@@ -6767,7 +6771,7 @@ class WorkerManager:
         if state.active and state.active not in registered:
             state.active = None
         if registered and not state.active:
-            state.active = list(registered.keys())[0]
+            state.active = next(iter(registered.keys()))
         with self._sessions_cache_lock:
             self._sessions_cache = dict(registered)
             self._sessions_cache_ts = self._clock.time()
@@ -6956,10 +6960,7 @@ class WorkerManager:
         if note:
             rendered = note.replace("{name}", name)
             host = get_worker_host(name)
-            if host:
-                machine = f"Mac Mini ({host})"
-            else:
-                machine = "VPS (100.125.36.102)"
+            machine = f"Mac Mini ({host})" if host else "VPS (100.125.36.102)"
             rendered = rendered.replace("{machine}", machine)
             welcome += f"\n\nMANAGER NOTE:\n{rendered}"
             _log(_LOG_INFO, "checkin", f"Checkin note included for {name}")
@@ -7268,7 +7269,7 @@ class WorkerManager:
         return True, None
 
 
-def cmd_pilot(router, name: str, chat_id) -> bool:
+def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /pilot <name> [name2 ...]", outcome="Needs decision")
         return True
@@ -7308,10 +7309,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
         router.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
         return True
     ts = time.strftime("%m%d-%H%M", time.gmtime(core._clock.time()))
-    if len(enabled) <= 3:
-        slug = "-".join(enabled) + "-" + ts
-    else:
-        slug = f"team{len(enabled)}-{ts}"
+    slug = "-".join(enabled) + "-" + ts if len(enabled) <= 3 else f"team{len(enabled)}-{ts}"
     with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
         payload = json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
         req = urllib.request.Request(
@@ -7333,7 +7331,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
     return True
 
 
-def cmd_rewind(router, name: str, chat_id) -> bool:
+def cmd_rewind(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /rewind <name>", outcome="Needs decision")
         return True
@@ -7360,7 +7358,7 @@ def cmd_rewind(router, name: str, chat_id) -> bool:
     return True
 
 
-def cmd_pr_review(router, arg: str, chat_id) -> bool:
+def cmd_pr_review(router: CommandRouter, arg: str, chat_id: int) -> bool:
     if not arg:
         router.reply(
             chat_id,
@@ -7415,7 +7413,7 @@ def cmd_pr_review(router, arg: str, chat_id) -> bool:
     return True
 
 
-def cmd_team(router, chat_id) -> bool:
+def cmd_team(router: CommandRouter, chat_id: int) -> bool:
     registered = router.workers.scan_tmux_sessions()
     registered = router.workers.get_registered_sessions(registered)
     if not registered:
@@ -7444,7 +7442,7 @@ def cmd_team(router, chat_id) -> bool:
     return True
 
 
-def cmd_status(router, chat_id) -> bool:
+def cmd_status(router: CommandRouter, chat_id: int) -> bool:
     registered = router.workers.get_registered_sessions()
     try:
         uptime_sec = int(time.time() - os.stat(f"/proc/{os.getpid()}").st_mtime)
@@ -7502,7 +7500,7 @@ def cmd_status(router, chat_id) -> bool:
     return True
 
 
-def cmd_focus(router, name: str, chat_id) -> bool:
+def cmd_focus(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
         return True
@@ -7516,7 +7514,7 @@ def cmd_focus(router, name: str, chat_id) -> bool:
     return True
 
 
-def cmd_hire(router, name: str, chat_id) -> bool:
+def cmd_hire(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
         router.reply(chat_id, "Usage: /hire <name>", outcome="Needs decision")
         return True
@@ -7542,7 +7540,7 @@ def cmd_hire(router, name: str, chat_id) -> bool:
     return True
 
 
-def cmd_end(router, name: str, chat_id) -> bool:
+def cmd_end(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
         router.reply(chat_id, "This is permanent. Usage: /end <name>", outcome="Needs decision")
         return True
@@ -7557,7 +7555,7 @@ def cmd_end(router, name: str, chat_id) -> bool:
     return True
 
 
-def cmd_restart(router, chat_id, args: str = "") -> bool:
+def cmd_restart(router: CommandRouter, chat_id: int, args: str = "") -> bool:
     args = (args or "").strip()
     clean = False
     force = False
@@ -7640,7 +7638,16 @@ def cmd_restart(router, chat_id, args: str = "") -> bool:
             watchdog.restart_in_progress.pop(name, None)
 
 
-def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -> bool:
+def _do_restart(
+    router: CommandRouter,
+    name: str,
+    session: dict[str, object],
+    chat_id: int,
+    host: str | None,
+    tmux_name: str,
+    force: bool,
+    clean: bool,
+) -> bool:
     if host:
         mode = "relaunch" if clean else "resume"
         backend_name = claudecode.get_worker_backend(name, session) if session else DEFAULT_BACKEND
@@ -7658,7 +7665,7 @@ def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -
         session.get("tmux", f"{router.workers.tmux_prefix}{name}") if session else f"{router.workers.tmux_prefix}{name}"
     )
     if not clean and not backend.is_interactive and session and "tmux" in session and claudecode.tmux_exists(tmux_name):
-        session_id, source = claudecode.get_any_session_id(name)
+        session_id, _source = claudecode.get_any_session_id(name)
         if session_id:
             router.reply(chat_id, f"{name.capitalize()} is still active. Next message continues where you left off.")
         else:
@@ -7678,7 +7685,7 @@ def _do_restart(router, name, session, chat_id, host, tmux_name, force, clean) -
     return _restart_reply(router, chat_id, name, ok, err)
 
 
-def _restart_reply(router, chat_id, name, ok, err, host=None) -> bool:
+def _restart_reply(router: CommandRouter, chat_id: int, name: str, ok: bool, err: str, host: str | None = None) -> bool:
     if ok:
         router.reply(chat_id, f"{name.capitalize()} is back and ready.")
     else:
@@ -7687,7 +7694,7 @@ def _restart_reply(router, chat_id, name, ok, err, host=None) -> bool:
     return True
 
 
-def _cmd_restart_all(router, chat_id, clean) -> bool:
+def _cmd_restart_all(router: CommandRouter, chat_id: int, clean: bool) -> bool:
     registered = router.workers.get_registered_sessions()
     if not registered:
         router.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
@@ -7712,7 +7719,7 @@ def _cmd_restart_all(router, chat_id, clean) -> bool:
     return True
 
 
-def _run_restart_all_sequence(router, chat_id, names, mode) -> None:
+def _run_restart_all_sequence(router: CommandRouter, chat_id: int, names: list[str], mode: str) -> None:
     delay_s = 7
     failed = []
     try:
@@ -7754,7 +7761,7 @@ def _run_restart_all_sequence(router, chat_id, names, mode) -> None:
             router._restart_all_thread = None
 
 
-def _cmd_restart_cancel(router, chat_id) -> bool:
+def _cmd_restart_cancel(router: CommandRouter, chat_id: int) -> bool:
     with router._restart_all_lock:
         if not router._restart_all_running:
             router.reply(chat_id, "No restart-all sequence is running.")
@@ -7829,7 +7836,7 @@ def _git_push_state(
             )
             if staged_files:
                 _remote_run(
-                    ["git", "-C", source_cwd, "add", "--"] + staged_files,
+                    ["git", "-C", source_cwd, "add", "--", *staged_files],
                     host=host,
                     timeout=TIMEOUT_FILE_TRANSFER,
                 )
@@ -7944,7 +7951,7 @@ def _git_pull_state(
                     timeout=TIMEOUT_FILE_TRANSFER,
                 )
                 _remote_run(
-                    ["git", "-C", target_cwd, "add", "--"] + staged_files,
+                    ["git", "-C", target_cwd, "add", "--", *staged_files],
                     host=host,
                     timeout=TIMEOUT_FILE_TRANSFER,
                 )
@@ -8031,7 +8038,7 @@ def _build_teleport_context(
     return "\n".join(lines)
 
 
-def teleport_notify(chat_id: "ChatId | None", text: str) -> None:
+def teleport_notify(chat_id: ChatId | None, text: str) -> None:
     if chat_id is None:
         return
     with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:_teleport_notify"):
@@ -8222,7 +8229,7 @@ def sync_session_transcript(
             _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
 
 
-def sync_shared_repos(target_host: str, chat_id: "int | str | None" = None) -> list[str]:
+def sync_shared_repos(target_host: str, chat_id: int | str | None = None) -> list[str]:
     if not target_host:
         return []
     warnings: list[str] = []
@@ -8528,7 +8535,7 @@ def teleport_rollback(
     source_cwd: str | None,
     session_id: str | None,
     backend_name: str,
-    chat_id: "ChatId | None",
+    chat_id: ChatId | None,
     reason: str,
 ) -> None:
 
@@ -8557,7 +8564,7 @@ def teleport_rollback(
         state_file.unlink(missing_ok=True)
 
 
-def handle_notify(handler, body: bytes = b"") -> None:
+def handle_notify(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     try:
         data = cast(dict[str, object], json.loads(body))
         text = _str_field(data, "text")
@@ -8587,7 +8594,7 @@ def handle_notify(handler, body: bytes = b"") -> None:
         handler._send_text(500, str(e))
 
 
-def handle_health_alert(handler, body: bytes = b"") -> None:
+def handle_health_alert(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     try:
         data = json.loads(body) if body else {}
         worker = _str_field(data, "worker", "unknown")
@@ -8605,7 +8612,7 @@ def handle_health_alert(handler, body: bytes = b"") -> None:
         handler._send_json(500, {"ok": False, "error": str(e)})
 
 
-def handle_forge_register(handler, body: bytes = b"") -> None:
+def handle_forge_register(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     try:
         data = json.loads(body) if body else {}
         name = _str_field(data, "Name") or _str_field(data, "name")
@@ -8669,7 +8676,7 @@ def handle_forge_register(handler, body: bytes = b"") -> None:
         handler._send_json(500, {"ok": False, "error": str(e)})
 
 
-def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
+def handle_checkin_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     try:
         params = parse_qs(parsed.query)
         name = params.get("name", ["worker"])[0]
@@ -8740,7 +8747,7 @@ def handle_checkin_endpoint(handler, parsed: ParseResult) -> None:
         handler._send_text(500, str(exc))
 
 
-def handle_health_workers_endpoint(handler) -> None:
+def handle_health_workers_endpoint(handler: BaseHTTPRequestHandler) -> None:
     try:
         now = core._clock.time()
         registered = get_registered_sessions()
@@ -8764,7 +8771,7 @@ def handle_health_workers_endpoint(handler) -> None:
         handler._send_text(500, str(e))
 
 
-def handle_pr_file_content(handler, parsed: ParseResult) -> None:
+def handle_pr_file_content(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
     if not tokens.validate_pr_review(token):
@@ -8788,7 +8795,7 @@ def handle_pr_file_content(handler, parsed: ParseResult) -> None:
         handler._send_status(500)
 
 
-def handle_pr_keepalive(handler, parsed: ParseResult) -> None:
+def handle_pr_keepalive(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
     if not tokens.validate_pr_review(token):
@@ -8797,7 +8804,7 @@ def handle_pr_keepalive(handler, parsed: ParseResult) -> None:
     handler._send_status(204)
 
 
-def handle_pr_review_comments(handler, body: bytes) -> None:
+def handle_pr_review_comments(handler: BaseHTTPRequestHandler, body: bytes) -> None:
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
@@ -8859,7 +8866,7 @@ def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
             send_to_worker(t, msg)
 
 
-def handle_pr_merge(handler, body: bytes) -> None:
+def handle_pr_merge(handler: BaseHTTPRequestHandler, body: bytes) -> None:
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
@@ -8888,7 +8895,7 @@ def handle_pr_merge(handler, body: bytes) -> None:
     handler._send_json(200, {"ok": True})
 
 
-def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
+def handle_pr_review_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
     info = tokens.validate_pr_review(token)
@@ -8951,7 +8958,7 @@ def _fanout_channel_message(
             _notify_admin(f"[{channel_id}] {from_member}: {text}")
 
 
-def _guest_auth(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> dict | None:
+def _guest_auth(handler: BaseHTTPRequestHandler, parsed: ParseResult | None = None) -> dict | None:
     query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
     token = query_params.get("token", [""])[0]
     if not token:
@@ -8970,7 +8977,7 @@ def _guest_auth(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = 
     return guest
 
 
-def _channel_guest_auth(handler: "BaseHTTPRequestHandler", query_params: dict) -> str | None:
+def _channel_guest_auth(handler: BaseHTTPRequestHandler, query_params: dict) -> str | None:
     token = query_params.get("token", [None])[0]
     if not token:
         return None
@@ -8983,7 +8990,7 @@ def _channel_guest_auth(handler: "BaseHTTPRequestHandler", query_params: dict) -
     return f"guest:{guest['name']}"
 
 
-def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+def handle_guest_register(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     try:
         data = cast(dict, json.loads(body)) if body else {}
     except (json.JSONDecodeError, ValueError):
@@ -9047,7 +9054,7 @@ def handle_guest_register(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
     )
 
 
-def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+def handle_guest_send(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     parsed = urlparse(handler.path)
     guest = _guest_auth(handler, parsed)
     if not guest:
@@ -9075,7 +9082,7 @@ def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> N
     registered = get_registered_sessions()
     results = []
     for target in targets:
-        if target.startswith("#") or target.startswith("ch_"):
+        if target.startswith(("#", "ch_")):
             with channel_store.lock:
                 if target.startswith("#"):
                     ch_id = next(
@@ -9150,7 +9157,7 @@ def handle_guest_send(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> N
         handler._send_json(200, {"ok": all(r.get("ok") for r in results), "results": results})
 
 
-def handle_guest_reply(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+def handle_guest_reply(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None:
         return
@@ -9171,7 +9178,7 @@ def handle_guest_reply(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> 
     handler._send_json(200, {"ok": True, "message_id": msg_id})
 
 
-def handle_guest_inbox(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+def handle_guest_inbox(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     guest = _guest_auth(handler, parsed)
     if not guest:
         return
@@ -9191,7 +9198,7 @@ def handle_guest_inbox(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -
     )
 
 
-def handle_guest_status(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+def handle_guest_status(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     guest = _guest_auth(handler, parsed)
     if not guest:
         return
@@ -9202,7 +9209,7 @@ def handle_guest_status(handler: "BaseHTTPRequestHandler", parsed: ParseResult) 
     )
 
 
-def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
+def handle_guests_list(handler: BaseHTTPRequestHandler) -> None:
     with guest_store.lock:
         guests_list = []
         expired = []
@@ -9224,7 +9231,7 @@ def handle_guests_list(handler: "BaseHTTPRequestHandler") -> None:
     handler._send_json(200, {"ok": True, "guests": guests_list})
 
 
-def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResult) -> None:
+def handle_guest_disconnect(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
     query_params = parse_qs(parsed.query)
     token = query_params.get("token", [""])[0]
     if not token:
@@ -9244,7 +9251,7 @@ def handle_guest_disconnect(handler: "BaseHTTPRequestHandler", parsed: ParseResu
     handler._send_json(200, {"ok": True, "name": guest["name"]})
 
 
-def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") -> None:
+def handle_channel_create(handler: BaseHTTPRequestHandler, body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None:
         return
@@ -9290,7 +9297,7 @@ def handle_channel_create(handler: "BaseHTTPRequestHandler", body: bytes = b"") 
     )
 
 
-def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
+def handle_channel_members(handler: BaseHTTPRequestHandler, channel_id: str, body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None:
         return
@@ -9311,7 +9318,7 @@ def handle_channel_members(handler: "BaseHTTPRequestHandler", channel_id: str, b
     handler._send_json(200, {"ok": True, "channel": channel_id, "added": added, "removed": removed, "members": current})
 
 
-def handle_channel_send(handler: "BaseHTTPRequestHandler", channel_id: str, body: bytes = b"") -> None:
+def handle_channel_send(handler: BaseHTTPRequestHandler, channel_id: str, body: bytes = b"") -> None:
     data = handler._parse_body(body)
     if data is None:
         return
@@ -9339,7 +9346,7 @@ def handle_channel_send(handler: "BaseHTTPRequestHandler", channel_id: str, body
     handler._send_json(200, {"ok": True, "channel": channel_id, "message_id": msg["id"], "seq": msg["seq"]})
 
 
-def handle_channel_messages(handler: "BaseHTTPRequestHandler", channel_id: str, parsed: ParseResult) -> None:
+def handle_channel_messages(handler: BaseHTTPRequestHandler, channel_id: str, parsed: ParseResult) -> None:
     query_params = parse_qs(parsed.query)
     after = query_params.get("after", [None])[0]
     from_member = _channel_guest_auth(handler, query_params)
@@ -9360,7 +9367,7 @@ def handle_channel_messages(handler: "BaseHTTPRequestHandler", channel_id: str, 
     handler._send_json(200, resp)
 
 
-def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult | None = None) -> None:
+def handle_channels_list(handler: BaseHTTPRequestHandler, parsed: ParseResult | None = None) -> None:
     query_params = parse_qs(parsed.query) if parsed else parse_qs(urlparse(handler.path).query)
     filter_member = _channel_guest_auth(handler, query_params)
     if filter_member == "":
@@ -9392,7 +9399,7 @@ def handle_channels_list(handler: "BaseHTTPRequestHandler", parsed: ParseResult 
     handler._send_json(200, {"ok": True, "channels": active})
 
 
-def handle_channel_delete(handler: "BaseHTTPRequestHandler", channel_id: str) -> None:
+def handle_channel_delete(handler: BaseHTTPRequestHandler, channel_id: str) -> None:
     with channel_store.lock:
         channel = channel_store.channels.pop(channel_id, None)
         if channel:
@@ -9695,9 +9702,7 @@ def is_pending(name: str) -> bool:
         return False
     try:
         ts = int(pending.read_text().strip())
-        if (_clock.time() - ts) > PENDING_TIMEOUT:
-            return False
-        return True
+        return not _clock.time() - ts > PENDING_TIMEOUT
     except (OSError, ValueError):
         return False
 
@@ -9761,7 +9766,7 @@ def _send_to_callback_worker(
         return False
 
 
-def _wm() -> "WorkerManager":
+def _wm() -> WorkerManager:
     """Return worker_manager after syncing its config."""
     assert worker_manager is not None, "worker_manager not initialized"
     worker_manager.sessions_dir = SESSIONS_DIR
@@ -9785,7 +9790,7 @@ def do_teleport(
     target_host: str,
     target_cwd: str,
     full_sync: bool,
-    chat_id: "int | str",
+    chat_id: int | str,
     workers: object,
     is_teleback: bool = False,
 ) -> None:
@@ -9942,7 +9947,7 @@ def do_teleport(
             state_file.unlink(missing_ok=True)
 
 
-def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool = False) -> bool:
+def cmd_teleport(router: object, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
     if not arg:
         cmd_name = "/teleport-check" if check_only else "/teleport"
         router.reply(chat_id, f"Usage: {cmd_name} <worker> <host>[:/path]")  # type: ignore[attr-defined]
@@ -10069,7 +10074,7 @@ def cmd_teleport(router: object, arg: str, chat_id: "ChatId", check_only: bool =
     return True
 
 
-def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
+def cmd_teleback(router: object, arg: str, chat_id: ChatId) -> bool:
     parts = arg.split()
     worker_name = parts[0].lower() if parts else ""
     full_sync = "--full" in parts
@@ -10141,7 +10146,7 @@ def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
 
 
 def restart_remote_worker(
-    name: str, backend_name: str, backend: "Backend", tmux_name: str, host: str, mode: str, workers: object
+    name: str, backend_name: str, backend: Backend, tmux_name: str, host: str, mode: str, workers: object
 ) -> tuple[bool, str | None]:
 
     resume_id = ""
@@ -10171,10 +10176,7 @@ def restart_remote_worker(
         _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
     if mode == "resume":
         cached = get_claude_session_id(name, authoritative=False)
-        if cached:
-            resume_id = cached
-        else:
-            resume_id = get_claude_session_id(name, authoritative=True) or resume_id
+        resume_id = cached or (get_claude_session_id(name, authoritative=True) or resume_id)
         _log(_LOG_INFO, "_restart_remote", f"{name}: post-stop resume_id={resume_id}")
     if resume_id and target_cwd and host:
         remote_home = _get_remote_home(host)
@@ -10293,10 +10295,7 @@ class CommandRouter:
         if not all_paths:
             return
         path_lines = "\n".join(f"Manager sent {mt}: `{p}`" for p, mt in all_paths)
-        if caption:
-            full_text = f"{caption}\n\n{path_lines}"
-        else:
-            full_text = path_lines
+        full_text = f"{caption}\n\n{path_lines}" if caption else path_lines
         self._route_media_message(full_text, caption, chat_id, msg_id, msg=first_msg)
 
     def _resolve_media_target(self, caption: str, msg: TelegramMessageDict) -> str | None:
@@ -10474,7 +10473,7 @@ class CommandRouter:
             )
         return f"Manager reply:\n{reply_text}"
 
-    def __init__(self, transport: MessageTransport | None, workers: "WorkerManager") -> None:
+    def __init__(self, transport: MessageTransport | None, workers: WorkerManager) -> None:
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
@@ -10525,7 +10524,7 @@ class CommandRouter:
         text = incoming.text
         chat_id = incoming.chat_id
         msg_id = incoming.msg_id
-        _log(_LOG_INFO, "handle_message", f"chat_id={chat_id} admin={admin_chat_id} text={repr(text[:40])}")
+        _log(_LOG_INFO, "handle_message", f"chat_id={chat_id} admin={admin_chat_id} text={text[:40]!r}")
         media_group_id = msg.get("media_group_id")
         has_media = (
             incoming.photo
@@ -10542,9 +10541,8 @@ class CommandRouter:
                 return
             self._buffer_media_group(media_group_id, msg, text)
             return
-        if has_media and chat_id:
-            if self._handle_single_media(incoming):
-                return
+        if has_media and chat_id and self._handle_single_media(incoming):
+            return
         if text and chat_id:
             self._route_text_message(incoming)
 
@@ -10577,7 +10575,7 @@ class CommandRouter:
             group["timer"] = t
             t.start()
 
-    def _handle_single_media(self, incoming: "IncomingMessage") -> bool:
+    def _handle_single_media(self, incoming: IncomingMessage) -> bool:
         global admin_chat_id
         msg = incoming.raw_msg
         text = incoming.text
@@ -10611,7 +10609,7 @@ class CommandRouter:
         self._route_media_message(media_text, text, chat_id, msg_id, msg=msg)
         return True
 
-    def _format_media_text(self, incoming: "IncomingMessage", local_path: str, media_label: str) -> str | None:
+    def _format_media_text(self, incoming: IncomingMessage, local_path: str, media_label: str) -> str | None:
         text = incoming.text
         chat_id = incoming.chat_id
         msg_id = incoming.msg_id
@@ -10640,7 +10638,7 @@ class CommandRouter:
             return f"Manager sent sticker: {incoming.sticker.get('emoji', '')}\nPath: {local_path}"
         return f"Manager sent media: {local_path}"
 
-    def _route_text_message(self, incoming: "IncomingMessage") -> None:
+    def _route_text_message(self, incoming: IncomingMessage) -> None:
         global admin_chat_id
         text = incoming.text
         chat_id = incoming.chat_id
@@ -10657,11 +10655,10 @@ class CommandRouter:
             _log(_LOG_WARN, "bridge", f"Rejected non-admin: {chat_id}")
             return
         save_last_chat_id(chat_id)
-        if text.startswith("/"):
-            if self.handle_command(text, chat_id, msg_id):
-                _last_mention.target = None
-                _last_mention.count = 0
-                return
+        if text.startswith("/") and self.handle_command(text, chat_id, msg_id):
+            _last_mention.target = None
+            _last_mention.count = 0
+            return
         if re.match(r"^\s*@all(?:\s|[:,]|$)", text, re.IGNORECASE):
             self.route_to_all(text, chat_id, msg_id)
             self._reset_mention_streak()
@@ -10773,11 +10770,10 @@ class CommandRouter:
             _, _, raw_lines = _read_tmux_activity(tmux_name, host=host)
             if raw_lines:
                 details = _extract_question_details(raw_lines)
-                if details:
-                    if _send_interactive_reply(tmux_name, shortcut, details, host=host):
-                        action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
-                        self.reply(chat_id, f"{action}.")
-                        return
+                if details and _send_interactive_reply(tmux_name, shortcut, details, host=host):
+                    action = f"Skipped" if shortcut in ("skip", "cancel") else f"Picked option {shortcut}"
+                    self.reply(chat_id, f"{action}.")
+                    return
         if not backend.is_interactive and chat_id is not None and not try_set_pending(session_name, chat_id):
             self.reply(
                 chat_id,
@@ -10800,9 +10796,12 @@ class CommandRouter:
             return
         if msg_id and send_ok:
             host = get_worker_host(session_name)
-            if not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host):
-                if self.transport and chat_id is not None:
-                    self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+            if (
+                (not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host))
+                and self.transport
+                and chat_id is not None
+            ):
+                self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
 PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]
@@ -10905,7 +10904,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_text(200, "OK")
         try:
             update = cast(TelegramWebhookBody, json.loads(body))
-            update_types = [k for k in update.keys() if k != "update_id"]
+            update_types = [k for k in update if k != "update_id"]
             msg = update.get("message", {})
             text = msg.get("text", "") or msg.get("caption", "")
             _log(
@@ -11024,7 +11023,7 @@ class Handler(BaseHTTPRequestHandler):
                     _LOG_DEBUG,
                     "hook",
                     f"Hook response DEBUG: {session_name} -> chat {chat_id}, "
-                    f"text={repr(text)}, len={len(text)}, "
+                    f"text={text!r}, len={len(text)}, "
                     f"source={_str_field(data, 'source', 'hook')}, "
                     f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
                     f"escape={escape_flag}, ip={source_ip}",
@@ -11105,8 +11104,8 @@ def _install_delegates(cls: type, names: list[str]) -> None:
     for name in names:
         fn = globals()[name]
 
-        def _make(f=fn, n=name):
-            def _d(self, *a, **kw):
+        def _make(f: Callable = fn, n: str = name) -> Callable:
+            def _d(self: object, *a: object, **kw: object) -> object:
                 return f(self, *a, **kw)
 
             _d.__name__ = n
@@ -11334,7 +11333,25 @@ GITHUB_REPOS: list[str] = [r.strip() for r in _GITHUB_REPO_RAW.split(",") if r.s
 GITHUB_FROM_USER = os.environ.get("BRIDGE_GHPOLL_USER", "beastoin")
 if GITHUB_ENABLED and not GITHUB_FROM_USER.strip():
     raise RuntimeError("BRIDGE_GHPOLL_USER must be set when BRIDGE_GHPOLL_ENABLED=1 (security: sender filter required)")
-TELEPORT_RSYNC_EXCLUDES = "node_modules .git __pycache__ .venv venv .next build dist target .gradle .cache .tox .mypy_cache .pytest_cache *.pyc .build .claude/worktrees".split()
+TELEPORT_RSYNC_EXCLUDES = [
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".next",
+    "build",
+    "dist",
+    "target",
+    ".gradle",
+    ".cache",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "*.pyc",
+    ".build",
+    ".claude/worktrees",
+]
 media_groups = MediaGroupState()
 tokens = TokenStore()
 
@@ -11408,10 +11425,12 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ppid = os.getppid()
     parent_info = f"ppid={ppid}"
-    with _log_suppress(OSError, UnicodeDecodeError, level=_LOG_DEBUG, tag="io:graceful_shutdown"):
-        with open(f"/proc/{ppid}/cmdline", "rb") as f:
-            cmdline = f.read().decode().replace("\x00", " ").strip()
-            parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
+    with (
+        _log_suppress(OSError, UnicodeDecodeError, level=_LOG_DEBUG, tag="io:graceful_shutdown"),
+        open(f"/proc/{ppid}/cmdline", "rb") as f,
+    ):
+        cmdline = f.read().decode().replace("\x00", " ").strip()
+        parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
     print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
     connectors.stop_all()
     if tunnel_manager is not None:
@@ -11622,10 +11641,10 @@ _this_module._sources = (_core_mod, _tg_mod, _cc_mod)
 if __name__ == "__main__":
     _sub = sys.argv[1] if len(sys.argv) > 1 else ""
     if _sub == "indexer":
-        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
         _indexer_main()
     elif _sub == "review":
-        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
         _pr_review_main()
     else:
         main()

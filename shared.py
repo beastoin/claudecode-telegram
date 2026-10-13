@@ -11,7 +11,7 @@ import time
 import traceback as _tb
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -680,7 +680,9 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
 
 
 @contextmanager
-def _log_suppress(*exc_types, level=_LOG_WARN, tag="bridge", msg="", exc_info=False):
+def _log_suppress(
+    *exc_types: type[BaseException], level: int = _LOG_WARN, tag: str = "bridge", msg: str = "", exc_info: bool = False
+) -> Iterator[None]:
     try:
         yield
     except exc_types as e:
@@ -883,7 +885,7 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-NODE_DIR = SESSIONS_DIR.parent if NODE_NAME else SESSIONS_DIR.parent
+NODE_DIR = SESSIONS_DIR.parent
 _node_name = TMUX_PREFIX.strip("-").removeprefix("claude-") or "default"
 MACHINES_CONFIG_FILE = Path(
     os.environ.get("MACHINES_CONFIG_FILE", Path.home() / ".config" / "claudecode-telegram" / "machines.json")
@@ -989,9 +991,7 @@ def _build_tunnel_config() -> TunnelConfig:
         mode = "none"
     elif raw == "poll":
         mode = "poll"
-    elif tunnel_url:
-        mode = "provided"
-    elif raw == "provided":
+    elif tunnel_url or raw == "provided":
         mode = "provided"
     elif raw == "auto":
         mode = "auto"

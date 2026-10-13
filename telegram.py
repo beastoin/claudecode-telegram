@@ -28,6 +28,7 @@ from typing import (
     IO,
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Literal,
     NamedTuple,
     Protocol,
@@ -383,7 +384,7 @@ class _TelegramHTMLSanitizer(HTMLParser):
             "tg-spoiler",
         }
     )
-    SAFE_ATTRS: dict[str, frozenset[str]] = {
+    SAFE_ATTRS: ClassVar[dict[str, frozenset[str]]] = {
         "a": frozenset({"href"}),
         "code": frozenset({"class"}),
         "blockquote": frozenset({"expandable"}),
@@ -418,9 +419,8 @@ class _TelegramHTMLSanitizer(HTMLParser):
             elif tag == "span" and name == "class":
                 if value != "tg-spoiler":
                     return False
-            elif tag == "tg-emoji" and name == "emoji-id":
-                if value is None:
-                    return False
+            elif tag == "tg-emoji" and name == "emoji-id" and value is None:
+                return False
         return True
 
     def _render_start_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
@@ -561,7 +561,7 @@ def _render_md_inline_html(children: list[MarkdownToken], rejected_open_tags: li
 
 
 def _render_table_as_pre(headers: list[str], rows: list[list[str]]) -> str:
-    all_rows = [headers] + rows
+    all_rows = [headers, *rows]
     if not all_rows or not all_rows[0]:
         return ""
     num_cols = max(len(r) for r in all_rows)
@@ -629,7 +629,7 @@ def _wrap_plain_tables(text: str) -> str:
 
 
 def markdown_to_telegram_html(text: str) -> str:
-    from markdown_it import MarkdownIt  # noqa: PLC0415  # optional dep, may not be installed
+    from markdown_it import MarkdownIt  # noqa: PLC0415  # optional dep
 
     md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
     tokens = md.parse(text)
@@ -870,7 +870,7 @@ def validate_document_path(doc_path: str | Path) -> FileValidation:
 def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     photo_path = Path(photo_path)
     try:
-        from PIL import Image  # noqa: PLC0415  # optional dep, may not be installed
+        from PIL import Image  # noqa: PLC0415  # optional dep
 
         with Image.open(photo_path) as img:
             w, h = img.size
@@ -1156,7 +1156,7 @@ class TelegramTransport(MessageTransport):
             payload["reply_to_message_id"] = reply_to
         return telegram_api("sendRichMessage", payload)
 
-    _MEDIA_DISPATCH: dict[str, tuple[str, str, str, bool]] = {
+    _MEDIA_DISPATCH: ClassVar[dict[str, tuple[str, str, str, bool]]] = {
         "photo": ("sendPhoto", "photo", "photo", True),
         "animation": ("sendAnimation", "animation", "photo", False),
         "document": ("sendDocument", "document", "doc", False),
@@ -1164,7 +1164,10 @@ class TelegramTransport(MessageTransport):
         "audio": ("sendAudio", "audio", "doc", False),
         "voice": ("sendVoice", "voice", "doc", False),
     }
-    _VALIDATORS = {"photo": lambda p: validate_photo_path(p), "doc": lambda p: validate_document_path(p)}
+    _VALIDATORS: ClassVar[dict[str, Callable]] = {
+        "photo": lambda p: validate_photo_path(p),
+        "doc": lambda p: validate_document_path(p),
+    }
 
     def _dispatch_media(self, kind: str, chat_id: ChatId, path: str | Path, caption: str | None = None) -> bool:
         if not BOT_TOKEN:
@@ -1382,7 +1385,7 @@ class LocalTransport(MessageTransport):
             with open(self._log_file, "a") as f:
                 f.write(msg + "\n")
 
-    _MSG_OK: TelegramApiResponse = {"ok": True, "result": {"message_id": 1}}
+    _MSG_OK: ClassVar[TelegramApiResponse] = {"ok": True, "result": {"message_id": 1}}
 
     def send_text(
         self, chat_id: ChatId, text: str, parse_mode: ParseMode = None, reply_to: MessageId | None = None

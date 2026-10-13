@@ -672,7 +672,7 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
             cmd_parts.extend(["resume", session_id, "-"])
         else:
             cmd_parts.append("-")
-        ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", host] + cmd_parts
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", host, *cmd_parts]
         result = subprocess.run(ssh_cmd, input=text, capture_output=True, text=True)
         response, new_session_id = _codex_parse_jsonl(result.stdout)
         if result.returncode != 0 and not response:
@@ -959,10 +959,7 @@ def _ensure_workspace_trusted(
         with open(lock_path, "w") as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
-                if target.exists():
-                    data = cast(dict[str, object], json.loads(target.read_text()))
-                else:
-                    data = {}
+                data = cast(dict[str, object], json.loads(target.read_text())) if target.exists() else {}
                 _projects_raw = data.setdefault("projects", {})
                 projects = _projects_raw if isinstance(_projects_raw, dict) else {}
                 _entry_raw = projects.get(cwd, {})
@@ -1187,9 +1184,8 @@ def tmux_prompt_empty(tmux_name: str, timeout: float = 0.5, host: str | None = N
             host=host,
             timeout=TIMEOUT_TMUX_CHECK,
         )
-        if result.returncode == 0:
-            if re.search(r"^❯\s*$", result.stdout, re.MULTILINE):
-                return True
+        if result.returncode == 0 and re.search(r"^❯\s*$", result.stdout, re.MULTILINE):
+            return True
         _clock.sleep(DELAY_BRIEF * 2)
     return False
 
