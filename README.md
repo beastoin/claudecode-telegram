@@ -90,11 +90,9 @@ claudecode-telegram/
 ├── bridge.py              # Control plane — routing, workers, health, machines
 ├── claudecode.py          # Runtime primitives — tmux, backends, sessions, SSH
 ├── telegram.py            # Human interface — formatting, transport, parsing
+├── shared.py              # Common types, utils, core constants
 ├── bridge.sh              # CLI wrapper — start/stop, tunnel, webhook setup
 ├── claudecode.sh          # Claude Code hook — stop/start/tool-failure events
-├── connectors.py          # Gmail, GitHub polling integrations
-├── review.py              # PR review page generator
-├── indexer.py             # JSONL transcript indexer (SQLite FTS5)
 ├── install.sh             # One-line installer
 ├── tests/                 # pytest suite (439 tests)
 ├── test.sh                # Acceptance tests (bash integration)

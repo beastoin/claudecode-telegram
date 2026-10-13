@@ -534,11 +534,11 @@ def test_tindex_missing_file(tmp_path):
 
     db = tmp_path / "test-tindex-missing.db"
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", "/nonexistent/path.jsonl",
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", "/nonexistent/path.jsonl",
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on missing file: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on missing file: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['entries'] == [], f"Expected empty entries, got {d['entries']}"
     assert d['total'] == 0, f"Expected total=0, got {d['total']}"
@@ -553,11 +553,11 @@ def test_tindex_empty_file(tmp_path):
     tmp.write_text("")
     db = tmp_path / "test-tindex-empty.db"
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on empty file: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on empty file: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['entries'] == [], 'Expected empty entries'
     assert d['total'] == 0
@@ -578,11 +578,11 @@ def test_tindex_basic_indexing(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on basic indexing: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on basic indexing: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total'] == 3, f"Expected 3 entries, got {d['total']}"
     assert len(d['entries']) == 3
@@ -617,11 +617,11 @@ def test_tindex_skips_noise(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on noise entries: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on noise entries: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total'] == 3, f"Expected 3 (skipping noise), got {d['total']}"
     types = [e['type'] for e in d['entries']]
@@ -645,7 +645,7 @@ def test_tindex_plain_text_extraction(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -673,7 +673,7 @@ def test_tindex_incremental(tmp_path):
 
     # First index
     subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -688,11 +688,11 @@ def test_tindex_incremental(tmp_path):
 
     # Re-index (incremental)
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on incremental: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on incremental: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total'] == 5, f"Expected 5 after incremental, got {d['total']}"
     assert d['entries'][0]['type'] == 'user'
@@ -708,20 +708,20 @@ def test_tindex_no_reindex_unchanged(tmp_path):
     tmp.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 
     subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
     time.sleep(1)
     # Run again — should skip indexing
     subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -742,7 +742,7 @@ def test_tindex_pagination(tmp_path):
 
     # Default (no --page) should be last page
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -754,7 +754,7 @@ def test_tindex_pagination(tmp_path):
 
     # Explicit page 1
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--page", "1", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -765,7 +765,7 @@ def test_tindex_pagination(tmp_path):
 
     # Page 2
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--page", "2", "--per-page", "50"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
@@ -790,11 +790,11 @@ def test_tindex_fts5_search(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "search", "--search", "teleport"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on search: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on search: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total_results'] == 2, f"Expected 2 results, got {d['total_results']}"
     # 3x teleport should rank higher (first)
@@ -810,11 +810,11 @@ def test_tindex_search_no_results(tmp_path):
     tmp.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "search", "--search", "xyznonexistent"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on empty search: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on empty search: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total_results'] == 0
     assert d['entries'] == []
@@ -838,11 +838,11 @@ def test_tindex_filter_prompts(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "entries", "--filter", "prompts"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on filter: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on filter: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['total'] == 2, f"Expected 2 prompts, got {d['total']}"
     texts = [json.loads(e['raw_json'])['message']['content'] for e in d['entries']]
@@ -866,11 +866,11 @@ def test_tindex_stats(tmp_path):
             f.write(json.dumps(e) + '\n')
 
     result = subprocess.run(
-        [sys.executable, "indexer.py", "transcript", "--jsonl", str(tmp),
+        [sys.executable, "bridge.py", "indexer", "transcript", "--jsonl", str(tmp),
          "--db", str(db), "--query", "stats"],
         capture_output=True, text=True, cwd=os.getcwd(),
     )
-    assert result.returncode == 0, f"indexer.py transcript crashed on stats: {result.stderr}"
+    assert result.returncode == 0, f"bridge.py indexer crashed on stats: {result.stderr}"
     d = json.loads(result.stdout)
     assert d['n_user'] == 1, f"n_user={d['n_user']}"
     assert d['n_tool'] == 1, f"n_tool={d['n_tool']}"

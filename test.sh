@@ -2096,11 +2096,11 @@ print('OK')
 }
 
 
-# ── Transcript Index Tests (indexer.py) ──────────────────────────
+# ── Transcript Index Tests (bridge.py indexer) ──────────────────────────
 
 test_tindex_missing_file() {
-    info "Testing indexer.py handles missing JSONL..."
-    if result=$(python3 indexer.py transcript --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
+    info "Testing bridge.py indexer handles missing JSONL..."
+    if result=$(python3 bridge.py indexer transcript --jsonl /nonexistent/path.jsonl --db /tmp/test-tindex-missing.db --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2110,18 +2110,18 @@ assert d['total'] == 0, f'Expected total=0, got {d[\"total\"]}'
 assert d['total_pages'] == 0
 assert d['page'] == 1
 print('OK')
-" && success "indexer.py handles missing JSONL" || fail "Missing file test failed"
+" && success "bridge.py indexer handles missing JSONL" || fail "Missing file test failed"
     else
-        fail "indexer.py crashed on missing file"
+        fail "bridge.py indexer crashed on missing file"
     fi
     rm -f /tmp/test-tindex-missing.db
 }
 
 test_tindex_empty_file() {
-    info "Testing indexer.py handles empty JSONL..."
+    info "Testing bridge.py indexer handles empty JSONL..."
     local tmp
     tmp=$(mktemp /tmp/tindex-empty-XXXX.jsonl)
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db /tmp/test-tindex-empty.db --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2129,15 +2129,15 @@ d = json.load(sys.stdin)
 assert d['entries'] == [], f'Expected empty entries'
 assert d['total'] == 0
 print('OK')
-" && success "indexer.py handles empty JSONL" || fail "Empty file test failed"
+" && success "bridge.py indexer handles empty JSONL" || fail "Empty file test failed"
     else
-        fail "indexer.py crashed on empty file"
+        fail "bridge.py indexer crashed on empty file"
     fi
     rm -f "$tmp" /tmp/test-tindex-empty.db
 }
 
 test_tindex_basic_indexing() {
-    info "Testing indexer.py indexes entries into SQLite..."
+    info "Testing bridge.py indexer indexes entries into SQLite..."
     local tmp
     tmp=$(mktemp /tmp/tindex-basic-XXXX.jsonl)
     local db="/tmp/test-tindex-basic.db"
@@ -2152,7 +2152,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json, sqlite3
@@ -2171,15 +2171,15 @@ parsed = j2.loads(d['entries'][0]['raw_json'])
 assert parsed['message']['content'] == 'Hello world'
 db.close()
 print('OK')
-" && success "indexer.py indexes entries" || fail "Basic indexing test failed"
+" && success "bridge.py indexer indexes entries" || fail "Basic indexing test failed"
     else
-        fail "indexer.py crashed on basic indexing"
+        fail "bridge.py indexer crashed on basic indexing"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_skips_noise() {
-    info "Testing indexer.py skips noise entry types..."
+    info "Testing bridge.py indexer skips noise entry types..."
     local tmp
     tmp=$(mktemp /tmp/tindex-noise-XXXX.jsonl)
     local db="/tmp/test-tindex-noise.db"
@@ -2198,7 +2198,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2209,15 +2209,15 @@ assert 'progress' not in types
 assert 'system' not in types
 assert 'queue-operation' not in types
 print('OK')
-" && success "indexer.py skips noise types" || fail "Noise skip test failed"
+" && success "bridge.py indexer skips noise types" || fail "Noise skip test failed"
     else
-        fail "indexer.py crashed on noise entries"
+        fail "bridge.py indexer crashed on noise entries"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_plain_text_extraction() {
-    info "Testing indexer.py extracts searchable plain text..."
+    info "Testing bridge.py indexer extracts searchable plain text..."
     local tmp
     tmp=$(mktemp /tmp/tindex-text-XXXX.jsonl)
     local db="/tmp/test-tindex-text.db"
@@ -2232,7 +2232,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # shellcheck disable=SC2015
     python3 -c "
 import sqlite3
@@ -2248,7 +2248,7 @@ print('OK')
 }
 
 test_tindex_incremental() {
-    info "Testing indexer.py indexes only new bytes..."
+    info "Testing bridge.py indexer indexes only new bytes..."
     local tmp
     tmp=$(mktemp /tmp/tindex-incr-XXXX.jsonl)
     local db="/tmp/test-tindex-incr.db"
@@ -2264,7 +2264,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # First index
-    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Append 2 more entries
     python3 -c "
 import json
@@ -2277,7 +2277,7 @@ with open('$tmp', 'a') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Re-index (incremental)
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2288,13 +2288,13 @@ assert d['entries'][4]['type'] == 'user'
 print('OK')
 " && success "Incremental indexing works" || fail "Incremental indexing test failed"
     else
-        fail "indexer.py crashed on incremental"
+        fail "bridge.py indexer crashed on incremental"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_no_reindex_unchanged() {
-    info "Testing indexer.py skips reindex when file unchanged..."
+    info "Testing bridge.py indexer skips reindex when file unchanged..."
     local tmp
     tmp=$(mktemp /tmp/tindex-noop-XXXX.jsonl)
     local db="/tmp/test-tindex-noop.db"
@@ -2303,12 +2303,12 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'test'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     sleep 1
     # Run again — should skip indexing
-    python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
+    python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries >/dev/null 2>/dev/null
     # Note: mtime may change due to SQLite WAL, so just check total is still 1
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2317,13 +2317,13 @@ assert d['total'] == 1, f'Expected 1, got {d[\"total\"]}'
 print('OK')
 " && success "No reindex when unchanged" || fail "No-reindex test failed"
     else
-        fail "indexer.py crashed on no-reindex"
+        fail "bridge.py indexer crashed on no-reindex"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_pagination() {
-    info "Testing indexer.py pagination..."
+    info "Testing bridge.py indexer pagination..."
     local tmp
     tmp=$(mktemp /tmp/tindex-page-XXXX.jsonl)
     local db="/tmp/test-tindex-page.db"
@@ -2335,7 +2335,7 @@ with open('$tmp', 'w') as f:
         f.write(json.dumps(e) + '\n')
 "
     # Default (no --page) should be last page
-    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
+    result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2347,7 +2347,7 @@ assert len(d['entries']) == 20, f'Last page should have 20 entries, got {len(d[\
 print('OK1')
 " 2>/dev/null | grep -q "OK1" || { fail "Pagination default-last-page failed"; rm -f "$tmp" "$db"; return; }
     # Explicit page 1
-    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
+    result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries --page 1 --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2358,7 +2358,7 @@ assert json.loads(d['entries'][0]['raw_json'])['message']['content'] == 'Message
 print('OK2')
 " 2>/dev/null | grep -q "OK2" || { fail "Pagination page-1 failed"; rm -f "$tmp" "$db"; return; }
     # Page 2
-    result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
+    result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries --page 2 --per-page 50 2>/dev/null)
     # shellcheck disable=SC2015
     echo "$result" | python3 -c "
 import sys, json
@@ -2372,7 +2372,7 @@ print('OK3')
 }
 
 test_tindex_fts5_search() {
-    info "Testing indexer.py FTS5 search with BM25 ranking..."
+    info "Testing bridge.py indexer FTS5 search with BM25 ranking..."
     local tmp
     tmp=$(mktemp /tmp/tindex-search-XXXX.jsonl)
     local db="/tmp/test-tindex-search.db"
@@ -2387,7 +2387,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query search --search teleport 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2399,13 +2399,13 @@ assert 'teleport teleport teleport' in str(first_text), f'3x teleport should be 
 print('OK')
 " && success "FTS5 search ranks correctly" || fail "FTS5 search ranking failed"
     else
-        fail "indexer.py crashed on search"
+        fail "bridge.py indexer crashed on search"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_search_no_results() {
-    info "Testing indexer.py search with no matches..."
+    info "Testing bridge.py indexer search with no matches..."
     local tmp
     tmp=$(mktemp /tmp/tindex-nores-XXXX.jsonl)
     local db="/tmp/test-tindex-nores.db"
@@ -2414,7 +2414,7 @@ import json
 with open('$tmp', 'w') as f:
     f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'Hello world'}, 'timestamp': '2026-04-05T10:00:00Z'}) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query search --search xyznonexistent 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2424,13 +2424,13 @@ assert d['entries'] == []
 print('OK')
 " && success "Search no-results works" || fail "Search no-results failed"
     else
-        fail "indexer.py crashed on empty search"
+        fail "bridge.py indexer crashed on empty search"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_filter_prompts() {
-    info "Testing indexer.py prompts filter..."
+    info "Testing bridge.py indexer prompts filter..."
     local tmp
     tmp=$(mktemp /tmp/tindex-filter-XXXX.jsonl)
     local db="/tmp/test-tindex-filter.db"
@@ -2448,7 +2448,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query entries --filter prompts 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2460,13 +2460,13 @@ assert 'Another real prompt' in texts
 print('OK')
 " && success "Prompts filter works" || fail "Prompts filter failed"
     else
-        fail "indexer.py crashed on filter"
+        fail "bridge.py indexer crashed on filter"
     fi
     rm -f "$tmp" "$db"
 }
 
 test_tindex_stats() {
-    info "Testing indexer.py stats query..."
+    info "Testing bridge.py indexer stats query..."
     local tmp
     tmp=$(mktemp /tmp/tindex-stats-XXXX.jsonl)
     local db="/tmp/test-tindex-stats.db"
@@ -2482,7 +2482,7 @@ with open('$tmp', 'w') as f:
     for e in entries:
         f.write(json.dumps(e) + '\n')
 "
-    if result=$(python3 indexer.py transcript --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
+    if result=$(python3 bridge.py indexer transcript --jsonl "$tmp" --db "$db" --query stats 2>/dev/null); then
         # shellcheck disable=SC2015
         echo "$result" | python3 -c "
 import sys, json
@@ -2503,7 +2503,7 @@ assert d['lines_del'] == 0, f'lines_del={d[\"lines_del\"]}'
 print('OK')
 " && success "Stats query works" || fail "Stats query failed"
     else
-        fail "indexer.py crashed on stats"
+        fail "bridge.py indexer crashed on stats"
     fi
     rm -f "$tmp" "$db"
 }

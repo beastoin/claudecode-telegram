@@ -4130,7 +4130,7 @@ class TranscriptSyncRegistry:
 
 
 _transcript_sync = TranscriptSyncRegistry()
-INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indexer.py")
+INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.py")
 
 
 def _run_transcript_query(
@@ -4151,8 +4151,19 @@ def _run_transcript_query(
     if host:
         remote_home = _get_remote_home(host) or ""
         if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/indexer.py"
-    cmd = ["python3", script_path, "transcript", "--jsonl", str(jsonl_path), "--db", db_path, "--query", query]
+            script_path = f"{remote_home}/claudecode-telegram/bridge.py"
+    cmd = [
+        "python3",
+        script_path,
+        "indexer",
+        "transcript",
+        "--jsonl",
+        str(jsonl_path),
+        "--db",
+        db_path,
+        "--query",
+        query,
+    ]
     if page is not None:
         cmd.extend(["--page", str(page)])
     if per_page is not None:
@@ -7374,11 +7385,11 @@ def cmd_pr_review(router, arg: str, chat_id) -> bool:
     else:
         owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
     router.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
-    script_path = Path(__file__).parent / "review.py"
+    script_path = Path(__file__).parent / "bridge.py"
     out_path = f"/tmp/pr-review-{pr_num}.html"
     try:
         r = core._subprocess_runner.run(
-            [sys.executable, str(script_path), arg, "--no-serve"],
+            [sys.executable, str(script_path), "review", arg, "--no-serve"],
             capture_output=True,
             text=True,
             timeout=PENDING_TIMEOUT,
@@ -11609,4 +11620,12 @@ _this_module._sources = (_core_mod, _tg_mod, _cc_mod)
 
 
 if __name__ == "__main__":
-    main()
+    _sub = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _sub == "indexer":
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        _indexer_main()
+    elif _sub == "review":
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        _pr_review_main()
+    else:
+        main()
