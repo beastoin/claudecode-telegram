@@ -1,0 +1,48 @@
+#!/bin/bash
+# Pre-commit hook: lint + format check on staged .py files
+# Blocks commit if ruff or black fails
+# Install: ln -sf ../../tools/git-hooks/pre-commit .git/hooks/pre-commit
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' | grep -v '^tests/' | grep -v '^experiments/' | grep -v '^test_' | grep -v '_test\.py$')
+
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+RUFF="${HOME}/.local/bin/ruff"
+BLACK="${HOME}/.local/bin/black"
+FAIL=0
+
+# 1. Lint
+if [ -x "$RUFF" ]; then
+    echo "Running ruff..."
+    $RUFF check $STAGED
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "❌ ruff lint failed. Fix violations before committing."
+        FAIL=1
+    fi
+else
+    echo "⚠ ruff not found at $RUFF — skipping lint"
+fi
+
+# 2. Format check (--check only, don't modify files)
+if [ -x "$BLACK" ]; then
+    echo "Running black --check..."
+    $BLACK --check --line-length 120 $STAGED 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "❌ black format check failed. Run: black --line-length 120 <files>"
+        FAIL=1
+    fi
+else
+    echo "⚠ black not found at $BLACK — skipping format check"
+fi
+
+if [ $FAIL -ne 0 ]; then
+    echo ""
+    echo "Commit blocked. Fix lint/format errors first."
+    exit 1
+fi
+
+exit 0
