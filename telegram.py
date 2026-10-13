@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import collections
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
 import hashlib
-from html.parser import HTMLParser
+import io
 import json
 import mimetypes
 import os
@@ -19,87 +17,88 @@ import tempfile
 import threading
 import time
 import types
-import uuid
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import (
     IO,
+    TYPE_CHECKING,
     Any,
-    Callable,
-    Iterator,
     Literal,
     NamedTuple,
     Protocol,
     TypedDict,
-    TYPE_CHECKING,
     cast,
     runtime_checkable,
 )
 
 from shared import (
-    _str_field,
-    _int_field,
-    _dict_field,
-    _bool_field,
-    _log,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
     _LOG_DEBUG,
-    _log_best_effort,
-    _log_suppress,
-    SubprocessRunner,
-    Clock,
-    MarkdownToken,
-    _subprocess_runner,
-    _urlopen,
-    _tg_http_client,
-    _clock as _default_clock,
-    _RealClock,
-    _RealSubprocessRunner,
-    AppContext,
-    get_app_context,
-    TunnelConfig,
-    VERSION,
+    _LOG_ERROR,
+    _LOG_INFO,
+    _LOG_WARN,
+    ADMIN_CHAT_ID_ENV,
     BOT_TOKEN,
     BRIDGE_PUBLIC_URL,
-    PORT,
-    NODE_NAME,
+    DEFAULT_BACKEND,
     NODE_DIR,
+    NODE_NAME,
+    PENDING_TIMEOUT,
+    PORT,
     SESSIONS_DIR,
+    STT_ENDPOINT,
+    STT_TIMEOUT,
+    TEAM_DIR,
+    TIMEOUT_FILE_TRANSFER,
     TIMEOUT_HTTP_API,
     TIMEOUT_HTTP_DOWNLOAD,
     TIMEOUT_HTTP_UPLOAD,
     TIMEOUT_PROCESS_WAIT,
-    TIMEOUT_FILE_TRANSFER,
     TIMEOUT_TMUX_CHECK,
-    PENDING_TIMEOUT,
-    STT_ENDPOINT,
-    STT_TIMEOUT,
-    TEAM_DIR,
-    ADMIN_CHAT_ID_ENV,
+    VERSION,
+    AppContext,
+    Clock,
+    FileValidation,
+    MarkdownToken,
+    MediaGroupEntry,
+    SubprocessRunner,
+    TelegramApiResponseDict,
+    TelegramAudio,
+    TelegramChat,
+    TelegramDocument,
+    TelegramMessageDict,
+    TelegramPhotoSize,
+    TelegramSticker,
+    TelegramUpdate,
+    TelegramUser,
+    TelegramVideo,
+    TelegramVoice,
+    TunnelConfig,
+    _bool_field,
+    _dict_field,
+    _int_field,
+    _log,
+    _log_best_effort,
+    _log_suppress,
+    _RealClock,
+    _RealSubprocessRunner,
+    _str_field,
+    _subprocess_runner,
+    _tg_http_client,
+    _urlopen,
     admin_chat_id,
-    DEFAULT_BACKEND,
+    get_app_context,
 )
 from shared import (
-    TelegramApiResponseDict,
-    TelegramUser,
-    TelegramChat,
-    TelegramPhotoSize,
-    TelegramDocument,
-    TelegramVoice,
-    TelegramVideo,
-    TelegramAudio,
-    TelegramSticker,
-    TelegramMessageDict,
-    TelegramUpdate,
-    FileValidation,
-    MediaGroupEntry,
+    _clock as _default_clock,
 )
 
 if TYPE_CHECKING:
-    from claudecode import WorkerStateEntry, TmuxSessionDict
+    from claudecode import TmuxSessionDict, WorkerStateEntry
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -228,7 +227,7 @@ class IncomingMessage:
     raw_msg: TelegramMessageDict = field(default_factory=lambda: TelegramMessageDict())
 
     @classmethod
-    def from_update(cls: type["IncomingMessage"], update: TelegramUpdate) -> "IncomingMessage":
+    def from_update(cls: type[IncomingMessage], update: TelegramUpdate) -> IncomingMessage:
         msg = update.get("message", {})
         text = msg.get("text", "") or msg.get("caption", "")
         photo = msg.get("photo")
@@ -630,7 +629,7 @@ def _wrap_plain_tables(text: str) -> str:
 
 
 def markdown_to_telegram_html(text: str) -> str:
-    from markdown_it import MarkdownIt
+    from markdown_it import MarkdownIt  # noqa: PLC0415  # optional dep, may not be installed
 
     md = MarkdownIt("commonmark").enable("strikethrough").enable("table")
     tokens = md.parse(text)
@@ -871,7 +870,7 @@ def validate_document_path(doc_path: str | Path) -> FileValidation:
 def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
     photo_path = Path(photo_path)
     try:
-        from PIL import Image
+        from PIL import Image  # noqa: PLC0415  # optional dep, may not be installed
 
         with Image.open(photo_path) as img:
             w, h = img.size
@@ -885,8 +884,6 @@ def _prepare_photo_for_telegram(photo_path: str | Path) -> tuple[bytes, str]:
                 new_w = int(w * scale)
                 new_h = int(h * scale)
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                import io
-
                 buf = io.BytesIO()
                 fmt = img.format or ("PNG" if photo_path.suffix.lower() == ".png" else "JPEG")
                 if fmt == "PNG" and resized.mode not in ("RGBA", "P", "L", "LA"):
@@ -1318,8 +1315,8 @@ class TelegramTransport(MessageTransport):
             _log(_LOG_WARN, "telegram", f"File too large: {file_size} > {MAX_FILE_SIZE}")
             return None
         download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        import bridge as _br
-        import claudecode as _cc
+        import bridge as _br  # noqa: PLC0415  # circular: bridge imports telegram
+        import claudecode as _cc  # noqa: PLC0415  # circular: bridge imports telegram
 
         inbox = _br.ensure_inbox_dir(session_name)
         ext = Path(file_path).suffix or ""
@@ -1579,7 +1576,7 @@ def format_multipart_messages(session_name: str, chunks: list[str]) -> list[str]
 
 def update_bot_commands() -> None:
     commands = list(BOT_COMMANDS)
-    import bridge as _br
+    import bridge as _br  # noqa: PLC0415  # circular: bridge imports telegram
 
     registered = _br.get_registered_sessions()
     for name in sorted(registered.keys()):
@@ -1592,7 +1589,7 @@ def update_bot_commands() -> None:
 def get_manager_chat_id(name: str) -> ChatId | None:
     if admin_chat_id is not None:
         return admin_chat_id
-    import claudecode as _cc
+    import claudecode as _cc  # noqa: PLC0415  # circular: bridge imports telegram
 
     chat_id_file = _cc.get_chat_id_file(name)
     if not chat_id_file.exists():

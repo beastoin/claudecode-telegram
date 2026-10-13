@@ -1,78 +1,60 @@
 #!/usr/bin/env python3
-import collections
-from contextlib import suppress
-from dataclasses import dataclass, field
-import os
-import json
-import secrets
-import shutil
-import signal
-import subprocess
 import sys
-from shared import *  # noqa: F401,F403
-from shared import (
-    _CHECKIN_NOTE_PATH,
-    _DEFAULT_PORTS,
-    _GuestSessionDictRequired,
-    _LEARNING_REMINDER_PATH,
-    _LOG_DEBUG,
-    _LOG_ERROR,
-    _LOG_INFO,
-    _LOG_WARN,
-    _MentionSnapshot,
-    _RealClock,
-    _RealSubprocessRunner,
-    _StateSnapshot,
-    _app_context,
-    _bool_field,
-    _bridge_url_env,
-    _build_app_context,
-    _build_tunnel_config,
-    _clock,
-    _int_field,
-    _log,
-    _log_suppress,
-    _node_name,
-    _res_cfg,
-    _str_field,
-    _subprocess_runner,
-    _urlopen,
-    _wd_cfg,
-)
 
 if __name__ == "__main__":
     sys.modules.setdefault("bridge", sys.modules[__name__])
+
+import abc
+import argparse
+import base64
+import binascii
+import collections
+import difflib
+import enum
+import gzip
+import hashlib
+import html
+import http.client
+import http.server
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import socketserver
+import sqlite3
+import subprocess
 import tempfile
 import threading
-import types
 import time
-import re
+import types
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import ParseResult, parse_qs, urlparse, quote as _urlquote
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from collections.abc import Mapping
-from typing import Any, Callable, Generic, IO, Iterable, NamedTuple, Optional, Protocol, Sequence, TYPE_CHECKING, TypeVar, TypedDict, cast
-from telegram import *  # noqa: F401,F403
-from telegram import (
-    _TelegramHTMLSanitizer,
-    _init_transport,
-    _prepare_photo_for_telegram,
-    _split_protected_segments,
-    _collapse_excess_newlines,
-    _parse_media_tags,
-    _sanitize_telegram_html,
-    _render_md_inline_plain,
-    _render_md_inline_html,
-    _render_table_as_pre,
-    _wrap_plain_tables,
-    _pipe_tables_to_html,
-    _MEDIA_GROUP_WAIT,
-    _extract_msg_text,
-    _build_cwd_change_notice,
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    Optional,
+    Protocol,
+    TypedDict,
+    cast,
 )
+from urllib.parse import ParseResult, parse_qs, urlparse
+from urllib.parse import quote as _urlquote
+
+import shared as core
 from claudecode import *  # noqa: F401,F403
 from claudecode import (
     _INTERACTIVE_CONTENT,
@@ -101,18 +83,60 @@ from claudecode import (
     _tmux_pane_pids,
     _which_binary,
 )
-
-
-import html
-
+from shared import *  # noqa: F401,F403
+from shared import (
+    _CHECKIN_NOTE_PATH,
+    _DEFAULT_PORTS,
+    _LEARNING_REMINDER_PATH,
+    _LOG_DEBUG,
+    _LOG_ERROR,
+    _LOG_INFO,
+    _LOG_WARN,
+    _app_context,
+    _bool_field,
+    _bridge_url_env,
+    _build_app_context,
+    _build_tunnel_config,
+    _clock,
+    _GuestSessionDictRequired,
+    _int_field,
+    _log,
+    _log_suppress,
+    _MentionSnapshot,
+    _node_name,
+    _RealClock,
+    _RealSubprocessRunner,
+    _res_cfg,
+    _StateSnapshot,
+    _str_field,
+    _subprocess_runner,
+    _urlopen,
+    _wd_cfg,
+)
+from telegram import *  # noqa: F401,F403
+from telegram import (
+    _MEDIA_GROUP_WAIT,
+    _build_cwd_change_notice,
+    _collapse_excess_newlines,
+    _extract_msg_text,
+    _init_transport,
+    _parse_media_tags,
+    _pipe_tables_to_html,
+    _prepare_photo_for_telegram,
+    _render_md_inline_html,
+    _render_md_inline_plain,
+    _render_table_as_pre,
+    _sanitize_telegram_html,
+    _split_protected_segments,
+    _TelegramHTMLSanitizer,
+    _wrap_plain_tables,
+)
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _REVIEW_CSS = (_TEMPLATE_DIR / "review.css").read_text() if (_TEMPLATE_DIR / "review.css").exists() else ""
 _REVIEW_JS = (_TEMPLATE_DIR / "review.js").read_text() if (_TEMPLATE_DIR / "review.js").exists() else ""
 _REVIEW_PAGE_TPL = (
-    (_TEMPLATE_DIR / "review_page.html").read_text()
-    .replace("__CSS__", _REVIEW_CSS)
-    .replace("__JS__", _REVIEW_JS)
+    (_TEMPLATE_DIR / "review_page.html").read_text().replace("__CSS__", _REVIEW_CSS).replace("__JS__", _REVIEW_JS)
     if (_TEMPLATE_DIR / "review_page.html").exists()
     else ""
 )
@@ -130,11 +154,24 @@ def parse_patch(patch_text: str | None) -> list[dict[str, object]]:
             m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)", line)
             if m:
                 current_hunk = {
-                    "header": line, "old_start": int(m.group(1)), "old_count": int(m.group(2) or 1),
-                    "new_start": int(m.group(3)), "new_count": int(m.group(4) or 1), "context": m.group(5), "lines": [],
+                    "header": line,
+                    "old_start": int(m.group(1)),
+                    "old_count": int(m.group(2) or 1),
+                    "new_start": int(m.group(3)),
+                    "new_count": int(m.group(4) or 1),
+                    "context": m.group(5),
+                    "lines": [],
                 }
             else:
-                current_hunk = {"header": line, "old_start": 0, "old_count": 0, "new_start": 0, "new_count": 0, "context": "", "lines": []}
+                current_hunk = {
+                    "header": line,
+                    "old_start": 0,
+                    "old_count": 0,
+                    "new_start": 0,
+                    "new_count": 0,
+                    "context": "",
+                    "lines": [],
+                }
         elif current_hunk is not None:
             lines_list = current_hunk["lines"]
             assert isinstance(lines_list, list)
@@ -164,19 +201,21 @@ def generate_html(
     """Render PR review page. All DOM rendering is done client-side by review.js."""
     data = json.dumps(
         {
-            "meta": meta, "files": files, "pr_num": pr_num, "owner": owner, "repo": repo,
-            "comments": comments or [], "reviews": reviews or [], "user_profiles": user_profiles or {},
-            "highlight_comment_id": highlight_comment_id, "commits": commits or [],
+            "meta": meta,
+            "files": files,
+            "pr_num": pr_num,
+            "owner": owner,
+            "repo": repo,
+            "comments": comments or [],
+            "reviews": reviews or [],
+            "user_profiles": user_profiles or {},
+            "highlight_comment_id": highlight_comment_id,
+            "commits": commits or [],
         },
         default=str,
     ).replace("</", "<\\/")
     title = f"PR #{pr_num}: {html.escape(meta.get('title', ''))}"
     return _REVIEW_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
-
-import argparse
-import sqlite3
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, timezone
 
 
 @dataclass
@@ -223,9 +262,21 @@ class TranscriptStats:
 
 
 _EMPTY_TRANSCRIPT_STATS: TranscriptStatsDict = {
-    "n_user": 0, "n_tool": 0, "n_edit": 0, "lines_add": 0, "lines_del": 0, "lines_mod": 0,
-    "n_files": 0, "model": "", "version": "", "git_branch": "", "first_ts": "", "last_ts": "",
-    "input_tokens": 0, "output_tokens": 0, "duration": "",
+    "n_user": 0,
+    "n_tool": 0,
+    "n_edit": 0,
+    "lines_add": 0,
+    "lines_del": 0,
+    "lines_mod": 0,
+    "n_files": 0,
+    "model": "",
+    "version": "",
+    "git_branch": "",
+    "first_ts": "",
+    "last_ts": "",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "duration": "",
 }
 
 
@@ -297,7 +348,7 @@ def _update_meta(
     db.commit()
 
 
-def _paginate(total: int, page: Optional[int], per_page: int) -> tuple[int, int, int]:
+def _paginate(total: int, page: int | None, per_page: int) -> tuple[int, int, int]:
     total_pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 0
     if page is None:
         page = total_pages  # Default to last page
@@ -417,7 +468,7 @@ def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
 
 def _transcript_query_entries(
     db: sqlite3.Connection,
-    page: Optional[int] = None,
+    page: int | None = None,
     per_page: int = 50,
     filter_mode: str = "",
 ) -> dict[str, Any]:
@@ -622,11 +673,6 @@ def _indexer_main() -> None:
     args = parser.parse_args()
     if args.mode == "transcript":
         _run_transcript(args)
-
-
-import enum
-import http.client
-import socket
 
 
 class UrlOpenFn(Protocol):
@@ -992,7 +1038,9 @@ class TunnelManager:
                 for update in data.get("result", []):
                     uid = update.get("update_id", 0)
                     if self._on_update:
-                        with _log_suppress(Exception, level=_LOG_ERROR, tag="tunnel:poll", msg=f"Forward failed update_id={uid}: "):
+                        with _log_suppress(
+                            Exception, level=_LOG_ERROR, tag="tunnel:poll", msg=f"Forward failed update_id={uid}: "
+                        ):
                             self._on_update(update)
                     else:
                         self._forward_to_localhost(update)
@@ -1060,10 +1108,6 @@ class TunnelManager:
                     if username:
                         (self._node_dir / "bot_username").write_text(username)
 
-import abc
-import base64
-import binascii
-
 
 class MessageCallback(Protocol):
     def __call__(
@@ -1072,7 +1116,7 @@ class MessageCallback(Protocol):
         html_text: str,
         plain_text: str,
         attachments: list[Attachment],
-        metadata: Optional[ConnectorMetadata] = None,
+        metadata: ConnectorMetadata | None = None,
     ) -> None: ...
 class AlertCallback(Protocol):
     def __call__(self, text: str) -> None: ...
@@ -1092,7 +1136,6 @@ _MAX_POLL_INTERVAL = 3600
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
 _MAX_SEEN_IDS = 500
 _PRUNE_KEEP = 200
-M = TypeVar("M")
 
 
 def _atomic_write(path: str, payload: str | bytes) -> None:
@@ -1122,9 +1165,7 @@ def _atomic_write(path: str, payload: str | bytes) -> None:
         raise
 
 
-
-
-class BaseConnector(abc.ABC, Generic[M]):
+class BaseConnector[M](abc.ABC):
     connector_name: str = "base"
 
     def __init__(
@@ -1133,7 +1174,7 @@ class BaseConnector(abc.ABC, Generic[M]):
         poll_interval: int,
         on_message: MessageCallback,
         get_registered_workers: WorkerListCallback,
-        on_alert: Optional[AlertCallback] = None,
+        on_alert: AlertCallback | None = None,
     ) -> None:
         if not sender_filter or not sender_filter.strip():
             raise ValueError(f"{self.connector_name}: sender_filter is required (security: cannot be empty)")
@@ -1145,9 +1186,9 @@ class BaseConnector(abc.ABC, Generic[M]):
         self.poll_interval: int = poll_interval
         self.on_message: MessageCallback = on_message
         self.get_registered_workers: WorkerListCallback = get_registered_workers
-        self.on_alert: Optional[AlertCallback] = on_alert
+        self.on_alert: AlertCallback | None = on_alert
         self._stop_event: threading.Event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._consecutive_failures: int = 0
         self._alert_sent: bool = False
         self._lock: threading.RLock = threading.RLock()
@@ -1387,7 +1428,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         poll_interval: int,
         on_message: MessageCallback,
         get_registered_workers: WorkerListCallback,
-        on_alert: Optional[AlertCallback] = None,
+        on_alert: AlertCallback | None = None,
         history_file: str = "",
     ) -> None:
         super().__init__(
@@ -1398,7 +1439,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             on_alert=on_alert,
         )
         self.gws_bin: str = gws_bin
-        self._history_id: Optional[str] = None
+        self._history_id: str | None = None
         self._history_file_path: str = history_file or os.path.join(
             os.path.expanduser("~"),
             ".cache",
@@ -1431,7 +1472,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 history_id=self._history_id,
             )
 
-    def _run_gws(self, *args: str, json_body: Optional[str] = None) -> Optional[dict[str, object]]:
+    def _run_gws(self, *args: str, json_body: str | None = None) -> dict[str, object] | None:
         cmd: list[str] = [self.gws_bin, "gmail", "users"] + list(args)
         if json_body:
             cmd.extend(["--json", json_body])
@@ -1460,24 +1501,24 @@ class GmailConnector(BaseConnector[GmailMessage]):
             print(f"[gmail] gws call failed: {e}")
             return None
 
-    def _get_profile(self) -> Optional[GmailProfile]:
-        return cast(Optional[GmailProfile], self._run_gws("getProfile", "--params", '{"userId":"me"}'))
+    def _get_profile(self) -> GmailProfile | None:
+        return cast(GmailProfile | None, self._run_gws("getProfile", "--params", '{"userId":"me"}'))
 
-    def get_message(self, msg_id: str) -> Optional[GmailMessage]:
+    def get_message(self, msg_id: str) -> GmailMessage | None:
         params = json.dumps({"userId": "me", "id": msg_id, "format": "full"})
-        return cast(Optional[GmailMessage], self._run_gws("messages", "get", "--params", params))
+        return cast(GmailMessage | None, self._run_gws("messages", "get", "--params", params))
 
-    def _get_history(self, start_history_id: str) -> Optional[GmailHistoryResponse]:
+    def _get_history(self, start_history_id: str) -> GmailHistoryResponse | None:
         params = json.dumps({"userId": "me", "startHistoryId": start_history_id})
-        return cast(Optional[GmailHistoryResponse], self._run_gws("history", "list", "--params", params))
+        return cast(GmailHistoryResponse | None, self._run_gws("history", "list", "--params", params))
 
-    def _get_attachment_data(self, msg_id: str, att_id: str) -> Optional[GmailAttachmentData]:
+    def _get_attachment_data(self, msg_id: str, att_id: str) -> GmailAttachmentData | None:
         params = json.dumps({"userId": "me", "messageId": msg_id, "id": att_id})
-        return cast(Optional[GmailAttachmentData], self._run_gws("messages", "attachments", "get", "--params", params))
+        return cast(GmailAttachmentData | None, self._run_gws("messages", "attachments", "get", "--params", params))
 
-    def _list_messages(self, query: str, max_results: int = 5) -> Optional[GmailMessageListResponse]:
+    def _list_messages(self, query: str, max_results: int = 5) -> GmailMessageListResponse | None:
         params = json.dumps({"userId": "me", "maxResults": max_results, "q": query})
-        return cast(Optional[GmailMessageListResponse], self._run_gws("messages", "list", "--params", params))
+        return cast(GmailMessageListResponse | None, self._run_gws("messages", "list", "--params", params))
 
     def mark_as_read(self, msg_id: str) -> bool:
         params = json.dumps({"userId": "me", "id": msg_id})
@@ -1495,9 +1536,9 @@ class GmailConnector(BaseConnector[GmailMessage]):
         except OSError as e:
             print(f"[gmail] Failed to save historyId: {e}")
 
-    def _load_history_id(self) -> Optional[str]:
+    def _load_history_id(self) -> str | None:
         try:
-            with open(self._history_file_path, "r") as f:
+            with open(self._history_file_path) as f:
                 hid = f.read().strip()
                 if hid:
                     return hid
@@ -1507,7 +1548,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             print(f"[gmail] Failed to load historyId: {e}")
         return None
 
-    def _bootstrap_history_id(self, skip_disk: bool = False) -> Optional[str]:
+    def _bootstrap_history_id(self, skip_disk: bool = False) -> str | None:
         if not skip_disk:
             saved = self._load_history_id()
             if saved:
@@ -1562,7 +1603,12 @@ class GmailConnector(BaseConnector[GmailMessage]):
         return self._find_text_part(payload)
 
     @staticmethod
-    def _walk_mime(part: GmailPayloadPart, visitor: Callable[[GmailPayloadPart], None], depth: int = 0, counter: Optional[list[int]] = None) -> None:
+    def _walk_mime(
+        part: GmailPayloadPart,
+        visitor: Callable[[GmailPayloadPart], None],
+        depth: int = 0,
+        counter: list[int] | None = None,
+    ) -> None:
         if counter is None:
             counter = [0]
         counter[0] += 1
@@ -1579,6 +1625,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
 
     def _find_text_part(self, part: GmailPayloadPart) -> str:
         found: list[str] = []
+
         def _visit(p: GmailPayloadPart) -> None:
             if found:
                 return
@@ -1597,6 +1644,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 return
             with suppress(ValueError, binascii.Error):
                 found.append(base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace"))
+
         self._walk_mime(part, _visit)
         return found[0] if found else ""
 
@@ -1605,6 +1653,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         payload = message.get("payload")
         if not isinstance(payload, dict):
             return attachments
+
         def _visit(p: GmailPayloadPart) -> None:
             raw_fn = p.get("filename")
             filename = str(raw_fn) if isinstance(raw_fn, str) else ""
@@ -1621,7 +1670,15 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 print(f"[gmail] Skipping oversized attachment: {filename} ({size} bytes)")
                 return
             raw_mime = p.get("mimeType")
-            attachments.append(GmailAttachmentInfo(filename=_sanitize_filename(filename), mimeType=str(raw_mime) if isinstance(raw_mime, str) else "", size=size, attachmentId=att_id))
+            attachments.append(
+                GmailAttachmentInfo(
+                    filename=_sanitize_filename(filename),
+                    mimeType=str(raw_mime) if isinstance(raw_mime, str) else "",
+                    size=size,
+                    attachmentId=att_id,
+                )
+            )
+
         self._walk_mime(payload, _visit)
         return attachments
 
@@ -1650,7 +1707,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 text = text[: m.start()]
         return text.strip()
 
-    def _detect_forward_split(self, body: str) -> tuple[Optional[str], Optional[str]]:
+    def _detect_forward_split(self, body: str) -> tuple[str | None, str | None]:
         gmail_marker = "---------- Forwarded message ---------"
         if gmail_marker in body:
             parts = body.split(gmail_marker, 1)
@@ -1706,7 +1763,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         plain = f"{sender_name} (sent via email):{thread_tag} {body}"
         return html, plain
 
-    def _get_new_message_ids(self) -> tuple[Optional[list[str]], Optional[str]]:
+    def _get_new_message_ids(self) -> tuple[list[str] | None, str | None]:
         with self._lock:
             current_hid = self._history_id
         if not current_hid:
@@ -1739,7 +1796,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             else ""
         )
 
-    def _download_attachment(self, msg_id: str, att: GmailAttachmentInfo) -> Optional[str]:
+    def _download_attachment(self, msg_id: str, att: GmailAttachmentInfo) -> str | None:
         att_id = str(att.get("attachmentId") or "")
         if not att_id:
             return None
@@ -1759,7 +1816,9 @@ class GmailConnector(BaseConnector[GmailMessage]):
         if len(decoded) > _MAX_ATTACHMENT_BYTES:
             return None
         prefix = re.sub(r"[^\w]", "", msg_id[:8]) if msg_id else ""
-        filename = _sanitize_filename(f"{prefix}_{att.get('filename', 'attachment')}" if prefix else str(att.get("filename", "attachment")))
+        filename = _sanitize_filename(
+            f"{prefix}_{att.get('filename', 'attachment')}" if prefix else str(att.get("filename", "attachment"))
+        )
         att_dir = os.path.join(os.path.expanduser("~"), ".cache", "beast", "email", "attachments")
         try:
             _atomic_write(os.path.join(att_dir, filename), decoded)
@@ -1907,7 +1966,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         poll_interval: int,
         on_message: MessageCallback,
         get_registered_workers: WorkerListCallback,
-        on_alert: Optional[AlertCallback] = None,
+        on_alert: AlertCallback | None = None,
         state_file: str = "",
         gh_bin: str = "",
     ) -> None:
@@ -1930,7 +1989,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 raise ValueError(f"github: repo must be 'owner/name' format, got: {r!r}")
         self.repos: list[str] = repos
         self._state_file: str = state_file
-        self._last_poll_time: Optional[str] = None
+        self._last_poll_time: str | None = None
         self._seen_ids: set[int] = set()
 
     def preflight_check(self) -> tuple[bool, str]:
@@ -2008,7 +2067,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 poll_time = self._last_poll_time
             print(f"[github] Restart — restored state: {seen_count} seen IDs, since={poll_time}")
         else:
-            initial_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            initial_time = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             with self._lock:
                 self._last_poll_time = initial_time
             seed, _ = self._get_all_comments(initial_time)
@@ -2029,7 +2088,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})"
         )
 
-    def _gh_api(self, endpoint: str, timeout: int = 30) -> Optional[str]:
+    def _gh_api(self, endpoint: str, timeout: int = 30) -> str | None:
         try:
             result = subprocess.run(
                 [self.gh_bin, "api", endpoint, "--paginate"],
@@ -2048,8 +2107,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
             print(f"[github] gh api exception: {e}")
             return None
 
-    def _get_all_comments(self, since: str) -> tuple[Optional[list[GithubComment]], bool]:
-        all_raws: list[Optional[str]] = []
+    def _get_all_comments(self, since: str) -> tuple[list[GithubComment] | None, bool]:
+        all_raws: list[str | None] = []
         any_success = False
         is_complete = True
         for repo in self.repos:
@@ -2092,14 +2151,22 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def extract_issue_context(self, comment: GithubComment) -> IssueContext:
         if comment.get("issue_num") and comment.get("kind"):
-            return IssueContext(number=str(comment["issue_num"]), kind=str(comment["kind"]), url=str(comment.get("html_url", "")))
+            return IssueContext(
+                number=str(comment["issue_num"]), kind=str(comment["kind"]), url=str(comment.get("html_url", ""))
+            )
+
         def _str(key: str) -> str:
             v = comment.get(key)
             return str(v) if isinstance(v, str) else ""
+
         issue_url = _str("issue_url") or _str("pull_request_url")
         html_url = _str("html_url")
         number = ""
-        for url, kind_val, pattern in [(issue_url, "issue", r"/issues/(\d+)"), (issue_url, "PR", r"/pulls/(\d+)"), (html_url, "PR", r"/pull/(\d+)")]:
+        for url, kind_val, pattern in [
+            (issue_url, "issue", r"/issues/(\d+)"),
+            (issue_url, "PR", r"/pulls/(\d+)"),
+            (html_url, "PR", r"/pull/(\d+)"),
+        ]:
             m = re.search(pattern, url)
             if m:
                 return IssueContext(number=m.group(1), kind=kind_val, url=html_url)
@@ -2185,7 +2252,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 had_errors = True
         if not had_errors and fetch_complete:
             with self._lock:
-                self._last_poll_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self._last_poll_time = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
             print(
                 f"[github] poll_time NOT advanced — {', '.join(r for r in ['partial fetch' if not fetch_complete else '', 'processing errors' if had_errors else ''] if r)}, will retry"
@@ -2201,9 +2268,6 @@ class GitHubConnector(BaseConnector[GithubComment]):
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
         self._save_state()
-
-
-import shared as core
 
 
 def connector_render_html(tag: str, current_html: str) -> str:
@@ -2270,7 +2334,6 @@ def connector_short_summary(
 
 def connector_export_github(number: int, repo: str) -> str | None:
 
-
     try:
         r = core._subprocess_runner.run(
             ["beast", "github", "export", str(number), "--format", "print", "--serve", "--repo", repo, "--fresh"],
@@ -2293,8 +2356,6 @@ def connector_export_github(number: int, repo: str) -> str | None:
 
 def connector_on_message(tag: str) -> Callable:
     def handler(targets, html_text, plain_text=None, attachments=None, metadata=None):
-        import urllib.error
-
         if plain_text is None:
             plain_text = html_text
         connectors.log_message(tag, html_text, plain_text, targets)
@@ -2346,10 +2407,10 @@ def connector_get_workers() -> set[str]:
 
 def connector_on_alert(tag: str) -> Callable:
     def handler(text: str) -> None:
-        import urllib.error
-
         if core.admin_chat_id:
-            with _log_suppress(urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Failed to send Telegram alert: "):
+            with _log_suppress(
+                urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Failed to send Telegram alert: "
+            ):
                 telegram.send_telegram_message(core.admin_chat_id, text)
 
     return handler
@@ -2448,9 +2509,7 @@ def _read_noninteractive_activity(worker_name: str) -> str:
     if path:
         try:
             if host:
-                r = _remote_run(
-                    ["stat", "-c", "%Y", path], host=host, timeout=TIMEOUT_TMUX_SEND
-                )
+                r = _remote_run(["stat", "-c", "%Y", path], host=host, timeout=TIMEOUT_TMUX_SEND)
                 if r.returncode == 0:
                     mtime = float(r.stdout.strip())
                     age = int(_clock.time() - mtime)
@@ -2669,7 +2728,7 @@ def _extract_activity(lines: list[str]) -> str:
     for raw in reversed(stripped):
         if re.match(r"^(FAIL|ERROR|Error|Traceback|Fail)\b", raw, re.IGNORECASE):
             if raw.lower().startswith("error"):
-                tail = raw[len("Error"):].lstrip(": ").strip()
+                tail = raw[len("Error") :].lstrip(": ").strip()
                 return f"Error: {tail}" if tail else "Error"
             return f"Error: {raw[:60]}"
     return "Active"
@@ -2711,8 +2770,9 @@ def _extract_question_details(lines: list[str]) -> QuestionDetails | None:
     stripped = [l.strip() for l in lines if l.strip()]
     if not stripped or any(line == "❯" for line in stripped[-5:]):
         return None
-    has_interactive = any(f in raw for raw in reversed(stripped) for f in _INTERACTIVE_FOOTERS) or \
-                      any(p in raw for raw in stripped for p in _INTERACTIVE_CONTENT)
+    has_interactive = any(f in raw for raw in reversed(stripped) for f in _INTERACTIVE_FOOTERS) or any(
+        p in raw for raw in stripped for p in _INTERACTIVE_CONTENT
+    )
     if not has_interactive:
         return None
     header = next((raw.replace("☐", "").strip() for raw in stripped if "☐" in raw), "")
@@ -2783,9 +2843,7 @@ def _child_count(pid: str, host: str | None = None) -> int:
     if not pid:
         return 0
     try:
-        result = _remote_run(
-            ["pgrep", "-P", str(pid)], host=host, timeout=TIMEOUT_TMUX_SEND
-        )
+        result = _remote_run(["pgrep", "-P", str(pid)], host=host, timeout=TIMEOUT_TMUX_SEND)
     except (subprocess.SubprocessError, OSError):
         return 0
     if result.returncode != 0:
@@ -2830,7 +2888,8 @@ def _run_metric(metric: str, host: str | None = None) -> dict[str, Any] | None: 
     try:
         r = _remote_run(
             ["bash", _METRICS_SCRIPT, metric],
-            host=host, timeout=TIMEOUT_REMOTE_CMD,
+            host=host,
+            timeout=TIMEOUT_REMOTE_CMD,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -2841,12 +2900,17 @@ def _run_metric(metric: str, host: str | None = None) -> dict[str, Any] | None: 
 
 
 def _probe_metric(
-    remote_hosts: set[str], *, metric: str,
-    usage_store: dict[str, Any], alerted_store: dict[str, Any],  # type: ignore[explicit-any]
-    alert_ts_store: dict[str, float], cooldown: int | float,
+    remote_hosts: set[str],
+    *,
+    metric: str,
+    usage_store: dict[str, Any],
+    alerted_store: dict[str, Any],  # type: ignore[explicit-any]
+    alert_ts_store: dict[str, float],
+    cooldown: int | float,
     is_critical_fn: Callable[[dict[str, Any]], bool],  # type: ignore[explicit-any]
     alert_fmt: Callable[[str, dict[str, Any]], str],  # type: ignore[explicit-any]
-    recovery_fmt: Callable[[str, dict[str, Any]], str], category: str,
+    recovery_fmt: Callable[[str, dict[str, Any]], str],
+    category: str,
 ) -> None:  # type: ignore[explicit-any]
     now = _clock.time()
     for host in [None, *remote_hosts]:
@@ -2874,8 +2938,11 @@ def _probe_metric(
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
     _probe_metric(
-        remote_hosts, metric="disk", usage_store=host_health.disk_usage,
-        alerted_store=host_health.disk_alerted, alert_ts_store=host_health.disk_alert_ts,
+        remote_hosts,
+        metric="disk",
+        usage_store=host_health.disk_usage,
+        alerted_store=host_health.disk_alerted,
+        alert_ts_store=host_health.disk_alert_ts,
         cooldown=_res_cfg.disk_cooldown,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.disk_alert_pct or u["free_gb"] < _res_cfg.disk_alert_gb,
         alert_fmt=lambda h, u: f"🔴 Disk space critical: {h}\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
@@ -2892,8 +2959,11 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
         return text
 
     _probe_metric(
-        remote_hosts, metric="mem", usage_store=host_health.mem_usage,
-        alerted_store=host_health.mem_alerted, alert_ts_store=host_health.mem_alert_ts,
+        remote_hosts,
+        metric="mem",
+        usage_store=host_health.mem_usage,
+        alerted_store=host_health.mem_alerted,
+        alert_ts_store=host_health.mem_alert_ts,
         cooldown=_res_cfg.mem_cooldown,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.mem_threshold_pct or u["avail_gb"] < _res_cfg.mem_threshold_gb,
         alert_fmt=_fmt,
@@ -2904,8 +2974,11 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
 
 def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
     _probe_metric(
-        remote_hosts, metric="io", usage_store=host_health.io_usage,
-        alerted_store=host_health.io_alerted, alert_ts_store=host_health.io_alert_ts,
+        remote_hosts,
+        metric="io",
+        usage_store=host_health.io_usage,
+        alerted_store=host_health.io_alerted,
+        alert_ts_store=host_health.io_alert_ts,
         cooldown=_res_cfg.io_cooldown,
         is_critical_fn=lambda u: u["iowait_pct"] >= _res_cfg.io_iowait_pct,
         alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w"
@@ -2928,20 +3001,31 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
         if real_hogs and now - host_health.cpu_hog_alert_ts.get(host_label, 0) >= _res_cfg.cpu_hog_cooldown:
             lines = []
             for h in real_hogs[:5]:
-                elapsed = f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
+                elapsed = (
+                    f"{h['etime_min'] // 60}h{h['etime_min'] % 60}m" if h["etime_min"] >= 60 else f"{h['etime_min']}m"
+                )
                 lines.append(f"  PID {h['pid']}: {h['cpu']}% CPU for {elapsed} — {h['cmd']}")
             host_health.cpu_hog_alert_ts[host_label] = now
-            _watchdog_alert("CPU hog", f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines))
+            _watchdog_alert(
+                "CPU hog",
+                f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines),
+            )
 
 
 def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     def _fmt(h: str, u: dict[str, Any]) -> str:  # type: ignore[explicit-any]
         top = sorted(u.get("items", []), key=lambda x: x["size_gb"], reverse=True)[:5]
-        return f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n" + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
+        return (
+            f"📁 Worktree bloat on {h}: {u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n"
+            + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
+        )
 
     _probe_metric(
-        remote_hosts, metric="worktree", usage_store=host_health.worktree_usage,
-        alerted_store=host_health.worktree_alerted, alert_ts_store=host_health.worktree_alert_ts,
+        remote_hosts,
+        metric="worktree",
+        usage_store=host_health.worktree_usage,
+        alerted_store=host_health.worktree_alerted,
+        alert_ts_store=host_health.worktree_alert_ts,
         cooldown=_res_cfg.worktree_cooldown,
         is_critical_fn=lambda u: u["total_gb"] >= _res_cfg.worktree_threshold_gb,
         alert_fmt=_fmt,
@@ -3119,8 +3203,11 @@ def _format_team_lines_pure(
 
 # --- State computation ---
 def _check_stuck_or_poisoned(
-    pending_age: float, last_hook_ts: float | None, pending_ts: int | None,
-    poisoned_reason: str | None, reason_suffix: str,
+    pending_age: float,
+    last_hook_ts: float | None,
+    pending_ts: int | None,
+    poisoned_reason: str | None,
+    reason_suffix: str,
 ) -> tuple[str, str] | None:
     if pending_age < STALE_PENDING:
         return None
@@ -3206,7 +3293,9 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 def _watchdog_alert(category: str, text: str | None) -> None:
     if not text or not admin_chat_id:
         return
-    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg=f"{category} error: "):
+    with _log_suppress(
+        urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg=f"{category} error: "
+    ):
         transport.send_text(admin_chat_id, text)
         _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
 
@@ -3333,7 +3422,14 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
             _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
             return
     text = f"✅ {name} is back to normal."
-    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog resolved alert error: "):
+    with _log_suppress(
+        urllib.error.URLError,
+        OSError,
+        TimeoutError,
+        level=_LOG_ERROR,
+        tag="watchdog",
+        msg="Watchdog resolved alert error: ",
+    ):
         transport.send_text(admin_chat_id, text)
 
 
@@ -3419,7 +3515,9 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
 def watchdog_loop() -> None:
     _disk_check_counter = 0
     while not watchdog.stop_event.is_set():
-        with _log_suppress(subprocess.SubprocessError, ValueError, KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog error: "):
+        with _log_suppress(
+            subprocess.SubprocessError, ValueError, KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog error: "
+        ):
             now = _clock.time()
             registered = get_registered_sessions()
             pane_pids = _tmux_pane_pids()
@@ -3732,7 +3830,9 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
         ("Tailscale", lambda: _probe_tailscale()),
     ]
     for label, check_fn in checks:
-        with _log_suppress(subprocess.SubprocessError, OSError, level=_LOG_ERROR, tag="watchdog", msg=f"{label} check error: "):
+        with _log_suppress(
+            subprocess.SubprocessError, OSError, level=_LOG_ERROR, tag="watchdog", msg=f"{label} check error: "
+        ):
             check_fn()
 
 
@@ -3823,22 +3923,44 @@ def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
             first_ts = first_ts or ts
             last_ts = ts
         usage = msg.get("usage", {})
-        input_tokens += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+        input_tokens += (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+        )
         output_tokens += usage.get("output_tokens", 0)
     duration_str = ""
     if first_ts and last_ts:
         with _log_suppress(ValueError, TypeError, KeyError, level=_LOG_DEBUG, tag="parse:unknown"):
-            total_s = max(0, int((datetime.fromisoformat(last_ts.replace("Z", "+00:00")) - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))).total_seconds()))
+            total_s = max(
+                0,
+                int(
+                    (
+                        datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+                    ).total_seconds()
+                ),
+            )
             d, rem = divmod(total_s, 86400)
             h = rem // 3600
             m = (rem % 3600) // 60
             duration_str = f"{d}d {h}h" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
     return {
-        "n_user": n_user, "n_tool": n_tool, "n_edit": n_edit,
-        "lines_add": lines_add, "lines_del": lines_del, "lines_mod": lines_mod,
-        "n_files": len(files_modified), "model": model, "version": version,
-        "git_branch": git_branch, "first_ts": first_ts, "last_ts": last_ts,
-        "input_tokens": input_tokens, "output_tokens": output_tokens, "duration": duration_str,
+        "n_user": n_user,
+        "n_tool": n_tool,
+        "n_edit": n_edit,
+        "lines_add": lines_add,
+        "lines_del": lines_del,
+        "lines_mod": lines_mod,
+        "n_files": len(files_modified),
+        "model": model,
+        "version": version,
+        "git_branch": git_branch,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration": duration_str,
     }
 
 
@@ -4291,7 +4413,6 @@ def handle_transcript_endpoint(handler, parsed) -> None:
         _log(_LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
         handler._send_text(500, str(e))
 
-import uuid
 
 _REVIEW_SCHEMA = (
     (_TEMPLATE_DIR / "review_schema.sql").read_text() if (_TEMPLATE_DIR / "review_schema.sql").exists() else ""
@@ -4531,7 +4652,8 @@ def fetch_user_info(usernames: Iterable[str]) -> dict[str, dict[str, object]]:
             "{login: .login, name: .name, followers: .followers, "
             "public_repos: .public_repos, created_at: .created_at, "
             "avatar_url: .avatar_url, bio: .bio}",
-            paginate=False, timeout=10,
+            paginate=False,
+            timeout=10,
         )
         if items:
             profiles[username] = items[0]
@@ -4549,27 +4671,31 @@ def fetch_pr_reviews(owner: str, repo: str, pr_num: int) -> list[dict[str, objec
 def fetch_pr_comments(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     issue = _gh_api(
         f"repos/{owner}/{repo}/issues/{pr_num}/comments",
-        '.[] | {id: .id, body: .body, user: .user.login, '
-        'created_at: .created_at, updated_at: .updated_at, '
+        ".[] | {id: .id, body: .body, user: .user.login, "
+        "created_at: .created_at, updated_at: .updated_at, "
         'html_url: .html_url, type: "issue"}',
     )
     review = _gh_api(
         f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
-        '.[] | {id: .id, body: .body, user: .user.login, '
-        'created_at: .created_at, path: .path, line: .line, '
-        'original_line: .original_line, side: .side, '
+        ".[] | {id: .id, body: .body, user: .user.login, "
+        "created_at: .created_at, path: .path, line: .line, "
+        "original_line: .original_line, side: .side, "
         'diff_hunk: .diff_hunk, html_url: .html_url, type: "review"}',
     )
     return sorted(issue + review, key=lambda c: c.get("created_at", ""))
 
 
 def _fetch_commit_list(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    return [c for c in _gh_api(
-        f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
-        ".[] | {sha: .sha, message: .commit.message, "
-        "author: .commit.author.name, author_login: .author.login, "
-        "date: .commit.author.date}",
-    ) if "sha" in c]
+    return [
+        c
+        for c in _gh_api(
+            f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
+            ".[] | {sha: .sha, message: .commit.message, "
+            "author: .commit.author.name, author_login: .author.login, "
+            "date: .commit.author.date}",
+        )
+        if "sha" in c
+    ]
 
 
 def _fetch_commit_files_single(owner: str, repo: str, c: dict[str, object]) -> None:
@@ -4602,7 +4728,8 @@ def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
         checks = _gh_api(
             f"repos/{owner}/{repo}/commits/{head_sha}/check-runs",
             "[.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}]",
-            paginate=False, timeout=15,
+            paginate=False,
+            timeout=15,
         )
         meta["checks"] = checks[0] if checks and isinstance(checks[0], list) else checks or []
     return meta
@@ -4611,8 +4738,7 @@ def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
 def fetch_pr_files(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
     files = _gh_api(
         f"repos/{owner}/{repo}/pulls/{pr_num}/files",
-        ".[] | {filename: .filename, status: .status, "
-        "additions: .additions, deletions: .deletions, patch: .patch}",
+        ".[] | {filename: .filename, status: .status, " "additions: .additions, deletions: .deletions, patch: .patch}",
         timeout=60,
     )
     missing = [f for f in files if not f.get("patch") and f.get("additions", 0) > 0]
@@ -4631,7 +4757,9 @@ def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
     try:
         r = subprocess.run(
             ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}", "-H", "Accept: application/vnd.github.v3.diff"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         return r.stdout if r.returncode == 0 else None
     except subprocess.TimeoutExpired:
@@ -4704,8 +4832,6 @@ def _notify_telegram(
     bridge_url = os.environ.get("BRIDGE_URL", "http://localhost:8271")
     text = f"\U0001f4ac " + _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha)
     try:
-        import urllib.request
-
         req = urllib.request.Request(
             f"{bridge_url}/notifications",
             data=json.dumps({"text": text}).encode(),
@@ -4803,8 +4929,6 @@ def _pr_review_main() -> None:
         f.write(html_content)
     print(f"Written to {out_path}")
     if "--no-serve" not in sys.argv:
-        import http.server
-        import socketserver
 
         os.chdir("/tmp")
         base_handler = http.server.SimpleHTTPRequestHandler
@@ -4899,9 +5023,7 @@ def _pr_review_main() -> None:
                             self.send_response(404)
                             self.end_headers()
                             return
-                        import base64 as b64
-
-                        content = b64.b64decode(result.stdout.strip()).decode("utf-8", errors="replace")
+                        content = base64.b64decode(result.stdout.strip()).decode("utf-8", errors="replace")
                         lines = content.split("\n")
                         self.send_response(200)
                         self.send_header("Content-Type", "application/json")
@@ -4918,9 +5040,6 @@ def _pr_review_main() -> None:
             print(f"\nServing at {url}")
             print("Press Ctrl+C to stop")
             httpd.serve_forever()
-
-
-import hashlib, json, os, secrets, time, threading
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -5108,7 +5227,11 @@ def _channel_save() -> None:
 
 
 def _load_store_entries(
-    target: dict, path: Path, label: str, is_active: Callable[[dict], bool], cast_type: str = "",
+    target: dict,
+    path: Path,
+    label: str,
+    is_active: Callable[[dict], bool],
+    cast_type: str = "",
 ) -> None:
     data = _load_state_json(path, label)
     if not data:
@@ -5124,7 +5247,9 @@ def _load_store_entries(
 
 def _channel_load() -> None:
     _load_store_entries(
-        channel_store.channels, NODE_DIR / "channel_state.json", "channel",
+        channel_store.channels,
+        NODE_DIR / "channel_state.json",
+        "channel",
         lambda ch: not channel_is_expired(ch),
     )
 
@@ -5235,7 +5360,9 @@ def _relay_save() -> None:
 def _relay_load() -> None:
     now = _clock.time()
     _load_store_entries(
-        relay_store.channels, NODE_DIR / "relay_state.json", "relay",
+        relay_store.channels,
+        NODE_DIR / "relay_state.json",
+        "relay",
         lambda ch: now <= ch.get("expires_at_unix", 0),
     )
 
@@ -5981,7 +6108,9 @@ def _schedule_idle_scan() -> None:
 
 
 def _send_learning_reminder(name: str, text: str) -> None:
-    with _log_suppress(ConnectionError, OSError, TimeoutError, level=_LOG_ERROR, msg=f"Learning reminder error for {name}: "):
+    with _log_suppress(
+        ConnectionError, OSError, TimeoutError, level=_LOG_ERROR, msg=f"Learning reminder error for {name}: "
+    ):
         _clock.sleep(DELAY_RESPONSE_GAP)
         if send_to_worker(name, text):
             _log(_LOG_INFO, "worker", f"Learning reminder sent to {name}")
@@ -6199,7 +6328,10 @@ def _parse_response_media(
 ) -> tuple[str, list[tuple[str | None, str]], list[tuple[str | None, str]]]:
     host = get_worker_host(name)
     if host:
-        _accept_all: Callable[[str | Path], FileValidation] = lambda p: FileValidation(True, Path(p))
+
+        def _accept_all(p: str | Path) -> FileValidation:
+            return FileValidation(True, Path(p))
+
         clean_text, images = _parse_media_tags(text, "image", _accept_all)
         clean_text, files = _parse_media_tags(clean_text, "file", _accept_all)
     else:
@@ -6468,8 +6600,8 @@ def _checkin_do_restart(
         with watchdog.restart_lock:
             watchdog.restart_in_progress.pop(name, None)
 
-import shlex
-import claudecode
+
+import claudecode  # noqa: E402
 
 if TYPE_CHECKING:
     from telegram import ChatId
@@ -7132,8 +7264,6 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
     names = name.lower().strip().split()
     prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
     pilot_port = os.environ.get("PILOT_PORT", "10170")
-    import urllib.request, json as _json
-
     if "all" in names:
 
         assert worker_manager is not None
@@ -7158,7 +7288,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
                 url += f"&host={_urlquote(worker_host)}"
             req = urllib.request.Request(url, method="POST")
             with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-                cast(dict[str, object], _json.loads(resp.read()))
+                cast(dict[str, object], json.loads(resp.read()))
             enabled.append(n)
             session_names.append(session_name)
         except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -7172,7 +7302,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
     else:
         slug = f"team{len(enabled)}-{ts}"
     with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
-        payload = _json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
+        payload = json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
         req = urllib.request.Request(
             f"http://localhost:{pilot_port}/api/grid-session",
             data=payload,
@@ -7180,7 +7310,7 @@ def cmd_pilot(router, name: str, chat_id) -> bool:
             headers={"Content-Type": "application/json"},
         )
         with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-            cast(dict[str, object], _json.loads(resp.read()))
+            cast(dict[str, object], json.loads(resp.read()))
 
     host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
     pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
@@ -8009,7 +8139,13 @@ def rsync_working_directory(
     cmd = ["rsync", "-az", "--delete"]
     gitignore_tmpfile = None
     if not full:
-        with _log_suppress(ConnectionError, TimeoutError, OSError, tag="teleport", msg="git ls-files failed, skipping gitignore excludes: "):
+        with _log_suppress(
+            ConnectionError,
+            TimeoutError,
+            OSError,
+            tag="teleport",
+            msg="git ls-files failed, skipping gitignore excludes: ",
+        ):
             gi_result = _remote_run(
                 ["git", "-C", source_cwd, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
                 host=source_host,
@@ -8233,7 +8369,9 @@ def sync_credentials_to_target(target_host: str) -> None:
     local_creds = os.path.expanduser("~/.claude/.credentials.json")
     if not os.path.exists(local_creds):
         return
-    with suppress(json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError):
+    with suppress(
+        json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError, subprocess.SubprocessError, OSError
+    ):
         r = _remote_run(
             ["cat", ".claude/.credentials.json"],
             host=target_host,
@@ -8271,9 +8409,7 @@ def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None)
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host)
     for _ in range(20):
         _clock.sleep(DELAY_RETRY)
-        r = _remote_run(
-            ["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host
-        )
+        r = _remote_run(["tmux", "display-message", "-t", tmux_name, "-p", "#{pane_pid}"], host=host)
         if r.returncode != 0:
             break
         pane_pid = r.stdout.strip()
@@ -8617,9 +8753,6 @@ def handle_health_workers_endpoint(handler) -> None:
         handler._send_text(500, str(e))
 
 
-import base64 as _b64
-
-
 def handle_pr_file_content(handler, parsed: ParseResult) -> None:
     params = dict(parse_qs(parsed.query))
     token = params.get("token", [None])[0]
@@ -8638,7 +8771,7 @@ def handle_pr_file_content(handler, parsed: ParseResult) -> None:
         handler._send_status(504 if out == "timeout" else 404)
         return
     try:
-        raw = _b64.b64decode(out.strip()).decode("utf-8", errors="replace")
+        raw = base64.b64decode(out.strip()).decode("utf-8", errors="replace")
         handler._send_json(200, raw.splitlines())
     except (ValueError, TypeError):
         handler._send_status(500)
@@ -8767,8 +8900,6 @@ def handle_pr_review_endpoint(handler, parsed: ParseResult) -> None:
 
 handle_pr_comment = handle_pr_review_comments
 handle_pr_general_comment = handle_pr_review_comments
-
-import hashlib
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -9271,6 +9402,7 @@ _start_connectors = start_connectors
 _restart_connector = restart_connector
 _get_connectors_status = get_connectors_status
 
+
 class WorkerRegistryEntry:
     backend: str = "claude"
     protocol: str = ""
@@ -9531,7 +9663,9 @@ def _sync_chat_id_to_remote(name: str, local_chat_id_path: str) -> None:
     host = get_worker_host(name)
     if not host:
         return
-    with _log_suppress(subprocess.SubprocessError, OSError, tag="set_pending", msg=f"Failed to sync chat_id to {host} for {name}: "):
+    with _log_suppress(
+        subprocess.SubprocessError, OSError, tag="set_pending", msg=f"Failed to sync chat_id to {host} for {name}: "
+    ):
         remote_sessions_dir = _remap_path(str(SESSIONS_DIR), host)
         _remote_run(["mkdir", "-p", f"{remote_sessions_dir}/{name}"], host=host, timeout=TIMEOUT_TMUX_CHECK)
         _remote_copy(local_chat_id_path, f"{remote_sessions_dir}/{name}/chat_id", host=host, direction="push")
@@ -9633,6 +9767,7 @@ def scan_tmux_sessions() -> dict[str, TmuxSessionDict]:
 
 class ReuseAddrServer(ThreadingHTTPServer):
     allow_reuse_address = True
+
 
 def do_teleport(
     name: str,
@@ -9956,9 +10091,7 @@ def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
     target_host = home_host
     target_cwd = home_cwd or get_claude_session_cwd(worker_name)
     if target_host:
-        r = _remote_run(
-            ["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD
-        )
+        r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode != 0:
             router.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")  # type: ignore[attr-defined]
             return True
@@ -9968,9 +10101,7 @@ def cmd_teleback(router: object, arg: str, chat_id: "ChatId") -> bool:
                 router.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")  # type: ignore[attr-defined]
                 return True
     if current_host:
-        r = _remote_run(
-            ["echo", "ok"], host=current_host, timeout=TIMEOUT_REMOTE_CMD
-        )
+        r = _remote_run(["echo", "ok"], host=current_host, timeout=TIMEOUT_REMOTE_CMD)
         if r.returncode != 0:
             router.reply(chat_id, f"Cannot reach {current_host} where {worker_name} currently is.")  # type: ignore[attr-defined]
             return True
@@ -10039,9 +10170,7 @@ def restart_remote_worker(
         if remote_home:
             cwd_slug = target_cwd.replace("/", "-")
             session_file = f"{remote_home}/.claude/projects/{cwd_slug}/{resume_id}.jsonl"
-            check = _remote_run(
-                ["test", "-f", session_file], host=host, timeout=TIMEOUT_TMUX_SEND
-            )
+            check = _remote_run(["test", "-f", session_file], host=host, timeout=TIMEOUT_TMUX_SEND)
             if check.returncode != 0:
                 _log(
                     _LOG_INFO,
@@ -10280,8 +10409,6 @@ class CommandRouter:
         return unknown
 
     def format_unknown_mentions_warning(self, unknown_mentions: list[str]) -> str:
-        import difflib
-
         known = sorted(self._known_names())
         parts = []
         for name in unknown_mentions:
@@ -10340,7 +10467,7 @@ class CommandRouter:
         if transport is not None and not isinstance(transport, MessageTransport):
             transport = _LegacyTransportAdapter(transport)
         self.transport: MessageTransport | None = transport
-        self.workers: "WorkerManager" = workers
+        self.workers: WorkerManager = workers
         self._restart_all_lock: threading.Lock = threading.Lock()
         self._restart_all_running: bool = False  # type: ignore[no-redef]
         self._restart_all_abort: threading.Event = threading.Event()
@@ -10704,7 +10831,6 @@ class Handler(BaseHTTPRequestHandler):
     # Guest, channel, relay, PR, transcript, notify, forge, checkin, health
     # delegations are auto-generated after the class via _HANDLER_DELEGATES.
 
-
     def _send_status(self, code: int) -> None:
         self.send_response(code)
         self.end_headers()
@@ -10722,9 +10848,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send_html(self, body: bytes, status: int = 200) -> None:
         use_gzip = "gzip" in self.headers.get("Accept-Encoding", "") and len(body) > 1024
         if use_gzip:
-            import gzip as _gzip
-
-            body = _gzip.compress(body, compresslevel=6)
+            body = gzip.compress(body, compresslevel=6)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         if use_gzip:
@@ -10781,7 +10905,16 @@ class Handler(BaseHTTPRequestHandler):
             if "message" in update:
 
                 def _safe_handle(upd: TelegramUpdate) -> None:
-                    with _log_suppress(json.JSONDecodeError, KeyError, ValueError, TypeError, level=_LOG_ERROR, tag="webhook", msg="handle_message CRASH: ", exc_info=True):
+                    with _log_suppress(
+                        json.JSONDecodeError,
+                        KeyError,
+                        ValueError,
+                        TypeError,
+                        level=_LOG_ERROR,
+                        tag="webhook",
+                        msg="handle_message CRASH: ",
+                        exc_info=True,
+                    ):
                         command_router.handle_message(upd)
 
                 _message_pool.submit(_safe_handle, update)
@@ -10960,32 +11093,73 @@ class Handler(BaseHTTPRequestHandler):
 def _install_delegates(cls: type, names: list[str]) -> None:
     for name in names:
         fn = globals()[name]
+
         def _make(f=fn, n=name):
             def _d(self, *a, **kw):
                 return f(self, *a, **kw)
+
             _d.__name__ = n
             _d.__qualname__ = f"{cls.__name__}.{n}"
             return _d
+
         setattr(cls, name, _make())
 
-_install_delegates(Handler, [
-    "_guest_auth", "_channel_guest_auth", "_relay_get_token", "_relay_auth_and_parse",
-    "handle_guest_register", "handle_guest_send", "handle_guest_reply", "handle_guest_inbox",
-    "handle_guest_status", "handle_guests_list", "handle_guest_disconnect",
-    "handle_channel_create", "handle_channel_members", "handle_channel_send",
-    "handle_channel_messages", "handle_channels_list", "handle_channel_delete",
-    "handle_relay_get", "handle_relay_send", "handle_relay_reply",
-    "handle_pr_file_content", "handle_pr_keepalive", "handle_pr_review_comments",
-    "handle_pr_general_comment", "handle_pr_merge", "handle_pr_review_endpoint",
-    "handle_pr_comment", "handle_transcript_endpoint",
-    "handle_notify", "handle_health_alert", "handle_forge_register",
-    "handle_checkin_endpoint", "handle_health_workers_endpoint",
-])
-_install_delegates(CommandRouter, [
-    "cmd_teleport", "cmd_teleback", "cmd_hire", "cmd_end", "cmd_restart",
-    "cmd_relay", "cmd_pilot", "cmd_rewind", "cmd_pr_review", "cmd_focus",
-    "cmd_team", "cmd_status",
-])
+
+_install_delegates(
+    Handler,
+    [
+        "_guest_auth",
+        "_channel_guest_auth",
+        "_relay_get_token",
+        "_relay_auth_and_parse",
+        "handle_guest_register",
+        "handle_guest_send",
+        "handle_guest_reply",
+        "handle_guest_inbox",
+        "handle_guest_status",
+        "handle_guests_list",
+        "handle_guest_disconnect",
+        "handle_channel_create",
+        "handle_channel_members",
+        "handle_channel_send",
+        "handle_channel_messages",
+        "handle_channels_list",
+        "handle_channel_delete",
+        "handle_relay_get",
+        "handle_relay_send",
+        "handle_relay_reply",
+        "handle_pr_file_content",
+        "handle_pr_keepalive",
+        "handle_pr_review_comments",
+        "handle_pr_general_comment",
+        "handle_pr_merge",
+        "handle_pr_review_endpoint",
+        "handle_pr_comment",
+        "handle_transcript_endpoint",
+        "handle_notify",
+        "handle_health_alert",
+        "handle_forge_register",
+        "handle_checkin_endpoint",
+        "handle_health_workers_endpoint",
+    ],
+)
+_install_delegates(
+    CommandRouter,
+    [
+        "cmd_teleport",
+        "cmd_teleback",
+        "cmd_hire",
+        "cmd_end",
+        "cmd_restart",
+        "cmd_relay",
+        "cmd_pilot",
+        "cmd_rewind",
+        "cmd_pr_review",
+        "cmd_focus",
+        "cmd_team",
+        "cmd_status",
+    ],
+)
 
 
 def _mg(m: re.Match[str] | None, n: int = 1) -> str:
@@ -11133,7 +11307,7 @@ if not BRIDGE_PUBLIC_URL:
     with suppress(subprocess.SubprocessError, OSError):
         _ts_ip = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3
-        ).stdout.strip()  # noqa: direct call — runs before constants init
+        ).stdout.strip()  # direct call — runs before constants init
         if _ts_ip:
             BRIDGE_PUBLIC_URL = f"http://{_ts_ip}:{PORT}"
 GMAIL_ENABLED = os.environ.get("GMAIL_ENABLED", "0") == "1"
@@ -11369,7 +11543,18 @@ def main() -> None:
             if "message" in update:
 
                 def _safe_handle(upd: dict[str, object]) -> None:
-                    with _log_suppress(json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, OSError, level=_LOG_ERROR, tag="tunnel:poll", msg="handle_message CRASH: ", exc_info=True):
+                    with _log_suppress(
+                        json.JSONDecodeError,
+                        KeyError,
+                        ValueError,
+                        TypeError,
+                        AttributeError,
+                        OSError,
+                        level=_LOG_ERROR,
+                        tag="tunnel:poll",
+                        msg="handle_message CRASH: ",
+                        exc_info=True,
+                    ):
                         command_router.handle_message(upd)
 
                 _message_pool.submit(_safe_handle, update)
@@ -11397,16 +11582,12 @@ def main() -> None:
         graceful_shutdown(signal.SIGINT, None)
 
 
-import types as _types_mod
+import claudecode as _cc_mod  # noqa: E402  # circular: claudecode imports bridge
+import shared as _core_mod  # noqa: E402  # module ref for attribute propagation
+import telegram as _tg_mod  # noqa: E402  # circular: telegram imports bridge
 
 
-# Propagate attribute writes to foundation modules (test monkeypatching support)
-import shared as _core_mod
-import claudecode as _cc_mod
-import telegram as _tg_mod
-
-
-class _BridgeModule(_types_mod.ModuleType):
+class _BridgeModule(types.ModuleType):
     _sources = ()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -11427,5 +11608,5 @@ _this_module.__class__ = _BridgeModule
 _this_module._sources = (_core_mod, _tg_mod, _cc_mod)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

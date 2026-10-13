@@ -8,14 +8,15 @@ import subprocess
 import sys
 import threading
 import time
+import traceback as _tb
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, NamedTuple, Optional, Protocol, TypedDict, runtime_checkable
-from urllib.parse import ParseResult
+from typing import Literal, NamedTuple, Optional, Protocol, TypedDict, runtime_checkable
+from urllib.parse import ParseResult, urlparse
 
 # --- Types ---
 
@@ -37,7 +38,6 @@ class TmuxActivityResult(NamedTuple):
     activity: str
     context_pct: str | None
     raw_lines: list[str] | None
-
 
 
 class TmuxSessionDict(TypedDict, total=False):
@@ -254,7 +254,7 @@ class TelegramMessageDict(TypedDict, total=False):
     animation: TelegramDocument
     audio: TelegramAudio
     sticker: TelegramSticker
-    reply_to_message: "TelegramMessageDict"
+    reply_to_message: TelegramMessageDict
     caption: str
     media_group_id: str
     rich_message: dict[str, str]
@@ -471,7 +471,7 @@ class GithubComment(TypedDict, total=False):
 
 
 class GithubState(TypedDict):
-    last_poll_time: Optional[str]
+    last_poll_time: str | None
     seen_ids: list[int]
 
 
@@ -482,7 +482,7 @@ class Attachment(TypedDict, total=False):
 
 
 class ConnectorMetadata(TypedDict, total=False):
-    number: Optional[str]
+    number: str | None
     repo: str
     comment_id: int
 
@@ -509,7 +509,7 @@ class GmailStatus(TypedDict):
     poll_interval: int
     consecutive_failures: int
     alert_sent: bool
-    history_id: Optional[str]
+    history_id: str | None
 
 
 class GithubStatus(TypedDict):
@@ -520,7 +520,7 @@ class GithubStatus(TypedDict):
     consecutive_failures: int
     alert_sent: bool
     repos: list[str]
-    last_poll_time: Optional[str]
+    last_poll_time: str | None
     seen_ids_count: int
 
 
@@ -668,8 +668,6 @@ _LOG_DEBUG: str = "DEBUG"
 def _log(level: str, component: str, msg: str | Path, *, exc: BaseException | None = None) -> None:
     print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
-        import traceback as _tb
-
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
 
 
@@ -692,7 +690,7 @@ def _log_suppress(*exc_types, level=_LOG_WARN, tag="bridge", msg="", exc_info=Fa
 class MarkdownToken(Protocol):
     type: str
     content: str
-    children: list["MarkdownToken"] | None
+    children: list[MarkdownToken] | None
     attrs: dict[str, str] | None
 
 
@@ -804,8 +802,6 @@ class HttpClient:
         timeout: float = 30.0,
         retry: RetryConfig | None = None,
     ) -> http.client.HTTPResponse:
-        from urllib.parse import urlparse
-
         host = urlparse(url).hostname or "localhost"
         cfg = retry or self._retry
         limiter = self._get_limiter(host)

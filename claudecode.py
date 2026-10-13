@@ -1,122 +1,13 @@
 from __future__ import annotations
-from contextlib import suppress
-from shared import (
-    _subprocess_runner,
-    _clock,
-    _log,
-    _log_best_effort,
-    _log_suppress,
-    _str_field,
-    _int_field,
-    _dict_field,
-    _bool_field,
-    _RealSubprocessRunner,
-    _RealClock,
-    _LOG_ERROR,
-    _LOG_WARN,
-    _LOG_INFO,
-    _LOG_DEBUG,
-    _build_app_context,
-    _wd_cfg,
-    _res_cfg,
-    _urlopen,
-    _DEFAULT_PORTS,
-    _bridge_url_env,
-    _node_name,
-    _CHECKIN_NOTE_PATH,
-    _LEARNING_REMINDER_PATH,
-    SubprocessRunner,
-    Clock,
-    MarkdownToken,
-    AppContext,
-    get_app_context,
-    VERSION,
-    BOT_TOKEN,
-    NODE_NAME,
-    NODE_DIR,
-    PORT,
-    BRIDGE_BIND,
-    BRIDGE_URL,
-    BRIDGE_PUBLIC_URL,
-    BRIDGE_SSH_TARGET,
-    SESSIONS_DIR,
-    TMUX_PREFIX,
-    CLAUDE_DIR,
-    CLAUDE_SETTINGS_FILE,
-    TIMEOUT_TMUX_CHECK,
-    TIMEOUT_TMUX_SEND,
-    TIMEOUT_REMOTE_CMD,
-    TIMEOUT_FILE_TRANSFER,
-    TIMEOUT_GIT_OP,
-    TIMEOUT_LARGE_TRANSFER,
-    TIMEOUT_RSYNC,
-    TIMEOUT_FULL_SYNC,
-    TIMEOUT_HTTP_API,
-    TIMEOUT_HTTP_DOWNLOAD,
-    TIMEOUT_HTTP_UPLOAD,
-    TIMEOUT_PROCESS_WAIT,
-    TIMEOUT_THREAD_JOIN,
-    DELAY_TMUX_SEND,
-    DELAY_PIPE_POLL,
-    DELAY_STARTUP,
-    DELAY_STARTUP_LONG,
-    DELAY_RETRY,
-    DELAY_BRIEF,
-    DELAY_SHORT,
-    DELAY_RESPONSE_GAP,
-    DELAY_PROCESS_SETTLE,
-    DELAY_CLAUDE_LOAD,
-    DEFAULT_BACKEND,
-    DEFAULT_WORKER_BACKEND,
-    PENDING_TIMEOUT,
-    FILE_INBOX_ROOT,
-    WORKER_PIPE_ROOT,
-    TEAM_DIR,
-    MACHINES_CONFIG_FILE,
-    WEBHOOK_SECRET,
-    WatchdogConfig,
-    ResourceAlertConfig,
-    WATCHDOG_INTERVAL,
-    START_GRACE,
-    THINK_GRACE,
-    TOOL_GAP_GRACE,
-    STALE_PENDING,
-    CPU_ACTIVE,
-    CPU_IDLE,
-    IDLE_STREAK_STUCK,
-    ALERT_COOLDOWN,
-    RESTART_COOLDOWN,
-    DISK_WARN_PCT,
-    DISK_ALERT_PCT,
-    DISK_ALERT_GB,
-    DISK_COOLDOWN,
-    CPU_HOG_PCT,
-    CPU_HOG_DURATION_MIN,
-    CPU_HOG_COOLDOWN,
-    WORKTREE_THRESHOLD_GB,
-    WORKTREE_COOLDOWN,
-    MEM_THRESHOLD_PCT,
-    MEM_THRESHOLD_GB,
-    MEM_COOLDOWN,
-    IO_IOWAIT_PCT,
-    IO_COOLDOWN,
-    INFRA_COOLDOWN,
-    HOST_DOWN_THRESHOLD,
-    PERSISTENCE_NOTE,
-    STT_ENDPOINT,
-    STT_TIMEOUT,
-    ADMIN_CHAT_ID_ENV,
-    admin_chat_id,
-    CLAUDE_PROJECTS_DIR,
-)
+
 import collections
-from dataclasses import dataclass, field
 import fcntl
+import glob
 import hashlib
 import http.client
-import os
 import json
 import mimetypes
+import os
 import re
 import secrets
 import shlex
@@ -128,45 +19,153 @@ import tempfile
 import threading
 import time
 import types
-import uuid
 import urllib.error
 import urllib.request
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterable, Mapping
 from typing import (
     IO,
-    Callable,
-    Iterator,
+    TYPE_CHECKING,
     Literal,
     NamedTuple,
     Protocol,
     TypedDict,
-    TYPE_CHECKING,
     cast,
     runtime_checkable,
 )
 from urllib.parse import urlparse
+
 from shared import (
+    _CHECKIN_NOTE_PATH,
+    _DEFAULT_PORTS,
+    _LEARNING_REMINDER_PATH,
+    _LOG_DEBUG,
+    _LOG_ERROR,
+    _LOG_INFO,
+    _LOG_WARN,
+    ADMIN_CHAT_ID_ENV,
+    ALERT_COOLDOWN,
+    BOT_TOKEN,
+    BRIDGE_BIND,
+    BRIDGE_PUBLIC_URL,
+    BRIDGE_SSH_TARGET,
+    BRIDGE_URL,
+    CLAUDE_DIR,
+    CLAUDE_PROJECTS_DIR,
+    CLAUDE_SETTINGS_FILE,
+    CPU_ACTIVE,
+    CPU_HOG_COOLDOWN,
+    CPU_HOG_DURATION_MIN,
+    CPU_HOG_PCT,
+    CPU_IDLE,
+    DEFAULT_BACKEND,
+    DEFAULT_WORKER_BACKEND,
+    DELAY_BRIEF,
+    DELAY_CLAUDE_LOAD,
+    DELAY_PIPE_POLL,
+    DELAY_PROCESS_SETTLE,
+    DELAY_RESPONSE_GAP,
+    DELAY_RETRY,
+    DELAY_SHORT,
+    DELAY_STARTUP,
+    DELAY_STARTUP_LONG,
+    DELAY_TMUX_SEND,
+    DISK_ALERT_GB,
+    DISK_ALERT_PCT,
+    DISK_COOLDOWN,
+    DISK_WARN_PCT,
+    FILE_INBOX_ROOT,
+    HOST_DOWN_THRESHOLD,
+    IDLE_STREAK_STUCK,
+    INFRA_COOLDOWN,
+    IO_COOLDOWN,
+    IO_IOWAIT_PCT,
+    MACHINES_CONFIG_FILE,
+    MEM_COOLDOWN,
+    MEM_THRESHOLD_GB,
+    MEM_THRESHOLD_PCT,
+    NODE_DIR,
+    NODE_NAME,
+    PENDING_TIMEOUT,
+    PERSISTENCE_NOTE,
+    PORT,
+    RESTART_COOLDOWN,
+    SESSIONS_DIR,
+    STALE_PENDING,
+    START_GRACE,
+    STT_ENDPOINT,
+    STT_TIMEOUT,
+    TEAM_DIR,
+    THINK_GRACE,
+    TIMEOUT_FILE_TRANSFER,
+    TIMEOUT_FULL_SYNC,
+    TIMEOUT_GIT_OP,
+    TIMEOUT_HTTP_API,
+    TIMEOUT_HTTP_DOWNLOAD,
+    TIMEOUT_HTTP_UPLOAD,
+    TIMEOUT_LARGE_TRANSFER,
+    TIMEOUT_PROCESS_WAIT,
+    TIMEOUT_REMOTE_CMD,
+    TIMEOUT_RSYNC,
+    TIMEOUT_THREAD_JOIN,
+    TIMEOUT_TMUX_CHECK,
+    TIMEOUT_TMUX_SEND,
+    TMUX_PREFIX,
+    TOOL_GAP_GRACE,
+    VERSION,
+    WATCHDOG_INTERVAL,
+    WEBHOOK_SECRET,
+    WORKER_PIPE_ROOT,
+    WORKTREE_COOLDOWN,
+    WORKTREE_THRESHOLD_GB,
+    AppContext,
+    Clock,
+    CodexTranscriptEntry,
+    CpuHogEntry,
+    DiskUsageDict,
+    GitPushStateResult,
+    IoUsageDict,
+    MachineHealthDict,
+    MarkdownToken,
+    MemUsageDict,
+    ProcStatsEntry,
+    PrReviewTokenEntry,
+    QuestionDetails,
+    QuestionOption,
+    RegistryFileDict,
+    RegistryWorkerDict,
     ReminderState,
-    WorkerStateEntry,
+    ResourceAlertConfig,
+    RewindTokenEntry,
+    SubprocessRunner,
     TmuxActivityResult,
     TmuxSessionDict,
-    RegistryWorkerDict,
-    RegistryFileDict,
-    RewindTokenEntry,
-    PrReviewTokenEntry,
-    ProcStatsEntry,
-    QuestionOption,
-    QuestionDetails,
-    DiskUsageDict,
-    MemUsageDict,
-    IoUsageDict,
+    WatchdogConfig,
+    WorkerStateEntry,
     WorktreeItemDict,
     WorktreeUsageDict,
-    CpuHogEntry,
-    MachineHealthDict,
-    CodexTranscriptEntry,
-    GitPushStateResult,
+    _bool_field,
+    _bridge_url_env,
+    _build_app_context,
+    _clock,
+    _dict_field,
+    _int_field,
+    _log,
+    _log_best_effort,
+    _log_suppress,
+    _node_name,
+    _RealClock,
+    _RealSubprocessRunner,
+    _res_cfg,
+    _str_field,
+    _subprocess_runner,
+    _urlopen,
+    _wd_cfg,
+    admin_chat_id,
+    get_app_context,
 )
 
 if TYPE_CHECKING:
@@ -267,7 +266,7 @@ class RemoteCache:
     def __init__(self) -> None:
         self.lock: threading.Lock = threading.Lock()
         self.tools: dict[str, str] = {}
-        self.machines: dict[str, "Machine"] | None = None
+        self.machines: dict[str, Machine] | None = None
         self.machines_path: Path | None = None
         self.home_dirs: dict[str, str] = {}
 
@@ -370,8 +369,6 @@ def _acquire_flock(tmux_name: str) -> int:
     lock_file = tmux_send_lock_path(tmux_name)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
-    import fcntl
-
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError:
@@ -381,19 +378,12 @@ def _acquire_flock(tmux_name: str) -> int:
 
 
 def _release_flock(fd: int) -> None:
-    import fcntl
-
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
 
 
 def tmux_exists(tmux_name: str, host: str | None = None, timeout: int = 3) -> bool:
-    return (
-        _remote_run(
-            ["tmux", "has-session", "-t", tmux_name], host=host, timeout=timeout
-        ).returncode
-        == 0
-    )
+    return _remote_run(["tmux", "has-session", "-t", tmux_name], host=host, timeout=timeout).returncode == 0
 
 
 def tmux_send_message(tmux_name: str, text: str, host: str | None = None, literal: bool = False) -> bool:
@@ -470,9 +460,7 @@ def is_process_running(tmux_name: str, process_name: str, host: str | None = Non
     pane_pid = result.stdout.strip()
     if not pane_pid:
         return False
-    result = _remote_run(
-        ["pgrep", "-P", pane_pid, process_name], host=host, timeout=TIMEOUT_TMUX_CHECK
-    )
+    result = _remote_run(["pgrep", "-P", pane_pid, process_name], host=host, timeout=TIMEOUT_TMUX_CHECK)
     return result.returncode == 0
 
 
@@ -511,7 +499,7 @@ class ClaudeBackend:
         return build_claude_start_cmd(resume_id)
 
     def send(self, worker_name: str, tmux_name: str, text: str, bridge_url: str, sessions_dir: Path) -> bool:
-        import bridge
+        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
         host = bridge.get_worker_host(worker_name)
         try:
@@ -662,8 +650,10 @@ def _codex_adapter_thread(worker_name: str, text: str, bridge_url: str, sessions
 
 
 def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions_dir: Path, host: str) -> None:
-    with _log_suppress(Exception, level=_LOG_ERROR, tag="codex", msg=f"Remote adapter for '{worker_name}' on {host} failed: "):
-        import bridge
+    with _log_suppress(
+        Exception, level=_LOG_ERROR, tag="codex", msg=f"Remote adapter for '{worker_name}' on {host} failed: "
+    ):
+        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
         remote_sessions = bridge._remap_sessions_dir(host)
         sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"
@@ -722,7 +712,7 @@ class CodexBackend:
         return "echo 'Codex worker ready (non-interactive)'"
 
     def send(self, worker_name: str, tmux_name: str, text: str, bridge_url: str, sessions_dir: Path) -> bool:
-        import bridge
+        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
         host = bridge.get_worker_host(worker_name)
         if host:
@@ -762,8 +752,6 @@ def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | N
         except (subprocess.SubprocessError, OSError) as exc:
             _log(_LOG_DEBUG, "probe:_find_codex_transcript", f"{type(exc).__name__}: {exc}")
         return None
-    import glob
-
     matches = glob.glob(os.path.join(codex_dir, "**", f"*{session_id}*"), recursive=True)
     jsonl_matches = [m for m in matches if m.endswith(".jsonl")]
     if jsonl_matches:
@@ -809,7 +797,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
         try:
             if stop_event.is_set():
                 break
-            with open(str(pipe_path), "r") as pipe:
+            with open(str(pipe_path)) as pipe:
                 while not stop_event.is_set():
                     line = pipe.readline()
                     if not line:
@@ -821,7 +809,13 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
                             "pipe",
                             f"Pipe message for '{name}': {message[:100]}{'...' if len(message) > 100 else ''}",
                         )
-                        with _log_suppress(OSError, ValueError, level=_LOG_ERROR, tag="bridge", msg=f"Error forwarding pipe message to '{name}': "):
+                        with _log_suppress(
+                            OSError,
+                            ValueError,
+                            level=_LOG_ERROR,
+                            tag="bridge",
+                            msg=f"Error forwarding pipe message to '{name}': ",
+                        ):
                             _forward_pipe_message(name, message)
         except FileNotFoundError:
             _log(_LOG_WARN, "pipe", f"Pipe for '{name}' no longer exists, stopping reader")
@@ -838,7 +832,7 @@ def pipe_reader_loop(name: str, stop_event: threading.Event) -> None:
 
 
 def _forward_pipe_message(name: str, message: str) -> None:
-    import bridge
+    import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
     if bridge.worker_manager is None or not bridge.worker_manager.send(name, message):
         _log(_LOG_WARN, "worker", f"Warning: Cannot forward pipe message to '{name}' - worker not found")
@@ -961,8 +955,6 @@ def _ensure_workspace_trusted(
         return
     target = config_path or _CLAUDE_JSON_PATH
     try:
-        import fcntl
-
         lock_path = target.with_suffix(".lock")
         with open(lock_path, "w") as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -1045,7 +1037,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
     if val:
         return val
     if current_cwd:
-        import bridge
+        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
         host = bridge.get_worker_host(name)
         scanned = _scan_latest_session_id(current_cwd, host=host)
@@ -1056,7 +1048,7 @@ def get_claude_session_id(name: str, authoritative: bool = False) -> str:
 
 
 def get_claude_session_cwd(name: str) -> str | None:
-    import bridge
+    import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
     cwd = bridge._get_worker_cwd(name)
     if cwd:
@@ -1065,7 +1057,7 @@ def get_claude_session_cwd(name: str) -> str | None:
 
 
 def save_claude_session_cwd(name: str, cwd: str) -> None:
-    import bridge
+    import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
     if cwd:
         cwd = os.path.expanduser(cwd)
@@ -1106,9 +1098,7 @@ def _get_remote_home(host: str | None) -> str:
     if cached is not None:
         return cached
     try:
-        r = _remote_run(
-            ["bash", "-c", "echo $HOME"], host=host, timeout=TIMEOUT_TMUX_SEND
-        )
+        r = _remote_run(["bash", "-c", "echo $HOME"], host=host, timeout=TIMEOUT_TMUX_SEND)
         home = r.stdout.strip() if r.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError):
         home = ""
@@ -1168,7 +1158,7 @@ def validate_cwd(cwd: str | None, host: str | None = None) -> tuple[str, str]:
 def get_worker_backend(name: str, session: RegistryWorkerDict | TmuxSessionDict | None = None) -> str:
     if session and session.get("backend"):
         return normalize_backend(str(session.get("backend")))
-    import bridge
+    import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
     registry = bridge._load_registry()
     entry = registry.get("workers", {}).get(name, {})
@@ -1190,8 +1180,6 @@ def get_tmux_env_value(tmux_name: str, key: str) -> str:
 
 
 def tmux_prompt_empty(tmux_name: str, timeout: float = 0.5, host: str | None = None) -> bool:
-    import re
-
     start = _clock.time()
     while _clock.time() - start < timeout:
         result = _remote_run(
