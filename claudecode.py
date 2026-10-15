@@ -407,7 +407,7 @@ def tmux_send_message(tmux_name: str, text: str, host: str | None = None, litera
                 r = _remote_run(
                     ["tmux", "load-buffer", "-b", buf_name, "-"],
                     host=host,
-                    input=text.encode(),
+                    input=text,
                     timeout=TIMEOUT_TMUX_SEND,
                 )
             else:
