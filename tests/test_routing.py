@@ -227,10 +227,22 @@ class TestRemoteFileLocalization:
         import bridge
         media = [("/remote/missing.png", "photo")]
         with patch.object(bridge, "get_worker_host", return_value="remote-host"), \
-             patch.object(bridge, "_fetch_remote_file", return_value=None):
+             patch.object(bridge, "_fetch_remote_file", return_value=None), \
+             patch("os.path.isfile", return_value=False):
             result = bridge._localize_media("lee", media)
         assert result[0][0] is None
         assert "Fetch failed" in result[0][1]
+
+    def test_localize_media_falls_back_to_local_file(self):
+        """When rsync fails but the file exists locally on the bridge, use local path."""
+        import bridge
+        media = [("/tmp/report.html", "report")]
+        with patch.object(bridge, "get_worker_host", return_value="remote-host"), \
+             patch.object(bridge, "_fetch_remote_file", return_value=None), \
+             patch("os.path.isfile", return_value=True):
+            result = bridge._localize_media("worker-x", media)
+        assert result[0][0] == "/tmp/report.html"
+        assert result[0][1] == "report"
 
 
 # ── Reply media extraction ────────────────────────────────

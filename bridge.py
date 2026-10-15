@@ -6332,6 +6332,11 @@ def _localize_media(name: str, media_list: list[tuple[str | None, str]]) -> list
         local = _fetch_remote_file(host, file_path)
         if local:
             result.append((local, caption))
+        elif os.path.isfile(file_path):
+            # File exists locally on the bridge machine (e.g. worker generated
+            # it via a tool that ran on the bridge host, not on the worker host)
+            _log(_LOG_INFO, "bridge", f"Remote fetch failed but file exists locally: {file_path} for {name}")
+            result.append((file_path, caption))
         else:
             _log(_LOG_WARN, "bridge", f"Cannot fetch remote file {host}:{file_path} for {name}")
             result.append((None, f"[Fetch failed: {file_path}]"))
