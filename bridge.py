@@ -10792,7 +10792,11 @@ class CommandRouter:
             set_pending(session_name, chat_id)
         if chat_id is not None:
             _task_pool.submit(send_typing_loop, chat_id, session_name)
-        send_ok = self.workers.send(session_name, text, chat_id, session)
+        try:
+            send_ok = self.workers.send(session_name, text, chat_id, session)
+        except Exception:
+            send_ok = False
+            _log(_LOG_ERROR, "dispatch", f"Exception sending to {session_name}", exc=sys.exc_info()[1])
         if not send_ok:
             clear_pending(session_name)
             self.reply(
