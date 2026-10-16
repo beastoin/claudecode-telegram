@@ -333,6 +333,8 @@ class TestHandleHookResponse:
                 "source": "lee",
             }).encode()
             handler.handle_hook_response(body)
+            # Flush debounce timer immediately (simulates timer expiry)
+            bridge._flush_hook_response("lee")
         handler.send_response.assert_called_with(200)
         mock_send.assert_called_once_with("lee", "feature built", 12345, log_prefix="Response")
 
@@ -356,6 +358,7 @@ class TestHandleHookResponse:
                 "session_id": "abc123def456",
             }).encode()
             handler.handle_hook_response(body)
+            bridge._flush_hook_response("lee")
         mock_cache.assert_called_once_with("lee", "abc123def456")
 
     def test_hook_response_auto_creates_chat_id_from_admin(self, tmp_path):
@@ -381,6 +384,33 @@ class TestHandleHookResponse:
         handler.send_response.assert_called_with(200)
         assert cid_file.exists()
         assert cid_file.read_text().strip() == "99999"
+
+    def test_hook_response_debounce_keeps_last(self, tmp_path):
+        """Second hook response within debounce window replaces the first."""
+        import bridge
+        handler = _make_handler()
+        handler.handle_hook_response = bridge.Handler.handle_hook_response.__get__(handler, bridge.Handler)
+        cid_file = bridge.SESSIONS_DIR / "lee" / "chat_id"
+        cid_file.parent.mkdir(parents=True)
+        cid_file.write_text("12345")
+        with patch.object(bridge, "send_response_to_telegram") as mock_send, \
+             patch.object(bridge, "clear_pending"), \
+             patch.object(bridge, "mark_hook_event"), \
+             patch.object(bridge, "_check_learning_reminder"), \
+             patch.object(bridge, "get_chat_id_file", return_value=cid_file):
+            # First response (partial/intermediate)
+            body1 = json.dumps({
+                "session": "lee", "text": "ack", "source": "lee",
+            }).encode()
+            handler.handle_hook_response(body1)
+            # Second response (final, replaces first)
+            body2 = json.dumps({
+                "session": "lee", "text": "full response here", "source": "lee",
+            }).encode()
+            handler.handle_hook_response(body2)
+            # Flush — only the last text should be sent
+            bridge._flush_hook_response("lee")
+        mock_send.assert_called_once_with("lee", "full response here", 12345, log_prefix="Response")
 
 
 # ── GET /machines ─────────────────────────────────────────

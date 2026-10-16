@@ -11037,14 +11037,10 @@ class Handler(BaseHTTPRequestHandler):
                     f"session_id={hook_sid[:12] if hook_sid else 'none'}, "
                     f"escape={escape_flag}, ip={source_ip}",
                 )
-            _log(_LOG_INFO, "hook", f"Hook response: {session_name} -> chat {chat_id} ({len(text)} chars)")
-            hook_sid = _str_field(data, "session_id")
-            if hook_sid:
-                _cache_session_id(session_name, hook_sid)
-            send_response_to_telegram(session_name, text, int(chat_id), log_prefix="Response")
-            _check_learning_reminder(session_name)
-            clear_pending(session_name)
-            mark_hook_event(session_name)
+            hook_sid = _str_field(data, "session_id") or ""
+            # Debounce: buffer this response; if another arrives within the
+            # window it replaces this one so only the final text is sent.
+            _debounce_hook_response(session_name, text, int(chat_id), hook_sid)
             self._send_text(200, "OK")
         except (json.JSONDecodeError, OSError, ValueError, KeyError) as e:
             _log(_LOG_ERROR, "bridge", f"Hook response error: {e}")
@@ -11320,6 +11316,48 @@ except ImportError as e:
     GITHUB_IMPORT_ERROR = e
 _message_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="msg")
 _task_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
+
+# ── Hook response debounce ──────────────────────────────────────────────────
+# Claude Code fires Stop for every assistant turn, including intermediate
+# turns between tool calls.  Without debounce a single task can send 2-3
+# messages to Telegram.  We buffer the last response per worker and flush
+# after _HOOK_DEBOUNCE_SECS of quiet.
+_HOOK_DEBOUNCE_SECS = 3.0
+_hook_debounce_lock = threading.Lock()
+_hook_debounce: dict[str, dict[str, object]] = {}  # name -> {text, chat_id, session_id, timer}
+
+
+def _flush_hook_response(name: str) -> None:
+    """Send the debounced hook response to Telegram after the quiet window."""
+    with _hook_debounce_lock:
+        entry = _hook_debounce.pop(name, None)
+    if not entry:
+        return
+    text = cast(str, entry["text"])
+    chat_id = cast(int, entry["chat_id"])
+    session_id = cast(str, entry.get("session_id", ""))
+    _log(_LOG_INFO, "hook", f"Hook response: {name} -> chat {chat_id} ({len(text)} chars)")
+    if session_id:
+        _cache_session_id(name, session_id)
+    send_response_to_telegram(name, text, chat_id, log_prefix="Response")
+    _check_learning_reminder(name)
+    clear_pending(name)
+    mark_hook_event(name)
+
+
+def _debounce_hook_response(name: str, text: str, chat_id: int, session_id: str) -> None:
+    """Buffer a hook response, replacing any pending one for this worker."""
+    with _hook_debounce_lock:
+        prev = _hook_debounce.get(name)
+        if prev and prev.get("timer"):
+            cast(threading.Timer, prev["timer"]).cancel()
+        t = threading.Timer(_HOOK_DEBOUNCE_SECS, _flush_hook_response, args=[name])
+        t.name = f"hook-debounce-{name}"
+        t.daemon = True
+        _hook_debounce[name] = {"text": text, "chat_id": chat_id, "session_id": session_id, "timer": t}
+        t.start()
+
+
 connectors = ConnectorRegistry()
 tunnel_manager: TunnelManager | None = None
 if not BRIDGE_PUBLIC_URL:
@@ -11468,6 +11506,11 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     for name in pipe_names:
         with suppress(OSError):
             stop_pipe_reader(name)
+    # Flush any pending debounced hook responses before shutdown
+    with _hook_debounce_lock:
+        pending_names = list(_hook_debounce.keys())
+    for name in pending_names:
+        _flush_hook_response(name)
     _message_pool.shutdown(wait=False, cancel_futures=True)
     _task_pool.shutdown(wait=False, cancel_futures=True)
     send_shutdown_message()
