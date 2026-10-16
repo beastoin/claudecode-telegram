@@ -26,7 +26,6 @@ import shlex
 import shutil
 import signal
 import socket
-import socketserver
 import sqlite3
 import subprocess
 import tempfile
@@ -1480,23 +1479,14 @@ class GmailConnector(BaseConnector[GmailMessage]):
             if result.returncode != 0:
                 stderr = result.stderr[:200]
                 print(f"[gmail] gws error: {stderr}")
-                if "token" in stderr.lower() or "auth" in stderr.lower() or "expired" in stderr.lower():
+                if any(kw in stderr.lower() for kw in ("token", "auth", "expired")):
                     print(
                         '[gmail] ⚠ TOKEN MAY BE EXPIRED — run: gws gmail users getProfile --params \'{"userId":"me"}\''
                     )
                 return None
             parsed: object = json.loads(result.stdout)
-            if not isinstance(parsed, dict):
-                print(f"[gmail] gws returned non-dict: {type(parsed).__name__}")
-                return None
-            return cast(dict[str, object], parsed)
-        except subprocess.TimeoutExpired:
-            print("[gmail] gws call timed out")
-            return None
-        except json.JSONDecodeError as e:
-            print(f"[gmail] gws JSON parse failed: {e}")
-            return None
-        except OSError as e:
+            return cast(dict[str, object], parsed) if isinstance(parsed, dict) else None
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
             print(f"[gmail] gws call failed: {e}")
             return None
 
@@ -1932,19 +1922,11 @@ class GmailConnector(BaseConnector[GmailMessage]):
         self._catchup_unread()
 
     def _catchup_unread(self) -> None:
-        q = f"from:{self.sender_filter} is:unread in:inbox newer_than:1d"
-        data = self._list_messages(q, max_results=5)
-        if not data:
-            return
-        messages_list = data.get("messages")
+        data = self._list_messages(f"from:{self.sender_filter} is:unread in:inbox newer_than:1d", max_results=5)
+        messages_list = (data or {}).get("messages")
         if not isinstance(messages_list, list):
             return
-        msg_ids: list[str] = []
-        for m in messages_list:
-            if isinstance(m, dict):
-                raw_id = m.get("id")
-                if isinstance(raw_id, str):
-                    msg_ids.append(raw_id)
+        msg_ids = [m["id"] for m in messages_list if isinstance(m, dict) and isinstance(m.get("id"), str)]
         if not msg_ids:
             return
         print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
@@ -2003,12 +1985,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 )
                 if result.returncode != 0:
                     return False, f"gh api failed for {repo}: {result.stderr.strip()}"
-            except subprocess.TimeoutExpired:
-                return False, f"gh api timed out during preflight for {repo}"
-            except FileNotFoundError:
-                return False, f"gh binary not found: {self.gh_bin}"
-            except OSError as e:
-                return False, f"gh error: {e}"
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                return False, f"gh preflight error for {repo}: {e}"
         return True, "OK"
 
     def status(self) -> GithubStatus:
@@ -4076,13 +4054,7 @@ def _render_transcript_html(
     file_size_str = ""
     if not host:
         with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:unknown"):
-            file_size_bytes = os.path.getsize(transcript_path) if transcript_path else 0
-            if file_size_bytes >= 1_048_576:
-                file_size_str = f"{file_size_bytes / 1_048_576:.1f} MB"
-            elif file_size_bytes >= 1024:
-                file_size_str = f"{file_size_bytes / 1024:.0f} KB"
-            else:
-                file_size_str = f"{file_size_bytes} B"
+            file_size_str = format_file_size(os.path.getsize(transcript_path) if transcript_path else 0)
     data = json.dumps(
         {
             "name": name,
@@ -4897,13 +4869,9 @@ def _route_mentions_to_workers(
 
 def _pr_review_main() -> None:
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <pr_url_or_number> [--port PORT]", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <pr_url_or_number> [--fresh] [--no-serve]", file=sys.stderr)
         sys.exit(1)
     pr_input = sys.argv[1]
-    port = 10171
-    for i, arg in enumerate(sys.argv):
-        if arg == "--port" and i + 1 < len(sys.argv):
-            port = int(sys.argv[i + 1])
     highlight_comment_id = None
     fragment_match = re.search(r"#issuecomment-(\d+)", pr_input)
     if fragment_match:
@@ -4942,117 +4910,9 @@ def _pr_review_main() -> None:
         f.write(html_content)
     print(f"Written to {out_path}")
     if "--no-serve" not in sys.argv:
-
-        os.chdir("/tmp")
-        base_handler = http.server.SimpleHTTPRequestHandler
-
-        class PRHandler(base_handler):
-            def log_message(self, fmt: str, *args: object) -> None:
-                pass
-
-            def do_POST(self) -> None:
-                if self.path == "/tools/review/comments":
-                    length = int(self.headers.get("Content-Length", 0))
-                    body = self.rfile.read(length)
-                    try:
-                        data = json.loads(body)
-                    except (json.JSONDecodeError, ValueError):
-                        self.send_response(400)
-                        self.end_headers()
-                        self.wfile.write(b"Invalid JSON")
-                        return
-                    o = data.get("owner", "")
-                    r = data.get("repo", "")
-                    pn = data.get("pr_num", 0)
-                    path = data.get("path", "")
-                    line = data.get("line", 0)
-                    side = data.get("side", "RIGHT")
-                    comment_body = data.get("body", "").strip()
-                    head_sha = data.get("head_sha", "")
-                    if not all([o, r, pn, path, line, comment_body, head_sha]):
-                        self.send_response(400)
-                        self.end_headers()
-                        self.wfile.write(b"Missing required fields")
-                        return
-                    gh_payload = json.dumps(
-                        {
-                            "body": comment_body,
-                            "commit_id": head_sha,
-                            "path": path,
-                            "line": line,
-                            "side": side,
-                        }
-                    )
-                    try:
-                        result = subprocess.run(
-                            ["gh", "api", f"repos/{o}/{r}/pulls/{pn}/comments", "--method", "POST", "--input", "-"],
-                            input=gh_payload,
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                        )
-                        if result.returncode != 0:
-                            err = result.stderr.strip() or result.stdout.strip()
-                            self.send_response(502)
-                            self.end_headers()
-                            self.wfile.write(f"GitHub API error: {err}".encode())
-                            return
-                    except subprocess.TimeoutExpired:
-                        self.send_response(504)
-                        self.end_headers()
-                        self.wfile.write(b"GitHub API timeout")
-                        return
-                    context_snippet, short_sha = _fetch_file_context(o, r, path, line, head_sha)
-                    _notify_telegram(comment_body, pn, path, line, context_snippet, short_sha)
-                    _route_mentions_to_workers(comment_body, pn, path, line, context_snippet, short_sha)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"ok": True}).encode())
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-
-            def do_GET(self) -> None:
-                parsed = urlparse(self.path)
-                if parsed.path == "/tools/review/files":
-                    params = parse_qs(parsed.query)
-                    o = params.get("owner", [""])[0]
-                    r = params.get("repo", [""])[0]
-                    fp = params.get("path", [""])[0]
-                    ref = params.get("ref", [""])[0]
-                    if not all([o, r, fp, ref]):
-                        self.send_response(400)
-                        self.end_headers()
-                        return
-                    try:
-                        result = subprocess.run(
-                            ["gh", "api", f"repos/{o}/{r}/contents/{fp}?ref={ref}", "--jq", ".content"],
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                        )
-                        if result.returncode != 0:
-                            self.send_response(404)
-                            self.end_headers()
-                            return
-                        content = base64.b64decode(result.stdout.strip()).decode("utf-8", errors="replace")
-                        lines = content.split("\n")
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps(lines).encode())
-                    except Exception:
-                        self.send_response(500)
-                        self.end_headers()
-                    return
-                super().do_GET()
-
-        with socketserver.TCPServer(("0.0.0.0", port), PRHandler) as httpd:
-            url = f"http://100.125.36.102:{port}/pr-review-{pr_num}.html"
-            print(f"\nServing at {url}")
-            print("Press Ctrl+C to stop")
-            httpd.serve_forever()
+        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+        print(f"\nView via bridge: {base_url}/tools/review/{pr_num}")
+        print("Or open directly: file://" + out_path)
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -5602,20 +5462,23 @@ def cmd_relay_list(router: CommandRouter, chat_id: int) -> bool:
     return True
 
 
+def _find_active_relay(channel_id: str) -> RelayChannelDict | None:
+    with relay_store.lock:
+        ch = relay_store.channels.get(channel_id)
+        if ch and _clock.time() <= ch["expires_at_unix"]:
+            return ch
+    return None
+
+
 def cmd_relay_add(router: CommandRouter, parts: list[str], chat_id: int) -> bool:
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
         return True
-    channel_id = parts[1]
-    new_worker = parts[2].lower()
-    registered = get_registered_sessions()
-    if new_worker not in registered:
+    channel_id, new_worker = parts[1], parts[2].lower()
+    if new_worker not in get_registered_sessions():
         router.reply(chat_id, f'Worker "{new_worker}" not found.')
         return True
-    with relay_store.lock:
-        found = relay_store.channels.get(channel_id)
-        if not found or _clock.time() > found["expires_at_unix"]:
-            found = None
+    found = _find_active_relay(channel_id)
     if not found:
         router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
         return True
@@ -5634,12 +5497,8 @@ def cmd_relay_remove(router: CommandRouter, parts: list[str], chat_id: int) -> b
     if len(parts) < 3:
         router.reply(chat_id, "Usage: /relay remove <channel_id> <worker>")
         return True
-    channel_id = parts[1]
-    rm_worker = parts[2].lower()
-    with relay_store.lock:
-        found = relay_store.channels.get(channel_id)
-        if not found or _clock.time() > found["expires_at_unix"]:
-            found = None
+    channel_id, rm_worker = parts[1], parts[2].lower()
+    found = _find_active_relay(channel_id)
     if not found:
         router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
         return True
@@ -7795,70 +7654,41 @@ def _bare_repo_url(bare_repo_path: str, target_host: str | None = None) -> str:
     return bare_repo_path
 
 
+def _gitcmd(
+    cwd: str, *args: str, host: str | None = None, timeout: int = TIMEOUT_GIT_OP
+) -> subprocess.CompletedProcess[str]:
+    """Run a git -C <cwd> <args> command, returning the CompletedProcess."""
+    return _remote_run(["git", "-C", cwd, *args], host=host, timeout=timeout)
+
+
 def _git_push_state(
     source_cwd: str, worker_name: str, bare_repo: str, host: str | None = None
 ) -> GitPushStateResult | None:
+    def git(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        return _gitcmd(source_cwd, *a, host=host, **kw)
 
     try:
-        r = _remote_run(
-            ["git", "-C", source_cwd, "rev-parse", "HEAD"],
-            host=host,
-            timeout=TIMEOUT_FILE_TRANSFER,
-        )
+        r = git("rev-parse", "HEAD", timeout=TIMEOUT_FILE_TRANSFER)
         if r.returncode != 0:
             _log(_LOG_WARN, "git-sync", f"rev-parse HEAD failed: {r.stderr[:200]}")
             return None
         orig_sha = r.stdout.strip()
-        r = _remote_run(
-            ["git", "-C", source_cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-            host=host,
-            timeout=TIMEOUT_REMOTE_CMD,
-        )
+        r = git("rev-parse", "--abbrev-ref", "HEAD", timeout=TIMEOUT_REMOTE_CMD)
         orig_branch = r.stdout.strip() if r.returncode == 0 else "HEAD"
-        r = _remote_run(
-            ["git", "-C", source_cwd, "diff", "--cached", "--name-only"],
-            host=host,
-            timeout=TIMEOUT_FILE_TRANSFER,
-        )
+        r = git("diff", "--cached", "--name-only", timeout=TIMEOUT_FILE_TRANSFER)
         staged_files = [f for f in r.stdout.strip().split("\n") if f] if r.returncode == 0 else []
-        _remote_run(
-            ["git", "-C", source_cwd, "add", "-A"],
-            host=host,
-            timeout=TIMEOUT_GIT_OP,
-        )
+        git("add", "-A")
         try:
-            r = _remote_run(
-                ["git", "-C", source_cwd, "stash", "create"],
-                host=host,
-                timeout=TIMEOUT_GIT_OP,
-            )
+            r = git("stash", "create")
             stash_sha = r.stdout.strip() if r.returncode == 0 else ""
         finally:
-            _remote_run(
-                ["git", "-C", source_cwd, "reset", "HEAD"],
-                host=host,
-                timeout=TIMEOUT_FILE_TRANSFER,
-            )
+            git("reset", "HEAD", timeout=TIMEOUT_FILE_TRANSFER)
             if staged_files:
-                _remote_run(
-                    ["git", "-C", source_cwd, "add", "--", *staged_files],
-                    host=host,
-                    timeout=TIMEOUT_FILE_TRANSFER,
-                )
-        push_sha = stash_sha if stash_sha else orig_sha
+                git("add", "--", *staged_files, timeout=TIMEOUT_FILE_TRANSFER)
+        push_sha = stash_sha or orig_sha
         ref = f"refs/heads/teleport/{worker_name}"
-        if host:
-            r = _remote_run(
-                ["git", "-C", source_cwd, "push", "--force", f"claude@100.125.36.102:{bare_repo}", f"{push_sha}:{ref}"],
-                host=host,
-                timeout=TIMEOUT_LARGE_TRANSFER,
-            )
-        else:
-            r = _remote_run(
-                ["git", "-C", source_cwd, "push", "--force", bare_repo, f"{push_sha}:{ref}"],
-                host=host,
-                timeout=TIMEOUT_LARGE_TRANSFER,
-            )
+        repo_url = _bare_repo_url(bare_repo, host)
+        r = git("push", "--force", repo_url, f"{push_sha}:{ref}", timeout=TIMEOUT_LARGE_TRANSFER)
         if r.returncode != 0:
             _log(_LOG_WARN, "git-sync", f"push failed: {r.stderr[:200]}")
             return None
@@ -7876,90 +7706,44 @@ def _git_push_state(
 def _git_pull_state(
     target_cwd: str, worker_name: str, bare_repo_url: str, metadata: GitPushStateResult, host: str | None = None
 ) -> bool:
+    def git(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        return _gitcmd(target_cwd, *a, host=host, **kw)
 
     try:
-        orig_sha = metadata["orig_sha"]
-        orig_branch = metadata["orig_branch"]
+        orig_sha, orig_branch = metadata["orig_sha"], metadata["orig_branch"]
         staged_files = metadata.get("staged_files", [])
         stash_sha = metadata.get("stash_sha")
         ref = f"teleport/{worker_name}"
         is_existing = False
         with _log_suppress(subprocess.SubprocessError, OSError, level=_LOG_DEBUG, tag="probe:_git_pull_state"):
-            r = _remote_run(
-                ["git", "-C", target_cwd, "rev-parse", "--git-dir"],
-                host=host,
-                timeout=TIMEOUT_REMOTE_CMD,
-            )
-            is_existing = r.returncode == 0
+            is_existing = git("rev-parse", "--git-dir", timeout=TIMEOUT_REMOTE_CMD).returncode == 0
         if not is_existing:
             r = _remote_run(
-                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd],
-                host=host,
-                timeout=TIMEOUT_RSYNC,
+                ["git", "clone", "--no-checkout", bare_repo_url, target_cwd], host=host, timeout=TIMEOUT_RSYNC
             )
             if r.returncode != 0:
                 _log(_LOG_WARN, "git-sync", f"clone failed: {r.stderr[:200]}")
                 return False
-            _remote_run(
-                ["git", "-C", target_cwd, "config", "user.email", "teleport@bridge"], host=host, capture_output=True
-            )
-            _remote_run(["git", "-C", target_cwd, "config", "user.name", "teleport"], host=host)
+            git("config", "user.email", "teleport@bridge")
+            git("config", "user.name", "teleport")
         else:
-            _remote_run(["git", "-C", target_cwd, "remote", "remove", "vps"], host=host)
-            _remote_run(
-                ["git", "-C", target_cwd, "remote", "add", "vps", bare_repo_url],
-                host=host,
-                timeout=TIMEOUT_REMOTE_CMD,
-            )
-            r = _remote_run(
-                ["git", "-C", target_cwd, "fetch", "vps", ref],
-                host=host,
-                timeout=TIMEOUT_RSYNC,
-            )
+            git("remote", "remove", "vps")
+            git("remote", "add", "vps", bare_repo_url, timeout=TIMEOUT_REMOTE_CMD)
+            r = git("fetch", "vps", ref, timeout=TIMEOUT_RSYNC)
             if r.returncode != 0:
                 _log(_LOG_WARN, "git-sync", f"fetch failed: {r.stderr[:200]}")
                 return False
-        if orig_branch and orig_branch != "HEAD":
-            _remote_run(
-                ["git", "-C", target_cwd, "checkout", "-B", orig_branch, orig_sha],
-                host=host,
-                timeout=TIMEOUT_GIT_OP,
-            )
-        else:
-            _remote_run(
-                ["git", "-C", target_cwd, "checkout", orig_sha],
-                host=host,
-                timeout=TIMEOUT_GIT_OP,
-            )
+        checkout_args = ("-B", orig_branch, orig_sha) if orig_branch and orig_branch != "HEAD" else (orig_sha,)
+        git("checkout", *checkout_args)
         if stash_sha:
             fetch_ref = f"vps/{ref}" if is_existing else f"origin/{ref}"
-            r = _remote_run(
-                ["git", "-C", target_cwd, "stash", "apply", fetch_ref],
-                host=host,
-                timeout=TIMEOUT_GIT_OP,
-            )
+            r = git("stash", "apply", fetch_ref)
             if r.returncode != 0:
-                _remote_run(
-                    ["git", "-C", target_cwd, "read-tree", "-u", "--reset", orig_sha],
-                    host=host,
-                    timeout=TIMEOUT_FILE_TRANSFER,
-                )
-                r = _remote_run(
-                    ["git", "-C", target_cwd, "cherry-pick", "--no-commit", fetch_ref],
-                    host=host,
-                    timeout=TIMEOUT_GIT_OP,
-                )
+                git("read-tree", "-u", "--reset", orig_sha, timeout=TIMEOUT_FILE_TRANSFER)
+                git("cherry-pick", "--no-commit", fetch_ref)
             if staged_files:
-                _remote_run(
-                    ["git", "-C", target_cwd, "reset", "HEAD"],
-                    host=host,
-                    timeout=TIMEOUT_FILE_TRANSFER,
-                )
-                _remote_run(
-                    ["git", "-C", target_cwd, "add", "--", *staged_files],
-                    host=host,
-                    timeout=TIMEOUT_FILE_TRANSFER,
-                )
+                git("reset", "HEAD", timeout=TIMEOUT_FILE_TRANSFER)
+                git("add", "--", *staged_files, timeout=TIMEOUT_FILE_TRANSFER)
         return True
     except (subprocess.SubprocessError, OSError) as e:
         _log(_LOG_ERROR, "git-sync", f"pull state error: {e}")
