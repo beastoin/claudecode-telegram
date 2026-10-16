@@ -11322,7 +11322,7 @@ _task_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 # turns between tool calls.  Without debounce a single task can send 2-3
 # messages to Telegram.  We buffer the last response per worker and flush
 # after _HOOK_DEBOUNCE_SECS of quiet.
-_HOOK_DEBOUNCE_SECS = 3.0
+_HOOK_DEBOUNCE_SECS = 8.0
 _hook_debounce_lock = threading.Lock()
 _hook_debounce: dict[str, dict[str, object]] = {}  # name -> {text, chat_id, session_id, timer}
 
@@ -11351,6 +11351,12 @@ def _debounce_hook_response(name: str, text: str, chat_id: int, session_id: str)
         prev = _hook_debounce.get(name)
         if prev and prev.get("timer"):
             cast(threading.Timer, prev["timer"]).cancel()
+            prev_len = len(cast(str, prev.get("text", "")))
+            _log(
+                _LOG_DEBUG,
+                "hook",
+                f"Debounce: replaced {name} buffered ({prev_len} chars) with new ({len(text)} chars)",
+            )
         t = threading.Timer(_HOOK_DEBOUNCE_SECS, _flush_hook_response, args=[name])
         t.name = f"hook-debounce-{name}"
         t.daemon = True
