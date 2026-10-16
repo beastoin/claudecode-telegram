@@ -879,9 +879,12 @@ if BRIDGE_PUBLIC_URL and not os.environ.get("BRIDGE_BIND"):
     from urllib.parse import urlparse as _urlparse_pub
 
     _pub_host = _urlparse_pub(BRIDGE_PUBLIC_URL).hostname or ""
-    BRIDGE_BIND = _pub_host if _pub_host and _pub_host not in ("localhost",) else "0.0.0.0"
-    if BRIDGE_BIND != "0.0.0.0":
-        BRIDGE_URL = f"http://{BRIDGE_BIND}:{PORT}"
+    # Always bind 0.0.0.0 so both localhost and the public IP work.
+    # BRIDGE_URL uses the specific IP for hooks/checkin; BRIDGE_BIND
+    # controls the listen address (all interfaces).
+    BRIDGE_BIND = "0.0.0.0"
+    if _pub_host and _pub_host not in ("localhost",):
+        BRIDGE_URL = f"http://{_pub_host}:{PORT}"
 BRIDGE_SSH_TARGET = os.environ.get("BRIDGE_SSH_TARGET", "vps")
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
