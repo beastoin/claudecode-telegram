@@ -107,3 +107,105 @@ def test_relay_messages_poll():
     after_msgs2 = bridge.relay_get_messages(cid, after=msg2['message_id'])
     assert len(after_msgs2) == 1, f'expected 1 msg after msg2, got {len(after_msgs2)}'
 
+
+def test_cmd_relay_multi_worker_create():
+    """Creating a relay with multiple workers: /relay mio sui geni."""
+    import bridge
+
+    # Mock router and registered sessions
+    router = MagicMock()
+    router.reply = MagicMock()
+    chat_id = 12345
+
+    # Register fake workers
+    with patch.object(bridge, 'get_registered_sessions', return_value={'mio': {}, 'sui': {}, 'geni': {}}):
+        result = bridge.cmd_relay(router, "mio sui geni", chat_id)
+
+    assert result is True
+    # Should have created a relay
+    router.reply.assert_called_once()
+    reply_text = router.reply.call_args[0][1]
+    assert "mio" in reply_text
+    assert "sui" in reply_text
+    assert "geni" in reply_text
+    assert "📡" in reply_text
+
+    # Verify channel has all workers
+    with bridge.relay_store.lock:
+        channels = list(bridge.relay_store.channels.values())
+    last_ch = channels[-1]
+    assert set(last_ch["workers"]) == {"mio", "sui", "geni"}
+
+
+def test_cmd_relay_multi_worker_not_found():
+    """Multi-worker relay creation rejects unknown workers."""
+    import bridge
+
+    router = MagicMock()
+    chat_id = 12345
+
+    with patch.object(bridge, 'get_registered_sessions', return_value={'mio': {}}):
+        bridge.cmd_relay(router, "mio unknown_worker", chat_id)
+
+    reply_text = router.reply.call_args[0][1]
+    assert "not found" in reply_text.lower()
+    assert "unknown_worker" in reply_text
+
+
+def test_cmd_relay_add_multi_worker():
+    """Adding multiple workers at once: /relay add <id> worker1 worker2."""
+    import bridge
+
+    ch, guest_token, _ = bridge.relay_channel_create('mio', 'relay-mio')
+    cid = ch['id']
+    bridge.relay_store.channels[cid] = ch
+
+    router = MagicMock()
+    chat_id = 12345
+
+    with patch.object(bridge, 'get_registered_sessions', return_value={'mio': {}, 'sui': {}, 'geni': {}}):
+        bridge.cmd_relay_add(router, ["add", cid, "sui", "geni"], chat_id)
+
+    reply_text = router.reply.call_args[0][1]
+    assert "sui" in reply_text
+    assert "geni" in reply_text
+
+    # Verify channel now has all 3
+    assert set(ch["workers"]) == {"mio", "sui", "geni"}
+
+
+def test_cmd_relay_add_skips_duplicates():
+    """Adding workers that are already in the relay doesn't duplicate."""
+    import bridge
+
+    ch, _, _ = bridge.relay_channel_create('mio', 'relay-mio')
+    cid = ch['id']
+    bridge.relay_store.channels[cid] = ch
+
+    router = MagicMock()
+    chat_id = 12345
+
+    with patch.object(bridge, 'get_registered_sessions', return_value={'mio': {}, 'sui': {}}):
+        bridge.cmd_relay_add(router, ["add", cid, "mio", "sui"], chat_id)
+
+    # mio was already there, sui is new — should add only sui
+    reply_text = router.reply.call_args[0][1]
+    assert "sui" in reply_text
+    assert ch["workers"].count("mio") == 1  # no duplicates
+
+
+def test_relay_guide_is_bash_script():
+    """Guide text is a ready-to-run bash script with functions."""
+    import bridge
+
+    ch, guest_token, _ = bridge.relay_channel_create('mio', 'relay-mio')
+    ch["workers"] = ["mio", "sui"]
+    guide = bridge.relay_guide_text(ch, guest_token)
+
+    assert guide.startswith("#!/usr/bin/env bash"), "guide must be a bash script"
+    assert "relay_send()" in guide, "guide must define relay_send function"
+    assert "relay_messages()" in guide, "guide must define relay_messages function"
+    assert "relay_poll()" in guide, "guide must define relay_poll function"
+    assert "mio" in guide and "sui" in guide, "guide must list all workers"
+    assert guest_token in guide, "guide must contain the token"
+

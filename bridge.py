@@ -1200,18 +1200,22 @@ class BaseConnector[M](abc.ABC):
     def _on_preflight_ok(self) -> None:  # noqa: B027
         pass
 
+    def _start_thread(self, skip_preflight: bool = False) -> threading.Thread:
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            kwargs={"skip_preflight": skip_preflight} if skip_preflight else {},
+            daemon=True,
+            name=f"{self.connector_name}-poller",
+        )
+        self._thread.start()
+        return self._thread
+
     def start(self) -> threading.Thread:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError(f"{self.connector_name}: already running (call stop() first)")
-            self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._poll_loop,
-                daemon=True,
-                name=f"{self.connector_name}-poller",
-            )
-            self._thread.start()
-            return self._thread
+            return self._start_thread()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -1225,20 +1229,13 @@ class BaseConnector[M](abc.ABC):
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False, f"{self.connector_name}: old thread did not exit in time"
-            self._stop_event.clear()
             self._consecutive_failures = 0
             self._alert_sent = False
         ok, msg = self.preflight_check()
         if not ok:
             return False, msg
         with self._lock:
-            self._thread = threading.Thread(
-                target=self._poll_loop,
-                kwargs={"skip_preflight": True},
-                daemon=True,
-                name=f"{self.connector_name}-poller",
-            )
-            self._thread.start()
+            self._start_thread(skip_preflight=True)
         return True, msg
 
     @property
@@ -1834,13 +1831,13 @@ class GmailConnector(BaseConnector[GmailMessage]):
         attachments = self.extract_attachments(message)
         if not body.strip():
             return
+        downloaded: list[Attachment] = []
+        for att in attachments:
+            path = self._download_attachment(msg_id, att)
+            if path:
+                downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
         if is_sent:
             html_text, plain_text = self._format_sent_reply(body, subject, thread_id, message)
-            downloaded: list[Attachment] = []
-            for att in attachments:
-                path = self._download_attachment(msg_id, att)
-                if path:
-                    downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
             self.on_message([], html_text, plain_text, downloaded)
             return
         body = self._strip_reply_chain(body)
@@ -1859,13 +1856,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
             reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
             plain_text += reply_hint
-        downloaded_atts: list[Attachment] = []
-        for att in attachments:
-            path = self._download_attachment(msg_id, att)
-            if path:
-                downloaded_atts.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
-                print(f"[gmail] attachment: {att['filename']} -> {path}")
-        self.on_message(targets, html_text, plain_text, downloaded_atts)
+        self.on_message(targets, html_text, plain_text, downloaded)
         if not self.mark_as_read(msg_id):
             print(f"[gmail] Warning: failed to mark message {msg_id} as read")
 
@@ -5271,14 +5262,61 @@ def relay_guide_url(channel_id: str, guest_token: str) -> str:
 
 def relay_guide_text(channel: RelayChannelDict, guest_token: str) -> str:
     base = f"{_relay_base_url()}/relay/{channel['id']}"
-    w = channel["worker"]
+    workers = channel.get("workers", [channel["worker"]])
+    w = ", ".join(workers)
     exp = channel["expires_at"]
     return (
-        f"# Chat Channel to {w}\nDirect chat channel to **{w}** (a Claude Code agent).\n"
-        f'```bash\nexport RELAY_TOKEN="{guest_token}"\nexport RELAY="{base}"\n```\n'
-        f'```bash\ncurl -fsS $RELAY/send -H "Authorization: Bearer $RELAY_TOKEN" -H "Content-Type: application/json" -d \'{{"text":"your message here"}}\'\n```\n'
-        f'```bash\ncurl -fsS $RELAY/messages -H "Authorization: Bearer $RELAY_TOKEN"\n```\n'
-        f"1. Send a message using the curl command above\n2. Poll `/messages` to see replies (add `?after=<message_id>` for new messages only)\n3. The channel expires at `{exp}`\n"
+        f"#!/usr/bin/env bash\n"
+        f"# Relay channel to {w} — expires {exp}\n"
+        f"# Connected workers: {w}\n"
+        f"#\n"
+        f"# Usage:\n"
+        f"#   1. Source this script: source relay.sh\n"
+        f'#   2. Send a message:    relay_send "your message here"\n'
+        f"#   3. Check messages:    relay_messages\n"
+        f"#   4. Poll for new:      relay_poll  (waits 2s between checks)\n"
+        f"#\n"
+        f"# Guidelines:\n"
+        f"#   - Always prefix your name in messages so workers know who sent it\n"
+        f"#   - Messages are delivered to ALL connected workers: {w}\n"
+        f"#   - Workers reply asynchronously — use relay_poll to watch for responses\n"
+        f"#   - Channel auto-expires at {exp}\n"
+        f"\n"
+        f'export RELAY_TOKEN="{guest_token}"\n'
+        f'export RELAY="{base}"\n'
+        f"\n"
+        f"# Send a message to the connected workers\n"
+        f"relay_send() {{\n"
+        f'  local text="${{1:?Usage: relay_send \\"your message\\"}}" \n'
+        f'  curl -fsS "$RELAY/send" \\\n'
+        f'    -H "Authorization: Bearer $RELAY_TOKEN" \\\n'
+        f'    -H "Content-Type: application/json" \\\n'
+        f'    -d "$(printf \'{{"text":"%s"}}\' "$text")"\n'
+        f"}}\n"
+        f"\n"
+        f"# Get all messages (or new messages after a given ID)\n"
+        f"relay_messages() {{\n"
+        f'  local after="${{1:-}}"\n'
+        f'  local url="$RELAY/messages"\n'
+        f'  [ -n "$after" ] && url="$url?after=$after"\n'
+        f'  curl -fsS "$url" -H "Authorization: Bearer $RELAY_TOKEN"\n'
+        f"}}\n"
+        f"\n"
+        f"# Poll for new messages (prints new ones, loops until Ctrl-C)\n"
+        f"relay_poll() {{\n"
+        f'  local last_id=""\n'
+        f"  while true; do\n"
+        f"    local resp\n"
+        f'    resp=$(relay_messages "$last_id")\n'
+        f"    local msgs\n"
+        f'    msgs=$(echo "$resp" | grep -o \'"message_id":"[^"]*"\' | tail -1 | cut -d\'"\' -f4)\n'
+        f'    if [ -n "$msgs" ]; then\n'
+        f'      echo "$resp"\n'
+        f'      last_id="$msgs"\n'
+        f"    fi\n"
+        f"    sleep 2\n"
+        f"  done\n"
+        f"}}\n"
     )
 
 
@@ -5472,24 +5510,28 @@ def _find_active_relay(channel_id: str) -> RelayChannelDict | None:
 
 def cmd_relay_add(router: CommandRouter, parts: list[str], chat_id: int) -> bool:
     if len(parts) < 3:
-        router.reply(chat_id, "Usage: /relay add <channel_id> <worker>")
+        router.reply(chat_id, "Usage: /relay add <channel_id> <worker> [worker2 ...]")
         return True
-    channel_id, new_worker = parts[1], parts[2].lower()
-    if new_worker not in get_registered_sessions():
-        router.reply(chat_id, f'Worker "{new_worker}" not found.')
+    channel_id = parts[1]
+    new_workers = [p.lower() for p in parts[2:]]
+    registered = get_registered_sessions()
+    not_found = [w for w in new_workers if w not in registered]
+    if not_found:
+        router.reply(chat_id, f'Worker(s) not found: {", ".join(not_found)}')
         return True
     found = _find_active_relay(channel_id)
     if not found:
         router.reply(chat_id, f'Relay "{channel_id}" not found. Use /relay list to see active channels.')
         return True
-    workers = found.get("workers", [found["worker"]])
-    if new_worker in workers:
-        router.reply(chat_id, f"{new_worker} is already in {channel_id}.")
+    existing = set(found.get("workers", [found["worker"]]))
+    to_add = [w for w in new_workers if w not in existing]
+    if not to_add:
+        router.reply(chat_id, f"All specified workers are already in {channel_id}.")
         return True
     with relay_store.lock:
-        found.setdefault("workers", [found["worker"]]).append(new_worker)
+        found.setdefault("workers", [found["worker"]]).extend(to_add)
         _relay_save()
-    router.reply(chat_id, f"📡 Added {new_worker} to {channel_id}. Workers: {', '.join(found['workers'])}")
+    router.reply(chat_id, f"📡 Added {', '.join(to_add)} to {channel_id}. Workers: {', '.join(found['workers'])}")
     return True
 
 
@@ -5575,8 +5617,8 @@ def cmd_relay(router: CommandRouter, arg: str, chat_id: int) -> bool:
         with relay_store.lock:
             active = [ch for ch in relay_store.channels.values() if _clock.time() <= ch["expires_at_unix"]]
         lines = ["📡 Relay — connect any agent to the team\n"]
-        lines.append("/relay <worker> — create relay, get a guideline link")
-        lines.append("/relay add <channel_id> <worker> — add worker to relay")
+        lines.append("/relay <worker> [worker2 ...] — create relay, get a guideline link")
+        lines.append("/relay add <channel_id> <worker> [worker2 ...] — add worker(s) to relay")
         lines.append("/relay remove <channel_id> <worker> — remove worker")
         lines.append("/relay list — active relays")
         lines.append("/relay status — counts for relays, channels, guests")
@@ -5596,22 +5638,30 @@ def cmd_relay(router: CommandRouter, arg: str, chat_id: int) -> bool:
     }
     if sub in subcommands:
         return subcommands[sub]()
-    worker = sub
+    # All remaining parts are worker names: /relay mio sui geni
     registered = get_registered_sessions()
-    if worker not in registered:
-        router.reply(chat_id, f'Worker "{worker}" not found.')
+    worker_names = [p.lower() for p in parts]
+    not_found = [w for w in worker_names if w not in registered]
+    if not_found:
+        router.reply(chat_id, f'Worker(s) not found: {", ".join(not_found)}')
         return True
-    label = f"relay-{worker}"
-    ch, guest_token, _reply_token = relay_channel_create(worker, label)
+    primary = worker_names[0]
+    label = f"relay-{primary}" if len(worker_names) == 1 else f"relay-{'+'.join(worker_names)}"
+    ch, guest_token, _reply_token = relay_channel_create(primary, label)
+    if len(worker_names) > 1:
+        ch["workers"] = worker_names
     with relay_store.lock:
         relay_store.channels[ch["id"]] = ch
         _relay_save()
     url = relay_guide_url(ch["id"], guest_token)
-    lines = [f"📡 Relay to {worker} (24h) — {ch['id']}"]
+    worker_str = ", ".join(worker_names)
+    lines = [f"📡 Relay to {worker_str} (24h) — {ch['id']}"]
     lines.append(f"\nManage: /relay add {ch['id']} <worker> to add more workers")
     lines.append(f"\nPaste this to the external agent:\n")
     lines.append(f"---")
-    lines.append(f"You have a direct channel to {worker}. Open this link to see the API guide (setup + curl commands):")
+    lines.append(
+        f"You have a direct channel to {worker_str}. Open this link to see the API guide (setup + curl commands):"
+    )
     lines.append(f"{url}")
     lines.append(
         f"Steps: (1) open the link, (2) copy the env vars and curl commands from the page, (3) send your message via the /send endpoint, (4) poll /messages for replies. Channel expires in 24h."
@@ -9607,19 +9657,22 @@ def do_teleport(
                 target_cwd = os.path.expanduser(target_cwd)
         ensure_session_dir(name)
         state_file = SESSIONS_DIR / name / "teleport_state"
-        _tmp_ts = state_file.with_suffix(".tmp")
-        _tmp_ts.write_text(
-            json.dumps(
-                {
-                    "phase": 1,
-                    "source_host": source_host,
-                    "target_host": target_host,
-                    "target_cwd": target_cwd,
-                    "started_at": int(_clock.time()),
-                }
+
+        def _save_phase(phase: int) -> None:
+            _atomic_write(
+                str(state_file),
+                json.dumps(
+                    {
+                        "phase": phase,
+                        "source_host": source_host,
+                        "target_host": target_host,
+                        "target_cwd": target_cwd,
+                        "started_at": int(_clock.time()),
+                    }
+                ),
             )
-        )
-        os.replace(str(_tmp_ts), str(state_file))
+
+        _save_phase(1)
         teleport_notify(chat_id, f"Stopping {name}...")
         session_id = stop_worker_for_teleport(name, tmux_name, source_host)
         _log(_LOG_INFO, "teleport", f"{name}: stopped, session_id={session_id}")
@@ -9654,19 +9707,7 @@ def do_teleport(
                     chat_id, f"Config sync completed with warnings:\n" + "\n".join(f"- {w}" for w in all_warnings)
                 )
             _log(_LOG_WARN, "teleport", f"{name}: team config + hooks synced ({len(all_warnings)} warnings)")
-        _tmp_ts2 = state_file.with_suffix(".tmp")
-        _tmp_ts2.write_text(
-            json.dumps(
-                {
-                    "phase": 2,
-                    "source_host": source_host,
-                    "target_host": target_host,
-                    "target_cwd": target_cwd,
-                    "started_at": int(_clock.time()),
-                }
-            )
-        )
-        os.replace(str(_tmp_ts2), str(state_file))
+        _save_phase(2)
         save_claude_session_cwd(name, target_cwd)
         clear_claude_session_id(name)
         _ensure_workspace_trusted_remote(target_cwd, target_host)
@@ -9736,6 +9777,27 @@ def do_teleport(
             state_file.unlink(missing_ok=True)
 
 
+def _teleport_preflight_common(
+    router: object, worker_name: str, chat_id: ChatId, action: str = "teleport"
+) -> dict[str, object] | None:
+    """Shared preflight for teleport/teleback: registry, busy, in-progress checks. Returns worker entry or None (already replied)."""
+    registry = _load_registry()
+    worker_entry = registry.get("workers", {}).get(worker_name)
+    if not worker_entry:
+        router.reply(chat_id, f"Worker '{worker_name}' not found in registry.")  # type: ignore[attr-defined]
+        return None
+    with watchdog.lock:
+        worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
+    if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
+        router.reply(chat_id, f"{worker_name} is busy. Must be idle to {action}.\nWait for it to finish or /pause {worker_name} first.")  # type: ignore[attr-defined]
+        return None
+    teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
+    if teleport_file.exists():
+        router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
+        return None
+    return worker_entry
+
+
 def cmd_teleport(router: object, arg: str, chat_id: ChatId, check_only: bool = False) -> bool:
     if not arg:
         cmd_name = "/teleport-check" if check_only else "/teleport"
@@ -9759,26 +9821,10 @@ def cmd_teleport(router: object, arg: str, chat_id: ChatId, check_only: bool = F
         machine = machines[target_host]
         if machine.ssh_target:
             target_host = machine.ssh_target
-    registry = _load_registry()
-    worker_entry = registry.get("workers", {}).get(worker_name)
-    if not worker_entry:
-        router.reply(chat_id, f"Worker '{worker_name}' not found in registry.")  # type: ignore[attr-defined]
+    worker_entry = _teleport_preflight_common(router, worker_name, chat_id, "teleport")
+    if worker_entry is None:
         return True
     backend_name = worker_entry.get("backend", "claude")
-    with watchdog.lock:
-        worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-    current_state = worker_state[0]
-    if current_state in ("BUSY_TOOL", "BUSY_THINKING"):
-        router.reply(
-            chat_id,  # type: ignore[attr-defined]
-            f"{worker_name} is busy. Must be idle to teleport.\n"
-            f"Wait for it to finish or /pause {worker_name} first.",
-        )
-        return True
-    teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
-    if teleport_file.exists():
-        router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
-        return True
     r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)
     if r.returncode != 0:
         router.reply(chat_id, f"Cannot reach {target_host} via SSH.")  # type: ignore[attr-defined]
@@ -9870,28 +9916,14 @@ def cmd_teleback(router: object, arg: str, chat_id: ChatId) -> bool:
     if not worker_name:
         router.reply(chat_id, "Usage: /teleback <worker> [--full]")  # type: ignore[attr-defined]
         return True
-    registry = _load_registry()
-    worker = registry.get("workers", {}).get(worker_name)
-    if not worker:
-        router.reply(chat_id, f"Worker '{worker_name}' not in registry.")  # type: ignore[attr-defined]
+    worker = _teleport_preflight_common(router, worker_name, chat_id, "teleback")
+    if worker is None:
         return True
     current_host = worker.get("host")
     home_host = worker.get("home_host")
     home_cwd = worker.get("home_cwd")
     if current_host is None and home_cwd is None:
         router.reply(chat_id, f"{worker_name} hasn't been teleported.")  # type: ignore[attr-defined]
-        return True
-    with watchdog.lock:
-        worker_state = watchdog.worker_states.get(worker_name, ("UNKNOWN", "", 0))
-    if worker_state[0] in ("BUSY_TOOL", "BUSY_THINKING"):
-        router.reply(
-            chat_id,  # type: ignore[attr-defined]
-            f"{worker_name} is busy. Must be idle to teleback. " f"Wait or /pause {worker_name} first.",
-        )
-        return True
-    teleport_file = SESSIONS_DIR / worker_name / "teleport_state"
-    if teleport_file.exists():
-        router.reply(chat_id, f"{worker_name} has a teleport in progress.")  # type: ignore[attr-defined]
         return True
     target_host = home_host
     target_cwd = home_cwd or get_claude_session_cwd(worker_name)
