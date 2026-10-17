@@ -224,6 +224,16 @@ The bridge uses a structured threading model with bounded concurrency:
 
 Do NOT add new unbounded `Thread()` spawns. Use `_message_pool` for update handling and `_task_pool` for background tasks. Only create dedicated threads for permanent loops (like connectors).
 
+### Logging and observability [SPEC-031]
+
+All operational output uses `_log(level, component, message)` from `shared.py`. Never use bare `print()` for bridge operational messages — only for user-facing CLI output (e.g., PR review tool).
+
+**Levels:** `_LOG_ERROR`, `_LOG_WARN`, `_LOG_INFO`, `_LOG_DEBUG`. Default minimum: INFO. Override: `BRIDGE_LOG_LEVEL=DEBUG`.
+
+**Error suppression:** Use `_log_suppress(*exc_types, level=, tag=, msg=)` instead of `contextlib.suppress()` for any error path that could indicate operational issues. Only use bare `suppress()` for truly expected conditions (fd cleanup on shutdown, optional file reads).
+
+**Health signals:** When adding a new subsystem or error path, wire `health.ok("signal")` on success and `health.error("signal")` on failure. Register any new permanent threads with `health.register_thread()`.
+
 ### HTTP API security model [SPEC-030]
 
 See SPEC-030 for the full model. Key rules for agents:

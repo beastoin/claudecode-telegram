@@ -1,6 +1,6 @@
 # Design Philosophy
 
-> Version: 0.51.0
+> Version: 0.52.0
 
 ## Documentation Contract
 
@@ -72,6 +72,7 @@ Spec IDs are stable references and may not appear in numeric order in the docume
 | SPEC-024 | Process lifecycle safety (PID-based) | Active | AUDIT-002 | 2b6cd8f |
 | SPEC-025 | Dev-before-prod deployment | Active | AUDIT-002 | 2b6cd8f |
 | SPEC-026 | Learning reminders (periodic self-reflection) | Active | — | — |
+| SPEC-031 | Structured logging and observability | Active | — | — |
 
 ## Superseded Specs
 
@@ -645,6 +646,86 @@ ssh vps -L 127.0.0.1:8271:127.0.0.1:8271   # port forward
 curl http://127.0.0.1:8271/outputs           # hits bridge via SSH
 ```
 No Tailscale port exposure. SSH keys provide the authentication layer.
+
+## SPEC-031. Structured Logging and Observability.
+
+The bridge uses a unified logging and health system for operational visibility.
+
+### Logging
+
+All operational messages use `_log(level, component, message)` from `shared.py`:
+
+```
+[2026-10-17 04:30:15 INFO:bridge] Multi-Session Bridge on 127.0.0.1:8271
+[2026-10-17 04:30:16 WARN:gmail] gws error: token expired
+[2026-10-17 04:30:17 ERROR:github] Error processing comment 12345: KeyError
+```
+
+**Levels:** ERROR (0) → WARN (1) → INFO (2) → DEBUG (3). Default minimum: INFO. Override: `BRIDGE_LOG_LEVEL=DEBUG`.
+
+**Components:** `bridge`, `gmail`, `github`, `tunnel`, `pr-review`, `pr-comment`, `health-alert`, connector names.
+
+**Rules:**
+- All bridge operational output uses `_log()` — never bare `print()` (exception: PR review CLI tool stdout).
+- `_log_suppress` context manager replaces `contextlib.suppress` for error paths that must not crash but should be visible.
+- `_LOG_DEBUG` level for expected/routine failures (fd cleanup, optional probes). `_LOG_WARN` for unexpected but recoverable. `_LOG_ERROR` for failures requiring attention.
+
+### Log Rotation
+
+| Layer | Trigger | Retention | Mechanism |
+|-------|---------|-----------|-----------|
+| `bridge.sh` startup | Bridge start | 10K lines | Truncate, save old as `.1` |
+| `bridge-watchdog.sh` | Every 2min (cron) | 5MB | copytruncate (safe for `tee -a`) |
+| `watchdog.log` | Every 2min | 500 lines | tail + mv |
+| Hook debug logs | Each hook invocation | 100KB | tail + mv |
+
+### Health Signals
+
+`BridgeHealth` tracks 7 signals and 5 threads:
+
+| Signal | Source | OK trigger | Error trigger |
+|--------|--------|------------|---------------|
+| `poll` | TunnelManager._poll_loop | Successful getUpdates | Poll error streak |
+| `dispatch` | route_message | Message delivered | Send failed |
+| `hook` | _flush_hook_response | Response forwarded to Telegram | Send failed |
+| `telegram_api` | Rich text / HTML send | Telegram API 200 | API error |
+| `watchdog` | watchdog_loop | End of each iteration | — |
+| `gmail` | GmailConnector.poll_once | Successful poll | Poll error |
+| `github` | GitHubConnector.poll_once | Successful poll | Poll error |
+
+| Thread | Source |
+|--------|--------|
+| `worker-watchdog` | main() |
+| `tunnel-watchdog` | TunnelManager.start() |
+| `tunnel-poll` | TunnelManager._start_poll() |
+| `gmail-poller` | start_connectors() |
+| `github-poller` | start_connectors() |
+
+### Health Endpoint
+
+`GET /health` returns a unified JSON snapshot:
+
+```json
+{
+  "ok": true,
+  "version": "0.52.0",
+  "uptime_s": 3600,
+  "signals": {"poll": {"ok": true, "last_ok_ago_s": 5.2, "errors": 0}, ...},
+  "threads": {"worker-watchdog": true, ...},
+  "pools": {"message_pool": {"max": 8, "pending": 0}, ...}
+}
+```
+
+HTTP 200 when `ok=true`, 503 otherwise. Used by `bridge-watchdog.sh` (cron) and can be used by external monitors.
+
+### Health Alerting
+
+Alerts route through the relay channel system (`bridge-health` channel):
+
+- **Internal:** `_health_alert_check()` runs every watchdog cycle (~4s). Checks signal staleness, thread liveness, pool saturation.
+- **External:** `bridge-watchdog.sh` runs via cron every 2min. Hits `/health`, alerts via direct Telegram API (bypasses bridge).
+- **Delivery:** Alerts post to the `bridge-health` relay channel (persistent history) and deliver directly to worker tmux sessions listed in `BRIDGE_ALERT_WORKERS`.
+- **Cooldown:** 300s between repeated alerts for the same issue. Recovery notifications sent when issues clear.
 
 ---
 

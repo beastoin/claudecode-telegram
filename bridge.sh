@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIG + GLOBALS
 # ============================================================
 
-VERSION="0.51.0"
+VERSION="0.52.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -513,6 +513,17 @@ cmd_run() {
     [[ -n "${GMAIL_GWS_BIN:-}" ]] && export GMAIL_GWS_BIN
 
     local bridge_log="$node_dir/bridge.log"
+
+    # Rotate bridge log at startup — keep last 10K lines, archive the rest
+    if [[ -f "$bridge_log" ]]; then
+        local log_lines
+        log_lines=$(wc -l < "$bridge_log" 2>/dev/null || echo 0)
+        if (( log_lines > 10000 )); then
+            mv "$bridge_log" "$bridge_log.1" 2>/dev/null || true
+            tail -10000 "$bridge_log.1" > "$bridge_log" 2>/dev/null || true
+            log "$(dim "Rotated bridge.log ($log_lines → 10000 lines, old saved as bridge.log.1")"
+        fi
+    fi
 
     # Set tunnel mode env vars for Python's TunnelManager
     if $no_tunnel; then

@@ -720,6 +720,13 @@ class TunnelManager:
         self._watchdog_thread: threading.Thread | None = None
         self._poll_stop = threading.Event()
         self._poll_thread: threading.Thread | None = None
+        # Poll health tracking
+        self._poll_last_ok: float = 0.0  # monotonic time of last successful getUpdates
+        self._poll_last_error: float = 0.0
+        self._poll_error_streak: int = 0
+        self._poll_updates_total: int = 0
+        self._poll_heartbeat_at: float = 0.0  # last heartbeat log time
+        self._poll_stale_alerted: bool = False
 
     def start(self) -> None:
         if self._config.mode == "none":
@@ -733,6 +740,7 @@ class TunnelManager:
             daemon=True,
         )
         self._watchdog_thread.start()
+        health.register_thread("tunnel-watchdog", self._watchdog_thread)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -757,12 +765,18 @@ class TunnelManager:
     def polling_active(self) -> bool:
         return self._polling_active
 
-    def status(self) -> dict[str, str | bool]:
+    def status(self) -> dict[str, str | bool | int | float | None]:
+        now = self._clock.time()
+        poll_age = round(now - self._poll_last_ok, 1) if self._poll_last_ok > 0 else None
         return {
             "mode": self._config.mode,
             "state": self._state.value,
             "tunnel_url": self._tunnel_url,
             "polling_active": self._polling_active,
+            "poll_last_ok_ago_s": poll_age,
+            "poll_error_streak": self._poll_error_streak,
+            "poll_updates_total": self._poll_updates_total,
+            "poll_thread_alive": self._poll_thread.is_alive() if self._poll_thread else None,
         }
 
     def _telegram_api(self, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
@@ -853,8 +867,17 @@ class TunnelManager:
                         self._start_poll_fallback()
             if self._polling_active and self._poll_thread and not self._poll_thread.is_alive():
                 _log(_LOG_WARN, "tunnel", "Poll fallback thread died, restarting...")
+                self._on_notify("⚠️ Poll thread died — restarting now")
                 self._poll_stop.clear()
                 self._start_poll_fallback()
+            # Stale poll detection: alert if no successful poll for 3+ minutes
+            if self._polling_active and self._poll_last_ok > 0:
+                stale_seconds = self._clock.time() - self._poll_last_ok
+                if stale_seconds > 180 and not self._poll_stale_alerted:
+                    self._poll_stale_alerted = True
+                    msg = f"⚠️ Poll stale: no successful getUpdates for {int(stale_seconds)}s (error_streak={self._poll_error_streak})"
+                    _log(_LOG_WARN, "tunnel", msg)
+                    self._on_notify(msg)
             check_counter = (check_counter + 1) % self._config.webhook_check_cycles
             if check_counter == 0:
                 if self._tunnel_url:
@@ -1008,6 +1031,7 @@ class TunnelManager:
             daemon=True,
         )
         self._poll_thread.start()
+        health.register_thread("tunnel-poll", self._poll_thread)
         self._polling_active = True
         self._state = TunnelState.POLL_FALLBACK
         _log(_LOG_INFO, "tunnel", "Poll fallback started")
@@ -1025,6 +1049,11 @@ class TunnelManager:
         offset = 0
         _bridge_host = self._bind_host or "127.0.0.1"
         _log(_LOG_INFO, "tunnel:poll", f"Poll loop started (bridge={_bridge_host}:{self._port})")
+        now = self._clock.time()
+        self._poll_last_ok = now
+        self._poll_heartbeat_at = now
+        self._poll_error_streak = 0
+        self._poll_stale_alerted = False
         while not self._poll_stop.is_set():
             try:
                 url = f"https://api.telegram.org/bot{self._token}/getUpdates?offset={offset}&timeout={self._config.poll_timeout}"
@@ -1034,6 +1063,25 @@ class TunnelManager:
                 if not data.get("ok"):
                     self._clock.sleep(1)
                     continue
+                # Successful poll
+                now = self._clock.time()
+                self._poll_last_ok = now
+                self._poll_error_streak = 0
+                health.ok("poll")
+                if self._poll_stale_alerted:
+                    self._poll_stale_alerted = False
+                    _log(_LOG_INFO, "tunnel:poll", "Poll recovered — getUpdates responding again")
+                    self._on_notify("✅ Poll recovered — getUpdates responding again")
+                n_updates = len(data.get("result", []))
+                self._poll_updates_total += n_updates
+                # Heartbeat every 5 minutes
+                if now - self._poll_heartbeat_at >= 300:
+                    _log(
+                        _LOG_INFO,
+                        "tunnel:poll",
+                        f"heartbeat: {self._poll_updates_total} updates total, streak_ok, offset={offset}",
+                    )
+                    self._poll_heartbeat_at = now
                 for update in data.get("result", []):
                     uid = update.get("update_id", 0)
                     if self._on_update:
@@ -1046,7 +1094,11 @@ class TunnelManager:
                     offset = uid + 1
             except Exception as exc:
                 if not self._poll_stop.is_set():
-                    _log(_LOG_WARN, "tunnel:poll", f"Poll error: {exc}")
+                    now = self._clock.time()
+                    self._poll_last_error = now
+                    self._poll_error_streak += 1
+                    health.error("poll")
+                    _log(_LOG_WARN, "tunnel:poll", f"Poll error (streak={self._poll_error_streak}): {exc}")
                     self._clock.sleep(self._config.poll_error_delay)
 
     def _forward_to_localhost(self, update: dict[str, object]) -> None:
@@ -1094,7 +1146,7 @@ class TunnelManager:
             (self._node_dir / "tunnel.pid").write_text(str(pid))
 
     def _save_bot_info(self) -> None:
-        with suppress(Exception):
+        with _log_suppress(Exception, level=_LOG_DEBUG, tag="tunnel:bot-info"):
             info = self._tg_get_me()
             if info.get("ok"):
                 result = info.get("result", {})
@@ -1188,6 +1240,8 @@ class BaseConnector[M](abc.ABC):
         self._stop_event: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
         self._consecutive_failures: int = 0
+        self._handler_errors: int = 0  # messages that arrived but failed to deliver
+        self._handler_error_alerted: bool = False
         self._alert_sent: bool = False
         self._lock: threading.RLock = threading.RLock()
 
@@ -1245,7 +1299,7 @@ class BaseConnector[M](abc.ABC):
 
     def status(self) -> ConnectorStatus:
         with self._lock:
-            return ConnectorStatus(
+            s = ConnectorStatus(
                 name=self.connector_name,
                 running=self.running,
                 sender_filter=self.sender_filter,
@@ -1253,6 +1307,8 @@ class BaseConnector[M](abc.ABC):
                 consecutive_failures=self._consecutive_failures,
                 alert_sent=self._alert_sent,
             )
+            s["handler_errors"] = self._handler_errors  # type: ignore[typeddict-unknown-key]
+            return s
 
     def is_allowed_sender(self, message: M) -> bool:
         return self.extract_sender(message) == self.sender_filter
@@ -1279,7 +1335,7 @@ class BaseConnector[M](abc.ABC):
 
     def _send_alert(self, text: str) -> None:
         tag = f"[{self.connector_name}]"
-        print(f"{tag} ALERT: {text}")
+        _log(_LOG_WARN, self.connector_name, f"ALERT: {text}")
         alert_fn = self.on_alert  # Capture ref outside lock
         if alert_fn is None:
             return
@@ -1290,7 +1346,7 @@ class BaseConnector[M](abc.ABC):
         try:
             alert_fn(f"{tag} {text}")
         except Exception as e:
-            print(f"{tag} Failed to send alert: {e}")
+            _log(_LOG_WARN, self.connector_name, f"Failed to send alert: {e}")
             with self._lock:
                 self._alert_sent = False  # Rollback — allow retry
 
@@ -1304,7 +1360,7 @@ class BaseConnector[M](abc.ABC):
                 try:
                     self.on_alert(f"{tag} Recovered — polling resumed")
                 except Exception as e:
-                    print(f"{tag} Failed to send recovery alert: {e}")
+                    _log(_LOG_WARN, self.connector_name, f"Failed to send recovery alert: {e}")
 
     def track_failure(self) -> None:
         with self._lock:
@@ -1320,28 +1376,51 @@ class BaseConnector[M](abc.ABC):
         if was_failing:
             self._clear_alert()
 
+    def track_handler_error(self, error: str) -> None:
+        """Track a message that arrived but failed to deliver (handler error)."""
+        with self._lock:
+            self._handler_errors += 1
+            count = self._handler_errors
+            should_alert = count >= 3 and not self._handler_error_alerted
+            if should_alert:
+                self._handler_error_alerted = True
+        if should_alert:
+            tag = f"[{self.connector_name}]"
+            msg = f"{tag} ⚠️ {count} messages arrived but failed to deliver: {error}"
+            _log(_LOG_WARN, self.connector_name, f"ALERT: handler errors = {count}")
+            if self.on_alert:
+                try:
+                    self.on_alert(msg)
+                except Exception as e:
+                    _log(_LOG_WARN, self.connector_name, f"Failed to send handler alert: {e}")
+
+    def clear_handler_errors(self) -> None:
+        with self._lock:
+            self._handler_errors = 0
+            self._handler_error_alerted = False
+
     def _poll_loop(self, skip_preflight: bool = False) -> None:
         tag = f"[{self.connector_name}]"
         if not skip_preflight:
             ok, msg = self.preflight_check()
             if not ok:
-                print(f"{tag} Preflight FAILED: {msg}")
-                print(f"{tag} Retrying in 60s...")
+                _log(_LOG_ERROR, self.connector_name, f"Preflight FAILED: {msg}")
+                _log(_LOG_INFO, self.connector_name, "Retrying in 60s...")
                 if self._stop_event.wait(60):
                     return
                 ok, msg = self.preflight_check()
                 if not ok:
                     self._send_alert(f"{self.connector_name} disabled — {msg}")
                     return
-            print(f"{tag} Preflight OK: {msg}")
+            _log(_LOG_INFO, self.connector_name, f"Preflight OK: {msg}")
         else:
-            print(f"{tag} Preflight OK (restart)")
+            _log(_LOG_INFO, self.connector_name, "Preflight OK (restart)")
         self._on_preflight_ok()
         while not self._stop_event.is_set():
             try:
                 self.poll_once()
             except Exception as e:
-                print(f"{tag} Poll error: {e}")
+                _log(_LOG_ERROR, self.connector_name, f"Poll error: {e}")
                 self.track_failure()
             self._stop_event.wait(self.poll_interval)
 
@@ -1457,7 +1536,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
 
     def status(self) -> GmailStatus:
         with self._lock:
-            return GmailStatus(
+            s = GmailStatus(
                 name=self.connector_name,
                 running=self.running,
                 sender_filter=self.sender_filter,
@@ -1466,6 +1545,8 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 alert_sent=self._alert_sent,
                 history_id=self._history_id,
             )
+            s["handler_errors"] = self._handler_errors  # type: ignore[typeddict-unknown-key]
+            return s
 
     def _run_gws(self, *args: str, json_body: str | None = None) -> dict[str, object] | None:
         cmd: list[str] = [self.gws_bin, "gmail", "users", *list(args)]
@@ -1475,16 +1556,19 @@ class GmailConnector(BaseConnector[GmailMessage]):
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
                 stderr = result.stderr[:200]
-                print(f"[gmail] gws error: {stderr}")
+                _log(_LOG_WARN, "gmail", f"gws error: {stderr}")
                 if any(kw in stderr.lower() for kw in ("token", "auth", "expired")):
-                    print(
-                        '[gmail] ⚠ TOKEN MAY BE EXPIRED — run: gws gmail users getProfile --params \'{"userId":"me"}\''
+                    _log(
+                        _LOG_ERROR,
+                        "gmail",
+                        'TOKEN MAY BE EXPIRED — run: gws gmail users getProfile --params \'{"userId":"me"}\'',
                     )
+
                 return None
             parsed: object = json.loads(result.stdout)
             return cast(dict[str, object], parsed) if isinstance(parsed, dict) else None
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
-            print(f"[gmail] gws call failed: {e}")
+            _log(_LOG_WARN, "gmail", f"gws call failed: {e}")
             return None
 
     def _get_profile(self) -> GmailProfile | None:
@@ -1520,7 +1604,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
         try:
             _atomic_write(self._history_file_path, hid)
         except OSError as e:
-            print(f"[gmail] Failed to save historyId: {e}")
+            _log(_LOG_WARN, "gmail", f"Failed to save historyId: {e}")
 
     def _load_history_id(self) -> str | None:
         try:
@@ -1531,14 +1615,14 @@ class GmailConnector(BaseConnector[GmailMessage]):
         except FileNotFoundError:
             pass
         except OSError as e:
-            print(f"[gmail] Failed to load historyId: {e}")
+            _log(_LOG_WARN, "gmail", f"Failed to load historyId: {e}")
         return None
 
     def _bootstrap_history_id(self, skip_disk: bool = False) -> str | None:
         if not skip_disk:
             saved = self._load_history_id()
             if saved:
-                print(f"[gmail] Resumed historyId={saved} from disk")
+                _log(_LOG_INFO, "gmail", f"Resumed historyId={saved} from disk")
                 return saved
         profile = self._get_profile()
         if profile and profile.get("historyId"):
@@ -1653,7 +1737,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             if not (filename and att_id):
                 return
             if size > _MAX_ATTACHMENT_BYTES:
-                print(f"[gmail] Skipping oversized attachment: {filename} ({size} bytes)")
+                _log(_LOG_WARN, "gmail", f"Skipping oversized attachment: {filename} ({size} bytes)")
                 return
             raw_mime = p.get("mimeType")
             attachments.append(
@@ -1858,7 +1942,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             plain_text += reply_hint
         self.on_message(targets, html_text, plain_text, downloaded)
         if not self.mark_as_read(msg_id):
-            print(f"[gmail] Warning: failed to mark message {msg_id} as read")
+            _log(_LOG_WARN, "gmail", f"Failed to mark message {msg_id} as read")
 
     def poll_once(self) -> None:
         msg_ids, new_hid = self._get_new_message_ids()
@@ -1867,13 +1951,13 @@ class GmailConnector(BaseConnector[GmailMessage]):
             with self._lock:
                 fail_count = self._consecutive_failures
             if fail_count >= CONSECUTIVE_FAIL_REBOOTSTRAP:
-                print(f"[gmail] ⚠ {fail_count} failures — attempting re-bootstrap")
+                _log(_LOG_WARN, "gmail", f"{fail_count} failures — attempting re-bootstrap")
                 new_id = self._bootstrap_history_id(skip_disk=True)
                 if new_id:
                     with self._lock:
                         self._history_id = new_id
                     self.track_success()
-                    print(f"[gmail] Re-bootstrap OK (historyId={new_id})")
+                    _log(_LOG_INFO, "gmail", f"Re-bootstrap OK (historyId={new_id})")
                 else:
                     self._send_alert(
                         "Gmail re-bootstrap failed — token expired, needs manual renewal (ask geni to run gws renewal)"
@@ -1881,25 +1965,32 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return
         self.track_success()
         had_errors: bool = False
+        last_error: str = ""
         for msg_id in msg_ids:
             try:
                 self._process_message(msg_id)
             except Exception as e:
-                print(f"[gmail] Error processing message {msg_id}: {e}")
+                _log(_LOG_ERROR, "gmail", f"Error processing message {msg_id}: {e}")
                 had_errors = True
+                last_error = str(e)
+                self.track_handler_error(str(e))
+                health.error("gmail")
+        if not had_errors:
+            self.clear_handler_errors()
+            health.ok("gmail")
         if new_hid and not had_errors:
             with self._lock:
                 self._history_id = new_hid
             self._save_history_id()
         elif had_errors:
-            print("[gmail] historyId NOT advanced — some messages failed, will retry next poll")
+            _log(_LOG_WARN, "gmail", "historyId NOT advanced — some messages failed, will retry next poll")
 
     def _on_preflight_ok(self) -> None:
         hid = self._bootstrap_history_id()
         with self._lock:
             self._history_id = hid
         if not hid:
-            print("[gmail] Bootstrap failed, retrying in 60s...")
+            _log(_LOG_WARN, "gmail", "Bootstrap failed, retrying in 60s...")
             if self._stop_event.wait(60):
                 return
             hid = self._bootstrap_history_id()
@@ -1909,7 +2000,9 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 self._send_alert("Gmail connector disabled — cannot get historyId")
                 self._stop_event.set()
                 return
-        print(f"[gmail] Started (interval={self.poll_interval}s, from={self.sender_filter}, historyId={hid})")
+        _log(
+            _LOG_INFO, "gmail", f"Started (interval={self.poll_interval}s, from={self.sender_filter}, historyId={hid})"
+        )
         self._catchup_unread()
 
     def _catchup_unread(self) -> None:
@@ -1920,12 +2013,12 @@ class GmailConnector(BaseConnector[GmailMessage]):
         msg_ids = [m["id"] for m in messages_list if isinstance(m, dict) and isinstance(m.get("id"), str)]
         if not msg_ids:
             return
-        print(f"[gmail] Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
+        _log(_LOG_INFO, "gmail", f"Catch-up: {len(msg_ids)} unread from {self.sender_filter}")
         for msg_id in msg_ids:
             try:
                 self._process_message(msg_id)
             except Exception as e:
-                print(f"[gmail] Catch-up error {msg_id}: {e}")
+                _log(_LOG_WARN, "gmail", f"Catch-up error {msg_id}: {e}")
 
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
@@ -1982,7 +2075,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def status(self) -> GithubStatus:
         with self._lock:
-            return GithubStatus(
+            s = GithubStatus(
                 name=self.connector_name,
                 running=self.running,
                 sender_filter=self.sender_filter,
@@ -1993,6 +2086,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 last_poll_time=self._last_poll_time,
                 seen_ids_count=len(self._seen_ids),
             )
+            s["handler_errors"] = self._handler_errors  # type: ignore[typeddict-unknown-key]
+            return s
 
     def _load_state(self) -> bool:
         if not self._state_file:
@@ -2026,7 +2121,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         try:
             _atomic_write(self._state_file, json.dumps(state))
         except OSError as e:
-            print(f"[github] Failed to save state: {e}")
+            _log(_LOG_WARN, "github", f"Failed to save state: {e}")
 
     def _on_preflight_ok(self) -> None:
         restored = self._load_state()
@@ -2034,7 +2129,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             with self._lock:
                 seen_count = len(self._seen_ids)
                 poll_time = self._last_poll_time
-            print(f"[github] Restart — restored state: {seen_count} seen IDs, since={poll_time}")
+            _log(_LOG_INFO, "github", f"Restart — restored state: {seen_count} seen IDs, since={poll_time}")
         else:
             initial_time = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             with self._lock:
@@ -2046,15 +2141,17 @@ class GitHubConnector(BaseConnector[GithubComment]):
                         cid = c.get("id")
                         if isinstance(cid, int) and not isinstance(cid, bool):
                             self._seen_ids.add(cid)
-                print(f"[github] First run — seeded {len(seed)} existing comments as seen")
+                _log(_LOG_INFO, "github", f"First run — seeded {len(seed)} existing comments as seen")
             else:
-                print(f"[github] First run — no comments to seed")
+                _log(_LOG_INFO, "github", f"First run — no comments to seed")
             self._save_state()
         with self._lock:
             poll_time = self._last_poll_time
         repos_str = ", ".join(self.repos)
-        print(
-            f"[github] Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})"
+        _log(
+            _LOG_INFO,
+            "github",
+            f"Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})",
         )
 
     def _gh_api(self, endpoint: str, timeout: int = 30) -> str | None:
@@ -2066,14 +2163,14 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 timeout=timeout,
             )
             if result.returncode != 0:
-                print(f"[github] gh api error: {result.stderr.strip()}")
+                _log(_LOG_WARN, "github", f"gh api error: {result.stderr.strip()}")
                 return None
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            print(f"[github] gh api timed out: {endpoint}")
+            _log(_LOG_WARN, "github", f"gh api timed out: {endpoint}")
             return None
         except OSError as e:
-            print(f"[github] gh api exception: {e}")
+            _log(_LOG_WARN, "github", f"gh api exception: {e}")
             return None
 
     def _get_all_comments(self, since: str) -> tuple[list[GithubComment] | None, bool]:
@@ -2092,7 +2189,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             if issue_raw is None or pr_raw is None:
                 is_complete = False
                 failed = "issues" if issue_raw is None else "pulls"
-                print(f"[github] Partial fetch for {repo} — {failed} comments failed")
+                _log(_LOG_WARN, "github", f"Partial fetch for {repo} — {failed} comments failed")
             all_raws.extend([issue_raw, pr_raw])
         if not any_success:
             return None, False
@@ -2200,7 +2297,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         self.on_message(targets, html_text, plain_text, [], metadata=metadata)
         with self._lock:
             self._seen_ids.add(cid)
-        print(f"[github] {context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
+        _log(_LOG_INFO, "github", f"{context['kind']} #{context['number']}: -> {targets or 'Telegram only'}")
 
     def poll_once(self) -> None:
         with self._lock:
@@ -2217,14 +2314,21 @@ class GitHubConnector(BaseConnector[GithubComment]):
             try:
                 self._process_comment(comment)
             except Exception as e:
-                print(f"[github] Error processing comment {comment.get('id')}: {e}")
+                _log(_LOG_ERROR, "github", f"Error processing comment {comment.get('id')}: {e}")
                 had_errors = True
+                self.track_handler_error(str(e))
+                health.error("github")
+        if not had_errors:
+            self.clear_handler_errors()
+            health.ok("github")
         if not had_errors and fetch_complete:
             with self._lock:
                 self._last_poll_time = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
-            print(
-                f"[github] poll_time NOT advanced — {', '.join(r for r in ['partial fetch' if not fetch_complete else '', 'processing errors' if had_errors else ''] if r)}, will retry"
+            _log(
+                _LOG_WARN,
+                "github",
+                f"poll_time NOT advanced — {', '.join(r for r in ['partial fetch' if not fetch_complete else '', 'processing errors' if had_errors else ''] if r)}, will retry",
             )
         self._prune_seen_ids()
         self._save_state()
@@ -2348,10 +2452,10 @@ def connector_on_message(tag: str) -> Callable:
                     serve_url = _beast_serve_deploy(tmp_path, f"connector-{tag}")
             summary = connector_short_summary(tag, plain_text, serve_url, metadata)
             try:
-                telegram.send_telegram_message(core.admin_chat_id, summary, parse_mode="HTML")
+                send_telegram_message(core.admin_chat_id, summary, parse_mode="HTML")
             except OSError:
                 with _log_suppress(urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Telegram send failed: "):
-                    telegram.send_telegram_message(core.admin_chat_id, plain_text[:300])
+                    send_telegram_message(core.admin_chat_id, plain_text[:300])
             for att in attachments or []:
                 fpath = att.get("path", "")
                 fname = att.get("filename", "")
@@ -2386,7 +2490,7 @@ def connector_on_alert(tag: str) -> Callable:
             with _log_suppress(
                 urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Failed to send Telegram alert: "
             ):
-                telegram.send_telegram_message(core.admin_chat_id, text)
+                send_telegram_message(core.admin_chat_id, text)
 
     return handler
 
@@ -2419,15 +2523,21 @@ def start_connectors() -> tuple[object, object]:
     if GMAIL_ENABLED and GmailConnector is not None:
         gmail_inst = new_gmail()
         gmail_inst.start()
-        print(f"Gmail connector: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
+        if gmail_inst._thread:
+            health.register_thread("gmail-poller", gmail_inst._thread)
+        _log(_LOG_INFO, "gmail", f"Connector started: polling every {GMAIL_POLL_INTERVAL}s for {GMAIL_FROM_FILTER}")
     elif GMAIL_ENABLED and GmailConnector is None:
         _log(_LOG_ERROR, "bridge", f"Gmail connector disabled: {GMAIL_IMPORT_ERROR}")
     github_inst = None
     if GITHUB_ENABLED and GitHubConnector is not None:
         github_inst = new_github()
         github_inst.start()
-        print(
-            f"GitHub connector: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {', '.join(GITHUB_REPOS)}"
+        if github_inst._thread:
+            health.register_thread("github-poller", github_inst._thread)
+        _log(
+            _LOG_INFO,
+            "github",
+            f"Connector started: polling every {GITHUB_POLL_INTERVAL}s for {GITHUB_FROM_USER} on {', '.join(GITHUB_REPOS)}",
         )
     elif GITHUB_ENABLED and GitHubConnector is None:
         _log(_LOG_ERROR, "bridge", f"GitHub connector disabled: {GITHUB_IMPORT_ERROR}")
@@ -2453,7 +2563,7 @@ def restart_connector(name: str) -> tuple[bool, str]:
     inst = factory()
     setattr(connectors, name, inst)
     ok, msg = inst.restart()
-    print(f"{name.title()} connector {'restarted' if ok else 'restart failed'}: {msg}")
+    _log(_LOG_INFO, name, f"Connector {'restarted' if ok else 'restart failed'}: {msg}")
     return ok, msg
 
 
@@ -3511,6 +3621,8 @@ def watchdog_loop() -> None:
             if _disk_check_counter >= 20:
                 _disk_check_counter = 0
                 _watchdog_resource_checks(set(remote_workers.keys()))
+            health.ok("watchdog")
+            _health_alert_check()
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)
 
 
@@ -4610,11 +4722,11 @@ def _gh_api(endpoint: str, jq: str, *, paginate: bool = True, timeout: int = 30)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
-            print(f"Warning: gh api {endpoint} returned {r.returncode}: {r.stderr.strip()[:200]}")
+            _log(_LOG_WARN, "pr-review", f"gh api {endpoint} returned {r.returncode}: {r.stderr.strip()[:200]}")
             return []
         return [json.loads(line) for line in r.stdout.strip().split("\n") if line.strip()]
     except Exception as e:
-        print(f"Warning: gh api {endpoint} failed: {e}")
+        _log(_LOG_WARN, "pr-review", f"gh api {endpoint} failed: {e}")
         return []
 
 
@@ -4739,7 +4851,7 @@ def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
         )
         return r.stdout if r.returncode == 0 else None
     except subprocess.TimeoutExpired:
-        print("Full diff fetch timed out")
+        _log(_LOG_WARN, "pr-review", "Full diff fetch timed out")
         return None
 
 
@@ -4787,7 +4899,7 @@ def _fetch_file_context(
             snippet.append(f"│ {ln:>4}: {lines[i]}{marker}")
         return "\n".join(snippet), ref[:12]
     except Exception as e:
-        print(f"[pr-comment] Failed to fetch file context: {e}")
+        _log(_LOG_WARN, "pr-comment", f"Failed to fetch file context: {e}")
         return None, ref[:12]
 
 
@@ -4816,7 +4928,7 @@ def _notify_telegram(
         )
         urllib.request.urlopen(req, timeout=5)
     except Exception as e:
-        print(f"[pr-comment] Telegram notify failed: {e}")
+        _log(_LOG_WARN, "pr-comment", f"Telegram notify failed: {e}")
 
 
 def _route_mentions_to_workers(
@@ -4853,9 +4965,9 @@ def _route_mentions_to_workers(
             finally:
                 with suppress(OSError):
                     os.unlink(tmpfile)
-            print(f"[pr-comment] Routed to @{mention} via tmux")
+            _log(_LOG_INFO, "pr-comment", f"Routed to @{mention} via tmux")
         except Exception as e:
-            print(f"[pr-comment] Failed to route to @{mention}: {e}")
+            _log(_LOG_WARN, "pr-comment", f"Failed to route to @{mention}: {e}")
 
 
 def _pr_review_main() -> None:
@@ -6054,7 +6166,7 @@ class ConnectorRegistry:
             if inst is not None:
                 with _log_suppress(RuntimeError, OSError, level=_LOG_DEBUG, tag=f"shutdown:{name}"):
                     inst.stop()
-                    print(f"{name.title()} connector stopped")
+                    _log(_LOG_INFO, name, "Connector stopped")
 
     def log_message(self, tag: str, html_text: str, plain_text: str, targets: list[str]) -> None:
         with self._lock:
@@ -6291,6 +6403,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 chunk = f"**{name}:** _(continued)_\n{chunk}"
             result = transport.send_rich_text(chat_id, chunk, reply_to=prev_msg_id if prev_msg_id else None)
             if result and result.get("ok"):
+                health.ok("telegram_api")
                 _rr = result.get("result", {})
                 prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
                 if len(rich_chunks) > 1:
@@ -6302,6 +6415,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 else:
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
             else:
+                health.error("telegram_api")
                 error_code = (result or {}).get("error_code", 0)
                 desc = (result or {}).get("description", "")
                 _log(
@@ -6329,6 +6443,7 @@ def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str, prev_msg_
     for i, part in enumerate(formatted_parts):
         result = transport.send_text(chat_id, part, parse_mode="HTML", reply_to=prev_msg_id if prev_msg_id else None)
         if result and result.get("ok"):
+            health.ok("telegram_api")
             _rr = result.get("result", {})
             prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
             if len(formatted_parts) > 1:
@@ -6338,6 +6453,7 @@ def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str, prev_msg_
             else:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
+            health.error("telegram_api")
             desc = str((result or {}).get("description", ""))
             _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed ({desc}), retrying as plain text")
             plain_text = re.sub(r"<[^>]+>", "", part)
@@ -8555,7 +8671,7 @@ def handle_checkin_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult
                 notice = _build_cwd_change_notice(name, old_cwd, requested_cwd, old_sid or "")
                 notify_chat_id = get_manager_chat_id(name)
                 if notify_chat_id is not None:
-                    telegram.send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
+                    send_telegram_message(notify_chat_id, notice, parse_mode="HTML")
             _log(_LOG_INFO, "checkin", f"{name}: requested_cwd={requested_cwd}, tmux={tmux_name}, host={host}")
             if tmux_name and claudecode.tmux_exists(tmux_name, host=host):
                 pane_cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
@@ -8566,7 +8682,7 @@ def handle_checkin_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult
                     if not allowed:
                         notify_chat_id = get_manager_chat_id(name)
                         if notify_chat_id is not None:
-                            telegram.send_telegram_message(notify_chat_id, block_msg)
+                            send_telegram_message(notify_chat_id, block_msg)
                         handler._send_text(200, block_msg)
                         return
                     _log(
@@ -9909,6 +10025,47 @@ def cmd_teleport(router: object, arg: str, chat_id: ChatId, check_only: bool = F
     return True
 
 
+def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
+    """Manage health alerts: /alert [status|snooze <signal>|history]"""
+    parts = arg.strip().split()
+    sub = parts[0].lower() if parts else "status"
+    if sub == "status":
+        router.reply(chat_id, _alert_status())  # type: ignore[attr-defined]
+        return True
+    if sub == "snooze":
+        signal = parts[1] if len(parts) > 1 else ""
+        if not signal:
+            router.reply(chat_id, "Usage: /alert snooze <signal>\nActive: " + ", ".join(_alert_active) or "none")  # type: ignore[attr-defined]
+            return True
+        duration = _ALERT_SNOOZE
+        if len(parts) > 2:
+            with contextlib.suppress(ValueError):
+                duration = int(parts[2]) * 60  # minutes to seconds
+        result = _alert_snooze(signal, duration)
+        router.reply(chat_id, result)  # type: ignore[attr-defined]
+        return True
+    if sub == "history":
+        if _health_channel_id and _health_channel_id in relay_store.channels:
+            ch = relay_store.channels[_health_channel_id]
+            msgs = ch.get("messages", [])
+            if not msgs:
+                router.reply(chat_id, "No alert history.")  # type: ignore[attr-defined]
+                return True
+            # Show last 10 alerts
+            recent = msgs[-10:]
+            lines = [f"Last {len(recent)} alerts (channel {_health_channel_id[:8]}):"]
+            for m in recent:
+                ts = m.get("ts", "?")
+                text = m.get("text", "?")
+                lines.append(f"  [{ts}] {text[:100]}")
+            router.reply(chat_id, "\n".join(lines))  # type: ignore[attr-defined]
+        else:
+            router.reply(chat_id, "Health channel not active. Set BRIDGE_ALERT_WORKERS and restart.")  # type: ignore[attr-defined]
+        return True
+    router.reply(chat_id, "Usage: /alert [status|snooze <signal> [minutes]|history]")  # type: ignore[attr-defined]
+    return True
+
+
 def cmd_teleback(router: object, arg: str, chat_id: ChatId) -> bool:
     parts = arg.split()
     worker_name = parts[0].lower() if parts else ""
@@ -10318,6 +10475,7 @@ class CommandRouter:
             "/teleport": lambda arg, cid, mid: self.cmd_teleport(arg, cid),
             "/teleport-check": lambda arg, cid, mid: self.cmd_teleport(arg, cid, check_only=True),
             "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),
+            "/alert": lambda arg, cid, mid: self.cmd_alert(arg, cid),
         }
 
     def reply(self, chat_id: ChatId | None, text: str, outcome: str | None = None) -> None:
@@ -10613,6 +10771,10 @@ class CommandRouter:
         except Exception:
             send_ok = False
             _log(_LOG_ERROR, "dispatch", f"Exception sending to {session_name}", exc=sys.exc_info()[1])
+        if send_ok:
+            health.ok("dispatch")
+        else:
+            health.error("dispatch")
         if not send_ok:
             clear_pending(session_name)
             self.reply(
@@ -10978,6 +11140,7 @@ _install_delegates(
     CommandRouter,
     [
         "cmd_teleport",
+        "cmd_alert",
         "cmd_teleback",
         "cmd_hire",
         "cmd_end",
@@ -11024,6 +11187,28 @@ def _setup_endpoint_routes() -> None:
     r.add(G, "/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
     r.add(G, "/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
     r.add(G, "/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
+    r.add(G, "/health", lambda h, p, _m: (lambda s: h._send_json(200 if s.get("ok") else 503, s))(health.snapshot()))
+    r.add(
+        G,
+        "/alerts",
+        lambda h, p, _m: h._send_json(
+            200,
+            {
+                "status": _alert_status(),
+                "active": dict(_alert_active),
+                "snoozed": {k: v - time.time() for k, v in _alert_snoozed.items() if v > time.time()},
+            },
+        ),
+    )
+    r.add(
+        P,
+        "/alerts/snooze",
+        lambda h, b, _m: (
+            lambda d: h._send_json(
+                200, {"result": _alert_snooze(d.get("signal", ""), int(d.get("duration", _ALERT_SNOOZE)))}
+            )
+        )(json.loads(b) if b else {}),
+    )
     r.add(G, "/health/workers", lambda h, p, _m: h.handle_health_workers_endpoint())
     r.add(G, "/health/tunnel", lambda h, p, _m: h.handle_health_tunnel_endpoint())
     r.add(G, "/connectors", lambda h, p, _m: h.handle_connectors_status())
@@ -11058,6 +11243,289 @@ class MentionTracker:
         self.ts = snap.ts
 
 
+class BridgeHealth:
+    """Unified health registry. Every subsystem writes timestamps here.
+    One endpoint reads them all. One external watchdog alerts on staleness.
+
+    Signals tracked (all as monotonic timestamps of last success):
+      poll_ok         — last successful getUpdates response
+      dispatch_ok     — last successful message dispatch to a worker
+      hook_ok         — last successful worker→Telegram delivery via /outputs
+      telegram_api_ok — last successful Telegram API send (text/photo/doc)
+      watchdog_ok     — last worker-watchdog loop iteration
+      gmail_ok        — last successful gmail message delivery
+      github_ok       — last successful github comment delivery
+    Error counters:
+      poll_errors     — consecutive getUpdates failures
+      hook_errors     — consecutive hook delivery failures
+      telegram_errors — consecutive Telegram API failures
+    Thread liveness:
+      threads         — {name: alive} for all expected permanent threads
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ok_ts: dict[str, float] = {}  # signal -> time.time() of last success
+        self._errors: dict[str, int] = {}  # signal -> consecutive error count
+        self._threads: dict[str, threading.Thread] = {}  # name -> thread ref
+        self._start_time: float = time.time()
+
+    def ok(self, signal: str) -> None:
+        """Record a successful operation."""
+        now = time.time()
+        with self._lock:
+            self._ok_ts[signal] = now
+            self._errors[signal] = 0
+
+    def error(self, signal: str) -> None:
+        """Record a failed operation."""
+        with self._lock:
+            self._errors[signal] = self._errors.get(signal, 0) + 1
+
+    def error_count(self, signal: str) -> int:
+        with self._lock:
+            return self._errors.get(signal, 0)
+
+    def register_thread(self, name: str, thread: threading.Thread) -> None:
+        with self._lock:
+            self._threads[name] = thread
+
+    # Event-driven signals: only unhealthy if errors accumulate, not if idle
+    _EVENT_SIGNALS = frozenset({"telegram_api", "hook", "dispatch"})
+
+    def snapshot(self) -> dict[str, object]:
+        """Full health snapshot for the /health endpoint."""
+        now = time.time()
+        with self._lock:
+            signals = {}
+            for sig, ts in self._ok_ts.items():
+                age = round(now - ts, 1)
+                errors = self._errors.get(sig, 0)
+                if sig in self._EVENT_SIGNALS:  # noqa: SIM108
+                    # Event-driven: OK unless errors are accumulating
+                    sig_ok = errors < 10
+                else:
+                    # Periodic: must have a recent heartbeat AND low errors
+                    sig_ok = age < 300 and errors < 10
+                signals[sig] = {
+                    "last_ok_ago_s": age,
+                    "errors": errors,
+                    "ok": sig_ok,
+                }
+            threads = {}
+            for name, t in self._threads.items():
+                threads[name] = t.is_alive()
+        # Pool depth (outside lock — reads are thread-safe qsize)
+        pools: dict[str, object] = {}
+        try:
+            pools["msg_pool"] = {"pending": _message_pool._work_queue.qsize(), "max": _message_pool._max_workers}
+            pools["task_pool"] = {"pending": _task_pool._work_queue.qsize(), "max": _task_pool._max_workers}
+        except Exception:
+            pass
+        all_ok = (all(s["ok"] for s in signals.values()) and all(threads.values())) if signals else False
+        return {
+            "ok": all_ok,
+            "version": VERSION,
+            "uptime_s": round(now - self._start_time),
+            "signals": signals,
+            "threads": threads,
+            "pools": pools,
+        }
+
+
+health = BridgeHealth()
+
+# --- Health alert routing via relay channel ---
+# Leverages the existing relay channel infrastructure for alert delivery.
+# On startup, creates (or restores) a "bridge-health" relay channel with
+# subscribed workers. Health alerts are posted as messages to this channel.
+# Workers receive alerts via the relay delivery path and can poll /relay/<id>
+# for alert history. The channel never expires (TTL = 10 years).
+ALERT_WORKERS: list[str] = [w.strip() for w in os.environ.get("BRIDGE_ALERT_WORKERS", "").split(",") if w.strip()]
+_ALERT_COOLDOWN = 300  # seconds between repeated alerts for same signal
+_ALERT_ESCALATE = 1800  # 30min: escalate if unresolved (shorter cooldown, severity bump)
+_ALERT_SNOOZE = 3600  # 1hr: /alert snooze duration
+_alert_active: dict[str, float] = {}  # signal -> time.time() when first alerted
+_alert_last_sent: dict[str, float] = {}  # signal -> time.time() when last alert sent
+_alert_snoozed: dict[str, float] = {}  # signal -> time.time() when snooze expires
+_alert_lock = threading.Lock()
+_health_channel_id: str | None = None  # set during startup
+
+
+def _health_channel_ensure() -> str | None:
+    """Create or restore the bridge-health relay channel."""
+    global _health_channel_id
+    if not ALERT_WORKERS:
+        return None
+    # Check if we already have one from a previous run
+    with relay_store.lock:
+        for cid, ch in relay_store.channels.items():
+            if ch.get("label") == "bridge-health":
+                # Update workers list in case it changed
+                ch["workers"] = list(ALERT_WORKERS)
+                _health_channel_id = cid
+                _log(_LOG_INFO, "health", f"Restored health relay channel: {cid} (workers={ALERT_WORKERS})")
+                return cid
+    # Create new channel with very long TTL (never expires in practice)
+    ch, _gt, _rt = relay_channel_create(ALERT_WORKERS[0], "bridge-health", ttl=86400 * 3650)
+    ch["workers"] = list(ALERT_WORKERS)
+    with relay_store.lock:
+        relay_store.channels[ch["id"]] = ch
+        _relay_save()
+    _health_channel_id = ch["id"]
+    _log(_LOG_INFO, "health", f"Created health relay channel: {ch['id']} (workers={ALERT_WORKERS})")
+    return ch["id"]
+
+
+def _health_alert_check() -> None:
+    """Evaluate health snapshot and send alerts to subscribed workers.
+    Called from the watchdog loop (every WATCHDOG_INTERVAL ≈ 4s).
+
+    Alert lifecycle:
+    1. Problem detected → 🔶 WARNING (first fire, 5min cooldown)
+    2. Unresolved 30min+ → 🚨 CRITICAL (escalated, 2min cooldown)
+    3. /alert snooze <signal> → suppressed for 1hr
+    4. Signal recovers → ✅ RESOLVED (clears all state)
+    """
+    if not ALERT_WORKERS or not _health_channel_id:
+        return
+    snap = health.snapshot()
+    now = time.time()
+    current_problems: dict[str, str] = {}  # key -> description
+    # Check signals
+    for sig, info in snap.get("signals", {}).items():
+        if not info.get("ok"):
+            current_problems[sig] = f"{sig}(age={info.get('last_ok_ago_s', '?')}s, errors={info.get('errors', 0)})"
+    # Check threads
+    for tname, alive in snap.get("threads", {}).items():
+        key = f"thread:{tname}"
+        if not alive:
+            current_problems[key] = f"thread {tname} DEAD"
+    # Check pool saturation
+    for pname, pinfo in snap.get("pools", {}).items():
+        key = f"pool:{pname}"
+        pending = pinfo.get("pending", 0) if isinstance(pinfo, dict) else 0
+        mx = pinfo.get("max", 1) if isinstance(pinfo, dict) else 1
+        if pending > mx * 2:
+            current_problems[key] = f"{pname} saturated ({pending} pending, max {mx})"
+    # --- Resolved: was active, now OK ---
+    with _alert_lock:
+        resolved = [k for k in _alert_active if k not in current_problems]
+    for key in resolved:
+        with _alert_lock:
+            _alert_active.pop(key, None)
+            _alert_last_sent.pop(key, None)
+            _alert_snoozed.pop(key, None)
+        _send_health_alert(f"✅ Resolved: {key}")
+    # --- Active problems: classify severity, apply cooldown/snooze ---
+    if not current_problems:
+        return
+    to_send: list[str] = []
+    for key, desc in current_problems.items():
+        with _alert_lock:
+            # Snooze check
+            snooze_until = _alert_snoozed.get(key, 0)
+            if now < snooze_until:
+                continue  # snoozed, skip
+            elif key in _alert_snoozed:
+                del _alert_snoozed[key]  # snooze expired
+            # Track first-seen time
+            first_seen = _alert_active.get(key)
+            if first_seen is None:
+                _alert_active[key] = now
+                first_seen = now
+            # Determine severity + cooldown
+            age = now - first_seen
+            if age >= _ALERT_ESCALATE:
+                severity = "🚨"
+                cooldown = 120  # 2min cooldown when escalated
+            else:
+                severity = "🔶"
+                cooldown = _ALERT_COOLDOWN  # 5min cooldown
+            # Cooldown check
+            last_sent = _alert_last_sent.get(key, 0)
+            if now - last_sent < cooldown:
+                continue
+            _alert_last_sent[key] = now
+        duration = _fmt_duration(now - first_seen)
+        to_send.append(f"{severity} {desc} ({duration})")
+    if to_send:
+        _send_health_alert("\n".join(to_send))
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60}s"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h}h{m}m"
+
+
+def _alert_snooze(signal: str, duration: int = _ALERT_SNOOZE) -> str:
+    """Snooze alerts for a signal. Returns confirmation message."""
+    with _alert_lock:
+        # Exact match first
+        if signal in _alert_active:
+            _alert_snoozed[signal] = time.time() + duration
+            return f"Snoozed '{signal}' for {_fmt_duration(duration)}"
+        # Partial match (e.g., "gmail" matches "gmail")
+        matches = [k for k in _alert_active if signal in k]
+        if len(matches) == 1:
+            _alert_snoozed[matches[0]] = time.time() + duration
+            return f"Snoozed '{matches[0]}' for {_fmt_duration(duration)}"
+        if matches:
+            return f"Ambiguous: {', '.join(matches)}. Be more specific."
+    return f"No active alert matching '{signal}'. Active: {', '.join(_alert_active) or 'none'}"
+
+
+def _alert_status() -> str:
+    """Return current alert state summary."""
+    now = time.time()
+    lines: list[str] = []
+    with _alert_lock:
+        if not _alert_active:
+            return "No active alerts."
+        for key, first_seen in sorted(_alert_active.items()):
+            age = _fmt_duration(now - first_seen)
+            parts = [f"  {key}: active {age}"]
+            if key in _alert_snoozed:
+                remaining = _alert_snoozed[key] - now
+                if remaining > 0:
+                    parts.append(f"(snoozed {_fmt_duration(remaining)})")
+                else:
+                    parts.append("(snooze expired)")
+            if now - first_seen >= _ALERT_ESCALATE:
+                parts.append("⚡ESCALATED")
+            lines.append(" ".join(parts))
+    return "Active alerts:\n" + "\n".join(lines)
+
+
+def _send_health_alert(text: str) -> None:
+    """Post alert to the bridge-health relay channel.
+    Workers subscribed to the channel receive it via relay delivery.
+    Also delivers directly to worker tmux sessions for immediate visibility."""
+    if not _health_channel_id:
+        return
+    # Post to relay channel (persists in message history, visible via /relay/<id>)
+    with _log_suppress(Exception, tag="health-alert", msg="relay append failed: "):
+        _relay_append_msg(
+            relay_store.channels[_health_channel_id],
+            "system",
+            "bridge-health",
+            ",".join(ALERT_WORKERS),
+            text,
+        )
+    # Also deliver to worker sessions directly for immediate prompt
+    for worker in ALERT_WORKERS:
+        with _log_suppress(Exception, tag="health-alert", msg=f"tmux delivery to {worker} failed: "):
+            if worker_manager is not None:
+                worker_manager.send(worker, f"bridge-health: {text}")
+
+
 class BridgeRuntimeState:
     def __init__(self) -> None:
         self.active: str | None = None
@@ -11082,6 +11550,7 @@ API_ENDPOINTS = {
     "GET /machines": "List configured machines, access hints, workers, and health",
     "GET /workers": "List active workers with send commands",
     "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
+    "GET /health": "Unified health: all signals, threads, uptime — single source of truth",
     "GET /health/workers": "Watchdog state for all workers",
     "GET /health/tunnel": "Tunnel and poll fallback state",
     "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
@@ -11155,7 +11624,12 @@ def _flush_hook_response(name: str) -> None:
     _log(_LOG_INFO, "hook", f"Hook response: {name} -> chat {chat_id} ({len(text)} chars)")
     if session_id:
         _cache_session_id(name, session_id)
-    send_response_to_telegram(name, text, chat_id, log_prefix="Response")
+    try:
+        send_response_to_telegram(name, text, chat_id, log_prefix="Response")
+        health.ok("hook")
+    except Exception:
+        health.error("hook")
+        raise
     _check_learning_reminder(name)
     clear_pending(name)
     mark_hook_event(name)
@@ -11300,12 +11774,12 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
     ):
         cmdline = f.read().decode().replace("\x00", " ").strip()
         parent_info = f"ppid={ppid} cmd={cmdline[:100]}"
-    print(f"\n[{timestamp}] Received {sig_name} ({parent_info}), shutting down...")
+    _log(_LOG_INFO, "bridge", f"Received {sig_name} ({parent_info}), shutting down...")
     connectors.stop_all()
     if tunnel_manager is not None:
         with _log_suppress(RuntimeError, OSError, level=_LOG_DEBUG, tag="shutdown:tunnel"):
             tunnel_manager.stop()
-            print("Tunnel manager stopped")
+            _log(_LOG_INFO, "bridge", "Tunnel manager stopped")
     watchdog.stop_event.set()
     for cancelable in [learning_reminders.idle_scan_timer]:
         if cancelable is not None:
@@ -11343,11 +11817,11 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
     registered = scan_tmux_sessions()
     registered = get_registered_sessions(registered)
     if registered:
-        print(f"Discovered sessions: {list(registered.keys())}")
+        _log(_LOG_INFO, "bridge", f"Discovered sessions: {list(registered.keys())}")
         for name, info in registered.items():
             tmux_name = info.get("tmux", f"{TMUX_PREFIX}{name}")
             if not tmux_name.startswith(TMUX_PREFIX):
-                print(f"  SKIP {name}: tmux '{tmux_name}' doesn't match prefix '{TMUX_PREFIX}'")
+                _log(_LOG_WARN, "bridge", f"SKIP {name}: tmux '{tmux_name}' doesn't match prefix '{TMUX_PREFIX}'")
                 continue
             backend_name = get_worker_backend(name, info)
             backend_obj = get_backend(backend_name)
@@ -11364,18 +11838,22 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     last_active = load_last_active()
     if last_active and last_active in registered:
         state.active = last_active
-        print(f"Restored last active worker: {last_active}")
+        _log(_LOG_INFO, "bridge", f"Restored last active worker: {last_active}")
     elif last_active:
-        print(f"Last active worker '{last_active}' no longer exists")
+        _log(_LOG_WARN, "bridge", f"Last active worker '{last_active}' no longer exists")
     if os.path.isdir(TEAM_DIR):
         _startup_note = read_checkin_note()
-        print(f"Team dir: {TEAM_DIR}" + (f"  Checkin note: {len(_startup_note)} chars" if _startup_note else ""))
+        _log(
+            _LOG_INFO,
+            "bridge",
+            f"Team dir: {TEAM_DIR}" + (f"  Checkin note: {len(_startup_note)} chars" if _startup_note else ""),
+        )
     else:
-        print(f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
+        _log(_LOG_WARN, "bridge", f"Team dir not found: {TEAM_DIR} (checkin note disabled)")
     last_chat_id = load_last_chat_id()
     if last_chat_id and admin_chat_id is None:
         admin_chat_id = last_chat_id
-        print(f"Restored admin from last_chat_id: {admin_chat_id}")
+        _log(_LOG_INFO, "bridge", f"Restored admin from last_chat_id: {admin_chat_id}")
     _relay_load()
     _channel_load()
     _guest_load()
@@ -11384,14 +11862,18 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
 
 def _log_startup_info(registered: dict[str, TmuxSessionDict]) -> None:
     update_bot_commands()
-    print(f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
+    _log(_LOG_INFO, "bridge", f"Multi-Session Bridge on {BRIDGE_BIND}:{PORT}")
     if BRIDGE_BIND == "0.0.0.0":
-        print("  ⚠️  WARNING: Bound to 0.0.0.0 — exposed on ALL interfaces. Use BRIDGE_BIND=<tailscale-ip>")
-    print(
-        f"Hook: http://{BRIDGE_BIND}:{PORT}/outputs | Active: {state.active or 'none'} | Sessions: {list(registered.keys()) or 'none'}"
+        _log(_LOG_WARN, "bridge", "Bound to 0.0.0.0 — exposed on ALL interfaces. Use BRIDGE_BIND=<tailscale-ip>")
+    _log(
+        _LOG_INFO,
+        "bridge",
+        f"Hook: http://{BRIDGE_BIND}:{PORT}/outputs | Active: {state.active or 'none'} | Sessions: {list(registered.keys()) or 'none'}",
     )
-    print(
-        f"Webhook: {'enabled' if WEBHOOK_SECRET else 'disabled'} | Admin: {admin_chat_id or 'auto-learn'} | Exec: direct"
+    _log(
+        _LOG_INFO,
+        "bridge",
+        f"Webhook: {'enabled' if WEBHOOK_SECRET else 'disabled'} | Admin: {admin_chat_id or 'auto-learn'} | Exec: direct",
     )
 
 
@@ -11408,7 +11890,7 @@ def _send_startup_notification(last_chat_id: int, registered: dict[str, TmuxSess
         lines.append("No workers yet. Hire your first long-lived worker with /hire <name>.")
     result = transport.send_text(last_chat_id, "\n".join(lines))
     if result and result.get("ok"):
-        print(f"Sent startup notification to chat {last_chat_id}")
+        _log(_LOG_INFO, "bridge", f"Sent startup notification to chat {last_chat_id}")
     else:
         _log(_LOG_WARN, "bridge", f"Failed to send startup notification: {result}")
 
@@ -11424,7 +11906,7 @@ def main() -> None:
     SESSIONS_DIR.chmod(0o700)
     try:
         machines = get_machine_catalog(force_reload=True)
-        print(f"Machine catalog: {list(machines.keys())} ({MACHINES_CONFIG_FILE})")
+        _log(_LOG_INFO, "bridge", f"Machine catalog: {list(machines.keys())} ({MACHINES_CONFIG_FILE})")
     except MachineConfigError as e:
         _log(_LOG_ERROR, "bridge", f"Error: {e}")
         sys.exit(1)
@@ -11435,10 +11917,16 @@ def main() -> None:
         _send_startup_notification(last_chat_id, registered)
     watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)
     watchdog.start()
+    health.register_thread("worker-watchdog", watchdog)
     _seed_learning_reminder_state(registered.keys())
     _schedule_idle_scan()
-    print(f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)")
+    _log(
+        _LOG_INFO,
+        "bridge",
+        f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)",
+    )
     connectors.gmail, connectors.github = _start_connectors()
+    _health_channel_ensure()
     server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
     tunnel_config = _build_tunnel_config()
     if tunnel_config.mode != "none" and BOT_TOKEN:
@@ -11465,7 +11953,7 @@ def main() -> None:
 
         def _tunnel_on_notify(msg: str) -> None:
             if admin_chat_id:
-                with suppress(Exception):
+                with _log_suppress(Exception, tag="tunnel", msg="notify failed: "):
                     transport.send_text(admin_chat_id, msg)
 
         tunnel_manager = TunnelManager(

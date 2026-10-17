@@ -1,5 +1,40 @@
 ## Changelog
 
+### v0.52.0 - Structured logging, health observability, log rotation [SPEC-031]
+
+**Structured logging:**
+- All bridge operational output now uses `_log(level, component, message)` with UTC timestamps.
+- Converted 65 bare `print()` calls to structured `_log()` across: Gmail connector (13), GitHub connector (10), BaseConnector lifecycle (10), connector start/stop (5), bridge startup/shutdown (12), PR comment routing (4), PR review warnings (3), health alerts (3), tunnel notify (1).
+- 22 remaining `print()` are intentional CLI output (PR review tool) or embedded code strings.
+- Log level filtering: `BRIDGE_LOG_LEVEL` env var (ERROR/WARN/INFO/DEBUG, default: INFO).
+- Fixed `_log_suppress` type annotation (`int` → `str`).
+
+**Health observability (BridgeHealth):**
+- Unified `BridgeHealth` class with `ok()`/`error()`/`register_thread()`/`snapshot()`.
+- 7 health signals: poll, dispatch, hook, telegram_api, watchdog, gmail, github.
+- 5 thread registrations: worker-watchdog, tunnel-watchdog, tunnel-poll, gmail-poller, github-poller.
+- `GET /health` endpoint: JSON snapshot with signals, threads, pools. HTTP 200/503.
+- `bridge-watchdog.sh` rewritten to use unified `/health` endpoint.
+
+**Health alerting via relay channels:**
+- `bridge-health` relay channel created on startup (10-year TTL).
+- `_health_alert_check()` runs every watchdog cycle (~4s): signal staleness, thread liveness, pool saturation.
+- Alerts post to relay channel (persistent history) + deliver to worker tmux sessions.
+- `BRIDGE_ALERT_WORKERS` env var controls delivery targets.
+- 300s cooldown between repeated alerts; recovery notifications on clear.
+
+**Log rotation (3 layers):**
+- `bridge.sh` startup: rotates bridge.log > 10K lines, saves old as `.1`.
+- `bridge-watchdog.sh` (cron 2min): copytruncate at 5MB (safe for `tee -a`).
+- Hook debug logs: self-rotate at 100KB per invocation.
+- Watchdog log: existing 500-line rotation preserved.
+
+**Silent failure fixes:**
+- Hook `_forward_to_bridge`: now logs HTTP status on curl failure (was `>/dev/null 2>&1`).
+- Health alert relay + tmux delivery: `suppress(Exception)` → `_log_suppress` with tags.
+- Tunnel notify: `suppress(Exception)` → `_log_suppress`.
+- Bot info save: `suppress(Exception)` → `_log_suppress(level=DEBUG)`.
+
 ### v0.51.0 - Feature-based module extraction for readability
 
 **Feature-based extraction from bridge.py:**

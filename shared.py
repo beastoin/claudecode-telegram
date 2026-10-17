@@ -629,7 +629,7 @@ class RelayChannelDict(TypedDict):
 
 # --- Core ---
 
-VERSION = "0.51.0"
+VERSION = "0.52.0"
 
 
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
@@ -664,9 +664,15 @@ _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
 _LOG_DEBUG: str = "DEBUG"
 
+_LOG_LEVELS: dict[str, int] = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
+_LOG_MIN_LEVEL: int = _LOG_LEVELS.get(os.environ.get("BRIDGE_LOG_LEVEL", "INFO").upper(), 2)
+
 
 def _log(level: str, component: str, msg: str | Path, *, exc: BaseException | None = None) -> None:
-    print(f"[{level}:{component}] {msg}", file=sys.stderr, flush=True)
+    if _LOG_LEVELS.get(level, 2) > _LOG_MIN_LEVEL:
+        return
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    print(f"[{ts} {level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
 
@@ -681,7 +687,7 @@ def _log_best_effort(label: str, func: Callable[..., object], *args: object, **k
 
 @contextmanager
 def _log_suppress(
-    *exc_types: type[BaseException], level: int = _LOG_WARN, tag: str = "bridge", msg: str = "", exc_info: bool = False
+    *exc_types: type[BaseException], level: str = _LOG_WARN, tag: str = "bridge", msg: str = "", exc_info: bool = False
 ) -> Iterator[None]:
     try:
         yield
