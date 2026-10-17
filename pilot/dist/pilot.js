@@ -11,13 +11,47 @@ import pty from "@lydell/node-pty";
 import { WebSocketServer } from "ws";
 var execFileAsync = promisify(execFile);
 var require2 = createRequire(import.meta.url);
-var PORT = Number.parseInt(process.env.PORT || "10170", 10);
-var PILOT_TOKEN = process.env.PILOT_TOKEN || "";
+function parsePilotArgs(argv) {
+  const args = {};
+  for (let i = 2;i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--") && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+      args[a.slice(2)] = argv[++i];
+    }
+  }
+  return {
+    port: Number.parseInt(args.port || process.env.PORT || "10170", 10),
+    token: args.token || process.env.PILOT_TOKEN || "",
+    ttl: Number.parseInt(args.ttl || "1800", 10),
+    sessions: (args.sessions || "").split(",").filter(Boolean)
+  };
+}
+var CLI_ARGS = parsePilotArgs(process.argv);
+var PORT = CLI_ARGS.port;
+var PILOT_TOKEN = CLI_ARGS.token;
 var ACTIVE_CONNECTIONS = new Map;
 var ENABLED_SESSIONS = new Map;
 var SESSION_TIMERS = new Map;
 var PILOT_TIMEOUT_MS = 30 * 60 * 1000;
 var GRID_SESSIONS = new Map;
+var _idleTimer = null;
+function resetIdleTimer() {
+  if (CLI_ARGS.ttl <= 0)
+    return;
+  if (_idleTimer)
+    clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => {
+    console.log(`[pilot] TTL expired after ${CLI_ARGS.ttl}s of inactivity — shutting down`);
+    shutdown();
+  }, CLI_ARGS.ttl * 1000);
+}
+for (const entry of CLI_ARGS.sessions) {
+  const [name, host] = entry.includes("@") ? entry.split("@", 2) : [entry, null];
+  if (name) {
+    ENABLED_SESSIONS.set(name, { host: host || null });
+    console.log(`[pilot] pre-enabled session: ${name}${host ? ` (host: ${host})` : ""}`);
+  }
+}
 function enableSession(sessionName, host) {
   ENABLED_SESSIONS.set(sessionName, { host: host || null });
   refreshSessionTimer(sessionName);
@@ -1446,6 +1480,7 @@ async function handleHttp(req, res) {
     sendText(res, 401, "Unauthorized");
     return;
   }
+  resetIdleTimer();
   if (pathname === "/debug") {
     sendHtml(res, 200, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1722,6 +1757,7 @@ wss.on("connection", async (ws, req) => {
   const cols = parseIntOrDefault(urlObj.searchParams.get("cols"), 80);
   const rows = parseIntOrDefault(urlObj.searchParams.get("rows"), 24);
   console.log(`[ws] connect session=${sessionName} readonly=${readonly} cols=${cols} rows=${rows}`);
+  resetIdleTimer();
   if (!isEnabledSessionName(sessionName)) {
     console.log(`[ws] session not enabled: ${sessionName}`);
     ws.send(`\r
@@ -1794,6 +1830,7 @@ wss.on("connection", async (ws, req) => {
   });
   ws.on("message", (raw) => {
     refreshSessionTimer(sessionName);
+    resetIdleTimer();
     const message = raw.toString("utf8");
     if (message.startsWith("{")) {
       try {
@@ -1846,5 +1883,6 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 restoreGridSessions();
 httpServer.listen(PORT, () => {
-  console.log(`pilot listening on http://localhost:${PORT}`);
+  console.log(`[pilot] listening on http://localhost:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
+  resetIdleTimer();
 });

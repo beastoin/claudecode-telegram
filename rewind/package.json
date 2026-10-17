@@ -1,0 +1,10 @@
+{
+  "name": "rewind-viewer",
+  "version": "1.0.0",
+  "description": "Spawn-on-demand transcript viewer using bun:sqlite FTS5",
+  "private": true,
+  "scripts": {
+    "start": "bun src/rewind.ts",
+    "test": "bun test"
+  }
+}

@@ -1,30 +1,61 @@
 #!/usr/bin/env node
 
-import fs from 'fs';
-import http from 'http';
-import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { createRequire } from 'module';
-import pty from '@lydell/node-pty';
-import { WebSocketServer } from 'ws';
-
-const execFileAsync = promisify(execFile);
-const require = createRequire(import.meta.url);
-
-const PORT = Number.parseInt(process.env.PORT || '10170', 10);
-const PILOT_TOKEN = process.env.PILOT_TOKEN || '';
-const ACTIVE_CONNECTIONS = new Map();
-const ENABLED_SESSIONS = new Map(); // sessionName -> { host?: string }
-const SESSION_TIMERS = new Map(); // sessionName -> timeout handle
-const PILOT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const GRID_SESSIONS = new Map(); // slug -> { sessions: [...], createdAt, expiresAt, timer }
-
+// src/pilot.ts
+import fs from "fs";
+import http from "http";
+import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { createRequire } from "module";
+import pty from "@lydell/node-pty";
+import { WebSocketServer } from "ws";
+var execFileAsync = promisify(execFile);
+var require2 = createRequire(import.meta.url);
+function parsePilotArgs(argv) {
+  const args = {};
+  for (let i = 2;i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--") && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+      args[a.slice(2)] = argv[++i];
+    }
+  }
+  return {
+    port: Number.parseInt(args.port || process.env.PORT || "10170", 10),
+    token: args.token || process.env.PILOT_TOKEN || "",
+    ttl: Number.parseInt(args.ttl || "1800", 10),
+    sessions: (args.sessions || "").split(",").filter(Boolean)
+  };
+}
+var CLI_ARGS = parsePilotArgs(process.argv);
+var PORT = CLI_ARGS.port;
+var PILOT_TOKEN = CLI_ARGS.token;
+var ACTIVE_CONNECTIONS = new Map;
+var ENABLED_SESSIONS = new Map;
+var SESSION_TIMERS = new Map;
+var PILOT_TIMEOUT_MS = 30 * 60 * 1000;
+var GRID_SESSIONS = new Map;
+var _idleTimer = null;
+function resetIdleTimer() {
+  if (CLI_ARGS.ttl <= 0)
+    return;
+  if (_idleTimer)
+    clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => {
+    console.log(`[pilot] TTL expired after ${CLI_ARGS.ttl}s of inactivity — shutting down`);
+    shutdown();
+  }, CLI_ARGS.ttl * 1000);
+}
+for (const entry of CLI_ARGS.sessions) {
+  const [name, host] = entry.includes("@") ? entry.split("@", 2) : [entry, null];
+  if (name) {
+    ENABLED_SESSIONS.set(name, { host: host || null });
+    console.log(`[pilot] pre-enabled session: ${name}${host ? ` (host: ${host})` : ""}`);
+  }
+}
 function enableSession(sessionName, host) {
   ENABLED_SESSIONS.set(sessionName, { host: host || null });
   refreshSessionTimer(sessionName);
 }
-
 function disableSession(sessionName) {
   ENABLED_SESSIONS.delete(sessionName);
   const timer = SESSION_TIMERS.get(sessionName);
@@ -33,18 +64,16 @@ function disableSession(sessionName) {
     SESSION_TIMERS.delete(sessionName);
   }
 }
-
 function refreshSessionTimer(sessionName) {
   const existing = SESSION_TIMERS.get(sessionName);
-  if (existing) clearTimeout(existing);
+  if (existing)
+    clearTimeout(existing);
   SESSION_TIMERS.set(sessionName, setTimeout(() => {
     console.log(`[pilot] auto-disabling ${sessionName} (5min idle)`);
     disableSession(sessionName);
   }, PILOT_TIMEOUT_MS));
 }
-
-const GRID_STATE_FILE = '/tmp/claudecode-telegram/pilot-grid-sessions.json';
-
+var GRID_STATE_FILE = "/tmp/claudecode-telegram/pilot-grid-sessions.json";
 function persistGridSessions() {
   try {
     const data = {};
@@ -54,17 +83,18 @@ function persistGridSessions() {
     const dir = path.dirname(GRID_STATE_FILE);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(GRID_STATE_FILE, JSON.stringify(data));
-  } catch { /* best effort */ }
+  } catch {}
 }
-
 function restoreGridSessions() {
   try {
-    if (!fs.existsSync(GRID_STATE_FILE)) return;
-    const data = JSON.parse(fs.readFileSync(GRID_STATE_FILE, 'utf-8'));
+    if (!fs.existsSync(GRID_STATE_FILE))
+      return;
+    const data = JSON.parse(fs.readFileSync(GRID_STATE_FILE, "utf-8"));
     const now = Date.now();
     let restored = 0;
     for (const [slug, gs] of Object.entries(data)) {
-      if (gs.expiresAt <= now) continue; // already expired
+      if (gs.expiresAt <= now)
+        continue;
       const remaining = gs.expiresAt - now;
       const timer = setTimeout(() => {
         console.log(`[pilot] grid session '${slug}' expired`);
@@ -74,13 +104,14 @@ function restoreGridSessions() {
       GRID_SESSIONS.set(slug, { sessions: gs.sessions, createdAt: gs.createdAt, expiresAt: gs.expiresAt, timer });
       restored++;
     }
-    if (restored) console.log(`[pilot] restored ${restored} grid session(s) from disk`);
-  } catch { /* first run or corrupt file */ }
+    if (restored)
+      console.log(`[pilot] restored ${restored} grid session(s) from disk`);
+  } catch {}
 }
-
 function createGridSession(slug, sessionNames, ttlMs) {
   const existing = GRID_SESSIONS.get(slug);
-  if (existing && existing.timer) clearTimeout(existing.timer);
+  if (existing && existing.timer)
+    clearTimeout(existing.timer);
   const now = Date.now();
   const expiresAt = now + ttlMs;
   const timer = setTimeout(() => {
@@ -92,10 +123,10 @@ function createGridSession(slug, sessionNames, ttlMs) {
   persistGridSessions();
   return { slug, expiresAt };
 }
-
 function getGridSession(slug) {
   const gs = GRID_SESSIONS.get(slug);
-  if (!gs) return null;
+  if (!gs)
+    return null;
   if (Date.now() >= gs.expiresAt) {
     GRID_SESSIONS.delete(slug);
     persistGridSessions();
@@ -103,86 +134,72 @@ function getGridSession(slug) {
   }
   return gs;
 }
-
-const MIME_TYPES = {
-  '.css': 'text/css; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.mjs': 'application/javascript; charset=utf-8',
-  '.wasm': 'application/wasm',
+var MIME_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".wasm": "application/wasm"
 };
-
 function resolveGhosttyAssets() {
-  const resolved = require.resolve('ghostty-web');
-  const packageRoot = resolved.replace(/[/\\]dist[/\\].*$/, '');
-  const distPath = path.join(packageRoot, 'dist');
-  const wasmPath = path.join(packageRoot, 'ghostty-vt.wasm');
-
-  if (!fs.existsSync(path.join(distPath, 'ghostty-web.js')) || !fs.existsSync(wasmPath)) {
-    throw new Error('ghostty-web assets were not found in node_modules');
+  const resolved = require2.resolve("ghostty-web");
+  const packageRoot = resolved.replace(/[/\\]dist[/\\].*$/, "");
+  const distPath = path.join(packageRoot, "dist");
+  const wasmPath = path.join(packageRoot, "ghostty-vt.wasm");
+  if (!fs.existsSync(path.join(distPath, "ghostty-web.js")) || !fs.existsSync(wasmPath)) {
+    throw new Error("ghostty-web assets were not found in node_modules");
   }
-
   return { distPath, wasmPath };
 }
-
-const { distPath, wasmPath } = resolveGhosttyAssets();
-
+var { distPath, wasmPath } = resolveGhosttyAssets();
 function escapeHtml(value) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-
 function parseIntOrDefault(value, fallback) {
-  const parsed = Number.parseInt(value || '', 10);
+  const parsed = Number.parseInt(value || "", 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return fallback;
   }
   return Math.min(parsed, 500);
 }
-
 function isAllowedSessionName(name) {
-  return typeof name === 'string' && /^claude-[A-Za-z0-9._:-]+$/.test(name);
+  return typeof name === "string" && /^claude-[A-Za-z0-9._:-]+$/.test(name);
 }
-
 function isAuthorized(urlObj) {
   if (!PILOT_TOKEN) {
     return true;
   }
-  return urlObj.searchParams.get('token') === PILOT_TOKEN;
+  return urlObj.searchParams.get("token") === PILOT_TOKEN;
 }
-
 function getTokenForTemplates(urlObj) {
   if (!PILOT_TOKEN) {
-    return '';
+    return "";
   }
-  return urlObj.searchParams.get('token') || '';
+  return urlObj.searchParams.get("token") || "";
 }
-
 function tokenSearch(token) {
-  return token ? `?token=${encodeURIComponent(token)}` : '';
+  return token ? `?token=${encodeURIComponent(token)}` : "";
 }
-
 async function diagnoseRemote(host, sessionName) {
   try {
-    await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host, 'true'], { timeout: 5000 });
+    await execFileAsync("ssh", ["-o", "ConnectTimeout=3", host, "true"], { timeout: 5000 });
   } catch {
     return `Cannot reach ${host} — SSH connection failed`;
   }
   try {
-    await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host, `tmux has-session -t '${sessionName.replace(/'/g, "'\\''")}'`], { timeout: 5000 });
+    await execFileAsync("ssh", ["-o", "ConnectTimeout=3", host, `tmux has-session -t '${sessionName.replace(/'/g, "'\\''")}'`], { timeout: 5000 });
   } catch {
     return `Session ${sessionName} does not exist on ${host}`;
   }
   try {
-    const { stdout } = await execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host,
+    const { stdout } = await execFileAsync("ssh", [
+      "-o",
+      "ConnectTimeout=3",
+      host,
       'ptys=$(sysctl -n kern.tty.ptmx_max 2>/dev/null || echo 0); used=$(lsof /dev/ptmx 2>/dev/null | tail -n+2 | wc -l | tr -d " "); echo "$used/$ptys"'
     ], { timeout: 5000 });
-    const parts = stdout.trim().split('/');
+    const parts = stdout.trim().split("/");
     if (parts.length === 2) {
       const used = parseInt(parts[0], 10);
       const max = parseInt(parts[1], 10);
@@ -190,70 +207,53 @@ async function diagnoseRemote(host, sessionName) {
         return `PTY exhaustion on ${host}: ${used}/${max} PTYs in use — cannot allocate terminal (try killing Terminal.app or leaked processes)`;
       }
     }
-  } catch {
-    // PTY check failed, not fatal
-  }
+  } catch {}
   return null;
 }
-
 async function execTmux(args, host) {
   if (host) {
     const quotedArgs = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`);
-    const remoteCmd = `tmux ${quotedArgs.join(' ')}`;
-    return execFileAsync('ssh', ['-o', 'ConnectTimeout=3', host, remoteCmd]);
+    const remoteCmd = `tmux ${quotedArgs.join(" ")}`;
+    return execFileAsync("ssh", ["-o", "ConnectTimeout=3", host, remoteCmd]);
   }
-  return execFileAsync('tmux', args);
+  return execFileAsync("tmux", args);
 }
-
 async function listSessionsFrom(host) {
-  let stdout = '';
+  let stdout = "";
   try {
     ({ stdout } = await execTmux([
-      'list-sessions',
-      '-F',
-      '#{session_name}:#{session_attached}:#{session_activity}',
+      "list-sessions",
+      "-F",
+      "#{session_name}:#{session_attached}:#{session_activity}"
     ], host));
   } catch (error) {
-    const stderr = `${error.stderr || ''}`.toLowerCase();
-    if (stderr.includes('no server running')) {
+    const stderr = `${error.stderr || ""}`.toLowerCase();
+    if (stderr.includes("no server running")) {
       return [];
     }
     throw error;
   }
-
-  return stdout
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name = '', attachedRaw = '0', activityRaw = '0'] = line.split(':');
-      return {
-        name,
-        attached: attachedRaw === '1',
-        activity: Number.parseInt(activityRaw, 10) || 0,
-      };
-    })
-    .filter((session) => isAllowedSessionName(session.name));
+  return stdout.split(`
+`).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [name = "", attachedRaw = "0", activityRaw = "0"] = line.split(":");
+    return {
+      name,
+      attached: attachedRaw === "1",
+      activity: Number.parseInt(activityRaw, 10) || 0
+    };
+  }).filter((session) => isAllowedSessionName(session.name));
 }
-
 async function listSessions() {
   const local = await listSessionsFrom(null);
-
-  // Also list sessions from remote hosts of enabled sessions
-  const remoteHosts = new Set();
+  const remoteHosts = new Set;
   for (const [, entry] of ENABLED_SESSIONS) {
-    if (entry.host) remoteHosts.add(entry.host);
+    if (entry.host)
+      remoteHosts.add(entry.host);
   }
-
-  const remoteResults = await Promise.all(
-    [...remoteHosts].map((host) =>
-      listSessionsFrom(host).catch((err) => {
-        console.log(`[pilot] remote list-sessions from ${host} failed: ${err.message}`);
-        return [];
-      })
-    )
-  );
-
+  const remoteResults = await Promise.all([...remoteHosts].map((host) => listSessionsFrom(host).catch((err) => {
+    console.log(`[pilot] remote list-sessions from ${host} failed: ${err.message}`);
+    return [];
+  })));
   const localNames = new Set(local.map((s) => s.name));
   for (const remoteSessions of remoteResults) {
     for (const session of remoteSessions) {
@@ -262,93 +262,71 @@ async function listSessions() {
       }
     }
   }
-
   return local;
 }
-
 function isEnabledSessionName(sessionName) {
   return ENABLED_SESSIONS.has(sessionName);
 }
-
 function getSessionHost(sessionName) {
   const entry = ENABLED_SESSIONS.get(sessionName);
   return entry ? entry.host : null;
 }
-
-function isRemoteSession(sessionName) {
-  return !!getSessionHost(sessionName);
-}
-
 function filterEnabledSessions(sessions) {
   return sessions.filter((session) => isEnabledSessionName(session.name));
 }
-
 async function sessionExists(sessionName) {
   try {
     const host = getSessionHost(sessionName);
-    await execTmux(['has-session', '-t', sessionName], host);
+    await execTmux(["has-session", "-t", sessionName], host);
     return true;
   } catch {
     return false;
   }
 }
-
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
   });
   res.end(JSON.stringify(data));
 }
-
 function sendText(res, statusCode, body) {
-  res.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
   res.end(body);
 }
-
 function sendHtml(res, statusCode, html) {
-  res.writeHead(statusCode, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(statusCode, { "Content-Type": "text/html; charset=utf-8" });
   res.end(html);
 }
-
 async function serveFile(filePath, res) {
   const ext = path.extname(filePath);
-  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+  const contentType = MIME_TYPES[ext] || "application/octet-stream";
   try {
     const data = await fs.promises.readFile(filePath);
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, { "Content-Type": contentType });
     res.end(data);
   } catch {
-    sendText(res, 404, 'Not Found');
+    sendText(res, 404, "Not Found");
   }
 }
-
 function renderIndexPage({ sessions, token, enabledCount }) {
   const tokenQuery = tokenSearch(token);
   const hasEnabledSessions = enabledCount > 0;
-  const emptyMessage = hasEnabledSessions
-    ? 'No enabled sessions are currently running.'
-    : 'No sessions enabled.';
-  const hintMessage = hasEnabledSessions
-    ? 'Open a session to attach. Use readonly mode to observe without sending input.'
-    : 'Use /pilot &lt;name&gt; in Telegram to enable a session.';
-  const listHtml = sessions.length
-    ? sessions
-        .map((session) => {
-          const safeName = escapeHtml(session.name);
-          const sessionHref = `/session/${encodeURIComponent(session.name)}${tokenQuery}`;
-          const readonlyHref = `${sessionHref}${tokenQuery ? '&' : '?'}readonly=1`;
-          return `<li class="session-item">
+  const emptyMessage = hasEnabledSessions ? "No enabled sessions are currently running." : "No sessions enabled.";
+  const hintMessage = hasEnabledSessions ? "Open a session to attach. Use readonly mode to observe without sending input." : "Use /pilot &lt;name&gt; in Telegram to enable a session.";
+  const listHtml = sessions.length ? sessions.map((session) => {
+    const safeName = escapeHtml(session.name);
+    const sessionHref = `/session/${encodeURIComponent(session.name)}${tokenQuery}`;
+    const readonlyHref = `${sessionHref}${tokenQuery ? "&" : "?"}readonly=1`;
+    return `<li class="session-item">
             <a class="session-link" href="${sessionHref}">
               <span class="name">${safeName}</span>
-              <span class="meta">${session.attached ? 'attached' : 'detached'}</span>
+              <span class="meta">${session.attached ? "attached" : "detached"}</span>
             </a>
             <a class="readonly-link" href="${readonlyHref}">readonly</a>
           </li>`;
-        })
-        .join('\n')
-    : `<li class="empty">${emptyMessage}</li>`;
-
+  }).join(`
+`) : `<li class="empty">${emptyMessage}</li>`;
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -521,10 +499,9 @@ function renderIndexPage({ sessions, token, enabledCount }) {
   </body>
 </html>`;
 }
-
 function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) {
-  const hideChrome = embed ? 'display:none !important;' : '';
-  const hideBar = (embed || hideheader) ? 'display:none !important;' : '';
+  const hideChrome = embed ? "display:none !important;" : "";
+  const hideBar = embed || hideheader ? "display:none !important;" : "";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -603,15 +580,15 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
       #terminal {
         flex: 1;
         min-height: 0;
-        padding: ${embed ? '0' : '10px'};
+        padding: ${embed ? "0" : "10px"};
         position: relative;
-        ${embed ? 'overflow: hidden;' : ''}
+        ${embed ? "overflow: hidden;" : ""}
       }
       ${embed ? `
       #terminal *, #terminal ::-webkit-scrollbar { scrollbar-width: none; }
       #terminal *::-webkit-scrollbar { display: none; }
       html, body { overflow: hidden; }
-      ` : ''}
+      ` : ""}
       #mobile-input {
         position: absolute;
         top: 0; left: 0;
@@ -721,7 +698,7 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
       <header class="bar">
         <a class="back" href="/${tokenSearch(token)}">sessions</a>
         <span class="session">${escapeHtml(sessionName)}</span>
-        ${readonly ? '<span class="badge">readonly</span>' : ''}
+        ${readonly ? '<span class="badge">readonly</span>' : ""}
         <span class="status"><span class="dot" id="status-dot"></span><span id="status-text">connecting</span></span>
       </header>
       <section id="terminal">
@@ -754,8 +731,8 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
       try {
       const sessionName = ${JSON.stringify(sessionName)};
       const token = ${JSON.stringify(token)};
-      const readonly = ${readonly ? 'true' : 'false'};
-      const embed = ${embed ? 'true' : 'false'};
+      const readonly = ${readonly ? "true" : "false"};
+      const embed = ${embed ? "true" : "false"};
       const statusDot = document.getElementById('status-dot');
       const statusText = document.getElementById('status-text');
 
@@ -1042,16 +1019,15 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
   </body>
 </html>`;
 }
-
 function renderGridPage({ token, slug, gridSession }) {
   const expiresAt = gridSession ? gridSession.expiresAt : 0;
-  const filterSessions = gridSession ? JSON.stringify(gridSession.sessions) : 'null';
+  const filterSessions = gridSession ? JSON.stringify(gridSession.sessions) : "null";
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pilot${slug ? ' — ' + escapeHtml(slug) : ''}</title>
+  <title>Pilot${slug ? " — " + escapeHtml(slug) : ""}</title>
   <style>
     :root {
       --bg: #0a0a08;
@@ -1497,17 +1473,15 @@ function renderGridPage({ token, slug, gridSession }) {
 </body>
 </html>`;
 }
-
 async function handleHttp(req, res) {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const urlObj = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const pathname = urlObj.pathname;
-
   if (!isAuthorized(urlObj)) {
-    sendText(res, 401, 'Unauthorized');
+    sendText(res, 401, "Unauthorized");
     return;
   }
-
-  if (pathname === '/debug') {
+  resetIdleTimer();
+  if (pathname === "/debug") {
     sendHtml(res, 200, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pilot Debug</title>
@@ -1555,23 +1529,17 @@ try {
 </script></body></html>`);
     return;
   }
-
-  if (pathname === '/' || pathname === '/index.html') {
+  if (pathname === "/" || pathname === "/index.html") {
     const sessions = filterEnabledSessions(await listSessions());
-    sendHtml(
-      res,
-      200,
-      renderIndexPage({
-        sessions,
-        token: getTokenForTemplates(urlObj),
-        enabledCount: ENABLED_SESSIONS.size,
-      })
-    );
+    sendHtml(res, 200, renderIndexPage({
+      sessions,
+      token: getTokenForTemplates(urlObj),
+      enabledCount: ENABLED_SESSIONS.size
+    }));
     return;
   }
-
-  if (pathname === '/grid' || pathname.startsWith('/grid/')) {
-    const slug = pathname === '/grid' ? null : decodeURIComponent(pathname.slice('/grid/'.length));
+  if (pathname === "/grid" || pathname.startsWith("/grid/")) {
+    const slug = pathname === "/grid" ? null : decodeURIComponent(pathname.slice("/grid/".length));
     const gs = slug ? getGridSession(slug) : null;
     if (slug && !gs) {
       sendHtml(res, 404, `<!doctype html><html><body style="background:#0a0a08;color:#40d870;font-family:monospace;padding:40px;text-align:center">
@@ -1582,29 +1550,28 @@ try {
 </body></html>`);
       return;
     }
-    sendHtml(
-      res,
-      200,
-      renderGridPage({
-        token: getTokenForTemplates(urlObj),
-        slug: slug || null,
-        gridSession: gs,
-      })
-    );
+    sendHtml(res, 200, renderGridPage({
+      token: getTokenForTemplates(urlObj),
+      slug: slug || null,
+      gridSession: gs
+    }));
     return;
   }
-
-  if (req.method === 'POST' && pathname === '/api/grid-session') {
+  if (req.method === "POST" && pathname === "/api/grid-session") {
     try {
       const body = await new Promise((resolve, reject) => {
-        let data = '';
-        req.on('data', (c) => { data += c; if (data.length > 1e5) reject(new Error('too large')); });
-        req.on('end', () => resolve(data));
-        req.on('error', reject);
+        let data = "";
+        req.on("data", (c) => {
+          data += c;
+          if (data.length > 1e5)
+            reject(new Error("too large"));
+        });
+        req.on("end", () => resolve(data));
+        req.on("error", reject);
       });
       const { slug, sessions: sessionNames, ttl } = JSON.parse(body);
       if (!slug || !Array.isArray(sessionNames) || !sessionNames.length) {
-        sendJson(res, 400, { error: 'slug and sessions[] required' });
+        sendJson(res, 400, { error: "slug and sessions[] required" });
         return;
       }
       const ttlMs = Math.min((ttl || 300) * 1000, 30 * 60 * 1000);
@@ -1615,14 +1582,12 @@ try {
     }
     return;
   }
-
-  if (pathname === '/api/sessions') {
+  if (pathname === "/api/sessions") {
     const sessions = filterEnabledSessions(await listSessions());
     sendJson(res, 200, sessions);
     return;
   }
-
-  if (pathname === '/api/enabled') {
+  if (pathname === "/api/enabled") {
     const entries = [...ENABLED_SESSIONS.keys()].sort().map((name) => {
       const entry = ENABLED_SESSIONS.get(name);
       return { name, host: entry ? entry.host : null };
@@ -1630,35 +1595,30 @@ try {
     sendJson(res, 200, entries);
     return;
   }
-
-  if (pathname === '/api/pilot') {
-    if (req.method !== 'POST' && req.method !== 'DELETE') {
-      res.writeHead(405, { Allow: 'POST, DELETE' });
-      res.end('Method Not Allowed');
+  if (pathname === "/api/pilot") {
+    if (req.method !== "POST" && req.method !== "DELETE") {
+      res.writeHead(405, { Allow: "POST, DELETE" });
+      res.end("Method Not Allowed");
       return;
     }
-
-    const sessionName = urlObj.searchParams.get('session') || '';
-    const host = urlObj.searchParams.get('host') || null;
+    const sessionName = urlObj.searchParams.get("session") || "";
+    const host = urlObj.searchParams.get("host") || null;
     if (!isAllowedSessionName(sessionName)) {
-      sendText(res, 400, 'Invalid session name');
+      sendText(res, 400, "Invalid session name");
       return;
     }
-
-    // For remote sessions, check via SSH before enabling
     if (host) {
       try {
-        await execTmux(['has-session', '-t', sessionName], host);
+        await execTmux(["has-session", "-t", sessionName], host);
       } catch {
-        sendText(res, 404, 'Session not found');
+        sendText(res, 404, "Session not found");
         return;
       }
-    } else if (!(await sessionExists(sessionName))) {
-      sendText(res, 404, 'Session not found');
+    } else if (!await sessionExists(sessionName)) {
+      sendText(res, 404, "Session not found");
       return;
     }
-
-    if (req.method === 'DELETE') {
+    if (req.method === "DELETE") {
       disableSession(sessionName);
       sendJson(res, 200, { ok: true, enabled: false });
     } else {
@@ -1667,144 +1627,119 @@ try {
     }
     return;
   }
-
-  if (pathname === '/api/capture') {
-    const sessionName = urlObj.searchParams.get('session') || '';
-    if (
-      !isAllowedSessionName(sessionName) ||
-      !isEnabledSessionName(sessionName) ||
-      !(await sessionExists(sessionName))
-    ) {
-      sendText(res, 404, 'Session not found');
+  if (pathname === "/api/capture") {
+    const sessionName = urlObj.searchParams.get("session") || "";
+    if (!isAllowedSessionName(sessionName) || !isEnabledSessionName(sessionName) || !await sessionExists(sessionName)) {
+      sendText(res, 404, "Session not found");
       return;
     }
     try {
       refreshSessionTimer(sessionName);
       const host = getSessionHost(sessionName);
-      const { stdout } = await execTmux(['capture-pane', '-t', sessionName, '-p'], host);
+      const { stdout } = await execTmux(["capture-pane", "-t", sessionName, "-p"], host);
       sendJson(res, 200, { text: stdout });
     } catch {
-      sendText(res, 500, 'Capture failed');
+      sendText(res, 500, "Capture failed");
     }
     return;
   }
-
-  if (pathname.startsWith('/session/')) {
-    let sessionName = '';
+  if (pathname.startsWith("/session/")) {
+    let sessionName = "";
     try {
-      sessionName = decodeURIComponent(pathname.slice('/session/'.length));
+      sessionName = decodeURIComponent(pathname.slice("/session/".length));
     } catch {
-      sendText(res, 404, 'Session not found');
+      sendText(res, 404, "Session not found");
       return;
     }
     if (!isAllowedSessionName(sessionName)) {
-      sendText(res, 404, 'Session not found');
+      sendText(res, 404, "Session not found");
       return;
     }
     if (!isEnabledSessionName(sessionName)) {
-      sendText(res, 404, 'Session not found');
+      sendText(res, 404, "Session not found");
       return;
     }
-    if (!(await sessionExists(sessionName))) {
-      sendText(res, 404, 'Session not found');
+    if (!await sessionExists(sessionName)) {
+      sendText(res, 404, "Session not found");
       return;
     }
     refreshSessionTimer(sessionName);
-    sendHtml(
-      res,
-      200,
-      renderSessionPage({
-        sessionName,
-        token: getTokenForTemplates(urlObj),
-        readonly: urlObj.searchParams.get('readonly') === '1',
-        embed: urlObj.searchParams.get('embed') === '1',
-        hideheader: urlObj.searchParams.get('hideheader') === '1',
-      })
-    );
+    sendHtml(res, 200, renderSessionPage({
+      sessionName,
+      token: getTokenForTemplates(urlObj),
+      readonly: urlObj.searchParams.get("readonly") === "1",
+      embed: urlObj.searchParams.get("embed") === "1",
+      hideheader: urlObj.searchParams.get("hideheader") === "1"
+    }));
     return;
   }
-
-  if (pathname.startsWith('/dist/')) {
-    const relativePath = pathname.slice('/dist/'.length);
+  if (pathname.startsWith("/dist/")) {
+    const relativePath = pathname.slice("/dist/".length);
     const requestedPath = path.resolve(distPath, relativePath);
     if (requestedPath !== distPath && !requestedPath.startsWith(`${distPath}${path.sep}`)) {
-      sendText(res, 404, 'Not Found');
+      sendText(res, 404, "Not Found");
       return;
     }
     await serveFile(requestedPath, res);
     return;
   }
-
-  if (pathname === '/ghostty-vt.wasm') {
+  if (pathname === "/ghostty-vt.wasm") {
     await serveFile(wasmPath, res);
     return;
   }
-
-  sendText(res, 404, 'Not Found');
+  sendText(res, 404, "Not Found");
 }
-
-const httpServer = http.createServer((req, res) => {
+var httpServer = http.createServer((req, res) => {
   handleHttp(req, res).catch((error) => {
-    console.error('HTTP error:', error);
-    sendText(res, 500, 'Internal Server Error');
+    console.error("HTTP error:", error);
+    sendText(res, 500, "Internal Server Error");
   });
 });
-
 function sendUpgradeError(socket, statusCode, reason) {
   if (socket.destroyed) {
     return;
   }
-  socket.write(
-    `HTTP/1.1 ${statusCode} ${reason}\r\n` +
-      'Connection: close\r\n' +
-      'Content-Type: text/plain; charset=utf-8\r\n' +
-      '\r\n' +
-      `${reason}`
-  );
+  socket.write(`HTTP/1.1 ${statusCode} ${reason}\r
+` + `Connection: close\r
+` + `Content-Type: text/plain; charset=utf-8\r
+` + `\r
+` + `${reason}`);
   socket.destroy();
 }
-
-const wss = new WebSocketServer({ noServer: true });
-
+var wss = new WebSocketServer({ noServer: true });
 async function handleUpgrade(req, socket, head) {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  if (urlObj.pathname !== '/ws') {
-    sendUpgradeError(socket, 404, 'Not Found');
+  const urlObj = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  if (urlObj.pathname !== "/ws") {
+    sendUpgradeError(socket, 404, "Not Found");
     return;
   }
-
   if (!isAuthorized(urlObj)) {
-    sendUpgradeError(socket, 401, 'Unauthorized');
+    sendUpgradeError(socket, 401, "Unauthorized");
     return;
   }
-
-  const sessionName = urlObj.searchParams.get('session') || '';
+  const sessionName = urlObj.searchParams.get("session") || "";
   if (!isAllowedSessionName(sessionName)) {
-    sendUpgradeError(socket, 404, 'Session not found');
+    sendUpgradeError(socket, 404, "Session not found");
     return;
   }
   if (!isEnabledSessionName(sessionName)) {
-    sendUpgradeError(socket, 404, 'Session not found');
+    sendUpgradeError(socket, 404, "Session not found");
     return;
   }
-
-  if (!(await sessionExists(sessionName))) {
-    sendUpgradeError(socket, 404, 'Session not found');
+  if (!await sessionExists(sessionName)) {
+    sendUpgradeError(socket, 404, "Session not found");
     return;
   }
-
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req);
+    wss.emit("connection", ws, req);
   });
 }
-
-httpServer.on('upgrade', (req, socket, head) => {
+httpServer.on("upgrade", (req, socket, head) => {
   handleUpgrade(req, socket, head).catch((error) => {
-    console.error('Upgrade error:', error);
-    sendUpgradeError(socket, 500, 'Internal Server Error');
+    console.error("Upgrade error:", error);
+    sendUpgradeError(socket, 500, "Internal Server Error");
   });
 });
-
 function closeConnection(ws) {
   const ptyProcess = ACTIVE_CONNECTIONS.get(ws);
   if (!ptyProcess) {
@@ -1813,38 +1748,34 @@ function closeConnection(ws) {
   ACTIVE_CONNECTIONS.delete(ws);
   try {
     ptyProcess.kill();
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
-
-wss.on('connection', async (ws, req) => {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  const sessionName = urlObj.searchParams.get('session') || '';
-  const readonly = urlObj.searchParams.get('readonly') === '1';
-  const cols = parseIntOrDefault(urlObj.searchParams.get('cols'), 80);
-  const rows = parseIntOrDefault(urlObj.searchParams.get('rows'), 24);
-
+wss.on("connection", async (ws, req) => {
+  const urlObj = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const sessionName = urlObj.searchParams.get("session") || "";
+  const readonly = urlObj.searchParams.get("readonly") === "1";
+  const cols = parseIntOrDefault(urlObj.searchParams.get("cols"), 80);
+  const rows = parseIntOrDefault(urlObj.searchParams.get("rows"), 24);
   console.log(`[ws] connect session=${sessionName} readonly=${readonly} cols=${cols} rows=${rows}`);
-
+  resetIdleTimer();
   if (!isEnabledSessionName(sessionName)) {
     console.log(`[ws] session not enabled: ${sessionName}`);
-    ws.send(`\r\n\x1b[31mSession expired — run /pilot ${sessionName.replace(/^claude-prod-/, '')} again from Telegram\x1b[0m\r\n`);
-    ws.close(4000, 'session not enabled');
+    ws.send(`\r
+\x1B[31mSession expired — run /pilot ${sessionName.replace(/^claude-prod-/, "")} again from Telegram\x1B[0m\r
+`);
+    ws.close(4000, "session not enabled");
     return;
   }
-
   refreshSessionTimer(sessionName);
-
   const host = getSessionHost(sessionName);
-
-  // Pre-flight: diagnose common failures before spawning PTY
   if (host) {
     try {
       const diag = await diagnoseRemote(host, sessionName);
       if (diag) {
         console.log(`[ws] pre-flight failed session=${sessionName}: ${diag}`);
-        ws.send(`\r\n\x1b[31m${diag}\x1b[0m\r\n`);
+        ws.send(`\r
+\x1B[31m${diag}\x1B[0m\r
+`);
         ws.close(4000, diag);
         return;
       }
@@ -1852,35 +1783,26 @@ wss.on('connection', async (ws, req) => {
       console.log(`[ws] pre-flight error session=${sessionName}: ${err.message}`);
     }
   }
-
-  const ptyCmd = host
-    ? { file: 'ssh', args: ['-t', '-o', 'ConnectTimeout=3', host, 'tmux', 'attach-session', '-t', sessionName] }
-    : { file: 'tmux', args: ['attach-session', '-t', sessionName] };
+  const ptyCmd = host ? { file: "ssh", args: ["-t", "-o", "ConnectTimeout=3", host, "tmux", "attach-session", "-t", sessionName] } : { file: "tmux", args: ["attach-session", "-t", sessionName] };
   const ptyProcess = pty.spawn(ptyCmd.file, ptyCmd.args, {
-    name: 'xterm-256color',
+    name: "xterm-256color",
     cols,
     rows,
     env: {
       ...process.env,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-    },
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor"
+    }
   });
-
-  // Force tmux to resize the window to match this client (avoids dot-fill)
   setTimeout(() => {
-    execTmux(['resize-window', '-t', sessionName, '-x', String(cols), '-y', String(rows)], host)
-      .catch(() => {});
+    execTmux(["resize-window", "-t", sessionName, "-x", String(cols), "-y", String(rows)], host).catch(() => {});
   }, 300);
-
   ACTIVE_CONNECTIONS.set(ws, ptyProcess);
-
   ptyProcess.onData((data) => {
     if (ws.readyState === ws.OPEN) {
       ws.send(data);
     }
   });
-
   ptyProcess.onExit(({ exitCode }) => {
     console.log(`[ws] pty exit session=${sessionName} code=${exitCode}`);
     ACTIVE_CONNECTIONS.delete(ws);
@@ -1888,82 +1810,79 @@ wss.on('connection', async (ws, req) => {
       if (exitCode !== 0 && host) {
         diagnoseRemote(host, sessionName).then((reason) => {
           const msg = reason || `Session exited (code ${exitCode})`;
-          ws.send(`\r\n\x1b[31m${msg}\x1b[0m\r\n`);
+          ws.send(`\r
+\x1B[31m${msg}\x1B[0m\r
+`);
           ws.close(4000, msg);
         }).catch(() => {
-          ws.send(`\r\n\x1b[33mSession exited (code ${exitCode})\x1b[0m\r\n`);
+          ws.send(`\r
+\x1B[33mSession exited (code ${exitCode})\x1B[0m\r
+`);
           ws.close();
         });
       } else {
-        ws.send(`\r\n\x1b[33mSession exited (code ${exitCode})\x1b[0m\r\n`);
+        ws.send(`\r
+\x1B[33mSession exited (code ${exitCode})\x1B[0m\r
+`);
         ws.close();
       }
     }
   });
-
-  ws.on('message', (raw) => {
+  ws.on("message", (raw) => {
     refreshSessionTimer(sessionName);
-    const message = raw.toString('utf8');
-    if (message.startsWith('{')) {
+    resetIdleTimer();
+    const message = raw.toString("utf8");
+    if (message.startsWith("{")) {
       try {
         const payload = JSON.parse(message);
-        if (payload.type === 'resize') {
-          const nextCols = parseIntOrDefault(String(payload.cols || ''), cols);
-          const nextRows = parseIntOrDefault(String(payload.rows || ''), rows);
+        if (payload.type === "resize") {
+          const nextCols = parseIntOrDefault(String(payload.cols || ""), cols);
+          const nextRows = parseIntOrDefault(String(payload.rows || ""), rows);
           ptyProcess.resize(nextCols, nextRows);
-          execTmux(['resize-window', '-t', sessionName, '-x', String(nextCols), '-y', String(nextRows)], host)
-            .catch(() => {});
+          execTmux(["resize-window", "-t", sessionName, "-x", String(nextCols), "-y", String(nextRows)], host).catch(() => {});
           return;
         }
-      } catch {
-        // treat as tty input
-      }
+      } catch {}
     }
-
     if (!readonly) {
       ptyProcess.write(message);
     }
   });
-
-  ws.on('close', (code) => { console.log(`[ws] close session=${sessionName} code=${code}`); closeConnection(ws); });
-  ws.on('error', (err) => { console.log(`[ws] error session=${sessionName}: ${err.message}`); closeConnection(ws); });
+  ws.on("close", (code) => {
+    console.log(`[ws] close session=${sessionName} code=${code}`);
+    closeConnection(ws);
+  });
+  ws.on("error", (err) => {
+    console.log(`[ws] error session=${sessionName}: ${err.message}`);
+    closeConnection(ws);
+  });
 });
-
-let shuttingDown = false;
-
+var shuttingDown = false;
 function shutdown() {
   if (shuttingDown) {
     return;
   }
   shuttingDown = true;
-
   for (const [ws, ptyProcess] of ACTIVE_CONNECTIONS.entries()) {
     ACTIVE_CONNECTIONS.delete(ws);
     try {
       ptyProcess.kill();
-    } catch {
-      // ignore
-    }
+    } catch {}
     try {
       ws.close();
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
-
   wss.close(() => {
     httpServer.close(() => {
       process.exit(0);
     });
   });
-
   setTimeout(() => process.exit(0), 1000).unref();
 }
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 restoreGridSessions();
 httpServer.listen(PORT, () => {
-  console.log(`pilot listening on http://localhost:${PORT}`);
+  console.log(`[pilot] listening on http://localhost:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
+  resetIdleTimer();
 });

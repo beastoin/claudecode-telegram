@@ -472,31 +472,28 @@ class TestCmdPilot:
         assert len(sent) == 1
         assert "Usage" in sent[0]["text"]
 
-    def test_pilot_calls_pilot_api(self):
+    def test_pilot_spawns_viewer(self):
         import bridge
         router, sent = _make_router()
-        fake_resp = MagicMock()
-        fake_resp.read.return_value = b'{"ok": true}'
-        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
-        fake_resp.__exit__ = MagicMock(return_value=False)
-        with patch.object(bridge, "_urlopen", return_value=fake_resp), \
+        fake_url = "http://100.125.36.102:10172/?token=abc123"
+        with patch.object(bridge.tool_manager, "spawn", return_value=(fake_url, "abc123")), \
              patch.object(bridge, "get_worker_host", return_value=None):
             router.cmd_pilot("lee", 12345)
         assert len(sent) == 1
         msg = sent[0]["text"]
         assert "Pilot" in msg
         assert "lee" in msg
+        assert "token=" in msg
 
-    def test_pilot_api_failure_reports_error(self):
+    def test_pilot_spawn_failure_reports_error(self):
         import bridge
-        import urllib.error
         router, sent = _make_router()
-        with patch.object(bridge, "_urlopen", side_effect=urllib.error.URLError("refused")), \
+        with patch.object(bridge.tool_manager, "spawn", return_value=None), \
              patch.object(bridge, "get_worker_host", return_value=None):
             router.cmd_pilot("lee", 12345)
         assert len(sent) == 1
         msg = sent[0]["text"]
-        assert "error" in msg.lower() or "refused" in msg
+        assert "error" in msg.lower()
 
 
 # ── /rewind command ───────────────────────────────────────
@@ -512,8 +509,9 @@ class TestCmdRewind:
     def test_rewind_generates_token_and_url(self):
         import bridge
         router, sent = _make_router()
-        with patch.object(bridge, "_render_transcript_html", return_value="<html>test</html>"), \
-             patch.object(bridge, "_beast_serve_deploy", return_value=None):
+        fake_url = "http://100.125.36.102:10171/?token=abc123"
+        with patch.object(bridge, "_resolve_transcript_path", return_value=("/tmp/test.jsonl", "sid123", "/")), \
+             patch.object(bridge.tool_manager, "spawn", return_value=(fake_url, "abc123")):
             router.cmd_rewind("lee", 12345)
         assert len(sent) == 1
         msg = sent[0]["text"]

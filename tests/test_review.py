@@ -10,8 +10,8 @@ import time
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
-from bridge import PRCache, parse_patch, generate_html
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'review'))
+from generate import PRCache, parse_patch, generate_html
 
 
 # ── PRCache tests ────────────────────────────────────────────────────────────

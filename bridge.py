@@ -134,544 +134,18 @@ from telegram import (
 )
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
-_REVIEW_CSS = (_TEMPLATE_DIR / "review.css").read_text() if (_TEMPLATE_DIR / "review.css").exists() else ""
-_REVIEW_JS = (_TEMPLATE_DIR / "review.js").read_text() if (_TEMPLATE_DIR / "review.js").exists() else ""
-_REVIEW_PAGE_TPL = (
-    (_TEMPLATE_DIR / "review_page.html").read_text().replace("__CSS__", _REVIEW_CSS).replace("__JS__", _REVIEW_JS)
-    if (_TEMPLATE_DIR / "review_page.html").exists()
-    else ""
-)
+# Review templates (_REVIEW_CSS, _REVIEW_JS, _REVIEW_PAGE_TPL) removed — loaded by review/generate.py
 
 
-def parse_patch(patch_text: str | None) -> list[dict[str, object]]:
-    if not patch_text:
-        return []
-    hunks: list[dict[str, object]] = []
-    current_hunk: dict[str, object] | None = None
-    for line in patch_text.split("\n"):
-        if line.startswith("@@"):
-            if current_hunk:
-                hunks.append(current_hunk)
-            m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)", line)
-            if m:
-                current_hunk = {
-                    "header": line,
-                    "old_start": int(m.group(1)),
-                    "old_count": int(m.group(2) or 1),
-                    "new_start": int(m.group(3)),
-                    "new_count": int(m.group(4) or 1),
-                    "context": m.group(5),
-                    "lines": [],
-                }
-            else:
-                current_hunk = {
-                    "header": line,
-                    "old_start": 0,
-                    "old_count": 0,
-                    "new_start": 0,
-                    "new_count": 0,
-                    "context": "",
-                    "lines": [],
-                }
-        elif current_hunk is not None:
-            lines_list = current_hunk["lines"]
-            assert isinstance(lines_list, list)
-            if line.startswith("+"):
-                lines_list.append(("add", line[1:]))
-            elif line.startswith("-"):
-                lines_list.append(("del", line[1:]))
-            else:
-                lines_list.append(("ctx", line[1:] if line.startswith(" ") else line))
-    if current_hunk:
-        hunks.append(current_hunk)
-    return hunks
+# parse_patch() and generate_html() removed — served by review/generate.py
 
 
-def generate_html(
-    meta: dict[str, object],
-    files: list[dict[str, object]],
-    pr_num: int,
-    owner: str,
-    repo: str,
-    comments: list[dict[str, object]] | None = None,
-    reviews: list[dict[str, object]] | None = None,
-    user_profiles: dict[str, dict[str, object]] | None = None,
-    highlight_comment_id: str | int | None = None,
-    commits: list[dict[str, object]] | None = None,
-) -> str:
-    """Render PR review page. All DOM rendering is done client-side by review.js."""
-    data = json.dumps(
-        {
-            "meta": meta,
-            "files": files,
-            "pr_num": pr_num,
-            "owner": owner,
-            "repo": repo,
-            "comments": comments or [],
-            "reviews": reviews or [],
-            "user_profiles": user_profiles or {},
-            "highlight_comment_id": highlight_comment_id,
-            "commits": commits or [],
-        },
-        default=str,
-    ).replace("</", "<\\/")
-    title = f"PR #{pr_num}: {html.escape(meta.get('title', ''))}"
-    return _REVIEW_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
-
-
-@dataclass
-class PaginatedResult:
-    total: int = 0
-    total_pages: int = 0
-    page: int = 1
-    per_page: int = 50
-
-
-@dataclass
-class EntriesResult(PaginatedResult):
-    entries: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class SearchResult(PaginatedResult):
-    query: str = ""
-    total_results: int = 0
-
-
-@dataclass
-class TranscriptSearchResult(SearchResult):
-    entries: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class TranscriptStats:
-    n_user: int = 0
-    n_tool: int = 0
-    n_edit: int = 0
-    lines_add: int = 0
-    lines_del: int = 0
-    lines_mod: int = 0
-    n_files: int = 0
-    model: str = ""
-    version: str = ""
-    git_branch: str = ""
-    first_ts: str = ""
-    last_ts: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    duration: str = ""
-
-
-_EMPTY_TRANSCRIPT_STATS: TranscriptStatsDict = {
-    "n_user": 0,
-    "n_tool": 0,
-    "n_edit": 0,
-    "lines_add": 0,
-    "lines_del": 0,
-    "lines_mod": 0,
-    "n_files": 0,
-    "model": "",
-    "version": "",
-    "git_branch": "",
-    "first_ts": "",
-    "last_ts": "",
-    "input_tokens": 0,
-    "output_tokens": 0,
-    "duration": "",
-}
-
-
-def _sanitize_fts5_query(term: str) -> str:
-    if re.search(r"\b(AND|OR|NOT|NEAR)\b", term):
-        return term
-    if re.search(r'[.*:^(){}"\-]', term):
-        tokens = term.split()
-        quoted = []
-        for t in tokens:
-            t = t.strip('"')
-            if t:
-                quoted.append(f'"{t}"')
-        return " ".join(quoted)
-    return term
-
-
-def _setup_db(db_path: str) -> sqlite3.Connection:
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    db = sqlite3.connect(db_path)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    return db
-
-
-def _check_incremental(
-    db: sqlite3.Connection,
-    jsonl_path: str,
-    table: str,
-    meta_table: str = "meta",
-) -> tuple[int, bool]:
-    file_size = os.path.getsize(jsonl_path)
-    if file_size == 0:
-        return 0, False
-    row = db.execute(f"SELECT value FROM {meta_table} WHERE key='file_size'").fetchone()
-    old_size = int(row[0]) if row else 0
-    path_row = db.execute(f"SELECT value FROM {meta_table} WHERE key='jsonl_path'").fetchone()
-    old_path = path_row[0] if path_row else ""
-    abs_path = os.path.abspath(jsonl_path)
-    fts_table = f"{table}_fts"
-    if old_path and old_path != abs_path:
-        db.execute(f"DELETE FROM {table}")
-        db.execute(f"DELETE FROM {fts_table}")
-        db.execute(f"DELETE FROM {meta_table}")
-        return 0, True
-    if old_size == file_size:
-        return old_size, False  # No changes
-    if old_size > file_size:
-        db.execute(f"DELETE FROM {table}")
-        db.execute(f"DELETE FROM {fts_table}")
-        db.execute(f"DELETE FROM {meta_table}")
-        return 0, True
-    return old_size, True
-
-
-def _update_meta(
-    db: sqlite3.Connection,
-    jsonl_path: str,
-    next_idx: int,
-    meta_table: str = "meta",
-) -> None:
-    file_size = os.path.getsize(jsonl_path)
-    abs_path = os.path.abspath(jsonl_path)
-    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('file_size', ?)", (str(file_size),))
-    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('entry_count', ?)", (str(next_idx),))
-    db.execute(f"INSERT OR REPLACE INTO {meta_table} VALUES ('jsonl_path', ?)", (abs_path,))
-    db.commit()
-
-
-def _paginate(total: int, page: int | None, per_page: int) -> tuple[int, int, int]:
-    total_pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 0
-    if page is None:
-        page = total_pages  # Default to last page
-    page = max(1, min(page, total_pages))
-    offset = (page - 1) * per_page
-    return page, total_pages, offset
-
-
-_SKIP_TYPES = frozenset(("progress", "queue-operation", "file-history-snapshot", "system"))
-
-
-def _transcript_create_tables(db: sqlite3.Connection) -> None:
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS entries (
-        idx INTEGER PRIMARY KEY,
-        byte_offset INTEGER,
-        type TEXT,
-        role TEXT,
-        timestamp TEXT,
-        model TEXT,
-        version TEXT,
-        git_branch TEXT,
-        raw_json TEXT,
-        plain_text TEXT,
-        input_tokens INTEGER DEFAULT 0,
-        output_tokens INTEGER DEFAULT 0
-    )"""
-    )
-    has_fts = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entries_fts'").fetchone()
-    if not has_fts:
-        db.execute(
-            """CREATE VIRTUAL TABLE entries_fts USING fts5(
-            plain_text, content=entries, content_rowid=idx,
-            tokenize='unicode61'
-        )"""
-        )
-    db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-
-
-def _extract_plain_text(entry: dict[str, Any]) -> str:
-    msg = entry.get("message", {})
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    if isinstance(content, list):
-        for c in content:
-            if not isinstance(c, dict):
-                continue
-            if c.get("text"):
-                parts.append(c["text"])
-            if c.get("thinking"):
-                parts.append(c["thinking"])
-            if isinstance(c.get("content"), str):
-                parts.append(c["content"])
-            if c.get("type") == "tool_use":
-                parts.append(json.dumps(c.get("input", {}), ensure_ascii=False))
-    return " ".join(parts)
-
-
-def _transcript_index(db: sqlite3.Connection, jsonl_path: str) -> int:
-    old_size, needs_work = _check_incremental(db, jsonl_path, "entries")
-    if not needs_work and old_size == os.path.getsize(jsonl_path):
-        return 0
-    row = db.execute("SELECT MAX(idx) FROM entries").fetchone()
-    next_idx: int = (row[0] + 1) if row[0] is not None else 0
-    new_count = 0
-    with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-        if old_size > 0:
-            f.seek(old_size)
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry: dict[str, Any] = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            etype: str = entry.get("type", "")
-            if etype in _SKIP_TYPES:
-                continue
-            msg = entry.get("message", {})
-            plain_text = _extract_plain_text(entry)
-            usage = msg.get("usage", {})
-            input_tokens = (
-                usage.get("input_tokens", 0)
-                + usage.get("cache_read_input_tokens", 0)
-                + usage.get("cache_creation_input_tokens", 0)
-            )
-            output_tokens: int = usage.get("output_tokens", 0)
-            db.execute(
-                "INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    next_idx,
-                    old_size,
-                    etype,
-                    msg.get("role", ""),
-                    entry.get("timestamp", ""),
-                    msg.get("model", ""),
-                    entry.get("version", ""),
-                    entry.get("gitBranch", ""),
-                    json.dumps(entry, ensure_ascii=False),
-                    plain_text,
-                    input_tokens,
-                    output_tokens,
-                ),
-            )
-            db.execute(
-                "INSERT INTO entries_fts(rowid, plain_text) VALUES (?, ?)",
-                (next_idx, plain_text),
-            )
-            next_idx += 1
-            new_count += 1
-    _update_meta(db, jsonl_path, next_idx)
-    return new_count
-
-
-def _transcript_query_entries(
-    db: sqlite3.Connection,
-    page: int | None = None,
-    per_page: int = 50,
-    filter_mode: str = "",
-) -> dict[str, Any]:
-    where = ""
-    if filter_mode == "prompts":
-        where = (
-            "WHERE type='user' AND role='user' "
-            "AND plain_text != '' AND plain_text NOT LIKE '<%' "
-            "AND json_type(raw_json, '$.message.content') = 'text'"
-        )
-    total: int = db.execute(f"SELECT COUNT(*) FROM entries {where}").fetchone()[0]
-    if total == 0:
-        return asdict(EntriesResult(per_page=per_page))
-    page_num, total_pages, offset = _paginate(total, page, per_page)
-    rows = db.execute(
-        f"SELECT idx, type, role, timestamp, raw_json FROM entries {where} " "ORDER BY idx LIMIT ? OFFSET ?",
-        (per_page, offset),
-    ).fetchall()
-    entries = [{"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4]} for r in rows]
-    return asdict(
-        EntriesResult(
-            entries=entries,
-            total=total,
-            total_pages=total_pages,
-            page=page_num,
-            per_page=per_page,
-        )
-    )
-
-
-def _transcript_query_search(
-    db: sqlite3.Connection,
-    search_term: str,
-    page: int = 1,
-    per_page: int = 50,
-    sort: str = "relevance",
-) -> dict[str, Any]:
-    if not search_term:
-        return asdict(TranscriptSearchResult(per_page=per_page))
-    safe_term = _sanitize_fts5_query(search_term)
-    try:
-        total_results: int = db.execute(
-            "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
-            (safe_term,),
-        ).fetchone()[0]
-    except Exception:
-        safe_term = f'"{search_term}"'
-        total_results = db.execute(
-            "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
-            (safe_term,),
-        ).fetchone()[0]
-    if total_results == 0:
-        return asdict(TranscriptSearchResult(query=search_term, per_page=per_page))
-    page_num, total_pages, offset = _paginate(total_results, page, per_page)
-    order = "ORDER BY e.idx" if sort == "time" else "ORDER BY f.rank"
-    rows = db.execute(
-        f"""SELECT e.idx, e.type, e.role, e.timestamp, e.raw_json, f.rank
-           FROM entries_fts f JOIN entries e ON f.rowid = e.idx
-           WHERE entries_fts MATCH ? {order} LIMIT ? OFFSET ?""",
-        (safe_term, per_page, offset),
-    ).fetchall()
-    entries = [
-        {"idx": r[0], "type": r[1], "role": r[2], "timestamp": r[3], "raw_json": r[4], "rank": r[5]} for r in rows
-    ]
-    return asdict(
-        TranscriptSearchResult(
-            entries=entries,
-            total_results=total_results,
-            total_pages=total_pages,
-            page=page_num,
-            per_page=per_page,
-            query=search_term,
-        )
-    )
-
-
-def _transcript_query_stats(db: sqlite3.Connection) -> dict[str, Any]:
-    agg = db.execute(
-        """SELECT
-        SUM(input_tokens), SUM(output_tokens),
-        MIN(timestamp), MAX(timestamp),
-        (SELECT model FROM entries WHERE type='assistant' AND model != '' LIMIT 1),
-        (SELECT version FROM entries WHERE version != '' LIMIT 1),
-        (SELECT git_branch FROM entries WHERE git_branch != '' LIMIT 1)
-    FROM entries"""
-    ).fetchone()
-    if not agg or agg[0] is None:
-        return asdict(TranscriptStats())
-    stats = TranscriptStats(
-        input_tokens=agg[0] or 0,
-        output_tokens=agg[1] or 0,
-        first_ts=agg[2] or "",
-        last_ts=agg[3] or "",
-        model=agg[4] or "",
-        version=agg[5] or "",
-        git_branch=agg[6] or "",
-    )
-    stats.n_user = db.execute(
-        "SELECT COUNT(*) FROM entries WHERE type='user' AND role='user' "
-        "AND plain_text != '' AND json_type(raw_json, '$.message.content') = 'text'"
-    ).fetchone()[0]
-    files_modified: set[str] = set()
-    for (raw,) in db.execute("SELECT raw_json FROM entries WHERE type='assistant'").fetchall():
-        try:
-            entry = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        content = entry.get("message", {}).get("content", [])
-        if isinstance(content, list):
-            for item in content:
-                if not isinstance(item, dict) or item.get("type") != "tool_use":
-                    continue
-                stats.n_tool += 1
-                name = item.get("name", "")
-                ti = item.get("input", {})
-                fp = ti.get("file_path", "") or ti.get("path", "")
-                if fp:
-                    files_modified.add(fp)
-                if name == "Edit":
-                    stats.n_edit += 1
-                    n_old = len(ti.get("old_string", "").splitlines(True))
-                    n_new = len(ti.get("new_string", "").splitlines(True))
-                    overlap = min(n_old, n_new)
-                    stats.lines_mod += overlap
-                    stats.lines_add += n_new - overlap
-                    stats.lines_del += n_old - overlap
-    stats.n_files = len(files_modified)
-    if stats.first_ts and stats.last_ts:
-        try:
-            fmt = "%Y-%m-%dT%H:%M:%S"
-            t0 = datetime.strptime(stats.first_ts[:19], fmt)
-            t1 = datetime.strptime(stats.last_ts[:19], fmt)
-            delta = int((t1 - t0).total_seconds())
-            if delta > 0:
-                days, rem = divmod(delta, 86400)
-                hours, rem = divmod(rem, 3600)
-                mins = rem // 60
-                if days > 0:
-                    stats.duration = f"{days}d {hours}h"
-                elif hours > 0:
-                    stats.duration = f"{hours}h {mins}m"
-                else:
-                    stats.duration = f"{mins}m"
-        except (ValueError, TypeError):
-            pass
-    return asdict(stats)
-
-
-def _run_transcript(args: argparse.Namespace) -> None:
-    if not os.path.exists(args.jsonl):
-        empty: dict[str, Any]
-        if args.query == "entries":
-            empty = asdict(EntriesResult(per_page=args.per_page))
-        elif args.query == "search":
-            empty = asdict(TranscriptSearchResult(query=args.search, per_page=args.per_page))
-        elif args.query == "stats" or args.query in ("entries+stats", "search+stats"):
-            empty = asdict(TranscriptStats())
-        else:
-            empty = {}
-        json.dump(empty, sys.stdout)
-        return
-    db = _setup_db(args.db)
-    _transcript_create_tables(db)
-    if os.path.getsize(args.jsonl) > 0:
-        _transcript_index(db, args.jsonl)
-    result: dict[str, Any]
-    if args.query == "entries":
-        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
-    elif args.query == "search":
-        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
-    elif args.query == "stats":
-        result = _transcript_query_stats(db)
-    elif args.query == "entries+stats":
-        result = _transcript_query_entries(db, page=args.page, per_page=args.per_page, filter_mode=args.filter_mode)
-        result["stats"] = _transcript_query_stats(db)
-    elif args.query == "search+stats":
-        result = _transcript_query_search(db, args.search, page=args.page or 1, per_page=args.per_page, sort=args.sort)
-        result["stats"] = _transcript_query_stats(db)
-    else:
-        result = {}
-    json.dump(result, sys.stdout, ensure_ascii=False)
-    db.close()
-
-
-def _indexer_main() -> None:
-    parser = argparse.ArgumentParser(
-        description="JSONL transcript indexer with SQLite FTS5",
-    )
-    sub = parser.add_subparsers(dest="mode", required=True)
-    shared = argparse.ArgumentParser(add_help=False)
-    shared.add_argument("--jsonl", required=True, help="Path to JSONL file")
-    shared.add_argument("--db", required=True, help="Path to SQLite database")
-    shared.add_argument("--page", type=int, default=None, help="Page number (default: last)")
-    shared.add_argument("--per-page", type=int, default=50, help="Items per page")
-    shared.add_argument("--search", type=str, default="", help="Search term")
-    t = sub.add_parser("transcript", parents=[shared], help="Index Claude transcripts")
-    t.add_argument("--query", required=True, choices=["entries", "search", "stats", "entries+stats", "search+stats"])
-    t.add_argument("--filter", type=str, default="", dest="filter_mode", help="Filter mode (e.g., 'prompts')")
-    t.add_argument("--sort", type=str, default="relevance", choices=["relevance", "time"])
-    args = parser.parse_args()
-    if args.mode == "transcript":
-        _run_transcript(args)
+# Transcript dataclasses (PaginatedResult, EntriesResult, SearchResult, TranscriptSearchResult,
+# TranscriptStats, _EMPTY_TRANSCRIPT_STATS) and Python indexer functions (_sanitize_fts5_query,
+# _setup_db, _check_incremental, _update_meta, _paginate, _transcript_create_tables,
+# _extract_plain_text, _transcript_index, _transcript_query_entries, _transcript_query_search,
+# _transcript_query_stats, _run_transcript, _indexer_main) removed — all served by spawn-on-demand
+# Bun viewer with bun:sqlite FTS5 (rewind/)
 
 
 class UrlOpenFn(Protocol):
@@ -3943,243 +3417,13 @@ def format_team_lines(  # type: ignore[no-redef]
     )
 
 
-_TRANSCRIPT_CSS = (_TEMPLATE_DIR / "transcript.css").read_text() if (_TEMPLATE_DIR / "transcript.css").exists() else ""
-_TRANSCRIPT_JS = (_TEMPLATE_DIR / "transcript.js").read_text() if (_TEMPLATE_DIR / "transcript.js").exists() else ""
-_ICONS = (
-    json.loads((_TEMPLATE_DIR / "transcript_icons.json").read_text())
-    if (_TEMPLATE_DIR / "transcript_icons.json").exists()
-    else {}
-)
-_TRANSCRIPT_PAGE_TPL = (
-    (_TEMPLATE_DIR / "transcript_page.html")
-    .read_text()
-    .replace("__CSS__", _TRANSCRIPT_CSS)
-    .replace("__JS__", _TRANSCRIPT_JS)
-    if (_TEMPLATE_DIR / "transcript_page.html").exists()
-    else ""
-)
-
-_TRANSCRIPT_CHEVRON_SVG = _ICONS.get("chevron", "")
-_TRANSCRIPT_CLAUDE_AVATAR = _ICONS.get("claude_avatar", "")
-_TRANSCRIPT_DEFAULT_TOOL_SVG = _ICONS.get("default_tool", "")
-_TRANSCRIPT_TOOL_SVGS: dict[str, str] = _ICONS.get("tools", {})
-_LOADING_CSS = (
-    (_TEMPLATE_DIR / "transcript_loading.css").read_text().strip()
-    if (_TEMPLATE_DIR / "transcript_loading.css").exists()
-    else ""
-)
-
-
-# _transcript_entry_to_html, _format_model_name, _detect_message_author,
-# and _generate_member_avatar moved to client-side JS (templates/transcript.js)
-
-
-def _transcript_stats(entries: list[TranscriptEntry]) -> TranscriptStatsDict:
-    n_user = n_tool = n_edit = lines_add = lines_del = lines_mod = input_tokens = output_tokens = 0
-    files_modified: set[str] = set()
-    model = version = git_branch = first_ts = last_ts = ""
-    for e in entries:
-        msg = e.get("message", {})
-        etype = e.get("type", "")
-        if etype == "user" and msg.get("role") == "user" and isinstance(msg.get("content"), str):
-            n_user += 1
-        if etype == "assistant":
-            for c in msg.get("content") or []:
-                if not isinstance(c, dict) or c.get("type") != "tool_use":
-                    continue
-                n_tool += 1
-                ti = c.get("input", {})
-                cname = c.get("name")
-                fp = ti.get("file_path", "")
-                if cname == "Edit" and ti.get("old_string") is not None:
-                    n_edit += 1
-                    n_old = len(ti.get("old_string", "").splitlines(True))
-                    n_new = len(ti.get("new_string", "").splitlines(True))
-                    overlap = min(n_old, n_new)
-                    lines_mod += overlap
-                    lines_del += n_old - overlap
-                    lines_add += n_new - overlap
-                if cname in ("Write", "Read", "Edit") and fp:
-                    files_modified.add(fp)
-        model = model or msg.get("model", "")
-        version = version or e.get("version", "")
-        git_branch = git_branch or e.get("gitBranch", "")
-        ts = e.get("timestamp", "")
-        if ts:
-            first_ts = first_ts or ts
-            last_ts = ts
-        usage = msg.get("usage", {})
-        input_tokens += (
-            usage.get("input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0)
-        )
-        output_tokens += usage.get("output_tokens", 0)
-    duration_str = ""
-    if first_ts and last_ts:
-        with _log_suppress(ValueError, TypeError, KeyError, level=_LOG_DEBUG, tag="parse:unknown"):
-            total_s = max(
-                0,
-                int(
-                    (
-                        datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-                        - datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
-                    ).total_seconds()
-                ),
-            )
-            d, rem = divmod(total_s, 86400)
-            h = rem // 3600
-            m = (rem % 3600) // 60
-            duration_str = f"{d}d {h}h" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
-    return {
-        "n_user": n_user,
-        "n_tool": n_tool,
-        "n_edit": n_edit,
-        "lines_add": lines_add,
-        "lines_del": lines_del,
-        "lines_mod": lines_mod,
-        "n_files": len(files_modified),
-        "model": model,
-        "version": version,
-        "git_branch": git_branch,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "duration": duration_str,
-    }
-
-
-def _render_transcript_loading(name: str, sid: str | None, token: str, sync_key: str) -> str:
-    esc = html.escape
-    info = _transcript_sync.get(sync_key) or {}
-    status = info.get("status", "syncing")
-    progress = esc(info.get("progress", "Starting sync..."))
-    pct = info.get("pct", 0)
-    elapsed = int(_clock.time() - info.get("started", _clock.time()))
-    error = info.get("error")
-    if status == "error":
-        bar_html = '<div class="bar-fill err" style="width:100%"></div>'
-        msg = f'<p class="err-msg">Error: {esc(error or "Unknown error")}</p>'
-        meta_js = ""
-    else:
-        bar_html = f'<div class="bar-fill" style="width:{pct}%"></div>'
-        msg = ""
-        meta_js = '<meta http-equiv="refresh" content="2">'
-    spin = '<span class="spinner"></span>' if status == "syncing" else ""
-    return f'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loading {esc(name)}</title>{meta_js}<style>{_LOADING_CSS}</style></head><body><div class="card"><h1>Preparing Transcript</h1><p class="sub">{esc(name)}</p><div class="bar">{bar_html}</div><p class="progress">{spin}{progress}</p><p class="elapsed">{elapsed}s elapsed</p>{msg}</div></body></html>'
+# Template loading, _transcript_stats, _render_transcript_loading, _render_transcript_html
+# removed — all served by spawn-on-demand Bun viewer (rewind/)
 
 
 def _err_page(title: str, detail: str = "") -> str:
     d = f"<p>{detail}</p>" if detail else ""
     return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>{title}</h1>{d}</body></html>"
-
-
-def _render_transcript_html(
-    name: str,
-    session_id: str | None = None,
-    page: int | None = None,
-    per_page: int = 50,
-    search_query: str = "",
-    token: str = "",
-    filter_mode: str = "",
-    search_sort: str = "relevance",
-    live_base_url: str = "",
-) -> str:
-
-    esc = html.escape
-    host = get_worker_host(name)
-    if host:
-        cwd = get_claude_session_cwd(name) or ""
-        sid: str | None = session_id or get_claude_session_id(name, authoritative=True)
-        if not sid:
-            return _err_page(f"No session found for {esc(name)}")
-        remote_home = _get_remote_home(host) or ""
-        if not remote_home:
-            return _err_page(f"Cannot resolve remote home for {esc(name)}")
-        remote_cwd = _remap_path(cwd, host)
-        remote_slug = _project_slug(remote_cwd)
-        jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
-        transcript_path = None
-    else:
-        transcript_path, sid, cwd = _resolve_transcript_path(name, session_id)
-        if not sid:
-            return _err_page(f"No session found for {esc(name)}")
-        if not transcript_path or transcript_path == "syncing":
-            return _err_page("Transcript not found", f"Worker: {esc(name)}, Session: {esc(sid)}")
-        jsonl_path = str(transcript_path)
-    query_result = (
-        _run_transcript_query(
-            jsonl_path,
-            sid,
-            "search+stats",
-            host=host,
-            search=search_query,
-            page=page or 1,
-            per_page=per_page,
-            sort=search_sort,
-        )
-        if search_query
-        else _run_transcript_query(
-            jsonl_path, sid, "entries+stats", host=host, page=page, per_page=per_page, filter_mode=filter_mode
-        )
-    )
-    stats_result = query_result.pop("stats", None) if query_result else None
-    if not query_result:
-        if not transcript_path or not Path(str(transcript_path)).exists():
-            return _err_page("Transcript not available", f"Worker: {esc(name)}, Session: {esc(sid)}")
-        all_entries = _parse_transcript_entries(transcript_path)
-        total = len(all_entries)
-        for _i, _e in enumerate(all_entries):
-            _e["_idx"] = _i
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        if page is None:
-            page = total_pages
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        page_entries = all_entries[start : start + per_page]
-        stats = _transcript_stats(all_entries)
-        file_size_str = ""
-    else:
-        page_entries = []
-        _entries_raw = query_result.get("entries", [])
-        for e in _entries_raw if isinstance(_entries_raw, list) else []:
-            try:
-                entry = cast(TranscriptEntry, json.loads(e["raw_json"]))
-                entry["_idx"] = e.get("idx", -1)
-                page_entries.append(entry)
-            except (json.JSONDecodeError, KeyError):
-                continue
-        total = _int_field(query_result, "total_results") if search_query else _int_field(query_result, "total")
-        total_pages = _int_field(query_result, "total_pages", 1)
-        page = _int_field(query_result, "page", 1)
-        stats = cast(TranscriptStatsDict, stats_result) if stats_result else dict(_EMPTY_TRANSCRIPT_STATS)
-    file_size_str = ""
-    if not host:
-        with _log_suppress(OSError, level=_LOG_DEBUG, tag="io:unknown"):
-            file_size_str = format_file_size(os.path.getsize(transcript_path) if transcript_path else 0)
-    data = json.dumps(
-        {
-            "name": name,
-            "session_id": sid,
-            "entries": page_entries,
-            "stats": stats,
-            "pagination": {"page": page, "total_pages": total_pages, "total": total, "per_page": per_page},
-            "search_query": search_query,
-            "search_sort": search_sort,
-            "filter_mode": filter_mode,
-            "token": token,
-            "live_base_url": live_base_url,
-            "file_size": file_size_str,
-            "icons": _ICONS,
-        },
-        default=str,
-    ).replace("</", "<\\/")
-    title = f"{html.escape(name)} — Transcript"
-    return _TRANSCRIPT_PAGE_TPL.replace("__TITLE__", title).replace("__DATA__", data)
-
-
-# get_worker_host, get_claude_session_cwd, get_claude_session_id — defined later in bridge body
 
 
 class TranscriptSyncRegistry:
@@ -4207,60 +3451,8 @@ class TranscriptSyncRegistry:
 
 
 _transcript_sync = TranscriptSyncRegistry()
-INDEXER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.py")
 
-
-def _run_transcript_query(
-    jsonl_path: str,
-    sid: str,
-    query: str,
-    host: str | None = None,
-    *,
-    page: int | None = None,
-    per_page: int | None = None,
-    search: str | None = None,
-    filter_mode: str | None = None,
-    sort: str | None = None,
-) -> dict[str, object] | None:
-
-    db_path = f"/tmp/transcript-cache/{sid}.db"
-    script_path = INDEXER_SCRIPT
-    if host:
-        remote_home = _get_remote_home(host) or ""
-        if remote_home:
-            script_path = f"{remote_home}/claudecode-telegram/bridge.py"
-    cmd = [
-        "python3",
-        script_path,
-        "indexer",
-        "transcript",
-        "--jsonl",
-        str(jsonl_path),
-        "--db",
-        db_path,
-        "--query",
-        query,
-    ]
-    if page is not None:
-        cmd.extend(["--page", str(page)])
-    if per_page is not None:
-        cmd.extend(["--per-page", str(per_page)])
-    if search:
-        cmd.extend(["--search", search])
-    if filter_mode:
-        cmd.extend(["--filter", filter_mode])
-    if sort and sort != "relevance":
-        cmd.extend(["--sort", sort])
-    try:
-        if host:
-            r = _remote_run(cmd, host=host, timeout=TIMEOUT_LARGE_TRANSFER)
-        else:
-            r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_GIT_OP)
-        if r.returncode == 0 and r.stdout.strip():
-            return cast(dict[str, object], json.loads(r.stdout))
-    except (subprocess.SubprocessError, OSError) as e:
-        _log(_LOG_ERROR, "transcript", f"Transcript query error: {e}")
-    return None
+# _run_transcript_query + INDEXER_SCRIPT removed — Bun viewer indexes directly via bun:sqlite
 
 
 def _start_transcript_sync(name: str, host: str, remote_path: str, local_tmp: Path, key: str) -> None:
@@ -4393,629 +3585,12 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
     return None, sid, cwd
 
 
-def _parse_transcript_entries(transcript_path: str) -> list[TranscriptEntry]:
-    entries = []
-    with open(transcript_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = cast(TranscriptEntry, json.loads(line))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            etype = entry.get("type", "")
-            if etype in ("progress", "queue-operation", "file-history-snapshot"):
-                continue
-            if etype == "system":
-                continue
-            entries.append(entry)
-    return entries
+# _parse_transcript_entries, handle_transcript_endpoint removed — served by Bun viewer (rewind/)
 
 
-def handle_transcript_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
-    try:
-
-        query_params = parse_qs(parsed.query)
-        token = query_params.get("token", [None])[0]
-        if not tokens.validate_rewind(token):
-            handler._send_html(
-                _err_page(
-                    "Session Expired",
-                    "This link has expired or is invalid. Send <code>/rewind &lt;name&gt;</code> in Telegram to get a fresh 5-minute link.",
-                ).encode("utf-8"),
-                403,
-            )
-            return
-        parts = parsed.path.rstrip("/").split("/")
-        if len(parts) < 3 or not parts[2]:
-            handler._send_json(400, {"error": "Usage: /transcript/<worker_name>"})
-            return
-        name = parts[2]
-        if len(parts) >= 4 and parts[3] == "updates":
-            query_params = parse_qs(parsed.query)
-            since = int(query_params.get("since", [0])[0])
-            session_id = query_params.get("sid", [None])[0]
-            host = get_worker_host(name)
-            if host:
-                cwd = get_claude_session_cwd(name) or ""
-                sid = session_id or get_claude_session_id(name)
-                if not sid:
-                    handler._send_json(200, {"total": 0, "new": 0})
-                    return
-                remote_home = _get_remote_home(host) or ""
-                remote_cwd = _remap_path(cwd, host)
-                remote_slug = _project_slug(remote_cwd)
-                jsonl_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
-            else:
-                _tp, sid, _cwd = _resolve_transcript_path(name, session_id)
-                if not _tp or not sid:
-                    handler._send_json(200, {"total": 0, "new": 0})
-                    return
-                jsonl_path = str(_tp)
-            result = _run_transcript_query(jsonl_path, sid, "stats", host=host)
-            total = 0
-            if result:
-                total = _int_field(result, "n_user") + _int_field(result, "n_tool")
-                count_result = _run_transcript_query(jsonl_path, sid, "entries", host=host, page=1, per_page=1)
-                if count_result:
-                    total = _int_field(count_result, "total", total)
-            new_count = max(0, total - since)
-            handler._send_json(200, {"total": total, "new": new_count})
-            return
-        query_params = parse_qs(parsed.query)
-        session_id = query_params.get("sid", [None])[0]
-        page_raw = query_params.get("page", [None])[0]
-        try:
-            page = max(1, int(page_raw)) if page_raw is not None else None
-        except (ValueError, TypeError):
-            page = None
-        try:
-            per_page = max(1, min(500, int(query_params.get("per_page", [50])[0])))
-        except (ValueError, TypeError):
-            per_page = 50
-        search_query = query_params.get("q", [""])[0].strip()
-        search_sort = query_params.get("sort", ["relevance"])[0].strip()
-        if search_sort not in ("relevance", "time"):
-            search_sort = "relevance"
-        filter_mode = query_params.get("filter", [""])[0].strip()
-        host = get_worker_host(name)
-        if not host:
-            _tp, _sid, _cwd = _resolve_transcript_path(name, session_id)
-            if _tp == "syncing":
-                sync_key = f"{name}:{_sid}"
-                handler._send_html(_render_transcript_loading(name, _sid, token or "", sync_key).encode("utf-8"))
-                return
-        html_content = _render_transcript_html(
-            name,
-            session_id=session_id,
-            page=page,
-            per_page=per_page,
-            search_query=search_query,
-            token=token or "",
-            filter_mode=filter_mode,
-            search_sort=search_sort,
-        )
-        handler._send_html(html_content.encode("utf-8"))
-    except (OSError, ValueError, KeyError) as e:
-        _log(_LOG_ERROR, "transcript", f"Transcript endpoint error: {e}", exc=e)
-        handler._send_text(500, str(e))
-
-
-_REVIEW_SCHEMA = (
-    (_TEMPLATE_DIR / "review_schema.sql").read_text() if (_TEMPLATE_DIR / "review_schema.sql").exists() else ""
-)
-CACHE_DB = os.environ.get("PR_CACHE_DB", "/tmp/pr-review-cache.db")
-USER_PROFILE_TTL = 86400
-
-
-class PRCache:
-    def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or CACHE_DB
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(_REVIEW_SCHEMA)
-
-    def clear_pr(self, pr_key: str) -> None:
-        for table in ("pr_meta", "pr_files", "pr_commits", "pr_comments", "pr_reviews"):
-            self.conn.execute(f"DELETE FROM {table} WHERE pr_key=?", (pr_key,))
-        self.conn.commit()
-
-    def get_meta(self, pr_key: str) -> dict[str, object] | None:
-        row = self.conn.execute(
-            "SELECT data, head_sha, comment_count, review_count, commit_count " "FROM pr_meta WHERE pr_key=?", (pr_key,)
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "data": json.loads(row[0]),
-            "head_sha": row[1],
-            "comment_count": row[2],
-            "review_count": row[3],
-            "commit_count": row[4],
-        }
-
-    def set_meta(
-        self, pr_key: str, meta: dict[str, object], comment_count: int, review_count: int, commit_count: int
-    ) -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO pr_meta VALUES (?,?,?,?,?,?,?)",
-            (
-                pr_key,
-                json.dumps(meta),
-                meta.get("head_sha", ""),
-                comment_count,
-                review_count,
-                commit_count,
-                time.time(),
-            ),
-        )
-        self.conn.commit()
-
-    def get_files(self, pr_key: str, head_sha: str) -> list[dict[str, object]] | None:
-        row = self.conn.execute(
-            "SELECT data FROM pr_files WHERE pr_key=? AND head_sha=?", (pr_key, head_sha)
-        ).fetchone()
-        return json.loads(row[0]) if row else None
-
-    def set_files(self, pr_key: str, head_sha: str, files: list[dict[str, object]]) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO pr_files VALUES (?,?,?)", (pr_key, head_sha, json.dumps(files)))
-        self.conn.commit()
-
-    def get_commits(self, pr_key: str) -> dict[str, dict[str, object]]:
-        rows = self.conn.execute("SELECT sha, data FROM pr_commits WHERE pr_key=?", (pr_key,)).fetchall()
-        return {r[0]: json.loads(r[1]) for r in rows}
-
-    def set_commit(self, pr_key: str, sha: str, commit_data: dict[str, object]) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO pr_commits VALUES (?,?,?)", (pr_key, sha, json.dumps(commit_data)))
-        self.conn.commit()
-
-    def _get_id_list(self, table: str, pr_key: str) -> list[dict[str, object]]:
-        rows = self.conn.execute(f"SELECT data FROM {table} WHERE pr_key=? ORDER BY id", (pr_key,)).fetchall()
-        return [json.loads(r[0]) for r in rows]
-
-    def _set_id_list(self, table: str, pr_key: str, items: list[dict[str, object]]) -> None:
-        self.conn.execute(f"DELETE FROM {table} WHERE pr_key=?", (pr_key,))
-        for item in items:
-            self.conn.execute(
-                f"INSERT OR REPLACE INTO {table} VALUES (?,?,?)", (pr_key, item.get("id", 0), json.dumps(item))
-            )
-        self.conn.commit()
-
-    def get_user_profile(self, username: str) -> dict[str, object] | None:
-        row = self.conn.execute("SELECT data, fetched_at FROM user_profiles WHERE username=?", (username,)).fetchone()
-        if not row:
-            return None
-        if time.time() - row[1] > USER_PROFILE_TTL:
-            return None  # expired
-        return json.loads(row[0])
-
-    def set_user_profile(self, username: str, profile: dict[str, object]) -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO user_profiles VALUES (?,?,?)", (username, json.dumps(profile), time.time())
-        )
-        self.conn.commit()
-
-    def close(self) -> None:
-        self.conn.close()
-
-
-def fetch_pr_cached(
-    owner: str,
-    repo: str,
-    pr_num: int,
-    cache: PRCache | None = None,
-    fresh: bool = False,
-) -> tuple[
-    dict[str, object],
-    list[dict[str, object]],
-    list[dict[str, object]],
-    list[dict[str, object]],
-    list[dict[str, object]],
-    dict[str, dict[str, object]],
-]:
-    pr_key = f"{owner}/{repo}/{pr_num}"
-    if not cache:
-        cache = PRCache()
-    if fresh:
-        print(f"  --fresh: clearing cache for {pr_key}")
-        cache.clear_pr(pr_key)
-    cached = cache.get_meta(pr_key)
-    print("  Fetching metadata...")
-    meta = fetch_pr_meta(owner, repo, pr_num)
-    new_head_sha = meta.get("head_sha", "")
-    head_changed = not cached or cached["head_sha"] != new_head_sha
-    need_files = head_changed or cache.get_files(pr_key, new_head_sha) is None
-    results = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        if need_files:
-            print(
-                "  Fetching file patches (head SHA changed)..."
-                if cached and head_changed
-                else "  Fetching file patches..."
-            )
-            results["files"] = pool.submit(fetch_pr_files, owner, repo, pr_num)
-        results["comments"] = pool.submit(fetch_pr_comments, owner, repo, pr_num)
-        results["reviews"] = pool.submit(fetch_pr_reviews, owner, repo, pr_num)
-        results["commit_list"] = pool.submit(_fetch_commit_list, owner, repo, pr_num)
-    if need_files:
-        files = results["files"].result()
-        cache.set_files(pr_key, new_head_sha, files)
-    else:
-        files = cache.get_files(pr_key, new_head_sha)
-        print(f"  Files: cached ({len(files)} files)")
-    cached_comments = cache._get_id_list("pr_comments", pr_key) if cached else []
-    cached_reviews = cache._get_id_list("pr_reviews", pr_key) if cached else []
-    comments = results["comments"].result()
-    reviews = results["reviews"].result()
-    if len(comments) != len(cached_comments) or len(reviews) != len(cached_reviews):
-        if cached:
-            print(
-                f"  Comments/reviews updated ({len(cached_comments)}->{len(comments)}, "
-                f"{len(cached_reviews)}->{len(reviews)})"
-            )
-        else:
-            print(f"  Fetched {len(comments)} comments, {len(reviews)} reviews")
-        cache._set_id_list("pr_comments", pr_key, comments)
-        cache._set_id_list("pr_reviews", pr_key, reviews)
-    else:
-        print(f"  Comments: cached ({len(comments)}), Reviews: cached ({len(reviews)})")
-        comments = cached_comments
-        reviews = cached_reviews
-    commit_list = results["commit_list"].result()
-    cached_commits = cache.get_commits(pr_key)
-    to_fetch_commits = []
-    commit_map = {}
-    for c in commit_list:
-        sha = c["sha"]
-        if sha in cached_commits and not head_changed:
-            commit_map[sha] = cached_commits[sha]
-        else:
-            to_fetch_commits.append(c)
-    if to_fetch_commits:
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            pool.map(lambda c: _fetch_commit_files_single(owner, repo, c), to_fetch_commits)
-        for c in to_fetch_commits:
-            cache.set_commit(pr_key, c["sha"], c)
-            commit_map[c["sha"]] = c
-    commits = [commit_map.get(c["sha"], c) for c in commit_list]
-    new_count = len(to_fetch_commits)
-    if new_count:
-        print(f"  Fetched {new_count} new commit(s), {len(commits) - new_count} cached")
-    else:
-        print(f"  Commits: all {len(commits)} cached")
-    usernames = {meta.get("user", "")}
-    for c in comments:
-        usernames.add(c.get("user", ""))
-    for r in reviews:
-        usernames.add(r.get("user", ""))
-    for cm in commits:
-        if cm.get("author_login"):
-            usernames.add(cm["author_login"])
-    usernames.discard("")
-    user_profiles = {}
-    to_fetch = []
-    for u in usernames:
-        cached_profile = cache.get_user_profile(u)
-        if cached_profile:
-            user_profiles[u] = cached_profile
-        else:
-            to_fetch.append(u)
-    if to_fetch:
-        print(f"  Fetching {len(to_fetch)} user profile(s)...")
-        fresh_profiles = fetch_user_info(to_fetch)
-        for u, p in fresh_profiles.items():
-            user_profiles[u] = p
-            cache.set_user_profile(u, p)
-    else:
-        print(f"  User profiles: all {len(user_profiles)} cached")
-    cache.set_meta(pr_key, meta, len(comments), len(reviews), len(commits))
-    return meta, files, comments, reviews, commits, user_profiles
-
-
-def _gh_api(endpoint: str, jq: str, *, paginate: bool = True, timeout: int = 30) -> list[dict[str, object]]:
-    """Run gh api and parse JSON line output. Returns [] on error."""
-    cmd = ["gh", "api", endpoint]
-    if paginate:
-        cmd.append("--paginate")
-    cmd.extend(["--jq", jq])
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if r.returncode != 0:
-            _log(_LOG_WARN, "pr-review", f"gh api {endpoint} returned {r.returncode}: {r.stderr.strip()[:200]}")
-            return []
-        return [json.loads(line) for line in r.stdout.strip().split("\n") if line.strip()]
-    except Exception as e:
-        _log(_LOG_WARN, "pr-review", f"gh api {endpoint} failed: {e}")
-        return []
-
-
-def fetch_user_info(usernames: Iterable[str]) -> dict[str, dict[str, object]]:
-    profiles = {}
-    for username in set(usernames):
-        if not username:
-            continue
-        items = _gh_api(
-            f"users/{username}",
-            "{login: .login, name: .name, followers: .followers, "
-            "public_repos: .public_repos, created_at: .created_at, "
-            "avatar_url: .avatar_url, bio: .bio}",
-            paginate=False,
-            timeout=10,
-        )
-        if items:
-            profiles[username] = items[0]
-    return profiles
-
-
-def fetch_pr_reviews(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    return _gh_api(
-        f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
-        ".[] | {id: .id, body: .body, user: .user.login, "
-        "state: .state, submitted_at: .submitted_at, html_url: .html_url}",
-    )
-
-
-def fetch_pr_comments(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    issue = _gh_api(
-        f"repos/{owner}/{repo}/issues/{pr_num}/comments",
-        ".[] | {id: .id, body: .body, user: .user.login, "
-        "created_at: .created_at, updated_at: .updated_at, "
-        'html_url: .html_url, type: "issue"}',
-    )
-    review = _gh_api(
-        f"repos/{owner}/{repo}/pulls/{pr_num}/comments",
-        ".[] | {id: .id, body: .body, user: .user.login, "
-        "created_at: .created_at, path: .path, line: .line, "
-        "original_line: .original_line, side: .side, "
-        'diff_hunk: .diff_hunk, html_url: .html_url, type: "review"}',
-    )
-    return sorted(issue + review, key=lambda c: c.get("created_at", ""))
-
-
-def _fetch_commit_list(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    return [
-        c
-        for c in _gh_api(
-            f"repos/{owner}/{repo}/pulls/{pr_num}/commits",
-            ".[] | {sha: .sha, message: .commit.message, "
-            "author: .commit.author.name, author_login: .author.login, "
-            "date: .commit.author.date}",
-        )
-        if "sha" in c
-    ]
-
-
-def _fetch_commit_files_single(owner: str, repo: str, c: dict[str, object]) -> None:
-    items = _gh_api(
-        f"repos/{owner}/{repo}/commits/{c['sha']}",
-        "{files: [.files[] | {filename: .filename, status: .status, "
-        "additions: .additions, deletions: .deletions, patch: .patch}]}",
-        paginate=False,
-    )
-    c["files"] = items[0].get("files", []) if items else []
-
-
-def fetch_pr_meta(owner: str, repo: str, pr_num: int) -> dict[str, object]:
-    items = _gh_api(
-        f"repos/{owner}/{repo}/pulls/{pr_num}",
-        "{title: .title, body: .body, user: .user.login, "
-        "changed_files: .changed_files, additions: .additions, "
-        "deletions: .deletions, commits: .commits, "
-        "base: .base.ref, head: .head.ref, html_url: .html_url, "
-        "head_sha: .head.sha, base_sha: .base.sha, "
-        "mergeable: .mergeable, mergeable_state: .mergeable_state, "
-        "merged: .merged, state: .state, draft: .draft}",
-        paginate=False,
-    )
-    if not items:
-        raise RuntimeError(f"PR #{pr_num} not found or API error")
-    meta = items[0]
-    head_sha = meta.get("head_sha", "")
-    if head_sha:
-        checks = _gh_api(
-            f"repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-            "[.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}]",
-            paginate=False,
-            timeout=15,
-        )
-        meta["checks"] = checks[0] if checks and isinstance(checks[0], list) else checks or []
-    return meta
-
-
-def fetch_pr_files(owner: str, repo: str, pr_num: int) -> list[dict[str, object]]:
-    files = _gh_api(
-        f"repos/{owner}/{repo}/pulls/{pr_num}/files",
-        ".[] | {filename: .filename, status: .status, " "additions: .additions, deletions: .deletions, patch: .patch}",
-        timeout=60,
-    )
-    missing = [f for f in files if not f.get("patch") and f.get("additions", 0) > 0]
-    if missing:
-        print(f"    Fetching full diff for {len(missing)} large files...")
-        full_diff = _fetch_full_diff(owner, repo, pr_num)
-        if full_diff:
-            diff_patches = _parse_full_diff(full_diff)
-            for f in files:
-                if not f.get("patch") and f["filename"] in diff_patches:
-                    f["patch"] = diff_patches[f["filename"]]
-    return files
-
-
-def _fetch_full_diff(owner: str, repo: str, pr_num: int) -> str | None:
-    try:
-        r = subprocess.run(
-            ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_num}", "-H", "Accept: application/vnd.github.v3.diff"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return r.stdout if r.returncode == 0 else None
-    except subprocess.TimeoutExpired:
-        _log(_LOG_WARN, "pr-review", "Full diff fetch timed out")
-        return None
-
-
-def _parse_full_diff(diff_text: str) -> dict[str, str]:
-    patches = {}
-    current_file = None
-    current_lines = []
-    for line in diff_text.split("\n"):
-        if line.startswith("diff --git"):
-            if current_file and current_lines:
-                patches[current_file] = "\n".join(current_lines)
-            current_lines = []
-            parts = line.split(" b/", 1)
-            current_file = parts[1] if len(parts) > 1 else None
-        elif line.startswith("@@") or (current_lines and current_file):
-            if line.startswith(("---", "+++")):
-                continue
-            if line.startswith("@@") or current_lines:
-                current_lines.append(line)
-    if current_file and current_lines:
-        patches[current_file] = "\n".join(current_lines)
-    return patches
-
-
-def _fetch_file_context(
-    owner: str, repo: str, path: str, line: int, ref: str, context: int = 3
-) -> tuple[str | None, str]:
-    try:
-        r = subprocess.run(
-            ["gh", "api", f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if r.returncode != 0:
-            return None, ref[:12]
-        content = base64.b64decode(r.stdout.strip()).decode("utf-8", errors="replace")
-        lines = content.split("\n")
-        start = max(0, line - context - 1)
-        end = min(len(lines), line + context)
-        snippet = []
-        for i in range(start, end):
-            ln = i + 1
-            marker = " ←" if ln == line else ""
-            snippet.append(f"│ {ln:>4}: {lines[i]}{marker}")
-        return "\n".join(snippet), ref[:12]
-    except Exception as e:
-        _log(_LOG_WARN, "pr-comment", f"Failed to fetch file context: {e}")
-        return None, ref[:12]
-
-
-def _format_comment_with_context(
-    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None, short_sha: str
-) -> str:
-    parts = [f"PR #{pr_num} comment on {path}:{line} (ref {short_sha})"]
-    if context_snippet:
-        parts.append(context_snippet)
-    parts.append("")
-    parts.append(comment_body)
-    return "\n".join(parts)
-
-
-def _notify_telegram(
-    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = ""
-) -> None:
-    bridge_url = os.environ.get("BRIDGE_URL", "http://localhost:8271")
-    text = f"\U0001f4ac " + _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha)
-    try:
-        req = urllib.request.Request(
-            f"{bridge_url}/notifications",
-            data=json.dumps({"text": text}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except Exception as e:
-        _log(_LOG_WARN, "pr-comment", f"Telegram notify failed: {e}")
-
-
-def _route_mentions_to_workers(
-    comment_body: str, pr_num: int, path: str, line: int, context_snippet: str | None = None, short_sha: str = ""
-) -> None:
-    tmux_prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
-    mentions = re.findall(r"@(\w+)", comment_body)
-    if not mentions:
-        return
-    try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True, timeout=5
-        )
-        active_sessions = set(r.stdout.strip().split("\n")) if r.returncode == 0 else set()
-    except Exception:
-        active_sessions = set()
-    msg = "manager: " + _format_comment_with_context(comment_body, pr_num, path, line, context_snippet, short_sha)
-    for mention in mentions:
-        target_session = f"{tmux_prefix}{mention}"
-        if target_session not in active_sessions:
-            continue
-        try:
-            buf_name = f"pr-{uuid.uuid4().hex[:8]}"
-            fd, tmpfile = tempfile.mkstemp(suffix=".msg", prefix="pr-send-")
-            try:
-                os.write(fd, msg.encode())
-                os.close(fd)
-                subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmpfile], capture_output=True, timeout=5)
-                subprocess.run(
-                    ["tmux", "paste-buffer", "-b", buf_name, "-t", target_session], capture_output=True, timeout=5
-                )
-                subprocess.run(["tmux", "send-keys", "-t", target_session, "Enter"], capture_output=True, timeout=5)
-                subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
-            finally:
-                with suppress(OSError):
-                    os.unlink(tmpfile)
-            _log(_LOG_INFO, "pr-comment", f"Routed to @{mention} via tmux")
-        except Exception as e:
-            _log(_LOG_WARN, "pr-comment", f"Failed to route to @{mention}: {e}")
-
-
-def _pr_review_main() -> None:
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <pr_url_or_number> [--fresh] [--no-serve]", file=sys.stderr)
-        sys.exit(1)
-    pr_input = sys.argv[1]
-    highlight_comment_id = None
-    fragment_match = re.search(r"#issuecomment-(\d+)", pr_input)
-    if fragment_match:
-        highlight_comment_id = fragment_match.group(1)
-    clean_url = pr_input.split("#")[0]
-    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", clean_url)
-    if m:
-        owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
-    else:
-        owner, repo, pr_num = "BasedHardware", "omi", int(clean_url)
-    fresh = "--fresh" in sys.argv
-    cache = PRCache()
-    print(f"Fetching PR #{pr_num} from {owner}/{repo}..." + (" (fresh)" if fresh else ""))
-    meta, files, comments, reviews, commits, user_profiles = fetch_pr_cached(
-        owner, repo, pr_num, cache=cache, fresh=fresh
-    )
-    cache.close()
-    print(
-        f"Ready: {len(files)} files, {len(comments)} comments, {len(reviews)} reviews, "
-        f"{len(commits)} commits, {len(user_profiles)} profiles"
-    )
-    html_content = generate_html(
-        meta,
-        files,
-        pr_num,
-        owner,
-        repo,
-        comments=comments,
-        reviews=reviews,
-        user_profiles=user_profiles,
-        highlight_comment_id=highlight_comment_id,
-        commits=commits,
-    )
-    out_path = f"/tmp/pr-review-{pr_num}.html"
-    with open(out_path, "w") as f:
-        f.write(html_content)
-    print(f"Written to {out_path}")
-    if "--no-serve" not in sys.argv:
-        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-        print(f"\nView via bridge: {base_url}/tools/review/{pr_num}")
-        print("Or open directly: file://" + out_path)
+# PR review data fetching (PRCache, fetch_pr_cached, fetch_pr_*, _gh_api, generate_html,
+# _pr_review_main, _fetch_file_context, _notify_telegram, _route_mentions_to_workers)
+# removed — served by standalone scripts (review/generate.py, review/src/serve.ts)
 
 
 class GuestSessionDict(_GuestSessionDictRequired, total=False):
@@ -6273,6 +4848,146 @@ class TokenStore:
         return self._validate(PR_REVIEW_TOKENS, token, extend, PR_REVIEW_EXTEND)
 
 
+# --- Viewer Manager: spawn-on-demand Bun servers ---
+
+_TOOL_PORT_MIN = 10171
+_TOOL_PORT_MAX = 10179
+
+
+class _SpawnedTool(NamedTuple):
+    pid: int
+    port: int
+    token: str
+    kind: str
+    name: str
+    started_at: float
+
+
+class ToolManager:
+    """Spawn and track lightweight Bun tool servers on demand."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._tools: dict[str, _SpawnedTool] = {}
+
+    def _allocate_port(self) -> int | None:
+        """Find an available port in the tool range."""
+        used_ports = {v.port for v in self._tools.values()}
+        for port in range(_TOOL_PORT_MIN, _TOOL_PORT_MAX + 1):
+            if port in used_ports:
+                continue
+            # Also check if port is actually free
+            try:
+                r = _subprocess_runner.run(
+                    ["ss", "-tlnp", f"sport = :{port}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if f":{port}" not in r.stdout:
+                    return port
+            except (OSError, subprocess.SubprocessError):
+                return port
+        return None
+
+    def spawn(
+        self,
+        kind: str,
+        name: str,
+        ttl: int,
+        extra_args: list[str],
+        runtime: str = "bun",
+        script_dir: str = "",
+    ) -> tuple[str, str] | None:
+        """Spawn a tool server. Returns (url, token) or None on failure.
+
+        runtime: "bun" (default)
+        script_dir: override script location (default: <kind>/src/<kind>.ts)
+        """
+        key = f"{kind}:{name}"
+        with self._lock:
+            # Reuse existing viewer if still alive
+            existing = self._tools.get(key)
+            if existing:
+                try:
+                    os.kill(existing.pid, 0)
+                    base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+                    host = urlparse(base_url).hostname or "localhost"
+                    url = f"http://{host}:{existing.port}/?token={existing.token}"
+                    return url, existing.token
+                except OSError:
+                    del self._tools[key]
+
+            port = self._allocate_port()
+            if port is None:
+                _log(_LOG_ERROR, "tool", "No available tool ports (10171-10179 all in use)")
+                return None
+
+        token = secrets.token_urlsafe(32)
+        bridge_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = script_dir or os.path.join(bridge_dir, kind, "src", f"{kind}.ts")
+
+        if not os.path.exists(script_path):
+            _log(_LOG_ERROR, "tool", f"Tool script not found: {script_path}")
+            return None
+
+        cmd = [runtime, script_path, "--port", str(port), "--token", token, "--ttl", str(ttl), *extra_args]
+
+        try:
+            proc = _subprocess_runner.popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            # Brief wait for startup
+            time.sleep(0.3)
+            if proc.poll() is not None:
+                _log(_LOG_ERROR, "tool", f"Tool exited immediately (port {port})")
+                return None
+
+            viewer = _SpawnedTool(
+                pid=proc.pid,
+                port=port,
+                token=token,
+                kind=kind,
+                name=name,
+                started_at=_clock.time(),
+            )
+            with self._lock:
+                self._tools[key] = viewer
+
+            base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+            host = urlparse(base_url).hostname or "localhost"
+            url = f"http://{host}:{port}/?token={token}"
+            _log(_LOG_INFO, "tool", f"Spawned tool for {name} on port {port} (pid={proc.pid}, ttl={ttl}s)")
+            return url, token
+        except (OSError, subprocess.SubprocessError) as e:
+            _log(_LOG_ERROR, "tool", f"Failed to spawn tool: {e}")
+            return None
+
+    def cleanup(self) -> None:
+        """Remove dead tools from tracking."""
+        with self._lock:
+            dead = []
+            for key, v in self._tools.items():
+                try:
+                    os.kill(v.pid, 0)
+                except OSError:
+                    dead.append(key)
+            for key in dead:
+                del self._tools[key]
+
+    def active(self) -> list[_SpawnedTool]:
+        """List active tools."""
+        self.cleanup()
+        with self._lock:
+            return list(self._tools.values())
+
+
+tool_manager = ToolManager()
+
+
 def _extract_file_id(msg: TelegramMessageDict) -> tuple[str | None, str]:
     if msg.get("animation"):
         return msg["animation"].get("file_id"), "GIF"
@@ -7305,9 +6020,7 @@ def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
         return True
     names = name.lower().strip().split()
     prefix = os.environ.get("TMUX_PREFIX", "claude-prod-")
-    pilot_port = os.environ.get("PILOT_PORT", "10170")
     if "all" in names:
-
         assert worker_manager is not None
         registered = worker_manager.scan_tmux_sessions()
         registry = _load_registry()
@@ -7318,42 +6031,63 @@ def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
             router.reply(chat_id, "No active workers found", outcome="Needs decision")
             return True
         names = sorted(registered.keys())
-    enabled = []
-    session_names = []
-    errors = []
+
+    # Build session list: "tmux_name[@host]" for --sessions arg
+    session_entries: list[str] = []
+    display_names: list[str] = []
+    errors: list[str] = []
     for n in names:
         session_name = f"{prefix}{n}" if not n.startswith("claude-") else n
-        try:
-            worker_host = get_worker_host(n)
-            url = f"http://localhost:{pilot_port}/api/pilot?session={session_name}"
-            if worker_host:
-                url += f"&host={_urlquote(worker_host)}"
-            req = urllib.request.Request(url, method="POST")
+        worker_host = get_worker_host(n)
+        entry = f"{session_name}@{worker_host}" if worker_host else session_name
+        session_entries.append(entry)
+        display_names.append(n)
+
+    if not session_entries:
+        router.reply(chat_id, "No workers specified", outcome="Needs decision")
+        return True
+
+    # Spawn pilot via ToolManager (Bun runtime)
+    bridge_dir = os.path.dirname(os.path.abspath(__file__))
+    pilot_script = os.path.join(bridge_dir, "pilot", "src", "pilot.ts")
+
+    slug_name = "-".join(display_names[:3]) if len(display_names) <= 3 else f"team{len(display_names)}"
+    result = tool_manager.spawn(
+        "pilot",
+        slug_name,
+        ttl=1800,
+        extra_args=["--sessions", ",".join(session_entries)],
+        runtime="bun",
+        script_dir=pilot_script,
+    )
+    if not result:
+        router.reply(chat_id, "Pilot error: no available ports or spawn failed", outcome="Needs decision")
+        return True
+
+    url, _token = result
+    # For multi-worker, create a grid session via the pilot's API
+    if len(session_entries) > 1:
+        ts = time.strftime("%m%d-%H%M", time.gmtime(core._clock.time()))
+        slug = "-".join(display_names) + "-" + ts if len(display_names) <= 3 else f"team{len(display_names)}-{ts}"
+        session_names = [e.split("@")[0] for e in session_entries]
+        # Parse port from the spawned URL
+        pilot_port = urlparse(url).port or 10171
+        with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
+            payload = json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
+            req = urllib.request.Request(
+                f"http://localhost:{pilot_port}/api/grid-session?token={_token}",
+                data=payload,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
             with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
                 cast(dict[str, object], json.loads(resp.read()))
-            enabled.append(n)
-            session_names.append(session_name)
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            errors.append(f"{n}: {e}")
-    if not enabled:
-        router.reply(chat_id, f"Pilot error: {'; '.join(errors)}", outcome="Needs decision")
-        return True
-    ts = time.strftime("%m%d-%H%M", time.gmtime(core._clock.time()))
-    slug = "-".join(enabled) + "-" + ts if len(enabled) <= 3 else f"team{len(enabled)}-{ts}"
-    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
-        payload = json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
-        req = urllib.request.Request(
-            f"http://localhost:{pilot_port}/api/grid-session",
-            data=payload,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
-            cast(dict[str, object], json.loads(resp.read()))
+        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
+        pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}?token={_token}"
+    else:
+        pilot_url = url
 
-    host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
-    pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}"
-    names_str = ", ".join(enabled)
+    names_str = ", ".join(display_names)
     msg = f"✈️ Pilot: {names_str} (30min)\n{pilot_url}"
     if errors:
         msg += f"\n⚠️ Failed: {'; '.join(errors)}"
@@ -7367,24 +6101,55 @@ def cmd_rewind(router: CommandRouter, name: str, chat_id: int) -> bool:
         return True
     name = name.lower().strip()
 
-    base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-    token = secrets.token_urlsafe(32)
-    tokens.add_rewind(token, name)
-    url = f"{base_url}/transcript/{name}?token={token}"
-    try:
-        html_content = _render_transcript_html(
-            name, per_page=200, token=token, live_base_url=f"{base_url}/transcript/{name}"
-        )
-        snap_path = f"/tmp/rewind-{name}.html"
-        with open(snap_path, "w") as f:
-            f.write(html_content)
-        serve_url = _beast_serve_deploy(snap_path, f"rewind-{name}")
-        if serve_url:
-            router.reply(chat_id, f"⏪ Rewind for {name}\n{serve_url}")
+    # Resolve JSONL path (local or remote)
+    host = get_worker_host(name)
+    if host:
+        cwd = get_claude_session_cwd(name) or ""
+        sid = get_claude_session_id(name, authoritative=True)
+        if not sid:
+            router.reply(chat_id, f"No session found for {name}", outcome="Needs decision")
             return True
-    except OSError as e:
-        _log(_LOG_WARN, "bridge", f"Rewind snapshot deploy failed for {name}: {e}")
-    router.reply(chat_id, f"⏪ Rewind for {name}\n{url}")
+        remote_home = _get_remote_home(host) or ""
+        if not remote_home:
+            router.reply(chat_id, f"Cannot resolve remote home for {name}", outcome="Needs decision")
+            return True
+        remote_cwd = _remap_path(cwd, host)
+        remote_slug = _project_slug(remote_cwd)
+        remote_path = f"{remote_home}/.claude/projects/{remote_slug}/{sid}.jsonl"
+        local_tmp = Path(f"/tmp/transcript-{name}-{sid}.jsonl")
+        sync_key = f"{name}:{sid}"
+        sync_info = _transcript_sync.get(sync_key)
+        if sync_info and sync_info["status"] == "done" and local_tmp.exists():
+            jsonl_path = str(local_tmp)
+        elif sync_info and sync_info["status"] == "syncing":
+            router.reply(chat_id, f"⏪ Syncing transcript for {name}… try again in a few seconds")
+            return True
+        else:
+            _task_pool.submit(_start_transcript_sync, name, host, remote_path, local_tmp, sync_key)
+            router.reply(chat_id, f"⏪ Syncing transcript for {name}… try again in a few seconds")
+            return True
+    else:
+        transcript_path, sid, _cwd = _resolve_transcript_path(name)
+        if not sid:
+            router.reply(chat_id, f"No session found for {name}", outcome="Needs decision")
+            return True
+        if not transcript_path or transcript_path == "syncing":
+            router.reply(chat_id, f"⏪ Syncing transcript for {name}… try again in a few seconds")
+            return True
+        jsonl_path = str(transcript_path)
+
+    # Spawn Bun rewind viewer
+    result = tool_manager.spawn(
+        "rewind",
+        name,
+        ttl=300,
+        extra_args=["--jsonl-path", jsonl_path, "--name", name, "--session-id", sid or "unknown"],
+    )
+    if not result:
+        router.reply(chat_id, "⏪ Rewind failed: no available tool ports", outcome="Needs decision")
+        return True
+    url, _token = result
+    router.reply(chat_id, f"⏪ Rewind for {name} (5 min)\n{url}")
     return True
 
 
@@ -7413,11 +6178,14 @@ def cmd_pr_review(router: CommandRouter, arg: str, chat_id: int) -> bool:
     else:
         owner, repo, pr_num = m.group(1), m.group(2), int(m.group(3))
     router.reply(chat_id, f"Generating PR review for {owner}/{repo}#{pr_num}...")
-    script_path = Path(__file__).parent / "bridge.py"
+
+    # Generate HTML via standalone script
+    bridge_dir = os.path.dirname(os.path.abspath(__file__))
+    generate_script = os.path.join(bridge_dir, "review", "generate.py")
     out_path = f"/tmp/pr-review-{pr_num}.html"
     try:
         r = core._subprocess_runner.run(
-            [sys.executable, str(script_path), "review", arg, "--no-serve"],
+            [sys.executable, generate_script, arg],
             capture_output=True,
             text=True,
             timeout=PENDING_TIMEOUT,
@@ -7429,17 +6197,41 @@ def cmd_pr_review(router: CommandRouter, arg: str, chat_id: int) -> bool:
         router.reply(chat_id, "PR review generation timed out (>300s).", outcome="Needs decision")
         return True
 
+    # Try beast serve deploy first (external CDN hosting)
     slug = f"pr-{pr_num}"
     serve_url = _beast_serve_deploy(out_path, slug)
     if serve_url:
         router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{serve_url}")
-    else:
+        return True
 
-        token = secrets.token_urlsafe(32)
-        tokens.add_pr_review(token, pr_num, owner, repo)
-        base_url = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
-        url = f"{base_url}/tools/review/{pr_num}?token={token}"
+    # Fallback: spawn Bun review server via ToolManager
+    serve_script = os.path.join(bridge_dir, "review", "src", "serve.ts")
+    result = tool_manager.spawn(
+        "review",
+        slug,
+        ttl=300,
+        extra_args=[
+            "--html-path",
+            out_path,
+            "--owner",
+            owner,
+            "--repo",
+            repo,
+            "--pr-num",
+            str(pr_num),
+        ],
+        runtime="bun",
+        script_dir=serve_script,
+    )
+    if result:
+        url, _token = result
         router.reply(chat_id, f"PR #{pr_num}: {owner}/{repo}\n{url}")
+    else:
+        router.reply(
+            chat_id,
+            f"PR #{pr_num}: generated at {out_path} but no ports available to serve it",
+            outcome="Needs decision",
+        )
     return True
 
 
@@ -8726,153 +7518,9 @@ def handle_health_workers_endpoint(handler: BaseHTTPRequestHandler) -> None:
         handler._send_text(500, str(e))
 
 
-def handle_pr_file_content(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
-    params = dict(parse_qs(parsed.query))
-    token = params.get("token", [None])[0]
-    if not tokens.validate_pr_review(token):
-        handler._send_status(403)
-        return
-    owner = params.get("owner", [None])[0]
-    repo = params.get("repo", [None])[0]
-    path = params.get("path", [None])[0]
-    ref = params.get("ref", [None])[0]
-    if not all([owner, repo, path, ref]):
-        handler._send_status(400)
-        return
-    ok, out = _gh_api_call([f"repos/{owner}/{repo}/contents/{path}?ref={ref}", "--jq", ".content"])
-    if not ok:
-        handler._send_status(504 if out == "timeout" else 404)
-        return
-    try:
-        raw = base64.b64decode(out.strip()).decode("utf-8", errors="replace")
-        handler._send_json(200, raw.splitlines())
-    except (ValueError, TypeError):
-        handler._send_status(500)
-
-
-def handle_pr_keepalive(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
-    params = dict(parse_qs(parsed.query))
-    token = params.get("token", [None])[0]
-    if not tokens.validate_pr_review(token):
-        handler._send_status(403)
-        return
-    handler._send_status(204)
-
-
-def handle_pr_review_comments(handler: BaseHTTPRequestHandler, body: bytes) -> None:
-    try:
-        data = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        handler._send_text(400, "Invalid JSON")
-        return
-    if not tokens.validate_pr_review(_str_field(data, "token")):
-        handler._send_text(403, "Token expired")
-        return
-    owner, repo = _str_field(data, "owner"), _str_field(data, "repo")
-    pr_num, comment_body = _int_field(data, "pr_num"), _str_field(data, "body").strip()
-    path, line = _str_field(data, "path"), _int_field(data, "line")
-    if path and line:
-        side = _str_field(data, "side", "RIGHT")
-        head_sha = _str_field(data, "head_sha")
-        if not all([owner, repo, pr_num, path, line, comment_body, head_sha]):
-            handler._send_text(400, "Missing required fields")
-            return
-        gh_payload = json.dumps({"body": comment_body, "commit_id": head_sha, "path": path, "line": line, "side": side})
-        ok, err = _gh_api_call(
-            [f"repos/{owner}/{repo}/pulls/{pr_num}/comments", "--method", "POST", "--input", "-"], input_data=gh_payload
-        )
-        if not ok:
-            _log(_LOG_ERROR, "pr-comment", f"GitHub API error: {err}")
-            handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err}")
-            return
-        if admin_chat_id:
-            transport.send_text(admin_chat_id, f"\U0001f4ac PR #{pr_num} comment\n{path}:{line}\n\n{comment_body}")
-        _pr_fan_out(pr_num, comment_body, f" on {path}:{line}")
-    else:
-        if not all([owner, repo, pr_num, comment_body]):
-            handler._send_text(400, "Missing required fields")
-            return
-        ok, err = _gh_api_call(
-            [f"repos/{owner}/{repo}/issues/{pr_num}/comments", "--method", "POST", "-f", f"body={comment_body}"]
-        )
-        if not ok:
-            handler._send_text(504 if err == "timeout" else 502, f"GitHub API error: {err[:200]}")
-            return
-        _pr_notify(f"\U0001f4ac PR #{pr_num} comment:\n{comment_body[:500]}")
-        _pr_fan_out(pr_num, comment_body)
-    handler._send_json(200, {"ok": True})
-
-
-def _pr_notify(text: str) -> None:
-    with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
-        req = urllib.request.Request(
-            f"{BRIDGE_PUBLIC_URL or f'http://localhost:{PORT}'}/notifications",
-            data=json.dumps({"text": text}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        _urlopen(req, timeout=TIMEOUT_TMUX_SEND)
-
-
-def _pr_fan_out(pr_num: int, comment_body: str, prefix: str = "") -> None:
-    targets, _ = command_router.parse_at_mentions(comment_body)
-    if targets:
-        msg = f"manager: PR #{pr_num} review comment{prefix}\n\n{comment_body}"
-        for t in targets:
-            send_to_worker(t, msg)
-
-
-def handle_pr_merge(handler: BaseHTTPRequestHandler, body: bytes) -> None:
-    try:
-        data = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        handler._send_text(400, "Invalid JSON")
-        return
-    if not tokens.validate_pr_review(_str_field(data, "token")):
-        handler._send_text(403, "Token expired")
-        return
-    owner = _str_field(data, "owner")
-    repo = _str_field(data, "repo")
-    pr_num = _int_field(data, "pr_num")
-    merge_method = _str_field(data, "merge_method", "merge")
-    if merge_method not in ("merge", "squash", "rebase"):
-        merge_method = "merge"
-    if not all([owner, repo, pr_num]):
-        handler._send_text(400, "Missing required fields")
-        return
-    ok, err = _gh_api_call(
-        [f"repos/{owner}/{repo}/pulls/{pr_num}/merge", "--method", "PUT", "-f", f"merge_method={merge_method}"],
-        timeout=TIMEOUT_GIT_OP,
-    )
-    if not ok:
-        handler._send_text(504 if err == "timeout" else 502, f"Merge failed: {err[:300]}")
-        return
-    _pr_notify(f"✅ PR #{pr_num} merged ({merge_method}) via review page")
-    handler._send_json(200, {"ok": True})
-
-
-def handle_pr_review_endpoint(handler: BaseHTTPRequestHandler, parsed: ParseResult) -> None:
-    params = dict(parse_qs(parsed.query))
-    token = params.get("token", [None])[0]
-    info = tokens.validate_pr_review(token)
-    if not info:
-        handler._send_html(
-            b"<h2>Link expired</h2><p>Send <code>/pr &lt;url&gt;</code> in Telegram to get a fresh 5-minute link.</p>",
-            403,
-        )
-        return
-    pr_num = info["pr_num"]
-    html_path = f"/tmp/pr-review-{pr_num}.html"
-    if not os.path.exists(html_path):
-        handler._send_html(
-            f"<h2>PR review not found</h2><p>File {html_path} missing. Re-run /pr command.</p>".encode(), 404
-        )
-        return
-    with open(html_path, "rb") as f:
-        handler._send_html(f.read())
-
-
-handle_pr_comment = handle_pr_review_comments
-handle_pr_general_comment = handle_pr_review_comments
+# PR review handler functions (handle_pr_file_content, handle_pr_review_comments,
+# handle_pr_merge, handle_pr_review_endpoint, handle_pr_keepalive) removed —
+# served by spawn-on-demand Python viewer (review/src/serve.ts)
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -11121,14 +9769,8 @@ _install_delegates(
         "handle_relay_get",
         "handle_relay_send",
         "handle_relay_reply",
-        "handle_pr_file_content",
-        "handle_pr_keepalive",
-        "handle_pr_review_comments",
-        "handle_pr_general_comment",
-        "handle_pr_merge",
-        "handle_pr_review_endpoint",
-        "handle_pr_comment",
-        "handle_transcript_endpoint",
+        # PR review handlers (handle_pr_*) removed — served by review/src/serve.ts
+        # Transcript handler (handle_transcript_endpoint) removed — served by rewind/
         "handle_notify",
         "handle_health_alert",
         "handle_forge_register",
@@ -11170,8 +9812,7 @@ def _setup_endpoint_routes() -> None:
     r.add(P, "/outputs", lambda h, b, _m: h.handle_hook_response(b))
     r.add(P, "/notifications", lambda h, b, _m: h.handle_notify(b))
     r.add(P, "/messages", lambda h, b, _m: h.handle_send_endpoint(b))
-    r.add(P, "/tools/review/comments", lambda h, b, _m: h.handle_pr_review_comments(b))
-    r.add(P, "/tools/review/merges", lambda h, b, _m: h.handle_pr_merge(b))
+    # PR review routes (comments, merges) removed — served by review/src/serve.ts
     r.add(P, "/workers", lambda h, b, _m: h.handle_forge_register(b))
     r.add(P, "/guests", lambda h, b, _m: h.handle_guest_register(b))
     r.add(P, "/channels", lambda h, b, _m: h.handle_channel_create(b))
@@ -11213,14 +9854,13 @@ def _setup_endpoint_routes() -> None:
     r.add(G, "/health/tunnel", lambda h, p, _m: h.handle_health_tunnel_endpoint())
     r.add(G, "/connectors", lambda h, p, _m: h.handle_connectors_status())
     r.add(G, "/channels", lambda h, p, _m: h.handle_channels_list(p))
-    r.add(G, "/tools/review/files", lambda h, p, _m: h.handle_pr_file_content(p))
-    r.add(G, "/pr-keepalive", lambda h, p, _m: h.handle_pr_keepalive(p))
+    # PR review file content and keepalive routes removed — served by review/src/serve.ts
     r.add_pattern(G, r"^/guests/inbox", lambda h, p, m: h.handle_guest_inbox(p))
     r.add_pattern(G, r"^/guests/status", lambda h, p, m: h.handle_guest_status(p))
     r.add_pattern(G, r"^/relay/([^/]+)(?:/(.+))?$", lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p))
     r.add_pattern(G, r"^/channels/([^/]+)/messages$", lambda h, p, m: h.handle_channel_messages(_mg(m), p))
-    r.add_pattern(G, r"^/transcript/", lambda h, p, m: h.handle_transcript_endpoint(p))
-    r.add_pattern(G, r"^/tools/review/", lambda h, p, m: h.handle_pr_review_endpoint(p))
+    # transcript endpoint removed — served by spawn-on-demand Bun viewer (rewind/)
+    # PR review endpoint removed — served by review/src/serve.ts
     r.add(D, "/guests", lambda h, p, _m: h.handle_guest_disconnect(p))
     r.add_pattern(D, r"^/channels/([^/]+)$", lambda h, p, m: h.handle_channel_delete(_mg(m)))
 
@@ -11553,9 +10193,9 @@ API_ENDPOINTS = {
     "GET /health": "Unified health: all signals, threads, uptime — single source of truth",
     "GET /health/workers": "Watchdog state for all workers",
     "GET /health/tunnel": "Tunnel and poll fallback state",
-    "GET /transcript/<name>": "Polished HTML transcript viewer for a worker",
+    "GET /transcript/<name>": "Polished HTML transcript tool for a worker",
     "GET /transcript/<name>/updates": "Poll for new transcript entries (returns {total, new})",
-    "GET /tools/review/<pr_num>": "PR review viewer with diff, search, file navigation",
+    # PR review viewer removed — served by review/src/serve.ts
     "POST /messages": "Send a prompt to a worker: {worker, message, from}",
     "POST /outputs": "Hook only: publish this worker's own response to Telegram",
     "POST /notifications": "Send notification to all admin chats",
@@ -11563,9 +10203,7 @@ API_ENDPOINTS = {
     "POST /workers": "Worker registration (name, host, version, tools, callback_url)",
     "GET /connectors": "Connector status (gmail, github — running, failures, config)",
     "POST /connectors/restarts": "Restart a connector: {name: 'gmail'|'github'}",
-    "POST /tools/review/comments": "Post a PR comment (inline if path+line in body, else general)",
-    "GET /tools/review/files": "Fetch file content from GitHub for diff expansion",
-    "POST /tools/review/merges": "Merge a PR via GitHub API",
+    # PR review endpoints (comments, files, merges) removed — served by review/src/serve.ts
     "GET /guests": "List active guest sessions",
     "POST /guests": "Register a temporary guest agent session",
     "DELETE /guests?token=<token>": "Disconnect a guest session",
@@ -12002,11 +10640,9 @@ _this_module._sources = (_core_mod, _tg_mod, _cc_mod)
 
 if __name__ == "__main__":
     _sub = sys.argv[1] if len(sys.argv) > 1 else ""
-    if _sub == "indexer":
-        sys.argv = [sys.argv[0], *sys.argv[2:]]
-        _indexer_main()
-    elif _sub == "review":
-        sys.argv = [sys.argv[0], *sys.argv[2:]]
-        _pr_review_main()
+    if _sub == "review":
+        # Forward to standalone generate script
+        _gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), "review", "generate.py")
+        sys.exit(subprocess.call([sys.executable, _gen, *sys.argv[2:]]))
     else:
         main()

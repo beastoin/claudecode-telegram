@@ -101,16 +101,67 @@ interface GhosttyAssets {
 }
 
 // ---------------------------------------------------------------------------
+// CLI arg parsing (spawn-on-demand mode)
+// ---------------------------------------------------------------------------
+
+function parsePilotArgs(argv: string[]): {
+  port: number;
+  token: string;
+  ttl: number;
+  sessions: string[];  // "name[@host]" entries
+} {
+  const args: Record<string, string> = {};
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--') && i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+      args[a.slice(2)] = argv[++i];
+    }
+  }
+  return {
+    port: Number.parseInt(args.port || process.env.PORT || '10170', 10),
+    token: args.token || process.env.PILOT_TOKEN || '',
+    ttl: Number.parseInt(args.ttl || '1800', 10),  // 30min default
+    sessions: (args.sessions || '').split(',').filter(Boolean),
+  };
+}
+
+const CLI_ARGS = parsePilotArgs(process.argv);
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PORT: number = Number.parseInt(process.env.PORT || '10170', 10);
-const PILOT_TOKEN: string = process.env.PILOT_TOKEN || '';
+const PORT: number = CLI_ARGS.port;
+const PILOT_TOKEN: string = CLI_ARGS.token;
 const ACTIVE_CONNECTIONS: Map<WsWebSocket, IPty> = new Map();
 const ENABLED_SESSIONS: Map<string, EnabledSessionEntry> = new Map();
 const SESSION_TIMERS: Map<string, ReturnType<typeof setTimeout>> = new Map();
 const PILOT_TIMEOUT_MS: number = 30 * 60 * 1000; // 30 minutes
 const GRID_SESSIONS: Map<string, GridSession> = new Map();
+
+// ---------------------------------------------------------------------------
+// Idle TTL — self-destruct after inactivity
+// ---------------------------------------------------------------------------
+
+let _idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function resetIdleTimer(): void {
+  if (CLI_ARGS.ttl <= 0) return;
+  if (_idleTimer) clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => {
+    console.log(`[pilot] TTL expired after ${CLI_ARGS.ttl}s of inactivity — shutting down`);
+    shutdown();
+  }, CLI_ARGS.ttl * 1000);
+}
+
+// Pre-enable sessions from CLI --sessions arg
+for (const entry of CLI_ARGS.sessions) {
+  const [name, host] = entry.includes('@') ? entry.split('@', 2) : [entry, null];
+  if (name) {
+    ENABLED_SESSIONS.set(name, { host: host || null });
+    console.log(`[pilot] pre-enabled session: ${name}${host ? ` (host: ${host})` : ''}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Session enable / disable / timer
@@ -1643,6 +1694,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
+  // Reset idle TTL on each valid request
+  resetIdleTimer();
+
   if (pathname === '/debug') {
     sendHtml(res, 200, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1974,6 +2028,7 @@ wss.on('connection', async (ws: WsWebSocket, req: IncomingMessage) => {
   const rows: number = parseIntOrDefault(urlObj.searchParams.get('rows'), 24);
 
   console.log(`[ws] connect session=${sessionName} readonly=${readonly} cols=${cols} rows=${rows}`);
+  resetIdleTimer();
 
   if (!isEnabledSessionName(sessionName)) {
     console.log(`[ws] session not enabled: ${sessionName}`);
@@ -2051,6 +2106,7 @@ wss.on('connection', async (ws: WsWebSocket, req: IncomingMessage) => {
 
   ws.on('message', (raw: Buffer) => {
     refreshSessionTimer(sessionName);
+    resetIdleTimer();
     const message: string = raw.toString('utf8');
     if (message.startsWith('{')) {
       try {
@@ -2117,5 +2173,6 @@ process.on('SIGTERM', shutdown);
 
 restoreGridSessions();
 httpServer.listen(PORT, () => {
-  console.log(`pilot listening on http://localhost:${PORT}`);
+  console.log(`[pilot] listening on http://localhost:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || 'dynamic'})`);
+  resetIdleTimer();
 });
