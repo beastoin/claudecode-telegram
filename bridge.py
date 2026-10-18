@@ -83,6 +83,7 @@ from claudecode import (
     _scan_latest_session_id,
     _tmux_pane_pids,
     _which_binary,
+    scan_session_id,
 )
 from shared import *
 from shared import (
@@ -3548,7 +3549,7 @@ def _resolve_transcript_path(name: str, session_id: str | None = None) -> tuple[
             assert worker_manager is not None
             cwd = normalize_cwd(worker_manager._get_tmux_pane_cwd(tmux_name, host=host))
     cwd = cwd or os.path.expanduser("~")
-    sid = session_id or get_claude_session_id(name, authoritative=True)
+    sid = session_id or get_claude_session_id(name)
     if not sid:
         return None, "", cwd
     slug = _project_slug(cwd)
@@ -5858,11 +5859,12 @@ class WorkerManager:
         resume_cwd = ""
         session_dir = self.sessions_dir / name
         if mode == "resume":
-            resume_id = (
-                claudecode.get_claude_session_id(name, authoritative=False)
-                or claudecode.get_claude_session_id(name, authoritative=True)
-                or ""
-            )
+            resume_id = claudecode.get_claude_session_id(name)
+            if not resume_id:
+                cwd = claudecode.get_claude_session_cwd(name)
+                if cwd:
+                    resume_id = claudecode.scan_session_id(cwd, host=get_worker_host(name))
+            resume_id = resume_id or ""
             resume_cwd = ""
         else:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -6097,7 +6099,7 @@ def cmd_rewind(router: CommandRouter, name: str, chat_id: int) -> bool:
     host = get_worker_host(name)
     if host:
         cwd = get_claude_session_cwd(name) or ""
-        sid = get_claude_session_id(name, authoritative=True)
+        sid = get_claude_session_id(name)
         if not sid:
             router.reply(chat_id, f"No session found for {name}", outcome="Needs decision")
             return True
@@ -7162,7 +7164,7 @@ def sync_credentials_to_target(target_host: str) -> None:
 
 
 def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None) -> str | None:
-    session_id = get_claude_session_id(name, authoritative=True)
+    session_id = get_claude_session_id(name)
     _remote_run(["tmux", "send-keys", "-t", tmux_name, "/exit", "Enter"], host=host)
     for _ in range(20):
         _clock.sleep(DELAY_RETRY)
@@ -7177,7 +7179,7 @@ def stop_worker_for_teleport(name: str, tmux_name: str, host: str | None = None)
     else:
         _remote_run(["tmux", "send-keys", "-t", tmux_name, "C-c", ""], host=host)
         _clock.sleep(DELAY_STARTUP)
-    return get_claude_session_id(name, authoritative=True) or session_id
+    return get_claude_session_id(name) or session_id
 
 
 def start_worker_on_target(
@@ -8798,9 +8800,11 @@ def restart_remote_worker(
         target_cwd = _remap_path(target_cwd, host)
     _log(_LOG_INFO, "_restart_remote", f"{name}: mode={mode}, host={host}, tmux={tmux_name}, cwd={target_cwd}")
     if mode == "resume":
-        resume_id = get_claude_session_id(name, authoritative=False)
+        resume_id = get_claude_session_id(name)
         if not resume_id:
-            resume_id = get_claude_session_id(name, authoritative=True)
+            cwd_for_scan = get_claude_session_cwd(name)
+            if cwd_for_scan:
+                resume_id = scan_session_id(cwd_for_scan, host=host)
         _log(_LOG_INFO, "_restart_remote", f"{name}: resume_id={resume_id}")
     else:
         session_dir = SESSIONS_DIR / name
@@ -8818,8 +8822,7 @@ def restart_remote_worker(
     else:
         _log(_LOG_INFO, "_restart_remote", f"{name}: tmux {tmux_name} not found on {host}")
     if mode == "resume":
-        cached = get_claude_session_id(name, authoritative=False)
-        resume_id = cached or (get_claude_session_id(name, authoritative=True) or resume_id)
+        resume_id = get_claude_session_id(name) or resume_id
         _log(_LOG_INFO, "_restart_remote", f"{name}: post-stop resume_id={resume_id}")
     if resume_id and target_cwd and host:
         remote_home = _get_remote_home(host)

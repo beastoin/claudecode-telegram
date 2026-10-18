@@ -3,6 +3,7 @@
 CWD consolidated into workers.json registry (no more worker_cwds.json).
 Session ID authoritative from marker file (no mtime fallback for lifecycle).
 """
+
 import json
 import tempfile
 from pathlib import Path
@@ -21,6 +22,7 @@ def _bridge_env(monkeypatch, tmp_path):
     monkeypatch.setenv("BRIDGE_SESSIONS_DIR", str(sessions))
     monkeypatch.setenv("TEAM_DIR", str(tmp_path / "team"))
     import bridge
+
     saved = {
         "SESSIONS_DIR": bridge.SESSIONS_DIR,
         "WORKER_REGISTRY_FILE": bridge.WORKER_REGISTRY_FILE,
@@ -163,6 +165,7 @@ def test_session_id_from_marker_not_mtime(tmp_path):
     slug_dir.mkdir(parents=True)
     (slug_dir / "wrong-uuid-222.jsonl").write_text("{}")
     import time
+
     time.sleep(0.05)
     (slug_dir / "wrong-uuid-333.jsonl").write_text("{}")
 
@@ -170,22 +173,77 @@ def test_session_id_from_marker_not_mtime(tmp_path):
     assert sid == "correct-uuid-111"
 
 
-def test_missing_marker_no_mtime_fallback_for_lifecycle(tmp_path):
+def test_missing_marker_no_mtime_fallback_for_lifecycle(tmp_path, monkeypatch):
     """When marker is missing, lifecycle ops get empty — no silent mtime guess."""
     import bridge
     import claudecode
+    from shared import CLAUDE_PROJECTS_DIR
 
     worker_dir = bridge.SESSIONS_DIR / "grace"
     worker_dir.mkdir()
 
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
     bridge._registry_add("grace", "claude")
-    bridge._set_worker_cwd("grace", str(tmp_path / "project"))
-    (tmp_path / "project").mkdir(exist_ok=True)
+    bridge._set_worker_cwd("grace", str(project_dir))
 
-    sid = claudecode.get_claude_session_id("grace", authoritative=True)
-    # With authoritative=True and no marker, should NOT silently pick
-    # newest JSONL. The marker IS the authority.
-    # (This test will fail until we remove the mtime fallback)
+    projects_dir = tmp_path / "claude_projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr("claudecode.CLAUDE_PROJECTS_DIR", projects_dir)
+    slug = str(project_dir).replace("/", "-")
+    slug_dir = projects_dir / slug
+    slug_dir.mkdir(parents=True)
+    (slug_dir / "scannable-uuid-111.jsonl").write_text("{}")
+
+    sid = claudecode.get_claude_session_id("grace")
+    assert sid == "", f"Without marker, should return empty — got '{sid}' from mtime scan"
+
+
+def test_scan_session_id_finds_latest_jsonl(tmp_path, monkeypatch):
+    """scan_session_id returns the newest JSONL by mtime (diagnostic only)."""
+    import claudecode
+
+    projects_dir = tmp_path / "claude_projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr("claudecode.CLAUDE_PROJECTS_DIR", projects_dir)
+    slug = str(tmp_path / "myproject").replace("/", "-")
+    slug_dir = projects_dir / slug
+    slug_dir.mkdir(parents=True)
+    import time
+
+    (slug_dir / "old-uuid.jsonl").write_text("{}")
+    time.sleep(0.05)
+    (slug_dir / "new-uuid.jsonl").write_text("{}")
+
+    sid = claudecode.scan_session_id(str(tmp_path / "myproject"))
+    assert sid == "new-uuid"
+
+
+def test_scan_does_not_write_marker(tmp_path, monkeypatch):
+    """scan_session_id must NOT auto-write the result to the marker file."""
+    import bridge
+    import claudecode
+
+    worker_dir = bridge.SESSIONS_DIR / "holly"
+    worker_dir.mkdir()
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    bridge._registry_add("holly", "claude")
+    bridge._set_worker_cwd("holly", str(project_dir))
+
+    projects_dir = tmp_path / "claude_projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr("claudecode.CLAUDE_PROJECTS_DIR", projects_dir)
+    slug = str(project_dir).replace("/", "-")
+    slug_dir = projects_dir / slug
+    slug_dir.mkdir(parents=True)
+    (slug_dir / "scanned-uuid.jsonl").write_text("{}")
+
+    claudecode.scan_session_id(str(project_dir))
+
+    marker = worker_dir / "claude_session_id"
+    assert not marker.exists(), "scan_session_id must not write to marker file"
 
 
 # --- Teleport state transitions ---

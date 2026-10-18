@@ -1005,43 +1005,34 @@ def _cache_session_id(name: str, sid: str) -> None:
         _log(_LOG_DEBUG, "io:_cache_session_id", f"{type(exc).__name__}: {exc}")
 
 
-def get_claude_session_id(name: str, authoritative: bool = False) -> str:
+def get_claude_session_id(name: str) -> str:
+    """Read session ID from marker file only. No mtime scan fallback."""
     cache_file = get_session_dir(name) / "claude_session_id"
     current_cwd = get_claude_session_cwd(name)
-
-    def _read_cache() -> str:
-        if not cache_file.exists():
+    if not cache_file.exists():
+        return ""
+    content = cache_file.read_text().strip()
+    if not content:
+        return ""
+    lines = content.split("\n", 1)
+    sid = lines[0].strip()
+    if not sid:
+        return ""
+    if len(lines) > 1:
+        cached_cwd = lines[1].strip()
+        if cached_cwd and current_cwd and cached_cwd.rstrip("/") != current_cwd.rstrip("/"):
+            _log(
+                _LOG_INFO,
+                "session",
+                f"{name}: stale session_id (cached_cwd={cached_cwd}, " f"current_cwd={current_cwd})",
+            )
             return ""
-        content = cache_file.read_text().strip()
-        if not content:
-            return ""
-        lines = content.split("\n", 1)
-        sid = lines[0].strip()
-        if not sid:
-            return ""
-        if len(lines) > 1:
-            cached_cwd = lines[1].strip()
-            if cached_cwd and current_cwd and cached_cwd.rstrip("/") != current_cwd.rstrip("/"):
-                _log(
-                    _LOG_INFO,
-                    "session",
-                    f"{name}: stale session_id (cached_cwd={cached_cwd}, " f"current_cwd={current_cwd})",
-                )
-                return ""
-        return sid
+    return sid
 
-    val = _read_cache()
-    if val:
-        return val
-    if current_cwd:
-        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
 
-        host = bridge.get_worker_host(name)
-        scanned = _scan_latest_session_id(current_cwd, host=host)
-        if scanned:
-            _cache_session_id(name, scanned)
-            return scanned
-    return ""
+def scan_session_id(cwd: str, host: str | None = None) -> str:
+    """Diagnostic: find newest JSONL by mtime. Does NOT write to marker."""
+    return _scan_latest_session_id(cwd, host=host)
 
 
 def get_claude_session_cwd(name: str) -> str | None:
