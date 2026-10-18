@@ -10644,5 +10644,12 @@ if __name__ == "__main__":
         # Forward to standalone generate script
         _gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), "review", "generate.py")
         sys.exit(subprocess.call([sys.executable, _gen, *sys.argv[2:]]))
+    elif _sub == "indexer":
+        # Indexer was extracted to rewind/ (Bun + bun:sqlite FTS5) in request 115.
+        # Falling through to main() here would start the FULL bridge including Telegram
+        # getUpdates polling — causing 409 Conflict with the real bridge. Fail loudly.
+        print("ERROR: 'bridge.py indexer' was removed in request 115.", file=sys.stderr)
+        print("Use: bun rewind/src/rewind.ts --port P --token T --ttl S --jsonl-path PATH", file=sys.stderr)
+        sys.exit(1)
     else:
         main()
