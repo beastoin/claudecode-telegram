@@ -330,11 +330,15 @@ export function querySearch(
       .get(safeTerm) as { c: number };
     totalResults = row.c;
   } catch {
-    safeTerm = `"${searchTerm}"`;
-    const row = db
-      .query("SELECT COUNT(*) as c FROM entries_fts WHERE entries_fts MATCH ?")
-      .get(safeTerm) as { c: number };
-    totalResults = row.c;
+    safeTerm = `"${searchTerm.replace(/"/g, '""')}"`;
+    try {
+      const row = db
+        .query("SELECT COUNT(*) as c FROM entries_fts WHERE entries_fts MATCH ?")
+        .get(safeTerm) as { c: number };
+      totalResults = row.c;
+    } catch {
+      return emptySearch(searchTerm, perPage);
+    }
   }
 
   if (totalResults === 0) return emptySearch(searchTerm, perPage);

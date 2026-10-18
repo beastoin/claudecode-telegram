@@ -217,21 +217,21 @@ kill "${PIDS[-1]}" 2>/dev/null; wait "${PIDS[-1]}" 2>/dev/null || true
 unset 'PIDS[-1]'
 
 # ════════════════════════════════════════════════════════════════════
-# TEST 3: Pilot — Bun runtime, health check
+# TEST 3: Pilot — Node.js runtime (Bun's node-pty can't attach to tmux)
 # ════════════════════════════════════════════════════════════════════
 
 echo ""
 echo "── Pilot Server E2E ───────────────────────────────────────────"
 
 PILOT_PORT=10179
-if [[ -f "pilot/src/pilot.ts" ]]; then
-    bun pilot/src/pilot.ts --port "$PILOT_PORT" --token "$TOKEN" --ttl 30 &>/dev/null &
+if [[ -f "pilot/pilot.js" ]]; then
+    node pilot/pilot.js --port "$PILOT_PORT" --token "$TOKEN" --ttl 30 &>/dev/null &
     PIDS+=($!)
     sleep 2  # Pilot needs extra startup time for node-pty
 
-    # 3a. Pilot runs under Bun (not Node)
+    # 3a. Pilot runs under Node.js (production runtime)
     if kill -0 "${PIDS[-1]}" 2>/dev/null; then
-        ok "Pilot: spawns successfully under Bun"
+        ok "Pilot: spawns successfully under Node.js"
     else
         fail "Pilot: spawn" "process exited immediately"
     fi
@@ -244,11 +244,19 @@ if [[ -f "pilot/src/pilot.ts" ]]; then
         fail "Pilot: auth" "expected non-200, got $STATUS"
     fi
 
+    # 3c. Authenticated request → 200 HTML
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PILOT_PORT/?token=$TOKEN" 2>/dev/null || echo "000")
+    if [[ "$STATUS" == "200" ]]; then
+        ok "Pilot: authenticated request → 200"
+    else
+        fail "Pilot: auth access" "expected 200, got $STATUS"
+    fi
+
     # Kill pilot
     kill "${PIDS[-1]}" 2>/dev/null; wait "${PIDS[-1]}" 2>/dev/null || true
     unset 'PIDS[-1]'
 else
-    echo "⚠ pilot/src/pilot.ts not found — skipping pilot tests"
+    echo "⚠ pilot/pilot.js not found — skipping pilot tests"
 fi
 
 # ════════════════════════════════════════════════════════════════════
@@ -314,8 +322,8 @@ assert os.path.exists(review_gen), f'Review generate not found: {review_gen}'
 review_serve = os.path.join(bridge_dir, 'review', 'src', 'serve.ts')
 assert os.path.exists(review_serve), f'Review serve not found: {review_serve}'
 
-# Pilot path
-pilot_path = os.path.join(bridge_dir, 'pilot', 'src', 'pilot.ts')
+# Pilot path (built JS — production uses Node.js, not Bun)
+pilot_path = os.path.join(bridge_dir, 'pilot', 'pilot.js')
 assert os.path.exists(pilot_path), f'Pilot not found: {pilot_path}'
 
 print('All tool paths resolve correctly')

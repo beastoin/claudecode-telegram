@@ -133,10 +133,10 @@ function renderPage(
 
   const title = `${config.name} — Transcript`;
   return assets.pageTpl
-    .replace("__TITLE__", title)
-    .replace("__CSS__", assets.css)
-    .replace("__JS__", assets.js)
-    .replace("__DATA__", data);
+    .replace("__TITLE__", () => title)
+    .replace("__CSS__", () => assets.css)
+    .replace("__JS__", () => assets.js)
+    .replace("__DATA__", () => data);
 }
 
 /** Create router for rewind viewer */
@@ -168,6 +168,53 @@ export function createRewindRoutes(config: RewindConfig) {
       return jsonResponse({ total, new: newCount });
     }
 
+    // GET /api/entries?page=1&per_page=50&filter=user — paginated transcript entries
+    if (path === "/api/entries") {
+      if (existsSync(config.jsonlPath) && statSync(config.jsonlPath).size > 0) {
+        indexJsonl(db, config.jsonlPath);
+      }
+      const page = parseInt(url.searchParams.get("page") || "1", 10);
+      const perPage = Math.min(500, Math.max(1, parseInt(url.searchParams.get("per_page") || "50", 10) || 50));
+      const filterMode = (url.searchParams.get("filter") || "").trim();
+      const result = queryEntries(db, Number.isFinite(page) ? Math.max(1, page) : 1, perPage, filterMode);
+      const entries = result.entries.map((e) => {
+        try { const p = JSON.parse(String(e.raw_json)); p._idx = e.idx; return p; } catch { return null; }
+      }).filter(Boolean);
+      return jsonResponse({
+        entries,
+        page: result.page,
+        total_pages: result.total_pages,
+        total: result.total,
+        per_page: result.per_page,
+      });
+    }
+
+    // GET /api/search?q=term&sort=relevance&page=1&per_page=50 — FTS5 search
+    if (path === "/api/search") {
+      if (existsSync(config.jsonlPath) && statSync(config.jsonlPath).size > 0) {
+        indexJsonl(db, config.jsonlPath);
+      }
+      const q = (url.searchParams.get("q") || "").trim();
+      if (!q) return jsonResponse({ error: "Missing ?q= parameter" }, 400);
+      const page = parseInt(url.searchParams.get("page") || "1", 10);
+      const perPage = Math.min(500, Math.max(1, parseInt(url.searchParams.get("per_page") || "50", 10) || 50));
+      let sort = (url.searchParams.get("sort") || "relevance").trim();
+      if (sort !== "relevance" && sort !== "time") sort = "relevance";
+      const result = querySearch(db, q, Number.isFinite(page) ? Math.max(1, page) : 1, perPage, sort);
+      const entries = result.entries.map((e) => {
+        try { const p = JSON.parse(String(e.raw_json)); p._idx = e.idx; return p; } catch { return null; }
+      }).filter(Boolean);
+      return jsonResponse({
+        entries,
+        page: result.page,
+        total_pages: result.total_pages,
+        total_results: result.total_results,
+        per_page: result.per_page,
+        query: q,
+        sort,
+      });
+    }
+
     // GET /api/stats — transcript stats
     if (path === "/api/stats") {
       if (existsSync(config.jsonlPath) && statSync(config.jsonlPath).size > 0) {
@@ -189,8 +236,9 @@ export function createRewindRoutes(config: RewindConfig) {
       const filterMode = (url.searchParams.get("filter") || "").trim();
 
       try {
+        const parsedPage = page ? parseInt(page, 10) : NaN;
         const html = renderPage(config, assets, db, {
-          page: page ? Math.max(1, parseInt(page)) : null,
+          page: Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : null,
           perPage,
           searchQuery,
           searchSort,

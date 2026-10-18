@@ -36,9 +36,13 @@ export function parseArgs(argv: string[]): ServerArgs {
     if (next === undefined || next.startsWith("--")) {
       args[key] = true;
     } else {
-      // Auto-parse numbers
-      const num = Number(next);
-      args[key] = isNaN(num) ? next : num;
+      // Only parse known numeric keys as numbers
+      if (key === "port" || key === "ttl") {
+        const num = Number(next);
+        args[key] = isNaN(num) ? next : num;
+      } else {
+        args[key] = next;
+      }
       i++;
     }
   }
@@ -62,7 +66,7 @@ function checkToken(url: URL, expected: string): boolean {
 export function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
 
@@ -70,7 +74,7 @@ export function jsonResponse(data: unknown, status = 200): Response {
 export function htmlResponse(html: string, status = 200): Response {
   return new Response(html, {
     status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
   });
 }
 
@@ -100,6 +104,7 @@ export function createServer(opts: ServerOptions): void {
 
   const server = Bun.serve({
     port: args.port,
+    hostname: "127.0.0.1",
     fetch(req: Request): Response | Promise<Response> {
       const url = new URL(req.url);
 
