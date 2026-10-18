@@ -6047,9 +6047,9 @@ def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
         router.reply(chat_id, "No workers specified", outcome="Needs decision")
         return True
 
-    # Spawn pilot via ToolManager (Bun runtime)
+    # Spawn pilot via ToolManager (Node.js — Bun's node-pty can't attach to tmux)
     bridge_dir = os.path.dirname(os.path.abspath(__file__))
-    pilot_script = os.path.join(bridge_dir, "pilot", "src", "pilot.ts")
+    pilot_script = os.path.join(bridge_dir, "pilot", "pilot.js")
 
     slug_name = "-".join(display_names[:3]) if len(display_names) <= 3 else f"team{len(display_names)}"
     result = tool_manager.spawn(
@@ -6057,7 +6057,7 @@ def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
         slug_name,
         ttl=1800,
         extra_args=["--sessions", ",".join(session_entries)],
-        runtime="bun",
+        runtime="node",
         script_dir=pilot_script,
     )
     if not result:

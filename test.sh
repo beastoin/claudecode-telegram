@@ -549,22 +549,26 @@ print('OK')
 test_media_tag_parsing() {
     info "Testing image/file tag parsing and protection..."
 
-    # Create test files
-    touch /tmp/test.jpg /tmp/a.jpg /tmp/b.png
-    echo "test" > /tmp/report.pdf
-    echo "test" > /tmp/data.json
-    echo "test" > /tmp/a.txt
-    echo "test" > /tmp/b.csv
+    # Create test files in isolated temp directory
+    local tag_test_dir="/tmp/claudecode-telegram/test-tags-$$"
+    mkdir -p "$tag_test_dir"
+    touch "$tag_test_dir/test.jpg" "$tag_test_dir/a.jpg" "$tag_test_dir/b.png"
+    echo "test" > "$tag_test_dir/report.pdf"
+    echo "test" > "$tag_test_dir/data.json"
+    echo "test" > "$tag_test_dir/a.txt"
+    echo "test" > "$tag_test_dir/b.csv"
 
     if python3 -c "
+import os
+d = '$tag_test_dir'
 from bridge import parse_image_tags, parse_file_tags
 
 # === Image tag parsing ===
-text = 'Here is an image [[image:/tmp/test.jpg|my caption]] and more text'
+text = f'Here is an image [[image:{d}/test.jpg|my caption]] and more text'
 clean, images = parse_image_tags(text)
 assert 'Here is an image' in clean, f'clean text wrong: {clean!r}'
 assert len(images) == 1, f'expected 1 image, got {len(images)}'
-assert images[0] == ('/tmp/test.jpg', 'my caption'), f'image data wrong: {images[0]}'
+assert images[0] == (f'{d}/test.jpg', 'my caption'), f'image data wrong: {images[0]}'
 
 # Non-existent file (tag stays)
 text2 = '[[image:/nonexistent/photo.png]]'
@@ -573,58 +577,58 @@ assert len(images2) == 0
 assert '[[image:' in clean2
 
 # Multiple images
-text3 = 'First [[image:/tmp/a.jpg|cap1]] middle [[image:/tmp/b.png|cap2]] end'
+text3 = f'First [[image:{d}/a.jpg|cap1]] middle [[image:{d}/b.png|cap2]] end'
 clean3, images3 = parse_image_tags(text3)
 assert len(images3) == 2
 
 # Escaped image tag
-text4 = r'Example: \[[image:/tmp/test.jpg|caption]]'
+text4 = f'Example: \\\[[image:{d}/test.jpg|caption]]'
 clean4, images4 = parse_image_tags(text4)
 assert len(images4) == 0
 
 # === File tag parsing ===
-text = 'Here is the report: [[file:/tmp/report.pdf|Q4 Report]]'
+text = f'Here is the report: [[file:{d}/report.pdf|Q4 Report]]'
 clean, files = parse_file_tags(text)
 assert 'Here is the report:' in clean
 assert len(files) == 1
-assert files[0] == ('/tmp/report.pdf', 'Q4 Report')
+assert files[0] == (f'{d}/report.pdf', 'Q4 Report')
 
-text = 'Output: [[file:/tmp/data.json]]'
+text = f'Output: [[file:{d}/data.json]]'
 clean, files = parse_file_tags(text)
 assert len(files) == 1
-assert files[0] == ('/tmp/data.json', '')
+assert files[0] == (f'{d}/data.json', '')
 
 text = 'Output: [[file:/nonexistent/file.txt]]'
 clean, files = parse_file_tags(text)
 assert len(files) == 0
 assert '[[file:' in clean
 
-text = '[[file:/tmp/a.txt|A]] and [[file:/tmp/b.csv|B]]'
+text = f'[[file:{d}/a.txt|A]] and [[file:{d}/b.csv|B]]'
 clean, files = parse_file_tags(text)
 assert len(files) == 2
 
 # Escaped file tag
-text = r'Example: \[[file:/tmp/report.pdf|caption]]'
+text = f'Example: \\\[[file:{d}/report.pdf|caption]]'
 clean, files = parse_file_tags(text)
 assert len(files) == 0
 
 # === Escape tag preservation ===
-text = r'Example: \[[image:/tmp/test.jpg|caption]] stays'
+text = f'Example: \\\[[image:{d}/test.jpg|caption]] stays'
 clean, images = parse_image_tags(text)
 assert len(images) == 0
 assert '[[image:' in clean
 
-text = r'Example: \[[file:/tmp/a.txt|caption]] stays'
+text = f'Example: \\\[[file:{d}/a.txt|caption]] stays'
 clean, files = parse_file_tags(text)
 assert len(files) == 0
 assert '[[file:' in clean
 
 # === Code fence protection ===
 import textwrap
-text = textwrap.dedent('''
+text = textwrap.dedent(f'''
 Here is code:
 \x60\x60\x60
-[[image:/tmp/test.jpg|caption]]
+[[image:{d}/test.jpg|caption]]
 \x60\x60\x60
 And outside text''').strip()
 clean, images = parse_image_tags(text)
@@ -643,7 +647,7 @@ print('OK')
     fi
 
     # Cleanup
-    rm -f /tmp/test.jpg /tmp/a.jpg /tmp/b.png /tmp/report.pdf /tmp/data.json /tmp/a.txt /tmp/b.csv
+    rm -rf "$tag_test_dir"
 }
 
 test_pending_files() {
@@ -6104,9 +6108,9 @@ assert sent_text == 'manager: hello world', f'plain text: expected manager prefi
 
 # 2) Media text (already has Manager sent) must NOT get double-prefixed
 mock_workers.send.reset_mock()
-router.route_message(worker_name, 'Manager sent image: /tmp/photo.jpg', 12345, None)
+router.route_message(worker_name, 'Manager sent image: /tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg', 12345, None)
 sent_media = mock_workers.send.call_args[0][1]
-assert sent_media == 'Manager sent image: /tmp/photo.jpg', f'media: should pass through unchanged, got: {sent_media!r}'
+assert sent_media == 'Manager sent image: /tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg', f'media: should pass through unchanged, got: {sent_media!r}'
 
 # 3) @all route also gets prefix (goes through route_message)
 mock_workers.send.reset_mock()

@@ -255,10 +255,10 @@ class TestReplyMediaExtraction:
         reply_msg = {
             "photo": [{"file_id": "photo123", "file_size": 1000}],
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/photo.jpg"):
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
-        assert "/tmp/photo.jpg" in result
+        assert "/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg" in result
 
     def test_extract_reply_document(self):
         import bridge
@@ -266,10 +266,10 @@ class TestReplyMediaExtraction:
         reply_msg = {
             "document": {"file_id": "doc456", "file_name": "report.pdf"},
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/report.pdf"):
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-report.pdf"):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
-        assert "/tmp/report.pdf" in result
+        assert "/tmp/claudecode-telegram/test/testworker/inbox/test-report.pdf" in result
 
     def test_extract_reply_no_media_returns_none(self):
         import bridge
@@ -284,7 +284,7 @@ class TestReplyMediaExtraction:
         reply_msg = {
             "animation": {"file_id": "anim789"},
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/anim.gif"):
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-anim.gif"):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
 
@@ -313,7 +313,7 @@ class TestMediaGroupFlush:
                 "caption": "",
                 "timer": None,
             }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/photo.jpg") as mock_dl, \
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg") as mock_dl, \
              patch.object(bridge, "send_to_worker", return_value=True):
             router._handle_media_group_flush("test-group")
         mock_dl.assert_called()
@@ -354,7 +354,7 @@ class TestSingleMediaHandling:
         incoming = self._make_incoming(
             photo=[{"file_id": "photo1", "file_size": 1000}],
         )
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/photo.jpg"), \
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"), \
              patch.object(bridge, "send_to_worker", return_value=True), \
              patch.object(router, "parse_at_mentions", return_value=([], "")), \
              patch.object(router, "_resolve_media_target", return_value="lee"):
@@ -393,7 +393,7 @@ class TestSingleMediaHandling:
         incoming = self._make_incoming(
             sticker={"file_id": "sticker1"},
         )
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/sticker.webp"), \
+        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-sticker.webp"), \
              patch.object(bridge, "send_to_worker", return_value=True), \
              patch.object(router, "parse_at_mentions", return_value=([], "")), \
              patch.object(router, "_resolve_media_target", return_value="lee"):
