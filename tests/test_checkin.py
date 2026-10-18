@@ -454,7 +454,8 @@ def test_checkin_cwd_restart_failure_notifies_manager():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_checkin_cwd_restart_blocked_by_cooldown():
+def test_checkin_cwd_restart_bypasses_cooldown():
+    """CWD mismatch restarts immediately — no cooldown."""
     import bridge
 
     tmpdir = tempfile.mkdtemp()
@@ -489,7 +490,7 @@ def test_checkin_cwd_restart_blocked_by_cooldown():
         bridge._wait_for_restart_ready = lambda *_args, **_kwargs: True
         bridge.send_telegram_message = lambda *a, **kw: {'ok': True}
 
-        # Set recent restart to NOW — should trigger cooldown
+        # Set recent restart to NOW — cooldown should be bypassed for CWD fix
         bridge.watchdog.recent_restarts['bob'] = time.time()
 
         handler = FakeHandler()
@@ -498,8 +499,7 @@ def test_checkin_cwd_restart_blocked_by_cooldown():
 
         body = handler.wfile.getvalue().decode()
         assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
-        assert 'blocked' in body.lower(), f'Expected cooldown block message: {body}'
-        assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+        assert len(restart_calls) == 1, f'Should have restarted despite cooldown: {restart_calls}'
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

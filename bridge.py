@@ -5284,9 +5284,6 @@ for _m in ("send_chat_action", "setup_commands"):
 setattr(_LegacyTransportAdapter, "download_file", lambda self, *a, **kw: None)
 
 
-_CWD_FIX_COOLDOWN = 120
-
-
 def _checkin_can_restart(
     name: str, tmux_name: str, host: str | None, pane_cwd: str, requested_cwd: str
 ) -> tuple[bool, str]:
@@ -5295,14 +5292,8 @@ def _checkin_can_restart(
     if elapsed < RESTART_COOLDOWN:
         if watchdog.force_restart_pending_cwd.pop(name, False):
             _log(_LOG_WARN, "checkin", f"{name}: cooldown bypassed (post-force CWD repair)")
-        elif elapsed >= _CWD_FIX_COOLDOWN:
-            _log(_LOG_INFO, "checkin", f"{name}: cooldown reduced for CWD fix ({elapsed:.0f}s >= {_CWD_FIX_COOLDOWN}s)")
         else:
-            _log(_LOG_WARN, "checkin", f"{name}: BLOCKED restart (cooldown {elapsed:.0f}s < {_CWD_FIX_COOLDOWN}s)")
-            return False, (
-                f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
-                f"(CWD fix cooldown {_CWD_FIX_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
-            )
+            _log(_LOG_INFO, "checkin", f"{name}: cooldown bypassed for CWD fix ({elapsed:.0f}s elapsed)")
     if is_claude_running(tmux_name, host=host):
         _log(_LOG_INFO, "checkin", f"{name}: Claude running but CWD wrong — allowing restart")
     with watchdog.restart_lock:
