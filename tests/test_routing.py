@@ -300,23 +300,28 @@ class TestMediaGroupFlush:
     def test_flush_group_routes_to_active_worker(self):
         import bridge
         router, sent = _make_router()
-        bridge.state.active = "lee"
-        router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
-        router.parse_at_mentions = MagicMock(return_value=([], ""))
-        with bridge.media_groups.lock:
-            bridge.media_groups.buffer["test-group"] = {
-                "items": [{
-                    "photo": [{"file_id": "photo1", "file_size": 500}],
-                    "chat": {"id": 12345},
-                    "message_id": 1,
-                }],
-                "caption": "",
-                "timer": None,
-            }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg") as mock_dl, \
-             patch.object(bridge, "send_to_worker", return_value=True):
-            router._handle_media_group_flush("test-group")
-        mock_dl.assert_called()
+        orig_active = bridge.state.active
+        try:
+            bridge.state.active = "testworker"
+            router.workers.get_registered_sessions = MagicMock(return_value={"testworker": {"tmux": "claude-test-testworker"}})
+            router.parse_at_mentions = MagicMock(return_value=([], ""))
+            with bridge.media_groups.lock:
+                bridge.media_groups.buffer["test-group"] = {
+                    "items": [{
+                        "photo": [{"file_id": "photo1", "file_size": 500}],
+                        "chat": {"id": 12345},
+                        "message_id": 1,
+                    }],
+                    "caption": "",
+                    "timer": None,
+                }
+            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg") as mock_dl, \
+                 patch.object(router.workers, "send", return_value=True), \
+                 patch.object(router.workers, "is_online", return_value=True):
+                router._handle_media_group_flush("test-group")
+            mock_dl.assert_called()
+        finally:
+            bridge.state.active = orig_active
 
 
 # ── Single media handling ─────────────────────────────────
@@ -349,56 +354,84 @@ class TestSingleMediaHandling:
     def test_single_photo_routes_to_active_worker(self):
         import bridge
         router, sent = _make_router()
-        bridge.state.active = "lee"
-        bridge.admin_chat_id = 12345
-        incoming = self._make_incoming(
-            photo=[{"file_id": "photo1", "file_size": 1000}],
-        )
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"), \
-             patch.object(bridge, "send_to_worker", return_value=True), \
-             patch.object(router, "parse_at_mentions", return_value=([], "")), \
-             patch.object(router, "_resolve_media_target", return_value="lee"):
-            result = router._handle_single_media(incoming)
-        assert result is True
+        orig_active = bridge.state.active
+        orig_admin = bridge.admin_chat_id
+        try:
+            bridge.state.active = "testworker"
+            bridge.admin_chat_id = 12345
+            incoming = self._make_incoming(
+                photo=[{"file_id": "photo1", "file_size": 1000}],
+            )
+            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"), \
+                 patch.object(router.workers, "send", return_value=True) as mock_send, \
+                 patch.object(router.workers, "get_registered_sessions", return_value={"testworker": {"tmux": "claude-test-testworker"}}), \
+                 patch.object(router.workers, "is_online", return_value=True), \
+                 patch.object(router, "parse_at_mentions", return_value=([], "")), \
+                 patch.object(router, "_resolve_media_target", return_value="testworker"):
+                result = router._handle_single_media(incoming)
+            assert result is True
+            assert mock_send.called, "workers.send must be called (not bypassed)"
+        finally:
+            bridge.state.active = orig_active
+            bridge.admin_chat_id = orig_admin
 
     def test_single_media_no_focus_shows_error(self):
         import bridge
         router, sent = _make_router()
-        bridge.state.active = None
-        bridge.admin_chat_id = 12345
-        incoming = self._make_incoming(
-            photo=[{"file_id": "photo1", "file_size": 1000}],
-        )
-        with patch.object(router, "parse_at_mentions", return_value=([], "")):
-            result = router._handle_single_media(incoming)
-        assert result is True
-        assert any("focus" in str(s["text"]).lower() or "No focused" in str(s["text"]) for s in sent)
+        orig_active = bridge.state.active
+        orig_admin = bridge.admin_chat_id
+        try:
+            bridge.state.active = None
+            bridge.admin_chat_id = 12345
+            incoming = self._make_incoming(
+                photo=[{"file_id": "photo1", "file_size": 1000}],
+            )
+            with patch.object(router, "parse_at_mentions", return_value=([], "")):
+                result = router._handle_single_media(incoming)
+            assert result is True
+            assert any("focus" in str(s["text"]).lower() or "No focused" in str(s["text"]) for s in sent)
+        finally:
+            bridge.state.active = orig_active
+            bridge.admin_chat_id = orig_admin
 
     def test_single_media_non_admin_rejected(self):
         import bridge
         router, sent = _make_router()
-        bridge.admin_chat_id = 99999
-        incoming = self._make_incoming(
-            chat_id=88888,
-            photo=[{"file_id": "photo1", "file_size": 1000}],
-        )
-        result = router._handle_single_media(incoming)
-        assert result is True
+        orig_admin = bridge.admin_chat_id
+        try:
+            bridge.admin_chat_id = 99999
+            incoming = self._make_incoming(
+                chat_id=88888,
+                photo=[{"file_id": "photo1", "file_size": 1000}],
+            )
+            result = router._handle_single_media(incoming)
+            assert result is True
+        finally:
+            bridge.admin_chat_id = orig_admin
 
     def test_sticker_routes_as_media(self):
         import bridge
         router, sent = _make_router()
-        bridge.state.active = "lee"
-        bridge.admin_chat_id = 12345
-        incoming = self._make_incoming(
-            sticker={"file_id": "sticker1"},
-        )
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-sticker.webp"), \
-             patch.object(bridge, "send_to_worker", return_value=True), \
-             patch.object(router, "parse_at_mentions", return_value=([], "")), \
-             patch.object(router, "_resolve_media_target", return_value="lee"):
-            result = router._handle_single_media(incoming)
-        assert result is True
+        orig_active = bridge.state.active
+        orig_admin = bridge.admin_chat_id
+        try:
+            bridge.state.active = "testworker"
+            bridge.admin_chat_id = 12345
+            incoming = self._make_incoming(
+                sticker={"file_id": "sticker1"},
+            )
+            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-sticker.webp"), \
+                 patch.object(router.workers, "send", return_value=True) as mock_send, \
+                 patch.object(router.workers, "get_registered_sessions", return_value={"testworker": {"tmux": "claude-test-testworker"}}), \
+                 patch.object(router.workers, "is_online", return_value=True), \
+                 patch.object(router, "parse_at_mentions", return_value=([], "")), \
+                 patch.object(router, "_resolve_media_target", return_value="testworker"):
+                result = router._handle_single_media(incoming)
+            assert result is True
+            assert mock_send.called, "workers.send must be called (not bypassed)"
+        finally:
+            bridge.state.active = orig_active
+            bridge.admin_chat_id = orig_admin
 
     def test_no_file_id_returns_false(self):
         import bridge
