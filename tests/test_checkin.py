@@ -504,12 +504,14 @@ def test_checkin_cwd_restart_blocked_by_cooldown():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_checkin_cwd_restart_blocked_by_running_claude():
+def test_checkin_cwd_mismatch_restarts_even_with_claude_running():
+    """CWD mismatch should trigger restart even when Claude is running — worker knows its correct CWD."""
     import bridge
 
     tmpdir = tempfile.mkdtemp()
     tmp_path = Path(tmpdir)
     bridge.NODE_DIR = tmp_path
+    bridge._WORKER_CWDS_FILE = tmp_path / 'worker_cwds.json'
     bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
     bridge.SESSIONS_DIR = tmp_path / 'sessions'
     bridge.SESSIONS_DIR.mkdir()
@@ -529,10 +531,10 @@ def test_checkin_cwd_restart_blocked_by_running_claude():
             'bob': {'tmux': f'{bridge.TMUX_PREFIX}bob', 'backend': 'claude'}
         }
         bridge.tmux_exists = lambda _name, host=None: True
-        bridge.is_claude_running = lambda _name, host=None: True  # Claude IS running
+        bridge.is_claude_running = lambda _name, host=None: True
         bridge.export_hook_env = lambda *_args, **_kwargs: None
         bridge.worker_manager._get_tmux_pane_cwd = lambda _tmux, host=None: str(old_dir)
-        bridge.watchdog.recent_restarts.pop('bob', None)  # No cooldown
+        bridge.watchdog.recent_restarts.pop('bob', None)
 
         restart_calls = []
         bridge.worker_manager.restart = lambda name, mode='relaunch': (restart_calls.append(1), (True, None))[1]
@@ -543,8 +545,8 @@ def test_checkin_cwd_restart_blocked_by_running_claude():
 
         body = handler.wfile.getvalue().decode()
         assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
-        assert 'skipped' in body.lower() or 'running' in body.lower(), f'Expected running guard message: {body}'
-        assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+        assert 'restarting' in body.lower(), f'Expected restart message: {body}'
+        assert len(restart_calls) == 1, f'Should have restarted: {restart_calls}'
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -603,4 +605,35 @@ def test_checkin_note_machine_substitution():
         bridge._CHECKIN_NOTE_PATH = old_checkin
         bridge.NODE_DIR = old_node_dir
         bridge.WORKER_REGISTRY_FILE = old_registry
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_worker_cwds_persist_to_disk():
+    """CWDs persist to JSON file and survive bridge reload."""
+    import bridge
+
+    tmpdir = tempfile.mkdtemp()
+    tmp_path = Path(tmpdir)
+    old_file = bridge._WORKER_CWDS_FILE
+    bridge._WORKER_CWDS_FILE = tmp_path / 'worker_cwds.json'
+    bridge.watchdog.worker_cwds.clear()
+
+    try:
+        bridge._set_worker_cwd('alice', '/home/alice/project')
+        bridge._set_worker_cwd('bob', '/home/bob/work')
+
+        assert bridge._WORKER_CWDS_FILE.exists(), 'CWD file not written'
+        data = json.loads(bridge._WORKER_CWDS_FILE.read_text())
+        assert data['alice'] == '/home/alice/project'
+        assert data['bob'] == '/home/bob/work'
+
+        bridge.watchdog.worker_cwds.clear()
+        assert bridge._get_worker_cwd('alice') == ''
+
+        bridge._load_worker_cwds()
+        assert bridge._get_worker_cwd('alice') == '/home/alice/project'
+        assert bridge._get_worker_cwd('bob') == '/home/bob/work'
+    finally:
+        bridge._WORKER_CWDS_FILE = old_file
+        bridge.watchdog.worker_cwds.clear()
         shutil.rmtree(tmpdir, ignore_errors=True)

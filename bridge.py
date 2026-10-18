@@ -5284,6 +5284,9 @@ for _m in ("send_chat_action", "setup_commands"):
 setattr(_LegacyTransportAdapter, "download_file", lambda self, *a, **kw: None)
 
 
+_CWD_FIX_COOLDOWN = 120
+
+
 def _checkin_can_restart(
     name: str, tmux_name: str, host: str | None, pane_cwd: str, requested_cwd: str
 ) -> tuple[bool, str]:
@@ -5292,18 +5295,16 @@ def _checkin_can_restart(
     if elapsed < RESTART_COOLDOWN:
         if watchdog.force_restart_pending_cwd.pop(name, False):
             _log(_LOG_WARN, "checkin", f"{name}: cooldown bypassed (post-force CWD repair)")
+        elif elapsed >= _CWD_FIX_COOLDOWN:
+            _log(_LOG_INFO, "checkin", f"{name}: cooldown reduced for CWD fix ({elapsed:.0f}s >= {_CWD_FIX_COOLDOWN}s)")
         else:
-            _log(_LOG_WARN, "checkin", f"{name}: BLOCKED restart (cooldown {elapsed:.0f}s < {RESTART_COOLDOWN}s)")
+            _log(_LOG_WARN, "checkin", f"{name}: BLOCKED restart (cooldown {elapsed:.0f}s < {_CWD_FIX_COOLDOWN}s)")
             return False, (
                 f"Checkin restart blocked: {name} was restarted {elapsed:.0f}s ago "
-                f"(cooldown {RESTART_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
+                f"(CWD fix cooldown {_CWD_FIX_COOLDOWN}s). CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
             )
     if is_claude_running(tmux_name, host=host):
-        _log(_LOG_INFO, "checkin", f"{name}: BLOCKED restart (Claude already running in tmux)")
-        return False, (
-            f"Checkin restart skipped: {name} has Claude running. "
-            f"CWD mismatch: pane={pane_cwd} vs requested={requested_cwd}"
-        )
+        _log(_LOG_INFO, "checkin", f"{name}: Claude running but CWD wrong — allowing restart")
     with watchdog.restart_lock:
         inflight_ts = watchdog.restart_in_progress.get(name)
         if inflight_ts and _clock.time() - inflight_ts < 120:
@@ -8187,6 +8188,26 @@ def _registry_remove(name: str) -> None:
         _save_registry(data)
 
 
+_WORKER_CWDS_FILE = NODE_DIR / "worker_cwds.json"
+
+
+def _persist_worker_cwds() -> None:
+    with watchdog.lock:
+        snapshot = dict(watchdog.worker_cwds)
+    _save_state_json(_WORKER_CWDS_FILE, snapshot, "worker_cwds")
+
+
+def _load_worker_cwds() -> None:
+    data = _load_state_json(_WORKER_CWDS_FILE, "worker_cwds")
+    if not data:
+        return
+    with watchdog.lock:
+        for name, cwd in data.items():
+            if isinstance(cwd, str) and cwd and name not in watchdog.worker_cwds:
+                watchdog.worker_cwds[name] = cwd
+    _log(_LOG_INFO, "bridge", f"Loaded {len(data)} worker CWDs from disk")
+
+
 def _set_worker_cwd(name: str, cwd: str) -> None:
     normalized = normalize_cwd(cwd)
     with watchdog.lock:
@@ -8194,6 +8215,7 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
             watchdog.worker_cwds[name] = normalized
         else:
             watchdog.worker_cwds.pop(name, None)
+    _persist_worker_cwds()
 
 
 def _get_worker_cwd(name: str) -> str:
@@ -10551,6 +10573,7 @@ def main() -> None:
     registered = _discover_and_configure_sessions()
     last_chat_id = _restore_bridge_state(registered)
     _log_startup_info(registered)
+    _load_worker_cwds()
     if last_chat_id:
         _send_startup_notification(last_chat_id, registered)
     watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)
