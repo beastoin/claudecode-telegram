@@ -8131,7 +8131,7 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None, host: 
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
         existing = data.get("workers", {}).get(name, {})
-        preserved_keys = {"host", "home_host", "home_cwd"}
+        preserved_keys = {"host", "home_host", "home_cwd", "cwd"}
         entry = {k: v for k, v in existing.items() if k in preserved_keys}
         entry.update(
             {
@@ -8179,26 +8179,6 @@ def _registry_remove(name: str) -> None:
         _save_registry(data)
 
 
-_WORKER_CWDS_FILE = NODE_DIR / "worker_cwds.json"
-
-
-def _persist_worker_cwds() -> None:
-    with watchdog.lock:
-        snapshot = dict(watchdog.worker_cwds)
-    _save_state_json(_WORKER_CWDS_FILE, snapshot, "worker_cwds")
-
-
-def _load_worker_cwds() -> None:
-    data = _load_state_json(_WORKER_CWDS_FILE, "worker_cwds")
-    if not data:
-        return
-    with watchdog.lock:
-        for name, cwd in data.items():
-            if isinstance(cwd, str) and cwd and name not in watchdog.worker_cwds:
-                watchdog.worker_cwds[name] = cwd
-    _log(_LOG_INFO, "bridge", f"Loaded {len(data)} worker CWDs from disk")
-
-
 def _set_worker_cwd(name: str, cwd: str) -> None:
     normalized = normalize_cwd(cwd)
     with watchdog.lock:
@@ -8206,13 +8186,29 @@ def _set_worker_cwd(name: str, cwd: str) -> None:
             watchdog.worker_cwds[name] = normalized
         else:
             watchdog.worker_cwds.pop(name, None)
-    _persist_worker_cwds()
+        data = _load_registry()
+        worker = data.get("workers", {}).get(name)
+        if worker is not None:
+            if normalized:
+                worker["cwd"] = normalized
+            else:
+                worker.pop("cwd", None)
+            _save_registry(data)
 
 
 def _get_worker_cwd(name: str) -> str:
     with watchdog.lock:
         cwd = watchdog.worker_cwds.get(name)
-    return cwd if isinstance(cwd, str) else ""
+    if isinstance(cwd, str) and cwd:
+        return cwd
+    data = _load_registry()
+    worker = data.get("workers", {}).get(name, {})
+    registry_cwd = worker.get("cwd", "")
+    if isinstance(registry_cwd, str) and registry_cwd:
+        with watchdog.lock:
+            watchdog.worker_cwds[name] = registry_cwd
+        return registry_cwd
+    return ""
 
 
 def _registry_bootstrap(registered: dict[str, TmuxSessionDict]) -> None:
@@ -8506,7 +8502,15 @@ def do_teleport(
         if is_teleback:
             _registry_clear_teleport(name)
         else:
-            _registry_update_teleport(name, host=target_host, home_host=source_host, home_cwd=source_cwd)
+            existing = _load_registry().get("workers", {}).get(name, {})
+            prev_home_host = existing.get("home_host")
+            prev_home_cwd = existing.get("home_cwd")
+            _registry_update_teleport(
+                name,
+                host=target_host,
+                home_host=prev_home_host or source_host,
+                home_cwd=prev_home_cwd or source_cwd,
+            )
         _remote_run(["tmux", "kill-session", "-t", tmux_name], host=source_host)
         if is_teleback:
             sync_worker_data_back(name, source_host)
@@ -10564,7 +10568,6 @@ def main() -> None:
     registered = _discover_and_configure_sessions()
     last_chat_id = _restore_bridge_state(registered)
     _log_startup_info(registered)
-    _load_worker_cwds()
     if last_chat_id:
         _send_startup_notification(last_chat_id, registered)
     watchdog = threading.Thread(target=watchdog_loop, name="worker-watchdog", daemon=True)

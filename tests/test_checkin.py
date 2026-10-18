@@ -252,7 +252,7 @@ def test_checkin_cwd_stores_in_memory():
         assert handler.status == 200, f'expected 200, got {handler.status}'
         assert bridge._get_worker_cwd('alice') == str(project_dir), bridge._get_worker_cwd('alice')
         data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
-        assert 'cwd' not in data['workers']['alice'], data['workers']['alice']
+        assert data['workers']['alice']['cwd'] == str(project_dir), 'CWD should be in registry'
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -608,32 +608,33 @@ def test_checkin_note_machine_substitution():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_worker_cwds_persist_to_disk():
-    """CWDs persist to JSON file and survive bridge reload."""
+def test_worker_cwds_persist_in_registry():
+    """CWDs persist in workers.json registry and survive RAM clear."""
     import bridge
 
     tmpdir = tempfile.mkdtemp()
     tmp_path = Path(tmpdir)
-    old_file = bridge._WORKER_CWDS_FILE
-    bridge._WORKER_CWDS_FILE = tmp_path / 'worker_cwds.json'
+    old_node = bridge.NODE_DIR
+    old_reg = bridge.WORKER_REGISTRY_FILE
+    bridge.NODE_DIR = tmp_path
+    bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
     bridge.watchdog.worker_cwds.clear()
 
     try:
+        bridge._registry_add('alice', 'claude')
+        bridge._registry_add('bob', 'claude')
         bridge._set_worker_cwd('alice', '/home/alice/project')
         bridge._set_worker_cwd('bob', '/home/bob/work')
 
-        assert bridge._WORKER_CWDS_FILE.exists(), 'CWD file not written'
-        data = json.loads(bridge._WORKER_CWDS_FILE.read_text())
-        assert data['alice'] == '/home/alice/project'
-        assert data['bob'] == '/home/bob/work'
+        data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
+        assert data['workers']['alice']['cwd'] == '/home/alice/project'
+        assert data['workers']['bob']['cwd'] == '/home/bob/work'
 
         bridge.watchdog.worker_cwds.clear()
-        assert bridge._get_worker_cwd('alice') == ''
-
-        bridge._load_worker_cwds()
-        assert bridge._get_worker_cwd('alice') == '/home/alice/project'
+        assert bridge._get_worker_cwd('alice') == '/home/alice/project', 'CWD should recover from registry'
         assert bridge._get_worker_cwd('bob') == '/home/bob/work'
     finally:
-        bridge._WORKER_CWDS_FILE = old_file
+        bridge.NODE_DIR = old_node
+        bridge.WORKER_REGISTRY_FILE = old_reg
         bridge.watchdog.worker_cwds.clear()
         shutil.rmtree(tmpdir, ignore_errors=True)
