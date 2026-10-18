@@ -12864,8 +12864,7 @@ assert sid == '', f'stale session should return empty, got {sid!r}'
 # get_claude_session_id which returns empty — so resume_id is empty.
 # Empty resume_id means backend.start_cmd('') → fresh start. Safe.
 mode = 'resume'
-resume_id = bridge.get_claude_session_id('cwdmismatch', authoritative=False) or \
-            bridge.get_claude_session_id('cwdmismatch', authoritative=True)
+resume_id = bridge.get_claude_session_id('cwdmismatch')
 assert resume_id == '', f'stale session should give empty resume_id, got {resume_id!r}'
 
 bridge.SESSIONS_DIR = orig
@@ -13145,8 +13144,8 @@ print('OK')
 
 # test_get_session_history removed — get_session_history was removed in reorg (1df6fef)
 
-test_get_claude_session_id_authoritative_overrides_stale() {
-    info "Testing get_claude_session_id(authoritative=True) overrides stale cache..."
+test_get_claude_session_id_marker_only() {
+    info "Testing get_claude_session_id reads marker only, scan_session_id is explicit..."
 
     if python3 -c "
 import os, tempfile, shutil
@@ -13182,26 +13181,27 @@ real_uuid = 'real-uuid-abc123-def456-7890-111213141516'
 
 bridge._registry_add('worker1', 'claude', 123)
 
-# Non-authoritative: returns cached value (fast path)
-sid_stale = bridge.get_claude_session_id('worker1')
-assert sid_stale == 'stale-uuid-does-not-exist', f'non-auth should trust cache, got {sid_stale!r}'
+# Marker file present: returns marker value
+sid = bridge.get_claude_session_id('worker1')
+assert sid == 'stale-uuid-does-not-exist', f'should read marker, got {sid!r}'
 
-# Authoritative: ALSO returns cached value (per-worker cache preferred over
-# CWD-based scan to prevent cross-worker contamination when workers share a CWD)
-sid = bridge.get_claude_session_id('worker1', authoritative=True)
-assert sid == 'stale-uuid-does-not-exist', f'authoritative should prefer cache, got {sid!r}'
-
-# Cache still has the per-worker value (NOT overwritten by scan)
+# Marker still untouched (no scan overwrites it)
 cached = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
-assert cached == 'stale-uuid-does-not-exist', f'cache should not be overwritten by scan: got {cached!r}'
+assert cached == 'stale-uuid-does-not-exist', f'marker should not be overwritten: got {cached!r}'
 
-# When cache is EMPTY, scan kicks in as fallback (self-heal)
+# Empty marker: returns empty — NO scan fallback
 (session_dir / 'claude_session_id').write_text('')
-sid_healed = bridge.get_claude_session_id('worker1', authoritative=True)
-assert sid_healed == real_uuid, f'empty cache should trigger scan fallback, got {sid_healed!r}'
-# Cache file now stores session_id + CWD (two lines)
-cached_healed = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
-assert cached_healed == real_uuid, f'scan result should be cached after self-heal: got {cached_healed!r}'
+sid_empty = bridge.get_claude_session_id('worker1')
+assert sid_empty == '', f'empty marker should return empty (no scan), got {sid_empty!r}'
+
+# Explicit scan_session_id finds the JSONL (diagnostic path)
+from claudecode import scan_session_id
+scanned = scan_session_id(cwd)
+assert scanned == real_uuid, f'scan_session_id should find JSONL, got {scanned!r}'
+
+# scan_session_id does NOT write to marker
+marker_after = (session_dir / 'claude_session_id').read_text().strip()
+assert marker_after == '', f'scan should not write marker, got {marker_after!r}'
 
 bridge.SESSIONS_DIR = orig_sessions
 bridge.CLAUDE_PROJECTS_DIR = orig_projects
@@ -13212,14 +13212,14 @@ shutil.rmtree(tmpdir, ignore_errors=True)
 shutil.rmtree(projects_dir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "get_claude_session_id authoritative prefers cache over scan"
+        success "get_claude_session_id reads marker only, scan_session_id is explicit"
     else
-        fail "authoritative cache preference test failed"
+        fail "session_id marker-only test failed"
     fi
 }
 
-test_get_claude_session_id_authoritative_remote() {
-    info "Testing get_claude_session_id(authoritative=True) scans remote for teleported workers..."
+test_get_claude_session_id_marker_only_remote() {
+    info "Testing get_claude_session_id reads marker only for remote workers..."
 
     if python3 -c "
 import tempfile, shutil
@@ -13251,20 +13251,27 @@ def mock_remote(cmd, host=None, **kwargs):
                          stderr='')
     return MagicMock(returncode=1, stdout='', stderr='unexpected')
 
-# With non-empty cache, authoritative returns cached value (not scan)
+# With marker present, returns marker value
 (session_dir / 'claude_session_id').write_text('stale-vps-cache')
 with patch('bridge._remote_run', side_effect=mock_remote):
-    sid = bridge.get_claude_session_id('ren', authoritative=True)
-assert sid == 'stale-vps-cache', f'authoritative should prefer cache over remote scan, got {sid!r}'
+    sid = bridge.get_claude_session_id('ren')
+assert sid == 'stale-vps-cache', f'should read marker, got {sid!r}'
 
-# With EMPTY cache, authoritative scans remote as fallback (self-heal)
+# With EMPTY marker, returns empty — no remote scan fallback
 (session_dir / 'claude_session_id').write_text('')
 with patch('bridge._remote_run', side_effect=mock_remote):
-    sid = bridge.get_claude_session_id('ren', authoritative=True)
-assert sid == 'fresh-mac-uuid', f'empty cache should trigger remote scan, got {sid!r}'
-# Cache file now stores session_id + CWD (two lines)
-cached = (session_dir / 'claude_session_id').read_text().strip().split('\n')[0]
-assert cached == 'fresh-mac-uuid', f'scan result should be cached: {cached!r}'
+    sid = bridge.get_claude_session_id('ren')
+assert sid == '', f'empty marker should return empty (no remote scan), got {sid!r}'
+
+# Explicit scan_session_id scans remote
+from claudecode import scan_session_id
+with patch('claudecode._remote_run', side_effect=mock_remote):
+    scanned = scan_session_id('/Users/beastoinagents/omi/omi-ren', host='mac-mini')
+assert scanned == 'fresh-mac-uuid', f'scan_session_id should find remote JSONL, got {scanned!r}'
+
+# scan does NOT write to marker
+marker_after = (session_dir / 'claude_session_id').read_text().strip()
+assert marker_after == '', f'scan should not write marker, got {marker_after!r}'
 
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -13273,9 +13280,9 @@ bridge._set_worker_cwd('ren', '')
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "authoritative prefers cache over remote scan, self-heals when empty"
+        success "get_claude_session_id reads marker only for remote workers"
     else
-        fail "remote authoritative cache preference test failed"
+        fail "remote session_id marker-only test failed"
     fi
 }
 
@@ -22247,8 +22254,8 @@ run_unit_tests() {
     run_test test_cwd_change_notifies_previous_session
     run_test test_cwd_change_notice_no_previous_session
     # test_get_session_history removed — function no longer exists
-    run_test test_get_claude_session_id_authoritative_overrides_stale
-    run_test test_get_claude_session_id_authoritative_remote
+    run_test test_get_claude_session_id_marker_only
+    run_test test_get_claude_session_id_marker_only_remote
     run_test test_hook_failures_teleported_use_remote_files
     run_test test_localize_media_teleported_fetches_remote_even_when_local_exists
     run_test test_download_telegram_file_syncs_to_remote_inbox
