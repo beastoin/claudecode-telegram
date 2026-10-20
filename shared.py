@@ -485,6 +485,11 @@ class ConnectorMetadata(TypedDict, total=False):
     number: str | None
     repo: str
     comment_id: int
+    thread_id: str
+    message_id: str
+    original_subject: str
+    sender_email: str
+    sender_name: str
 
 
 class IssueContext(TypedDict):

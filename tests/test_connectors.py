@@ -138,6 +138,34 @@ class TestGmailExtractSender:
         assert gc.extract_sender(msg) == "boss@example.com"
 
 
+# --- Increment 4b: Strip subject prefixes ---
+
+class TestGmailStripSubjectPrefixes:
+    def test_single_re(self):
+        assert GmailConnector._strip_subject_prefixes("Re: Hello") == "Hello"
+
+    def test_single_fwd(self):
+        assert GmailConnector._strip_subject_prefixes("Fwd: Hello") == "Hello"
+
+    def test_fw_variant(self):
+        assert GmailConnector._strip_subject_prefixes("FW: Hello") == "Hello"
+
+    def test_chained_prefixes(self):
+        assert GmailConnector._strip_subject_prefixes("Re: Re: Fwd: Hello") == "Hello"
+
+    def test_no_prefix(self):
+        assert GmailConnector._strip_subject_prefixes("Hello") == "Hello"
+
+    def test_empty(self):
+        assert GmailConnector._strip_subject_prefixes("") == ""
+
+    def test_case_insensitive(self):
+        assert GmailConnector._strip_subject_prefixes("RE: RE: Hello") == "Hello"
+
+    def test_forwarded_prefix(self):
+        assert GmailConnector._strip_subject_prefixes("Forwarded: Re: Hello") == "Hello"
+
+
 # --- Increment 5: Extract body text ---
 
 class TestGmailExtractBody:
@@ -597,6 +625,58 @@ class TestGmailProcessMessage:
         targets, html_text, plain_text, attachments = gc.on_message.call_args[0]
         assert targets == []
         assert "beast email send" not in plain_text
+
+    def test_reply_hint_uses_stripped_subject(self):
+        gc = make_gmail_connector(
+            from_filter="manager@example.com",
+            get_registered_workers=lambda: {"mon"},
+        )
+        msg = make_message(from_addr="manager@example.com", subject="Re: Re: Fwd: Deploy plan",
+                           body_text="@mon check this",
+                           message_id="<abc@mail.gmail.com>")
+        msg["threadId"] = "t1"
+        with patch.object(gc, "get_message", return_value=msg), \
+             patch.object(gc, "mark_as_read"):
+            gc._process_message("m1")
+        gc.on_message.assert_called_once()
+        plain_text = gc.on_message.call_args[0][2]
+        assert "Re: Deploy plan" in plain_text
+        assert "Re: Re: Re: Fwd: Deploy plan" not in plain_text
+
+    def test_metadata_passed_with_email_fields(self):
+        gc = make_gmail_connector(
+            from_filter="manager@example.com",
+            get_registered_workers=lambda: {"mon"},
+        )
+        msg = make_message(from_addr="manager@example.com", subject="Re: Status update",
+                           body_text="@mon check deploy",
+                           message_id="<xyz@mail.gmail.com>")
+        msg["threadId"] = "thread123"
+        with patch.object(gc, "get_message", return_value=msg), \
+             patch.object(gc, "mark_as_read"):
+            gc._process_message("m1")
+        gc.on_message.assert_called_once()
+        metadata = gc.on_message.call_args[1].get("metadata")
+        assert metadata is not None
+        assert metadata["thread_id"] == "thread123"
+        assert metadata["message_id"] == "<xyz@mail.gmail.com>"
+        assert metadata["original_subject"] == "Status update"
+        assert metadata["sender_email"] == "manager@example.com"
+
+    def test_metadata_passed_for_sent_reply(self):
+        gc = make_gmail_connector(from_filter="manager@example.com")
+        msg = make_message(from_addr="manager@example.com", subject="Re: Hello",
+                           body_text="my reply", message_id="<sent1@mail.gmail.com>")
+        msg["labelIds"] = ["SENT"]
+        msg["threadId"] = "t_sent"
+        with patch.object(gc, "get_message", return_value=msg), \
+             patch.object(gc, "mark_as_read"):
+            gc._process_message("m1")
+        gc.on_message.assert_called_once()
+        metadata = gc.on_message.call_args[1].get("metadata")
+        assert metadata is not None
+        assert metadata["original_subject"] == "Hello"
+        assert metadata["thread_id"] == "t_sent"
 
 
 # --- Increment 13: Poll cycle ---

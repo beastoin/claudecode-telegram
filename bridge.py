@@ -1135,6 +1135,10 @@ class GmailConnector(BaseConnector[GmailMessage]):
     def extract_message_id(self, message: GmailMessage) -> str:
         return _get_header(self._hdrs(message), "message-id")
 
+    @staticmethod
+    def _strip_subject_prefixes(subject: str) -> str:
+        return re.sub(r"^(?:(?:Re|Fwd?|Forwarded)\s*:\s*)+", "", subject, flags=re.IGNORECASE).strip()
+
     def is_sent_message(self, message: GmailMessage) -> bool:
         label_ids = message.get("labelIds")
         if not isinstance(label_ids, list):
@@ -1384,6 +1388,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             return
         body = self.extract_body_text(message)
         subject = self.extract_subject(message)
+        original_subject = self._strip_subject_prefixes(subject)
         raw_tid = message.get("threadId")
         thread_id: str = str(raw_tid) if isinstance(raw_tid, str) else ""
         message_id = self.extract_message_id(message)
@@ -1395,9 +1400,16 @@ class GmailConnector(BaseConnector[GmailMessage]):
             path = self._download_attachment(msg_id, att)
             if path:
                 downloaded.append(Attachment(path=path, filename=att["filename"], mimeType=att["mimeType"]))
+        email_metadata = ConnectorMetadata(
+            thread_id=thread_id,
+            message_id=message_id,
+            original_subject=original_subject,
+            sender_email=self.extract_sender(message),
+            sender_name=self.extract_sender_name(message),
+        )
         if is_sent:
             html_text, plain_text = self._format_sent_reply(body, subject, thread_id, message)
-            self.on_message([], html_text, plain_text, downloaded)
+            self.on_message([], html_text, plain_text, downloaded, metadata=email_metadata)
             return
         body = self._strip_reply_chain(body)
         targets, cleaned = self.parse_mentions(body)
@@ -1409,13 +1421,13 @@ class GmailConnector(BaseConnector[GmailMessage]):
         html_text += att_line
         plain_text += att_line
         if targets and message_id:
-            safe_subject = subject.replace("'", "'\\''")
+            safe_subject = original_subject.replace("'", "'\\''")
             safe_thread = thread_id.replace("'", "'\\''")
             safe_msgid = message_id.replace("'", "'\\''")
             reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
             reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
             plain_text += reply_hint
-        self.on_message(targets, html_text, plain_text, downloaded)
+        self.on_message(targets, html_text, plain_text, downloaded, metadata=email_metadata)
         if not self.mark_as_read(msg_id):
             _log(_LOG_WARN, "gmail", f"Failed to mark message {msg_id} as read")
 
