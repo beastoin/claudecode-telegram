@@ -1424,8 +1424,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
             safe_subject = original_subject.replace("'", "'\\''")
             safe_thread = thread_id.replace("'", "'\\''")
             safe_msgid = message_id.replace("'", "'\\''")
-            reply_hint = f"\n\nReply (prefer HTML): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --html-file /tmp/reply.html"
-            reply_hint += f"\nReply (plain text): beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
+            reply_hint = f"\n\nReply: beast email send -s 'Re: {safe_subject}' --thread-id '{safe_thread}' --in-reply-to '{safe_msgid}' --body 'your reply'"
             plain_text += reply_hint
         self.on_message(targets, html_text, plain_text, downloaded, metadata=email_metadata)
         if not self.mark_as_read(msg_id):
