@@ -6,7 +6,7 @@ This file is the single source of truth for agent workflow.
 
 ## Doc Contract
 
-Authority flows downstream: `SPEC.md → AGENTS.md → Code → Tests`. Citations point upstream only (`[SPEC-NNN]`). Manager owns SPEC.md. Agent owns AGENTS.md, code, and tests. When code diverges from spec, STOP and notify manager. See SPEC.md "Documentation Contract" for the full rules.
+Authority flows downstream: `SPEC.md → AGENTS.md → Code → Tests`. Citations point upstream only: `[SPEC-NNN]` for product specs, `[GOAL-NNN]` for process constraints. Manager owns approval authority over all layers. Agent drafts and owns AGENTS.md, code, and tests. When code diverges from spec, STOP and notify manager. See SPEC.md "Documentation Contract" for the full rules.
 
 ## Version Management
 
@@ -101,9 +101,19 @@ Every path a message takes through the system. Check here before changing any me
 | Hook no chat_id | Hook fires but no `chat_id` file | Hook exits silently |
 | Stale transcript | JSONL not updated recently | Hook sends health alert to `/alerts` endpoint |
 
+## Process Constraints
+
+These process-level GOALs constrain how agents work, not what the product does.
+
+- **Facts before fixes** [GOAL-019]: Check logs and trace execution before writing any fix. Never guess at root cause.
+- **Precise terminology** [GOAL-023]: Machine, host, node, worker, tmux session, Claude session, working directory, CWD — use terms consistently and precisely across all docs and code.
+- **Single-source guidance** [GOAL-028]: Worker-facing docs teach only the P2P discovery path (`/workers?from=<name>` → `send_example`). Never reference internal endpoints in worker guidance.
+- **Portable commands** [GOAL-029]: Commands serve managers, not infrastructure. Don't couple to deployment targets.
+
 ## Testing Requirements
 
 - Write tests alongside features. Focus on end-to-end behavior, not scaffolding [SPEC-021].
+- Both integration tests AND user acceptance tests are required [GOAL-013]. They are distinct: integration verifies wiring, acceptance verifies user-visible behavior.
 - Use FAST mode during development. Run default mode before you commit. Run FULL mode before you push.
 - Follow TDD: Red-Green-Refactor per increment.
 - See `TEST.md` for mode definitions, commands, env vars, TDD workflow, and test inventories.
@@ -120,9 +130,13 @@ Export env vars explicitly at each process boundary. Use `tmux set-environment`,
 
 When you make something configurable, search for all usages of the old hardcoded value. Verify all entry points handle the option consistently.
 
-### Watchdog for bridge requires careful testing
+### Watchdog architecture [SPEC-031]
 
-Only the tunnel watchdog exists (v0.5.0). A bridge watchdog was attempted but reverted. If re-implementing: test manually first, use `stdbuf -oL` for unbuffered output, add delays between kill and port check, make `start_bridge()` pass all required env vars.
+Two watchdog layers exist:
+- **Internal:** `BridgeHealth` in Python — signal staleness, thread liveness, pool saturation checks every watchdog cycle (~4s). See SPEC-031.
+- **External:** `bridge-watchdog.sh` via cron every 2min — hits `/health`, alerts via direct Telegram API (bypasses bridge).
+
+If modifying either: test manually first, use `stdbuf -oL` for unbuffered output, add delays between kill and port check.
 
 ### Bridge lifecycle: always use bridge.sh, never raw kill
 
@@ -239,6 +253,6 @@ All operational output uses `_log(level, component, message)` from `shared.py`. 
 See SPEC-030 for the full model. Key rules for agents:
 
 - **Admin secret** (`BRIDGE_API_SECRET`) must NEVER be injected into worker env, hook env, or tmux env. Only the bridge process reads it.
-- **New mutating endpoints** default to admin tier (HMAC required). Only downgrade to worker tier with explicit justification.
+- **New mutating endpoints** default to admin tier (`BRIDGE_API_SECRET` check required when external binding is active). Only downgrade to worker tier with explicit justification. On localhost, no per-request HMAC — same OS user means no isolation benefit (SPEC-030 explicit non-goal).
 - **Classify first, then serve**: endpoint tier check runs before any request handling. New endpoints must be added to the tier classification in the handler, not just the route table.
 - **External binding** (`BRIDGE_BIND != 127.0.0.1/::1`) refuses startup without `BRIDGE_API_SECRET`. Never weaken this check.
