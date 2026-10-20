@@ -380,11 +380,11 @@ def test_extract_worker_activity():
 
 def test_clear_hook_failures_on_restart():
     import bridge
+    from shared import _node_name
 
-    # Set up signal file
-    node = os.environ.get("TMUX_PREFIX", "claude-test-").rstrip("-").removeprefix("claude-") or "default"
+    # Set up signal file at the same path _clear_hook_failures uses
     name = "cleartest"
-    hook_dir = Path(f"/tmp/claudecode-telegram/{node}/{name}/hooks")
+    hook_dir = Path(f"/tmp/claudecode-telegram/{_node_name}/{name}/hooks")
     hook_dir.mkdir(parents=True, exist_ok=True)
     failures_file = hook_dir / "failures"
     now = int(time.time())

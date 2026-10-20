@@ -1,11 +1,12 @@
 #!/bin/bash
-# Pre-commit hook: lint + format check on staged .py files
-# Blocks commit if ruff or black fails
+# Pre-commit hook: Python lint + test.sh hygiene
+# Blocks commit if any check fails.
 # Install: ln -sf ../../tools/git-hooks/pre-commit .git/hooks/pre-commit
 
-STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' | grep -v '^tests/' | grep -v '^experiments/' | grep -v '^test_' | grep -v '_test\.py$')
+PY_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' | grep -v '^tests/' | grep -v '^experiments/' | grep -v '^test_' | grep -v '_test\.py$') || true
+SH_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'test\.sh$|Makefile$') || true
 
-if [ -z "$STAGED" ]; then
+if [ -z "$PY_STAGED" ] && [ -z "$SH_STAGED" ]; then
     exit 0
 fi
 
@@ -13,35 +14,45 @@ RUFF="${HOME}/.local/bin/ruff"
 BLACK="${HOME}/.local/bin/black"
 FAIL=0
 
-# 1. Lint
-if [ -x "$RUFF" ]; then
-    echo "Running ruff..."
-    $RUFF check $STAGED
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "❌ ruff lint failed. Fix violations before committing."
-        FAIL=1
+# 1. Python lint (staged .py only)
+if [ -n "$PY_STAGED" ]; then
+    if [ -x "$RUFF" ]; then
+        echo "Running ruff..."
+        $RUFF check $PY_STAGED || FAIL=1
     fi
-else
-    echo "⚠ ruff not found at $RUFF — skipping lint"
+    if [ -x "$BLACK" ]; then
+        echo "Running black --check..."
+        $BLACK --check --line-length 120 $PY_STAGED 2>&1 || FAIL=1
+    fi
 fi
 
-# 2. Format check (--check only, don't modify files)
-if [ -x "$BLACK" ]; then
-    echo "Running black --check..."
-    $BLACK --check --line-length 120 $STAGED 2>&1
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "❌ black format check failed. Run: black --line-length 120 <files>"
+# 2. test.sh hygiene (when test.sh or Makefile staged)
+if [ -n "$SH_STAGED" ]; then
+    echo "Running test.sh hygiene checks..."
+
+    # No hardcoded python3 -c (must use "$PYTHON" -c for cross-platform compat)
+    if grep -En '(^|[[:space:]])python3 -c' test.sh 2>/dev/null | grep -v '^\s*#' | head -1 | grep -q .; then
+        echo "❌ test.sh: hardcoded 'python3 -c' — use \"\$PYTHON\" -c"
+        grep -n 'python3 -c' test.sh | head -3
         FAIL=1
     fi
-else
-    echo "⚠ black not found at $BLACK — skipping format check"
+
+    # No deleted module imports (connectors.py was removed in 4-file consolidation)
+    if grep -q 'from connectors import' test.sh 2>/dev/null; then
+        echo "❌ test.sh: 'from connectors import' — connectors.py deleted, use 'from bridge import'"
+        FAIL=1
+    fi
+
+    # No real chat IDs in test configs (check test.sh only — Makefile self-references are fine)
+    if grep -qE 'TEST_CHAT_ID.*(ADMIN_CHAT_ID|121604706)' test.sh 2>/dev/null; then
+        echo "❌ Real chat ID in test config — never pass ADMIN_CHAT_ID as TEST_CHAT_ID"
+        FAIL=1
+    fi
 fi
 
 if [ $FAIL -ne 0 ]; then
     echo ""
-    echo "Commit blocked. Fix lint/format errors first."
+    echo "Commit blocked. Fix errors above."
     exit 1
 fi
 

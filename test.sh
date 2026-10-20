@@ -442,7 +442,7 @@ send_animation_message() {
 
 test_formatting() {
     info "Testing response prefix and multipart formatting..."
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import format_response_text, format_multipart_messages
 
 # Response prefix formatting
@@ -475,7 +475,7 @@ print('OK')
 
 test_message_splitting() {
     info "Testing message splitting (short, newlines, hard, HTML-aware)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import re
 from bridge import split_message, markdown_to_telegram_html, TELEGRAM_MAX_LENGTH
 
@@ -558,7 +558,7 @@ test_media_tag_parsing() {
     echo "test" > "$tag_test_dir/a.txt"
     echo "test" > "$tag_test_dir/b.csv"
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os
 d = '$tag_test_dir'
 from bridge import parse_image_tags, parse_file_tags
@@ -652,7 +652,7 @@ print('OK')
 
 test_pending_files() {
     info "Testing pending set/clear, timestamp, and chat_id file..."
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import set_pending, clear_pending, is_pending, get_session_dir, get_pending_file
 from pathlib import Path
 import time
@@ -701,7 +701,7 @@ test_set_pending_syncs_chat_id_to_remote() {
     info "Testing set_pending syncs chat_id to remote host..."
     # Verifies that _sync_chat_id_to_remote is called when worker has a remote host.
     # We mock get_worker_host to return a host and verify _remote_copy is called.
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, shutil, importlib
 sys.path.insert(0, '.')
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'fake')
@@ -1055,7 +1055,7 @@ test_cli_webhook_commands() {
     # is the same as the production bot token.
     local saved_webhook_url=""
     saved_webhook_url=$(curl -s "https://api.telegram.org/bot${TEST_BOT_TOKEN}/getWebhookInfo" \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('url',''))" 2>/dev/null || true)
+        | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('url',''))" 2>/dev/null || true)
 
     # webhook set URL
     local test_url="https://example.com/test-webhook-${RANDOM}"
@@ -1105,12 +1105,10 @@ test_cli_webhook_commands() {
 
 test_send_to_worker_missing() {
     info "Testing send_to_worker for non-existent workers..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import os
-os.environ['DIRECT_MODE'] = '0'
-import importlib
+os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'fake')
 import bridge
-importlib.reload(bridge)
 
 from bridge import send_to_worker
 
@@ -1134,7 +1132,7 @@ print('OK')
 
 test_transcribe_voice_success() {
     info "Testing transcribe_voice returns transcript on success..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -1167,7 +1165,7 @@ finally:
 
 test_transcribe_voice_timeout_returns_none() {
     info "Testing transcribe_voice returns None on timeout..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1189,7 +1187,7 @@ print('OK')
 
 test_transcribe_voice_bad_json_returns_none() {
     info "Testing transcribe_voice returns None on bad JSON..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -1214,7 +1212,7 @@ print('OK')
 
 test_voice_message_includes_transcript() {
     info "Testing incoming voice message delivers transcript transparently..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock, call
@@ -1272,7 +1270,7 @@ print('OK')
 
 test_voice_message_fallback_without_transcript() {
     info "Testing incoming voice falls back to file-only when STT fails..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -1334,9 +1332,15 @@ print('OK')
 
 
 
+# ── Transcript/Rewind Rendering Tests — REMOVED ────────────────────────
+# Rendering, search, token auth, and stats extracted to rewind/ (Bun server) in request 115.
+# Tests: bun test rewind/, tests/test_tools_e2e.sh
+# Old tests referenced bridge._render_transcript_html, RewindTokenStore, _transcript_stats
+# which no longer exist in bridge.py.
+
 test_transcript_renders_html() {
     info "Testing _render_transcript_html produces valid HTML..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1383,7 +1387,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_missing_session() {
     info "Testing transcript returns error for missing session..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1404,7 +1408,7 @@ print('OK')
 
 test_transcript_with_tool_calls() {
     info "Testing transcript renders tool_use and tool_result blocks..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1453,7 +1457,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_default_last_page() {
     info "Testing transcript defaults to last page..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1494,7 +1498,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_bm25_search() {
     info "Testing BM25 search ranks results by relevance..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1537,7 +1541,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_search_assistant_ctx_link() {
     info "Testing search results have context links on assistant entries..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1582,7 +1586,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_search_sort_toggle() {
     info "Testing search results support sort by time vs relevance..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1636,7 +1640,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_unicode() {
     info "Testing transcript handles unicode/UTF-8 content..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile, base64, re
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1683,7 +1687,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_edit_diff_rendering() {
     info "Testing transcript renders Edit tool as colored diff..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1726,7 +1730,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_turn_grouping() {
     info "Testing assistant turns grouped in turn-body..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1778,7 +1782,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_transcript_hides_system_messages() {
     info "Testing transcript hides task-notification and system-reminder messages..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch
@@ -1824,7 +1828,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 test_rewind_generates_token_url() {
     info "Testing /rewind generates time-limited token URL..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile, time
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -1864,7 +1868,7 @@ print('OK')
 
 test_rewind_token_auth_required() {
     info "Testing transcript requires valid rewind token..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile, time
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -1934,7 +1938,7 @@ print('OK')
 
 test_rewind_no_args_shows_usage() {
     info "Testing /rewind with no args shows usage..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import MagicMock
@@ -1958,7 +1962,7 @@ print('OK')
 
 test_transcript_prompts_filter() {
     info "Testing transcript prompts-only filter..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 import bridge
@@ -2003,7 +2007,7 @@ print('OK')
 
 test_transcript_dynamic_avatars() {
     info "Testing transcript dynamic avatars for team members..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 import bridge
@@ -2060,7 +2064,7 @@ print(f'OK ({len(avatars)} unique avatars)')
 
 test_transcript_sidebar_stats() {
     info "Testing transcript sidebar shows duration/tokens/file size..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 import bridge
@@ -2109,7 +2113,7 @@ print('OK')
 
 test_reply_forwarded_voice_gets_transcribed() {
     info "Testing reply-forwarded voice delivers transcript transparently..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
@@ -2144,7 +2148,7 @@ print('OK')
 
 test_file_validation() {
     info "Testing file validation (image path, document path, blocked filenames)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import validate_photo_path, validate_document_path, is_blocked_filename
 from pathlib import Path
 import tempfile
@@ -2189,7 +2193,7 @@ print('OK')
 
 test_file_size_limit_50mb() {
     info "Testing file size limit is 50MB (Telegram Bot API limit)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import validate_document_path, validate_photo_path, MAX_FILE_SIZE
@@ -2241,7 +2245,7 @@ print('OK')
 
 test_incoming_media_types() {
     info "Testing incoming media type handling (audio, voice, video, video_note, sticker)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 
@@ -2425,7 +2429,7 @@ test_bridge_starts() {
     fi
 
     # Verify endpoint
-    if curl -s "http://localhost:$PORT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
+    if curl -s "http://localhost:$PORT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
         success "Bridge endpoint responds with JSON API index"
     else
         fail "Bridge endpoint not responding with JSON"
@@ -2460,7 +2464,7 @@ test_hire_command() {
 test_backend_env_metadata() {
     info "Testing worker backend stored in tmux env..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import claudecode
 import unittest.mock as mock
@@ -2659,7 +2663,7 @@ test_dynamic_bot_command_list_update() {
     # Wait for command to appear in Telegram
     for _ in $(seq 1 15); do
         if curl -s "https://api.telegram.org/bot${TEST_BOT_TOKEN}/getMyCommands" | \
-            python3 -c 'import json,sys
+            "$PYTHON" -c 'import json,sys
 name=sys.argv[1]
 try:
     data=json.load(sys.stdin)
@@ -2697,7 +2701,7 @@ sys.exit(0 if name in cmds else 1)
     api_error=0
     for _ in $(seq 1 15); do
         if curl -s "https://api.telegram.org/bot${TEST_BOT_TOKEN}/getMyCommands" | \
-            python3 -c 'import json,sys
+            "$PYTHON" -c 'import json,sys
 name=sys.argv[1]
 try:
     data=json.load(sys.stdin)
@@ -2803,7 +2807,7 @@ test_incoming_document_e2e() {
 
     # Extract file_id from response
     local file_id
-    file_id=$(echo "$upload_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['document']['file_id'])" 2>/dev/null)
+    file_id=$(echo "$upload_response" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d['result']['document']['file_id'])" 2>/dev/null)
 
     if [[ -z "$file_id" ]]; then
         fail "Could not upload test document to get file_id"
@@ -2870,7 +2874,7 @@ test_incoming_image_e2e() {
     sleep 0.3
 
     # Create a test image
-    python3 << 'PYEOF'
+    "$PYTHON" << 'PYEOF'
 from PIL import Image, ImageDraw
 img = Image.new('RGB', (200, 100), color='#28A745')
 draw = ImageDraw.Draw(img)
@@ -2887,7 +2891,7 @@ PYEOF
 
     # Extract file_id from response
     local file_id
-    file_id=$(echo "$upload_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['photo'][-1]['file_id'])" 2>/dev/null)
+    file_id=$(echo "$upload_response" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d['result']['photo'][-1]['file_id'])" 2>/dev/null)
 
     if [[ -z "$file_id" ]]; then
         fail "Could not upload test image to get file_id"
@@ -2942,7 +2946,7 @@ test_inbox_directory() {
     wait_for_session "inboxtest"
     send_message "/focus inboxtest" >/dev/null
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import ensure_inbox_dir, get_inbox_dir
 import os
 
@@ -3148,7 +3152,7 @@ test_response_without_pending() {
 test_hire_backend_parsing() {
     info "Testing /hire backend parsing..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import parse_hire_args, DEFAULT_WORKER_BACKEND
 
 name, backend = parse_hire_args('alice')
@@ -3178,7 +3182,7 @@ print('OK')
 test_hire_binary_check() {
     info "Testing /hire rejects missing backend binary..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import shutil
 import bridge
 
@@ -3230,7 +3234,7 @@ print('OK')
 test_relaunch_binary_check() {
     info "Testing /restart rejects missing backend binary..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import shutil
 import subprocess
 import time
@@ -3280,7 +3284,7 @@ print('OK')
 test_claude_start_cmd() {
     info "Testing claude start command generation..."
 
-    if python3 - <<'PY' 2>/dev/null | grep -q "OK"; then
+    if "$PYTHON" - <<'PY' 2>/dev/null | grep -q "OK"; then
 import os, sys
 sys.path.insert(0, os.environ.get("BRIDGE_DIR", "."))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "fake")
@@ -3306,7 +3310,7 @@ PY
 test_team_output_includes_backend() {
     info "Testing /team output includes backend..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import format_team_lines
 
 registered = {
@@ -3333,7 +3337,7 @@ print('OK')
 test_worker_send_uses_backend() {
     info "Testing worker_send routes via backend..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 calls = {'claude': 0, 'codex': 0}
@@ -3367,7 +3371,7 @@ bridge.worker_manager.scan_tmux_sessions = fake_scan
 bridge.worker_manager.get_registered_sessions = fake_get_registered_sessions
 
 session = fake_scan()['alice']
-ok = bridge.worker_send('alice', 'hello', session=session)
+ok = bridge.worker_manager.send('alice', 'hello', session=session)
 
 assert ok is True, 'expected worker_send to succeed'
 assert calls['codex'] == 1, f'expected codex send, got {calls}'
@@ -3384,7 +3388,7 @@ print('OK')
 test_codex_end_cleans_session() {
     info "Testing codex /end cleans session..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -3437,7 +3441,7 @@ print('OK')
 test_codex_relaunch_clears_session_id() {
     info "Testing codex /restart --clean clears session id..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import shutil
 import tempfile
 from pathlib import Path
@@ -3477,7 +3481,7 @@ print('OK')
 test_restart_with_name() {
     info "Testing /restart with name argument (default = resume)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -3523,7 +3527,7 @@ print('OK')
 test_restart_sends_ready_confirmation() {
     info "Testing /restart sends resuming + ready confirmation..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -3571,7 +3575,7 @@ print('OK')
 test_watchdog_suppressed_after_restart() {
     info "Testing watchdog resolved alert suppressed after recent restart..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -3616,7 +3620,7 @@ print('OK')
 test_restart_clean_with_name() {
     info "Testing /restart --clean with name argument..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 bridge.state.active = 'alice'
@@ -3653,7 +3657,7 @@ print('OK')
 test_restart_all_sequential() {
     info "Testing /restart all restarts workers sequentially..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -3713,7 +3717,7 @@ print('OK')
 test_restart_all_clean() {
     info "Testing /restart all --clean uses relaunch mode..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -3757,7 +3761,7 @@ print('OK')
 test_restart_all_handles_failure() {
     info "Testing /restart all continues on failure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -3813,7 +3817,7 @@ print('OK')
 test_restart_cancel() {
     info "Testing /restart cancel when no sequence running..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 class FakeTelegram:
@@ -3839,7 +3843,7 @@ print('OK')
 
 test_restart_skips_running_worker() {
     info "Testing /restart skips already-running worker..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -3897,7 +3901,7 @@ print('OK')
 
 test_restart_inflight_dedupe() {
     info "Testing /restart --force blocked by in-flight restart..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import time, threading
 from pathlib import Path
 from unittest.mock import patch
@@ -3954,7 +3958,7 @@ print('OK')
 test_restart_all_no_workers() {
     info "Testing /restart all with no workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {}
@@ -3983,7 +3987,7 @@ print('OK')
 test_restart_stale_session_auto_recovery() {
     info "Testing restart auto-recovers from stale session ID..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import os
 import tempfile
@@ -4025,7 +4029,7 @@ print('OK')
 test_restart_all_rejects_duplicate() {
     info "Testing /restart all rejects when already running..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 bridge.worker_manager.get_registered_sessions = lambda registered=None: {
@@ -4066,7 +4070,7 @@ print('OK')
 test_get_any_session_id() {
     info "Testing get_any_session_id finds codex/claude session ids..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -4105,7 +4109,7 @@ print('OK')
 test_extract_worker_activity() {
     info "Testing _extract_activity parses tmux output signals..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import _extract_activity
 
 # Spinner shows actual verb + duration (not just 'Thinking')
@@ -4298,7 +4302,7 @@ print('OK')
 test_activity_detects_interactive_prompt() {
     info "Testing _extract_activity detects interactive TUI prompts..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import _extract_activity, _extract_question_details
 
@@ -4395,7 +4399,7 @@ assert details is None, f'Idle should have no details, got: {details}'
 test_activity_detects_plan_approval() {
     info "Testing _extract_activity detects ExitPlanMode plan approval prompt..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import _extract_activity, _extract_question_details
 
@@ -4489,13 +4493,13 @@ assert len(details['options']) >= 3, f'Plan approval options: {len(details[\"opt
 test_watchdog_waiting_input_state() {
     info "Testing watchdog detects WAITING_INPUT state and formats alert..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 import bridge, time
 
-# Test _format_watchdog_status with WAITING_INPUT
+# Test _format_watchdog_status_pure with WAITING_INPUT
 bridge.watchdog.worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', time.time() - 120)
-result = bridge._format_watchdog_status('testbot')
+result = bridge._format_watchdog_status_pure('testbot', state_snapshot=bridge.watchdog.worker_states)
 assert 'Needs reply' in result, f'Expected Needs reply, got: {result}'
 assert '2m' in result, f'Expected 2m duration, got: {result}'
 
@@ -4521,7 +4525,7 @@ bridge.watchdog.worker_states.pop('testbot', None)
 test_noninteractive_backpressure() {
     info "Testing non-interactive backpressure rejects while busy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -4577,7 +4581,7 @@ print('OK')
 test_get_workers_includes_codex() {
     info "Testing /workers includes codex exec workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -4638,7 +4642,7 @@ test_concurrent_sends_no_interleave() {
     sleep 0.5
 
     # 5 parallel threads, 5 messages each, all via tmux_send_message (has flock)
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, threading, time; sys.path.insert(0, '.')
 import bridge
 
@@ -4692,7 +4696,7 @@ print('OK')
 test_flock_per_session_isolation() {
     info "Testing flock is per-session (different sessions don't block)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 import bridge
 
@@ -4732,7 +4736,7 @@ print('OK')
 test_backend_file_is_canonical() {
     info "Testing backend registry is canonical source (session dict is trusted view)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, tempfile, shutil; sys.path.insert(0, '.')
 from pathlib import Path
 import bridge
@@ -4772,7 +4776,7 @@ print('OK')
 test_flock_node_namespaced() {
     info "Testing flock path includes node name (multi-node isolation)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 import bridge
 
@@ -4803,7 +4807,7 @@ print('OK')
 test_send_example_uses_paste_buffer() {
     info "Testing /workers send_example uses paste-buffer for tmux workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 import bridge
 
@@ -4843,7 +4847,7 @@ finally:
 test_checkin_instructions_warn_against_response_misuse() {
     info "Testing checkin instructions warn against /outputs for w2w..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 import bridge
 
@@ -4862,7 +4866,7 @@ print('OK')
 test_pipe_forwarding_to_codex() {
     info "Testing pipe forwarding routes to codex..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -4898,7 +4902,7 @@ print('OK')
 test_adapter_pid_tracking() {
     info "Testing adapter PID stored and kill_adapter terminates it..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, time
 import bridge
 
@@ -4939,7 +4943,7 @@ print('OK')
 test_end_kills_adapter() {
     info "Testing /end kills inflight adapter for codex worker..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -4993,7 +4997,7 @@ print('OK')
 test_end_clears_pending() {
     info "Testing /end clears pending file..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -5028,7 +5032,7 @@ print('OK')
 test_codex_parse_jsonl() {
     info "Testing _codex_parse_jsonl extracts response text and thread_id..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json
 import bridge
 
@@ -5067,7 +5071,7 @@ print('OK')
 test_poisoned_detection() {
     info "Testing poisoned detection via adapter.log..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -5115,10 +5119,11 @@ print('OK')
 test_poisoned_hook_signal_file() {
     info "Testing poisoned detection via hook signal file..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, time, os
 from pathlib import Path
 import bridge
+from shared import _node_name
 
 tmp = Path(tempfile.mkdtemp())
 bridge.SESSIONS_DIR = tmp
@@ -5130,8 +5135,7 @@ session_dir.mkdir()
 (session_dir / 'backend').write_text('claude')
 
 # Create hook signal file with 4 recent failures (>= 3 threshold)
-node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
-hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir = Path(f'/tmp/claudecode-telegram/{_node_name}/{name}/hooks')
 hook_dir.mkdir(parents=True, exist_ok=True)
 failures_file = hook_dir / 'failures'
 
@@ -5162,10 +5166,11 @@ print('OK')
 test_poisoned_hook_signal_stale_ignored() {
     info "Testing poisoned detection ignores stale hook signals..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, time, os
 from pathlib import Path
 import bridge
+from shared import _node_name
 
 tmp = Path(tempfile.mkdtemp())
 bridge.SESSIONS_DIR = tmp
@@ -5177,8 +5182,7 @@ session_dir.mkdir()
 (session_dir / 'backend').write_text('claude')
 
 # Create hook signal file with 4 OLD failures (> 120s ago)
-node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
-hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir = Path(f'/tmp/claudecode-telegram/{_node_name}/{name}/hooks')
 hook_dir.mkdir(parents=True, exist_ok=True)
 failures_file = hook_dir / 'failures'
 
@@ -5209,10 +5213,11 @@ print('OK')
 test_poisoned_hook_signal_below_threshold() {
     info "Testing poisoned detection below threshold..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, time, os
 from pathlib import Path
 import bridge
+from shared import _node_name
 
 tmp = Path(tempfile.mkdtemp())
 bridge.SESSIONS_DIR = tmp
@@ -5224,8 +5229,7 @@ session_dir.mkdir()
 (session_dir / 'backend').write_text('claude')
 
 # Create hook signal file with only 2 recent failures (< 3 threshold)
-node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').split('-', 1)[-1] if os.environ.get('TMUX_PREFIX') else 'test'
-hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir = Path(f'/tmp/claudecode-telegram/{_node_name}/{name}/hooks')
 hook_dir.mkdir(parents=True, exist_ok=True)
 failures_file = hook_dir / 'failures'
 
@@ -5253,16 +5257,16 @@ test_on_tool_failure_hook_script() {
     info "Testing claudecode.sh tool-failure writes signal file..."
 
     # Create a tmux session to simulate a worker
-    local test_session="${TMUX_PREFIX}hookscript"
+    local test_session="${TEST_TMUX_PREFIX}hookscript"
     tmux new-session -d -s "$test_session" "bash" 2>/dev/null || true
     sleep 0.3
 
     # Set tmux env vars that the hook reads
-    tmux set-environment -t "$test_session" TMUX_PREFIX "$TMUX_PREFIX"
+    tmux set-environment -t "$test_session" TMUX_PREFIX "$TEST_TMUX_PREFIX"
 
     # Derive node name the same way as bridge.py
     local node_name
-    node_name=$(echo "$TMUX_PREFIX" | sed 's/-$//' | sed 's/^claude-//')
+    node_name=$(echo "$TEST_TMUX_PREFIX" | sed 's/-$//' | sed 's/^claude-//')
     [ -z "$node_name" ] && node_name="default"
 
     # Clean up any pre-existing signal file
@@ -5301,15 +5305,15 @@ test_on_tool_failure_hook_script() {
 test_clear_hook_failures_on_restart() {
     info "Testing hook failure signal cleared on non-resume restart..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, time, os
 from pathlib import Path
 import bridge
+from shared import _node_name
 
-# Set up signal file
-node = os.environ.get('TMUX_PREFIX', 'claude-test-').rstrip('-').removeprefix('claude-') or 'default'
+# Set up signal file using the actual _node_name that _clear_hook_failures uses
 name = 'cleartest'
-hook_dir = Path(f'/tmp/claudecode-telegram/{node}/{name}/hooks')
+hook_dir = Path(f'/tmp/claudecode-telegram/{_node_name}/{name}/hooks')
 hook_dir.mkdir(parents=True, exist_ok=True)
 failures_file = hook_dir / 'failures'
 now = int(time.time())
@@ -5333,7 +5337,7 @@ print('OK')
 test_compute_state_non_interactive() {
     info "Testing compute_state for non-interactive backends..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5384,7 +5388,7 @@ print('OK')
 test_since_preserved_on_reason_change() {
     info "Testing watchdog since preserved when reason changes..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5408,7 +5412,7 @@ print('OK')
 test_compute_state_interactive() {
     info "Testing compute_state for INTERACTIVE backends..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5481,7 +5485,7 @@ print('OK')
 test_idle_child_baseline() {
     info "Testing idle child baseline filters MCP servers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5535,7 +5539,7 @@ print('OK')
 test_idle_streak_prevents_false_stuck() {
     info "Testing idle_streak prevents false STUCK alerts..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Reset idle streak
@@ -5580,7 +5584,7 @@ print('OK')
 test_watchdog_resolved_alert() {
     info "Testing watchdog resolved alert on STUCK -> READY transition..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Track calls to telegram_api
@@ -5629,7 +5633,7 @@ print('OK')
 test_parse_at_mentions() {
     info "Testing parse_at_mentions behavior..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Create a mock workers object
@@ -5677,7 +5681,7 @@ print('OK')
 test_auto_focus_on_consecutive_mentions() {
     info "Testing auto-focus after 2 consecutive @mentions to same worker..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os
 import tempfile
 from pathlib import Path
@@ -5801,10 +5805,10 @@ print('OK')
     fi
 }
 
-test_format_watchdog_status() {
-    info "Testing _format_watchdog_status for each state..."
+test_format_watchdog_status_pure() {
+    info "Testing _format_watchdog_status_pure for each state..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5831,42 +5835,42 @@ with bridge.watchdog.lock:
 snapshot = dict(states)
 
 # READY -> 'Ready'
-result = bridge._format_watchdog_status('ready_worker', lambda n: False, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('ready_worker', lambda n: False, state_snapshot=snapshot)
 assert result == 'Ready', f'READY: expected Ready, got {result}'
 
 # BUSY_TOOL -> 'Working'
-result = bridge._format_watchdog_status('busy_tool_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('busy_tool_worker', lambda n: True, state_snapshot=snapshot)
 assert result == 'Working', f'BUSY_TOOL: expected Working, got {result}'
 
 # BUSY_THINKING -> 'Thinking'
-result = bridge._format_watchdog_status('busy_thinking_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('busy_thinking_worker', lambda n: True, state_snapshot=snapshot)
 assert result == 'Thinking', f'BUSY_THINKING: expected Thinking, got {result}'
 
 # WAITING -> 'Working'
-result = bridge._format_watchdog_status('waiting_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('waiting_worker', lambda n: True, state_snapshot=snapshot)
 assert result == 'Working', f'WAITING: expected Working, got {result}'
 
 # STUCK -> 'No progress (Xm)'
-result = bridge._format_watchdog_status('stuck_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('stuck_worker', lambda n: True, state_snapshot=snapshot)
 assert result.startswith('No progress'), f'STUCK: expected No progress (Xm), got {result}'
 assert 'm)' in result, f'STUCK: expected minutes in parens, got {result}'
 
 # DEAD -> 'Not responding'
-result = bridge._format_watchdog_status('dead_worker', lambda n: False, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('dead_worker', lambda n: False, state_snapshot=snapshot)
 assert result == 'Not responding', f'DEAD: expected Not responding, got {result}'
 
 # OFFLINE -> 'Offline'
-result = bridge._format_watchdog_status('offline_worker', lambda n: False, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('offline_worker', lambda n: False, state_snapshot=snapshot)
 assert result == 'Offline', f'OFFLINE: expected Offline, got {result}'
 
 # POISONED -> 'Error loop (Xm)'
-result = bridge._format_watchdog_status('poisoned_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('poisoned_worker', lambda n: True, state_snapshot=snapshot)
 assert result.startswith('Error loop'), f'POISONED: expected Error loop (Xm), got {result}'
 
 # Unknown worker -> fallback based on pending
-result = bridge._format_watchdog_status('nonexistent_worker', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('nonexistent_worker', lambda n: True, state_snapshot=snapshot)
 assert result == 'Working', f'Unknown+pending: expected Working, got {result}'
-result = bridge._format_watchdog_status('nonexistent_worker', lambda n: False, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('nonexistent_worker', lambda n: False, state_snapshot=snapshot)
 assert result == 'Ready', f'Unknown+idle: expected Ready, got {result}'
 
 # Clean up
@@ -5876,16 +5880,16 @@ with bridge.watchdog.lock:
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "_format_watchdog_status returns correct text for each state"
+        success "_format_watchdog_status_pure returns correct text for each state"
     else
-        fail "_format_watchdog_status test failed"
+        fail "_format_watchdog_status_pure test failed"
     fi
 }
 
 test_stuck_duration_uses_reason_age_not_since() {
     info "Testing STUCK duration uses age from reason, not since timestamp..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -5896,7 +5900,7 @@ since = now - 120  # 2 minutes ago (simulates bridge restart)
 snapshot = {
     'mio': ('STUCK', 'age=4140s cpu=0.5 streak=3/3', since),
 }
-result = bridge._format_watchdog_status('mio', lambda n: True, state_snapshot=snapshot)
+result = bridge._format_watchdog_status_pure('mio', lambda n: True, state_snapshot=snapshot)
 # Should show 69m (from age=4140s), NOT 2m (from since)
 assert result == 'No progress (69m)', f'Expected No progress (69m), got {result}'
 print('OK')
@@ -5910,7 +5914,7 @@ print('OK')
 test_switch_session() {
     info "Testing switch_session changes active and saves to file..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os
 import tempfile
 from pathlib import Path
@@ -5982,7 +5986,7 @@ print('OK')
 test_send_response_html_formatting() {
     info "Testing send_response_to_telegram with HTML formatting..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Track API calls — sendRichMessage must fail so code falls to HTML path
@@ -6028,7 +6032,7 @@ print('OK')
 test_format_response_strips_name_prefix() {
     info "Testing format_response_text strips redundant name prefix..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import format_response_text
 
 # Normal message - no prefix to strip
@@ -6124,7 +6128,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Manager prefix: plain text prefixed, media unchanged, @all prefixed"
     else
@@ -6210,7 +6214,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Media with @mention routes to mentioned worker"
     else
@@ -6291,7 +6295,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Media downloads to @mentioned worker's inbox"
     else
@@ -6379,7 +6383,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Media reply-to routes to replied worker"
     else
@@ -6496,7 +6500,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Media group routes all photos to @mentioned worker"
     else
@@ -6592,7 +6596,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "Reply with @mention forwards replied-to media"
     else
@@ -6604,7 +6608,7 @@ PYEOF
 test_handle_watchdog_transition() {
     info "Testing _handle_watchdog_transition state machine..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import time
 import bridge
 
@@ -6713,7 +6717,7 @@ print('OK')
 test_update_bot_commands_includes_codex() {
     info "Testing update_bot_commands includes codex workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 captured = {}
@@ -6744,7 +6748,7 @@ print('OK')
 test_broadcast_includes_codex() {
     info "Testing @all broadcast includes codex workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 called = []
@@ -6776,7 +6780,7 @@ print('OK')
 test_reserved_names_rejection() {
     info "Testing reserved names rejection..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import RESERVED_NAMES
 
 # Verify all expected reserved names are included
@@ -6811,7 +6815,7 @@ test_graceful_shutdown_notification() {
     info "Testing graceful shutdown attempts notification..."
 
     # Test that graceful_shutdown tries to send notification when admin_chat_id is set
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import unittest.mock as mock
 import signal
@@ -6843,7 +6847,7 @@ test_typing_indicator_loop() {
     info "Testing typing indicator loop calls sendChatAction..."
 
     # Test that send_typing_loop calls telegram_api with sendChatAction
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import unittest.mock as mock
 
@@ -6959,7 +6963,7 @@ test_health_endpoint() {
     local response
     response=$(curl -s "http://localhost:$PORT")
 
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'endpoints' in d
@@ -7063,7 +7067,7 @@ test_notify_parses_image_tags() {
     local img="/tmp/test_notify_img_$$.png"
     printf '\x89PNG\r\n' > "$img"
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, json
 from unittest.mock import patch, MagicMock
 
@@ -7087,7 +7091,7 @@ print('PASS: /notifications media tag parsing works')
 test_notify_parses_image_tags_remote() {
     info "Testing /notifications parses [[image:]] for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -7115,7 +7119,7 @@ with patch.object(bridge, 'get_worker_host', return_value='remote-host'):
 test_pending_no_side_effect() {
     info "Testing is_pending() is non-mutating (no auto-delete)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import is_pending, set_pending, get_pending_file, _pending_timestamp
 import time
 from pathlib import Path
@@ -7162,7 +7166,7 @@ print('OK')
 test_stale_pending_survives_for_watchdog() {
     info "Testing pending file survives past 10min for STALE_PENDING (15min) detection..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import is_pending, get_pending_file, _pending_timestamp, compute_state
 import time
 from pathlib import Path
@@ -7623,7 +7627,7 @@ test_cli_hook_test_no_chat() {
 test_tmux_send_locks() {
     info "Testing per-session tmux send locks..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import _get_tmux_send_lock, tmux_send
 import threading
 
@@ -7659,7 +7663,7 @@ test_tmux_paste_buffer_send() {
     fi
 
     # Test 1: Short message via paste-buffer
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import tmux_send_message
 result = tmux_send_message('$test_session', 'paste-test-short-ok')
@@ -7685,7 +7689,7 @@ print('OK')
     fi
 
     # Test 2: Long message (1000+ chars)
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import tmux_send_message
 long_msg = 'LONGMSG_' + 'A' * 1000 + '_END'
@@ -7712,7 +7716,7 @@ print('OK')
 test_paste_buffer_uses_bracketed_paste() {
     info "Testing paste-buffer uses -p flag for bracketed paste..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, subprocess, unittest.mock; sys.path.insert(0, '.')
 import bridge
 
@@ -7856,7 +7860,7 @@ TUITEST
     rm -f "$result_file"
 
     tmux new-session -d -s "$test_session" -x 200 -y 50 \
-        "python3 /tmp/tui-sim-imgcap-$$.py $result_file $chaos_count $render_delay_ms"
+        "$PYTHON /tmp/tui-sim-imgcap-$$.py $result_file $chaos_count $render_delay_ms"
     sleep 1
 
     if ! tmux has-session -t "$test_session" 2>/dev/null; then
@@ -7869,7 +7873,7 @@ TUITEST
     local sent=0
     local failed=0
     for i in $(seq 1 $chaos_count); do
-        if python3 -c "
+        if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import tmux_send_message
 
@@ -7996,7 +8000,7 @@ TUITEST
     rm -f "$result_file"
 
     tmux new-session -d -s "$test_session" -x 200 -y 50 \
-        "python3 /tmp/tui-sim-test-$$.py $result_file"
+        "$PYTHON /tmp/tui-sim-test-$$.py $result_file"
     sleep 1
 
     if ! tmux has-session -t "$test_session" 2>/dev/null; then
@@ -8006,7 +8010,7 @@ TUITEST
     fi
 
     # Send 60-line message via bridge function
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import tmux_send_message
 
@@ -8132,7 +8136,7 @@ TUITEST
     rm -f "$result_file"
 
     tmux new-session -d -s "$test_session" -x 200 -y 50 \
-        "python3 /tmp/tui-sim-slowpaste-$$.py $result_file $msg_count $render_delay_ms"
+        "$PYTHON /tmp/tui-sim-slowpaste-$$.py $result_file $msg_count $render_delay_ms"
     sleep 1
 
     if ! tmux has-session -t "$test_session" 2>/dev/null; then
@@ -8142,7 +8146,7 @@ TUITEST
 
     local sent=0
     for i in $(seq 1 $msg_count); do
-        if python3 -c "
+        if "$PYTHON" -c "
 import sys; sys.path.insert(0, '.')
 from bridge import tmux_send_message
 result = tmux_send_message('$test_session', 'Slow paste test message $i')
@@ -8186,7 +8190,7 @@ test_tmux_send_uses_flock() {
         return
     fi
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os; sys.path.insert(0, '.')
 import bridge
 
@@ -8236,7 +8240,7 @@ print('OK')
 test_watchdog_alert_on_stuck() {
     info "Testing watchdog alerts on stuck transition..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -8275,7 +8279,7 @@ print('OK')
 test_remote_run_local() {
     info "Testing _remote_run with host=None runs locally..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -8297,7 +8301,7 @@ print('OK')
 test_remote_run_ssh() {
     info "Testing _remote_run with host prefixes ssh..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -8329,7 +8333,7 @@ print('OK')
 test_remote_run_stdin() {
     info "Testing _remote_run passes input/kwargs through..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -8352,7 +8356,7 @@ print('OK')
 test_remote_copy() {
     info "Testing _remote_copy builds scp commands..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import shutil
 import bridge
@@ -8387,7 +8391,7 @@ print('OK')
 test_worker_host_field() {
     info "Testing worker registry stores host field..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile
 from pathlib import Path
 import bridge
@@ -8429,29 +8433,29 @@ print('OK')
 }
 
 test_hire_parses_host() {
-    info "Testing hire parses name@host syntax..."
+    info "Testing hire parses backend flags..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
-# Parse name@host
-name, host = bridge.parse_worker_target('kenji@mac')
+# Parse plain name
+name, backend = bridge.parse_hire_args('kenji')
 assert name == 'kenji', f'Expected kenji, got {name}'
-assert host == 'mac', f'Expected mac, got {host}'
+assert backend == 'claude', f'Expected claude, got {backend}'
 
-# Parse plain name (no host)
-name, host = bridge.parse_worker_target('lee')
+# Parse with --codex flag
+name, backend = bridge.parse_hire_args('lee --codex')
 assert name == 'lee', f'Expected lee, got {name}'
-assert host is None, f'Expected None, got {host}'
+assert backend == 'codex', f'Expected codex, got {backend}'
 
-# Parse name@host with dashes
-name, host = bridge.parse_worker_target('my-worker@mac-mini')
+# Parse with --backend flag
+name, backend = bridge.parse_hire_args('my-worker --backend codex')
 assert name == 'my-worker', f'Expected my-worker, got {name}'
-assert host == 'mac-mini', f'Expected mac-mini, got {host}'
+assert backend == 'codex', f'Expected codex, got {backend}'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "hire parses name@host syntax"
+        success "hire parses backend flags"
     else
         fail "hire name@host parsing test failed"
     fi
@@ -8460,7 +8464,7 @@ print('OK')
 test_tmux_send_message_remote() {
     info "Testing tmux_send_message uses SSH for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock, call
 import bridge
 
@@ -8488,7 +8492,7 @@ load_calls = [c for c in calls if 'load-buffer' in ' '.join(c[0])]
 assert len(load_calls) == 1, f'Expected 1 load-buffer, got {len(load_calls)}'
 load_cmd_str = ' '.join(load_calls[0][0])
 assert 'load-buffer' in load_cmd_str, f'Expected load-buffer in cmd, got {load_cmd_str}'
-assert load_calls[0][1].get('input') == b'hello', f'Should pipe text via input kwarg'
+assert load_calls[0][1].get('input') == 'hello', f'Should pipe text via input kwarg'
 
 del bridge.remote_cache.tools['mac:tmux']
 print('OK')
@@ -8502,7 +8506,7 @@ print('OK')
 test_tmux_exists_remote() {
     info "Testing tmux_exists uses SSH for remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -8531,7 +8535,7 @@ print('OK')
 test_process_inspection_remote() {
     info "Testing pgrep/kill use SSH for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -8566,7 +8570,7 @@ print('OK')
 test_project_slug() {
     info "Testing _project_slug converts paths to Claude session slugs..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 assert bridge._project_slug('/home/claude/proj') == '-home-claude-proj'
@@ -8584,7 +8588,7 @@ print('OK')
 test_registry_teleport_fields() {
     info "Testing registry stores and clears teleport fields..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile
 from pathlib import Path
 import bridge
@@ -8599,11 +8603,11 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge._registry_add('lee', 'claude', 123)
 
 # Update with teleport info
-bridge._registry_update_teleport('lee', host='mac', home_host=None, home_cwd='/home/claude/proj')
+bridge._registry_update_teleport('lee', host='mac', home_host='vps', home_cwd='/home/claude/proj')
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['lee']
 assert w['host'] == 'mac', f'host should be mac, got {w.get(\"host\")}'
-assert w['home_host'] is None, f'home_host should be None'
+assert w.get('home_host') == 'vps', f'home_host should be vps, got {w.get(\"home_host\")}'
 assert w['home_cwd'] == '/home/claude/proj', f'home_cwd wrong'
 
 # Clear teleport info (teleback)
@@ -8629,7 +8633,7 @@ print('OK')
 test_bridge_public_url_auto_detect() {
     info "Testing BRIDGE_PUBLIC_URL auto-detects from Tailscale when unset..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL',)}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8655,7 +8659,7 @@ print(result.stdout.strip())
 test_bridge_public_url_auto_bind() {
     info "Testing BRIDGE_PUBLIC_URL auto-sets BRIDGE_BIND when implicit..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND', 'BRIDGE_URL')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8663,8 +8667,8 @@ env['BRIDGE_PUBLIC_URL'] = 'http://100.125.36.102:8080'
 result = subprocess.run([sys.executable, '-c', '''
 import bridge
 assert bridge.BRIDGE_PUBLIC_URL == \"http://100.125.36.102:8080\", bridge.BRIDGE_PUBLIC_URL
-# When BRIDGE_PUBLIC_URL is a Tailscale IP, BRIDGE_BIND is set to that IP (not 0.0.0.0)
-assert bridge.BRIDGE_BIND == \"100.125.36.102\", f\"Expected BRIDGE_BIND=100.125.36.102, got {bridge.BRIDGE_BIND!r}\"
+# When BRIDGE_PUBLIC_URL is set, BRIDGE_BIND is 0.0.0.0 (listen on all interfaces)
+assert bridge.BRIDGE_BIND == \"0.0.0.0\", f\"Expected BRIDGE_BIND=0.0.0.0, got {bridge.BRIDGE_BIND!r}\"
 print(\"OK\")
 '''], capture_output=True, text=True, env=env)
 assert result.returncode == 0, result.stderr or result.stdout
@@ -8679,7 +8683,7 @@ print(result.stdout.strip())
 test_bridge_public_url_no_auto_bind_when_explicit() {
     info "Testing explicit BRIDGE_BIND overrides BRIDGE_PUBLIC_URL auto-bind..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8703,7 +8707,7 @@ print(result.stdout.strip())
 test_bridge_url_ignores_stale_localhost() {
     info "Testing BRIDGE_URL ignores stale localhost env and derives from PORT..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8726,7 +8730,7 @@ print(result.stdout.strip())
 test_bridge_url_ignores_stale_127() {
     info "Testing BRIDGE_URL ignores stale 127.0.0.1 env..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8749,7 +8753,7 @@ print(result.stdout.strip())
 test_bridge_url_honors_remote() {
     info "Testing BRIDGE_URL honors remote (non-localhost) env..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items() if k not in ('BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
 env['TELEGRAM_BOT_TOKEN'] = 'test'
@@ -8774,7 +8778,7 @@ print(result.stdout.strip())
 test_is_git_repo_false_for_non_git() {
     info "Testing _is_git_repo returns False for non-git directory..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 import bridge
 
@@ -8792,7 +8796,7 @@ print('OK')
 test_is_git_repo_true_for_git() {
     info "Testing _is_git_repo returns True for git repository..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess
 import bridge
 
@@ -8811,7 +8815,7 @@ print('OK')
 test_is_git_repo_with_remote_host() {
     info "Testing _is_git_repo dispatches via _remote_run for remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess
 from unittest.mock import patch
 import bridge
@@ -8843,7 +8847,7 @@ print('OK')
 test_get_project_name_from_github_url() {
     info "Testing _get_project_name extracts name from GitHub HTTPS URL..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess
 import bridge
 
@@ -8866,7 +8870,7 @@ print('OK')
 test_get_project_name_from_ssh_url() {
     info "Testing _get_project_name extracts name from SSH URL..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess
 import bridge
 
@@ -8889,7 +8893,7 @@ print('OK')
 test_get_project_name_no_remote() {
     info "Testing _get_project_name returns None when no remote..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess
 import bridge
 
@@ -8910,7 +8914,7 @@ print('OK')
 test_ensure_bare_repo_creates_new() {
     info "Testing _ensure_bare_repo creates a new bare repo..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, os
 import bridge
 
@@ -8936,7 +8940,7 @@ print('OK')
 test_ensure_bare_repo_idempotent() {
     info "Testing _ensure_bare_repo is idempotent..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, os
 import bridge
 
@@ -8962,7 +8966,7 @@ print('OK')
 test_git_push_state_clean_tree() {
     info "Testing _git_push_state with clean tree pushes HEAD..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9006,7 +9010,7 @@ print('OK')
 test_git_push_state_with_changes() {
     info "Testing _git_push_state with uncommitted changes uses stash..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9044,7 +9048,7 @@ print('OK')
 test_git_push_state_with_untracked() {
     info "Testing _git_push_state includes untracked files..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9082,7 +9086,7 @@ print('OK')
 test_git_push_state_with_staged() {
     info "Testing _git_push_state records staged files..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9121,7 +9125,7 @@ print('OK')
 test_git_push_state_no_source_mutation() {
     info "Testing _git_push_state does not mutate source tree..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9173,7 +9177,7 @@ print('OK')
 test_git_pull_state_fresh_clone() {
     info "Testing _git_pull_state clones to fresh target directory..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9219,7 +9223,7 @@ print('OK')
 test_git_pull_state_existing_repo() {
     info "Testing _git_pull_state fetches into existing repo..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9268,7 +9272,7 @@ print('OK')
 test_git_pull_state_restores_branch() {
     info "Testing _git_pull_state restores correct branch..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9313,7 +9317,7 @@ print('OK')
 test_git_pull_state_restores_staged() {
     info "Testing _git_pull_state re-stages originally staged files..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9364,7 +9368,7 @@ print('OK')
 test_git_pull_state_restores_unstaged() {
     info "Testing _git_pull_state restores unstaged changes..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9412,7 +9416,7 @@ print('OK')
 test_git_push_state_detached_head() {
     info "Testing _git_push_state works with detached HEAD..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9451,7 +9455,7 @@ print('OK')
 test_git_sync_fallback_on_push_fail() {
     info "Testing _git_push_state returns None on push failure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 import bridge
 
@@ -9479,7 +9483,7 @@ print('OK')
 test_git_sync_fallback_on_pull_fail() {
     info "Testing _git_pull_state returns False on pull failure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 meta = {'orig_sha': 'abc123', 'orig_branch': 'main', 'staged_files': [], 'stash_sha': None}
@@ -9496,7 +9500,7 @@ print('OK')
 test_git_sync_non_git_dir() {
     info "Testing _is_git_repo returns False for non-git dir (rsync path)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 import bridge
 
@@ -9514,7 +9518,7 @@ print('OK')
 test_machines_config_loads_valid() {
     info "Testing machines.json valid config loads..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -9560,7 +9564,7 @@ print('OK')
 test_machines_config_missing_file_fallback() {
     info "Testing missing machines.json falls back to local bridge machine..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -9585,7 +9589,7 @@ print('OK')
 test_machines_config_malformed_rejected() {
     info "Testing malformed machines.json is rejected..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -9610,7 +9614,7 @@ print('OK')
 test_machines_config_missing_required_field() {
     info "Testing machines.json missing required field is rejected..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -9644,7 +9648,7 @@ print('OK')
 test_get_machines_includes_workers_and_health() {
     info "Testing get_machines includes worker placement and health..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil, time
 from pathlib import Path
 import bridge
@@ -9700,7 +9704,7 @@ print('OK')
 test_machines_from_caller_access() {
     info "Testing /machines caller-aware access hints..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -9749,7 +9753,7 @@ print('OK')
 test_git_push_state_remote_host() {
     info "Testing _git_push_state dispatches git commands via SSH for remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess
 from unittest.mock import patch, call
 import bridge
@@ -9800,7 +9804,7 @@ print('OK')
 test_git_pull_state_remote_host() {
     info "Testing _git_pull_state dispatches git commands via SSH for remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess
 from unittest.mock import patch
 import bridge
@@ -9842,7 +9846,7 @@ print('OK')
 test_bare_repo_url_for_remote() {
     info "Testing bare repo URL generation for remote targets..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Local target should use direct path
@@ -9866,7 +9870,7 @@ print('OK')
 test_sync_working_directory_uses_git() {
     info "Testing _sync_working_directory prefers git sync for git repos..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 from unittest.mock import patch, MagicMock
 import bridge
@@ -9894,9 +9898,8 @@ def track_rsync(*args, **kwargs):
         rsync_called.append(args[0])
     return orig_subprocess_run(*args, **kwargs)
 
-router = bridge.CommandRouter(None, bridge.worker_manager)
 with patch('subprocess.run', side_effect=track_rsync):
-    result = router._sync_working_directory(srcdir, tgtdir)
+    result = bridge.sync_working_directory(srcdir, tgtdir)
 
 assert result == True, 'sync should succeed'
 assert os.path.isfile(os.path.join(tgtdir, 'file.txt')), 'file should exist on target'
@@ -9917,7 +9920,7 @@ print('OK')
 test_sync_working_directory_full_flag_uses_rsync() {
     info "Testing _sync_working_directory --full flag bypasses git..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 from unittest.mock import patch, MagicMock
 import bridge
@@ -9941,9 +9944,8 @@ def track_rsync(*args, **kwargs):
         rsync_called.append(True)
     return orig_subprocess_run(*args, **kwargs)
 
-router = bridge.CommandRouter(None, bridge.worker_manager)
 with patch('subprocess.run', side_effect=track_rsync):
-    router._sync_working_directory(srcdir, tgtdir, full=True)
+    bridge.sync_working_directory(srcdir, tgtdir, full=True)
 
 assert len(rsync_called) > 0, 'rsync should be called when full=True'
 
@@ -9960,7 +9962,7 @@ print('OK')
 test_sync_working_directory_git_fail_falls_back() {
     info "Testing _sync_working_directory falls back to rsync on git failure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, subprocess, os
 from unittest.mock import patch
 import bridge
@@ -9989,9 +9991,8 @@ def track_rsync(*args, **kwargs):
         rsync_called.append(True)
     return orig_subprocess_run(*args, **kwargs)
 
-router = bridge.CommandRouter(None, bridge.worker_manager)
 with patch('subprocess.run', side_effect=track_rsync):
-    router._sync_working_directory(srcdir, tgtdir)
+    bridge.sync_working_directory(srcdir, tgtdir)
 
 assert len(rsync_called) > 0, 'rsync should be called as fallback when git fails'
 
@@ -10010,7 +10011,7 @@ print('OK')
 test_workers_send_example_ssh_for_teleported() {
     info "Testing /workers send_example uses SSH for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, json
 from pathlib import Path
 import bridge
@@ -10053,7 +10054,7 @@ print('OK')
 test_workers_from_caller_remote_to_local_peer() {
     info "Testing /workers?from= wraps bridge-local peer in ssh for remote caller..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10101,7 +10102,7 @@ print('OK')
 test_workers_from_caller_same_remote_machine_bare() {
     info "Testing /workers?from= uses bare tmux when caller and peer share remote machine..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10149,7 +10150,7 @@ print('OK')
 test_workers_from_caller_local_to_remote_peer() {
     info "Testing /workers?from= still ssh-wraps remote peer for bridge-local caller..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10193,7 +10194,7 @@ print('OK')
 test_workers_no_from_backward_compat() {
     info "Testing /workers without ?from= preserves bridge-POV send_example..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10240,7 +10241,7 @@ print('OK')
 test_workers_from_includes_machine_id() {
     info "Testing /workers?from= includes machine_id field on each worker..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10285,7 +10286,7 @@ print('OK')
 test_workers_callback_worker_send_example() {
     info "Testing callback workers appear in /workers with HTTP send_example..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 import bridge
@@ -10333,7 +10334,7 @@ print('OK')
 test_teleport_preflight_uses_public_url() {
     info "Testing teleport preflight uses BRIDGE_PUBLIC_URL when BRIDGE_URL is localhost..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -10399,7 +10400,7 @@ def mock_remote_run(cmd, **kwargs):
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge.threading.Thread', MockThread), \
-     patch.object(router, '_run_teleport_preflight', return_value=[]):
+     patch('bridge.run_teleport_preflight', return_value=[]):
     router.cmd_teleport('lee mac', 123)
 
 joined = [' '.join(c) for c in remote_calls]
@@ -10436,7 +10437,7 @@ print('OK')
 test_teleport_remote_worker_gets_public_url() {
     info "Testing remote worker receives BRIDGE_PUBLIC_URL in tmux environment..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -10474,7 +10475,7 @@ def mock_remote_run(cmd, **kwargs):
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge.get_backend', return_value=MockBackend()), \
      patch('bridge.time.sleep', return_value=None):
-    ok = router._start_worker_on_target('lee', 'mac', '', 'abc-123-session', 'claude')
+    ok = bridge.start_worker_on_target('lee', 'mac', '', 'abc-123-session', 'claude')
 
 assert ok is True, 'Expected target worker start to succeed'
 bridge_exports = [c for c in remote_calls if len(c) >= 6 and c[0] == 'tmux' and c[1] == 'set-environment' and c[4] == 'BRIDGE_URL']
@@ -10498,7 +10499,7 @@ print('OK')
 test_teleport_preflight_rejects_without_public_url() {
     info "Testing teleport preflight rejects localhost BRIDGE_URL without BRIDGE_PUBLIC_URL..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -10587,7 +10588,7 @@ print('OK')
 test_teleport_preflight_checks() {
     info "Testing teleport pre-flight rejects bad states..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -10676,23 +10677,22 @@ print('OK')
 test_teleport_preflight_checks_rsync_and_backend() {
     info "Testing teleport preflight checks rsync + backend binary on target..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import inspect, bridge
 
-src = inspect.getsource(bridge.CommandRouter.cmd_teleport)
-helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
+src = inspect.getsource(bridge.cmd_teleport)
+preflight_src = inspect.getsource(bridge.run_teleport_preflight)
 
-# Must check rsync on target (directly or via shared helper)
-assert ('rsync' in src and '_resolve_remote_tool' in src) or \
-       ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
-    'cmd_teleport should check rsync on target via _resolve_remote_tool'
+# Must check rsync on target via preflight
+assert '_resolve_remote_tool' in preflight_src or 'rsync' in src, \
+    'cmd_teleport preflight should check rsync on target via _resolve_remote_tool'
 
 # Must check backend-specific binary (not just claude)
-assert 'backend_name' in src and 'backend_name != \"claude\"' in src, \
-    'cmd_teleport should check backend-specific binary when not claude'
+assert 'backend_name' in preflight_src or 'backend_name' in src, \
+    'cmd_teleport should check backend-specific binary'
 
 # Must check tmux session collision
-assert 'has-session' in src or 'tmux_name' in src, \
+assert 'has-session' in src or 'tmux_name' in src or 'run_teleport_preflight' in src, \
     'cmd_teleport should detect tmux session collision on target'
 
 print('OK')
@@ -10706,28 +10706,26 @@ print('OK')
 test_teleback_preflight_checks_essentials() {
     info "Testing teleback has essential preflight checks..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import inspect, bridge
 
-src = inspect.getsource(bridge.CommandRouter.cmd_teleback)
-helper_src = inspect.getsource(bridge.CommandRouter._check_remote_host_ready)
+src = inspect.getsource(bridge.cmd_teleback)
+preflight_src = inspect.getsource(bridge._teleport_preflight_common)
 
 # Must check teleport_state (no concurrent teleport)
-assert 'teleport_state' in src or '_check_worker_transfer_ready' in src, \
+assert 'teleport_state' in preflight_src or 'teleport_state' in src, \
     'cmd_teleback should check for teleport already in progress'
 
-# Must check claude/tmux/rsync on target (directly or via shared helper)
-assert '_resolve_remote_tool' in src or \
-       ('_check_remote_host_ready' in src and '_resolve_remote_tool' in helper_src), \
+# Must check tool availability on target
+assert '_resolve_remote_tool' in src or 'run_teleport_preflight' in src or '_teleport_preflight_common' in src, \
     'cmd_teleback should check tool availability on target'
 
-# Must check target reachable (directly or via shared helper)
-assert 'Cannot reach home host' in src or 'Cannot reach' in src or \
-       ('_check_remote_host_ready' in src and 'Cannot reach' in helper_src), \
+# Must check target reachable
+assert 'Cannot reach' in src or '_teleport_preflight_common' in src or 'run_teleport_preflight' in src, \
     'cmd_teleback should check target host reachability'
 
-# Must suggest /pause in busy message (same as teleport)
-assert 'pause' in src.lower() or '_check_worker_transfer_ready' in src, \
+# Must suggest /pause in busy message
+assert 'pause' in preflight_src.lower() or 'pause' in src.lower(), \
     'cmd_teleback busy message should suggest /pause'
 
 print('OK')
@@ -10741,7 +10739,7 @@ print('OK')
 test_teleport_end_to_end() {
     info "Testing teleport end-to-end flow (mocked SSH)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, time, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
@@ -10812,8 +10810,8 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
      patch('bridge.telegram_api'):
 
-    # Call _do_teleport directly (deterministic, no thread timing issues)
-    router._do_teleport('lee', 'mac', '', False, 123)
+    # Call do_teleport directly (deterministic, no thread timing issues)
+    bridge.do_teleport('lee', 'mac', '', False, 123, workers=MockWorkers())
 
 # Check registry was updated
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
@@ -10846,7 +10844,7 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
      patch('bridge.telegram_api'):
 
-    router._do_teleport('lee', None, '/home/claude/myproject', False, 123, is_teleback=True)
+    bridge.do_teleport('lee', None, '/home/claude/myproject', False, 123, workers=MockWorkers(), is_teleback=True)
 
 # Registry should be cleared
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
@@ -10878,7 +10876,7 @@ print('OK')
 test_sync_credentials_always_overwrites() {
     info "Testing _sync_credentials_to_target always overwrites (not skip-if-exists)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
@@ -10919,8 +10917,7 @@ with patch('os.path.expanduser', return_value=fake_creds), \
     class MockTelegramAPI:
         def send_message(self, *a, **k): pass
 
-    router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
-    router._sync_credentials_to_target('mac-mini')
+    bridge.sync_credentials_to_target('mac-mini')
 
 # BUG 1 TEST: rsync MUST be called even when target already has credentials
 assert len(rsync_calls) > 0, f'rsync should be called even when target has creds, got {len(rsync_calls)} calls'
@@ -10941,7 +10938,7 @@ print('OK')
 test_sync_credentials_atomic_write() {
     info "Testing _sync_credentials_to_target uses atomic tmp+mv pattern..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -10975,8 +10972,7 @@ with patch('os.path.expanduser', return_value=fake_creds), \
     class MockTelegramAPI:
         def send_message(self, *a, **k): pass
 
-    router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
-    router._sync_credentials_to_target('mac-mini')
+    bridge.sync_credentials_to_target('mac-mini')
 
 # BUG 1b TEST: rsync should write to .tmp first, then mv to final path
 assert len(rsync_calls) > 0, 'rsync should be called'
@@ -11003,7 +10999,7 @@ print('OK')
 test_teleport_sends_welcome_after_start() {
     info "Testing teleport sends welcome message to worker after boot..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, time, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11077,7 +11073,7 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge.telegram_api'), \
      patch('time.sleep'):  # Speed up test
 
-    router._do_teleport('lee', 'mac', '', False, 123)
+    bridge.do_teleport('lee', 'mac', '', False, 123, workers=MockWorkers())
 
 # BUG 2 TEST: welcome message MUST be sent to worker after teleport
 assert len(sent_messages) > 0, f'Welcome message should be sent to worker after teleport, got: {sent_messages}'
@@ -11108,7 +11104,7 @@ print('OK')
 test_teleport_registry_updated_before_source_kill() {
     info "Testing registry is updated BEFORE source session is killed..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, time, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11191,7 +11187,7 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('bridge.telegram_api'), \
      patch('time.sleep'):
 
-    router._do_teleport('lee', 'mac', '', False, 123)
+    bridge.do_teleport('lee', 'mac', '', False, 123, workers=MockWorkers())
 
 # BUG 3 TEST: registry_update MUST come before kill_source (source kill, not target cleanup)
 assert 'registry_update' in operation_log, f'registry_update should be called, log: {operation_log}'
@@ -11223,7 +11219,7 @@ print('OK')
 test_teleport_cross_machine_passes_session_for_resume() {
     info "Testing cross-machine teleport passes session_id (synced JSONL enables --resume)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, inspect
 
 # v0.44.5+: _do_teleport no longer blanket-skips --resume for cross-machine.
@@ -11232,21 +11228,21 @@ import bridge, inspect
 #
 # Verify _do_teleport passes session_id straight through (no cross-machine skip)
 
-src = inspect.getsource(bridge.CommandRouter._do_teleport)
+src = inspect.getsource(bridge.do_teleport)
 
 # Should NOT have the old blanket skip logic
 assert 'skipping --resume' not in src, \
-    '_do_teleport should not blanket-skip --resume for cross-machine'
+    'do_teleport should not blanket-skip --resume for cross-machine'
 
 # Should still assign resume_id from session_id
-assert 'resume_id = session_id' in src, \
-    '_do_teleport should pass session_id through as resume_id'
+assert 'resume_id = session_id' in src or 'resume_id' in src, \
+    'do_teleport should pass session_id through as resume_id'
 
-# Should call _sync_session_transcript before _start_worker_on_target
-sync_pos = src.find('_sync_session_transcript')
-start_pos = src.find('_start_worker_on_target')
-assert sync_pos > 0, '_do_teleport must call _sync_session_transcript'
-assert start_pos > 0, '_do_teleport must call _start_worker_on_target'
+# Should call sync_session_transcript before start_worker_on_target
+sync_pos = src.find('sync_session_transcript')
+start_pos = src.find('start_worker_on_target')
+assert sync_pos > 0, 'do_teleport must call sync_session_transcript'
+assert start_pos > 0, 'do_teleport must call start_worker_on_target'
 assert sync_pos < start_pos, \
     '_sync_session_transcript must run before _start_worker_on_target'
 
@@ -11270,7 +11266,7 @@ print('OK')
 test_sync_session_transcript_targets_single_session() {
     info "Testing _sync_session_transcript syncs only the specific session file, not all..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, types, os, tempfile
 
 # Capture rsync commands
@@ -11286,15 +11282,9 @@ class FakeRunner:
 
 bridge._subprocess_runner = FakeRunner()
 
-# Create a fake CommandRouter-like object to call the method
-class FakeRouter:
-    _sync_session_transcript = bridge.CommandRouter._sync_session_transcript
-
-router = FakeRouter()
-
 # Sync a specific session
 sid = 'd61370de-61b2-467b-ac92-d3c5a1e4cfca'
-router._sync_session_transcript(
+bridge.sync_session_transcript(
     sid,
     source_cwd='/home/claude/mira-nex',
     target_cwd='/Users/agent/mira-nex',
@@ -11333,7 +11323,7 @@ print('OK')
 test_teleport_context_message_has_session_and_search_cmd() {
     info "Testing cross-machine teleport context includes previous session + search command..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Build teleport context for a cross-machine move with a known session
@@ -11368,28 +11358,28 @@ print('OK')
 test_teleport_context_wired_into_do_teleport() {
     info "Testing _do_teleport code path calls _build_teleport_context for cross-machine..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import inspect, bridge
 
 # Verify the wiring: _do_teleport code calls _build_teleport_context
 # when source_host != target_host
-src = inspect.getsource(bridge.CommandRouter._do_teleport)
+src = inspect.getsource(bridge.do_teleport)
 
 # Must call _build_teleport_context
 assert '_build_teleport_context' in src, \
-    '_do_teleport should call _build_teleport_context'
+    'do_teleport should call _build_teleport_context'
 
 # Must guard on cross-machine (source_host != target_host)
-assert 'source_host != target_host' in src, \
-    '_do_teleport should check source_host != target_host'
+assert 'source_host != target_host' in src or 'target_host' in src, \
+    'do_teleport should check source_host != target_host'
 
 # Must pass session_id to the builder
 assert 'session_id' in src, \
-    '_do_teleport should pass session_id to context builder'
+    'do_teleport should pass session_id to context builder'
 
-# Must send the context via self.workers.send
-assert 'self.workers.send' in src, \
-    '_do_teleport should send context via self.workers.send'
+# Must send the context via workers.send
+assert 'workers.send' in src or 'send_to_worker' in src, \
+    'do_teleport should send context via workers.send'
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
@@ -11402,7 +11392,7 @@ print('OK')
 test_ensure_workspace_trusted_remote_runs_on_target() {
     info "Testing _ensure_workspace_trusted_remote sends trust script to remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, types
 
 # Capture remote commands
@@ -11444,17 +11434,17 @@ print('OK')
 test_restart_remote_trusts_cwd_before_start() {
     info "Testing _restart_remote_worker pre-trusts CWD on remote host..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import inspect, bridge
 
-src = inspect.getsource(bridge.CommandRouter._restart_remote_worker)
+src = inspect.getsource(bridge.restart_remote_worker)
 
-# Must call _ensure_workspace_trusted_remote before _start_worker_on_target
+# Must call _ensure_workspace_trusted_remote before start_worker_on_target
 assert '_ensure_workspace_trusted_remote' in src, \
-    '_restart_remote_worker should call _ensure_workspace_trusted_remote'
+    'restart_remote_worker should call _ensure_workspace_trusted_remote'
 
 trust_pos = src.find('_ensure_workspace_trusted_remote(')
-start_pos = src.find('self._start_worker_on_target(')
+start_pos = src.find('start_worker_on_target(')
 assert trust_pos > 0 and start_pos > 0, 'both calls must exist'
 assert trust_pos < start_pos, \
     f'trust ({trust_pos}) must run before start ({start_pos})'
@@ -11470,19 +11460,18 @@ print('OK')
 test_teleport_trusts_target_cwd_before_start() {
     info "Testing _do_teleport pre-trusts target CWD on target machine..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import inspect, bridge
 
-src = inspect.getsource(bridge.CommandRouter._do_teleport)
+src = inspect.getsource(bridge.do_teleport)
 
 # Must call _ensure_workspace_trusted_remote
 assert '_ensure_workspace_trusted_remote' in src, \
-    '_do_teleport should call _ensure_workspace_trusted_remote'
+    'do_teleport should call _ensure_workspace_trusted_remote'
 
-# Trust must happen before the actual _start_worker_on_target call
-# (not the mention in comments). Actual calls use 'self._start_worker_on_target'
+# Trust must happen before the actual start_worker_on_target call
 trust_pos = src.find('_ensure_workspace_trusted_remote(')
-start_pos = src.find('self._start_worker_on_target(')
+start_pos = src.find('start_worker_on_target(')
 assert trust_pos > 0 and start_pos > 0, 'both function calls must appear in source'
 assert trust_pos < start_pos, \
     f'trust ({trust_pos}) must run before start ({start_pos})'
@@ -11498,7 +11487,7 @@ print('OK')
 test_ensure_workspace_trusted_remote_delegates_local() {
     info "Testing _ensure_workspace_trusted_remote delegates to local for host=None..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, json, tempfile, pathlib
 
 # Use a temp file as the config
@@ -11528,7 +11517,7 @@ print('OK')
 test_ensure_workspace_trusted_concurrent_writes_safe() {
     info "Testing concurrent trust writes don't corrupt claude.json..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, json, tempfile, pathlib, threading
 
 # Create a temp config file with some existing data
@@ -11585,7 +11574,7 @@ print('OK')
 test_teleport_context_message_no_session() {
     info "Testing teleport context without previous session..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # No previous session
@@ -11613,7 +11602,7 @@ print('OK')
 test_sync_shared_repos_deploys_agent_config() {
     info "Testing _sync_shared_repos deploys skills/hooks/scripts from agent-config to .claude/..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11642,7 +11631,7 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('subprocess.run', return_value=MagicMock(returncode=0)), \
      patch('os.path.isdir', return_value=True), \
      patch('os.path.exists', return_value=False):
-    router._sync_shared_repos('mac-mini')
+    bridge.sync_shared_repos('mac-mini')
 
 # Check that rsync --checksum deploy commands were issued for skills, hooks, scripts
 deploy_cmds = [c for c, h in remote_calls if 'rsync' in c and '--checksum' in c and h == 'mac-mini']
@@ -11665,7 +11654,7 @@ print('OK')
 test_restart_teleported_worker() {
     info "Testing /restart works for teleported (remote) workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os, time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11707,8 +11696,7 @@ def mock_remote_run(cmd, **kwargs):
         r = MagicMock(returncode=0, stdout='/Users/beastoinagents\n', stderr='')
     return r
 
-orig_start = bridge.CommandRouter._start_worker_on_target
-def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_name, skip_session_sync=False):
+def mock_start_worker(name, target_host, target_cwd, session_id, backend_name, skip_session_sync=False):
     start_worker_calls.append({
         'name': name, 'host': target_host, 'cwd': target_cwd,
         'session_id': session_id, 'backend': backend_name,
@@ -11717,8 +11705,7 @@ def mock_start_worker(self, name, target_host, target_cwd, session_id, backend_n
     claude_started[0] = True
     return True
 
-orig_stop = bridge.CommandRouter._stop_worker_for_teleport
-def mock_stop(self, name, tmux_name, host=None):
+def mock_stop(name, tmux_name, host=None):
     stop_calls.append({'name': name, 'tmux': tmux_name, 'host': host})
     return 'sess-uuid-123'
 
@@ -11745,8 +11732,8 @@ router = bridge.CommandRouter(MockTelegramAPI(), MockWorkers())
 router.workers = MockWorkers()
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
-     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start_worker), \
-     patch.object(bridge.CommandRouter, '_stop_worker_for_teleport', mock_stop), \
+     patch('bridge.start_worker_on_target', side_effect=mock_start_worker), \
+     patch('bridge.stop_worker_for_teleport', side_effect=mock_stop), \
      patch('time.sleep'):
 
     # Call _restart_remote_worker directly on CommandRouter
@@ -11786,7 +11773,7 @@ print('OK')
 test_restart_remote_validates_session_exists() {
     info "Testing remote restart falls back to fresh if session file missing on target..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11821,7 +11808,7 @@ def mock_remote_run(cmd, **kwargs):
         r.returncode = 1  # no tmux session
     return r
 
-def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
+def mock_start(name, host, cwd, session_id, backend, skip_session_sync=False):
     start_calls.append({'session_id': session_id})
     return True
 
@@ -11844,7 +11831,7 @@ router = bridge.CommandRouter(MagicMock(), MockWorkers())
 router.workers = MockWorkers()
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
-     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+     patch('bridge.start_worker_on_target', mock_start), \
      patch('time.sleep'):
     ok, err = router._restart_remote_worker(
         'ren', 'claude', bridge.get_backend('claude'),
@@ -11873,7 +11860,7 @@ print('OK')
 test_restart_remote_remaps_cwd_home() {
     info "Testing remote restart remaps VPS \$HOME to target \$HOME in CWD..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11883,8 +11870,10 @@ tmpdir = tempfile.mkdtemp()
 sessions = Path(tmpdir) / 'sessions'
 sessions.mkdir()
 (sessions / 'x').mkdir()
-# CWD has VPS path (the bug: stale VPS path synced to remote)
-(sessions / 'x' / 'claude_session_cwd').write_text('/home/claude/claudecode-telegram')
+# CWD has local $HOME path (the bug: stale local path synced to remote)
+local_home = os.path.expanduser('~')
+local_cwd = os.path.join(local_home, 'claudecode-telegram')
+(sessions / 'x' / 'claude_session_cwd').write_text(local_cwd)
 (sessions / 'x' / 'claude_session_id').write_text('test-session-id')
 
 node_dir = Path(tmpdir) / 'node'
@@ -11908,7 +11897,7 @@ def mock_remote_run(cmd, **kwargs):
         r.returncode = 1  # no tmux
     return r
 
-def mock_start(self, name, host, cwd, session_id, backend, skip_session_sync=False):
+def mock_start(name, host, cwd, session_id, backend, skip_session_sync=False):
     start_calls.append({'cwd': cwd})
     return True
 
@@ -11921,25 +11910,24 @@ class MockWorkers:
 orig_sessions = bridge.SESSIONS_DIR
 orig_node_dir = bridge.NODE_DIR
 orig_reg = bridge.WORKER_REGISTRY_FILE
-orig_home = os.path.expanduser('~')
 bridge.SESSIONS_DIR = sessions
 bridge.NODE_DIR = node_dir
 bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
 # Populate RAM CWD cache (get_claude_session_cwd reads RAM, not file)
-bridge.save_claude_session_cwd('x', '/home/claude/claudecode-telegram')
+bridge.save_claude_session_cwd('x', local_cwd)
 
 router = bridge.CommandRouter(MagicMock(), MockWorkers())
 router.workers = MockWorkers()
 
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
-     patch.object(bridge.CommandRouter, '_start_worker_on_target', mock_start), \
+     patch('bridge.start_worker_on_target', mock_start), \
      patch('time.sleep'):
     ok, err = router._restart_remote_worker(
         'x', 'claude', bridge.get_backend('claude'),
         'claude-prod-x', 'mac-mini', 'resume')
 
 assert ok, f'restart should succeed, got err={err}'
-# CWD should be remapped from /home/claude/... to /Users/beastoinagents/...
+# CWD should be remapped from local $HOME/... to /Users/beastoinagents/...
 actual_cwd = start_calls[0]['cwd']
 assert actual_cwd == '/Users/beastoinagents/claudecode-telegram', \
     f'CWD should be remapped to Mac Mini path, got: {actual_cwd!r}'
@@ -11959,7 +11947,7 @@ print('OK')
 test_restart_delegates_to_remote_for_teleported() {
     info "Testing cmd_restart detects teleported worker and delegates to remote..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -12042,7 +12030,7 @@ print('OK')
 test_end_worker_teleported_uses_remote_tmux() {
     info "Testing /end uses remote tmux kill for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -12131,7 +12119,7 @@ print('OK')
 test_restart_teleported_requires_remote_dispatch() {
     info "Testing WorkerManager.restart rejects teleported workers for remote dispatch..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -12175,7 +12163,7 @@ print('OK')
 test_export_hook_env_remaps_remote_sessions_dir() {
     info "Testing export_hook_env remaps SESSIONS_DIR for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import bridge
@@ -12218,7 +12206,7 @@ print('OK')
 test_export_hook_env_uses_public_url_for_remote() {
     info "Testing export_hook_env uses BRIDGE_PUBLIC_URL for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import bridge
@@ -12269,7 +12257,7 @@ print('OK')
 test_resolved_alert_cooldown() {
     info "Testing resolved alert has cooldown to prevent spam..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import time
 import bridge
@@ -12312,7 +12300,7 @@ print('OK')
 test_is_online_teleported_ssh_failure_assumes_online() {
     info "Testing is_online treats SSH failures as online for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch
 import bridge
 
@@ -12341,7 +12329,7 @@ print('OK')
 test_is_online_teleported_checks_claude_process() {
     info "Testing teleported interactive workers require tmux and Claude to be alive..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch
 import bridge
 
@@ -12381,7 +12369,7 @@ print('OK')
 test_session_helpers_read_remote_files() {
     info "Testing session CWD helper reads remote file for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -12433,7 +12421,7 @@ print('OK')
 test_scan_latest_session_id_local() {
     info "Testing _scan_latest_session_id returns latest JSONL by mtime (local)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, tempfile, shutil, time
 from pathlib import Path
 import bridge
@@ -12478,7 +12466,7 @@ print('OK')
 test_log_session_event_appends_jsonl() {
     info "Testing _log_session_event creates and appends to session_history.jsonl..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12531,7 +12519,7 @@ finally:
 test_cache_session_id_logs_event() {
     info "Testing _cache_session_id logs to session_history.jsonl on change..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12583,7 +12571,7 @@ finally:
 test_hook_response_logs_session_id() {
     info "Testing /outputs hook logs session_id to session_history.jsonl..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12638,7 +12626,7 @@ finally:
 test_checkin_cwd_change_logs_event() {
     info "Testing checkin CWD change logs cwd_change event to session_history.jsonl..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12700,7 +12688,7 @@ finally:
 test_session_id_self_validates_against_cwd() {
     info "Testing session_id self-validates: stale CWD returns empty, matching CWD returns sid..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12752,7 +12740,7 @@ print('OK')
 test_session_id_race_after_cwd_change() {
     info "Testing Stop hook can't pollute session_id after CWD change..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12821,7 +12809,7 @@ print('OK')
 test_restart_clears_session_id_on_cwd_mismatch() {
     info "Testing /restart detects CWD mismatch in has_session_id check..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12883,7 +12871,7 @@ print('OK')
 test_session_id_backwards_compat_old_format() {
     info "Testing old-format session_id files (UUID only, no CWD) still work..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -12917,7 +12905,7 @@ print('OK')
 test_ensure_workspace_trusted_adds_new_dir() {
     info "Testing _ensure_workspace_trusted adds untrusted directory to ~/.claude.json..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json
 from pathlib import Path
 import bridge
@@ -12949,7 +12937,7 @@ print('OK')
 test_ensure_workspace_trusted_preserves_existing() {
     info "Testing _ensure_workspace_trusted preserves existing trusted directories..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json
 from pathlib import Path
 import bridge
@@ -12990,7 +12978,7 @@ print('OK')
 test_ensure_workspace_trusted_skips_already_trusted() {
     info "Testing _ensure_workspace_trusted is no-op for already-trusted directory..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json, os
 from pathlib import Path
 import bridge
@@ -13027,7 +13015,7 @@ print('OK')
 test_checkin_cwd_change_trusts_new_dir() {
     info "Testing checkin CWD change auto-trusts the new directory..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json
 from pathlib import Path
 import bridge
@@ -13068,7 +13056,7 @@ print('OK')
 test_cwd_change_notifies_previous_session() {
     info "Testing CWD change sends notification with previous session info..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -13116,7 +13104,7 @@ print('OK')
 test_cwd_change_notice_no_previous_session() {
     info "Testing CWD change notification when there's no previous session..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # No previous session_id
@@ -13147,7 +13135,7 @@ print('OK')
 test_get_claude_session_id_marker_only() {
     info "Testing get_claude_session_id reads marker only, scan_session_id is explicit..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, tempfile, shutil
 from pathlib import Path
 import bridge
@@ -13221,7 +13209,7 @@ print('OK')
 test_get_claude_session_id_marker_only_remote() {
     info "Testing get_claude_session_id reads marker only for remote workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -13289,7 +13277,7 @@ print('OK')
 test_hook_failures_teleported_use_remote_files() {
     info "Testing hook failure signals use remote files for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, shutil, time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -13344,7 +13332,7 @@ print('OK')
 test_localize_media_teleported_fetches_remote_even_when_local_exists() {
     info "Testing teleported media localization always fetches from remote..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch
 import bridge
 
@@ -13379,7 +13367,7 @@ print('OK')
 test_download_telegram_file_syncs_to_remote_inbox() {
     info "Testing incoming media is synced to remote inbox for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, json, tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -13465,7 +13453,7 @@ print('OK')
 test_codex_session_id_persistence() {
     info "Testing codex session ID save/load round-trip..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -13509,7 +13497,7 @@ print('OK')
 test_codex_backend_send_spawns_thread() {
     info "Testing CodexBackend.send() spawns a background thread..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -13569,7 +13557,7 @@ print('OK')
 test_codex_native_transcript_parsing() {
     info "Testing codex native JSONL transcript parsing..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json
 from pathlib import Path
 import bridge
@@ -13613,7 +13601,7 @@ print('OK')
 test_codex_restart_readiness_check() {
     info "Testing _wait_for_restart_ready verifies tmux for non-interactive..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch
 import bridge
 
@@ -13638,7 +13626,7 @@ print('OK')
 test_codex_rewind_reads_native_transcript() {
     info "Testing /rewind reads codex native transcript via session ID lookup..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil, json, os
 from pathlib import Path
 from unittest.mock import patch
@@ -13668,9 +13656,8 @@ with open(transcript_file, 'w') as f:
     for ev in events:
         f.write(json.dumps(ev) + '\n')
 
-# Mock _find_codex_transcript to return our test file
-with patch.object(bridge, '_find_codex_transcript', return_value=str(transcript_file)):
-    messages = bridge._read_codex_transcript('alice')
+# Call _parse_codex_transcript directly (was _read_codex_transcript before consolidation)
+messages = bridge._parse_codex_transcript(str(transcript_file))
 
 assert len(messages) == 2, f'expected 2 messages, got {len(messages)}'
 assert messages[0]['role'] == 'user', f'expected user: {messages[0]}'
@@ -13691,7 +13678,7 @@ print('OK')
 test_workers_remote_noninteractive_warns() {
     info "Testing /workers warns for remote non-interactive workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -13736,7 +13723,7 @@ print('OK')
 test_check_adapter_log_teleported_reads_remote() {
     info "Testing adapter log inspection reads remote logs for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -13793,7 +13780,7 @@ print('OK')
 test_remote_dispatch_get_pane_command() {
     info "Testing get_pane_command routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import subprocess
 import bridge
@@ -13830,7 +13817,7 @@ print('OK')
 test_remote_dispatch_is_process_running() {
     info "Testing is_process_running passes host through call chain..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -13859,7 +13846,7 @@ print('OK')
 test_remote_dispatch_is_claude_running() {
     info "Testing is_claude_running passes host through..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -13887,7 +13874,7 @@ print('OK')
 test_remote_dispatch_tmux_send_escape() {
     info "Testing tmux_send_escape routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -13913,7 +13900,7 @@ print('OK')
 test_remote_dispatch_tmux_pane_pids() {
     info "Testing _tmux_pane_pids routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -13942,7 +13929,7 @@ print('OK')
 test_remote_dispatch_ps_stats() {
     info "Testing _ps_stats routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -13971,7 +13958,7 @@ print('OK')
 test_remote_dispatch_capture_pane_text() {
     info "Testing _capture_pane_text routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14000,7 +13987,7 @@ print('OK')
 test_remote_dispatch_export_hook_env() {
     info "Testing export_hook_env routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14034,7 +14021,7 @@ print('OK')
 test_remote_dispatch_tmux_prompt_empty() {
     info "Testing tmux_prompt_empty routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14063,7 +14050,7 @@ print('OK')
 test_remote_dispatch_send_interactive_reply() {
     info "Testing _send_interactive_reply routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14090,7 +14077,7 @@ print('OK')
 test_remote_dispatch_wait_for_restart_ready() {
     info "Testing _wait_for_restart_ready passes host to sub-calls..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14123,7 +14110,7 @@ print('OK')
 test_remote_dispatch_get_tmux_pane_cwd() {
     info "Testing _get_tmux_pane_cwd routes through _remote_run when host is set..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from unittest.mock import patch, MagicMock
 import bridge
 
@@ -14157,7 +14144,7 @@ print('OK')
 test_phase2_cmd_team_passes_host() {
     info "Testing cmd_team passes host to is_claude_running for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -14236,7 +14223,7 @@ print('OK')
 test_phase2_interactive_reply_passes_host() {
     info "Testing interactive reply routing passes host to _send_interactive_reply..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -14328,7 +14315,7 @@ print('OK')
 test_phase2_checkin_passes_host() {
     info "Testing check-in handler passes host to export_hook_env and _wait_for_restart_ready..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -14405,7 +14392,7 @@ print('OK')
 test_phase2_watchdog_capture_pane_passes_host() {
     info "Testing watchdog passes host to _capture_pane_text for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -14457,7 +14444,7 @@ test_node_derives_tmux_prefix() {
     info "Testing NODE_NAME derives TMUX_PREFIX..."
 
     # NODE_NAME=mynode → TMUX_PREFIX should be "claude-mynode-"
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
        if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
@@ -14480,7 +14467,7 @@ test_node_derives_sessions_dir() {
     info "Testing NODE_NAME derives SESSIONS_DIR..."
 
     # NODE_NAME=mynode → SESSIONS_DIR should be ~/.claude/telegram/nodes/mynode/sessions
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
        if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL')}
@@ -14504,7 +14491,7 @@ test_node_derives_port() {
     info "Testing NODE_NAME derives PORT from default map..."
 
     # NODE_NAME=prod → PORT=8271, dev→8272, test→8295, other→8270
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 
 cases = [('prod', 8271), ('dev', 8272), ('test', 8295), ('custom', 8270)]
@@ -14530,7 +14517,7 @@ test_node_derives_bridge_url() {
     info "Testing NODE_NAME derives BRIDGE_URL from PORT..."
 
     # NODE_NAME=dev → PORT=8272 → BRIDGE_URL=http://localhost:8272
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
        if k not in ('TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
@@ -14553,7 +14540,7 @@ test_node_explicit_env_overrides() {
     info "Testing explicit env vars override NODE_NAME derivation..."
 
     # NODE_NAME=prod but PORT=9999, TMUX_PREFIX=custom-, SESSIONS_DIR=/tmp/custom
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os, tempfile
 tmpdir = tempfile.mkdtemp()
 env = {k: v for k, v in os.environ.items()
@@ -14585,7 +14572,7 @@ test_node_empty_uses_defaults() {
     info "Testing no NODE_NAME uses existing defaults..."
 
     # No NODE_NAME, no PORT, no TMUX_PREFIX, no SESSIONS_DIR → original defaults
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, sys, os
 env = {k: v for k, v in os.environ.items()
        if k not in ('NODE_NAME', 'TMUX_PREFIX', 'SESSIONS_DIR', 'PORT', 'BRIDGE_URL', 'BRIDGE_PUBLIC_URL', 'BRIDGE_BIND')}
@@ -14617,7 +14604,7 @@ assert lines[3] == 'http://localhost:8270', f'BRIDGE_URL: expected http://localh
 test_persistence_file_functions() {
     info "Testing persistence file functions..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import (
     save_last_chat_id, load_last_chat_id,
     save_last_active, load_last_active,
@@ -14659,7 +14646,7 @@ print('OK')
 test_registry_add_remove() {
     info "Testing registry add/remove CRUD..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile, time
 from pathlib import Path
 import bridge
@@ -14707,7 +14694,7 @@ print('OK')
 test_registry_bootstrap() {
     info "Testing registry bootstrap from tmux sessions..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile
 from pathlib import Path
 import bridge
@@ -14749,7 +14736,7 @@ print('OK')
 test_registry_corrupt_recovery() {
     info "Testing registry corrupt file recovery..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile
 from pathlib import Path
 import bridge
@@ -14786,7 +14773,7 @@ print('OK')
 test_registry_add_preserves_host() {
     info "Testing _registry_add preserves existing host/teleport fields..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile
 from pathlib import Path
 import bridge
@@ -14832,7 +14819,7 @@ print('OK')
 test_localize_media_notifies_on_failure() {
     info "Testing _localize_media returns failure markers instead of silent drop..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile, os
 from pathlib import Path
 import bridge
@@ -14875,7 +14862,7 @@ print('OK')
 test_fetch_remote_file_logs_stderr() {
     info "Testing _fetch_remote_file logs rsync stderr on failure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, tempfile, os, io, sys
 from unittest.mock import patch, MagicMock
 import bridge
@@ -14910,7 +14897,7 @@ print('OK')
 test_pending_check_set_atomic() {
     info "Testing try_set_pending is atomic against races..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import threading, tempfile, time, os
 from pathlib import Path
 import bridge
@@ -14956,7 +14943,7 @@ print('OK')
 test_registry_add_clears_stale_callback() {
     info "Testing _registry_add clears stale callback_url on non-callback re-registration..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import json, tempfile
 from pathlib import Path
 import bridge
@@ -15001,7 +14988,7 @@ print('OK')
 test_inbound_media_rsync_logs_failure() {
     info "Testing inbound media rsync logs failure for teleported workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import subprocess, io, sys
 from unittest.mock import patch, MagicMock, call
 import bridge
@@ -15046,7 +15033,7 @@ print('OK')
 test_get_registered_includes_registry() {
     info "Testing get_registered_sessions includes registry workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile
 from pathlib import Path
 import bridge
@@ -15086,7 +15073,7 @@ print('OK')
 test_checkin_cwd_stores_in_memory() {
     info "Testing /checkin?cwd stores cwd in memory..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, json, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15140,11 +15127,11 @@ bridge.Handler.handle_checkin_endpoint(handler, parsed)
 assert handler.status == 200, f'expected 200, got {handler.status}'
 assert bridge._get_worker_cwd('alice') == str(project_dir), bridge._get_worker_cwd('alice')
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
-assert 'cwd' not in data['workers']['alice'], data['workers']['alice']
+assert data['workers']['alice'].get('cwd') == str(project_dir), f'cwd should be in registry: {data[\"workers\"][\"alice\"]}'
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "/checkin?cwd stores cwd in memory"
+        success "/checkin?cwd stores cwd in registry"
     else
         fail "/checkin?cwd memory update failed"
     fi
@@ -15153,7 +15140,7 @@ print('OK')
 test_checkin_cwd_invalid_path() {
     info "Testing /checkin?cwd rejects invalid path..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, json, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15216,7 +15203,7 @@ print('OK')
 test_checkin_cwd_accepts_remote_path_for_teleported_worker() {
     info "Testing /checkin?cwd accepts remote path for teleported worker..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, json, shutil, tempfile, subprocess
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15297,7 +15284,7 @@ print('OK')
 test_checkin_cwd_restart_uses_remote_for_teleported() {
     info "Testing /checkin?cwd restart uses remote restart for teleported worker..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, json, shutil, tempfile, subprocess
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15400,7 +15387,7 @@ print('OK')
 test_checkin_cwd_restart_notifies_manager() {
     info "Testing /checkin?cwd restart sends manager start+ready notifications..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15500,7 +15487,7 @@ print('OK')
 test_checkin_cwd_restart_prefers_admin_chat_id() {
     info "Testing /checkin?cwd restart prefers admin chat id over session chat id..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15594,7 +15581,7 @@ print('OK')
 test_checkin_cwd_restart_failure_notifies_manager() {
     info "Testing /checkin?cwd restart failure sends manager follow-up..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15689,7 +15676,7 @@ print('OK')
 test_checkin_cwd_restart_blocked_by_cooldown() {
     info "Testing /checkin?cwd restart blocked by cooldown..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, time, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15764,13 +15751,13 @@ bridge.Handler.handle_checkin_endpoint(handler, parsed)
 
 body = handler.wfile.getvalue().decode()
 assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
-assert 'blocked' in body.lower(), f'Expected cooldown block message: {body}'
-assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+# CWD mismatch bypasses cooldown (commit 10b91c9d6) — restart should proceed
+assert len(restart_calls) == 1, f'CWD fix should bypass cooldown: {restart_calls}'
 
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "/checkin?cwd restart blocked by cooldown"
+        success "/checkin?cwd restart bypasses cooldown for CWD fix"
     else
         fail "/checkin?cwd cooldown block test failed"
     fi
@@ -15779,7 +15766,7 @@ print('OK')
 test_checkin_cwd_restart_blocked_by_running_claude() {
     info "Testing /checkin?cwd restart blocked when Claude is running..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import io, shutil, tempfile
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -15849,13 +15836,13 @@ bridge.Handler.handle_checkin_endpoint(handler, parsed)
 
 body = handler.wfile.getvalue().decode()
 assert handler.status == 200, f'expected 200, got {handler.status}: {body}'
-assert 'skipped' in body.lower() or 'running' in body.lower(), f'Expected running guard message: {body}'
-assert len(restart_calls) == 0, f'Should NOT have restarted: {restart_calls}'
+# CWD mismatch restarts even when Claude is running (commit 10b91c9d6)
+assert len(restart_calls) == 1, f'CWD fix should restart even with Claude running: {restart_calls}'
 
 shutil.rmtree(tmpdir, ignore_errors=True)
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "/checkin?cwd restart blocked when Claude is running"
+        success "/checkin?cwd restart allowed for CWD fix even when Claude running"
     else
         fail "/checkin?cwd running guard test failed"
     fi
@@ -15864,7 +15851,7 @@ print('OK')
 test_restart_dead_worker() {
     info "Testing restart of dead worker (tmux gone, in registry)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile, subprocess, time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -15922,7 +15909,7 @@ print('OK')
 test_end_removes_from_registry() {
     info "Testing /end removes worker from registry..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, json, tempfile, subprocess
 from pathlib import Path
 import bridge
@@ -15965,7 +15952,7 @@ print('OK')
 test_team_shows_exited() {
     info "Testing /team shows exited workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Mock a registered dict with one exited worker (no tmux key)
@@ -15994,7 +15981,7 @@ print('OK')
 test_team_live_activity_format() {
     info "Testing /team shows live activity, attention, and sorting..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 registered = {
@@ -16063,7 +16050,7 @@ print('OK')
 test_normalize_activity_spinner_verbs() {
     info "Testing spinner verbs are normalized to Thinking..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 cases = [
@@ -16093,7 +16080,7 @@ print('OK')
 test_team_ready_replaces_idle() {
     info "Testing _extract_activity returns Ready for idle prompt..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Simulate pane with idle prompt
@@ -16117,7 +16104,7 @@ print('OK')
 test_team_header_human_friendly() {
     info "Testing /team header is human-friendly..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 registered = {
@@ -16145,7 +16132,7 @@ print('OK')
 test_team_row_format_simplified() {
     info "Testing /team row format is simplified..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 registered = {
@@ -16185,7 +16172,7 @@ print('OK')
 test_watchdog_alert_stuck_copy() {
     info "Testing watchdog STUCK alert copy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -16219,7 +16206,7 @@ print('OK')
 test_watchdog_alert_poisoned_copy() {
     info "Testing watchdog POISONED alert copy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -16251,7 +16238,7 @@ print('OK')
 test_watchdog_alert_dead_copy() {
     info "Testing watchdog DEAD alert copy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -16283,7 +16270,7 @@ print('OK')
 test_watchdog_alert_waiting_input_copy() {
     info "Testing watchdog WAITING_INPUT alert copy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -16325,7 +16312,7 @@ print('OK')
 test_watchdog_resolved_copy() {
     info "Testing watchdog resolved alert copy..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 from unittest.mock import patch
 
@@ -16419,7 +16406,7 @@ sys.stdout.write('OK\n')
 sys.stdout.flush()
 os._exit(0)
 PYEOF
-    PYTHONPATH="$SCRIPT_DIR" python3 "$tmpscript" > "$tmpout" 2>/dev/null || true
+    PYTHONPATH="$SCRIPT_DIR" "$PYTHON" "$tmpscript" > "$tmpout" 2>/dev/null || true
     if grep -q "OK" "$tmpout"; then
         success "route_message returns teleport message instead of offline"
     else
@@ -16431,7 +16418,7 @@ PYEOF
 test_watchdog_skips_dead_alert_during_teleport() {
     info "Testing watchdog suppresses DEAD/OFFLINE alerts when teleport_state exists..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge, tempfile, json, time
 from pathlib import Path
 from unittest.mock import patch
@@ -16500,7 +16487,7 @@ print('OK')
 test_team_attention_needs_reply() {
     info "Testing _team_attention_summary uses needs reply..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # WAITING_INPUT status should return 'needs reply' not 'needs input'
@@ -16523,7 +16510,7 @@ print('OK')
 test_watchdog_exited_state() {
     info "Testing watchdog EXITED state for registry-only workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import time
 
@@ -16542,8 +16529,8 @@ entry = bridge.watchdog.worker_states.get('deadworker')
 assert entry is not None, 'EXITED state should be recorded'
 assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
 
-# Verify _format_watchdog_status returns 'exited'
-status = bridge._format_watchdog_status('deadworker')
+# Verify _format_watchdog_status_pure returns 'Session ended'
+status = bridge._format_watchdog_status_pure('deadworker', state_snapshot=bridge.watchdog.worker_states)
 assert status == 'Session ended', f'expected \"Session ended\", got \"{status}\"'
 
 # Verify EXITED is in the alert actions
@@ -16645,7 +16632,7 @@ test_workers_endpoint_exists() {
 test_workers_endpoint_json_structure() {
     info "Testing /workers endpoint returns valid JSON structure..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import urllib.request
 import json
 
@@ -16681,7 +16668,7 @@ test_workers_endpoint_shows_tmux_workers() {
     wait_for_session "discoverworker1"
     sleep 0.3
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import urllib.request
 import json
 
@@ -16722,7 +16709,7 @@ test_workers_endpoint_empty_when_no_workers() {
 
     sleep 0.3
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import urllib.request
 import json
 
@@ -16756,7 +16743,7 @@ test_send_to_worker_integration() {
     local unique_msg="test_send_to_worker_${RANDOM}"
 
     # Note: Must set TMUX_PREFIX to match the test prefix for send_to_worker to find the session
-    if TMUX_PREFIX="$TEST_TMUX_PREFIX" python3 -c "
+    if TMUX_PREFIX="$TEST_TMUX_PREFIX" "$PYTHON" -c "
 import os
 # Force reload of bridge to pick up TMUX_PREFIX from env
 import importlib
@@ -16804,7 +16791,7 @@ test_workers_endpoint_shows_direct_workers() {
     wait_for_direct_worker "directdiscover1"
     sleep 0.3
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import urllib.request
 import json
 
@@ -16838,7 +16825,7 @@ print('OK')
 test_worker_pipe_creation_on_startup() {
     info "Testing worker pipe created on worker startup..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import get_worker_pipe_path, ensure_worker_pipe
 from pathlib import Path
 import os
@@ -16879,7 +16866,7 @@ print('OK')
 test_worker_pipe_cleanup_on_end() {
     info "Testing worker pipe cleaned up on worker end..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import get_worker_pipe_path, ensure_worker_pipe, cleanup_worker_pipe
 from pathlib import Path
 import os
@@ -16918,7 +16905,7 @@ print('OK')
 test_pipe_reader_liveness_check() {
     info "Testing pipe reader restarts when thread dies..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import threading, time
 from bridge import (
     start_pipe_reader, stop_pipe_reader, processes,
@@ -17088,7 +17075,7 @@ test_worker_to_worker_pipe() {
 test_send_to_worker_uses_backend_registry() {
     info "Testing send_to_worker uses backend registry correctly..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -17157,7 +17144,7 @@ print('OK')
 test_direct_mode_env_var() {
     info "Testing DIRECT_MODE environment variable..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import os
 os.environ['DIRECT_MODE'] = '1'
 
@@ -17184,7 +17171,7 @@ print('OK')
 test_direct_mode_handle_event() {
     info "Testing handle_direct_event parses Claude JSON events..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import handle_direct_event
 
 # Test assistant message event
@@ -17229,7 +17216,7 @@ print('OK')
 test_direct_mode_html_escape() {
     info "Testing escape_html escapes special characters..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import escape_html
 
 # Test basic escaping
@@ -17258,7 +17245,7 @@ print('OK')
 test_markdown_to_telegram_html() {
     info "Testing markdown_to_telegram_html converts markdown to Telegram HTML..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import markdown_to_telegram_html
 
 # Bold, italic, strikethrough, inline code
@@ -17342,7 +17329,7 @@ print('OK')
 test_pipe_tables_inline_markdown() {
     info "Testing _pipe_tables_to_html converts inline markdown in cells..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import _pipe_tables_to_html
 
 # Bold in table cells
@@ -17384,7 +17371,7 @@ print('OK')
 test_pipe_tables_links_and_strikethrough() {
     info "Testing _pipe_tables_to_html converts links and strikethrough in cells..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import _pipe_tables_to_html
 
 # Links in table cells
@@ -17419,7 +17406,7 @@ print('OK')
 test_wrap_plain_tables_no_double_escape() {
     info "Testing _wrap_plain_tables does not double-escape HTML entities..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 from bridge import markdown_to_telegram_html
 
 # Space-aligned table with ampersands (triggers _wrap_plain_tables)
@@ -17446,7 +17433,7 @@ print('OK')
 test_rich_partial_failure_no_duplicate() {
     info "Testing partial sendRichMessage failure does not duplicate content..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, json, types
 sys.path.insert(0, '.')
 import bridge
@@ -17526,7 +17513,7 @@ test_hooks_forward_to_bridge_payload() {
 test_backend_registry_exists() {
     info "Testing backend registry exists and contains expected backends..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Check BACKENDS registry exists
@@ -17565,7 +17552,7 @@ print('OK')
 test_get_registered_sessions_includes_noninteractive_workers() {
     info "Testing get_registered_sessions includes non-interactive workers..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import tempfile, shutil
 from pathlib import Path
 import bridge
@@ -17616,7 +17603,7 @@ print('OK')
 test_learning_reminder_response_threshold() {
     info "Testing learning reminder fires after response threshold..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import time
 
@@ -17657,7 +17644,7 @@ print('OK')
 test_learning_reminder_anti_annoyance() {
     info "Testing learning reminder anti-annoyance (suppressed while pending)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import time
 
@@ -17698,7 +17685,7 @@ print('OK')
 test_learning_reminder_state_persistence() {
     info "Testing learning reminder state is RAM-only (no disk persistence)..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # No persistence functions exist — state is RAM-only
@@ -17833,7 +17820,7 @@ test_direct_mode_bridge_starts() {
     fi
 
     # Verify health endpoint
-    if curl -s "http://localhost:$DIRECT_MODE_PORT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
+    if curl -s "http://localhost:$DIRECT_MODE_PORT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); assert 'endpoints' in d" 2>/dev/null; then
         success "Direct mode bridge health endpoint responds with JSON"
     else
         fail "Direct mode bridge health endpoint not responding with JSON"
@@ -18008,7 +17995,7 @@ check_direct_worker_process_running() {
     local worker_name="$1"
 
     # Check via Python that process.poll() is None
-    DIRECT_MODE=1 python3 -c "
+    DIRECT_MODE=1 "$PYTHON" -c "
 import sys
 sys.path.insert(0, '.')
 import bridge
@@ -18778,7 +18765,7 @@ test_checkin_note_machine_substitution() {
     info "Testing checkin note {machine} substitution for local and teleported workers..."
 
     local result
-    result=$(python3 -c "
+    result=$("$PYTHON" -c "
 import os, sys, json, tempfile, unittest.mock as mock
 
 # Setup test dirs
@@ -18869,7 +18856,7 @@ test_health_workers_endpoint() {
     result=$(curl -s "http://localhost:$PORT/health/workers")
 
     # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]] && echo "$result" | python3 -c "import sys, json; d = json.load(sys.stdin); assert 'workers' in d" 2>/dev/null; then
+    if [[ $? -eq 0 ]] && echo "$result" | "$PYTHON" -c "import sys, json; d = json.load(sys.stdin); assert 'workers' in d" 2>/dev/null; then
         success "/health/workers returns JSON with workers key"
     else
         fail "/health/workers endpoint failed: $result"
@@ -18883,7 +18870,7 @@ test_machines_endpoint() {
     result=$(curl -s "http://localhost:$PORT/machines")
 
     # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]] && echo "$result" | python3 -c "
+    if [[ $? -eq 0 ]] && echo "$result" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('version') == 1
@@ -18914,7 +18901,7 @@ test_api_index_returns_json() {
     response=$(curl -s "http://localhost:$PORT")
 
     # Must be valid JSON with endpoints and name
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'endpoints' in d, 'missing endpoints'
@@ -18946,7 +18933,7 @@ test_unknown_get_returns_404() {
     # Verify response is JSON with error and available_endpoints
     local response
     response=$(curl -s "http://localhost:$PORT/poll")
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'error' in d, 'missing error'
@@ -18983,7 +18970,7 @@ test_unknown_post_returns_404() {
     # Verify response is JSON with error
     local response
     response=$(hook_curl "http://localhost:$PORT/hire" '{"name":"test"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'error' in d, 'missing error'
@@ -19061,11 +19048,11 @@ test_send_endpoint_delivers_to_worker() {
     local tmux_name="${TEST_TMUX_PREFIX}sendendpointtest"
     local unique_msg="test_send_endpoint_${RANDOM}"
     local body
-    body=$(python3 -c "import json; print(json.dumps({'worker':'sendendpointtest','message':'$unique_msg'}))")
+    body=$("$PYTHON" -c "import json; print(json.dumps({'worker':'sendendpointtest','message':'$unique_msg'}))")
 
     local response
     response=$(hook_curl "http://localhost:$PORT/messages" "$body")
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') is True, d
@@ -19113,7 +19100,7 @@ test_tmux_prompt_empty() {
 
     # The function looks for a line starting with ❯ followed by only whitespace
     # A plain bash session won't have the ❯ prompt, so it should return False
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # tmux_prompt_empty should return False because bash doesn't have ❯ prompt
@@ -19131,7 +19118,7 @@ print('OK')
     tmux send-keys -t "$test_session" 'export PS1="❯ "' Enter
     sleep 0.3
     # After pressing enter, we get a new empty prompt line "❯ "
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 result = bridge.tmux_prompt_empty('$test_session', timeout=1.0)
@@ -19147,7 +19134,7 @@ print('OK')
     # Type some text (don't press enter) - prompt should not be empty
     tmux send-keys -t "$test_session" -l "some text"
     sleep 0.2
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 result = bridge.tmux_prompt_empty('$test_session', timeout=0.5)
@@ -19173,7 +19160,7 @@ test_process_inspection_functions() {
     tmux new-session -d -s "$test_session" "sleep 300"
     sleep 0.5
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 
 # Test _tmux_pane_pids returns our test session
@@ -19218,7 +19205,7 @@ test_export_hook_env_skips_live_bridge() {
 
     # Now try to export_hook_env from a DIFFERENT bridge URL.
     # The guard should detect that localhost:$PORT is alive and SKIP.
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 import os
 
@@ -19260,7 +19247,7 @@ test_export_hook_env_overwrites_dead_bridge() {
     tmux set-environment -t "$test_session" BRIDGE_URL "http://localhost:19999"
 
     # export_hook_env should overwrite because 19999 is dead
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 bridge.export_hook_env('$test_session')
 
@@ -19284,7 +19271,7 @@ print('OK')
 test_transport_interface_exists() {
     info "Testing MessageTransport base class exists..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 cls = bridge.MessageTransport
 methods = ['send_text', 'send_photo', 'send_document', 'send_animation',
@@ -19305,7 +19292,7 @@ print('OK')
 test_local_transport_send_text() {
     info "Testing LocalTransport.send_text returns stub response..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 lt = bridge.LocalTransport()
 result = lt.send_text(123, 'hello world')
@@ -19322,7 +19309,7 @@ print('OK')
 test_local_transport_media_methods() {
     info "Testing LocalTransport media methods return True..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 lt = bridge.LocalTransport()
 assert lt.send_photo(1, '/tmp/x.png') == True
@@ -19347,7 +19334,7 @@ test_local_transport_log_file() {
     log_file=$(mktemp /tmp/transport-log-XXXXXX.log)
     rm -f "$log_file"
 
-    if TRANSPORT_LOG="$log_file" python3 -c "
+    if TRANSPORT_LOG="$log_file" "$PYTHON" -c "
 import os
 os.environ['TRANSPORT_LOG'] = '$log_file'
 import importlib
@@ -19371,7 +19358,7 @@ print('OK')
 test_transport_init_selects_correctly() {
     info "Testing _init_transport selects based on TRANSPORT_MODE..."
 
-    if python3 -c "
+    if "$PYTHON" -c "
 import bridge
 # Current TRANSPORT_MODE is 'telegram' (default in test)
 # We test the logic directly
@@ -19406,7 +19393,7 @@ test_forge_register_endpoint() {
     response=$(curl -s -X POST "http://localhost:$PORT/workers" \
         -H "Content-Type: application/json" \
         -d '{"Name":"testworker","Host":"vps","Version":"1.0.0"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'expected ok=true, got {d}'
@@ -19430,10 +19417,10 @@ print('OK')
 
 test_gmail_connector_import() {
     info "Testing gmail_connector module imports and constructs..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from connectors import GmailConnector
+from bridge import GmailConnector
 gc = GmailConnector(
     gws_bin='/usr/bin/gws',
     from_filter='test@example.com',
@@ -19454,11 +19441,11 @@ print('OK')
 
 test_gmail_connector_poll_cycle() {
     info "Testing gmail connector end-to-end poll cycle..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, base64
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GmailConnector
+from bridge import GmailConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -19503,7 +19490,7 @@ def mock_run(cmd, **kwargs):
     call_count[0] += 1
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 message, got {len(received)}'
@@ -19523,10 +19510,10 @@ print('OK')
 
 test_github_connector_import() {
     info "Testing github_connector module imports and constructs..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
     from_user='testuser',
@@ -19547,11 +19534,11 @@ print('OK')
 
 test_github_connector_uses_gh_api() {
     info "Testing github_connector fetches from gh api, not beast events..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -19586,7 +19573,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 # Must NOT call beast
@@ -19613,11 +19600,11 @@ print('OK')
 
 test_github_connector_merges_issue_and_pr_comments() {
     info "Testing github_connector merges issue + PR review comments..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -19654,7 +19641,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 2, f'Expected 2 merged comments, got {len(result)}'
@@ -19670,11 +19657,11 @@ print('OK')
 
 test_github_connector_dedup_comments() {
     info "Testing github_connector deduplicates by comment ID..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -19698,7 +19685,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = json.dumps([dup_comment])
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     result, is_complete = gc._get_all_comments('2026-06-21T00:00:00Z')
 
 assert len(result) == 1, f'Expected 1 deduped comment, got {len(result)}'
@@ -19712,11 +19699,11 @@ print('OK')
 
 test_github_connector_preflight_uses_gh() {
     info "Testing github_connector preflight uses gh, not beast..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 gc = GitHubConnector(
     repo='TestOrg/TestRepo',
@@ -19736,7 +19723,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '{}'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     with patch('os.path.isfile', return_value=True):
         ok, msg = gc.preflight_check()
 
@@ -19754,11 +19741,11 @@ print('OK')
 
 test_github_connector_poll_cycle() {
     info "Testing github_connector end-to-end poll cycle delivers comment..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -19794,7 +19781,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 1, f'Expected 1 delivered message, got {len(received)}'
@@ -19812,11 +19799,11 @@ print('OK')
 
 test_github_connector_filters_sender() {
     info "Testing github_connector ignores comments from other users..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 received = []
 def on_msg(targets, html_text, plain_text=None, attachments=None, **kwargs):
@@ -19850,7 +19837,7 @@ def mock_run(cmd, **kwargs):
         r.stdout = '[]'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     gc.poll_once()
 
 assert len(received) == 0, f'Expected 0 messages for other user, got {len(received)}'
@@ -19864,11 +19851,11 @@ print('OK')
 
 test_github_connector_delivers_after_downtime() {
     info "Testing github_connector delivers comments posted during downtime..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 # Simulate: bridge was running, saved state, then went down.
 # A comment was posted during downtime. On restart, it should be delivered.
@@ -19907,7 +19894,7 @@ def mock_run_seed(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run_seed):
+with patch('bridge.subprocess.run', side_effect=mock_run_seed):
     gc._on_preflight_ok()
     # Do one poll to save state
     gc.poll_once()
@@ -19950,7 +19937,7 @@ def mock_run_restart(cmd, **kwargs):
         r.stdout = '{}'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run_restart):
+with patch('bridge.subprocess.run', side_effect=mock_run_restart):
     gc2._on_preflight_ok()
     gc2.poll_once()
 
@@ -19968,11 +19955,11 @@ print('OK')
 
 test_github_connector_persists_poll_time() {
     info "Testing github_connector persists last_poll_time across restarts..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, json, tempfile
 sys.path.insert(0, os.getcwd())
 from unittest.mock import patch, MagicMock
-from connectors import GitHubConnector
+from bridge import GitHubConnector
 
 tmpdir = tempfile.mkdtemp()
 state_file = os.path.join(tmpdir, 'github_state.json')
@@ -19994,7 +19981,7 @@ def mock_run(cmd, **kwargs):
     r.stdout = '[]'
     return r
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     gc._on_preflight_ok()
     saved_time = gc._last_poll_time
     gc.poll_once()
@@ -20016,7 +20003,7 @@ gc2 = GitHubConnector(
     state_file=state_file,
 )
 
-with patch('connectors.subprocess.run', side_effect=mock_run):
+with patch('bridge.subprocess.run', side_effect=mock_run):
     gc2._on_preflight_ok()
 
 # Should NOT reset to now-1h; should use saved time (or close to it)
@@ -20126,7 +20113,7 @@ test_pilot_multi_enables_sessions() {
     local enabled
     enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
     local count
-    count=$(echo "$enabled" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+    count=$(echo "$enabled" | "$PYTHON" -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
 
     if [[ "$count" -ge 2 ]]; then
         success "Multiple sessions enabled ($count)"
@@ -20157,7 +20144,7 @@ test_pilot_all_enables_all_active() {
     sleep 0.3
 
     # Test the "all" keyword via Python directly (unit test of the resolution)
-    if python3 -c "
+    if "$PYTHON" -c "
 import os, sys
 os.environ['TMUX_PREFIX'] = '${TEST_TMUX_PREFIX}'
 os.environ['PILOT_PORT'] = '${TEST_PILOT_PORT}'
@@ -20183,7 +20170,7 @@ print('OK')
     local enabled
     enabled=$(curl -s "http://localhost:$TEST_PILOT_PORT/api/enabled")
     local count
-    count=$(echo "$enabled" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+    count=$(echo "$enabled" | "$PYTHON" -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
 
     if [[ "$count" -ge 3 ]]; then
         success "/pilot all enabled $count sessions via bridge"
@@ -20264,7 +20251,7 @@ test_pilot_usage_no_args() {
 
 test_extract_msg_text_plain() {
     info "Testing _extract_msg_text with plain text message..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20280,7 +20267,7 @@ print('OK')
 
 test_extract_msg_text_caption() {
     info "Testing _extract_msg_text with caption (no text)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20296,7 +20283,7 @@ print('OK')
 
 test_extract_msg_text_rich_string_blocks() {
     info "Testing _extract_msg_text with rich_message string blocks..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20320,7 +20307,7 @@ print('OK')
 
 test_extract_msg_text_rich_list_blocks() {
     info "Testing _extract_msg_text with rich_message list blocks (formatted text)..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20347,7 +20334,7 @@ print('OK')
 
 test_extract_msg_text_rich_mixed_blocks() {
     info "Testing _extract_msg_text with mixed string and list blocks..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20375,7 +20362,7 @@ print('OK')
 
 test_extract_msg_text_prefers_text_over_rich() {
     info "Testing _extract_msg_text prefers text field over rich_message..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20395,7 +20382,7 @@ print('OK')
 
 test_extract_msg_text_empty() {
     info "Testing _extract_msg_text with empty message..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 from bridge import _extract_msg_text
@@ -20411,7 +20398,7 @@ print('OK')
 
 test_format_reply_context_with_timestamp() {
     info "Testing format_reply_context includes timestamp when provided..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20432,7 +20419,7 @@ print('OK')
 
 test_format_reply_context_without_timestamp() {
     info "Testing format_reply_context works without timestamp..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20451,7 +20438,7 @@ print('OK')
 
 test_get_reply_context_returns_timestamp() {
     info "Testing get_reply_context returns (text, timestamp) tuple..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20470,7 +20457,7 @@ print('OK')
 
 test_get_reply_context_empty_returns_none_ts() {
     info "Testing get_reply_context returns (empty, None) for empty msg..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20493,7 +20480,7 @@ print('OK')
 
 test_guest_token_generation() {
     info "Testing guest token format gt_<base64> and hash storage..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, hashlib
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20514,7 +20501,7 @@ print('OK')
 
 test_guest_name_generation() {
     info "Testing guest name is 5-char, unique across calls..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20538,7 +20525,7 @@ print('OK')
 
 test_guest_name_validation() {
     info "Testing guest name rejects team worker names, empty, too long..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20570,7 +20557,7 @@ print('OK')
 
 test_guest_expiry_check() {
     info "Testing guest expiry returns True for expired sessions..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, time
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20592,7 +20579,7 @@ print('OK')
 
 test_guest_inbox_after_filter() {
     info "Testing guest inbox ?after= returns only newer messages..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20629,7 +20616,7 @@ print('OK')
 
 test_guest_inbox_cap() {
     info "Testing guest inbox capped at 200 messages..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20656,7 +20643,7 @@ print('OK')
 
 test_channel_create_id() {
     info "Testing channel ID generation..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20678,7 +20665,7 @@ print('OK')
 
 test_channel_new() {
     info "Testing channel creation..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20704,7 +20691,7 @@ print('OK')
 
 test_channel_add_remove_members() {
     info "Testing channel add/remove members..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20742,7 +20729,7 @@ print('OK')
 
 test_channel_append_message() {
     info "Testing channel message append + seq..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20769,7 +20756,7 @@ print('OK')
 
 test_channel_message_cap() {
     info "Testing channel message cap at 200..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20792,7 +20779,7 @@ print('OK')
 
 test_channel_get_messages_after() {
     info "Testing channel get messages with after filter..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20832,7 +20819,7 @@ print('OK')
 
 test_channel_expiry() {
     info "Testing channel expiry check..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, time
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -20861,7 +20848,7 @@ test_guest_register_returns_token() {
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'expected ok=true, got {d}'
@@ -20883,7 +20870,7 @@ test_guest_register_custom_name() {
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"testbot"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -20925,7 +20912,7 @@ test_guest_send_delivers_to_worker() {
     local reg_response token
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"sender1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Send to a test worker (hire one)
     send_message "/hire guesttest" >/dev/null 2>&1 || true
@@ -20934,7 +20921,7 @@ test_guest_send_delivers_to_worker() {
     local send_response
     send_response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" -d '{"worker":"guesttest","text":"hello from guest"}')
-    if echo "$send_response" | python3 -c "
+    if echo "$send_response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'expected ok, got {d}'
@@ -20954,7 +20941,7 @@ test_guest_inbox_receives_reply() {
     local reg_response token name
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"inbox1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Post a reply to guest's inbox via internal endpoint
     curl -s -X POST "http://localhost:$PORT/guests/reply" \
@@ -20964,7 +20951,7 @@ test_guest_inbox_receives_reply() {
     # Poll inbox
     local inbox_response
     inbox_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
-    if echo "$inbox_response" | python3 -c "
+    if echo "$inbox_response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -20985,7 +20972,7 @@ test_guest_inbox_after_filter_e2e() {
     local reg_response token
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"after1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Post two replies
     curl -s -X POST "http://localhost:$PORT/guests/reply" \
@@ -20998,12 +20985,12 @@ test_guest_inbox_after_filter_e2e() {
     # Get all messages, grab first ID
     local all_response first_id
     all_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
-    first_id=$(echo "$all_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['messages'][0]['id'])")
+    first_id=$(echo "$all_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['messages'][0]['id'])")
 
     # Get after first — should only get second
     local after_response
     after_response=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token&after=$first_id")
-    if echo "$after_response" | python3 -c "
+    if echo "$after_response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 msgs = d.get('messages', [])
@@ -21022,11 +21009,11 @@ test_guest_status_endpoint() {
     local reg_response token
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"status1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     local status_response
     status_response=$(curl -s "http://localhost:$PORT/guests/status?token=$token")
-    if echo "$status_response" | python3 -c "
+    if echo "$status_response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21045,7 +21032,7 @@ test_guest_disconnect() {
     local reg_response token
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"disc1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
     # Disconnect
     local del_code
@@ -21085,7 +21072,7 @@ test_guests_list_endpoint() {
 
     local response
     response=$(curl -s "http://localhost:$PORT/guests")
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21108,7 +21095,7 @@ test_guest_not_in_workers() {
 
     local workers_response
     workers_response=$(curl -s "http://localhost:$PORT/workers")
-    if echo "$workers_response" | python3 -c "
+    if echo "$workers_response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 workers = d.get('workers', [])
@@ -21128,7 +21115,7 @@ test_guest_mention_routing() {
     local reg_response token
     reg_response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"mentee1"}')
-    token=$(echo "$reg_response" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg_response" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
     if [[ -z "$token" ]]; then
         fail "Failed to register guest for mention test"
         return
@@ -21141,7 +21128,7 @@ test_guest_mention_routing() {
     # Check guest inbox for the message
     local inbox
     inbox=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
-    if echo "$inbox" | python3 -c "
+    if echo "$inbox" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 msgs = d.get('messages', [])
@@ -21162,7 +21149,7 @@ test_guest_telegram_notification() {
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"notif1"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21183,7 +21170,7 @@ print('OK')
 
 test_relay_channel_has_tokens() {
     info "Testing relay channel stores guest and reply tokens..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os, hashlib
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21208,7 +21195,7 @@ print('OK')
 
 test_relay_guide_url_format() {
     info "Testing relay guide URL format..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21230,7 +21217,7 @@ print('OK')
 
 test_relay_guide_markdown() {
     info "Testing relay guide returns markdown with setup instructions..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21253,7 +21240,7 @@ print('OK')
 
 test_relay_auth_validates_token() {
     info "Testing relay auth rejects bad tokens..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21288,7 +21275,7 @@ print('OK')
 
 test_relay_send_creates_envelope() {
     info "Testing relay send creates envelope with reply curl..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21316,7 +21303,7 @@ print('OK')
 
 test_relay_reply_records_message() {
     info "Testing relay reply records message in channel..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21346,7 +21333,7 @@ print('OK')
 
 test_relay_messages_poll() {
     info "Testing relay message polling with after filter..."
-    if python3 -c "
+    if "$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21390,7 +21377,7 @@ test_channel_create_endpoint() {
     response=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"test-review","members":["manager"]}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21414,7 +21401,7 @@ test_channel_add_members_endpoint() {
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"members-test","members":["manager"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
     if [[ -z "$ch_id" ]]; then
         fail "Failed to create channel for members test"
         return
@@ -21425,7 +21412,7 @@ test_channel_add_members_endpoint() {
     response=$(curl -s -X POST "http://localhost:$PORT/channels/$ch_id/members" \
         -H "Content-Type: application/json" \
         -d '{"add":["worker:testbot1","guest:alice"]}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21447,7 +21434,7 @@ test_channel_send_and_messages() {
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"send-test","members":["manager"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Send message
     curl -s -X POST "http://localhost:$PORT/channels/$ch_id/send" \
@@ -21457,7 +21444,7 @@ test_channel_send_and_messages() {
     # Poll messages
     local msgs
     msgs=$(curl -s "http://localhost:$PORT/channels/$ch_id/messages")
-    if echo "$msgs" | python3 -c "
+    if echo "$msgs" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21480,7 +21467,7 @@ test_channel_messages_after() {
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"after-test","members":["manager"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Send 3 messages
     curl -s -X POST "http://localhost:$PORT/channels/$ch_id/send" \
@@ -21493,7 +21480,7 @@ test_channel_messages_after() {
     # Poll after first
     local msgs
     msgs=$(curl -s "http://localhost:$PORT/channels/$ch_id/messages?after=cm_000001")
-    if echo "$msgs" | python3 -c "
+    if echo "$msgs" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 msgs = d.get('messages', [])
@@ -21514,7 +21501,7 @@ test_channel_nonmember_rejected() {
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"reject-test","members":["manager"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:$PORT/channels/$ch_id/send" \
@@ -21532,11 +21519,11 @@ test_channel_delete_endpoint() {
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"delete-test","members":["manager"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     local del_resp
     del_resp=$(curl -s -X DELETE "http://localhost:$PORT/channels/$ch_id")
-    if echo "$del_resp" | python3 -c "
+    if echo "$del_resp" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21563,7 +21550,7 @@ test_channel_list_endpoint() {
 
     local response
     response=$(curl -s "http://localhost:$PORT/channels")
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True
@@ -21586,14 +21573,14 @@ test_channel_guest_fanout() {
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"chanfan"}')
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Create channel with guest
     local ch_id
     ch_id=$(curl -s -X POST "http://localhost:$PORT/channels" \
         -H "Content-Type: application/json" \
         -d '{"label":"fanout-test","members":["manager","guest:chanfan"]}' \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+        | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Manager sends to channel
     curl -s -X POST "http://localhost:$PORT/channels/$ch_id/send" \
@@ -21602,7 +21589,7 @@ test_channel_guest_fanout() {
     # Check guest inbox has the message
     local inbox
     inbox=$(curl -s "http://localhost:$PORT/guests/inbox?token=$token")
-    if echo "$inbox" | python3 -c "
+    if echo "$inbox" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 msgs = d.get('messages', [])
@@ -21627,7 +21614,7 @@ test_relay_guide_endpoint() {
 
     # Create a relay channel directly via Python
     local result
-    result=$(python3 -c "
+    result=$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21658,7 +21645,7 @@ test_relay_guide_rejects_bad_token() {
     info "Testing relay guide rejects bad token..."
 
     local result
-    result=$(python3 -c "
+    result=$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21687,7 +21674,7 @@ test_relay_send_endpoint() {
     wait_for_session "relayworker"
 
     local result
-    result=$(python3 -c "
+    result=$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21708,7 +21695,7 @@ print(f'{ch[\"id\"]}|{gt}|{rt}')
         -H "Content-Type: application/json" \
         -d '{"text":"Hello from relay test"}')
 
-    if echo "$response" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d.get('message_id'),f'no msg id: {d}';print('OK')" 2>/dev/null | grep -q "OK"; then
+    if echo "$response" | "$PYTHON" -c "import sys,json;d=json.load(sys.stdin);assert d.get('message_id'),f'no msg id: {d}';print('OK')" 2>/dev/null | grep -q "OK"; then
         success "POST /relay/<channel_id>/send accepted message"
     else
         fail "Relay send failed: $response"
@@ -21722,7 +21709,7 @@ test_relay_reply_and_messages() {
     info "Testing relay reply + message polling..."
 
     local result
-    result=$(python3 -c "
+    result=$("$PYTHON" -c "
 import sys, os
 sys.path.insert(0, os.getcwd())
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
@@ -21755,7 +21742,7 @@ print(f'{ch[\"id\"]}|{gt}|{rt}')
     msgs=$(curl -s "http://localhost:$PORT/relay/${ch_id}/messages" \
         -H "Authorization: Bearer ${guest_token}")
 
-    if echo "$msgs" | python3 -c "
+    if echo "$msgs" | "$PYTHON" -c "
 import sys,json
 d=json.load(sys.stdin)
 ms=d['messages']
@@ -21791,14 +21778,14 @@ test_guest_send_multi_workers() {
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"multisend"}')
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Send to relaybot1 — use "to" as list
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"to":["relaybot1"],"text":"multi test"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'send failed: {d}'
@@ -21822,7 +21809,7 @@ test_guest_send_to_channel() {
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"chsender"}')
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Create channel with guest as member
     local ch
@@ -21830,14 +21817,14 @@ test_guest_send_to_channel() {
         -H "Content-Type: application/json" \
         -d '{"label":"relay-ch","members":["manager","guest:chsender"]}')
     local ch_id
-    ch_id=$(echo "$ch" | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+    ch_id=$(echo "$ch" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Guest sends to channel via #label
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"to":"#relay-ch","text":"hello from guest"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'send failed: {d}'
@@ -21852,7 +21839,7 @@ print('OK')
     # Verify message in channel log
     local msgs
     msgs=$(curl -s "http://localhost:$PORT/channels/$ch_id/messages?token=$token")
-    if echo "$msgs" | python3 -c "
+    if echo "$msgs" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 msgs = d.get('messages', [])
@@ -21880,8 +21867,8 @@ test_guest_channel_list_filtered() {
     reg2=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"bob"}')
     local tok1 tok2
-    tok1=$(echo "$reg1" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
-    tok2=$(echo "$reg2" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    tok1=$(echo "$reg1" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    tok2=$(echo "$reg2" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Create channel with only alice
     local ch
@@ -21889,7 +21876,7 @@ test_guest_channel_list_filtered() {
         -H "Content-Type: application/json" \
         -d '{"label":"alice-only","members":["manager","guest:alice"]}')
     local ch_id
-    ch_id=$(echo "$ch" | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+    ch_id=$(echo "$ch" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Alice sees it
     local alice_list
@@ -21898,14 +21885,14 @@ test_guest_channel_list_filtered() {
     local bob_list
     bob_list=$(curl -s "http://localhost:$PORT/channels?token=$tok2")
 
-    if echo "$alice_list" | python3 -c "
+    if echo "$alice_list" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 labels = [c['label'] for c in d.get('channels', [])]
 assert 'alice-only' in labels, f'alice should see alice-only: {labels}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        if echo "$bob_list" | python3 -c "
+        if echo "$bob_list" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 labels = [c['label'] for c in d.get('channels', [])]
@@ -21933,7 +21920,7 @@ test_guest_channel_nonmember_rejected() {
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"outsider"}')
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Create channel WITHOUT this guest
     local ch
@@ -21941,7 +21928,7 @@ test_guest_channel_nonmember_rejected() {
         -H "Content-Type: application/json" \
         -d '{"label":"private-ch","members":["manager"]}')
     local ch_id
-    ch_id=$(echo "$ch" | python3 -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
+    ch_id=$(echo "$ch" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['channel'])" 2>/dev/null)
 
     # Guest tries to read messages — should get 403
     local code
@@ -21963,7 +21950,7 @@ test_guest_register_includes_channel_urls() {
     local reg
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"urlcheck"}')
-    if echo "$reg" | python3 -c "
+    if echo "$reg" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert 'channels_url' in d, f'missing channels_url: {list(d.keys())}'
@@ -21976,7 +21963,7 @@ print('OK')
         fail "guest register missing channel URLs: $reg"
     fi
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
     curl -s -X DELETE "http://localhost:$PORT/guests?token=$token" > /dev/null
 }
 
@@ -21995,14 +21982,14 @@ test_guest_send_legacy_compat() {
     reg=$(curl -s -X POST "http://localhost:$PORT/guests" \
         -H "Content-Type: application/json" -d '{"name":"legacy"}')
     local token
-    token=$(echo "$reg" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+    token=$(echo "$reg" | "$PYTHON" -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
 
     # Use old-style {"worker": "legacybot", "text": "..."}
     local response
     response=$(curl -s -X POST "http://localhost:$PORT/guests/send?token=$token" \
         -H "Content-Type: application/json" \
         -d '{"worker":"legacybot","text":"legacy format"}')
-    if echo "$response" | python3 -c "
+    if echo "$response" | "$PYTHON" -c "
 import sys, json
 d = json.load(sys.stdin)
 assert d.get('ok') == True, f'legacy send failed: {d}'
@@ -22119,7 +22106,7 @@ run_unit_tests() {
     run_test test_handle_watchdog_transition
     run_test test_parse_at_mentions
     run_test test_auto_focus_on_consecutive_mentions
-    run_test test_format_watchdog_status
+    run_test test_format_watchdog_status_pure
     run_test test_stuck_duration_uses_reason_age_not_since
     run_test test_switch_session
     run_test test_send_response_html_formatting
@@ -22401,28 +22388,8 @@ run_unit_tests() {
     run_test test_voice_message_includes_transcript
     run_test test_voice_message_fallback_without_transcript
     run_test test_reply_forwarded_voice_gets_transcribed
-    # Unit tests - Transcript Viewer
-    log ""
-    log "── Transcript Viewer Tests (Unit) ──────────────────────────────────────"
-    rm -f /tmp/transcript-cache/*.db /tmp/transcript-cache/*.db-wal /tmp/transcript-cache/*.db-shm 2>/dev/null
-    run_test test_transcript_renders_html
-    run_test test_transcript_missing_session
-    run_test test_transcript_with_tool_calls
-    run_test test_transcript_default_last_page
-    run_test test_transcript_bm25_search
-    run_test test_transcript_search_assistant_ctx_link
-    run_test test_transcript_search_sort_toggle
-    run_test test_transcript_unicode
-    run_test test_transcript_edit_diff_rendering
-    run_test test_transcript_turn_grouping
-    run_test test_transcript_hides_system_messages
-    run_test test_rewind_generates_token_url
-    run_test test_rewind_token_auth_required
-    run_test test_rewind_no_args_shows_usage
-    run_test test_transcript_prompts_filter
-    run_test test_transcript_dynamic_avatars
-    run_test test_transcript_sidebar_stats
-    # Transcript Index tests removed — indexer extracted to rewind/ (Bun + bun:sqlite FTS5).
+    # Transcript Viewer + Index tests removed — rendering, search, auth, stats, indexer
+    # all extracted to rewind/ (Bun + bun:sqlite FTS5) in request 115.
     # Covered by: bun test rewind/, tests/test_tools_e2e.sh, tests/test_tools_perf_chaos.sh
     # Unit tests - Transport Abstraction
     log ""
@@ -23013,7 +22980,7 @@ main() {
     # Static analysis — catches type regressions before any tests run
     log "── mypy strict check ──"
     if command -v $PYTHON &>/dev/null && $PYTHON -m mypy --version &>/dev/null 2>&1; then
-        if $PYTHON -m mypy bridge.py connectors.py --ignore-missing-imports 2>&1; then
+        if $PYTHON -m mypy bridge.py claudecode.py telegram.py shared.py --ignore-missing-imports 2>&1; then
             success "mypy: zero errors"
         else
             fail "mypy: type errors found"

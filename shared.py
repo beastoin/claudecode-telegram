@@ -391,8 +391,8 @@ class _StateSnapshot(NamedTuple):
     startup_notified: bool
 
 
-PostRouteHandler = Callable[..., None]  # (handler, body, match) -> None
-GetRouteHandler = Callable[..., None]  # (handler, parsed, match) -> None
+PostRouteHandler = Callable[..., None]  # type: ignore[explicit-any]  # (handler, body, match) -> None
+GetRouteHandler = Callable[..., None]  # type: ignore[explicit-any]  # (handler, parsed, match) -> None
 
 
 class GmailHeader(TypedDict, total=False):

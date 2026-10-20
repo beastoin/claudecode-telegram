@@ -653,9 +653,7 @@ def _codex_adapter_remote(worker_name: str, text: str, bridge_url: str, sessions
     with _log_suppress(
         Exception, level=_LOG_ERROR, tag="codex", msg=f"Remote adapter for '{worker_name}' on {host} failed: "
     ):
-        import bridge  # noqa: PLC0415  # circular: bridge imports claudecode
-
-        remote_sessions = bridge._remap_sessions_dir(host)
+        remote_sessions = _remap_path(str(sessions_dir), host)
         sid_file = f"{remote_sessions}/{worker_name}/codex_session_id"
         session_id = ""
         with suppress(OSError, subprocess.TimeoutExpired):

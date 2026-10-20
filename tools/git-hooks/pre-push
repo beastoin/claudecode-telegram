@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-push hook: runs CD pipeline (lint + local FAST + triassic-4 cross-platform)
+# Blocks push if any stage fails.
+# Install: ln -sf ../../tools/git-hooks/pre-push .git/hooks/pre-push
+
+echo "Running CD pipeline before push..."
+make -C "$(git rev-parse --show-toplevel)" cd
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Push blocked — CD pipeline failed. Fix errors above."
+    exit 1
+fi
