@@ -9065,6 +9065,7 @@ class CommandRouter:
             return False
         if admin_chat_id is None:
             admin_chat_id = chat_id  # type: ignore[assignment]
+            core.admin_chat_id = chat_id  # type: ignore[assignment]
             return True
         return chat_id == admin_chat_id
 
@@ -9159,6 +9160,7 @@ class CommandRouter:
         msg = incoming.raw_msg
         if admin_chat_id is None:
             admin_chat_id = chat_id
+            core.admin_chat_id = chat_id
             save_last_chat_id(chat_id)
             _log(_LOG_INFO, "admin", f"Admin registered: {chat_id}")
         if not state.startup_notified:
@@ -10352,6 +10354,7 @@ def _restore_bridge_state(registered: dict[str, TmuxSessionDict]) -> int | None:
     last_chat_id = load_last_chat_id()
     if last_chat_id and admin_chat_id is None:
         admin_chat_id = last_chat_id
+        core.admin_chat_id = last_chat_id
         _log(_LOG_INFO, "bridge", f"Restored admin from last_chat_id: {admin_chat_id}")
     _relay_load()
     _channel_load()
