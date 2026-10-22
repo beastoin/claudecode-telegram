@@ -7,13 +7,11 @@ if __name__ == "__main__":
     sys.modules.setdefault("bridge", sys.modules[__name__])
 
 import abc
-import argparse
 import base64
 import binascii
 import collections
 import difflib
 import enum
-import gzip
 import hashlib
 import html
 import http.client
@@ -26,7 +24,6 @@ import shlex
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -35,12 +32,12 @@ import types
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import (
     IO,
