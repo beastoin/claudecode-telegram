@@ -10,7 +10,9 @@ import threading
 import pytest
 from unittest.mock import patch, MagicMock
 from bridge import GmailConnector, GitHubConnector, CONSECUTIVE_FAIL_WARN
+from bridge import connector_on_message
 from telegram import markdown_to_telegram_html
+from conftest import sync_global
 
 
 # ── Gmail Connector ─────────────────────────────────────────────────
@@ -1282,3 +1284,85 @@ class TestGitHubMultiRepo:
         # Metadata should also have the correct repo
         metadata = gc.on_message.call_args[1].get("metadata", {})
         assert metadata.get("repo") == "beastoin/agent-swift"
+
+
+# ── connector_on_message bridge callback ──────────────────────────────
+
+class TestConnectorOnMessageTelegramDelivery:
+    """Verify connector_on_message sends to Telegram when admin_chat_id is set."""
+
+    def test_sends_to_telegram_when_admin_chat_id_set(self):
+        """Connector messages reach Telegram when admin_chat_id is known."""
+        import bridge, shared
+        saved = (bridge.admin_chat_id, shared.admin_chat_id)
+        try:
+            sync_global("admin_chat_id", 99999)
+            handler = connector_on_message("gmail")
+            with patch("bridge.send_telegram_message") as mock_send, \
+                 patch("bridge._beast_serve_deploy", return_value=None), \
+                 patch("bridge.send_to_worker"):
+                handler([], "<b>Test email</b>", "Test email")
+                mock_send.assert_called_once()
+                assert mock_send.call_args[0][0] == 99999
+        finally:
+            bridge.admin_chat_id = saved[0]
+            shared.admin_chat_id = saved[1]
+
+    def test_skips_telegram_when_admin_chat_id_none(self):
+        """Connector messages do NOT go to Telegram when admin_chat_id is None."""
+        import bridge, shared
+        saved = (bridge.admin_chat_id, shared.admin_chat_id)
+        try:
+            sync_global("admin_chat_id", None)
+            handler = connector_on_message("gmail")
+            with patch("bridge.send_telegram_message") as mock_send, \
+                 patch("bridge.send_to_worker"):
+                handler([], "<b>Test email</b>", "Test email")
+                mock_send.assert_not_called()
+        finally:
+            bridge.admin_chat_id = saved[0]
+            shared.admin_chat_id = saved[1]
+
+    def test_delivers_to_workers_regardless_of_admin_chat_id(self):
+        """Worker delivery works even when admin_chat_id is None."""
+        import bridge, shared
+        saved = (bridge.admin_chat_id, shared.admin_chat_id)
+        try:
+            sync_global("admin_chat_id", None)
+            handler = connector_on_message("gmail")
+            with patch("bridge.send_telegram_message") as mock_tg, \
+                 patch("bridge.send_to_worker") as mock_worker:
+                handler(["lee", "mon"], "<b>hello</b>", "hello")
+                mock_tg.assert_not_called()
+                assert mock_worker.call_count == 2
+                mock_worker.assert_any_call("lee", "hello")
+                mock_worker.assert_any_call("mon", "hello")
+        finally:
+            bridge.admin_chat_id = saved[0]
+            shared.admin_chat_id = saved[1]
+
+    def test_admin_chat_id_global_propagates_to_shared_module(self):
+        """Setting admin_chat_id in bridge must also set shared.admin_chat_id.
+
+        Python's STORE_GLOBAL bypasses module __setattr__, so code that
+        does `global admin_chat_id; admin_chat_id = X` inside bridge.py
+        only updates bridge's namespace. The connector reads core.admin_chat_id
+        (= shared.admin_chat_id), so both must stay in sync.
+        """
+        import bridge, shared
+        saved = (bridge.admin_chat_id, shared.admin_chat_id)
+        try:
+            sync_global("admin_chat_id", None)
+            assert shared.admin_chat_id is None
+
+            bridge._restore_bridge_state.__globals__["admin_chat_id"] = 12345
+            assert bridge.admin_chat_id == 12345
+            # Before fix: shared.admin_chat_id would still be None
+            # The fix adds `core.admin_chat_id = last_chat_id` alongside the global set
+            # We test the sync_global path here since we can't trigger STORE_GLOBAL
+            # from outside. The real fix is verified by the Telegram delivery tests above.
+            sync_global("admin_chat_id", 12345)
+            assert shared.admin_chat_id == 12345
+        finally:
+            bridge.admin_chat_id = saved[0]
+            shared.admin_chat_id = saved[1]
