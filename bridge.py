@@ -31,7 +31,6 @@ import time
 import types
 import urllib.error
 import urllib.request
-import uuid
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress

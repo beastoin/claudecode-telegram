@@ -3,40 +3,28 @@ from __future__ import annotations
 import collections
 import fcntl
 import glob
-import hashlib
-import http.client
 import json
-import mimetypes
 import os
 import re
-import secrets
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import types
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     IO,
     TYPE_CHECKING,
-    Literal,
-    NamedTuple,
     Protocol,
-    TypedDict,
     cast,
-    runtime_checkable,
 )
-from urllib.parse import urlparse
 
 from shared import (
     _CHECKIN_NOTE_PATH,

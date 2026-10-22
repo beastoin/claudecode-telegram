@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol, TypedDict
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import urlparse
 
 # --- Types ---
 

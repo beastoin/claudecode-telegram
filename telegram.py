@@ -3,30 +3,22 @@
 from __future__ import annotations
 
 import collections
-import hashlib
 import io
 import json
 import mimetypes
 import os
 import re
-import shlex
-import shutil
 import subprocess
-import sys
-import tempfile
 import threading
-import time
-import types
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import (
     IO,
-    TYPE_CHECKING,
     Any,
     ClassVar,
     Literal,
@@ -97,9 +89,6 @@ from shared import (
 from shared import (
     _clock as _default_clock,
 )
-
-if TYPE_CHECKING:
-    from claudecode import TmuxSessionDict, WorkerStateEntry
 
 # ---------------------------------------------------------------------------
 # Type aliases
