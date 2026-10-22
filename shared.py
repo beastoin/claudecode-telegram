@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, Protocol, TypedDict, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, TypedDict
 from urllib.parse import ParseResult, urlparse
 
 # --- Types ---

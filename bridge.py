@@ -44,7 +44,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     NamedTuple,
-    Optional,
     Protocol,
     TypedDict,
     cast,
