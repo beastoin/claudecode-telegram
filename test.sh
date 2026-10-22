@@ -15782,17 +15782,23 @@ registered = wm.get_registered_sessions()
 assert 'deadworker' in registered, 'dead worker should be in registered'
 
 # Test that restart detects dead worker and enters recovery path
-# Mock _restart_dead_worker to track that it was called (avoids tmux/claude deps)
+# Mock _recreate_tmux_session and _finalize_restart to track calls (avoids tmux/claude deps)
 called = {}
-original = wm._restart_dead_worker
-def mock_restart(name, backend_name, backend, tmux_name, mode):
+def mock_recreate(name, backend, tmux_name):
+    called['recreate_name'] = name
+    called['recreate_tmux'] = tmux_name
+    return True, None
+
+def mock_finalize(name, tmux_name, backend_name, backend, mode, *, fresh_session=False):
     called['name'] = name
     called['backend'] = backend_name
     called['tmux'] = tmux_name
     called['mode'] = mode
+    called['fresh_session'] = fresh_session
     return True, None
 
-wm._restart_dead_worker = mock_restart
+wm._recreate_tmux_session = mock_recreate
+wm._finalize_restart = mock_finalize
 
 ok, err = wm.restart('deadworker', mode='relaunch')
 assert ok, f'restart should succeed, got err: {err}'
@@ -15800,6 +15806,7 @@ assert called.get('name') == 'deadworker', f'expected deadworker, got {called}'
 assert called.get('backend') == 'claude', f'expected claude backend, got {called}'
 assert called.get('tmux') == f'{prefix}deadworker', f'expected regtest prefix, got {called}'
 assert called.get('mode') == 'relaunch', f'expected relaunch mode, got {called}'
+assert called.get('fresh_session') is True, f'expected fresh_session=True for dead worker, got {called}'
 
 import shutil; shutil.rmtree(tmpdir)
 print('OK')

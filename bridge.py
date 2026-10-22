@@ -5703,39 +5703,25 @@ class WorkerManager:
         backend_name = claudecode.get_worker_backend(name, session)  # type: ignore[arg-type]
         backend = claudecode.get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
-        if not claudecode.tmux_exists(tmux_name):
-            return self._restart_dead_worker(name, backend_name, backend, tmux_name, mode)
         if not _which_binary(backend.binary):
             return False, f"'{backend.binary}' not found in PATH. Install it first."
-        resume_id, startup_cwd = self._prepare_restart_state(name, mode)
-        if mode != "resume":
-            _clear_hook_failures(name)
-        session_dir = self.sessions_dir / name
-        if not backend.is_interactive:
-            session_dir.mkdir(parents=True, exist_ok=True)
-            claudecode.ensure_worker_pipe(name)
-            clear_pending(name)
-        elif claudecode.is_claude_running(tmux_name):
-            self._stop_running_claude(name, tmux_name)
-        if backend.is_interactive and not claudecode.is_claude_running(tmux_name):
-            self._kill_stray_children(name, tmux_name)
-        claudecode.export_hook_env(tmux_name, backend_name)
-        self._clock.sleep(DELAY_TMUX_SEND)
-        self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
-        welcome = self._build_welcome(name, backend)
-        if backend.is_interactive:
-            started = self._wait_for_startup(name, tmux_name, backend, resume_id, startup_cwd)
-            if started:
-                self.send(name, welcome)
-            else:
-                _log(_LOG_WARN, "restart", f"{name}: Claude did not start within 10s, skipping welcome")
+        fresh_session = False
+        if not claudecode.tmux_exists(tmux_name):
+            ok, err = self._recreate_tmux_session(name, backend, tmux_name)
+            if not ok:
+                return False, err
+            fresh_session = True
         else:
-            self._runner.run(
-                ["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND
-            )
-        _reset_learning_reminder(name)
-        self.invalidate_sessions_cache()
-        return True, None
+            session_dir = self.sessions_dir / name
+            if not backend.is_interactive:
+                session_dir.mkdir(parents=True, exist_ok=True)
+                claudecode.ensure_worker_pipe(name)
+                clear_pending(name)
+            elif claudecode.is_claude_running(tmux_name):
+                self._stop_running_claude(name, tmux_name)
+            if backend.is_interactive and not claudecode.is_claude_running(tmux_name):
+                self._kill_stray_children(name, tmux_name)
+        return self._finalize_restart(name, tmux_name, backend_name, backend, mode, fresh_session=fresh_session)
 
     def _prepare_restart_state(self, name: str, mode: str) -> tuple[str, str]:
         resume_id = ""
@@ -5844,12 +5830,7 @@ class WorkerManager:
             )
         return started
 
-    def _restart_dead_worker(
-        self, name: str, backend_name: str, backend: Backend, tmux_name: str, mode: str
-    ) -> tuple[bool, str | None]:
-
-        if not _which_binary(backend.binary):
-            return False, f"'{backend.binary}' not found in PATH. Install it first."
+    def _recreate_tmux_session(self, name: str, backend: Backend, tmux_name: str) -> tuple[bool, str | None]:
         clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = self._runner.run(
             ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "200", "-y", "50"],
@@ -5868,11 +5849,18 @@ class WorkerManager:
         claudecode.ensure_session_dir(name)
         if not backend.is_interactive:
             claudecode.ensure_worker_pipe(name)
+        return True, None
+
+    def _finalize_restart(
+        self, name: str, tmux_name: str, backend_name: str, backend: Backend, mode: str, *, fresh_session: bool = False
+    ) -> tuple[bool, str | None]:
+        if mode != "resume":
+            _clear_hook_failures(name)
         resume_id, startup_cwd = self._prepare_restart_state(name, mode)
         claudecode.export_hook_env(tmux_name, backend_name)
         self._clock.sleep(DELAY_TMUX_SEND)
         self._send_start_command(name, tmux_name, backend, resume_id, startup_cwd)
-        if backend.is_interactive:
+        if fresh_session and backend.is_interactive:
             self._clock.sleep(DELAY_STARTUP_LONG)
             self._runner.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], timeout=TIMEOUT_TMUX_SEND)
         welcome = self._build_welcome(name, backend)
@@ -5881,12 +5869,12 @@ class WorkerManager:
             if started:
                 self.send(name, welcome)
             else:
-                _log(_LOG_WARN, "restart", f"{name}: dead worker did not start within 10s, skipping welcome")
+                _log(_LOG_WARN, "restart", f"{name}: did not start within 10s, skipping welcome")
         else:
             self._runner.run(
                 ["tmux", "send-keys", "-t", tmux_name, f"echo '{welcome[:200]}...'", "Enter"], timeout=TIMEOUT_TMUX_SEND
             )
-        _log(_LOG_INFO, "worker", f"Dead worker '{name}' recovered from registry (mode={mode})")
+        _reset_learning_reminder(name)
         self.invalidate_sessions_cache()
         return True, None
 
@@ -6353,19 +6341,15 @@ def _do_restart(
     force: bool,
     clean: bool,
 ) -> bool:
-    if host:
-        mode = "relaunch" if clean else "resume"
-        backend_name = claudecode.get_worker_backend(name, session) if session else DEFAULT_BACKEND  # type: ignore[arg-type]
-        backend_obj = claudecode.get_backend(backend_name)
-        _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, host={host}")
-        router.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
-
-        ok, err = router._restart_remote_worker(name, backend_name, backend_obj, tmux_name, host, mode)
-        watchdog.recent_restarts[name] = core._clock.time()
-        _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart result ok={ok}, err={err}")
-        return _restart_reply(router, chat_id, name, ok, err, host)  # type: ignore[arg-type]
     backend_name = claudecode.get_worker_backend(name, session) if session else DEFAULT_BACKEND  # type: ignore[arg-type]
     backend = claudecode.get_backend(backend_name)
+    mode = "relaunch" if clean else "resume"
+    if host:
+        _log(_LOG_INFO, "cmd_restart", f"{name}: remote restart mode={mode}, host={host}")
+        router.reply(chat_id, f"Restarting {name.capitalize()} on remote host...")
+        ok, err = router._restart_remote_worker(name, backend_name, backend, tmux_name, host, mode)
+        watchdog.recent_restarts[name] = core._clock.time()
+        return _restart_reply(router, chat_id, name, ok, err, host)  # type: ignore[arg-type]
     tmux_name = (
         session.get("tmux", f"{router.workers.tmux_prefix}{name}") if session else f"{router.workers.tmux_prefix}{name}"  # type: ignore[assignment]
     )
@@ -6376,7 +6360,6 @@ def _do_restart(
         else:
             router.reply(chat_id, f"No active session for {name.capitalize()}. Next message starts fresh.")
         return True
-    mode = "relaunch" if clean else "resume"
     if mode == "resume":
         session_dir = claudecode.get_session_dir(name)
         if not session_dir.exists() or not any(session_dir.glob("*_session_id")):
@@ -6385,7 +6368,6 @@ def _do_restart(
     router.reply(chat_id, f"{label} {name.capitalize()}...")
     ok, err = restart_claude(name, mode=mode)
     if ok:
-
         watchdog.recent_restarts[name] = core._clock.time()
     return _restart_reply(router, chat_id, name, ok, err)  # type: ignore[arg-type]
 
