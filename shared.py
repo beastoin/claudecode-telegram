@@ -521,33 +521,6 @@ class TranscriptSyncState(TypedDict, total=False):
     remote_size: int
 
 
-class TranscriptEntry(TypedDict, total=False):
-    type: str
-    message: dict[str, object]
-    timestamp: str
-    version: str
-    gitBranch: str
-    _idx: int
-
-
-class TranscriptStatsDict(TypedDict):
-    n_user: int
-    n_tool: int
-    n_edit: int
-    lines_add: int
-    lines_del: int
-    lines_mod: int
-    n_files: int
-    model: str
-    version: str
-    git_branch: str
-    first_ts: str
-    last_ts: str
-    input_tokens: int
-    output_tokens: int
-    duration: str
-
-
 class _GuestSessionDictRequired(TypedDict):
     name: str
     created_at: str
