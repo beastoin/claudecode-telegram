@@ -69,18 +69,6 @@ class RegistryFileDict(TypedDict, total=False):
     workers: dict[str, RegistryWorkerDict]
 
 
-class RewindTokenEntry(TypedDict):
-    name: str
-    expires_at: float
-
-
-class PrReviewTokenEntry(TypedDict):
-    pr_num: int
-    owner: str
-    repo: str
-    expires_at: float
-
-
 class ProcStatsEntry(TypedDict):
     cpu: float
     state: str
@@ -147,12 +135,6 @@ class MachineHealthDict(TypedDict, total=False):
     disk: DiskUsageDict | None
     memory: MemUsageDict | None
     io: IoUsageDict | None
-
-
-class CodexTranscriptEntry(TypedDict, total=False):
-    role: str
-    text: str
-    timestamp: str
 
 
 class GitPushStateResult(TypedDict, total=False):

@@ -3435,11 +3435,6 @@ def format_team_lines(  # type: ignore[no-redef]
 # removed — all served by spawn-on-demand Bun viewer (rewind/)
 
 
-def _err_page(title: str, detail: str = "") -> str:
-    d = f"<p>{detail}</p>" if detail else ""
-    return f"<html><body style='background:#0b0d0b;color:#f6fff5;font-family:system-ui;padding:40px'><h1>{title}</h1>{d}</body></html>"
-
-
 class TranscriptSyncRegistry:
     def __init__(self) -> None:
         self._state: dict[str, TranscriptSyncState] = {}
@@ -3625,31 +3620,6 @@ GuestInboxMessageDict = TypedDict(
     },
     total=False,
 )
-# ChannelMessageDict = TypedDict(
-#     "ChannelMessageDict",
-#     {
-#         "id": str,
-#         "seq": int,
-#         "from": str,
-#         "text": str,
-#         "ts": int,
-#     },
-# )
-# _RelayMessageDictRequired = TypedDict(
-#     "_RelayMessageDictRequired",
-#     {
-#         "message_id": str,
-#         "direction": str,
-#         "from": str,
-#         "to": str,
-#         "text": str,
-#         "ts": str,
-#     },
-# )
-
-
-# class RelayMessageDict(_RelayMessageDictRequired, total=False):
-#     sender_name: str
 
 
 def _save_state_json(path: Path, data: object, label: str) -> None:
@@ -4777,93 +4747,6 @@ class ConnectorRegistry:
             return list(self._log.get(tag, []))
 
 
-def _parse_codex_transcript(path: str, host: str | None = None) -> list[CodexTranscriptEntry]:
-    try:
-        if host:
-            r = _remote_run(["cat", path], host=host, timeout=TIMEOUT_GIT_OP)
-            if r.returncode != 0:
-                return []
-            content = r.stdout
-        else:
-            content = Path(path).read_text()
-    except (subprocess.SubprocessError, OSError):
-        return []
-    messages = []
-    for line in content.strip().split("\n"):
-        if not line.strip():
-            continue
-        try:
-            ev = cast(dict[str, object], json.loads(line))
-        except json.JSONDecodeError:
-            continue
-        ev_type = str(ev.get("type", ""))
-        raw_payload = ev.get("payload", {})
-        payload = cast(dict[str, object], raw_payload) if isinstance(raw_payload, dict) else {}
-        ts = str(ev.get("timestamp", ""))
-        if ev_type == "response_item":
-            item_type = str(payload.get("type", ""))
-            if item_type == "message":
-                role = str(payload.get("role", "assistant"))
-                text_parts: list[str] = []
-                raw_content = payload.get("content", [])
-                for c in cast(list[dict[str, object]], raw_content) if isinstance(raw_content, list) else []:
-                    if isinstance(c, dict) and c.get("type") in ("output_text", "input_text") and c.get("text"):
-                        text_parts.append(str(c["text"]))
-                text = "\n".join(text_parts).strip()
-                if text and role != "developer":
-                    messages.append({"role": role, "text": text, "timestamp": ts})
-            elif item_type == "function_call":
-                name = str(payload.get("name", ""))
-                messages.append({"role": "tool_use", "text": f"[{name}]", "timestamp": ts})
-            elif item_type == "function_call_output":
-                output = str(payload.get("output", ""))
-                if output:
-                    messages.append({"role": "tool_result", "text": output[:500], "timestamp": ts})
-    return cast(list[CodexTranscriptEntry], messages)
-
-
-REWIND_TIMEOUT: int = 24 * 60 * 60
-PR_REVIEW_EXTEND: int = 300
-
-
-class TokenStore:
-    def __init__(self) -> None:
-        self._lock: threading.Lock = threading.Lock()
-
-    def _validate(  # type: ignore[explicit-any]
-        self, store: dict[str, dict[str, object]], token: str | None, extend: bool, ttl: int
-    ) -> dict[str, object] | None:
-        if not token:
-            return None
-        now = _clock.time()
-        with self._lock:
-            for k in [k for k, v in store.items() if v["expires_at"] <= now]:  # type: ignore[operator]
-                del store[k]
-            entry = store.get(token)
-            if entry and extend:
-                entry["expires_at"] = now + ttl
-            return entry
-
-    def add_rewind(self, token: str, name: str, timeout: int = REWIND_TIMEOUT) -> None:
-        with self._lock:
-            REWIND_TOKENS[token] = {"name": name, "expires_at": _clock.time() + timeout}
-
-    def validate_rewind(self, token: str | None, extend: bool = True) -> RewindTokenEntry | None:
-        return self._validate(REWIND_TOKENS, token, extend, REWIND_TIMEOUT)  # type: ignore[no-any-return, arg-type, return-value]
-
-    def add_pr_review(self, token: str, pr_num: int, owner: str, repo: str) -> None:
-        with self._lock:
-            PR_REVIEW_TOKENS[token] = {
-                "pr_num": pr_num,
-                "owner": owner,
-                "repo": repo,
-                "expires_at": _clock.time() + PR_REVIEW_EXTEND,
-            }
-
-    def validate_pr_review(self, token: str | None, extend: bool = True) -> PrReviewTokenEntry | None:
-        return self._validate(PR_REVIEW_TOKENS, token, extend, PR_REVIEW_EXTEND)  # type: ignore[no-any-return, arg-type, return-value]
-
-
 # --- Viewer Manager: spawn-on-demand Bun servers ---
 
 _TOOL_PORT_MIN = 10171
@@ -5035,21 +4918,6 @@ def _format_offline_warning(statuses: list[MentionRouteResult | None]) -> str | 
     if sent_to:
         parts.append(f"Delivered to {', '.join(sent_to)}.")
     return " ".join(parts)
-
-
-def _gh_api_call(
-    args: list[str], *, input_data: str | None = None, timeout: int = TIMEOUT_FILE_TRANSFER
-) -> tuple[bool, str]:
-    try:
-        kw: dict[str, object] = {"capture_output": True, "text": True, "timeout": timeout}
-        if input_data is not None:
-            kw["input"] = input_data
-        r = _subprocess_runner.run(["gh", "api", *args], **kw)
-        if r.returncode != 0:
-            return False, r.stderr.strip() or r.stdout.strip()
-        return True, r.stdout
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
 
 
 def _fetch_remote_file(host: str, remote_path: str) -> str | None:
@@ -9531,18 +9399,6 @@ class Handler(BaseHTTPRequestHandler):
     def _send_error_json(self, code: int, message: str) -> None:
         self._send_json(code, {"ok": False, "error": message})
 
-    def _send_html(self, body: bytes, status: int = 200) -> None:
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "") and len(body) > 1024
-        if use_gzip:
-            body = gzip.compress(body, compresslevel=6)
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
     def _send_text(self, code: int, text: str) -> None:
         body = text.encode()
         self.send_response(code)
@@ -9736,14 +9592,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_status(200)
         else:
             self._send_status(404)
-
-    def do_DELETE(self) -> None:
-        parsed = urlparse(self.path)
-        handler, match = _endpoint_router.resolve("DELETE", parsed.path)  # type: ignore[union-attr]
-        if handler:
-            handler(self, parsed, match)  # type: ignore[operator]
-            return
-        self._send_unknown_endpoint("DELETE", parsed.path)
 
     def handle_workers_endpoint(self, parsed: ParseResult | None = None) -> None:
         try:
@@ -9962,10 +9810,6 @@ class BridgeHealth:
         """Record a failed operation."""
         with self._lock:
             self._errors[signal] = self._errors.get(signal, 0) + 1
-
-    def error_count(self, signal: str) -> int:
-        with self._lock:
-            return self._errors.get(signal, 0)
 
     def register_thread(self, name: str, thread: threading.Thread) -> None:
         with self._lock:
@@ -10375,7 +10219,6 @@ TELEPORT_RSYNC_EXCLUDES = [
     ".claude/worktrees",
 ]
 media_groups = MediaGroupState()
-tokens = TokenStore()
 
 
 def kill_session(name: str) -> tuple[bool, str | None]:

@@ -13554,50 +13554,6 @@ print('OK')
 }
 
 
-test_codex_native_transcript_parsing() {
-    info "Testing codex native JSONL transcript parsing..."
-
-    if "$PYTHON" -c "
-import tempfile, shutil, json
-from pathlib import Path
-import bridge
-
-tmpdir = tempfile.mkdtemp()
-tmp = Path(tmpdir)
-
-# Create a codex native JSONL transcript
-transcript = tmp / 'session.jsonl'
-events = [
-    {'timestamp': '2026-06-01T10:00:00Z', 'type': 'session_meta', 'payload': {'id': 'test-session-123', 'cwd': '/home/claude'}},
-    {'timestamp': '2026-06-01T10:00:01Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'hello from manager'}]}},
-    {'timestamp': '2026-06-01T10:00:05Z', 'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'exec_command', 'call_id': 'call_1', 'arguments': '{\"cmd\": \"ls\"}'}},
-    {'timestamp': '2026-06-01T10:00:06Z', 'type': 'response_item', 'payload': {'type': 'function_call_output', 'call_id': 'call_1', 'output': 'file1.txt\nfile2.txt'}},
-    {'timestamp': '2026-06-01T10:00:10Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'I found 2 files.'}]}},
-    {'timestamp': '2026-06-01T10:00:11Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'developer', 'content': [{'type': 'input_text', 'text': 'system prompt'}]}},
-]
-with open(transcript, 'w') as f:
-    for ev in events:
-        f.write(json.dumps(ev) + '\n')
-
-messages = bridge._parse_codex_transcript(str(transcript))
-assert len(messages) == 4, f'expected 4 messages (user, tool_use, tool_result, assistant), got {len(messages)}: {messages}'
-assert messages[0]['role'] == 'user', f'expected user: {messages[0]}'
-assert messages[0]['text'] == 'hello from manager', f'text mismatch: {messages[0]}'
-assert messages[1]['role'] == 'tool_use', f'expected tool_use: {messages[1]}'
-assert 'exec_command' in messages[1]['text'], f'tool name mismatch: {messages[1]}'
-assert messages[2]['role'] == 'tool_result', f'expected tool_result: {messages[2]}'
-assert messages[3]['role'] == 'assistant', f'expected assistant: {messages[3]}'
-assert messages[3]['text'] == 'I found 2 files.', f'response text mismatch: {messages[3]}'
-
-shutil.rmtree(tmpdir, ignore_errors=True)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "codex native JSONL transcript parsing works"
-    else
-        fail "codex native JSONL transcript parsing should work"
-    fi
-}
-
 test_codex_restart_readiness_check() {
     info "Testing _wait_for_restart_ready verifies tmux for non-interactive..."
 
@@ -13622,58 +13578,6 @@ print('OK')
     fi
 }
 
-
-test_codex_rewind_reads_native_transcript() {
-    info "Testing /rewind reads codex native transcript via session ID lookup..."
-
-    if "$PYTHON" -c "
-import tempfile, shutil, json, os
-from pathlib import Path
-from unittest.mock import patch
-import bridge
-
-tmpdir = tempfile.mkdtemp()
-tmp = Path(tmpdir)
-orig_sessions = bridge.SESSIONS_DIR
-bridge.SESSIONS_DIR = tmp
-
-# Create worker session dir with codex_session_id
-worker_dir = tmp / 'alice'
-worker_dir.mkdir()
-(worker_dir / 'backend').write_text('codex')
-(worker_dir / 'codex_session_id').write_text('abc-session-123')
-
-# Create codex native transcript at ~/.codex/sessions/ (simulated)
-codex_dir = tmp / 'codex_sessions' / '2026' / '06'
-codex_dir.mkdir(parents=True)
-transcript_file = codex_dir / 'rollout-2026-06-01-abc-session-123.jsonl'
-
-events = [
-    {'timestamp': '2026-06-01T10:00:01Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'hello'}]}},
-    {'timestamp': '2026-06-01T10:00:10Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'hi there!'}]}},
-]
-with open(transcript_file, 'w') as f:
-    for ev in events:
-        f.write(json.dumps(ev) + '\n')
-
-# Call _parse_codex_transcript directly (was _read_codex_transcript before consolidation)
-messages = bridge._parse_codex_transcript(str(transcript_file))
-
-assert len(messages) == 2, f'expected 2 messages, got {len(messages)}'
-assert messages[0]['role'] == 'user', f'expected user: {messages[0]}'
-assert messages[0]['text'] == 'hello', f'text mismatch: {messages[0]}'
-assert messages[1]['role'] == 'assistant', f'expected assistant: {messages[1]}'
-assert messages[1]['text'] == 'hi there!', f'text mismatch: {messages[1]}'
-
-bridge.SESSIONS_DIR = orig_sessions
-shutil.rmtree(tmpdir, ignore_errors=True)
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "/rewind reads codex native transcript"
-    else
-        fail "/rewind should read codex native transcript"
-    fi
-}
 
 test_workers_remote_noninteractive_warns() {
     info "Testing /workers warns for remote non-interactive workers..."
@@ -22249,9 +22153,7 @@ run_unit_tests() {
     run_test test_codex_session_id_persistence
     # Codex backend full support
     run_test test_codex_backend_send_spawns_thread
-    run_test test_codex_native_transcript_parsing
     run_test test_codex_restart_readiness_check
-    run_test test_codex_rewind_reads_native_transcript
     run_test test_workers_remote_noninteractive_warns
     run_test test_check_adapter_log_teleported_reads_remote
     # Phase 1: Remote dispatch (host=None parameter)

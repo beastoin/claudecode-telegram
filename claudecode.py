@@ -123,7 +123,6 @@ from shared import (
     WORKTREE_THRESHOLD_GB,
     AppContext,
     Clock,
-    CodexTranscriptEntry,
     CpuHogEntry,
     DiskUsageDict,
     GitPushStateResult,
@@ -132,14 +131,12 @@ from shared import (
     MarkdownToken,
     MemUsageDict,
     ProcStatsEntry,
-    PrReviewTokenEntry,
     QuestionDetails,
     QuestionOption,
     RegistryFileDict,
     RegistryWorkerDict,
     ReminderState,
     ResourceAlertConfig,
-    RewindTokenEntry,
     SubprocessRunner,
     TmuxActivityResult,
     TmuxSessionDict,
@@ -1268,8 +1265,6 @@ _LEARNING_REMINDER_TEXT = (
     'because the error message says connection refused which misleads you into checking network config."\n'
     'Bad: "Fixed auth-token bug." (no When/because, no reuse value, will rot)'
 )
-REWIND_TOKENS: dict[str, RewindTokenEntry] = {}
-PR_REVIEW_TOKENS: dict[str, PrReviewTokenEntry] = {}
 WORKER_REGISTRY_FILE = NODE_DIR / "workers.json"
 RESERVED_NAMES = {
     "team",
