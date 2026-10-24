@@ -63,6 +63,18 @@ function disableSession(sessionName) {
     clearTimeout(timer);
     SESSION_TIMERS.delete(sessionName);
   }
+  for (const [ws, ptyProc] of ACTIVE_CONNECTIONS.entries()) {
+    const sessionTag = ws.__pilotSession;
+    if (sessionTag === sessionName) {
+      try {
+        ptyProc.kill();
+      } catch {}
+      try {
+        ws.close(4002, "Session disabled");
+      } catch {}
+      ACTIVE_CONNECTIONS.delete(ws);
+    }
+  }
 }
 function refreshSessionTimer(sessionName) {
   const existing = SESSION_TIMERS.get(sessionName);
@@ -167,9 +179,8 @@ function isAllowedSessionName(name) {
   return typeof name === "string" && /^claude-[A-Za-z0-9._:-]+$/.test(name);
 }
 function isAuthorized(urlObj) {
-  if (!PILOT_TOKEN) {
-    return true;
-  }
+  if (!PILOT_TOKEN)
+    return false;
   return urlObj.searchParams.get("token") === PILOT_TOKEN;
 }
 function getTokenForTemplates(urlObj) {
@@ -210,11 +221,16 @@ async function diagnoseRemote(host, sessionName) {
   } catch {}
   return null;
 }
+function isValidHost(host) {
+  return /^[A-Za-z0-9._-]+$/.test(host) && !host.startsWith("-");
+}
 async function execTmux(args, host) {
   if (host) {
+    if (!isValidHost(host))
+      throw new Error(`Invalid host: ${host}`);
     const quotedArgs = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`);
     const remoteCmd = `tmux ${quotedArgs.join(" ")}`;
-    return execFileAsync("ssh", ["-o", "ConnectTimeout=3", host, remoteCmd]);
+    return execFileAsync("ssh", ["-o", "ConnectTimeout=3", "--", host, remoteCmd]);
   }
   return execFileAsync("tmux", args);
 }
@@ -1783,21 +1799,32 @@ wss.on("connection", async (ws, req) => {
       console.log(`[ws] pre-flight error session=${sessionName}: ${err.message}`);
     }
   }
-  const ptyCmd = host ? { file: "ssh", args: ["-t", "-o", "ConnectTimeout=3", host, "tmux", "attach-session", "-t", sessionName] } : { file: "tmux", args: ["attach-session", "-t", sessionName] };
-  const ptyProcess = pty.spawn(ptyCmd.file, ptyCmd.args, {
-    name: "xterm-256color",
-    cols,
-    rows,
-    env: {
-      ...process.env,
-      TERM: "xterm-256color",
-      COLORTERM: "truecolor"
-    }
-  });
+  const ptyCmd = host ? { file: "ssh", args: ["-t", "-o", "ConnectTimeout=3", "--", host, "tmux", "attach-session", "-t", sessionName] } : { file: "tmux", args: ["attach-session", "-t", sessionName] };
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(ptyCmd.file, ptyCmd.args, {
+      name: "xterm-256color",
+      cols,
+      rows,
+      env: {
+        ...process.env,
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor"
+      }
+    });
+  } catch (err) {
+    console.error(`[ws] PTY spawn failed session=${sessionName}: ${err.message}`);
+    ws.send(`\r
+\x1B[31mPTY allocation failed: ${err.message}\x1B[0m\r
+`);
+    ws.close(4001, "PTY spawn failed");
+    return;
+  }
   setTimeout(() => {
     execTmux(["resize-window", "-t", sessionName, "-x", String(cols), "-y", String(rows)], host).catch(() => {});
   }, 300);
   ACTIVE_CONNECTIONS.set(ws, ptyProcess);
+  ws.__pilotSession = sessionName;
   ptyProcess.onData((data) => {
     if (ws.readyState === ws.OPEN) {
       ws.send(data);
@@ -1881,8 +1908,20 @@ function shutdown() {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+if (!PILOT_TOKEN) {
+  console.error("[pilot] ERROR: --token is required (auth fails closed without it)");
+  process.exit(1);
+}
 restoreGridSessions();
-httpServer.listen(PORT, () => {
-  console.log(`[pilot] listening on http://localhost:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
+var PILOT_HOST = (() => {
+  const pubUrl = process.env.BRIDGE_PUBLIC_URL;
+  if (pubUrl)
+    try {
+      return new URL(pubUrl).hostname;
+    } catch {}
+  return "127.0.0.1";
+})();
+httpServer.listen(PORT, PILOT_HOST, () => {
+  console.log(`[pilot] listening on http://${PILOT_HOST}:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
   resetIdleTimer();
 });

@@ -5978,7 +5978,15 @@ if (!PILOT_TOKEN) {
   process.exit(1);
 }
 restoreGridSessions();
-httpServer.listen(PORT, "127.0.0.1", () => {
-  console.log(`[pilot] listening on http://127.0.0.1:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
+var PILOT_HOST = (() => {
+  const pubUrl = process.env.BRIDGE_PUBLIC_URL;
+  if (pubUrl)
+    try {
+      return new URL(pubUrl).hostname;
+    } catch {}
+  return "127.0.0.1";
+})();
+httpServer.listen(PORT, PILOT_HOST, () => {
+  console.log(`[pilot] listening on http://${PILOT_HOST}:${PORT} (TTL: ${CLI_ARGS.ttl}s, sessions: ${CLI_ARGS.sessions.length || "dynamic"})`);
   resetIdleTimer();
 });
