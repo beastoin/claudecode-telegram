@@ -797,3 +797,139 @@ class TestCmdStatus:
         )
         assert not emoji_pattern.search(text), \
             f"/status output contains emoji: {text}"
+
+
+# --- JSONL alert log tests ---
+
+def test_alert_log_append_writes_jsonl(tmp_path):
+    import json
+    import bridge
+    orig_node = bridge.NODE_DIR
+    bridge.NODE_DIR = tmp_path
+    try:
+        eid = bridge._alert_log_append("fire", "gmail", desc="token expired")
+        assert len(eid) == 16
+        log_file = tmp_path / "alert_log.jsonl"
+        assert log_file.exists()
+        with open(log_file) as f:
+            line = f.readline()
+        entry = json.loads(line)
+        assert entry["id"] == eid
+        assert entry["event"] == "fire"
+        assert entry["key"] == "gmail"
+        assert entry["desc"] == "token expired"
+        assert "ts" in entry
+    finally:
+        bridge.NODE_DIR = orig_node
+
+
+def test_alert_log_multiple_appends(tmp_path):
+    import json
+    import bridge
+    orig_node = bridge.NODE_DIR
+    bridge.NODE_DIR = tmp_path
+    try:
+        bridge._alert_log_append("fire", "poll", desc="timeout")
+        bridge._alert_log_append("resolve", "poll", duration_s=120)
+        bridge._alert_log_append("fire", "gmail", desc="expired")
+        log_file = tmp_path / "alert_log.jsonl"
+        lines = log_file.read_text().strip().split("\n")
+        assert len(lines) == 3
+        events = [json.loads(l)["event"] for l in lines]
+        assert events == ["fire", "resolve", "fire"]
+    finally:
+        bridge.NODE_DIR = orig_node
+
+
+def test_alerts_active_save_and_load(tmp_path):
+    import json
+    import time
+    import bridge
+    orig_node = bridge.NODE_DIR
+    bridge.NODE_DIR = tmp_path
+    now = time.time()
+    with bridge._alert_lock:
+        orig_active = dict(bridge._alert_active)
+        orig_snoozed = dict(bridge._alert_snoozed)
+        bridge._alert_active.clear()
+        bridge._alert_snoozed.clear()
+        bridge._alert_active["gmail"] = now - 60
+        bridge._alert_active["poll"] = now - 300
+    try:
+        bridge._alerts_active_save()
+        active_file = tmp_path / "alerts_active.jsonl"
+        assert active_file.exists()
+        lines = active_file.read_text().strip().split("\n")
+        assert len(lines) == 2
+        keys = {json.loads(l)["key"] for l in lines}
+        assert keys == {"gmail", "poll"}
+
+        with bridge._alert_lock:
+            bridge._alert_active.clear()
+        bridge._alerts_active_load()
+        with bridge._alert_lock:
+            assert "gmail" in bridge._alert_active
+            assert "poll" in bridge._alert_active
+    finally:
+        with bridge._alert_lock:
+            bridge._alert_active.clear()
+            bridge._alert_active.update(orig_active)
+            bridge._alert_snoozed.clear()
+            bridge._alert_snoozed.update(orig_snoozed)
+        bridge.NODE_DIR = orig_node
+
+
+def test_health_alert_check_logs_fire_and_resolve(tmp_path):
+    import json
+    import time
+    import bridge
+    from unittest.mock import patch
+    orig_node = bridge.NODE_DIR
+    bridge.NODE_DIR = tmp_path
+    with bridge._alert_lock:
+        orig_active = dict(bridge._alert_active)
+        orig_sent = dict(bridge._alert_last_sent)
+        orig_snoozed = dict(bridge._alert_snoozed)
+        bridge._alert_active.clear()
+        bridge._alert_last_sent.clear()
+        bridge._alert_snoozed.clear()
+    orig_workers = bridge.ALERT_WORKERS[:]
+    orig_hcid = bridge._health_channel_id
+    bridge.ALERT_WORKERS = ["lee"]
+    bridge._health_channel_id = "test-ch"
+    try:
+        bad_snap = {
+            "signals": {"gmail": {"ok": False, "last_ok_ago_s": 600, "errors": 0, "last_error": "token expired"}},
+            "threads": {},
+            "pools": {},
+        }
+        with patch.object(bridge.health, "snapshot", return_value=bad_snap), \
+             patch("bridge._send_health_alert"):
+            bridge._health_alert_check()
+        log_file = tmp_path / "alert_log.jsonl"
+        assert log_file.exists()
+        lines = log_file.read_text().strip().split("\n")
+        assert len(lines) >= 1
+        entry = json.loads(lines[0])
+        assert entry["event"] == "fire"
+        assert entry["key"] == "gmail"
+
+        good_snap = {"signals": {"gmail": {"ok": True, "last_ok_ago_s": 1, "errors": 0}}, "threads": {}, "pools": {}}
+        with patch.object(bridge.health, "snapshot", return_value=good_snap), \
+             patch("bridge._send_health_alert"):
+            bridge._health_alert_check()
+        lines = log_file.read_text().strip().split("\n")
+        resolve_events = [json.loads(l) for l in lines if json.loads(l)["event"] == "resolve"]
+        assert len(resolve_events) >= 1
+        assert resolve_events[0]["key"] == "gmail"
+    finally:
+        with bridge._alert_lock:
+            bridge._alert_active.clear()
+            bridge._alert_active.update(orig_active)
+            bridge._alert_last_sent.clear()
+            bridge._alert_last_sent.update(orig_sent)
+            bridge._alert_snoozed.clear()
+            bridge._alert_snoozed.update(orig_snoozed)
+        bridge.ALERT_WORKERS[:] = orig_workers
+        bridge._health_channel_id = orig_hcid
+        bridge.NODE_DIR = orig_node

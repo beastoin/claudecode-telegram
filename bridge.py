@@ -806,7 +806,8 @@ class BaseConnector[M](abc.ABC):
     def _send_alert(self, text: str) -> None:
         tag = f"[{self.connector_name}]"
         _log(_LOG_WARN, self.connector_name, f"ALERT: {text}")
-        alert_fn = self.on_alert  # Capture ref outside lock
+        _alert_log_append("fire", f"connector:{self.connector_name}", desc=text[:200])
+        alert_fn = self.on_alert
         if alert_fn is None:
             return
         with self._lock:
@@ -2913,6 +2914,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         text = f"{icon} {name} {msg}.\n{cmd} {name}"
     else:
         text = f"{name}: {state} ({reason}). Check /team"
+    _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
     with _log_suppress(KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog alert error: "):
         result = transport.send_text(admin_chat_id, text)
         if result and result.get("ok"):
@@ -2941,6 +2943,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
                 _do_send = True
                 alert_text = f"✅ Host BACK UP: {host}\nWas down for {duration // 60}m {duration % 60}s\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
+                _alert_log_append("resolve", f"host:{host}", duration_s=duration)
             else:
                 _do_send = False
                 alert_text = None
@@ -2954,6 +2957,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
                 _do_send = True
                 alert_text = f"🔴 Host DOWN: {host}\nAfter {failures} consecutive SSH failures\nError: {error or 'unknown'}\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
+                _alert_log_append("fire", f"host:{host}", state="DOWN", reason=error or "ssh probe failed")
             else:
                 _do_send = False
                 alert_text = None
@@ -2975,6 +2979,7 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         prev_state = watchdog.prev_worker_states.get(name)
     if prev_state not in bad_states or new_state not in good_states:
         return
+    _alert_log_append("resolve", f"worker:{name}", prev_state=prev_state, new_state=new_state)
     restart_ts = watchdog.recent_restarts.get(name)
     if restart_ts and _clock.time() - restart_ts < 30:
         return
@@ -8579,24 +8584,59 @@ def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
         router.reply(chat_id, result)  # type: ignore[attr-defined]
         return True
     if sub == "history":
-        if _health_channel_id and _health_channel_id in relay_store.channels:
-            ch = relay_store.channels[_health_channel_id]
-            msgs = ch.get("messages", [])
-            if not msgs:
-                router.reply(chat_id, "No alert history.")  # type: ignore[attr-defined]
-                return True
-            # Show last 10 alerts
-            recent = msgs[-10:]
-            lines = [f"Last {len(recent)} alerts (channel {_health_channel_id[:8]}):"]
-            for m in recent:
-                ts = m.get("ts", "?")
-                text = m.get("text", "?")
-                lines.append(f"  [{ts}] {text[:100]}")
-            router.reply(chat_id, "\n".join(lines))  # type: ignore[attr-defined]
-        else:
-            router.reply(chat_id, "Health channel not active. Set BRIDGE_ALERT_WORKERS and restart.")  # type: ignore[attr-defined]
+        count = 20
+        if len(parts) > 1:
+            with suppress(ValueError):
+                count = min(int(parts[1]), 100)
+        lines: list[str] = []
+        try:
+            path = _alert_log_path()
+            if path.exists():
+                with open(path) as fh:
+                    all_lines = fh.readlines()
+                recent = all_lines[-count:]
+                lines.append(f"Last {len(recent)} of {len(all_lines)} alert events:")
+                for raw in recent:
+                    try:
+                        e = json.loads(raw)
+                        ts = e.get("ts", "?")
+                        ev = e.get("event", "?")
+                        key = e.get("key", "?")
+                        desc = e.get("desc", e.get("state", ""))
+                        eid = e.get("id", "?")[:8]
+                        line = f"  [{ts}] {ev} {key}"
+                        if desc:
+                            line += f" — {desc[:80]}"
+                        line += f" (id:{eid})"
+                        lines.append(line)
+                    except json.JSONDecodeError:
+                        continue
+            else:
+                lines.append("No alert log yet.")
+        except OSError as exc:
+            lines.append(f"Error reading alert log: {exc}")
+        router.reply(chat_id, "\n".join(lines))  # type: ignore[attr-defined]
         return True
-    router.reply(chat_id, "Usage: /alert [status|snooze <signal> [minutes]|history]")  # type: ignore[attr-defined]
+    if sub == "show":
+        eid_prefix = parts[1] if len(parts) > 1 else ""
+        if not eid_prefix:
+            router.reply(chat_id, "Usage: /alert show <id>")  # type: ignore[attr-defined]
+            return True
+        try:
+            with open(_alert_log_path()) as fh:
+                for raw in fh:
+                    try:
+                        e = json.loads(raw)
+                        if e.get("id", "").startswith(eid_prefix):
+                            router.reply(chat_id, json.dumps(e, indent=2))  # type: ignore[attr-defined]
+                            return True
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        router.reply(chat_id, f"No event matching id '{eid_prefix}'")  # type: ignore[attr-defined]
+        return True
+    router.reply(chat_id, "Usage: /alert [status|snooze <signal> [min]|history [count]|show <id>]")  # type: ignore[attr-defined]
     return True
 
 
@@ -9707,6 +9747,8 @@ def _setup_endpoint_routes() -> None:
                 "status": _alert_status(),
                 "active": dict(_alert_active),
                 "snoozed": {k: v - time.time() for k, v in _alert_snoozed.items() if v > time.time()},
+                "log_file": str(_alert_log_path()),
+                "active_file": str(_alerts_active_path()),
             },
         ),
     )
@@ -9864,6 +9906,87 @@ _alert_snoozed: dict[str, float] = {}  # signal -> time.time() when snooze expir
 _alert_lock = threading.Lock()
 _health_channel_id: str | None = None  # set during startup
 
+# --- JSONL alert persistence ---
+# alert_log.jsonl: append-only event log (fire, escalate, resolve, snooze)
+# alerts_active.jsonl: current unresolved alerts (atomically rewritten)
+
+
+def _alert_log_path() -> Path:
+    return NODE_DIR / "alert_log.jsonl"
+
+
+def _alerts_active_path() -> Path:
+    return NODE_DIR / "alerts_active.jsonl"
+
+
+def _alert_log_append(event: str, key: str, **extra: object) -> str:
+    """Append an event to alert_log.jsonl. Returns the event ID."""
+    eid = secrets.token_hex(8)
+    entry = {
+        "id": eid,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": event,
+        "key": key,
+        **{k: v for k, v in extra.items() if v},
+    }
+    try:
+        with open(_alert_log_path(), "a") as fh:
+            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        _log(_LOG_DEBUG, "alert-log", f"append failed: {exc}")
+    return eid
+
+
+def _alerts_active_save() -> None:
+    """Atomically rewrite alerts_active.jsonl from RAM state."""
+    now = time.time()
+    rows: list[dict[str, object]] = []
+    with _alert_lock:
+        for key, first_seen in _alert_active.items():
+            row: dict[str, object] = {
+                "key": key,
+                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(first_seen)),
+                "age_s": round(now - first_seen, 1),
+            }
+            snooze_until = _alert_snoozed.get(key)
+            if snooze_until and snooze_until > now:
+                row["snoozed_until"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(snooze_until))
+            rows.append(row)
+    try:
+        payload = "\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
+        if rows:
+            payload += "\n"
+        _atomic_write(str(_alerts_active_path()), payload)
+    except OSError as exc:
+        _log(_LOG_DEBUG, "alert-log", f"active save failed: {exc}")
+
+
+def _alerts_active_load() -> None:
+    """Restore active alerts from disk on startup."""
+    path = _alerts_active_path()
+    if not path.exists():
+        return
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    key = row.get("key", "")
+                    since = row.get("since", "")
+                    if key and since:
+                        ts = datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+                        with _alert_lock:
+                            _alert_active[key] = ts
+                except (json.JSONDecodeError, ValueError, KeyError):
+                    continue
+        if _alert_active:
+            _log(_LOG_INFO, "alert-log", f"Restored {len(_alert_active)} active alerts from disk")
+    except OSError as exc:
+        _log(_LOG_WARN, "alert-log", f"Failed to load active alerts: {exc}")
+
 
 def _health_channel_ensure() -> str | None:
     """Create or restore the bridge-health relay channel."""
@@ -9930,42 +10053,50 @@ def _health_alert_check() -> None:
         resolved = [k for k in _alert_active if k not in current_problems]
     for key in resolved:
         with _alert_lock:
-            _alert_active.pop(key, None)
+            fs_resolved = _alert_active.pop(key, None)
             _alert_last_sent.pop(key, None)
             _alert_snoozed.pop(key, None)
+        duration_s = round(now - fs_resolved, 1) if fs_resolved else 0
+        _alert_log_append("resolve", key, duration_s=duration_s)
+        _alerts_active_save()
         _send_health_alert(f"✅ Resolved: {key}")
     # --- Active problems: classify severity, apply cooldown/snooze ---
     if not current_problems:
         return
     to_send: list[str] = []
+    active_changed = False
     for key, desc in current_problems.items():
         with _alert_lock:
-            # Snooze check
             snooze_until = _alert_snoozed.get(key, 0)
             if now < snooze_until:
-                continue  # snoozed, skip
+                continue
             elif key in _alert_snoozed:
-                del _alert_snoozed[key]  # snooze expired
-            # Track first-seen time
-            first_seen = _alert_active.get(key)
-            if first_seen is None:
+                del _alert_snoozed[key]
+            first_seen = _alert_active.get(key, now)
+            is_new = key not in _alert_active
+            if is_new:
                 _alert_active[key] = now
                 first_seen = now
-            # Determine severity + cooldown
+                active_changed = True
             age = now - first_seen
             if age >= _ALERT_ESCALATE:
                 severity = "🚨"
-                cooldown = 120  # 2min cooldown when escalated
+                cooldown = 120
             else:
                 severity = "🔶"
-                cooldown = _ALERT_COOLDOWN  # 5min cooldown
-            # Cooldown check
+                cooldown = _ALERT_COOLDOWN
             last_sent = _alert_last_sent.get(key, 0)
             if now - last_sent < cooldown:
                 continue
             _alert_last_sent[key] = now
+        if is_new:
+            _alert_log_append("fire", key, desc=desc)
+        elif age >= _ALERT_ESCALATE and age - (now - last_sent if last_sent else age) < _ALERT_ESCALATE:
+            _alert_log_append("escalate", key, desc=desc, age_s=round(age, 1))
         duration = _fmt_duration(now - first_seen)
         to_send.append(f"{severity} {desc} ({duration})")
+    if active_changed:
+        _alerts_active_save()
     if to_send:
         _send_health_alert("\n".join(to_send))
 
@@ -9985,14 +10116,16 @@ def _fmt_duration(seconds: float) -> str:
 def _alert_snooze(signal: str, duration: int = _ALERT_SNOOZE) -> str:
     """Snooze alerts for a signal. Returns confirmation message."""
     with _alert_lock:
-        # Exact match first
         if signal in _alert_active:
             _alert_snoozed[signal] = time.time() + duration
+            _alert_log_append("snooze", signal, duration_s=duration)
+            _alerts_active_save()
             return f"Snoozed '{signal}' for {_fmt_duration(duration)}"
-        # Partial match (e.g., "gmail" matches "gmail")
         matches = [k for k in _alert_active if signal in k]
         if len(matches) == 1:
             _alert_snoozed[matches[0]] = time.time() + duration
+            _alert_log_append("snooze", matches[0], duration_s=duration)
+            _alerts_active_save()
             return f"Snoozed '{matches[0]}' for {_fmt_duration(duration)}"
         if matches:
             return f"Ambiguous: {', '.join(matches)}. Be more specific."
@@ -10441,6 +10574,7 @@ def main() -> None:
         f"Learning reminder idle scan: started (every 30 min, {len(learning_reminders.state)} workers tracked)",
     )
     connectors.gmail, connectors.github = _start_connectors()
+    _alerts_active_load()
     _health_channel_ensure()
     server = ReuseAddrServer((BRIDGE_BIND, PORT), Handler)
     tunnel_config = _build_tunnel_config()
