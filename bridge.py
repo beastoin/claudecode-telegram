@@ -567,7 +567,7 @@ class TunnelManager:
                     now = self._clock.time()
                     self._poll_last_error = now
                     self._poll_error_streak += 1
-                    health.error("poll")
+                    health.error("poll", str(exc))
                     _log(_LOG_WARN, "tunnel:poll", f"Poll error (streak={self._poll_error_streak}): {exc}")
                     self._clock.sleep(self._config.poll_error_delay)
 
@@ -1440,6 +1440,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                     self.track_success()
                     _log(_LOG_INFO, "gmail", f"Re-bootstrap OK (historyId={new_id})")
                 else:
+                    health.error("gmail", "token expired, needs gws renewal")
                     self._send_alert(
                         "Gmail re-bootstrap failed — token expired, needs manual renewal (ask geni to run gws renewal)"
                     )
@@ -1455,7 +1456,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
                 had_errors = True
                 last_error = str(e)
                 self.track_handler_error(str(e))
-                health.error("gmail")
+                health.error("gmail", str(e))
         if not had_errors:
             self.clear_handler_errors()
             health.ok("gmail")
@@ -1798,7 +1799,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 _log(_LOG_ERROR, "github", f"Error processing comment {comment.get('id')}: {e}")
                 had_errors = True
                 self.track_handler_error(str(e))
-                health.error("github")
+                health.error("github", str(e))
         if not had_errors:
             self.clear_handler_errors()
             health.ok("github")
@@ -5009,9 +5010,9 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 else:
                     _log(_LOG_INFO, "telegram", f"{log_prefix} sent (rich): {name} -> Telegram OK")
             else:
-                health.error("telegram_api")
                 error_code = (result or {}).get("error_code", 0)
                 desc = (result or {}).get("description", "")
+                health.error("telegram_api", f"rich send {error_code}: {desc}")
                 _log(
                     _LOG_ERROR,
                     "bridge",
@@ -5047,8 +5048,8 @@ def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str, prev_msg_
             else:
                 _log(_LOG_INFO, "telegram", f"{log_prefix} sent: {name} -> Telegram OK")
         else:
-            health.error("telegram_api")
             desc = str((result or {}).get("description", ""))
+            health.error("telegram_api", f"HTML send: {desc}")
             _log(_LOG_WARN, "bridge", f"{log_prefix} HTML send failed ({desc}), retrying as plain text")
             plain_text = re.sub(r"<[^>]+>", "", part)
             plain_text = plain_text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
@@ -9304,13 +9305,13 @@ class CommandRouter:
             _task_pool.submit(send_typing_loop, chat_id, session_name)
         try:
             send_ok = self.workers.send(session_name, text, chat_id, session)
-        except Exception:
+        except Exception as _dispatch_exc:
             send_ok = False
-            _log(_LOG_ERROR, "dispatch", f"Exception sending to {session_name}", exc=sys.exc_info()[1])
+            _log(_LOG_ERROR, "dispatch", f"Exception sending to {session_name}", exc=_dispatch_exc)
         if send_ok:
             health.ok("dispatch")
         else:
-            health.error("dispatch")
+            health.error("dispatch", f"send to {session_name} failed")
         if not send_ok:
             clear_pending(session_name)
             self.reply(
@@ -9775,6 +9776,7 @@ class BridgeHealth:
         self._lock = threading.Lock()
         self._ok_ts: dict[str, float] = {}  # signal -> time.time() of last success
         self._errors: dict[str, int] = {}  # signal -> consecutive error count
+        self._last_error_msg: dict[str, str] = {}  # signal -> last error context
         self._threads: dict[str, threading.Thread] = {}  # name -> thread ref
         self._start_time: float = time.time()
 
@@ -9784,11 +9786,14 @@ class BridgeHealth:
         with self._lock:
             self._ok_ts[signal] = now
             self._errors[signal] = 0
+            self._last_error_msg.pop(signal, None)
 
-    def error(self, signal: str) -> None:
-        """Record a failed operation."""
+    def error(self, signal: str, msg: str = "") -> None:
+        """Record a failed operation with optional context."""
         with self._lock:
             self._errors[signal] = self._errors.get(signal, 0) + 1
+            if msg:
+                self._last_error_msg[signal] = msg[:200]
 
     def register_thread(self, name: str, thread: threading.Thread) -> None:
         with self._lock:
@@ -9811,11 +9816,15 @@ class BridgeHealth:
                 else:
                     # Periodic: must have a recent heartbeat AND low errors
                     sig_ok = age < 300 and errors < 10
-                signals[sig] = {
+                entry: dict[str, object] = {
                     "last_ok_ago_s": age,
                     "errors": errors,
                     "ok": sig_ok,
                 }
+                err_msg = self._last_error_msg.get(sig)
+                if err_msg:
+                    entry["last_error"] = err_msg
+                signals[sig] = entry
             threads = {}
             for name, t in self._threads.items():
                 threads[name] = t.is_alive()
@@ -9899,7 +9908,11 @@ def _health_alert_check() -> None:
     # Check signals
     for sig, info in snap.get("signals", {}).items():  # type: ignore[attr-defined]
         if not info.get("ok"):
-            current_problems[sig] = f"{sig}(age={info.get('last_ok_ago_s', '?')}s, errors={info.get('errors', 0)})"
+            desc = f"{sig}(age={info.get('last_ok_ago_s', '?')}s, errors={info.get('errors', 0)})"
+            last_err = info.get("last_error")
+            if last_err:
+                desc += f" — {last_err}"
+            current_problems[sig] = desc
     # Check threads
     for tname, alive in snap.get("threads", {}).items():  # type: ignore[attr-defined]
         key = f"thread:{tname}"
@@ -10129,8 +10142,8 @@ def _flush_hook_response(name: str) -> None:
     try:
         send_response_to_telegram(name, text, chat_id, log_prefix="Response")
         health.ok("hook")
-    except Exception:
-        health.error("hook")
+    except Exception as _hook_exc:
+        health.error("hook", f"{name}: {_hook_exc}")
         raise
     _check_learning_reminder(name)
     clear_pending(name)
